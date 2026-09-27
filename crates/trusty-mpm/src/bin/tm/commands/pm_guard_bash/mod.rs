@@ -92,8 +92,9 @@ pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 pub(crate) use heredoc::split_heredoc_bodies;
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
+// #8723: and which tokens are prose a `printf`/`echo` writes into a file.
 pub(crate) use bash_tokens::{
-    TokenizeError, has_regex_quantifier, program_text_indices, tokenize,
+    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
     without_glob_metacharacters,
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used

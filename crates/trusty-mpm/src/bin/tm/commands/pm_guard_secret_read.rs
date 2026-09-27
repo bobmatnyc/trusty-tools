@@ -198,6 +198,17 @@
 //! withdrawn by a nested command, so `--body "$(cat .env)"` and
 //! `git branch $(basename config/credentials)` deny.
 //!
+//! #8723 withdraws the same over-refusal from PROSE WRITTEN TO A FILE:
+//! `printf '%s\n' '<issue body>' > body.md` was refused because the body
+//! quoted this guard's deny text, which names a dotenv file. A `printf` or
+//! `echo` argument is text it prints, so
+//! `pm_guard_bash::prose_write_indices` skips it when the command is one
+//! segment, stdout goes to a file, and nothing nested runs. A pipe, a nested
+//! command, `printf -v` or a redirect target still screens, so
+//! `echo .env | xargs cat` and `echo x > .env` deny. The name reaching a
+//! reader through the written FILE (`xargs cat < body.md` in a later call) is
+//! the variable-indirection residual below, which a `Write` call reaches too.
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -310,7 +321,9 @@
 //! `denies_a_secret_file_in_a_git_ref_position`,
 //! `allows_a_filename_named_in_a_text_payload`,
 //! `denies_a_file_flag_beside_a_text_payload`,
-//! `reads_as_a_branch_name_needs_a_branch_prefix`, and the rest of this
+//! `reads_as_a_branch_name_needs_a_branch_prefix`,
+//! `allows_issue_prose_a_lone_printer_writes_to_a_file_8723`,
+//! `denies_a_secret_read_beside_a_prose_write_8723`, and the rest of this
 //! module's `tests` submodule. The rule is proved WIRED end to end through the
 //! real binary by `pm_guard_denies_a_line_range_read_of_a_secret_bearing_file`,
 //! `pm_guard_denies_a_read_tool_call_on_a_secret_bearing_file`,
@@ -344,7 +357,7 @@ use crate::commands::pm_guard_bash::{
 // guard asks — which token is an interpreter's PROGRAM, which word is regex
 // syntax, and how a parse failure is named.
 use crate::commands::pm_guard_bash::{
-    TokenizeError, has_regex_quantifier, program_text_indices, tokenize,
+    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
     without_glob_metacharacters,
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
@@ -573,12 +586,16 @@ pub(crate) fn evaluate_secret_file_read(
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
     let (argv_text, bodies) = split_heredoc_bodies(command);
-    for segment in split_shell_segments(&argv_text) {
+    let segments = split_shell_segments(&argv_text);
+    // #8723: prose is read as prose only in a one-segment command; a pipe or a
+    // wrapper's inner command could hand the printed text to a reader.
+    let lone = segments.iter().filter(|s| !s.trim().is_empty()).count() == 1;
+    for segment in segments {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let named = secret_words_in_segment(trimmed);
+        let named = secret_words_in_segment(trimmed, lone);
         let Some(first) = named.first() else {
             continue;
         };
@@ -675,13 +692,14 @@ fn pattern_argument_index(segment: &str, argv: &[String]) -> Option<usize> {
 /// words really are, so when it succeeds its TOKENS are what gets scanned.
 /// What: `shlex::split`'s tokens, each run through [`secret_files_named_in`],
 /// minus the one token [`pattern_argument_index`] identifies as a search
-/// pattern. A segment that does not lex falls back to the raw byte scan, which
+/// pattern, and minus the prose `prose_write_indices` finds when `lone` says
+/// the segment is the whole command (#8723). A segment that does not lex falls back to the raw byte scan, which
 /// is the fail-CLOSED arm — [`segment_only_handles`] can never grant the
 /// allowlist to it either.
 /// Test: `denies_a_name_reassembled_by_quoting_or_escaping`,
 /// `allows_a_secret_name_written_as_a_search_pattern`,
 /// `denies_an_unlexable_segment_that_names_a_secret`.
-fn secret_words_in_segment(segment: &str) -> Vec<String> {
+fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
     let Ok(argv) = tokenize(segment) else {
         return secret_files_named_in(segment, Scan::Argv);
     };
@@ -690,7 +708,11 @@ fn secret_words_in_segment(segment: &str) -> Vec<String> {
     // #7839: so is a `sed` expression, which the shared classifier now names.
     let program_at = inline_program_indices(&argv);
     // #7498 round 3: a text payload is prose written for a human to read.
-    let text_payloads = text_payload_indices(segment, &argv);
+    let mut text_payloads = text_payload_indices(segment, &argv);
+    // #8723: so is what a lone `printf`/`echo` writes into a file.
+    if lone {
+        text_payloads.extend(prose_write_indices(segment, &argv));
+    }
     // #7498: the words after `in` are a loop's word LIST, and the words in a
     // ref-creating position are REF names — neither is a path operand list, and
     // both withdraw the same one arm.
@@ -2144,6 +2166,68 @@ mod tests {
             // Only the payload token is prose; an operand beside it is not.
             "gh issue comment 1 --body 'see below' .env",
             "gh issue create --title 'x' --body 'y' -F id_rsa",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// 🔴 REGRESSION (#8723): issue prose a lone `printf`/`echo` writes into a
+    /// scratch file for `gh issue create --body-file`.
+    ///
+    /// Why: the first two rows quote this guard's own deny text, which names a
+    /// dotenv file, and DENIED on 62b6f29e1 as "naming `.env` in a `printf`
+    /// command". The remaining rows are the issue's first body shape — code
+    /// spans, file:line references, identifiers — and pin that it allows.
+    #[test]
+    fn allows_issue_prose_a_lone_printer_writes_to_a_file_8723() {
+        let quoted = "> tm pm-guard: naming `.env` in a `printf` command is refused \
+                      (issue #7266) — its name is in this guard's secret-bearing file class";
+        let shape = "- `list_recent_errors` (`daemon/mcp_bugreport.rs:32-34`) reads \
+                     `errors.jsonl`; a deny exists only as `permissionDecisionReason` JSON.";
+        for body in [quoted, shape] {
+            let body = body.replace('\'', "'\\''");
+            for command in [
+                format!("printf '%s\\n' '{body}' > /tmp/mpm8723-body.md"),
+                format!("echo '{body}' >> /tmp/mpm8723-body.md"),
+            ] {
+                assert_eq!(eval(&command), None, "prose must allow: `{command}`");
+            }
+        }
+        assert_eq!(
+            eval("gh issue create --title t --body-file /tmp/mpm8723-body.md"),
+            None
+        );
+    }
+
+    /// The bounds of the #8723 prose skip: every row must still DENY.
+    ///
+    /// Why: the skip reads a `printf`/`echo` argument as text only while that
+    /// text can reach nothing but a file. A pipe, a second segment, a nested
+    /// command, `printf -v`, a redirect target or a non-stdout redirect each
+    /// hand the name to something that could open it, or name a real file.
+    #[test]
+    fn denies_a_secret_read_beside_a_prose_write_8723() {
+        for command in [
+            // A real read of a secret-bearing file.
+            "cat .env > /tmp/out.md",
+            "sed -n '38,46p' terraform.tfvars > /tmp/out.md",
+            // No file redirect, or stdout not the redirected descriptor.
+            "echo .env",
+            "printf '%s' .env 2>/tmp/err.md",
+            // A pipe or a second segment hands the name to a reader.
+            "echo .env | xargs cat",
+            "printf '%s' .env > /tmp/n.md | xargs cat",
+            "printf '%s' .env > /tmp/n.md; cat .env",
+            "sh -c 'printf .env > /tmp/n.md'",
+            // A nested command runs and prints the file.
+            "printf '%s' \"$(cat .env)\" > /tmp/out.md",
+            "echo `cat .env` > /tmp/out.md",
+            "printf '%s' .env > >(xargs cat)",
+            // `printf -v` stores the name where a later command reads it.
+            "printf -v F '%s' .env > /tmp/out.md",
+            // A redirect target is a file, never prose.
+            "printf 'API_KEY=1' > .env",
+            "echo x < .env > /tmp/out.md",
         ] {
             assert!(eval(command).is_some(), "`{command}` must deny");
         }

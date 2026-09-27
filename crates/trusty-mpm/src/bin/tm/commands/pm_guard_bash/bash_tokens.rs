@@ -305,6 +305,92 @@ pub(crate) fn without_glob_metacharacters(word: &str) -> String {
         .collect()
 }
 
+/// Programs whose every argument is text they PRINT, never a file they open.
+///
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
+const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
+
+/// Which tokens of a `printf`/`echo` call are prose it writes into a file
+/// (#8723).
+///
+/// Why: `printf '%s\n' '<issue prose>' > body.md` was refused because the
+/// prose quoted this guard's own deny text, which names a dotenv file. Neither
+/// program opens an argument as a file, so a name in one is text.
+/// What: the argument indices after the program, only when all of these hold:
+/// the program's basename is a [`TEXT_PRINTERS`] entry; a stdout redirect
+/// (`>`, `>>`, `1>`, `&>`) names a file; `printf` carries no `-v`, which
+/// stores the text in a variable a later command can read; and `segment`
+/// runs nothing nested — no `$` or backtick outside single quotes, and no
+/// unquoted `(`. A redirect token and its target are never prose, so
+/// `echo x > .env` and `echo x < .env` stay screened; a token carrying
+/// whitespace was quoted, so it is prose even when it starts with `>`. The
+/// CALLER owns one
+/// more gate: `segment` must be the whole command, because a pipe hands the
+/// printed name to a reader (`echo .env | xargs cat`).
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`,
+/// `allows_issue_prose_a_lone_printer_writes_to_a_file_8723`,
+/// `denies_a_secret_read_beside_a_prose_write_8723`.
+pub(crate) fn prose_write_indices(segment: &str, argv: &[String]) -> Vec<usize> {
+    let Some(start) = crate::commands::hook_rewrite::strip_wrapper_prefix(argv) else {
+        return Vec::new();
+    };
+    let program = argv
+        .get(start)
+        .map_or("", |t| t.rsplit('/').next().unwrap_or(t));
+    if !TEXT_PRINTERS.contains(&program) || runs_a_nested_command(segment) {
+        return Vec::new();
+    }
+    let (mut prose, mut writes_a_file, mut target_next) = (Vec::new(), false, false);
+    for (index, token) in argv.iter().enumerate().skip(start + 1) {
+        if std::mem::take(&mut target_next) {
+            continue;
+        }
+        // A token carrying whitespace was quoted, so it is a word: a blockquote
+        // line `'> naming …'` is prose, never a redirect.
+        let is_word = token.chars().any(char::is_whitespace);
+        let role = if is_word {
+            RedirectRole::None
+        } else {
+            redirect_role(token)
+        };
+        if role != RedirectRole::None {
+            let descriptor = token.split_once('>').map_or("", |(d, _)| d);
+            let names_a_file =
+                matches!(role, RedirectRole::Target(_) | RedirectRole::TargetFollows);
+            writes_a_file |= names_a_file && matches!(descriptor, "" | "1" | "&");
+            target_next = role == RedirectRole::TargetFollows;
+            continue;
+        }
+        // An input redirect (`<`, `0<`, `<<<`): screened, target included.
+        if !is_word
+            && let Some((descriptor, rest)) = token.split_once('<')
+            && descriptor.chars().all(|c| c.is_ascii_digit())
+        {
+            target_next = rest.trim_start_matches(['<', '&']).is_empty();
+            continue;
+        }
+        if program == "printf" && token.starts_with("-v") {
+            return Vec::new();
+        }
+        prose.push(index);
+    }
+    if writes_a_file { prose } else { Vec::new() }
+}
+
+/// Whether `segment` can run or expand anything beyond its literal words.
+///
+/// What: unbalanced quoting, a `$` or backtick outside single quotes, or an
+/// unquoted `(` (a subshell or a process substitution).
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
+fn runs_a_nested_command(segment: &str) -> bool {
+    let scan = super::shell_lex::QuoteScan::new(segment);
+    !scan.balanced
+        || segment.bytes().enumerate().any(|(i, b)| {
+            (matches!(b, b'$' | b'`') && scan.allows_substitution(i))
+                || (b == b'(' && scan.is_unquoted(i))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +483,28 @@ mod tests {
         assert_eq!(without_glob_metacharacters(".env.*"), ".env.");
         assert_eq!(without_glob_metacharacters(".*?pen"), ".pen");
         assert_eq!(without_glob_metacharacters("/.*[Oo]pen/"), "/.Oopen/");
+    }
+
+    /// #8723: a printer's arguments are prose only while stdout is a file and
+    /// nothing nested runs; a redirect token and its target never are.
+    #[test]
+    fn bash_tokens_reads_prose_a_printer_writes_to_a_file() {
+        let prose = |c: &str| prose_write_indices(c, &words(c));
+        assert_eq!(prose("printf '%s\\n' 'a `.env` b' > out.md"), vec![1, 2]);
+        assert_eq!(prose("echo -n a .env >> out.md"), vec![1, 2, 3]);
+        assert_eq!(prose("FOO=1 echo a 2>&1 >out.md < in.txt"), vec![2]);
+        assert_eq!(prose("echo a &> out.md"), vec![1]);
+        assert_eq!(prose("printf '%s' '> a .env' > out.md"), vec![1, 2]);
+        for command in [
+            "echo a .env",
+            "echo a .env 2> err.md",
+            "cat .env > out.md",
+            "printf -v F .env > out.md",
+            "echo \"$(cat .env)\" > out.md",
+            "echo \"`cat .env`\" > out.md",
+            "echo .env > >(cat)",
+        ] {
+            assert!(prose(command).is_empty(), "no prose in `{command}`");
+        }
     }
 }
