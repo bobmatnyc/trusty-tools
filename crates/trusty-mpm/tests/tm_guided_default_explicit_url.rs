@@ -23,7 +23,7 @@
 //! run — the explicit-URL guard fires before it).
 //! Test: this test.
 
-mod common;
+use crate::common;
 
 #[test]
 fn bare_tm_explicit_unreachable_url_errors_not_silent_fallback() {

@@ -53,7 +53,7 @@ context. The job's relevance step decides whether the step runs: any change in
 trusty-mpm's dependency closure, which includes `trusty-agents-common` and its
 agent assets, runs it.
 
-The job builds once. `cargo test -p trusty-mpm --lib --test config_mount
+The job builds once. `cargo test -p trusty-mpm --lib --test env_serial
 --no-run` builds the lib test harness and the `tm` binary from one dependency
 graph; the drift check runs that `tm`, and the budget step compiles nothing.
 This replaced a release `cargo install`: the lib tests need trusty-mpm's

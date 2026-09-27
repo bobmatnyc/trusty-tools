@@ -181,22 +181,17 @@ pub fn handle_start() -> Result<()> {
     }
 
     // #6287: no `--socket` is passed — see `serve_args`.
-    let exe = std::env::current_exe().context("resolve current executable")?;
-    let child = std::process::Command::new(&exe)
-        .args(serve_args())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawn {} serve", exe.display()))?;
+    // #8783: the shared detached spawn, which starts the daemon in its own
+    // session so a group kill aimed at this CLI's caller spares it.
+    let pid = trusty_common::daemon_guard::spawn_current_exe(&serve_args())?;
 
-    std::fs::write(&pid_path, child.id().to_string())
+    std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
     println!(
         "{} trusty-analyze started (pid {}, socket {})",
         "✓".green(),
-        child.id(),
+        pid,
         socket.display()
     );
     Ok(())

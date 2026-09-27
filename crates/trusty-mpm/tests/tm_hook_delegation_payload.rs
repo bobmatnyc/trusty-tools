@@ -11,9 +11,9 @@
 //! as `tm --url <server> hook` with a real captured hook payload on stdin, and
 //! asserts on the JSON body the daemon would have received. The payloads mirror
 //! live Claude Code 2.1.220 captures (the #2864 Step-0 probe).
-//! Test: `cargo test -p trusty-mpm --test tm_hook_delegation_payload`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_delegation_payload::`.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

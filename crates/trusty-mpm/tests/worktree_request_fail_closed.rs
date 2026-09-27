@@ -18,9 +18,6 @@
 //! OWN reason (provisioning), so the assertion is on WHICH failure came back —
 //! `is_err()` alone would pass against the pre-fix commit and prove nothing.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use serial_test::serial;
 use tempfile::TempDir;
 

@@ -19,7 +19,9 @@
 #      which are set — this job bumps a formula on every real tag push.
 #
 # TRIGGERS:
-#   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`)
+#   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`), except
+#     `content-v*` (Refs #8389) — that tag belongs to content-release.yml's
+#     independent bundle-versioning channel, not a crate release.
 #   - workflow_dispatch for manual dry-runs (skips the release upload by default)
 #
 # LINUX BINARY PORTABILITY (issue #2037):
@@ -136,6 +138,7 @@ on:
   push:
     tags:
       - "*-v*"
+      - "!content-v*"
   workflow_dispatch:
     inputs:
       crate:

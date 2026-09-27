@@ -10,7 +10,7 @@
 //! cache-hit test proving the LLM is skipped on repeated identical content.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

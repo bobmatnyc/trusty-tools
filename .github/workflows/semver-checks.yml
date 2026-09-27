@@ -71,6 +71,9 @@ on:
   push:
     tags:
       - "*-v*"
+      # #8389: content-release.yml's `content-v*` tag is a bundle release,
+      # not a crate publish — this gate has nothing to compare against.
+      - "!content-v*"
   pull_request:
     # Explicit activity types (#4179), matching ci.yml and version-parity.yml:
     # `edited` is not in GitHub's default set and is the event a base-branch

@@ -76,6 +76,46 @@ fn expected_additions_omit_the_capture_when_the_flag_is_off() {
     );
 }
 
+/// The host layer of the #7688 flag comes from `fw.root`, never `$HOME`.
+///
+/// Why: the resolver took `fw` so a caller could supply the host config, but
+/// read this one toggle through `$HOME` anyway — so a doctor-repair test that
+/// injected `fw` still saw the operator's config, and a concurrent `#[serial]`
+/// `$HOME` redirect could change it mid-test.
+/// What: a project with NO committed flag, under a framework root whose
+/// `config.toml` sets `[pm] prompt_self_improvement` each way. Both directions
+/// are asserted, so the test fails against a `$HOME` read on any host.
+/// Test: itself.
+#[test]
+fn expected_additions_read_the_host_flag_from_the_framework_root() {
+    for on in [true, false] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+        fw.trusty_mpm_root = None;
+        std::fs::create_dir_all(&fw.root).expect("create framework root");
+        std::fs::write(
+            fw.config_toml(),
+            format!("[pm]\nprompt_self_improvement = {on}\n"),
+        )
+        .expect("write host config");
+
+        let additions = project_hook_additions_for(
+            &fw,
+            &workspace,
+            Some(std::path::Path::new(STABLE_HOOK_EXE)),
+        )
+        .expect("resolve");
+
+        assert_eq!(
+            !capture_events(&settings_from(&additions)).is_empty(),
+            on,
+            "the host flag in fw.root's config.toml ({on}) must decide the capture"
+        );
+    }
+}
+
 #[test]
 fn diff_reports_nothing_for_an_exact_match() {
     let tmp = tempfile::tempdir().expect("tempdir");

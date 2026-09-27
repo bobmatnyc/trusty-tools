@@ -6,7 +6,7 @@
 //! `session_question` strategy directly against a policy loaded from a planted
 //! `overseer.toml` — still the file -> config -> overseer path, end to end.
 
-use crate::harness::{TestDaemon, write_overseer_toml};
+use super::harness::{TestDaemon, write_overseer_toml};
 use serde_json::{Value, json};
 use trusty_mpm::core::deterministic_overseer::DeterministicOverseer;
 use trusty_mpm::core::overseer::{Overseer, OverseerContext, OverseerDecision};

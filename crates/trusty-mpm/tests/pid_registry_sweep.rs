@@ -14,10 +14,7 @@
 //! and a [`PidOrphanGc`] debounce, asserting the terminated-PID list and the
 //! surviving PID files across one or more sweeps.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test pid_registry_sweep`.
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//! `cargo test -p trusty-mpm --test integration pid_registry_sweep::`.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

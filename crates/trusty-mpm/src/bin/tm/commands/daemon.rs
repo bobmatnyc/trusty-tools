@@ -264,13 +264,14 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     let exe = std::env::current_exe()?;
     // Set a stable cwd so the spawned daemon never inherits a deleted directory.
     let stable_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-    std::process::Command::new(&exe)
-        .arg("daemon")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon")
         .current_dir(&stable_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
-        .stderr(std::process::Stdio::from(stderr))
-        .spawn()?;
+        .stderr(std::process::Stdio::from(stderr));
+    // #8783: own session, so a group kill aimed at this CLI spares the daemon.
+    trusty_common::daemon_guard::start_in_new_session(&mut cmd).spawn()?;
 
     // Poll the lock file for up to 5 seconds. The daemon writes it as soon as
     // it has a bound address — use that URL for the health check.

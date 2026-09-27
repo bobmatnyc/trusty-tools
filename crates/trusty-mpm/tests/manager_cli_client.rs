@@ -39,7 +39,7 @@
 //! `from_body` parser unit tests), and
 //! `manager_route_task_client_degrades_cleanly_on_404_against_older_daemon`.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test manager_cli_client`.
+//! `cargo test -p trusty-mpm --test integration manager_cli_client::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::project::Project;
 
 // #6671: the project registry seeds from the config file under `$HOME`.
-mod common;
+use crate::common;
 
 /// Serve the REAL daemon router on an ephemeral loopback port; return its base URL.
 async fn serve_real(state: Arc<DaemonState>) -> String {

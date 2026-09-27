@@ -6,7 +6,7 @@
 //! chain (`engineer -> base-engineer -> base-agent`) with lowercase filenames
 //! so composition resolves identically on case-sensitive CI hosts.
 
-use crate::harness::write_agent_sources;
+use super::harness::write_agent_sources;
 use tempfile::TempDir;
 use trusty_mpm::core::agent_builder::compose_agent;
 use trusty_mpm::core::agent_deployer::deploy_agents;
