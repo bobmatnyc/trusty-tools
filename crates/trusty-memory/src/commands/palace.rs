@@ -174,7 +174,7 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             limit,
             json,
         } => {
-            let palace = resolve(&name)?;
+            let (_, palace) = resolve(&name)?;
             let report =
                 super::palace_deletions::deletions_report(&name, &palace, drawer, limit, json)?;
             print!("{report}");
