@@ -89,8 +89,8 @@ impl CodeIndexer {
         self.deleted = false;
     }
 
-    /// Whether a delete has started closing this indexer's files.
-    #[cfg(test)]
+    /// Whether a delete has started closing this indexer's files. #8664: read
+    /// by a queued deferred-embed job before it runs.
     pub(crate) fn is_deleted(&self) -> bool {
         self.deleted
     }

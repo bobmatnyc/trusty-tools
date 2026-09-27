@@ -19,11 +19,24 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
 /// File name of the lease inside a data root.
 pub const MAINTENANCE_LOCK_FILE: &str = "maintenance.lock";
+
+/// Sidecar lock that makes "lock taken" and "pid written" one step (#8733).
+const PID_GATE_SUFFIX: &str = ".gate";
+
+/// How long a contender polls for the pid gate before going ungated (#8733).
+///
+/// A peer holds the gate only for a few syscalls, but a loaded host was
+/// measured delaying a thread by over 100 ms, so the bound leaves headroom.
+const PID_GATE_WAIT: Duration = Duration::from_millis(500);
+
+/// Poll interval while the pid gate is busy.
+const PID_GATE_POLL: Duration = Duration::from_millis(1);
 
 /// Outcome of one [`MaintenanceLease::try_hold`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +44,10 @@ pub enum LeaseStatus {
     /// This process holds the lease and may run maintenance.
     Held,
     /// Another process holds the lease; `holder_pid` is the pid it recorded.
+    ///
+    /// `None` only when the pid could not be read: the holder failed to write
+    /// it, or a contender stalled inside its acquisition for longer than the
+    /// pid-gate bound. Callers render it as "unknown" (#8733).
     HeldElsewhere { holder_pid: Option<u32> },
     /// The lock file could not be opened or locked; maintenance fails closed.
     Unavailable { reason: String },
@@ -59,6 +76,8 @@ impl LeaseStatus {
 #[derive(Debug)]
 pub struct MaintenanceLease {
     path: PathBuf,
+    /// Bound on the pid-gate wait; [`PID_GATE_WAIT`] outside tests.
+    gate_wait: Duration,
     inner: Mutex<Inner>,
 }
 
@@ -76,8 +95,17 @@ impl MaintenanceLease {
     pub fn new(data_root: &Path) -> Self {
         Self {
             path: data_root.join(MAINTENANCE_LOCK_FILE),
+            gate_wait: PID_GATE_WAIT,
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// The same lease with a different pid-gate bound, so a test does not
+    /// depend on host scheduling latency.
+    #[cfg(test)]
+    fn with_gate_wait(mut self, gate_wait: Duration) -> Self {
+        self.gate_wait = gate_wait;
+        self
     }
 
     /// Path of the lock file this lease guards.
@@ -95,7 +123,10 @@ impl MaintenanceLease {
     /// and tries a non-blocking exclusive lock. On success it records this
     /// pid in the file and logs at warn. A busy lock yields `HeldElsewhere`
     /// with the recorded pid; an open or lock error yields `Unavailable`.
+    /// The lock attempt and the pid write or read run under a sidecar
+    /// `maintenance.lock.gate` lock, so a loser reads the winner's pid (#8733).
     /// Test: `only_one_of_two_leases_on_a_root_is_held`,
+    /// `a_loser_waits_for_the_winners_pid_write`,
     /// `an_uncreatable_lock_file_fails_closed`.
     pub fn try_hold(&self) -> LeaseStatus {
         let mut inner = self.inner.lock();
@@ -135,6 +166,11 @@ impl MaintenanceLease {
             .truncate(false)
             .open(&self.path)
             .map_err(unavailable)?;
+        // #8733: a winner's lock and its pid write are two syscalls, so a loser
+        // could see the lock held with the file still empty (None) or still
+        // carrying the previous holder's pid. Both steps, and the loser's read,
+        // run under the gate; dropping `_gate` at return releases it.
+        let _gate = enter_pid_gate(&gate_path(&self.path), self.gate_wait);
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
@@ -145,14 +181,56 @@ impl MaintenanceLease {
             Err(TryLockError::Error(e)) => return Err(unavailable(e)),
         }
         // The pid is diagnostic only; failing to write it never gates the lease.
+        let pid_line = format!("{}\n", std::process::id());
         let recorded = file
             .set_len(0)
             .and_then(|()| file.seek(SeekFrom::Start(0)))
-            .and_then(|_| writeln!(file, "{}", std::process::id()));
+            .and_then(|_| file.write_all(pid_line.as_bytes()));
         if let Err(e) = recorded {
             tracing::warn!(lock = %self.path.display(), "maintenance lease: pid not recorded: {e}");
         }
         Ok(file)
+    }
+}
+
+/// Path of the pid gate that sits beside `lock_path`.
+fn gate_path(lock_path: &Path) -> PathBuf {
+    let mut name = lock_path.as_os_str().to_owned();
+    name.push(PID_GATE_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Take the pid gate, polling for at most `wait` (#8733).
+///
+/// Why: the gate orders a winner's "lock + write pid" before any loser's
+/// "see lock busy + read pid", so a loser reads the current holder's pid.
+/// What: returns the locked gate file, or `None` when it cannot be opened or
+/// stays busy past the bound. `None` means the caller proceeds ungated: the
+/// election itself rests on the lease lock alone, so only the pid a loser
+/// reports can then be missing. Never blocks longer than the bound, so a
+/// stopped process that holds the gate cannot wedge maintenance ticks.
+/// Test: `a_loser_waits_for_the_winners_pid_write`,
+/// `a_wedged_pid_gate_does_not_block_the_election`.
+fn enter_pid_gate(path: &Path, wait: Duration) -> Option<File> {
+    let gate = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .inspect_err(|e| tracing::debug!(gate = %path.display(), "pid gate not opened: {e}"))
+        .ok()?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match gate.try_lock() {
+            Ok(()) => return Some(gate),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(PID_GATE_POLL);
+            }
+            Err(e) => {
+                tracing::debug!(gate = %path.display(), "pid gate not taken: {e}");
+                return None;
+            }
+        }
     }
 }
 

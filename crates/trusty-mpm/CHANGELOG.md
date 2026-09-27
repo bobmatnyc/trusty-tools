@@ -6,6 +6,86 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.9] — 2026-09-27
+
+### Fixed
+
+- ADR-0044's main-checkout write boundary now judges every composition
+  segment of a `Bash` command that names a write, not only the first one
+  found across the whole command — a benign first write (`echo hi >
+  notes.md`) used to hide a later segment's source write
+  (`&& echo … > src/lib.rs`) from the rule entirely (closes [#8468](https://github.com/bobmatnyc/trusty-tools/issues/8468))
+  - a `cd` segment's own trailing redirect is judged the same way as any other
+    segment's
+  - no segment's target is resolved against a directory a preceding `cd`
+    moved to; every target resolves against the hook's own `cwd` (following
+    `cd` moves to #8704)
+- `tm hook --pm-guard` now refuses a read of pm2's `~/.pm2/dump.pm2` (and its `.bak`), which holds every managed process's environment, and a read, `plutil -p`, `defaults read` or edit of a launchd plist whose `EnvironmentVariables` carries a credential-keyed entry (#8523). A plist is judged by its content, so an ordinary plist still reads; one the guard cannot read, parse or locate is refused. The refusal names the credential keys, never their values.
+- `Edit`, `MultiEdit` and `Write` calls on a secret-bearing file (`*.tfvars`, `.env`, `*.tfstate`, …) are now refused the same way a Bash read of that file is, with the same exemptions (#8483).
+- An unscoped environment dump inside a pod — `kubectl exec <pod> -- env`, `printenv` with no variable name, a bare `export`/`set`, `/proc/*/environ`, directly or inside `sh -c` — is now refused, because it prints the pod's injected Secrets (#7648). `kubectl exec <pod> -- printenv NAME` still runs. `oc rsh <pod> env` (with or without `--`) is refused the same way, including behind an option the guard does not know (`oc rsh --as admin <pod> env`). A container dump — `docker exec`, `docker container exec`, `docker compose exec`, `podman exec` or `nerdctl exec` of `<name> env`, `printenv` or `cat /proc/1/environ` — is refused too; `docker exec <name> ls` still runs.
+- A content `Grep` over a launchd directory (or one under it) and over the pm2 home `~/.pm2` is refused, and so is a Bash command such as `grep -r`, `rg` or `find -exec cat` naming a launchd directory, because it prints every plist's environment or the pm2 dump; `ls` of either still runs. A plist path that is a FIFO, device or other non-regular file is refused without being read, and a plist is never read past the 1 MiB bound (#8523).
+- The secret-file guard's branch-name exemption for `for` word lists and git ref positions now requires a well-formed git ref name that is the whole shell word, so a glob component that expands onto `..` (`feat/.?/…`) or a fragment cut out of a longer path (`../x=feat/…`) no longer escapes the branch prefix to a credential-shaped target (#7557).
+- `mkdir`, `touch`, `cp` and `mv` into a launchd directory (e.g. `mkdir -p ~/Library/LaunchAgents`, the documented supervisor install step) no longer trip the launchd-directory content-search refusal; `cp`/`mv` still refuse when their SOURCE is itself a credential-bearing plist, and `grep`/`rg`/`cat`/`tar` over the directory stay refused (#8523).
+- `tm hook --pm-guard` now records every deny in `pm-guard-denials.jsonl` under the trusty-mpm data directory, so `list_recent_errors` and `preview_bug_report` can see it (#8722). Each record names the check that refused the call (for example `destructive-delete` or `worktree-add`), the tool, the command or file path, the cwd, the session and the refusal text. The command is scrubbed of secrets before it is written. Denials of one check share a fingerprint, so they group as one entry. `TRUSTY_NO_BUG_CAPTURE` turns the record off, and a store that cannot be written costs the record, never the deny.
+- `tm hook --pm-guard` no longer refuses a lone `printf` or `echo` that writes issue or PR prose into a file because the prose names a secret-bearing file such as `.env` (#8723). The arguments count as text only when the command is one segment, stdout goes to a file, and nothing nested runs; a pipe, `$(…)`, `printf -v`, a redirect target, and every real read of a secret-bearing file are still refused.
+- ADR-0044's main-checkout write boundary now sees a `Bash` write made
+  through `tee <path>`, inside a command substitution (`$(…)`, a backtick, a
+  double-quoted `"$(…)"`, `>(…)`) or inside a subshell `( … )`, and denies it
+  when the file is source in a main checkout; each used to be allowed (refs
+  [#8730](https://github.com/bobmatnyc/trusty-tools/issues/8730))
+  - a write the guard finds but cannot delimit — an unclosed `$(`, `(` or
+    backtick, a `tee` whose arguments do not lex, nesting past the depth cap —
+    is now refused instead of allowed
+  - every redirect in a segment is judged, so `> notes.md > src/lib.rs` no
+    longer hides the second file
+  - a `>&word` redirect is read as the file write it is (bash opens `word`
+    for stdout and stderr); only a descriptor word (`2>&1`, `>&-`, `>&2-`)
+    is a copy. zsh's `>&|`/`>&!` always name a file
+- The credential-print rule now refuses a `find-generic-password -w` whose
+  stdout zsh's clobber spellings send to the terminal (`>!/dev/tty`,
+  `>>!/dev/tty`, `>!/dev/stdout`, `>&!/dev/tty`); the `!` stayed on the
+  target, which then read as a file. A `>|` to an ordinary file is no longer
+  refused as unreadable (refs [#8730](https://github.com/bobmatnyc/trusty-tools/issues/8730))
+- A here-document written into the session scratchpad is no longer refused as
+  a source write when its body holds an apostrophe (`it's`) beside
+  redirect-shaped prose; the body is read as data, as it already was without
+  the apostrophe (refs [#8111](https://github.com/bobmatnyc/trusty-tools/issues/8111))
+- The `ls`/`cp`/copy-script/delete refusals in an unpacked `git archive` tree
+  under the scratchpad (refs [#8571](https://github.com/bobmatnyc/trusty-tools/issues/8571))
+  are not changed here: `tm pm-guard` already allows them for the PM and for
+  writing agents, and the refusal a read-only agent meets is the #8439
+  read-only allowlist, whose scope is an open decision
+- The pm-guard credential-scan test for wide bracket runs no longer times the scan against a 1 s wall clock, which failed debug CI runs at 1.00-1.17 s. It now pins the scan's work units per input size, which fixes the pass count, the charge per KiB and linear growth. A single 5 s wall-clock backstop on the old 100k-run input remains, to catch superlinear work the budget does not charge, and the deep-nesting and bounded-work scan tests now allow 5 s instead of 1 s ([#8765](https://github.com/bobmatnyc/trusty-tools/issues/8765))
+- The `tm` binary's rustdoc builds again: twelve intra-doc links between the secret-read guard modules resolve, where the #8523 module split had left them pointing at items private to a sibling module (#8523).
+
+### Security
+
+- `tm hook --pm-guard` now refuses a credential captured into a shell variable and printed in a later stage of the same command, such as `T=$(gcloud auth print-access-token); echo "${T:0:10}"`, `export K=$(security find-generic-password … -w) && printenv K`, or a `for` loop over the value. A name bound by an assignment, `export`/`local`/`declare`/`readonly`, a `for`/`select` loop or `set --` carries the credential into every stage, and `printenv`, `env`, `set` and `declare -p` dumps count as printing it. `${#T}` and passing `"$T"` to a program that does not print it stay allowed. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+- While a shell variable holds a credential, `tm hook --pm-guard` also refuses the other ways to read it: inline code handed to `python3 -c`, `node -e`, `ruby -e`, `osascript -e` or any other evaluator, which can read the environment with no `$`; zsh forms such as `${(P)N}`, `${(U)T}`, `${=T}` and `$~T`; compound array assignments such as `A=("$T")` or `declare -a A=(…)`; arithmetic reads (`$((T))`, `let`, `[[ T -eq 0 ]]`, `A[T]`); the `=~` match arrays; a loop or printer after a `f() {` header; `awk` `ENVIRON`, `jq` `env`, `ps e` and `/proc/*/environ`; and zsh's flagless `typeset T`. A word nested thousands of `${` deep, or a command whose variables take exponential work to follow, now gets a deny instead of crashing or stalling the hook. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+- `tm hook --pm-guard` also refuses these ways to print a credential held in a shell variable: a declared name built by brace expansion (`export {T,U}=$(…)`); an evaluator that reads its script from `/dev/stdin`, `/dev/fd/N` or a `<(…)` file (`echo 'printenv T' | bash /dev/stdin`, `bash < <(…)`); arithmetic in `declare -i X=T`, `${X:0:T}` and `$[T]`, or through a name that holds the bare name (`U=T; echo $((U))`); nameref loops and subscripted namerefs (`declare -n R; for R in T`); `trap` code, versioned interpreter names such as `python3.12`, and `bun`, `lua` and `pwsh`; and builtins that repeat their operand (`cd "$T"`, `exit "$T"`, `compgen -W "$T"`, `export "$T"`). Bracket scans run in linear time, and nesting deeper than 32 levels refuses. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+- `tm hook --pm-guard` also refuses a credential held in a shell variable that reaches the output through a declared name built by a brace sequence (`declare {A..C}=$(…); echo $B`), the arithmetic key of an indexed-array element (`A=([T]=1)`), or a `coproc` command (`coproc printf %s "$T"`, `coproc NAME { echo "$T"; }`). Any assignment name that is not a plain identifier now counts as chosen at run time. The module documentation names the five accepted residual classes. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+- `tm hook --pm-guard` refuses four more ways a credential held in a shell variable reaches stderr or stdout: a `coproc` stage is now refused outright while any name is tainted, not only one whose own words carry the value (`coproc X ( declare -p T )`, `coproc X ( set )`); a `select NAME in WORD...` whose item list carries the value, since bash lists every item on stderr; a `${NAME?word}`/`${NAME:?word}` whose `word` carries, since bash aborts and writes it to stderr at expansion time, even for a stage that is only an assignment; and a plain input redirect (`wc -c < "$T"`, `: < "$T"`) whose target expands the credential, since a missing file's error would name it. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+- `tm hook --pm-guard` now also refuses a plain input redirect whose target reaches the credential through a command substitution or backtick, not only a bare `$NAME` (`wc -c < "$(echo "$T")"`, `wc -c < "` + `` `echo $T` `` + `"`), since a missing file's error names the substituted path the same way. A `<(…)` process-substitution target stays allowed by this check, since bash always opens that descriptor. ([#8676](https://github.com/bobmatnyc/trusty-tools/issues/8676))
+
+### Documentation
+
+- `BASE-AGENT.md`, `self-improvement-loop`, and `tm-ticketing` now state that
+  an agent's Improvement recommendations and self-improvement findings go to
+  the `bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the
+  parent issue, and never as a new issue (owner ruling 2026-09-27). The
+  `tm-ticketing` skill and `TICKETING.md` also state that a sweep closure
+  (age, staleness, duplicate, or obsolete) carries the `closed:sweep` label,
+  which a fix closure from a merged PR never carries.
+- `rust-delivery-workflow` now states that a `--include-ignored` gate run
+  excludes every profiling/benchmark test binary, run at most one at a time
+  and only for a performance-touching change, naming the excluded targets in
+  the report (owner ruling 2026-09-27).
+- The `tm-ticketing` skill now states that an issue title names the observed
+  symptom, an issue body carries Symptom and Evidence sections (Suspected
+  cause optional and labeled a hypothesis), and a project may define its own
+  `area:` label family in its `TICKETING.md`, tagging the subsystem where the
+  symptom shows rather than where the fix lands.
+
 ## [1.7.8] — 2026-09-26
 
 ### Fixed

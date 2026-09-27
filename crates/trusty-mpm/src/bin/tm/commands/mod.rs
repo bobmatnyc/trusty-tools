@@ -137,6 +137,11 @@ pub(crate) mod pm_guard_secret_read;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
+// #7557: the word-list / ref / text-payload position rules, split out of
+// `pm_guard_secret_read` when the structure check pushed it over the cap.
+pub(crate) mod pm_guard_secret_positions;
+// #8523: a pm2 dump and a credential-carrying launchd plist hold a process env.
+pub(crate) mod pm_guard_secret_env_files;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.

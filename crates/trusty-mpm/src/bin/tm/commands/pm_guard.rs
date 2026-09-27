@@ -239,6 +239,7 @@ pub(crate) use crate::commands::pm_guard_response::{
     build_pm_guard_deny_response, build_pretooluse_context_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_read;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
@@ -595,7 +596,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // structural reason as its neighbours: the reported caller was a dispatched
     // agent. See `pm_guard_secret_read` for the verb class, the shared
     // classifier it reads, and the key-name-only `grep` it still allows.
-    if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input) {
+    // #8523: a launchd plist is judged by CONTENT, so it needs the hook cwd.
+    if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input)
+        .or_else(|| evaluate_env_plist_read(tool_name, tool_input, &hook_cwd))
+    {
         audit_denied_tool(&refused, "secret-file-read", &reason).await;
         println!("{}", build_pm_guard_deny_response(&reason));
         return Ok(());

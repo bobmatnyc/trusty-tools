@@ -1715,4 +1715,20 @@ mod tests {
             Some("notes.md")
         );
     }
+
+    // #8730: a zsh clobber redirect names the file after its `!`; the rule
+    // read the destination as `!notes.md`, and `!.env.bak` as a laundered name.
+    #[test]
+    fn redirection_target_reads_a_clobber_destination_8730() {
+        let argv = |s: &str| shlex::split(s).expect("lexes");
+        for command in ["cat .env >!notes.md", "cat .env >>! notes.md"] {
+            assert_eq!(
+                redirection_target(&argv(command)).as_deref(),
+                Some("notes.md"),
+                "{command}"
+            );
+            assert!(eval_outside_a_worktree(command).is_some(), "{command}");
+        }
+        assert_eq!(eval_outside_a_worktree("cat .env >!.env.bak"), None);
+    }
 }

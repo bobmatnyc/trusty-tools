@@ -76,15 +76,15 @@ restore is where the work gets lost.
    `git checkout <pre-fix-sha> -- <paths>`. `origin/main` is a moving ref: it
    advances while you work, so reverting to it can hand you someone else's
    change and make the test fail — or pass — for a reason that is not yours.
-   Run the test and confirm it fails for the reason you expect (#7705).
+   Run the test and confirm it fails for the expected reason, including that
+   it reached the failure point, not just that it failed (#7705, #8516).
 3. Restore with `git checkout HEAD -- <paths>`, naming `HEAD`. Inside a
    Claude Code isolation worktree this form is refused as unverifiable; use
    `git restore --source=HEAD --staged --worktree <paths>` there instead
    (#7508).
 4. **Never restore with `git checkout <branch> -- <paths>` on a branch with no
-   commit yet.** Its tip IS the base branch, so that checkout discards every
-   uncommitted edit and prints nothing — an engineer lost a finished fix this
-   way and redid it from scratch (#7271).
+   commit yet** — its tip IS the base branch, so the checkout silently discards
+   every uncommitted edit, costing a finished fix before (#7271).
 5. **Spell a repository gate script `./scripts/<name>.sh`, never
    `bash scripts/<name>.sh`.** Inside a Claude Code isolation worktree the
    `bash`-prefixed form is sometimes refused as unverifiable while the
@@ -95,17 +95,16 @@ restore is where the work gets lost.
 7. **New test + uncommitted fix + no prior commit:** WIP-commit the fix,
    revert to confirm the test fails, `git reset --soft HEAD~1` to restore —
    never `git checkout HEAD -- <paths>` here, it can discard the fix (#7552).
-8. **Net-new module, nothing on `origin/main` to revert to** (that checkout
-   is a compile error there): revert the one decision the fix embodies inside
-   the new code instead, confirm the test fails, then restore (#7552).
+8. **Net-new module, nothing on `origin/main` to revert to** — revert the one
+   decision the fix embodies inside the new code, confirm the test fails, then
+   restore (#7552).
 
 ## Squashing WIP Commits
 
-Same moving-ref hazard as item 2 above, different command: `git reset --soft
-origin/main` mid-squash staged a deletion of a file `origin/main` had gained,
-which would have reverted a merged PR (#7849). Reset to the merge-base or
-task-start SHA instead — `git reset --soft $(git merge-base origin/main
-HEAD)` — and check `git status --porcelain` before committing.
+Same moving-ref hazard as item 2: `git reset --soft origin/main` mid-squash
+staged a deletion of a file `origin/main` had gained, reverting a merged PR
+(#7849). Reset to the merge-base instead — `git reset --soft $(git
+merge-base origin/main HEAD)` — and check `git status --porcelain` first.
 
 ## Right-Level Engineering
 

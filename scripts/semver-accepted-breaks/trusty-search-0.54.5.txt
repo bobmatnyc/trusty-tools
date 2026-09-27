@@ -1,0 +1,9 @@
+crate   trusty-search
+version 0.54.5
+reason  PR (fix/8147-colocated-opt-out-final-r2, Refs #8674, #8147) adds a new pub field `colocated: Option<bool>` to `CreateIndexRequest` (re-exported at `trusty_search::service::server::CreateIndexRequest`), letting a caller opt a registration out of the colocated `.trusty-search/` layout. Owner ruling 2026-09-26: a public-API break never forces a major version; the break is recorded here and the release stays on the 0.54.x line, per the same rationale as the trusty-mpm 1.7.x declarations.
+# release-notes: trusty-search 0.54.5 ships a disclosed, accepted API break —
+# the additive `CreateIndexRequest.colocated` field makes an existing
+# exhaustive struct literal against `CreateIndexRequest` stop compiling; no
+# deprecated shim was added, since the field is additive and optional
+# (`#[serde(default)]`).
+accept  constructible_struct_adds_field  CreateIndexRequest.colocated
