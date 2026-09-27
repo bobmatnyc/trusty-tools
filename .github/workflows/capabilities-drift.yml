@@ -147,6 +147,22 @@ jobs:
           # the shared closure detector.
           changed_nl="${RUNNER_TEMP}/capabilities-drift-changed.lines"
           tr '\0' '\n' < "$changed" > "$changed_nl"
+
+          # #8378: an instruction-content edit is Cargo-inert, so `Rust tests
+          # (affected crates)` skips it. `asset_content=true` makes this job
+          # run the asset-content lib tests instead. Only a Cargo-inert diff
+          # that touches an instruction root sets it; a code diff leaves the
+          # tests to the affected-crates job. A failed classification sets it.
+          if ! verdict="$(env -u GITHUB_OUTPUT DOCS_ONLY_BASE="$merge_base" bash scripts/detect-docs-only.sh)"; then
+            echo "asset_content=true" >> "$GITHUB_OUTPUT"
+            echo "capabilities-drift: detect-docs-only.sh failed — asset-content tests run (fail closed)"
+          elif [ "$verdict" = "docs_only=true" ] &&
+             grep -qE '^(crates/trusty-mpm/src/assets/|crates/trusty-agents-common/src/assets/|content/)' "$changed_nl"; then
+            echo "asset_content=true" >> "$GITHUB_OUTPUT"
+            echo "capabilities-drift: Cargo-inert instruction-content edit — asset-content tests run here"
+          else
+            echo "asset_content=false" >> "$GITHUB_OUTPUT"
+          fi
           # #8700: check_test_count.sh wraps the budget-test step, so an edit
           # to it must run that step too.
           if grep -qxF "scripts/check_capabilities.sh" "$changed_nl" ||
@@ -231,8 +247,8 @@ jobs:
       # #8700: the agent resident-budget tests (bundle_tests.rs) ran only in
       # the non-required pre-publish shards, so PR #8695 grew BASE-AGENT.md
       # past the rust-engineer and ticketing budgets and merged green. The
-      # step names the three budget tests in full under `--exact` and then
-      # requires `running 3 tests`, so renaming or deleting any one of them
+      # step names the four budget tests (#8378 added the #7915 ledger test) in full under `--exact` and then
+      # requires `running 4 tests`, so renaming or deleting any one of them
       # fails the step; check_test_count.sh still refuses a zero-test run.
       # Same env as the build step, so nothing recompiles. Runs even when the
       # drift check failed, so one push reports both verdicts.
@@ -252,12 +268,35 @@ jobs:
             core::bundle::tests::the_default_output_style_stays_within_its_resident_budget \
             core::bundle::tests::rust_engineer_composed_body_stays_within_its_resident_budget \
             core::bundle::tests::every_deployed_agent_composed_body_stays_within_its_resident_budget \
+            core::bundle::tests::composed_body_ledger_names_every_chain_link_7915 \
             > "$log" 2>&1 || status=$?
           cat "$log"
           if [ "$status" -ne 0 ]; then
             exit "$status"
           fi
-          if ! grep -qx "running 3 tests" "$log"; then
-            echo "::error::expected exactly the 3 resident-budget tests to run; a name above no longer matches a test (#8700)"
+          if ! grep -qx "running 4 tests" "$log"; then
+            echo "::error::expected exactly the 4 resident-budget tests to run; a name above no longer matches a test (#8700, #8378)"
             exit 1
           fi
+
+      # #8378 (owner ruling 2026-09-27, until PHASE_3): an instruction-content
+      # edit is Cargo-inert, so the affected-crates job no longer runs the lib
+      # tests that read the bundled assets — golden prompts, anchor checks,
+      # roster tables. They run here instead, and only for that diff class
+      # (`asset_content`, set by the relevance step). trusty-mpm's lib harness
+      # is the one built above; trusty-agents-common's is compiled here, in a
+      # separate invocation so trusty-mpm's feature set is not re-resolved.
+      - name: Asset-content lib tests (Cargo-inert instruction edits)
+        if: >-
+          !cancelled() && steps.relevance.outputs.relevant != 'false'
+          && steps.relevance.outputs.asset_content != 'false'
+          && steps.build.outcome == 'success'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test -p trusty-mpm --lib --locked --no-fail-fast || status=$?
+          cargo test -p trusty-agents-common --lib --locked --no-fail-fast || status=$?
+          exit "$status"

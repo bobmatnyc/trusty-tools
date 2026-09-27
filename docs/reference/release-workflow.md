@@ -253,7 +253,7 @@ then publish. Closing that needs the tag and the upload to be one command, and
 it, before the tag becomes something anyone has relied on.
 
 **Tested by** `scripts/check-tag-publish-parity-selftest.sh` (CI:
-`.github/workflows/tag-publish-parity.yml`), which builds a synthetic repo per
+`.github/workflows/ci.yml`, job `parity-selftest`), which builds a synthetic repo per
 failure and asserts the finding code, not just a non-zero exit. CI runs the
 self-test rather than the gate: on a tag push the workflow checkout IS the
 tagged commit, so the comparison is true by construction and proves nothing.
