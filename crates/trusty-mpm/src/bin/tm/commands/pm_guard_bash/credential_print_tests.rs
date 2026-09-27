@@ -502,13 +502,16 @@ fn deep_brace_nesting_denies_without_overflow() {
     let spent = started.elapsed();
     assert!(verdict.is_some(), "must deny");
     // #8676 round 4: bounded in time as well as in stack depth.
-    assert!(spent < std::time::Duration::from_secs(1), "took {spent:?}");
+    // #8765: 5 s, not 1 s. The limit guards overflow and unbounded work, not a
+    // constant factor; 1 s was a CI flake risk under #8734's 2x slowdown.
+    assert!(spent < std::time::Duration::from_secs(5), "took {spent:?}");
 }
 
 /// #8676 round 2, row 5: a scan whose fixed point would take exponential work
 /// refuses inside its budget. Eight substitution levels, each with an
 /// eight-name copy chain seeded by a credential call; the reversed chain needs
-/// one pass per name at every level.
+/// one pass per name at every level. #8765: the 5 s limit guards unbounded
+/// work, not a constant factor.
 #[test]
 fn scan_work_is_bounded() {
     let seed = "A=$(gcloud auth print-access-token)";
@@ -523,7 +526,8 @@ fn scan_work_is_bounded() {
         let verdict = evaluate_credential_print_command(&text);
         let spent = started.elapsed();
         assert!(verdict.is_some(), "must deny: {text}");
-        assert!(spent < std::time::Duration::from_secs(1), "took {spent:?}");
+        // #8765: 5 s, not 1 s; 1 s was a CI flake risk under #8734's 2x slowdown.
+        assert!(spent < std::time::Duration::from_secs(5), "took {spent:?}");
     }
 }
 
@@ -918,14 +922,26 @@ fn pinned_units(passes: usize, subs: usize, kib: usize) -> usize {
 /// What: at n, 2n and 4n KiB of run, pins the exact units, which fixes the
 /// pass count (2 for an allowed row with the `T=` binding, 1 for a refused
 /// row or with no binding), the charge per KiB and linear growth; then pins
-/// the verdict where two passes cross the budget.
+/// the verdict where two passes cross the budget. The work-unit pins are the
+/// primary assertion. #8765: one wall-clock backstop runs first, on the
+/// timed form's own input (100k `${X:0:1}` runs, bound), and exists only to
+/// catch superlinear work the budget never charges; #8771 tracks the proper
+/// close, a `#[cfg(test)]` byte counter. Worst CI time today is 1.17 s, and
+/// the 5 s budget is about 4x that.
 #[test]
 fn wide_bracket_runs_scan_in_linear_work() {
+    let bound = "T=$(gcloud auth print-access-token); echo ";
+    // #8765: wall-clock backstop for uncharged superlinear work; see #8771.
+    let command = format!("{bound}{}", "${X:0:1}".repeat(100_000));
+    let started = std::time::Instant::now();
+    let verdict = evaluate_credential_print_command(&command);
+    let spent = started.elapsed();
+    assert!(verdict.is_none(), "100k `${{X:0:1}}` runs must be allowed");
+    assert!(spent < std::time::Duration::from_secs(5), "took {spent:?}");
     // #8765: the seeds stay under 1 KiB and every run body is whole KiB, so
     // the charge per pass is exact. 4n stays under `WORK_BUDGET`.
     const KIB: usize = 1_024;
     const N_KIB: usize = 128;
-    let bound = "T=$(gcloud auth print-access-token); echo ";
     let unbound = "gcloud auth print-access-token >/dev/null; echo ";
     let body = |run: &str, kib: usize| run.repeat(kib * KIB / run.len());
     // A refused row stops inside its first pass; an allowed one takes two,
