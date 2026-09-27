@@ -77,6 +77,8 @@ mod read_only_programs;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
+// #8756: one substitution scanner for the forbidden-verb and secret rules.
+mod substitutions;
 mod worktree_remove;
 mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
@@ -148,6 +150,12 @@ use path_tokens::unresolved_target;
 // it reaches this resolver instead of growing a second normalizer.
 pub(crate) use path_tokens::{PathEnv, resolve_target_path};
 use shell_lex::QuoteScan;
+// #8756: `substitutions` asks the credential rule which programs run their input.
+use credential_print::is_evaluator;
+// #8756: the secret rules read substitution bodies through the same scanner.
+pub(crate) use substitutions::{
+    MAX_SUBSTITUTION_DEPTH, Substitution, command_substitutions, without_inert_heredoc_bodies,
+};
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
 pub(crate) const SHELL_EDIT_REASON: &str = "PM must not edit files via shell tools \
@@ -243,19 +251,6 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
     }
     None
 }
-
-/// Maximum command-substitution recursion depth before conservatively denying.
-///
-/// Why: [`classify_command_substitutions`] recurses through
-/// [`evaluate_bash_command`] on each `$(…)` / backtick body. Adversarial deep
-/// nesting (`$($($(…`) would otherwise recurse without bound and could exhaust
-/// the stack, crashing the short-lived `tm hook --pm-guard` process. Capping
-/// the depth turns a crash into a (safe-direction) deny. The cap is generous —
-/// real commands nest a handful of levels at most, never dozens.
-/// What: the recursion budget threaded as `depth` through
-/// [`evaluate_bash_command_inner`] → [`classify_bash_segment`] →
-/// [`classify_command_substitutions`]. Past it, substitution scanning denies.
-const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 /// Classify a `Bash` command: `Some(reason)` denies, `None` allows.
 ///
@@ -502,36 +497,6 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     classify_command_substitutions(trimmed, depth)
 }
 
-/// Whether a paren-delimited substitution opens at byte `i`, and whether it is
-/// live there given the segment's quote map.
-///
-/// Why (#2745): `$(…)`, `<(…)` and `>(…)` are one CLASS — bash executes the
-/// body of each, so each must be decomposed and classified. Naming them in one
-/// place is what makes that true by construction: a spelling added here is
-/// scanned by [`classify_command_substitutions`] with no other edit, and the
-/// gap that let `diff <(sed -i …) x` through cannot reopen one form at a time.
-/// The two forms differ in ONE respect, which is why this returns liveness
-/// rather than a bare bool: double quotes suppress process substitution
-/// (`echo "<(x)"` is literal text) but NOT command substitution
-/// (`echo "$(sed -i …)"` still runs `sed`).
-/// What: `Some(true)` when a substitution opens at `i` and is live shell
-/// syntax there, `Some(false)` when one opens but is quoted into literal text,
-/// `None` when no substitution opens at `i`. On unbalanced quotes the map is
-/// untrustworthy, so every opener reads as live — the conservative direction.
-/// Test: `evaluate_bash_command_denies_process_substitution_edit`,
-/// `evaluate_bash_command_allows_quoted_process_substitution_prose`,
-/// `evaluate_bash_command_allows_quoted_substitution_prose`.
-fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Option<bool> {
-    if bytes.get(i + 1).copied() != Some(b'(') {
-        return None;
-    }
-    match bytes[i] {
-        b'$' => Some(!scan.balanced || scan.allows_substitution(i)),
-        b'<' | b'>' => Some(!scan.balanced || scan.is_unquoted(i)),
-        _ => None,
-    }
-}
-
 /// Inspect every substitution in a segment — `$(…)`, `<(…)`, `>(…)`, and
 /// backticks — for hidden forbidden verbs.
 ///
@@ -552,7 +517,10 @@ fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Optio
 /// `diff <(sed -i s/a/b/ f) x` was ALLOWED while bash ran the `sed -i`, and
 /// `>(…)` denied only incidentally — its leading `>` tripped
 /// [`has_file_write_redirection`], never its body. Both now classify like every
-/// other substitution, via [`paren_substitution_live_at`].
+/// other substitution, via `substitutions::paren_substitution_live_at`.
+///
+/// #8756: the byte scan moved to [`substitutions::segment_substitutions`], which
+/// the secret rules share, so both read the same bodies.
 /// What: past the depth cap, returns [`SHELL_EDIT_REASON`] immediately.
 /// Otherwise byte-scans for each paren-delimited opener (matching `)` with
 /// paren-depth tracking) and for backtick pairs, recursively evaluates each
@@ -573,52 +541,16 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
         // than recurse further and risk a stack overflow.
         return Some(SHELL_EDIT_REASON);
     }
-    let scan = QuoteScan::new(segment);
-    let backtick_live = |i: usize| !scan.balanced || scan.allows_substitution(i);
-    let bytes = segment.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if let Some(live) = paren_substitution_live_at(&scan, bytes, i) {
-            if !live {
-                i += 1;
-                continue;
-            }
-            let mut paren = 1usize;
-            let mut j = i + 2;
-            while j < bytes.len() && paren > 0 {
-                match bytes[j] {
-                    b'(' => paren += 1,
-                    b')' => paren -= 1,
-                    _ => {}
+    for body in substitutions::segment_substitutions(segment) {
+        match body {
+            // Unbalanced opener — cannot decompose; deny conservatively.
+            Substitution::Unclosed(_) => return Some(SHELL_EDIT_REASON),
+            Substitution::Closed(text) => {
+                if let Some(reason) = evaluate_bash_command_inner(&text, depth + 1) {
+                    return Some(reason);
                 }
-                j += 1;
             }
-            if paren != 0 {
-                // Unbalanced opener — cannot decompose; deny conservatively.
-                return Some(SHELL_EDIT_REASON);
-            }
-            if let Some(reason) = evaluate_bash_command_inner(&segment[i + 2..j - 1], depth + 1) {
-                return Some(reason);
-            }
-            i = j;
-            continue;
         }
-        if bytes[i] == b'`' && backtick_live(i) {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'`' {
-                j += 1;
-            }
-            if j >= bytes.len() {
-                // Unbalanced backtick — cannot decompose; deny conservatively.
-                return Some(SHELL_EDIT_REASON);
-            }
-            if let Some(reason) = evaluate_bash_command_inner(&segment[i + 1..j], depth + 1) {
-                return Some(reason);
-            }
-            i = j + 1;
-            continue;
-        }
-        i += 1;
     }
     None
 }

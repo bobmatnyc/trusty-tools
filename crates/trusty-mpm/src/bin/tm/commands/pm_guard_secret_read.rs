@@ -348,10 +348,9 @@ use std::path::Path;
 
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    any_pattern_overlaps, evaluate_credential_print_command, evaluate_pod_env_dump_command,
-    evaluate_process_env_dump_command, expand_brace_alternatives, git_subcommand,
-    matches_only_name_substring_family, secret_pattern_overlaps, split_heredoc_bodies,
-    split_shell_segments, strip_process_substitution,
+    any_pattern_overlaps, evaluate_credential_print_command, expand_brace_alternatives,
+    git_subcommand, matches_only_name_substring_family, secret_pattern_overlaps,
+    split_heredoc_bodies, split_shell_segments, strip_process_substitution,
 };
 // #7839, #7738, #7744: the ONE tokenizer and token classifier every Bash
 // guard asks — which token is an interpreter's PROGRAM, which word is regex
@@ -372,6 +371,8 @@ use crate::commands::pm_guard_secret_positions::{
 };
 // #8523: process-environment files beside the #7266 name class.
 use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
+// #8756 round 2: the dump rules, and every rule on each substitution body.
+use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -554,9 +555,10 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
 /// What: routes `Bash` to [`evaluate_secret_file_read_command`] over its
 /// `command` string, then to [`evaluate_credential_print_command`] (#8596,
 /// #8248: a credential CLI prints the same bytes with no file named), then to
-/// `evaluate_pod_env_dump_command` (#7648: a pod's environment dump), then to
-/// `evaluate_process_env_dump_command` (#8756: a launchd or pm2 job's), and
-/// every other tool to [`evaluate_secret_file_read_tool`].
+/// `evaluate_pod_env_dump_command` (#7648: a pod's environment dump) and
+/// `evaluate_process_env_dump_command` (#8756: a launchd or pm2 job's) through
+/// [`evaluate_nested_secret_rules`], which also reads every substitution body
+/// (#8756 round 2), and every other tool to [`evaluate_secret_file_read_tool`].
 /// Test: `the_unified_entry_point_routes_both_surfaces`,
 /// `the_unified_entry_point_refuses_a_printed_credential`.
 pub(crate) fn evaluate_secret_file_read(
@@ -570,10 +572,9 @@ pub(crate) fn evaluate_secret_file_read(
             .unwrap_or_default();
         return evaluate_secret_file_read_command(command)
             .or_else(|| evaluate_credential_print_command(command))
-            // #7648: a pod's env dump prints injected Secrets, naming no file.
-            .or_else(|| evaluate_pod_env_dump_command(command))
-            // #8756: a launchd or pm2 job's env dump prints its keys, naming no file.
-            .or_else(|| evaluate_process_env_dump_command(command));
+            // #7648, #8756: a pod's or a launchd/pm2 job's env dump prints its
+            // keys, naming no file; round 2 reads every substitution body too.
+            .or_else(|| evaluate_nested_secret_rules(command));
     }
     evaluate_secret_file_read_tool(tool_name, tool_input)
 }

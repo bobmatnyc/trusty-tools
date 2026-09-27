@@ -71,8 +71,10 @@ use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
     basename, code_operands, consumes_stdin, credential_fds, enables_xtrace, evaluator_name,
-    first_credential_program, is_evaluator, keyword_words,
+    first_credential_program, keyword_words,
 };
+// #8756: re-exported for `substitutions`, which asks which bodies run as code.
+pub(super) use credential_print_programs::is_evaluator;
 use credential_print_redirect::{apply_redirections, terminal_name_sink};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
