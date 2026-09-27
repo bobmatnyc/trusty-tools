@@ -567,6 +567,22 @@ This governs issue bodies only. It does **not** relax the evidence rule for
 claiming a gate passed: raw test output stays mandatory there (`BASE-AGENT.md` —
 never summarise test results in your own words).
 
+## Symptom Titles and Area Labels
+
+🔴 **Title states the observed symptom**, never the cause or the fix. Describe
+what the observer sees, e.g. "index remove deletes the wrong index when
+TRUSTY_INDEX is set" rather than the internal function at fault.
+
+🔴 **Body carries a Symptom section and an Evidence section.** A Suspected
+cause section is optional and labeled a hypothesis, never presented as a
+diagnosis.
+
+🟡 **A project may define an `area:` label family**, one label per issue,
+tagging the subsystem where the symptom shows — never where the fix will
+land. The area set itself is per-project, named in that project's own
+`TICKETING.md`; this skill defines none. Example: a project might carry
+`area:secrets`, `area:ci`, `area:other` (fallback).
+
 ## Clickable References — the Link Shapes
 
 Moved out of the instruction package by #7423, which keeps the rule itself:

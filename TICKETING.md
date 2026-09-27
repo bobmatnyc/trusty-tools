@@ -386,6 +386,41 @@ may still be filed — search first.
   (its evidence inventory).
 - Every reference renders as a clickable markdown link, never a bare number.
 
+## Symptom Titles and Area Labels (owner decision, 2026-09-27)
+
+1. **Title states the observed symptom**, never the cause or the fix. Good:
+   "index remove deletes the wrong index when TRUSTY_INDEX is set". Bad:
+   "value_source ignores -i".
+2. **Body carries three sections:** Symptom, Evidence, and Suspected cause.
+   Suspected cause is optional and labeled a hypothesis, never a diagnosis.
+3. **Every issue carries exactly one `area:` label**, from this fixed set:
+
+   | Label | Area |
+   |---|---|
+   | `area:pm-guard` | `tm hook --pm-guard` checks and dispatch gating |
+   | `area:secrets` | Secret-scan heuristics and pm-guard secret refusals |
+   | `area:worktree` | Worktree creation, isolation, and cleanup |
+   | `area:build-lease` | Build-lease locking and concurrent-build coordination |
+   | `area:session-lifecycle` | Session launch, resume, and provisioning |
+   | `area:daemon-launchd` | Daemon process management under launchd |
+   | `area:release` | PR merge, auto-merge, and release gate mechanics |
+   | `area:ci` | CI workflow definitions and gate execution |
+   | `area:test-hermeticity` | Test isolation, fixtures, and flake sources |
+   | `area:memory-daemon` | trusty-memory daemon runtime |
+   | `area:memory-import` | trusty-memory import and ingestion |
+   | `area:search-index` | trusty-search indexing and query |
+   | `area:agent-platform` | Agent runtime and roster mechanics |
+   | `area:agent-prompts` | Agent and skill prompt content |
+   | `area:channels` | trusty-channels messaging integrations |
+   | `area:other` | Fallback when no area above fits |
+
+4. **Tie-break: label the area where the symptom shows**, never where the fix
+   will land. A guard refusal triggered by a secret heuristic is
+   `area:secrets`, not `area:pm-guard`.
+5. **If `area:other` exceeds 5% of open issues, propose a new area** instead
+   of growing the fallback.
+6. **Status reports give issues opened and closed per area per day.**
+
 ## Attribution
 
 Every issue body and every issue comment ends with exactly one line, no preamble
