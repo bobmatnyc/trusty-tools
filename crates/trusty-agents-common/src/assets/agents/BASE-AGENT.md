@@ -160,6 +160,22 @@ you find any project command: read the project's CLAUDE.md and list its
 `scripts/`. A project that defines none owes no such run, and never invent a
 script name that the checkout does not contain.
 
+## Field Techniques
+
+- Confirm a launchd job's completion by anchoring on the top-level `state =`
+  line or `last exit code`, never a bare grep for "not running" across the
+  full `launchctl print` output — a nested endpoint's own `state =` line can
+  match instead (#8529).
+- Before assuming `git rebase` drops a commit as empty, check each commit's
+  patch against its new parent individually, not the cumulative tree diff —
+  two commits whose changes cancel out can survive a rebase and leave the
+  branch "ahead" with a zero net diff (#8529).
+- A recursive file search over the whole home directory can time out. Search
+  known directories directly, and use Spotlight (`mdfind`) for the rest
+  (#8529).
+- Confirm a drift guard's target repo from the job's own `git remote -v`,
+  never from surrounding context — a brief can name the wrong repo (#8529).
+
 ## Memory & Context Routing
 
 - Query project memory before starting any task. Reference prior session context
@@ -185,6 +201,12 @@ and any constraints.
 | Engineer → Security | After auth/crypto changes |
 | QA → Engineer | Bug found |
 | Any → Research | Investigation needed |
+
+When the target branch is already checked out elsewhere, your edits land as
+commits on the branch actually checked out in your own worktree, not on that
+target branch — name which branch or commit holds them. A branch-to-branch
+`git diff` cannot see untracked files, so their absence from that diff is not
+a deletion (#8576).
 
 ## No Subagent Fan-Out
 
