@@ -421,11 +421,22 @@ pub fn reap_orphans_before_start() {
     // Clear the lock/port files the reaped orphans left behind. Only reachable
     // when we actually reaped something on OUR data dir, so this can no longer
     // delete a foreign daemon's files.
+    // #8760: and only while holding the daemon lock ourselves. A concurrent
+    // starter that already holds it keeps its lock and port file.
     if let Ok(lock) = crate::service::daemon_lock_path() {
-        let _ = std::fs::remove_file(&lock);
-    }
-    if let Some(port) = crate::commands::daemon_utils::daemon_port_path() {
-        let _ = std::fs::remove_file(&port);
+        let port = crate::commands::daemon_utils::daemon_port_path();
+        let also: Vec<&Path> = port.as_deref().into_iter().collect();
+        match crate::service::remove_daemon_files_if_unheld(&lock, &also) {
+            Ok(crate::service::StaleLockRemoval::HeldByLiveDaemon) => tracing::info!(
+                "orphan reaper: {} is held by a live daemon — leaving it and the port file (#8760)",
+                lock.display()
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "orphan reaper: could not clear {}: {e} — the next daemon reuses it",
+                lock.display()
+            ),
+        }
     }
 }
 

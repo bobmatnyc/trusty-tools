@@ -170,6 +170,26 @@ fn check_lock_file_stale_pid_warns() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// #8760: `doctor --fix` must not unlink a lock a live process holds, even when
+/// the file still names a dead predecessor (the holder's pid-write window).
+#[test]
+fn fix_stale_lock_leaves_a_held_lock_in_place() {
+    use fs4::FileExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let lock_path = tmp.path().join("daemon.lock");
+    std::fs::write(&lock_path, "2000000000").unwrap();
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock_exclusive().unwrap();
+
+    fix_stale_lock(tmp.path());
+
+    assert!(lock_path.exists(), "doctor --fix unlinked a held lock file");
+}
+
 #[tokio::test]
 async fn check_port_reachable_unbound_port_errors() {
     // Port 65535 is unlikely to be bound; assert we get an Error variant.
