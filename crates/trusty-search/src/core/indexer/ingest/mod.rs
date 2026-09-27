@@ -715,8 +715,8 @@ impl CodeIndexer {
         // #8600: the three phases `run_embed_catch_up` runs with the indexer
         // guard dropped between them, here under one borrow.
         let plan = self.plan_deferred_embed().await;
-        let embeddings = plan.embed(progress_tx, pause).await?;
-        self.commit_deferred_embed(plan, embeddings).await
+        let run = plan.embed(progress_tx, pause).await?;
+        self.commit_deferred_embed(plan, run).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

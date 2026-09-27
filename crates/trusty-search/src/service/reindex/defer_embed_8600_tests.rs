@@ -62,6 +62,35 @@ fn chunk(n: usize) -> RawChunk {
     }
 }
 
+/// An embedder that answers its first `answer` batch calls and never answers
+/// the rest — a sidecar that wedges part-way through a pass.
+struct WedgesAfterCalls {
+    answer: usize,
+    calls: AtomicUsize,
+    answered_texts: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for WedgesAfterCalls {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        std::future::pending().await
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= self.answer {
+            return std::future::pending().await;
+        }
+        self.answered_texts.fetch_add(texts.len(), Ordering::SeqCst);
+        Ok(texts
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (0..8).map(|d| (i + d + 1) as f32).collect())
+            .collect())
+    }
+    fn dimension(&self) -> usize {
+        8
+    }
+}
+
 /// An index whose three chunks live in a real redb corpus at `redb_path`, and
 /// whose embedder never answers.
 async fn handle_over_redb(
@@ -70,13 +99,31 @@ async fn handle_over_redb(
     redb_path: &std::path::Path,
     calls: Arc<AtomicUsize>,
 ) -> Arc<IndexHandle> {
+    handle_with(
+        id,
+        root,
+        redb_path,
+        Arc::new(NeverCompletingEmbedder { calls }),
+        3,
+    )
+    .await
+}
+
+/// An index of `n` chunks in a real redb corpus at `redb_path`, embedding
+/// through `embedder`.
+async fn handle_with(
+    id: &str,
+    root: &std::path::Path,
+    redb_path: &std::path::Path,
+    embedder: Arc<dyn Embedder>,
+    n: usize,
+) -> Arc<IndexHandle> {
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(8).expect("usearch"));
-    let mut indexer = CodeIndexer::new(id, root)
-        .with_components(Arc::new(NeverCompletingEmbedder { calls }), store);
+    let mut indexer = CodeIndexer::new(id, root).with_components(embedder, store);
     indexer.set_corpus_store(Arc::new(CorpusStore::open(redb_path).expect("open corpus")));
     let parsed = ParsedBatch {
-        chunks: (0..3).map(chunk).collect(),
-        embeddings: vec![None, None, None],
+        chunks: (0..n).map(chunk).collect(),
+        embeddings: vec![None; n],
         entities_by_file: vec![],
         parse_ms: 0,
         embed_ms: 0,
@@ -167,6 +214,73 @@ async fn a_never_completing_embedder_aborts_the_pass_within_the_deadline() {
     assert!(
         reason.contains("no progress"),
         "failure names the cause: {reason}"
+    );
+}
+
+/// A pass whose second wave stalls commits the first wave before it settles
+/// `Failed`, and keeps the pending marker so the next boot embeds the rest.
+///
+/// Pre-fix the stall was a bare `Err` from the embed loop, so the completed
+/// first wave was dropped and `pending_embed_count` still read the full corpus.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_wave_commits_the_waves_before_it() {
+    let id = "stall-prefix-8600";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let redb_path = tmp.path().join("index.redb");
+    let mut entry = crate::service::persistence::PersistedIndex::new(id, tmp.path());
+    entry.deferred_embed_pending = true;
+    crate::service::persistence::upsert_index_registry_entry(entry).expect("persist entry");
+
+    // Wave 1 is `inflight` sub-batches, all answered; every later call hangs.
+    // More chunks than any wave can hold, whatever the batch size resolves to.
+    let inflight = crate::core::indexer::resolve_embed_inflight();
+    let n = inflight * 512 + 1;
+    let answered_texts = Arc::new(AtomicUsize::new(0));
+    let embedder = Arc::new(WedgesAfterCalls {
+        answer: inflight,
+        calls: AtomicUsize::new(0),
+        answered_texts: Arc::clone(&answered_texts),
+    });
+    let handle = handle_with(id, tmp.path(), &redb_path, embedder, n).await;
+
+    let pass = crate::core::indexer::WAVE_DEADLINE_OVERRIDE.scope(
+        Duration::from_millis(500),
+        run_embed_catch_up(Arc::clone(&handle), Arc::new(ReindexProgress::new())),
+    );
+    tokio::time::timeout(Duration::from_secs(20), pass)
+        .await
+        .expect("a stalled pass must abort within its deadline");
+
+    let wave_one = answered_texts.load(Ordering::SeqCst);
+    assert!(
+        wave_one > 0 && wave_one < n,
+        "wave 1 was answered, wave 2 was not"
+    );
+    {
+        let stages = handle.stages.read().await;
+        assert_eq!(stages.semantic.status, StageStatus::Failed);
+        let reason = format!("{:?}", stages.semantic.failure);
+        assert!(
+            reason.contains("no progress"),
+            "failure names the cause: {reason}"
+        );
+    }
+    let owed = handle.indexer.read().await.pending_embed_count().await;
+    assert_eq!(
+        owed,
+        n - wave_one,
+        "wave 1's {wave_one} vectors must be committed before the pass settles Failed"
+    );
+    let path = crate::service::persistence::indexes_toml_path().expect("indexes.toml path");
+    let kept = crate::service::persistence::load_index_registry_at(&path)
+        .expect("registry must load")
+        .into_iter()
+        .find(|e| e.id == id)
+        .expect("entry must exist");
+    assert!(
+        kept.deferred_embed_pending,
+        "the pending marker must survive so the next boot embeds the remainder"
     );
 }
 

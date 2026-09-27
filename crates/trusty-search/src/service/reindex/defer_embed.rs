@@ -148,9 +148,11 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
         .embed(Some(&progress_tx), Some(&handle.embedding_pause))
         .await
     {
-        Ok(embeddings) => {
+        // #8600: a stalled run still commits its completed waves here; the
+        // stall then comes back as the `Err` that settles `Failed` below.
+        Ok(run) => {
             let indexer = handle.indexer.read().await;
-            indexer.commit_deferred_embed(plan, embeddings).await
+            indexer.commit_deferred_embed(plan, run).await
         }
         Err(e) => Err(e),
     };

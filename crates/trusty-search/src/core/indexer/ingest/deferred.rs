@@ -16,7 +16,7 @@ use anyhow::Result;
 use crate::core::chunker::RawChunk;
 
 use super::super::CodeIndexer;
-use super::embed::EmbedContext;
+use super::embed::{EmbedContext, EmbedRun};
 use super::EmbedCatchUp;
 
 /// The chunks one catch-up pass owes, snapshotted under the indexer lock.
@@ -34,19 +34,25 @@ pub(crate) struct DeferredEmbedPlan {
 impl DeferredEmbedPlan {
     /// Embed the owed chunks. Holds no indexer lock (#8600).
     ///
-    /// What: the result is 1:1 with the owed chunks; a pause or drain leaves
-    /// the tail `None` (#6524), and a no-progress wave is an `Err`.
-    /// Test: `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`.
+    /// What: the embeddings are 1:1 with the owed chunks; a pause, drain or
+    /// no-progress abort leaves the tail `None` (#6524). #8600: an abort is
+    /// carried in [`EmbedRun::stalled`], not an `Err`, so the completed waves
+    /// before it still reach [`CodeIndexer::commit_deferred_embed`].
+    /// Test: `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`,
+    /// `a_stalled_wave_commits_the_waves_before_it`.
     pub(crate) async fn embed(
         &self,
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
-    ) -> Result<Vec<Option<Vec<f32>>>> {
+    ) -> Result<EmbedRun> {
         if self.to_embed.is_empty() {
-            return Ok(Vec::new());
+            return Ok(EmbedRun {
+                embeddings: Vec::new(),
+                stalled: None,
+            });
         }
         self.embed
-            .embed_chunks_in_batches(&self.to_embed, progress_tx, pause)
+            .embed_chunks_keeping_prefix(&self.to_embed, progress_tx, pause)
             .await
     }
 }
@@ -91,17 +97,24 @@ impl CodeIndexer {
     /// reads a `None` slot as a stale-embedding eviction, so committing the
     /// un-embedded remainder would undo work instead of deferring it.
     /// What: commits only the leading `Some` run; `paused` is true when that
-    /// run is shorter than the plan. A DURABLE WRITE — the caller must hold
-    /// the per-index teardown read-guard (#3049).
-    /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
+    /// run is shorter than the plan. A stalled run (#8600) commits and
+    /// snapshots its prefix too, then returns the stall as the `Err` that
+    /// settles the pass `Failed`. A DURABLE WRITE — the caller must hold the
+    /// per-index teardown read-guard (#3049).
+    /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`,
+    /// `a_stalled_wave_commits_the_waves_before_it`.
     pub(crate) async fn commit_deferred_embed(
         &self,
         plan: DeferredEmbedPlan,
-        mut embeddings: Vec<Option<Vec<f32>>>,
+        run: EmbedRun,
     ) -> Result<EmbedCatchUp> {
         if plan.to_embed.is_empty() {
             return Ok(EmbedCatchUp::finished(0, plan.total));
         }
+        let EmbedRun {
+            mut embeddings,
+            stalled,
+        } = run;
         let done = embeddings.iter().take_while(|e| e.is_some()).count();
         let paused = done < plan.to_embed.len();
         embeddings.truncate(done);
@@ -109,6 +122,14 @@ impl CodeIndexer {
             .await?;
         self.commit_embeddings_cache(&plan.to_embed[..done], embeddings)
             .await;
+        if let Some(stall) = stalled {
+            // #8600: the completed waves are committed; make them durable
+            // before the pass settles `Failed`, as the paused arm does.
+            if done > 0 {
+                self.force_incremental_persist();
+            }
+            return Err(stall);
+        }
         Ok(EmbedCatchUp {
             embedded: done,
             total: plan.total,

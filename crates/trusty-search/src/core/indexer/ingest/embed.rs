@@ -162,6 +162,18 @@ where
     }
 }
 
+/// An embed pass's vectors, plus the no-progress abort that cut it short.
+///
+/// Why: #8600 — an abort used to be a bare `Err`, which discarded the waves
+/// that had already completed in the same pass.
+/// What: `embeddings` is 1:1 with the chunks; every completed wave's slots are
+/// `Some`. `stalled` is the no-progress error when a wave hit the deadline.
+/// Test: `a_stalled_wave_commits_the_waves_before_it`.
+pub(crate) struct EmbedRun {
+    pub(crate) embeddings: Vec<Option<Vec<f32>>>,
+    pub(crate) stalled: Option<anyhow::Error>,
+}
+
 /// What an embed loop needs from its indexer, detached from the indexer lock.
 ///
 /// Why: #8600 — a deferred-embed pass held the indexer read guard for the
@@ -215,6 +227,24 @@ impl CodeIndexer {
 }
 
 impl EmbedContext {
+    /// [`Self::embed_chunks_keeping_prefix`], with a no-progress abort
+    /// reported as an `Err` — for callers that cannot use a partial result.
+    /// Test: `test_index_files_batch_*`.
+    pub(crate) async fn embed_chunks_in_batches(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        let run = self
+            .embed_chunks_keeping_prefix(chunks, progress_tx, pause)
+            .await?;
+        match run.stalled {
+            Some(stall) => Err(stall),
+            None => Ok(run.embeddings),
+        }
+    }
+
     /// Batched ONNX embed — multi-flight pipelined (issue #753).
     ///
     /// Why: serial loop left ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2)
@@ -229,20 +259,27 @@ impl EmbedContext {
     /// here — the caller holds the process-wide background permit and this
     /// index's teardown guard, so parking would stall every other index's
     /// catch-up and any `DELETE` on this one. The caller commits the embedded
-    /// prefix and re-queues the rest.
+    /// prefix and re-queues the rest. A wave that hits the no-progress
+    /// deadline ends the loop the same way, with the error in
+    /// [`EmbedRun::stalled`] (#8600).
     /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`. The
     /// pause arm: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-    pub(crate) async fn embed_chunks_in_batches(
+    /// The stall arm: `a_stalled_wave_commits_the_waves_before_it`.
+    pub(crate) async fn embed_chunks_keeping_prefix(
         &self,
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
-    ) -> Result<Vec<Option<Vec<f32>>>> {
+    ) -> Result<EmbedRun> {
         use futures::StreamExt as _;
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
+        let mut stalled = None;
         let Some(embedder) = &self.embedder else {
-            return Ok(embeddings);
+            return Ok(EmbedRun {
+                embeddings,
+                stalled,
+            });
         };
         let chunk_total = chunks.len();
         // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
@@ -332,14 +369,29 @@ impl EmbedContext {
             // #8600: a wave is bounded by a no-progress deadline and abandoned
             // on a shutdown drain. Its slots stay `None`, so the caller commits
             // only the waves that completed — never a partial one.
-            let Some(wave_results) = await_wave(wave, pause).await? else {
-                tracing::info!(
-                    index_id = %self.index_id,
-                    embedded = batch_start,
-                    chunk_total,
-                    "embed pass abandoned its in-flight wave: the daemon is shutting down (#8600)",
-                );
-                break;
+            let wave_results = match await_wave(wave, pause).await {
+                Ok(Some(results)) => results,
+                Ok(None) => {
+                    tracing::info!(
+                        index_id = %self.index_id,
+                        embedded = batch_start,
+                        chunk_total,
+                        "embed pass abandoned its in-flight wave: the daemon is shutting down (#8600)",
+                    );
+                    break;
+                }
+                // #8600: keep the completed waves; the caller commits them
+                // before it settles the pass `Failed`.
+                Err(stall) => {
+                    tracing::warn!(
+                        index_id = %self.index_id,
+                        embedded = batch_start,
+                        chunk_total,
+                        "embed pass stalled: {stall:#}",
+                    );
+                    stalled = Some(stall);
+                    break;
+                }
             };
 
             for (start_pos, expected_n, vecs) in wave_results {
@@ -391,7 +443,10 @@ impl EmbedContext {
 
             batch_start = wave_pos;
         }
-        Ok(embeddings)
+        Ok(EmbedRun {
+            embeddings,
+            stalled,
+        })
     }
 }
 
