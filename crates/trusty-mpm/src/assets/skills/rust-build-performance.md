@@ -1,6 +1,6 @@
 ---
 name: rust-build-performance
-description: "Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks."
+description: "Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs."
 user-invocable: false
 version: "1.1.0"
 category: agent-reference
@@ -33,12 +33,8 @@ cargo check                 # whole workspace, no codegen
 cargo check -p trusty-search # narrow to the crate you're actually editing
 ```
 
-`cargo check` runs the same type-checking and borrow-checking as `cargo
-build` but skips code generation, so it's dramatically faster for the
-edit-check-edit cycle. In a large workspace, always
-narrow with `-p <crate>` unless you specifically need cross-crate diagnostics
-— checking the whole workspace on every keystroke-adjacent save wastes the
-exact time `cargo check` exists to save.
+`cargo check` checks types and borrows without code generation. Scope it to
+`-p <crate>` unless cross-crate diagnostics are needed.
 
 **The project's risk/stage test ladder defines the shipping gate.** Run its
 required crate, consumer and release checks; prose-only changes need its doc
@@ -60,13 +56,9 @@ cargo build --timings
 # → target/cargo-timings/cargo-timing.html
 ```
 
-Open the HTML report. It shows, per crate: wall-clock compile time, how much
-of that is the crate's own codegen vs. waiting on dependencies, build-script
-(`build.rs`) time, and where parallelism is blocked (a long serial chain in
-the dependency graph caps how much your core count actually helps). Use this
-to find the actual bottleneck — a single slow proc-macro crate or a build
-script re-running unnecessarily — before touching anything else. Tuning
-without a `--timings` report first is optimizing blind.
+The HTML report separates codegen, dependency waits, and build-script time.
+Locate serial chains, slow proc-macros, and unnecessary build-script reruns
+before tuning.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/timings.html>
 
@@ -149,15 +141,16 @@ Treat this as a **local, uncommitted** override
 profile changes to the workspace root `Cargo.toml` without explicit team
 approval; it affects every contributor's build and debugging experience.
 
-**Worktree-lifecycle note:** this project's parallel-worktree discipline
-means every fresh `git worktree add` is a cold build — there is no shared
-`target/` to inherit. Don't delete a *live* worktree's `target/` mid-task
-expecting a quick rebuild. Reclaiming a merged worktree (and the `target/`
-inside it) is the PM's to run, never an agent's (#5791): `tm session
-prune-worktrees --merged-prs --force` sweeps the trees whose PR has landed
-(#2919), sparing any that still holds unsaved work or a live owner. Nothing
-runs it automatically, so a machine that has not had it run still carries every
-merged worktree's `target/`.
+**Worktree caches:** fresh worktrees have empty `target/` directories. Use
+an assigned shared `CARGO_TARGET_DIR` to reuse registry dependencies; path
+crates still rebuild because their absolute source paths differ. Shared
+builds serialize on Cargo's lock: apply the ownership and wait bounds in §2.
+`rust-delivery-workflow` §4 documents setup; use the `tm doctor`
+`rust_build_env` prefix, not a hand-assembled one.
+
+Never delete live build caches. The PM reclaims merged, unowned worktrees via
+`tm session prune-worktrees --merged-prs --force` (#5791, #2919); this is not
+automatic and must preserve unsaved work and live owners.
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html#incremental>
 
@@ -246,3 +239,26 @@ something fixable by §4/§5/§6:
 
 Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html>,
 <https://doc.rust-lang.org/cargo/reference/build-scripts.html>
+
+## 8. Build Output Volume
+
+Run `cargo check -p <crate>` before build or clippy. Use
+`--message-format=short` for one-line diagnostics and `-q` / `--quiet` to
+suppress Cargo progress. Redirect logs; report exit status and final result
+lines per BASE-AGENT's Gate Output rule. Read failure details on non-zero.
+Never pipe a gate into `tail`: that can hide its failure status.
+
+```bash
+cargo check -q -p <crate> --message-format=short > <scratchpad>/check.log 2>&1
+echo "EXIT=$?"
+```
+
+Keep `--no-fail-fast` on tests so one failing target cannot hide later targets.
+Redirect the extra output instead of dropping coverage.
+
+## 9. macOS / Apple Silicon: Never `nice` a Build
+
+Use `CARGO_BUILD_JOBS` to cap concurrency, not `nice`. On the measured
+16-core Apple Silicon host (2026-09-17), `nice -n 10` placed work on four
+efficiency cores while twelve performance cores sat idle: load 27–37,
+CPU 70% idle. Bound jobs while preserving access to performance cores.
