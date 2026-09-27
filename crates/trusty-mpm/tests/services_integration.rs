@@ -8,10 +8,7 @@
 //! then calls `Discoverer::list()` and `Discoverer::health()` and asserts
 //! the expected fields.
 //! Test: run with:
-//!   cargo test -p trusty-mpm --test services_integration -- --include-ignored --nocapture
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//!   cargo test -p trusty-mpm --test integration services_integration:: -- --include-ignored --nocapture
 
 use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};
 

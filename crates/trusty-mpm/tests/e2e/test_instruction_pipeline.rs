@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use crate::harness::write_agent_sources;
+use super::harness::write_agent_sources;
 use tempfile::TempDir;
 use trusty_mpm::core::agent_deployer::deploy_agents;
 use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};

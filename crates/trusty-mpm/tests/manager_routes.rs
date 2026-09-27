@@ -13,7 +13,7 @@
 //! against a multi-project fixture, asserting the portfolio totals sum the
 //! per-project histograms and the per-project breakdown is present and sorted.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test manager_routes`.
+//! `cargo test -p trusty-mpm --test integration manager_routes::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use std::sync::Arc;
 // #6671: `DaemonState::project_registry()` seeds from
 // `~/.trusty-tools/trusty-mpm/config.yaml`, so an isolated framework root is not
 // enough — this target must own its `$HOME` too.
-mod common;
+use crate::common;
 
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::deliverable::{

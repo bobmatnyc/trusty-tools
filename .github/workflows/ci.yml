@@ -264,6 +264,11 @@ jobs:
       - name: Startup-context budget gate (#7424)
         run: bash scripts/check_context_budget.sh
 
+      # #8389: content-release.yml runs only on dispatch, so a packager change
+      # would otherwise meet its selftest for the first time at release time.
+      - name: Content-bundle packager selftest (#8389)
+        run: bash scripts/package_content_selftest.sh
+
       # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
       # pr-version-bump job). `github.event.pull_request.base.sha` is a
       # SNAPSHOT taken when the triggering event was delivered, but

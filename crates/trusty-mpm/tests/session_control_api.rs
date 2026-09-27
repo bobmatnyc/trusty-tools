@@ -13,10 +13,7 @@
 //! and degrade behavior offline. Back-compat for `send`/`send_input` is asserted
 //! alongside `inject(.., Enter)` so the two paths cannot diverge.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm
-//! --test session_control_api`.
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//! --test integration session_control_api::`.
 
 use std::sync::{Arc, Mutex};
 

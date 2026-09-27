@@ -37,8 +37,15 @@
 //! silently cancels the dispatcher mid-flight — orphaning every other
 //! pending job forever (the `dispatcher_active` flag it never got to reset
 //! stays stuck `true`). Per-job tasks tie each job's task lifetime to the
-//! SAME calling context that produced it (matching the pre-#3748 shape), so
-//! one test's early return can never strand another test's job.
+//! SAME calling context that produced it (matching the pre-#3748 shape).
+//!
+//! Dropping a job (#8770): a per-job task can itself be dropped — its runtime
+//! shuts down, or it is aborted — before it claims, while it waits, or after
+//! it claimed. A job left on the heap with no task stays the best pending
+//! entry, so every later job would poll for it forever. So each job is owned
+//! by a [`LiveJob`] guard from [`push_job`] on, moved into its task; dropping
+//! the guard at any point removes the job from the heap, and the other
+//! waiters see a new best on their next [`POLL_INTERVAL`] tick.
 //!
 //! Anti-starvation (issue #3748 slice A review finding 1): a pure
 //! size-priority queue has an unbounded-wait failure mode — a large job can
@@ -78,7 +85,8 @@
 //! `pop_next_still_prefers_smallest_when_nothing_has_aged_out`,
 //! `same_burst_never_reverts_to_arrival_order_even_once_max_wait_has_elapsed`,
 //! `enqueue_drains_smallest_first_end_to_end`,
-//! `burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end` in this
+//! `burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end`,
+//! `a_job_dropped_before_its_turn_does_not_strand_the_next_job` in this
 //! module's tests.
 
 use std::cmp::Ordering as CmpOrdering;
@@ -187,15 +195,36 @@ pub(crate) fn job_handles_for(id: &IndexId) -> Vec<Arc<IndexHandle>> {
     handles
 }
 
-/// Settles one job's bookkeeping however its task ends (#8664).
+/// Owns one pushed job's bookkeeping from [`push_job`] until it is dropped
+/// (#8664, #8770).
 ///
-/// Why: the task has several exits — drained pause, closed semaphore, deleted
-/// index, a completed pass — and each must drop its [`live_jobs`] entry and
-/// its [`QUEUE_DEPTH`] count exactly once.
-struct LiveJob(u64);
+/// Why: a job ends in many ways — drained pause, closed semaphore, deleted
+/// index, a completed pass, or its task dropped at any await, even before
+/// the first poll. Each must settle the job exactly once.
+/// What: on drop, removes the job's `seq` from the heap if it is still there,
+/// then its [`live_jobs`] entry, then its [`QUEUE_DEPTH`] count. Removing the
+/// heap entry is the wake: every waiter re-reads [`best_pending_seq`] each
+/// [`POLL_INTERVAL`], so the next job claims on its next tick.
+/// Test: `a_job_dropped_before_its_turn_does_not_strand_the_next_job`,
+/// `a_job_dropped_at_any_point_leaves_the_heap`,
+/// `every_job_exit_drops_its_live_entry`.
+pub(crate) struct LiveJob(u64);
+
+impl LiveJob {
+    /// The job's heap sequence number.
+    pub(crate) fn seq(&self) -> u64 {
+        self.0
+    }
+}
 
 impl Drop for LiveJob {
     fn drop(&mut self) {
+        // #8770: a job dropped before it claimed left its `seq` as the best
+        // pending entry, so every later waiter polled for it forever.
+        queue_heap()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|j| j.seq != self.0);
         live_jobs()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -246,8 +275,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 ///
 /// Why: exposed on `/health` (mirrors `background_reindex_queue_depth`) so
 /// operators can watch the size-ordered catch-up backlog drain.
-/// What: incremented on enqueue, decremented once a job's embed pass
-/// completes (success or failure).
+/// What: incremented on enqueue, decremented when the job's [`LiveJob`]
+/// guard drops — its pass ended, or its task was dropped (#8770).
 static QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Bumped every time [`QUEUE_DEPTH`] transitions from non-zero to zero, i.e.
@@ -293,24 +322,27 @@ pub(super) fn enqueue(
     progress: Arc<ReindexProgress>,
     chunk_count: usize,
 ) {
-    let seq = push_job(handle, progress, chunk_count);
+    // #8770: the guard moves into the task, so a task dropped before its
+    // first poll still takes its job off the heap.
+    let live = push_job(handle, progress, chunk_count);
     tokio::spawn(async move {
         // #8664: a job whose index was deleted ends here, with its handle
         // released and nothing embedded.
-        if let Err(deleted) = wait_for_turn(seq).await {
+        if let Err(deleted) = wait_for_turn(live).await {
             tracing::warn!("deferred_embed: job abandoned — {deleted}");
         }
     });
 }
 
-/// Push one job onto the heap and record it in [`live_jobs`]; returns its
-/// `seq`. The half of [`enqueue`] that does not spawn, so a test can hold a
-/// job queued across a DELETE.
+/// Push one job onto the heap and record it in [`live_jobs`]; returns the
+/// [`LiveJob`] guard that owns it. The half of [`enqueue`] that does not
+/// spawn, so a test can hold a job queued across a DELETE. Dropping the guard
+/// without running it withdraws the job (#8770).
 pub(crate) fn push_job(
     handle: Arc<IndexHandle>,
     progress: Arc<ReindexProgress>,
     chunk_count: usize,
-) -> u64 {
+) -> LiveJob {
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     live_jobs()
         .lock()
@@ -338,7 +370,7 @@ pub(crate) fn push_job(
         plan.0,
         plan.1
     );
-    seq
+    LiveJob(seq)
 }
 
 /// Render the heap's current ascending-size order for logging, truncated to
@@ -405,9 +437,12 @@ fn best_pending_seq(heap: &BinaryHeap<QueuedEmbedJob>) -> Option<u64> {
 ///
 /// #8664: returns `Err(IndexDeleted)` without embedding anything when a DELETE
 /// closed the job's handle while it waited.
-/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`.
-pub(crate) async fn wait_for_turn(my_seq: u64) -> Result<(), IndexDeleted> {
-    let _live = LiveJob(my_seq);
+/// #8770: owns `live` for its whole run, so dropping this future at any
+/// await withdraws the job from the heap.
+/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`,
+/// `a_job_dropped_at_any_point_leaves_the_heap`.
+pub(crate) async fn wait_for_turn(live: LiveJob) -> Result<(), IndexDeleted> {
+    let my_seq = live.seq();
     let job = loop {
         let claimed = {
             let mut heap = queue_heap()

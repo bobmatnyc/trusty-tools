@@ -22,7 +22,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::service::colocated_storage::ensure_gitignored;
+use crate::service::colocated_storage::ensure_self_ignored;
 use crate::service::roots_registry::upsert_root;
 
 /// Names of the data files that live in the per-index directory.
@@ -84,7 +84,8 @@ pub(super) fn do_migrate_with_pointer_removal(
 ///
 /// What: creates `dst_dir`, moves each file in `DATA_FILES` from `src_dir`
 /// using atomic rename (same-fs) or copy-verify-remove (cross-fs), then
-/// registers `root_path` in `roots.toml` and adds a `.gitignore` entry.
+/// registers `root_path` in `roots.toml` and writes `<dst_dir>/.gitignore`
+/// (`*`) so the directory hides itself from git (#8499).
 /// Returns the number of files successfully moved.
 ///
 /// Test: `migrate::tests::migrate_needs_migration_moves_files` and
@@ -122,12 +123,13 @@ pub(super) fn move_data_files(src_dir: &Path, dst_dir: &Path, root_path: &Path) 
         dst_dir.display()
     );
 
-    // Register root in roots.toml and add .gitignore.
+    // Register root in roots.toml. #8499: hide the directory with its own
+    // `.gitignore`; the repository's tracked `.gitignore` is never edited.
     upsert_root(root_path.to_path_buf()).context("register root in roots.toml")?;
-    if let Err(e) = ensure_gitignored(root_path) {
+    if let Err(e) = ensure_self_ignored(dst_dir) {
         tracing::warn!(
-            "migrate storage: could not add .gitignore entry for {}: {e}",
-            root_path.display()
+            "migrate storage: could not hide {} from git: {e}",
+            dst_dir.display()
         );
     }
 

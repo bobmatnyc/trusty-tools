@@ -14,9 +14,9 @@
 //! `core::discovery`'s own tests), so the daemon call fails fast without a
 //! live daemon; the deprecation notice — printed before that network call —
 //! is unaffected by the subsequent failure.
-//! Test: `cargo test -p trusty-mpm --test tm_sessions_alias_notice`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_sessions_alias_notice::`.
 
-mod common;
+use crate::common;
 
 /// Deterministic never-listening address (reserved port), so the daemon round
 /// trip fails immediately instead of hanging or requiring a live daemon.

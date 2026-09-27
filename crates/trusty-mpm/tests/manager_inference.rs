@@ -16,7 +16,7 @@
 //! suite; THIS file only proves a plain reply with no confirmed proposal still
 //! mutates nothing), and history threading over real HTTP.
 //! What: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test manager_inference`.
+//! `cargo test -p trusty-mpm --test integration manager_inference::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ use trusty_mpm::runtime::RuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId;
 
 // #6671: the project registry seeds from the config file under `$HOME`.
-mod common;
+use crate::common;
 
 /// Serve the real router on an ephemeral loopback port; return its base URL.
 async fn serve(state: Arc<DaemonState>) -> String {

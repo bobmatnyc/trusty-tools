@@ -85,6 +85,7 @@ async fn json_body(resp: axum::response::Response) -> serde_json::Value {
 /// and the caller — which reads only the status — treats that as a successful
 /// registration of tree B. Every query it then issues is answered from tree A.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_same_id_different_root_is_refused() {
     let state = mock_state_async().await;
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-mismatch-a-");
@@ -92,14 +93,14 @@ async fn create_index_same_id_different_root_is_refused() {
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root_a.clone())),
+        Json(create_req("api-mismatch", root_a.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root_b.clone())),
+        Json(create_req("api-mismatch", root_b.clone())),
     )
     .await;
     assert_eq!(
@@ -110,7 +111,7 @@ async fn create_index_same_id_different_root_is_refused() {
     );
 
     let body = json_body(second).await;
-    assert_eq!(body["index_id"], "api");
+    assert_eq!(body["index_id"], "api-mismatch");
     assert_eq!(
         body["registered_root_path"],
         serde_json::json!(root_a),
@@ -125,7 +126,7 @@ async fn create_index_same_id_different_root_is_refused() {
     // The registered tree is untouched — a refused request changes nothing.
     let handle = state
         .registry
-        .get(&IndexId::new("api".to_string()))
+        .get(&IndexId::new("api-mismatch".to_string()))
         .expect("index 'api' is still registered");
     assert_eq!(
         handle.root_path, root_a,
@@ -141,20 +142,21 @@ async fn create_index_same_id_different_root_is_refused() {
 /// `best_effort_create_index` verify rather than infer — without it, a client
 /// talking to a daemon still has only a status code to go on.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_same_id_same_root_still_reports_already_exists() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-mismatch-same-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root.clone())),
+        Json(create_req("api-mismatch", root.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK);
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root.clone())),
+        Json(create_req("api-mismatch", root.clone())),
     )
     .await;
     assert_eq!(
@@ -180,13 +182,14 @@ async fn create_index_same_id_same_root_still_reports_already_exists() {
 /// is entirely legitimate.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("TS-Mismatch-Case-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root.clone())),
+        Json(create_req("api-mismatch", root.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK);
@@ -211,7 +214,7 @@ async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", variant)),
+        Json(create_req("api-mismatch", variant)),
     )
     .await;
     assert_eq!(
@@ -234,26 +237,27 @@ async fn create_index_same_id_case_variant_root_is_not_a_mismatch() {
 /// `create_index_reap_does_not_disturb_unrelated_cold_entry`; this pins the
 /// boundary from the near side so the next reader does not re-extend it.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_same_id_different_root_still_reaps_a_cold_entry() {
     let state = mock_state_async().await;
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-mismatch-cold-a-");
     let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-mismatch-cold-b-");
 
     // Park an entry for `api` at tree A without ever making it resident.
-    let mut cold = PersistedIndex::new("api", root_a.clone());
+    let mut cold = PersistedIndex::new("api-mismatch", root_a.clone());
     cold.colocated = true;
     state.cold_store.register_cold_entries(vec![cold]);
     assert!(
         state
             .registry
-            .get(&IndexId::new("api".to_string()))
+            .get(&IndexId::new("api-mismatch".to_string()))
             .is_none(),
         "the entry must be cold, not resident, for this test to mean anything"
     );
 
     let resp = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("api", root_b.clone())),
+        Json(create_req("api-mismatch", root_b.clone())),
     )
     .await;
     assert_eq!(
@@ -265,7 +269,7 @@ async fn create_index_same_id_different_root_still_reaps_a_cold_entry() {
 
     let handle = state
         .registry
-        .get(&IndexId::new("api".to_string()))
+        .get(&IndexId::new("api-mismatch".to_string()))
         .expect("'api' is now resident");
     assert_eq!(
         handle.root_path, root_b,

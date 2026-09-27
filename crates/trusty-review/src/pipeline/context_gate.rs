@@ -111,7 +111,9 @@ pub enum GateOutcome {
 /// healthy_target_index_proceeds_despite_an_unrelated_failed_index,
 /// degraded_target_index_reason_comes_from_the_per_index_probe,
 /// unknown_index_skips_and_names_the_index,
-/// unknown_index_skips_even_when_search_is_opted_out}`.
+/// unknown_index_skips_even_when_search_is_opted_out}`;
+/// `fresh_worktree_tests::fresh_clone_without_any_index_degrades_loudly_instead_of_skipping`
+/// covers the #8411 empty-index branch.
 pub async fn preflight_context(
     config: &ReviewConfig,
     deps: &ReviewDeps,
@@ -195,6 +197,19 @@ pub async fn preflight_context(
                 "trusty-search unavailable at {search_url}; review produced WITHOUT code context"
             ),
         };
+        return GateOutcome::Degraded(reason);
+    }
+
+    // #8411: no index covers this checkout (`resolve_index` found none). Probing
+    // "" would 404 and skip; review the diff alone, labelled, unless required.
+    if index.is_empty() {
+        let reason = format!(
+            "no trusty-search index at {search_url} covers this checkout — review produced \
+             from the diff alone, WITHOUT code context or static analysis"
+        );
+        if require_search {
+            return GateOutcome::Skip(format!("{reason}; search is required on this surface"));
+        }
         return GateOutcome::Degraded(reason);
     }
 
@@ -317,3 +332,7 @@ pub fn degraded_banner(reason: &str) -> String {
 #[cfg(test)]
 #[path = "context_gate_tests.rs"]
 mod gate_tests;
+
+#[cfg(test)]
+#[path = "fresh_worktree_tests.rs"]
+mod fresh_worktree_tests;
