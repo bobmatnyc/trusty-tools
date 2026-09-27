@@ -417,7 +417,7 @@ mod tests {
     /// mechanical and substantive is not dropped.
     /// Test: `cargo test -p trusty-review -- stage_c_live_bedrock --include-ignored`
     #[tokio::test]
-    #[ignore = "needs AWS Bedrock credentials"]
+    #[ignore]
     async fn stage_c_live_bedrock() {
         use crate::llm::BedrockProvider;
         let provider = BedrockProvider::new(DEFAULT_CLASSIFIER_MODEL.to_string())

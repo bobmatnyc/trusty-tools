@@ -246,7 +246,9 @@ pub fn is_test_file(path: &str) -> bool {
 /// compute script so both storage paths produce the same T-shirt size.
 /// What: given per-file diff records (path + insertions + deletions), computes
 /// LoC, test_LoC, tests_factor, the v1 score, and the bucketed size.
-/// Test: `tests::formula_known_values`, `tests::formula_empty_commit`.
+/// Test: `tests::formula_known_values`, `tests::formula_empty_commit`,
+/// and the cross-validation integration test in `tests::effort_cross_validate`
+/// (marked `#[ignore]` until the parallel bash PR lands).
 ///
 /// # Arguments
 ///
@@ -450,5 +452,29 @@ mod tests {
         assert_eq!(result.loc, 72_000);
         assert!(result.score.is_finite());
         assert_eq!(result.size, EffortSize::Xl);
+    }
+
+    /// Cross-validation placeholder.
+    ///
+    /// Why: ensures Rust formula output matches bash script output exactly once
+    /// both sides have landed.  Marked `#[ignore]` so it does not break CI
+    /// before `scripts/compute-effort.sh` from the parallel PR is merged.
+    /// What: will build a temp git repo, run `compute_effort` on each commit,
+    /// shell out to `scripts/compute-effort.sh`, and assert score within ±0.01.
+    /// Test: run manually with `cargo test -p tga -- --include-ignored cross_validate`.
+    #[ignore]
+    #[test]
+    fn effort_cross_validate() {
+        // TODO: implement once scripts/compute-effort.sh has landed from the
+        // parallel PR (feat/commit-effort-scope).
+        //
+        // Steps:
+        //  1. Create a tempdir git repo.
+        //  2. Make 5-10 commits of varying sizes using git2.
+        //  3. For each commit:
+        //     a. Run `compute_effort` from Rust.
+        //     b. Run `scripts/compute-effort.sh <sha> <repo>` via std::process::Command.
+        //     c. Assert size labels are equal.
+        //     d. Assert scores are within ±0.01 (float rounding tolerance).
     }
 }
