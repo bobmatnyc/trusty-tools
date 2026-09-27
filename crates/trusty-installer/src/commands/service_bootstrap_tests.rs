@@ -774,7 +774,7 @@ fn run_isolated_inner_test(inner_test_name: &str) {
 /// Test: this is the test (invoked via
 /// `run_captured_never_leaks_to_parent_stdio`).
 #[test]
-#[ignore]
+#[ignore = "re-entry helper: run alone in a child by run_captured_never_leaks_to_parent_stdio"]
 fn run_captured_never_leaks_to_parent_stdio_inner() {
     use std::io::Read;
 
