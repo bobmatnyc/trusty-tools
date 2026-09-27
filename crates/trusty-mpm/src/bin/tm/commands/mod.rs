@@ -115,6 +115,8 @@ pub(crate) mod pm_guard_budget;
 pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
+// #8722: the denial record and audit POST every pm-guard deny makes.
+pub(crate) mod pm_guard_deny_log;
 pub(crate) mod pm_guard_dispatch;
 pub(crate) mod pm_guard_dispatch_deny;
 // #8257: `tm repair delegation --list`.

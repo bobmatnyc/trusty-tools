@@ -27,6 +27,26 @@ use std::time::Duration;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
+/// Resolve the target `index-status`/`status` reports on, from the
+/// subcommand's own positional `INDEX` and the global `-i`/`--index` (which
+/// carries the `TRUSTY_INDEX` env fallback) — issue #8175.
+///
+/// Why: before this, `main.rs` passed only the positional argument to
+/// [`handle_index_status`], so `-i`/`TRUSTY_INDEX` was silently ignored for
+/// this command and it fell through to the cwd-derived default instead —
+/// exactly the second defect issue #8175 reports
+/// (`index-status -i bobmatnyc` resolving by cwd).
+/// What: the positional value wins when present (an explicit target always
+/// wins); otherwise the global flag/env value is used; otherwise `None` (cwd
+/// auto-detect, unchanged).
+/// Test: `resolve_status_target_*` below.
+pub(crate) fn resolve_status_target(
+    positional: Option<String>,
+    cli_flag: Option<String>,
+) -> Option<String> {
+    positional.or(cli_flag)
+}
+
 /// Handle `trusty-search index-status [index_id] [--watch]`.
 ///
 /// Why: exposes per-stage reindex status and deferred-embed progress so
@@ -406,6 +426,43 @@ pub fn colorize_status(status: &str) -> colored::ColoredString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for issue #8175: `-i <id>` must reach `index-status`, not
+    /// be dropped in favor of the cwd default. Against the pre-#8175
+    /// `main.rs`, which passed only the positional argument to
+    /// `handle_index_status`, this exact case resolved to cwd auto-detect
+    /// instead of `"bobmatnyc"`.
+    /// Why: this is `resolve_status_target`'s core contract.
+    /// What: no positional, `-i bobmatnyc` → `Some("bobmatnyc")`.
+    /// Test: this test.
+    #[test]
+    fn resolve_status_target_honours_the_flag_when_no_positional_is_given() {
+        assert_eq!(
+            resolve_status_target(None, Some("bobmatnyc".to_string())),
+            Some("bobmatnyc".to_string())
+        );
+    }
+
+    /// Why: an explicit positional INDEX is the more specific argument and
+    /// must win over the global flag/env value when both are given.
+    /// What: positional `"a"`, flag `"b"` → `Some("a")`.
+    /// Test: this test.
+    #[test]
+    fn resolve_status_target_positional_wins_over_the_flag() {
+        assert_eq!(
+            resolve_status_target(Some("a".to_string()), Some("b".to_string())),
+            Some("a".to_string())
+        );
+    }
+
+    /// Why: the unchanged default — nothing given resolves to cwd auto-detect,
+    /// which `handle_index_status` performs on `None`.
+    /// What: neither given → `None`.
+    /// Test: this test.
+    #[test]
+    fn resolve_status_target_neither_given_is_none() {
+        assert_eq!(resolve_status_target(None, None), None);
+    }
 
     /// `colorize_status` must map each known status string to the expected
     /// colored variant without panicking.

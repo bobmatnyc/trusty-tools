@@ -194,6 +194,17 @@ async fn fixture_with_office(index_id: &str) -> Fixture {
 }
 
 async fn fixture_inner(index_id: &str, cap: Option<usize>, office: bool) -> Fixture {
+    fixture_build(index_id, cap, office, None).await
+}
+
+/// As [`fixture_inner`], with `embedder` wired in place of [`RefusingEmbedder`]
+/// when it is `Some` (#8726 — the backfill after the pass has to embed).
+async fn fixture_build(
+    index_id: &str,
+    cap: Option<usize>,
+    office: bool,
+    embedder: Option<Arc<dyn Embedder>>,
+) -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -266,8 +277,10 @@ async fn fixture_inner(index_id: &str, cap: Option<usize>, office: bool) -> Fixt
         .unwrap();
 
     let embed_calls = Arc::new(AtomicUsize::new(0));
-    let embedder: Arc<dyn Embedder> = Arc::new(RefusingEmbedder {
-        calls: Arc::clone(&embed_calls),
+    let embedder: Arc<dyn Embedder> = embedder.unwrap_or_else(|| {
+        Arc::new(RefusingEmbedder {
+            calls: Arc::clone(&embed_calls),
+        })
     });
     let mut indexer = CodeIndexer::new(index_id, root.to_string_lossy().as_ref())
         // #8438: this fixture models a colocated index; the registry decides.
@@ -1256,3 +1269,8 @@ fn orphan_partition_retains_only_unreadable_files() {
     assert_eq!(none_held, 0);
     assert_eq!(all.len(), 2);
 }
+
+// #8726: the boot migration path must not leave a re-chunked index `ready`
+// over chunks that have no vector.
+#[path = "vector_gap_8726_tests.rs"]
+mod vector_gap_8726_tests;

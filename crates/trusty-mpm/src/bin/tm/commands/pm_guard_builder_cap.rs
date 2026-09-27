@@ -574,7 +574,8 @@ pub(crate) async fn emit_builder_cap_or(
 ) {
     match evaluate(url, payload, tool_name, tool_input, session_id, hook_cwd).await {
         BuilderCapVerdict::Deny(reason) => {
-            super::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
+            let refused = super::pm_guard_deny_log::DenyContext::from_payload(url, payload);
+            super::pm_guard::audit_denied_tool(&refused, "builder-cap", &reason).await;
             println!(
                 "{}",
                 super::pm_guard_response::build_pm_guard_deny_response(&reason)
