@@ -222,6 +222,9 @@ pub async fn handle_start(
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        // #8783: own session, so a group kill aimed at this CLI's caller spares
+        // the daemon. Not `spawn_current_exe`: `--data-dir` may be non-UTF-8.
+        trusty_common::daemon_guard::start_in_new_session(&mut cmd);
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("could not spawn detached daemon: {e}"))?;
