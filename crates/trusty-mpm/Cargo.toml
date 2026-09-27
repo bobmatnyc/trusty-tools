@@ -138,7 +138,11 @@ name = "trusty-mpm"
 # 1.7.8 release cut: 1.7.8 was never published (crates.io max 1.7.7), so the
 # release ships as 1.7.8 per the owner's plan and milestone "trusty-mpm 1.7.8
 # · bugfix"; the 1.7.9 number above is unused.
-version = "1.7.8"
+# 1.7.9 (issue #4421): patch — 1.7.8 is published on crates.io and this PR
+# edits `src/**`, so the "PR version bump vs crates.io" check requires the
+# bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
+# consumer surface, no library dependents); no signature break.
+version = "1.7.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
