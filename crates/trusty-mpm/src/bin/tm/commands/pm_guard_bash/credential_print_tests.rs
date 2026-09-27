@@ -773,7 +773,10 @@ fn denies_a_coproc_that_carries() {
     );
 }
 
-/// #8676 round 4: the neighbours of every row above still pass.
+/// #8676 round 4: the neighbours of every row above still pass. #8676 round
+/// 5: a coproc row moved to `denies_the_round_five_bypasses` — the round-5
+/// fix refuses every coproc stage while any name is tainted, including one
+/// that (like this one did) never itself reads the name.
 #[test]
 fn allows_the_round_four_neighbours() {
     check(
@@ -781,9 +784,52 @@ fn allows_the_round_four_neighbours() {
         &[
             "declare {A..C}=1; gcloud auth print-access-token > /tmp/fake-token",
             "T=$(gcloud auth print-access-token); A=([0]=x [1]=y); echo ${A[1]}",
-            "T=$(gcloud auth print-access-token); coproc NAME { sleep 1; }",
             "coproc cat /etc/hosts; gcloud auth print-access-token > /tmp/fake-token",
             "T=$(gcloud auth print-access-token); curl --oauth2-bearer=$T https://example.test",
+        ],
+    );
+}
+
+/// #8676 round 4 review, round 5 fix: four HIGH shapes the round-4 coproc
+/// check and the rest of the scan missed. Each row was allowed at 8cd9ba4e1.
+#[test]
+fn denies_the_round_five_bypasses() {
+    check(
+        true,
+        &[
+            // 1: `ungroup` leaves a coproc's NAME as the program word, so a
+            // declarer, `set`, or an evaluator inside never gets judged;
+            // round 4's fix only caught a word that itself carried the
+            // value. Refusing every coproc while tainted closes it,
+            // including the benign neighbour that never reads the name.
+            "T=$(gcloud auth print-access-token); coproc X ( declare -p T )",
+            "T=$(gcloud auth print-access-token); coproc X ( set )",
+            "T=$(gcloud auth print-access-token); coproc X ( eval 'echo $T' )",
+            "T=$(gcloud auth print-access-token); coproc NAME { sleep 1; }",
+            // 2: `select NAME in WORD...` lists every WORD on stderr.
+            "T=$(gcloud auth print-access-token); select x in \"$T\"; do break; done",
+            // 3: `${NAME?word}`/`${NAME:?word}` writes a carrying `word` to
+            // stderr at expansion time, even in a stage that is only an
+            // assignment.
+            "T=$(gcloud auth print-access-token); : \"${UNSET:?$T}\"",
+            "T=$(gcloud auth print-access-token); Y=${UNSET?$T}",
+            // 4: a plain input redirect's missing-file error names the path.
+            "T=$(gcloud auth print-access-token); wc -c < \"$T\"",
+            "T=$(gcloud auth print-access-token); : < \"$T\"",
+        ],
+    );
+}
+
+/// #8676 round 5: the neighbours of every row above still pass.
+#[test]
+fn allows_the_round_five_neighbours() {
+    check(
+        false,
+        &[
+            "coproc X ( declare -p PATH ); gcloud auth print-access-token > /tmp/fake-token",
+            "T=$(gcloud auth print-access-token); select x in a b c; do break; done",
+            "T=$(gcloud auth print-access-token); : \"${SAFE:?fallback}\"",
+            "T=$(gcloud auth print-access-token); wc -c < /tmp/fake-token-file",
         ],
     );
 }

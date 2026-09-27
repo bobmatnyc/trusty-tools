@@ -43,8 +43,9 @@
 //!    the script.
 //! 4. Shell history: `history -s …; history`, and `fc`, where history is on.
 //! 5. Descriptors read across stages: a descriptor opened in one stage and
-//!    read in a later one (`exec N< <(…)`). The `coproc` form refuses (#8676
-//!    round 4); the general form stays residual.
+//!    read in a later one (`exec N< <(…)`). The `coproc` form refuses outright
+//!    while any name is tainted (#8676 rounds 4-5); the general form stays
+//!    residual.
 //!
 //! Why a denylist and not an allowlist: see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
@@ -76,7 +77,9 @@ use credential_print_redirect::{apply_redirections, terminal_name_sink};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
-use credential_print_taint_sinks::{judge_builtin_sinks, reads_script_by_path};
+use credential_print_taint_sinks::{
+    judge_builtin_sinks, reads_script_by_path, reports_unset_error,
+};
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -183,6 +186,8 @@ struct Lifted {
 /// `credential_print_tests::denies_inline_code_reading_a_tainted_name`,
 /// `credential_print_tests::denies_a_coproc_that_carries`,
 /// `credential_print_tests::allows_the_round_four_neighbours`,
+/// `credential_print_tests::denies_the_round_five_bypasses`,
+/// `credential_print_tests::allows_the_round_five_neighbours`,
 /// `credential_print_tests::scan_work_is_bounded`,
 /// `credential_print_tests::deny_reason_never_echoes_the_command`,
 /// `credential_print_tests::no_prefix_of_a_command_panics`.
@@ -369,6 +374,11 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     let stage = ungroup(stage);
     let tokens = tokenize(&stage).map_err(|_| Refusal::Unreadable("its quoting"))?;
     let routed = apply_redirections(&tokens, ctx.out, ctx.err, lifted)?;
+    // #8676 round 5: `wc -c < "$T"` — a missing file's "No such file" error
+    // names the carrying target on stderr.
+    if routed.read_target_carries {
+        route(routed.err, &mut emitted)?;
+    }
     let argv = &routed.argv;
     let reads_input = argv
         .iter()
@@ -394,9 +404,13 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if reads_in_arithmetic(raw, argv, &program, &lifted.names) {
         return Err(Refusal::Prints);
     }
-    // #8676 round 4: a coproc's output is a descriptor a later stage reads,
-    // and `coproc NAME ( … )` hides its program, so any carrying word refuses.
-    if coproc && argv.iter().any(|w| carries(w, lifted)) {
+    // #8676 round 4/5: a coproc's output is a descriptor a later stage reads,
+    // and `coproc NAME ( … )` hides its program, so `ungroup` can leave a bare
+    // NAME standing in for a declarer, `set`, or an evaluator this scan never
+    // re-parses (`coproc X ( declare -p T >&2 )`). While any name is tainted,
+    // refuse every coproc stage outright, not only one with a word that
+    // itself carries the value.
+    if coproc && (!lifted.names.is_empty() || argv.iter().any(|w| carries(w, lifted))) {
         return Err(Refusal::Prints);
     }
     if dumps_variables(argv, &program, args, &lifted.names) {
@@ -405,6 +419,16 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     // #8676 round 3: `cd "$T"`, `export "$T"`, `trap 'echo $T' EXIT`.
     let sinks = (routed.out, routed.err);
     judge_builtin_sinks(&program, args, sinks, lifted, ctx.depth, &mut emitted)?;
+    // #8676 round 5: `select NAME in WORD...` lists every WORD on stderr.
+    if program == "select" && select_items_carry(argv, lifted) {
+        route(routed.err, &mut emitted)?;
+    }
+    // #8676 round 5: `${NAME?word}`/`${NAME:?word}` aborts and writes a
+    // carrying `word` to stderr at expansion time, before any program runs —
+    // this must precede the empty check below, which is why it runs here.
+    if reports_unset_error(argv, &lifted.names) {
+        route(routed.err, &mut emitted)?;
+    }
     if program_word.is_empty() {
         // Assignments only (`T=$(…)`): nothing is printed.
         return Ok(emitted);
@@ -577,6 +601,18 @@ fn carries_kind(word: &str, lifted: &Lifted, kind: Option<SubKind>) -> bool {
             .subs
             .get(i)
             .is_some_and(|s| s.yields && kind.is_none_or(|k| s.kind == k))
+    })
+}
+
+/// Whether a `select NAME in ITEM...` stage lists a carrying item (#8676
+/// round 5): bash writes the numbered menu, one line per item, to stderr, and
+/// no reader argument names it, so nothing else in [`judge_stage`] sees it.
+fn select_items_carry(argv: &[String], lifted: &Lifted) -> bool {
+    argv.iter().position(|w| w == "in").is_some_and(|at| {
+        argv.get(at + 1..)
+            .unwrap_or_default()
+            .iter()
+            .any(|w| carries(w, lifted))
     })
 }
 
