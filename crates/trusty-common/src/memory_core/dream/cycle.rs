@@ -15,6 +15,7 @@ use super::helpers::{
 };
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::embed::Embedder;
+use crate::memory_core::maintenance_log::DeletionReason;
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::store::vector::VectorStore;
@@ -95,7 +96,11 @@ pub(super) async fn content_prune_pass(
         if started.elapsed() >= budget {
             break;
         }
-        match handle.forget(id).await {
+        // #8732: recorded as a maintenance deletion, not a bare forget.
+        match handle
+            .forget_for_maintenance(id, DeletionReason::DreamContentPrune, None)
+            .await
+        {
             Ok(outcome) if outcome.is_deleted() => count += 1,
             Ok(_) => {}
             Err(e) => tracing::warn!(?id, "dream content prune: forget failed: {e:#}"),
@@ -376,7 +381,12 @@ async fn dedup_one(
         merge_into(handle, survivor, loser);
         // #5231: surface a failed loser-eviction instead of discarding it —
         // silently keeping the loser leaves the merged content duplicated.
-        if let Err(e) = handle.forget(loser.id).await {
+        // #8732: the record names the survivor and the score that decided it.
+        let survivor_ref = Some((survivor.id, Some(hit.score)));
+        if let Err(e) = handle
+            .forget_for_maintenance(loser.id, DeletionReason::DreamDedup, survivor_ref)
+            .await
+        {
             tracing::warn!(id = ?loser.id, "dream dedup: loser evict failed: {e:#}");
         }
         already_removed.insert(loser.id);
@@ -431,7 +441,10 @@ pub(super) async fn prune_pass(
     // #5231: report drawers actually dropped, not candidates considered.
     let mut count = 0usize;
     for id in victims {
-        match handle.forget(id).await {
+        match handle
+            .forget_for_maintenance(id, DeletionReason::DreamPrune, None)
+            .await
+        {
             Ok(outcome) if outcome.is_deleted() => count += 1,
             Ok(_) => {}
             Err(e) => tracing::warn!(?id, "dream prune: forget failed: {e:#}"),
