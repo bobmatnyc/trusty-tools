@@ -374,13 +374,25 @@ fn survey_verdict(
     index: &dyn Fn(&Path) -> PrIndex,
     probe: &dyn Fn(&Path) -> crate::core::worktree_landed_content::LandingAdmission,
 ) -> (BranchPrState, ReclaimVerdict) {
+    survey_verdict_with(fx, wt, index, probe, false)
+}
+
+/// [`survey_verdict`]; `fallback` runs the `gh` commit search, as `--merged-prs`
+/// does. Here it cannot answer: `origin` is a local path, not a GitHub slug.
+fn survey_verdict_with(
+    fx: &GitWorktreeFixture,
+    wt: &Path,
+    index: &dyn Fn(&Path) -> PrIndex,
+    probe: &dyn Fn(&Path) -> crate::core::worktree_landed_content::LandingAdmission,
+    fallback: bool,
+) -> (BranchPrState, ReclaimVerdict) {
     let s = survey_with_landed_content(
         &fx.repos_root,
         &LiveClaims::default(),
         index,
         &no_agents,
         SurveyBudget::default(),
-        false,
+        fallback,
         &KeepList::default(),
         &[],
         Some(probe),
@@ -467,4 +479,45 @@ fn worktree_8721_the_recheck_admits_a_detached_head_whose_content_landed() {
         recheck(None).is_some(),
         "no probe offered keeps the refusal"
     );
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8721, critic HIGH): a commit search that did not
+/// answer on a detached tree whose content IS on `origin/main` never reaches
+/// the landed-content admission — at the survey or at the pre-delete
+/// re-check — because the failure is `LookupFailed`, not `Unknown`. Fails at
+/// 334329d3e, which resolved it to `Unknown` and reclaimed the tree. A
+/// published detached tree still takes #7771 (f)'s route, which needs no
+/// GitHub answer.
+#[test]
+fn worktree_8721_a_failed_commit_search_never_reclaims_a_detached_head() {
+    let (fx, wt) = detached_donor("search-failed-8721");
+    let (pr, verdict) =
+        survey_verdict_with(&fx, &wt, &unrelated_index, &reclaim_landed_content, true);
+    assert!(!verdict.is_reclaimable(), "{verdict:?}");
+    assert!(
+        matches!(pr, BranchPrState::LookupFailed { .. }),
+        "the search did not answer: {pr:?}"
+    );
+    assert!(
+        !format!("{verdict:?}").contains("landed-content"),
+        "{verdict:?}"
+    );
+    let claims = LiveClaims::default();
+    let recheck = |p: &BranchPrState| {
+        let offered: &dyn Fn(&Path) -> _ = &reclaim_landed_content;
+        recheck_before_delete(
+            &wt,
+            &KeepList::default(),
+            Some(&claims),
+            p,
+            &no_agents,
+            Some(offered),
+        )
+    };
+    assert!(recheck(&pr).is_some(), "the re-check refuses it too");
+
+    let published = published_elsewhere(&fx, "published-detached-8721");
+    git(&published, &["checkout", "-q", "--detach"]);
+    // No probe offered: only the #7771 (f) route can permit, and it does.
+    assert_eq!(super::landing_recheck(&published, &pr, None), None);
 }

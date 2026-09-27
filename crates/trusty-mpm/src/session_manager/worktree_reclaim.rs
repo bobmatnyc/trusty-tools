@@ -39,7 +39,8 @@ use serde::{Deserialize, Serialize};
 // under the SLOC cap; the re-export keeps `worktree_reclaim::LandedContentProbe`.
 pub(crate) use super::worktree_reclaim_landed::LandedContentProbe;
 use super::worktree_reclaim_landed::{
-    merged_pr_verdict, no_pr_verdict, published_verdict, unknown_pr_verdict,
+    merged_pr_verdict, no_pr_verdict, published_route_applies, published_verdict,
+    unknown_pr_verdict,
 };
 
 // #6561: the `gh` runner lives next door so this file stays under the SLOC cap;
@@ -841,7 +842,8 @@ pub(crate) fn classify_with_landed_content(
     // the reclamation trigger. Everything else — including "we could not find
     // out" — refuses. #7771 (f): with no PR found, every commit on an origin
     // ref is landing evidence too.
-    if matches!(pr, BranchPrState::NoPr | BranchPrState::Unknown)
+    // #8721: a detached HEAD's failed search is `LookupFailed`; still asked.
+    if published_route_applies(path, pr)
         && let Some(verdict) = published_verdict(path, probe_dirt)
     {
         return verdict;

@@ -35,6 +35,9 @@
 //! keeps the operator-facing reason stable: a worktree with no pull request
 //! still reports "no pull request found for this branch" when the network is
 //! down, rather than a lookup failure that is really about the widening.
+//! #8721: the one exception is a detached HEAD, whose `Unknown` gate 5 now
+//! lets reach the landed-content admission; its failed search is
+//! `LookupFailed`, which refuses.
 //!
 //! The extra `gh` and `git` calls ride on `per_branch_fallback`, so the
 //! `tm doctor` probe — which runs on a three-second budget and passes `false` —
@@ -186,8 +189,14 @@ fn resolve_landing_parts(
     }
     // #8109: a rung-3 match is another branch's pull request, so `by_name`
     // keeps rung 1's refusal.
-    let landing =
-        merged_by_head_commit(worktree, registry_root, probe).unwrap_or_else(|| exact.clone());
+    let landing = match merged_by_head_commit(worktree, registry_root, probe) {
+        Ok(Some(merged)) => merged,
+        // #8721: a detached HEAD's `Unknown` reaches gate 5's landed-content
+        // admission, so a search that did not answer must not read as one
+        // that found nothing — `PrIndex::state_for`'s own split.
+        Err(reason) if branch.is_none() => BranchPrState::LookupFailed { reason },
+        Ok(None) | Err(_) => exact.clone(),
+    };
     PrResolution {
         by_name: exact,
         landing,
@@ -244,8 +253,9 @@ fn merged_round_sibling(
 /// and this worktree's HEAD stand in an ancestor relationship either way round
 /// — the pull request was opened from this commit, from a descendant of it, or
 /// from an ancestor of it. A fork's row is skipped for the reason
-/// `PrIndex::from_json` skips it. `None` on every failure, and on a search that
-/// returned nothing this tree's HEAD belongs to.
+/// `PrIndex::from_json` skips it. `Ok(None)` on a search that returned nothing
+/// this tree's HEAD belongs to; `Err` when HEAD or the search did not answer
+/// (#8721).
 ///
 /// Content this tree holds BEYOND the matched pull request's head is not this
 /// gate's to catch and is not let through by it: `classify` gate 6 runs
@@ -254,12 +264,13 @@ fn merged_round_sibling(
 /// Test: `a_renamed_branch_matches_the_pr_opened_from_its_head_commit`,
 /// `a_fork_pull_request_containing_the_commit_is_ignored`,
 /// `an_unrelated_merged_pr_containing_no_ancestor_is_not_a_match`,
-/// `a_failed_ancestry_probe_leaves_the_refusal_standing`.
+/// `a_failed_ancestry_probe_leaves_the_refusal_standing`,
+/// `worktree_8721_a_detached_head_whose_search_failed_is_a_lookup_failure`.
 fn merged_by_head_commit(
     worktree: &Path,
     registry_root: &Path,
     probe: &dyn LandingProbe,
-) -> Option<BranchPrState> {
+) -> Result<Option<BranchPrState>, String> {
     let head = match probe.head_commit(worktree) {
         Ok(head) if !head.trim().is_empty() => head.trim().to_string(),
         Ok(_) => {
@@ -268,7 +279,7 @@ fn merged_by_head_commit(
                 "worktree-reclaim: this worktree named no HEAD commit, so the \
                  commit search cannot run (#7267)"
             );
-            return None;
+            return Err("`git rev-parse HEAD` named no commit to search for".to_string());
         }
         Err(e) => {
             tracing::warn!(
@@ -277,7 +288,7 @@ fn merged_by_head_commit(
                  pull request carrying this tree cannot be searched for — the \
                  branch-name answer stands (#7267): {e}"
             );
-            return None;
+            return Err(format!("the HEAD commit could not be read: {e}"));
         }
     };
     let rows = match probe.merged_prs_containing(registry_root, &head) {
@@ -289,7 +300,9 @@ fn merged_by_head_commit(
                 "worktree-reclaim: the merged-pull-request commit search did not \
                  answer — the branch-name answer stands (#7267): {e}"
             );
-            return None;
+            return Err(format!(
+                "the merged-pull-request commit search for `{head}` did not answer: {e}"
+            ));
         }
     };
     for row in rows {
@@ -310,10 +323,10 @@ fn merged_by_head_commit(
                 "worktree-reclaim: this worktree's HEAD is carried by a merged pull \
                  request opened from a different branch name (#7267)"
             );
-            return Some(BranchPrState::Merged { pr: row.number });
+            return Ok(Some(BranchPrState::Merged { pr: row.number }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Does the pull request whose head sat on `oid` vouch for `head`?
