@@ -415,13 +415,12 @@ async fn remove_with_path_and_flag_when_daemon_is_down_refuses_with_no_requests(
 }
 
 /// (b) PATH and `-i` both given, the daemon is reachable but answers every
-/// per-index status lookup with `503` — the exact call `find_index_by_path`
-/// needs to resolve PATH → id during the agreement check. `remove` must
-/// exit non-zero with NO `DELETE` ever sent.
+/// per-index status lookup with `503` — the lookup of the `-i` id during the
+/// agreement check. `remove` must exit non-zero with NO `DELETE` ever sent.
 ///
-/// Why: `handle_index_remove`'s `PathAndId` arm calls
-/// `find_index_by_path(&client, &base, &p).await?` — the `?` already
-/// propagates a resolution failure as a hard error before the id-agreement
+/// Why: with `--index` set, `handle_index_remove` resolves the id through
+/// `find_index_by_id`, whose `error_for_status()?` propagates the `503` as a
+/// hard error before the id-agreement
 /// comparison (and therefore before any `DELETE`) is ever reached. This pins
 /// that existing propagation against a REAL 503, not just a synthetic
 /// `Result::Err` in a unit test.
