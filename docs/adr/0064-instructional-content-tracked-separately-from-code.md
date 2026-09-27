@@ -6,10 +6,17 @@
   offline-bootstrap fallback is dropped; content distribution is
   runtime-only. See "Superseded 2026-09-27" under Decision item 5.
 - **Date:** 2026-09-22
-- **Scope:** Workspace-wide — bundled agents (`crates/trusty-agents-common/src/assets/agents/`),
-  skills (`crates/trusty-mpm/src/assets/skills/`, `crates/trusty-code/src/assets/skills/`),
-  PM instruction sections and output styles (`crates/trusty-mpm/src/assets/`),
-  and the generated `tm-capabilities` catalog
+- **Scope:** Workspace-wide — bundled agents
+  (`crates/trusty-agents-common/src/assets/agents/`), skills
+  (`crates/trusty-mpm/src/assets/skills/`), PM instruction sections, output
+  styles (`crates/trusty-mpm/src/assets/`), and the generated
+  `tm-capabilities` catalog. `sm_instructions/` and `harness_understanding/`
+  move to `content/instructions/`, per the 2026-09-23 ruling on #8387.
+  trusty-code's own 12 agents and skills stay in
+  `crates/trusty-code/src/assets/` until PHASE_4 (#8390). trusty-code's
+  re-export of trusty-agents-common's agent consts switches to `content/`
+  in PHASE_3. A supervisor ruling (2026-09-27) holds that the #8389
+  non-goal covers only trusty-code's own asset tree, not that re-export
 - **Reversibility Cost:** Medium — the migration is a path move plus a
   version/changelog convention, not a rewrite; reverting means moving the
   tree back and dropping the runtime-fetch path, which nothing downstream
@@ -77,6 +84,9 @@ tree, versioned and changelogged independently of any crate:
    `check_line_cap.sh`'s `.rs`/`.swift` scan) reach a path outside
    `crates/`, so a content-only PR trips none of them once
    `detect-docs-only.sh` gains one explicit inert case for `content/**`.
+   An add or modify under `content/**` is inert for CI even while it is
+   still compiled in via `include_str!`; a delete or rename there stays
+   code, because it changes a compile-time path (owner ruling 2026-09-27).
 2. **Versioning.** Every asset keeps (agents: gains) a `version:` semver
    frontmatter field. A `content/manifest.toml` — same `HarnessManifest`
    shape as `framework-manifest.toml` today — additionally declares one
@@ -150,12 +160,11 @@ bump; instructional content can ship on its own cadence, faster than a
 `tm doctor` can report content-version-vs-binary-version as two independent
 facts instead of conflating "stale" with "binary rebuilt."
 
-**Harder:** every `include_str!` call site across `trusty-mpm`,
-`trusty-agents-common`, and `trusty-code` moves and must be re-pointed in
-one coordinated PR (the migration's step 1) — interim only, since decision 5
-(amended 2026-09-27) deletes these call sites entirely in a later phase
-rather than keeping them as a permanent offline fallback; `extends:`-chain
-resolution
+**Harder:** the migration's step 1 moves every file `include_str!`
+currently embeds across `trusty-mpm`, `trusty-agents-common`, and
+`trusty-code` into the new `content/` tree, in one coordinated PR; with no
+cache and no network, `tm` names the command to run, and content changes
+never touch a crate version. `extends:`-chain resolution
 (`agents::builder::SourceLookup`) must keep resolving within the new
 single `content/agents/` directory — no code change needed there, but the
 directory move must not split the roster across two locations; the
