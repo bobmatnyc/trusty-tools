@@ -1431,6 +1431,12 @@ fn wrapper_spellings(inner: &str) -> Vec<String> {
         format!("xargs {inner}"),
         format!("xargs -0 {inner}"),
         format!("xargs -n 4 {inner}"),
+        // #8756: `eval` joins and runs its operands; a flag or `--` may sit
+        // between `-c` and the command string.
+        format!("eval \"{inner}\""),
+        format!("eval {inner}"),
+        format!("bash -ce \"{inner}\""),
+        format!("sh -c -- \"{inner}\""),
         // A wrapper over a wrapper, and a shell over a shell.
         format!("sudo sh -c \"{inner}\""),
         format!("sh -c \"bash -c '{inner}'\""),
@@ -1651,6 +1657,8 @@ fn wrappers_around_benign_commands_still_allow() {
         "xargs git add",
         "sh -c 'echo hello'",
         "bash -c 'cargo build'",
+        "eval \"git status --porcelain\"",
+        "eval \"$(ssh-agent -s)\"",
     ] {
         assert_eq!(
             evaluate_bash_command(command),

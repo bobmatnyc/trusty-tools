@@ -69,6 +69,60 @@ fn refuses_a_dump_through_a_wrapper_or_process_substitution() {
     );
 }
 
+/// #8756 round 2: `eval` runs its joined operands as a command, quoted or
+/// not, alone or inside a substitution.
+#[test]
+fn refuses_a_dump_run_through_eval() {
+    assert_denies(
+        "#8756",
+        &[
+            "eval \"pm2 jlist\"",
+            "eval pm2 jlist",
+            "eval 'pm2 prettylist'",
+            "eval -- \"pm2 env 0\"",
+            "eval \"launchctl print gui/501/x\"",
+            "command eval \"pm2 describe 0\"",
+            "echo \"$(eval \"pm2 jlist\")\"",
+            "x=$(eval 'launchctl print gui/501/x'); echo \"$x\"",
+            "eval \"sh -c 'pm2 jlist'\"",
+        ],
+    );
+    assert_denies("#7648", &["eval \"docker exec web env\""]);
+}
+
+/// #8756 round 2: an `eval` of a routine tool's output is decided by the tool
+/// it runs, so the shell-setup idioms still run.
+#[test]
+fn allows_eval_of_a_routine_command() {
+    assert_allows(&[
+        "eval \"$(ssh-agent -s)\"",
+        "eval \"$(direnv export bash)\"",
+        "eval \"$(tm completions zsh)\"",
+        "eval \"pm2 ls\"",
+    ]);
+}
+
+/// #8756 round 2: every spelling of a shell's `-c` option runs its command
+/// string — a flag after `-c`, a cluster not ending in `c`, and `--`.
+#[test]
+fn refuses_a_dump_through_every_dash_c_spelling() {
+    assert_denies(
+        "#8756",
+        &[
+            "bash -c \"pm2 jlist\"",
+            "sh -c 'pm2 jlist'",
+            "zsh -c \"launchctl print gui/501/x\"",
+            "bash -lc \"pm2 env 0\"",
+            "bash -ce \"pm2 jlist\"",
+            "bash -c -e 'pm2 jlist'",
+            "sh -c -- 'pm2 jlist'",
+            "bash -cl 'launchctl print gui/501/x'",
+            "bash -o pipefail -c 'pm2 prettylist'",
+        ],
+    );
+    assert_allows(&["bash -ce \"pm2 ls\"", "bash script.sh -c 'pm2 jlist'"]);
+}
+
 /// #8756 round 2: a subshell group runs its body too, alone or inside a
 /// substitution.
 #[test]

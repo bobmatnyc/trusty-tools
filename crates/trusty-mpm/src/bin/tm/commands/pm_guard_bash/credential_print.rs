@@ -452,7 +452,13 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if program_word.starts_with('$') || program_word.starts_with(MARK) || dynamic_before_trigger {
         return Err(Refusal::Unreadable("a program name chosen at run time"));
     }
-    let wrapped = wrapped_command(&stage);
+    // #8756: `wrapped_command` now unwraps `eval`; this rule keeps reading it
+    // as an evaluator, whose operands are program text.
+    let wrapped = if program == "eval" {
+        WrappedCommand::None
+    } else {
+        wrapped_command(&stage)
+    };
     // A wrapper with flags (`sudo -u x bash -c …`) hides its program, so the
     // first evaluator word after it stands in.
     let evaluator_at = if resolved.is_some() {
