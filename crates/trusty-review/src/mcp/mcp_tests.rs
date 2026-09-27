@@ -375,12 +375,9 @@ async fn deferred_dispatch_tool_call_when_ready() {
 /// fires the internal 30-second `tokio::time::timeout` instantly without any
 /// real wall-clock wait.  The watch channel never receives a value, simulating
 /// an in-progress (or stalled) background build.
-/// Test: gated `#[ignore]` because paused-clock tests require `tokio::test`
-/// with `start_paused = true` and can be flaky under high parallel test load.
-/// Run explicitly: `cargo test -p trusty-review -- --include-ignored
-/// deferred_dispatch_tool_call_times_out_warming_up`.
+/// Runs by default: the paused clock belongs to this test's own runtime, so
+/// parallel load cannot move it (#8787).
 #[tokio::test(start_paused = true)]
-#[ignore = "paused-clock test — run with --include-ignored"]
 async fn deferred_dispatch_tool_call_times_out_warming_up() {
     use std::time::Duration;
 
