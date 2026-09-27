@@ -493,7 +493,7 @@ const SOFT_MRR_FLOOR: f32 = 0.3;
 // Tests — `#[ignore]` so they don't run in `cargo test --workspace`.
 // ---------------------------------------------------------------------------
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bench_definition_queries() {
     let indexer = build_indexer().await;
@@ -505,7 +505,7 @@ async fn bench_definition_queries() {
     );
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bench_usage_queries() {
     let indexer = build_indexer().await;
@@ -517,7 +517,7 @@ async fn bench_usage_queries() {
     );
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bench_conceptual_queries() {
     let indexer = build_indexer().await;
@@ -529,7 +529,7 @@ async fn bench_conceptual_queries() {
     );
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bench_bugdebt_queries() {
     let indexer = build_indexer().await;
@@ -583,25 +583,25 @@ fn run_grep_baseline(label: &str, queries: &[(&str, &str)]) {
     );
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[test]
 fn bench_definition_grep_baseline() {
     run_grep_baseline("definition", DEFINITION_QUERIES);
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[test]
 fn bench_usage_grep_baseline() {
     run_grep_baseline("usage", USAGE_QUERIES);
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[test]
 fn bench_conceptual_grep_baseline() {
     run_grep_baseline("conceptual", CONCEPTUAL_QUERIES);
 }
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[test]
 fn bench_bugdebt_grep_baseline() {
     run_grep_baseline("bugdebt", BUGDEBT_QUERIES);
@@ -633,7 +633,7 @@ const GREP_ENDPOINT_PATTERNS: &[(&str, &str)] = &[
     (r"impl\s+\w+\s+for", "regex impl block"),
 ];
 
-#[ignore]
+#[ignore = "benchmark: reports MRR, latency and a ripgrep baseline; the query benches index the crate with the ONNX model and run for minutes"]
 #[tokio::test]
 async fn bench_grep_endpoint_vs_ripgrep() {
     let daemon = daemon_url();
