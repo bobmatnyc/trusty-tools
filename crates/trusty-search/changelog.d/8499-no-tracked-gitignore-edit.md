@@ -24,6 +24,17 @@ Fixed
   with its data dir at `<repo>/data` is refused, because `git clean -fdx` at
   the repository top deletes it. A linked worktree or a submodule counts as
   its own work tree. An index already in `indexes.toml` keeps registering
+  only while its store still exists there
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- No path creates a new data-dir store inside the work tree that holds the
+  index root: re-registering an `indexes.toml` row whose store is missing, a
+  warm boot, and a lazy restore now refuse (`409` on `POST /indexes`) instead
+  of creating an empty store that `git clean -fdx` then deletes. An existing
+  store keeps working. An unreadable `indexes.toml` exempts nothing
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- The `500` that `POST /indexes` answers when a new index's corpus cannot be
+  opened now carries `failure_kind`, as the `503` does (`null` when the
+  failure was not classified)
   ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
 - Re-registering an index whose store an earlier registration still holds
   open (a background embed pass, or a delete that has not closed the files

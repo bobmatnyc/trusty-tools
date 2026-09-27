@@ -118,8 +118,10 @@ pub(super) async fn claim_registration(id: &str, root: &Path) -> RegistrationCla
 /// What: a transient kind (#4333 `Contention` or `OpenTimeout`) → `503
 /// index_corpus_unavailable` with `index_id`, `failure_kind`, `transient` and
 /// `retryable: true`, the index-scoped contract's shape. Any other kind keeps
-/// the #2336 `500`. Nothing is registered either way.
-/// Test: `re_register_while_an_earlier_handle_holds_the_store_is_retryable`.
+/// the #2336 `500`, which also carries `failure_kind` (`null` when the open
+/// failure was not classified). Nothing is registered either way.
+/// Test: `re_register_while_an_earlier_handle_holds_the_store_is_retryable`,
+/// `corpus_open_refusal_names_the_failure_kind_on_both_arms`.
 pub(super) fn corpus_open_refusal(
     id: &str,
     root: &Path,
@@ -135,9 +137,11 @@ pub(super) fn corpus_open_refusal(
             "corpus open failed for root_path {:?}; refusing to register a broken index handle",
             root.display()
         );
+        // #8499: name the kind here too, as the 503 arm does.
+        let failure_kind = kind.map(|k| k.label());
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({ "error": error }),
+            serde_json::json!({ "error": error, "failure_kind": failure_kind }),
         );
     };
     let message = format!(

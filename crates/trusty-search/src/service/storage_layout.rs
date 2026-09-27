@@ -148,19 +148,23 @@ impl StorageLayout {
     /// otherwise `DataDir`, after resolving (and creating) the data-dir store.
     /// Fails closed: a store anywhere inside the root
     /// ([`refuse_data_dir_store_in_work_tree`]) or one the #8438 guard refuses
-    /// is returned as the refusal, never redirected.
+    /// is returned as the refusal, never redirected. A non-colocated
+    /// `indexes.toml` row at the same root skips the up-front check, but only
+    /// an existing store is then accepted — [`Self::storage_dir`] refuses to
+    /// create one in the work tree.
     /// Test: `index_survives_git_reset_hard_and_clean_fdx`,
     /// `create_refuses_when_the_store_would_land_in_the_work_tree`,
     /// `create_refuses_a_data_dir_inside_the_work_tree`,
     /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
+    /// `create_with_a_corrupt_registry_still_refuses_a_store_in_the_work_tree`,
     /// `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
     pub(crate) fn for_new_registration(index_id: &str, root_path: &Path) -> Result<Self> {
         if holds_colocated_artifact(root_path) {
             return Ok(Self::Colocated);
         }
         // #8499: an entry `indexes.toml` already holds at this root keeps the
-        // #8438 exemption; only a new placement is refused. An unreadable
-        // registry exempts nothing.
+        // #8438 exemption for its EXISTING store; `storage_dir` refuses to
+        // create a missing one. An unreadable registry exempts nothing.
         let existing = persistence::find_index_registry_entry(index_id)
             .ok()
             .flatten()
@@ -184,13 +188,17 @@ impl StorageLayout {
     /// non-recursive `create_dir`, so a missing root is a
     /// [`ColocatedRootMissing`] error and is never recreated. `DataDir` →
     /// `<data_dir>/indexes/<sanitized id>/`, checked by
-    /// [`refuse_write_under_root`] before `indexes/<id>/` is created. A refused
+    /// [`refuse_write_under_root`], and — when `indexes/<id>/` does not exist
+    /// yet — by [`refuse_data_dir_store_in_work_tree`] before it is created
+    /// (#8499): an existing store keeps its writes, a new one never lands in
+    /// the work tree, whichever caller asks. A refused
     /// `DataDir` resolution never creates `indexes/<id>/`, but
     /// `persistence::data_dir()` runs first and creates the configured data
     /// dir itself (`TRUSTY_DATA_DIR`, or the platform default) when missing —
     /// so a `TRUSTY_DATA_DIR` naming a path inside the repo leaves that one
     /// directory behind.
     /// Test: `guard_refuses_a_data_dir_that_resolves_into_the_repo`,
+    /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
     /// `colocated_layout_creates_a_missing_directory`,
     /// `colocated_persist_never_recreates_a_missing_root`.
     pub(crate) fn storage_dir(self, index_id: &str, root_path: &Path) -> Result<PathBuf> {
@@ -205,6 +213,11 @@ impl StorageLayout {
                     .join("indexes")
                     .join(persistence::sanitize_id_for_path(index_id));
                 refuse_write_under_root(index_id, root_path, &base, &dir)?;
+                // #8499: creating a store is a new placement, whether a
+                // registration, a warm boot or a lazy restore asks for it.
+                if !dir.is_dir() {
+                    refuse_data_dir_store_in_work_tree(index_id, root_path)?;
+                }
                 std::fs::create_dir_all(&dir).context("create per-index data dir")?;
                 Ok(dir)
             }
@@ -374,8 +387,9 @@ pub(crate) fn enclosing_work_tree(root: &Path) -> Option<PathBuf> {
 /// directory as `root` or as [`enclosing_work_tree`]`(root)` — compared by
 /// `(dev, ino)` over both the configured and the canonical spelling, so a
 /// symlink or a case variant cannot slip past. A root in no repository is
-/// checked against itself only. Registration and relocate call it; the
-/// existing-entry write path does not. Creates only the data dir itself,
+/// checked against itself only. Registration, relocate, and
+/// [`StorageLayout::storage_dir`] before it creates a store call it; a write
+/// into an existing store does not. Creates only the data dir itself,
 /// exactly as [`persistence::data_dir`] always does.
 /// Test: `create_refuses_a_data_dir_inside_the_work_tree`,
 /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,

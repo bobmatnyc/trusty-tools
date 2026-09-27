@@ -333,3 +333,40 @@ async fn relocate_races_into_one_root_register_exactly_once() {
         }
     }
 }
+
+/// #8499: both arms of the corpus-open refusal name the failure kind — the
+/// `503` for a transient kind, the `500` for any other, `null` when none.
+///
+/// Why: the `500` body carried only `error`, so a caller could not tell a
+/// format-incompatible corpus from an unclassified failure.
+/// Test: this test.
+#[test]
+fn corpus_open_refusal_names_the_failure_kind_on_both_arms() {
+    use crate::core::corpus::CorpusOpenFailure;
+    let root = Path::new("/nonexistent-8499");
+    let cases = [
+        (
+            Some(CorpusOpenFailure::Contention),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "contention",
+        ),
+        (
+            Some(CorpusOpenFailure::FormatIncompatible),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "format_incompatible",
+        ),
+    ];
+    for (kind, want_status, want_kind) in cases {
+        let (status, body) = super::create_layout::corpus_open_refusal("k-8499", root, kind);
+        assert_eq!(status, want_status, "{kind:?}: {body}");
+        assert_eq!(body["failure_kind"], want_kind, "{kind:?}: {body}");
+    }
+    let (status, body) = super::create_layout::corpus_open_refusal("k-8499", root, None);
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body.as_object()
+            .is_some_and(|o| o.contains_key("failure_kind")),
+        "the 500 names the kind even when unclassified: {body}"
+    );
+    assert!(body["failure_kind"].is_null(), "{body}");
+}

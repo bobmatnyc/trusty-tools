@@ -248,7 +248,8 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   repository (not only under `<root_path>`), or the default data dir under a
   root such as `$HOME`. Outside any repository the root itself is the bound.
   A linked worktree or submodule is its own work tree. An id already in
-  `indexes.toml` at the same root is exempt. Nothing is registered and no
+  `indexes.toml` at the same root is exempt only while its store already
+  exists there; a missing store is never created. Nothing is registered and no
   store is written. `PATCH /indexes/:id` refuses a new root the same way, and
   also answers `409` while a reindex holds that index.
 - **Response 503** `index_corpus_unavailable` (#8499): the store is still
