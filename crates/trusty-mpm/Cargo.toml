@@ -138,7 +138,7 @@ name = "trusty-mpm"
 # 1.7.8 release cut: 1.7.8 was never published (crates.io max 1.7.7), so the
 # release ships as 1.7.8 per the owner's plan and milestone "trusty-mpm 1.7.8
 # · bugfix"; the 1.7.9 number above is unused.
-version = "1.7.8"
+version = "1.7.9"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
