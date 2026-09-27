@@ -895,29 +895,77 @@ fn allows_the_round_six_neighbours() {
     );
 }
 
-/// #8676 round 3: bracket runs 100k wide scan in linear time. A scan from each
-/// opener to its close took minutes on the round-two nesting row; a nest
-/// deeper than the cap refuses.
+/// Work units one [`super::scan`] of `command` spends, and whether it refuses.
+fn scan_units(command: &str) -> (usize, bool) {
+    let lifted = super::Lifted::default();
+    let sink = super::Sink::Terminal;
+    let refused = super::scan(command, sink, sink, 0, &lifted).is_err();
+    (lifted.spent.get(), refused)
+}
+
+/// Units a scan charges: `passes` top-level passes, each one unit, one per KiB
+/// of text, and one per single-pass `$(…)` body it lifts.
+fn pinned_units(passes: usize, subs: usize, kib: usize) -> usize {
+    passes * (1 + subs + kib)
+}
+
+/// #8676 round 3: wide bracket runs scan in linear work; a nest deeper than
+/// the cap refuses.
+///
+/// Why: a scan from each opener to its close took minutes on the round-two
+/// nesting row. #8765: the timed form failed CI at 1.00-1.17 s once #8734's
+/// fixed point added a second pass, so this counts the scan's own work units.
+/// What: at n, 2n and 4n KiB of run, pins the exact units, which fixes the
+/// pass count (2 for an allowed row with the `T=` binding, 1 for a refused
+/// row or with no binding), the charge per KiB and linear growth; then pins
+/// the verdict where two passes cross the budget.
 #[test]
-fn wide_bracket_runs_scan_in_linear_time() {
-    let seed = "T=$(gcloud auth print-access-token); echo ";
-    for (run, deny) in [
-        ("A[", true),
-        ("$[", true),
-        ("${X:", true),
-        ("A[x]", false),
-        ("${X:0:1}", false),
+fn wide_bracket_runs_scan_in_linear_work() {
+    // #8765: the seeds stay under 1 KiB and every run body is whole KiB, so
+    // the charge per pass is exact. 4n stays under `WORK_BUDGET`.
+    const KIB: usize = 1_024;
+    const N_KIB: usize = 128;
+    let bound = "T=$(gcloud auth print-access-token); echo ";
+    let unbound = "gcloud auth print-access-token >/dev/null; echo ";
+    let body = |run: &str, kib: usize| run.repeat(kib * KIB / run.len());
+    // A refused row stops inside its first pass; an allowed one takes two,
+    // the second finding `T` already bound.
+    for (run, deny, passes) in [
+        ("A[", true, 1),
+        ("$[", true, 1),
+        ("${X:", true, 1),
+        ("A[x]", false, 2),
+        ("${X:0:1}", false, 2),
     ] {
-        let command = format!("{seed}{}", run.repeat(100_000));
-        let started = std::time::Instant::now();
-        let verdict = evaluate_credential_print_command(&command);
-        let spent = started.elapsed();
-        assert_eq!(verdict.is_some(), deny, "{run:?}");
-        assert!(
-            spent < std::time::Duration::from_secs(1),
-            "{run:?} took {spent:?}"
-        );
+        let mut units = Vec::new();
+        for kib in [N_KIB, 2 * N_KIB, 4 * N_KIB] {
+            let text = body(run, kib);
+            assert_eq!(text.len(), kib * KIB, "{run:?}");
+            let (got, refused) = scan_units(&format!("{bound}{text}"));
+            assert_eq!(refused, deny, "{run:?} at {kib} KiB");
+            // A third pass, or a costlier byte, changes this count.
+            let want = pinned_units(passes, 1, kib);
+            assert_eq!(got, want, "{run:?} at {kib} KiB, bound: {passes} pass(es)");
+            units.push(got);
+            let (got, refused) = scan_units(&format!("{unbound}{text}"));
+            assert!(!refused, "{run:?} at {kib} KiB, unbound");
+            let want = pinned_units(1, 0, kib);
+            assert_eq!(got, want, "{run:?} at {kib} KiB, unbound: pinned 1 pass");
+        }
+        // Linear: doubling the run doubles the units it adds.
+        let (n, n2, n4) = (units[0], units[1], units[2]);
+        assert_eq!(n4 - n2, 2 * (n2 - n), "{run:?}: {units:?} not linear");
     }
+    // At 2 MiB one pass fits the budget and two do not: the bound form
+    // refuses as it charges its second pass, and the unbound form is allowed.
+    let text = body("${X:0:1}", 2 * KIB);
+    let (got, refused) = scan_units(&format!("{bound}{text}"));
+    assert!(refused, "2 MiB bound must cross the budget");
+    assert_eq!(got, pinned_units(2, 1, 2 * KIB), "2 MiB bound");
+    assert!(pinned_units(1, 1, 2 * KIB) <= super::WORK_BUDGET);
+    let (got, refused) = scan_units(&format!("{unbound}{text}"));
+    assert!(!refused, "2 MiB unbound fits in one pass");
+    assert_eq!(got, pinned_units(1, 0, 2 * KIB), "2 MiB unbound");
 }
 
 /// #8676 round 3: the deny reason never quotes the command, so a credential
