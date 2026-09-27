@@ -5,11 +5,14 @@
 //! through [`super::spawn_detached`] used to inherit that group and die with
 //! it, taking the operator's `trusty-search` / `trusty-analyze` down too.
 //! What: re-invokes this test binary as a stub parent that leads its own
-//! process group, has it start `/bin/sleep` through the real helper, SIGKILLs
-//! the stub's whole group, and asserts the sleeper is still running. No trusty
-//! daemon is started and no host state is read or written.
+//! process group, has it start `/bin/sleep` through the real helper, asserts
+//! the sleeper leads its own session and group, SIGKILLs the stub's whole
+//! group, and checks the sleeper is still running. No trusty daemon is started
+//! and no host state is read or written.
 //! Test: `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`, with
-//! `stub_parent_spawns_a_detached_sleeper` as its child half.
+//! `stub_parent_spawns_a_detached_sleeper` as its child half;
+//! `a_new_session_combined_with_process_group_fails_the_spawn_with_eperm` for
+//! the helper's error arm.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt as _;
@@ -17,7 +20,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::spawn_detached;
+use super::{spawn_detached, start_in_new_session};
 
 /// Set on the stub parent only; the child half is a no-op without it.
 const STUB_ENV: &str = "TRUSTY_COMMON_DETACH_SESSION_STUB";
@@ -41,6 +44,9 @@ const SURVIVAL_WINDOW: Duration = Duration::from_secs(2);
 const STUB_LIFETIME: Duration = Duration::from_secs(120);
 
 /// True while `pid` exists. Signal 0 delivers nothing.
+///
+/// A zombie still "exists", so this is only the secondary check; the session
+/// and group assertions made before the kill are the primary one.
 fn alive(pid: libc::pid_t) -> bool {
     // SAFETY: `kill` with signal 0 only checks that the pid exists.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -134,10 +140,28 @@ fn a_detached_daemon_survives_a_sigkill_of_its_spawners_group() {
         Err(_) => panic!("the stub parent reported nothing within {STUB_REPORT_BOUND:?}"),
     };
     let mut sleeper = Sleeper(Some(daemon));
-    // SAFETY: `getpgid` only reads the process group of an existing pid.
-    let daemon_pgid = unsafe { libc::getpgid(daemon) };
+    // SAFETY: `getpgid` and `getsid` only read the group and session of an
+    // existing pid; the sleeper is alive until the kill below.
+    let (daemon_pgid, daemon_sid) = unsafe { (libc::getpgid(daemon), libc::getsid(daemon)) };
 
-    // The kill `trusty-audit` issues on a budget timeout or Ctrl-C.
+    // Primary check, made while both processes are certainly alive: the
+    // sleeper left the stub's group by leading a session of its own.
+    assert_ne!(
+        daemon_pgid, stub_pgid,
+        "the detached child {daemon} is still in its spawner's process group (#8783)"
+    );
+    assert_eq!(
+        daemon_sid, daemon,
+        "the detached child {daemon} does not lead its own session; getsid \
+         returned {daemon_sid} (#8783)"
+    );
+    assert_eq!(
+        daemon_pgid, daemon,
+        "a session leader also leads its own process group"
+    );
+
+    // Secondary check: the kill `trusty-audit` issues on a budget timeout or
+    // Ctrl-C leaves the sleeper running.
     stub.kill_group().expect("SIGKILL the stub's process group");
 
     let give_up = Instant::now() + SURVIVAL_WINDOW;
@@ -169,4 +193,26 @@ fn stub_parent_spawns_a_detached_sleeper() {
     println!("{PID_MARKER}{pid}");
     let _ = std::io::stdout().flush();
     std::thread::sleep(STUB_LIFETIME);
+}
+
+/// The error arm of [`start_in_new_session`]: a group leader cannot `setsid`.
+///
+/// Why: the helper's doc promises a failed `setsid` fails the spawn instead of
+/// starting a daemon still in its spawner's group. `process_group(0)` runs
+/// before the `pre_exec` hook and makes the child a group leader, which is the
+/// one way to make `setsid` fail on demand.
+/// Test: this test.
+#[test]
+fn a_new_session_combined_with_process_group_fails_the_spawn_with_eperm() {
+    let mut cmd = Command::new("/usr/bin/true");
+    cmd.process_group(0);
+    start_in_new_session(&mut cmd);
+    let err = cmd
+        .spawn()
+        .expect_err("setsid in a group leader must fail the spawn");
+    assert_eq!(
+        err.raw_os_error(),
+        Some(libc::EPERM),
+        "expected EPERM from setsid, got {err:?}"
+    );
 }

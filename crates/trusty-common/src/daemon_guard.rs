@@ -446,29 +446,43 @@ fn detached_command(
 /// over `process_group(0)` because it also drops the controlling terminal, so a
 /// terminal hangup or job-control signal can never reach the daemon either; a
 /// daemon has no use for a terminal, and its stdio is null.
-/// What: installs a `pre_exec` hook that calls `setsid()` in the forked child;
-/// a failure fails the spawn rather than starting a daemon still in the group.
-/// It cannot fail in practice, since a freshly forked child never leads a group.
+/// What: installs a `pre_exec` hook that runs [`become_session_leader`] in the
+/// forked child; a failure fails the spawn rather than starting a daemon still
+/// in the group. A plain forked child never leads a group, so on its own the
+/// hook does not fail. It DOES fail, with `EPERM`, when the same `Command` also
+/// sets `process_group` (or a `pre_exec` of its own calls `setpgid`) first:
+/// the child then leads a group, and a group leader cannot call `setsid`.
 /// Public so a daemon start that needs its own stdio or cwd — and so cannot use
 /// [`spawn_detached`] — gets the same treatment instead of a second copy.
-/// Test: `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`.
+/// Test: `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`,
+/// `a_new_session_combined_with_process_group_fails_the_spawn_with_eperm`.
 pub fn start_in_new_session(cmd: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
         // SAFETY: the hook runs in the forked child before `exec`, where only
-        // async-signal-safe calls are allowed. `setsid` is one, and building an
-        // `io::Error` from errno does not allocate.
+        // async-signal-safe calls are allowed; see `become_session_leader`.
         unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            cmd.pre_exec(become_session_leader);
         }
     }
     cmd
+}
+
+/// The `pre_exec` body behind [`start_in_new_session`]: `setsid()`, errno on failure.
+///
+/// Why: `uds::supervisor` starts its detached children through a tokio
+/// `Command`, whose `pre_exec` is a separate method; both share this one body.
+/// It runs between `fork` and `exec`, so it makes async-signal-safe calls only:
+/// `setsid` is one, and building an `io::Error` from errno does not allocate.
+/// Test: `a_new_session_combined_with_process_group_fails_the_spawn_with_eperm`.
+#[cfg(unix)]
+pub(crate) fn become_session_leader() -> std::io::Result<()> {
+    // SAFETY: `setsid` takes no arguments and touches only the calling process.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Spawn a prepared detached command, rendering a failure with what was tried.

@@ -500,6 +500,32 @@ async fn spawn_child_reports_a_missing_binary() {
     );
 }
 
+/// Why (#8783): a detached child is meant to outlive its caller, so it must
+/// lead its own session, out of reach of a group kill aimed at the caller. A
+/// supervised child is the control: it stays in the caller's session.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn only_a_detached_child_leads_its_own_session() {
+    // SAFETY: `getsid(0)` reads this process's own session id.
+    let own_sid = unsafe { libc::getsid(0) };
+    for detached in [true, false] {
+        let spec = SpawnSpec::new("/bin/sleep").arg("60");
+        let mut spawned = super::child::spawn_child("test-service", "k", &spec, detached)
+            .await
+            .expect("spawn a sleeper");
+        let pid = spawned.child.id().expect("a live child has a pid") as libc::pid_t;
+        // SAFETY: `getsid` only reads the session of our own unreaped child.
+        let sid = unsafe { libc::getsid(pid) };
+        let _ = spawned.child.kill().await;
+        if detached {
+            assert_eq!(sid, pid, "a detached child must lead its own session");
+        } else {
+            assert_eq!(sid, own_sid, "a supervised child stays in our session");
+        }
+    }
+}
+
 // ── Supervisor state machine ──────────────────────────────────────────────
 
 /// Why: the supervisor must start with an empty map so the first

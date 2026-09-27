@@ -239,33 +239,67 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
 /// daemon through the SAME code rather than a parallel lifecycle — this repo's
 /// common-entry-point rule. A second spawn implementation is how the two paths
 /// would drift on stdio hygiene or cwd handling.
-/// What: resolves `current_exe()`, sets a stable cwd so the daemon never
-/// inherits a deleted worktree directory, nulls all three stdio fds so the
-/// child outlives the bridge process, and spawns. Does NOT wait for readiness —
-/// that is [`poll_until_ready`]'s job.
+/// What: resolves `current_exe()`, builds the command with
+/// [`detached_daemon_command`], and spawns. Does NOT wait for readiness — that
+/// is [`poll_until_ready`]'s job.
 /// Test: the spawn path is exercised end-to-end by
-/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`.
+/// `crates/trusty-mcp/tests/single_flight_exclusion.rs`; the detachment by
+/// `detached_daemon_command_starts_the_daemon_in_its_own_session`.
 pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
     eprintln!("\u{25cf} Starting {} daemon\u{2026}", config.service_name);
 
     let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
-    // Set a stable cwd so the spawned daemon never inherits a deleted directory.
+    detached_daemon_command(&exe, config).spawn().map_err(|e| {
+        anyhow!(
+            "could not spawn `{} {}`: {e}",
+            exe.display(),
+            config.spawn_args.join(" "),
+        )
+    })?;
+    Ok(())
+}
+
+/// The `Command` [`spawn_daemon_detached`] runs: `exe` plus `config.spawn_args`,
+/// detached from the bridge.
+///
+/// Why (#8783): this is the auto-start path of `trusty-search serve` and of
+/// `tm`'s stdio bridge, and the daemon it starts is meant to outlive the
+/// bridge. Without a session of its own the daemon stays in the bridge's
+/// process group, so a group kill or Ctrl-C aimed at the bridge (an MCP host
+/// tearing its server down, a terminal) kills the daemon with it.
+/// What: a stable cwd (home, else `/`) so the daemon never inherits a deleted
+/// worktree directory, null stdio so it outlives the bridge's pipes, and on
+/// Unix a `pre_exec` hook that calls `setsid()`, failing the spawn if that
+/// fails. This mirrors `trusty_common::daemon_guard::start_in_new_session`;
+/// trusty-mcp stays free of a trusty-common dependency (ADR-0040).
+/// Test: `detached_daemon_command_starts_the_daemon_in_its_own_session`.
+fn detached_daemon_command(
+    exe: &std::path::Path,
+    config: &DaemonBridgeConfig,
+) -> std::process::Command {
     let stable_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-    std::process::Command::new(&exe)
-        .args(&config.spawn_args)
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&config.spawn_args)
         .current_dir(&stable_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            anyhow!(
-                "could not spawn `{} {}`: {e}",
-                exe.display(),
-                config.spawn_args.join(" "),
-            )
-        })?;
-    Ok(())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: the hook runs in the forked child before `exec`, where only
+        // async-signal-safe calls are allowed. `setsid` is one, and building an
+        // `io::Error` from errno does not allocate.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd
 }
 
 /// Poll the daemon's health endpoint until it responds or the budget expires.
@@ -328,6 +362,31 @@ mod tests {
             no_spawn: false,
             no_spawn_hint: None,
         }
+    }
+
+    /// Why (#8783): the daemon the bridge auto-starts must lead its own
+    /// session, so a group kill aimed at the bridge cannot reach it.
+    /// What: builds the production command around `/bin/sleep` in place of
+    /// `current_exe()`, spawns it, and compares `getsid(child)` with the
+    /// child's pid while it is alive.
+    /// Test: this test.
+    #[cfg(unix)]
+    #[test]
+    fn detached_daemon_command_starts_the_daemon_in_its_own_session() {
+        let mut cfg = make_config("http://127.0.0.1:1", "/health");
+        cfg.spawn_args = vec!["60".to_string()];
+        let mut child = detached_daemon_command(std::path::Path::new("/bin/sleep"), &cfg)
+            .spawn()
+            .expect("spawn the stand-in daemon");
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: `getsid` only reads the session of our own unreaped child.
+        let sid = unsafe { libc::getsid(pid) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            sid, pid,
+            "the auto-started daemon must lead its own session (#8783)"
+        );
     }
 
     /// Why: `health_url()` must concatenate base URL and health path exactly,
