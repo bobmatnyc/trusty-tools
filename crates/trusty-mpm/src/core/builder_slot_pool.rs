@@ -144,9 +144,10 @@ pub enum SlotPoolError {
         #[source]
         source: std::io::Error,
     },
-    /// #8794: the unseeded slot holds a live cargo build, so the seed refused
-    /// to replace it and left it as it was.
-    #[error("refused to seed builder slot {path}: cargo holds {lock}, so a build is running there")]
+    /// #8794: the slot holds a live cargo build, so the seed or the handover
+    /// refused it and left it as it was.
+    // #8794: neutral text — a handover refusal is not a seed refusal.
+    #[error("builder slot {path} is in use: cargo holds {lock}, so a build is running there")]
     ActiveBuild {
         /// The slot directory left untouched.
         path: PathBuf,
@@ -190,19 +191,33 @@ pub struct SlotPool {
     identity: GithubPath,
     /// Where the dispatch was issued from; see [`Self::with_checkout`].
     checkout: Option<PathBuf>,
+    /// #8794: slots `0..ceiling` are the only ones a claim may start seeding.
+    ceiling: u32,
 }
 
 impl SlotPool {
-    /// A pool under `root` for one repo.
+    /// A pool under `root` for one repo, seeding at most `ceiling` slots.
     ///
-    /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
+    /// Why (#8794): the seed of a new slot clones a target directory measured
+    /// at 207 GB. Without a bound, a pool whose seeded slots all fail their
+    /// handover would clone a new `slot-N` on every admission. `ceiling` is the
+    /// operator's builder ceiling, floored at one so a slot can always exist.
+    /// Test: `slot_paths_are_keyed_by_owner_and_repo`,
+    /// `a_failed_handover_is_not_reseeded_past_the_ceiling`.
     #[must_use]
-    pub fn new(root: PathBuf, identity: GithubPath) -> Self {
+    pub fn new(root: PathBuf, identity: GithubPath, ceiling: u32) -> Self {
         Self {
             root,
             identity,
             checkout: None,
+            ceiling: ceiling.max(1),
         }
+    }
+
+    /// The number of slot indexes, from zero, a claim may start seeding.
+    #[must_use]
+    pub fn ceiling(&self) -> u32 {
+        self.ceiling
     }
 
     /// Where slot `index` lives, whether or not it exists yet.
@@ -750,6 +765,27 @@ enum CloneError {
     Failed(String),
 }
 
+/// Fixtures shared by every suite that hands a pool slot over (#8794).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// Make `dir` a checkout whose `Cargo.lock` names one path package
+    /// (`widgets-core`) and one registry package (`serde`), and return it. A
+    /// handover refuses a pool with no resolvable path package (#8794).
+    pub(crate) fn write_checkout(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("checkout");
+        std::fs::write(
+            dir.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"widgets-core\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .expect("Cargo.lock");
+        dir.to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,12 +800,13 @@ mod tests {
     /// Every test here roots the pool in a temp dir. #8311: tests that wrote
     /// under the real `~/.trusty-tools` leaked 42,000 directories.
     fn pool(root: &Path) -> SlotPool {
-        SlotPool::new(root.to_path_buf(), identity())
+        SlotPool::new(root.to_path_buf(), identity(), 8)
     }
 
     #[test]
     fn slot_paths_are_keyed_by_owner_and_repo() {
-        let pool = SlotPool::new(PathBuf::from("/pool"), identity());
+        let pool = SlotPool::new(PathBuf::from("/pool"), identity(), 0);
+        assert_eq!(pool.ceiling(), 1, "a pool can always hold one slot");
         assert_eq!(
             pool.slot_path(3),
             Path::new("/pool/bobmatnyc/trusty-tools/slot-3")

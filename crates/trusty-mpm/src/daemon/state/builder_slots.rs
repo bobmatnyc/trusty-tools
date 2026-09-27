@@ -234,6 +234,12 @@ pub struct BuilderSlotGrant {
     /// Why: the seed clones a target directory measured at 207 GB, which cannot
     /// run under the claim mutex — the caller runs it after answering.
     pub seed_index: Option<u32>,
+    /// Trash trees of invalidated fingerprints the caller deletes with
+    /// [`SlotPool::purge_invalidated`] after answering (#8794).
+    ///
+    /// Why: a handover moves the previous holder's builds aside under this
+    /// mutex; deleting their files there outran the hook's 2-second budget.
+    pub purge: Vec<PathBuf>,
 }
 
 /// Why an admitted builder got no slot index at all (#8261 critic round).
@@ -259,6 +265,18 @@ fn unseeded_notice(index: u32, in_flight: bool, last_failure: Option<String>) ->
          target directory and builds in the shared one. An unseeded slot is never handed out \
          (#8794): slot-{index} {seeding}, and a later builder gets it once the seed completes. \
          Do not point CARGO_TARGET_DIR at it.{failure}"
+    )
+}
+
+/// Why an admitted builder got no slot: no free seeded slot could be handed
+/// over, and every index below the ceiling is taken or seeded (#8794).
+/// Test: `a_failed_handover_is_not_reseeded_past_the_ceiling`.
+fn ceiling_notice(ceiling: u32) -> String {
+    format!(
+        "no builder slot could be handed to this dispatch and every slot below the ceiling of \
+         {ceiling} is held or already seeded, so no new slot is seeded and this dispatch builds \
+         in the shared target directory. The daemon log names why each seeded slot was not \
+         handed over."
     )
 }
 
@@ -500,17 +518,21 @@ impl DaemonState {
     /// [`SlotPool::hand_over`] — which refuses a slot a live cargo build holds
     /// and invalidates another holder's builds — and records the first one it
     /// hands over. With none, the builder is admitted with NO slot and a notice,
-    /// and this call claims the seed of the lowest free unseeded slot for the
-    /// caller to run off this path. The claim is keyed by the slot's path and
-    /// taken under this mutex, so a seed already in flight is never spawned
-    /// twice (#8261 critic round 2). A slot whose parent cannot be made refuses
-    /// the claim. Every step is bounded: stats, a `create_dir_all`, and the
-    /// handover's fingerprint removal.
+    /// and this call claims the seed of the lowest free unseeded slot below
+    /// [`SlotPool::ceiling`] for the caller to run off this path — none at all
+    /// once every index below it is taken or seeded (#8794). The claim is keyed
+    /// by the slot's path and taken under this mutex, so a seed already in
+    /// flight is never spawned twice (#8261 critic round 2). A slot whose parent
+    /// cannot be made refuses the claim. Every step is bounded: stats, a
+    /// `create_dir_all`, and the handover's one `rename` per invalidated package
+    /// directory. The trash trees of every slot tried go to
+    /// [`BuilderSlotGrant::purge`] for the caller to delete after answering.
     /// Test: `two_admissions_racing_for_an_unseeded_slot_get_no_slot_and_one_seed`,
     /// `an_admitted_builder_records_the_slot_directory_it_was_given`,
     /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`,
     /// `a_second_claim_on_a_slot_invalidates_the_first_holders_build`,
-    /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`.
+    /// `a_slot_the_pool_cannot_provide_is_refused_not_admitted_unthrottled`,
+    /// `a_failed_handover_is_not_reseeded_past_the_ceiling`.
     fn grant_pool_slot(
         &self,
         pool: &SlotPool,
@@ -528,7 +550,11 @@ impl DaemonState {
                 continue;
             }
             seeded.insert(index);
-            match pool.hand_over(index, holder) {
+            let handed = pool.hand_over(index, holder);
+            // #8794: listed here, under the mutex every handover runs under, so
+            // no listed tree is still being filled; deleted after the answer.
+            grant.purge.extend(pool.invalidated_trees(index));
+            match handed {
                 Ok(path) if self.stamp_builder_slot(holder, index) => {
                     let rendered = format!("{:?}", SeedKind::AlreadySeeded);
                     self.record_builder_slot_dir(tool_use_id, &path, &rendered);
@@ -543,8 +569,11 @@ impl DaemonState {
                 Err(err) => tracing::warn!("seeded builder slot {index} not handed out: {err}"),
             }
         }
-        let Some(target) = (0u32..).find(|i| !taken.contains(i) && !seeded.contains(i)) else {
-            grant.slot_notice = Some(NO_INDEX_NOTICE.to_string());
+        // #8794: bounded by the ceiling, so hand-overs that keep failing cannot
+        // clone a new slot on every admission.
+        let Some(target) = (0..pool.ceiling()).find(|i| !taken.contains(i) && !seeded.contains(i))
+        else {
+            grant.slot_notice = Some(ceiling_notice(pool.ceiling()));
             return;
         };
         match pool.reserve_path(target) {
@@ -1056,15 +1085,26 @@ mod tests {
         }
     }
 
-    /// A pool rooted at `root`, for a fixed test identity.
+    /// A pool rooted at `root`, for a fixed test identity, whose checkout (a
+    /// sibling of `root`) names a path package — a handover needs one (#8794).
     fn test_pool(root: std::path::PathBuf) -> SlotPool {
+        test_pool_with_ceiling(root, 4)
+    }
+
+    /// [`test_pool`] seeding at most `ceiling` slots.
+    fn test_pool_with_ceiling(root: std::path::PathBuf, ceiling: u32) -> SlotPool {
+        let checkout = crate::core::builder_slot_pool::test_support::write_checkout(
+            &root.with_file_name("checkout"),
+        );
         SlotPool::new(
             root,
             trusty_common::github_path::GithubPath {
                 owner: "acme".to_string(),
                 repo: "widgets".to_string(),
             },
+            ceiling,
         )
+        .with_checkout(checkout)
     }
 
     /// #8261: an admitted builder is handed a DIRECTORY, not just an index — the
@@ -1278,6 +1318,107 @@ mod tests {
         );
         assert_eq!(second.slot_dir, Some(slot), "B is handed the same slot");
         assert!(!built.exists(), "A's build must not be served to B");
+        // #8794 critic round 3: the delete is handed to the caller.
+        assert_eq!(second.purge.len(), 1, "{:?}", second.purge);
+        assert_eq!(SlotPool::purge_invalidated(&second.purge), 1);
+    }
+
+    /// Seed slot 0 of `pool` and hand it to `toolu_A` outside any lease, so the
+    /// slot is free, seeded, and names A; returns its `served:` line.
+    fn slot_zero_served_to_a(pool: &SlotPool) -> String {
+        pool.seed(0, None).expect("a seeded slot 0");
+        let slot = pool.hand_over(0, "toolu_A").expect("A is handed slot 0");
+        served_line(&slot)
+    }
+
+    /// The `served:` line of `slot`'s marker.
+    fn served_line(slot: &Path) -> String {
+        std::fs::read_to_string(slot.join(crate::core::builder_slot_pool::SEED_MARKER))
+            .expect("marker")
+            .lines()
+            .find(|line| line.starts_with("served: "))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Claim a slot from `pool` for a new running builder `id`.
+    fn claim_for(
+        state: &DaemonState,
+        session: SessionId,
+        id: &str,
+        pool: &SlotPool,
+    ) -> BuilderSlotGrant {
+        let mut d = running(session, "rust-engineer", 1);
+        d.tool_use_id = Some(id.to_string());
+        state.claim_builder_slot_with_pool(
+            4,
+            Some(id),
+            true,
+            Some(pool),
+            move |s| s.upsert_delegation(d),
+            |_| {},
+        )
+    }
+
+    /// #8794 critic round 3: `hand_over` fails (its checkout has no
+    /// `Cargo.lock`), so B gets no directory, the marker still names A, and the
+    /// failed slot is not the seed target. At c7cf951a4 B was handed slot 0.
+    #[test]
+    fn a_handover_error_grants_no_slot_and_keeps_the_marker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+        let pool = test_pool(root.path().join("pool"));
+        let before = slot_zero_served_to_a(&pool);
+        let no_lock = pool.clone().with_checkout(root.path().join("no-lock"));
+
+        let grant = claim_for(&state, session, "toolu_B", &no_lock);
+
+        assert!(grant.claimed, "the admission itself stands: {grant:?}");
+        assert_eq!(grant.slot_dir, None, "a failed handover hands out nothing");
+        assert_eq!(
+            served_line(&pool.slot_path(0)),
+            before,
+            "the marker keeps A"
+        );
+        assert_eq!(grant.seed_index, Some(1), "slot 0 is not re-seeded");
+    }
+
+    /// #8794 critic round 3: with the only seeded slot refusing its handover (a
+    /// live build holds it), no seed starts at or past the pool's ceiling. At
+    /// c7cf951a4 every such admission seeded the next index, unbounded.
+    #[test]
+    fn a_failed_handover_is_not_reseeded_past_the_ceiling() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = DaemonState::new();
+        let session = session_with_pid(&state, Some(std::process::id()));
+        let pool = test_pool_with_ceiling(root.path().join("pool"), 1);
+        let before = slot_zero_served_to_a(&pool);
+        let debug = pool.slot_path(0).join("debug");
+        std::fs::create_dir_all(&debug).expect("profile");
+        let lock = std::fs::File::create(debug.join(".cargo-lock")).expect("lock");
+        lock.lock().expect("a live build holds slot 0");
+
+        let grant = claim_for(&state, session, "toolu_B", &pool);
+        assert_eq!(grant.slot_dir, None, "{grant:?}");
+        assert_eq!(grant.seed_index, None, "the ceiling of 1 is reached");
+        assert!(
+            grant
+                .slot_notice
+                .as_deref()
+                .is_some_and(|n| n.contains("ceiling")),
+            "{:?}",
+            grant.slot_notice
+        );
+        assert_eq!(
+            served_line(&pool.slot_path(0)),
+            before,
+            "the marker keeps A"
+        );
+
+        let wider = test_pool_with_ceiling(root.path().join("pool"), 2);
+        let grant = claim_for(&state, session, "toolu_C", &wider);
+        assert_eq!(grant.seed_index, Some(1), "below the ceiling, one seed");
     }
 
     /// #8261 Fail-Open Check: a slot the pool cannot provide is NO slot.
