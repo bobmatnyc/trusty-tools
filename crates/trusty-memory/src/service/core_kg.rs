@@ -414,6 +414,13 @@ impl MemoryService {
     /// `spawn_blocking` for the open before awaiting the async dream cycle.
     /// Test: `dream_run_aggregates_stats`.
     pub async fn dream_run(&self) -> ServiceResult<DreamStatusPayload> {
+        // #8733: a dream run is maintenance; only the lease holder runs it.
+        if !self.state.registry.may_run_maintenance() {
+            return Err(ServiceError::conflict(
+                "another process holds this data root's maintenance lease; \
+                 see the pid in maintenance.lock (#8733)",
+            ));
+        }
         let palaces = list_palaces_blocking(&self.state)
             .await
             .map_err(|e| ServiceError::internal(format!("{e:#}")))?;

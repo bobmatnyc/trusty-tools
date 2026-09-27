@@ -13,6 +13,7 @@
 //! `registry_remove_clears_cached_handle` in this module.
 
 use crate::memory_core::community::KnowledgeGap;
+use crate::memory_core::maintenance_lease::MaintenanceLease;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
@@ -184,6 +185,9 @@ pub struct PalaceRegistry {
     /// [`PalaceRegistry::unopenable`] / [`PalaceRegistry::unopenable_reason`].
     /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
     unopenable: Arc<DashMap<PalaceId, String>>,
+    /// #8733: this data root's maintenance election. `None` (CLI, stdio,
+    /// tests) keeps the pre-#8733 behaviour of always maintaining.
+    maintenance: Option<Arc<MaintenanceLease>>,
 }
 
 impl Default for PalaceRegistry {
@@ -223,6 +227,7 @@ impl PalaceRegistry {
             open_locks: Arc::new(DashMap::new()),
             open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
             unopenable: Arc::new(DashMap::new()),
+            maintenance: None,
         }
     }
 
@@ -283,6 +288,50 @@ impl PalaceRegistry {
     #[must_use]
     pub fn open_intent(&self) -> OpenIntent {
         self.open_intent
+    }
+
+    /// Gate this registry's maintenance on `lease` (#8733).
+    ///
+    /// Why: several processes may open one data root; only the lease holder
+    /// may run dream passes and the open-time TTL purge.
+    /// What: consuming builder storing the lease that
+    /// [`Self::may_run_maintenance`] consults.
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    #[must_use]
+    pub fn with_maintenance_lease(mut self, lease: Arc<MaintenanceLease>) -> Self {
+        self.maintenance = Some(lease);
+        self
+    }
+
+    /// The maintenance lease this registry is gated on, if any.
+    #[must_use]
+    pub fn maintenance_lease(&self) -> Option<&Arc<MaintenanceLease>> {
+        self.maintenance.as_ref()
+    }
+
+    /// Whether this process may run maintenance on this registry's palaces now.
+    ///
+    /// Why (#8733): every maintenance entry point — the dream loop, the manual
+    /// dream run, the open-time purge — asks this one question.
+    /// What: `true` without a lease; otherwise tries to take (or confirms) the
+    /// lease, so a non-holder takes over once the holder exits.
+    /// Test: `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
+    #[must_use]
+    pub fn may_run_maintenance(&self) -> bool {
+        self.maintenance
+            .as_ref()
+            .is_none_or(|lease| lease.try_hold().is_held())
+    }
+
+    /// Open `palace` under this registry's intent without registering it.
+    ///
+    /// Why (#8733): the open-time TTL purge is maintenance, so every open the
+    /// registry performs, and the daemon's hydration, routes through here.
+    /// What: [`PalaceHandle::open_with_intent_purging`] with the purge gated
+    /// on [`Self::may_run_maintenance`].
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    pub fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
+        PalaceHandle::open_with_intent_purging(palace, self.open_intent, self.may_run_maintenance())
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
@@ -556,7 +605,7 @@ impl PalaceRegistry {
         // Issue #1487: honour the registry's open intent. On the HTTP daemon
         // (`Writer`) a second live instance holding the lock makes this fail
         // loud rather than returning a snapshot-mode (read-only) handle.
-        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        let handle = self.open_handle(&palace)?;
         // ADR-0027 T2: name the rooms this palace's drawers already sit in.
         Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
@@ -711,7 +760,7 @@ impl PalaceRegistry {
         // Issue #1487: honour the registry's open intent (Writer on the HTTP
         // daemon) so a freshly-created palace is opened under the same
         // fail-loud contract as a re-opened one.
-        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        let handle = self.open_handle(&palace)?;
         // ADR-0027 T2: name the rooms this palace's drawers already sit in.
         Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
@@ -767,7 +816,7 @@ impl PalaceRegistry {
             // `Self::new()`, so this preserves the historical snapshot-fallback
             // behaviour while staying correct if a future caller hydrates a
             // writer registry.
-            match PalaceHandle::open_with_intent(&palace, registry.open_intent) {
+            match registry.open_handle(&palace) {
                 Ok(handle) => {
                     // ADR-0027 T2: same additive backfill on the eager path.
                     Self::backfill_rooms(&handle);
