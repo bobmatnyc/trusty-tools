@@ -181,9 +181,8 @@ redb = { workspace = true }
 # trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
 # lockfile churn.
 sha2 = { workspace = true }
-# `commands::daemon_lock` probes a recorded pid with `libc::kill(pid, 0)` and
 # `fd_metrics` reads `RLIMIT_NOFILE` via `libc::getrlimit`. (#5329 removed the
-# other caller, the BM25 spawn supervisor's SIGTERM path.)
+# BM25 spawn supervisor's SIGTERM caller; #8759 removed `commands::daemon_lock`.)
 libc = { workspace = true }
 # Issue #220: rolling dedup window uses Jaro-Winkler similarity to detect
 # near-duplicate memory writes within a short time window. `strsim` is

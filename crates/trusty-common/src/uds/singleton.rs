@@ -39,13 +39,29 @@
 //! server with a wrong-mode socket would be misread as a corpse and unlinked
 //! out from under itself.
 //!
+//! 🔴 Invariant (#8759): every caller runs its whole lstat → probe → unlink →
+//! bind → listen sequence while holding an exclusive, non-blocking `flock` on
+//! `<socket>.lock`. Without it, two starters could both prove the same corpse
+//! dead and both unlink and bind — the second unlinking the first's fresh
+//! socket — or one could probe the other's socket in the gap between `bind`
+//! and `listen`, where a connect is refused, and read it as a corpse. Either
+//! way both returned `Ok` and both served. Under the lock, a binder sees only a
+//! socket another binder finished listening on, so the probe refuses it; a
+//! binder that finds the lock held refuses with
+//! [`UdsSecurityError::BindInProgress`]; and one that cannot take the lock at
+//! all refuses with [`UdsSecurityError::BindLock`] instead of binding unlocked.
+//! The lock file is never removed: unlinking it while another process has it
+//! open would let a third lock a fresh inode alongside.
+//!
 //! `trusty-agents`' `CtrlSocket::bind_singleton` predates this and still carries
 //! its own copy; migrating it is a separate change, not a side effect of one
 //! that adds two new bind sites.
 //!
 //! Test: `tests.rs` — `bind_singleton_*` and `takeover_verdict_*`.
 
-use std::path::Path;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::net::UnixListener;
@@ -124,15 +140,47 @@ pub(crate) fn classify_takeover(
 /// because two listeners on one socket means every delivery goes to whichever
 /// the kernel picks. [`UdsSecurityError::NotASocketFile`] when the path holds
 /// something that is not a socket, which this function refuses rather than
-/// deletes (#7312). Otherwise any [`super::bind_hardened`] error.
+/// deletes (#7312). [`UdsSecurityError::BindInProgress`] when another process
+/// holds the bind lock, and [`UdsSecurityError::BindLock`] when the lock cannot
+/// be taken at all (#8759). Otherwise any [`super::bind_hardened`] error.
 ///
 /// Test: `bind_singleton_takes_over_a_stale_socket_file`,
+/// `bind_singleton_racing_takeover_leaves_exactly_one_owner`,
+/// `bind_singleton_refuses_while_another_binder_holds_the_lock`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
 /// `bind_singleton_refuses_a_socket_someone_is_serving`,
 /// `bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk`,
 /// `bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket`,
 /// `bind_singleton_hardened_refuses_a_symlink_to_a_live_socket`,
 /// `bind_singleton_binds_a_fresh_path`.
 pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
+    bind_singleton_with(path, || async {}).await
+}
+
+/// [`bind_singleton_hardened`]'s body, with a hook run after the takeover
+/// decision and before the unlink.
+///
+/// Why: the #8759 race lives between "the probe proved this socket dead" and
+/// "unlink it and bind"; a test forces a second binder into exactly that gap
+/// by running it inside `before_takeover`, with no sleep standing in for the
+/// interleaving.
+/// What: identical to [`bind_singleton_hardened`]; `before_takeover` runs only
+/// on the [`TakeoverVerdict::TakeOver`] arm.
+/// Test: `bind_singleton_racing_takeover_leaves_exactly_one_owner`.
+pub(crate) async fn bind_singleton_with<F, Fut>(
+    path: &Path,
+    before_takeover: F,
+) -> Result<UnixListener, UdsSecurityError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    // #8759: the lock lives beside the socket, so the directory is hardened
+    // first; the guard is held to the end of this function, past `listen`.
+    super::check_sun_path_budget(path)?;
+    super::prepare_socket_dir(super::socket_parent(path)?)?;
+    let _bind_lock = lock_for_bind(path)?;
+
     // #7312: `lstat`, not `Path::exists` — the latter follows a symlink and
     // answers only "is something there", which is one of the two inputs the
     // decision below needs. A stat that fails for any other reason is left to
@@ -156,6 +204,7 @@ pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSec
         };
         match classify_takeover(is_socket, verdict) {
             TakeoverVerdict::TakeOver => {
+                before_takeover().await;
                 // A corpse from a child that died without cleaning up. Removing
                 // it is the whole point of this function; a failure to remove it
                 // is reported by the bind that follows.
@@ -186,4 +235,50 @@ pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSec
         }
     }
     bind_hardened(path)
+}
+
+/// Take the exclusive, non-blocking bind lock beside `path`.
+///
+/// Why: #8759 — see the invariant in the module doc.
+/// What: opens `<path>.lock` (created `0600`, never truncated, never removed)
+/// and `try_lock`s it. Contention is [`UdsSecurityError::BindInProgress`];
+/// any I/O failure is [`UdsSecurityError::BindLock`]. The returned file holds
+/// the lock until dropped.
+/// Test: `bind_singleton_refuses_while_another_binder_holds_the_lock`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`.
+fn lock_for_bind(path: &Path) -> Result<File, UdsSecurityError> {
+    let lock_path = bind_lock_path(path);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path);
+    let file = match file {
+        Ok(file) => file,
+        Err(source) => {
+            return Err(UdsSecurityError::BindLock {
+                path: lock_path,
+                source,
+            });
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(UdsSecurityError::BindInProgress {
+            path: path.to_path_buf(),
+        }),
+        Err(TryLockError::Error(source)) => Err(UdsSecurityError::BindLock {
+            path: lock_path,
+            source,
+        }),
+    }
+}
+
+/// `<path>.lock`: the bind lock's file, beside the socket it guards.
+pub(crate) fn bind_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }
