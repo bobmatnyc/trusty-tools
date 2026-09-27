@@ -35,6 +35,8 @@ use super::super::managed_render::{
     truncate,
 };
 use super::{session_activity, session_decommission, session_resume, session_stop};
+use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
+use trusty_mpm::core::tmux::{exact_session_target, with_tmux_binary};
 
 #[test]
 fn truncate_clips_and_appends_ellipsis() {
@@ -414,6 +416,11 @@ async fn session_resume_restart_failure_errors() {
 /// always flips state to `active`. The real tmux session is owned by a
 /// `ScratchTmuxSession` guard, so it is killed on every exit path — normal
 /// return, assertion failure, and panic alike (#6116).
+///
+/// #6542: that session lives on a `PrivateTmuxServer`, and the CLI's probes
+/// reach it through a `with_tmux_binary` shim scope. On the default server a
+/// killed run leaked `tm-r<pid>-01`, a name outside the reserved namespace the
+/// stale sweep collects.
 #[tokio::test]
 async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     use trusty_mpm::daemon::{api, state::DaemonState};
@@ -463,8 +470,12 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     //
     // #6116: owned by an RAII guard, so the session dies with this test whether
     // it returns, fails an assertion, or panics inside the wait below.
-    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+    // #6542: on a private server, which the guard declared first outlives.
+    let server = PrivateTmuxServer::new(&tmux_bin, "resume-live");
+    let shim = server.shim_bin();
+    let scratch = ScratchTmuxSession::spawn_on_socket(
         &tmux_bin,
+        Some(server.name()),
         &record.tmux_name,
         "sleep 300",
     );
@@ -474,7 +485,7 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     // sends this test down the #3873 dead-runtime branch. Wait for the pane to
     // settle into the live-runtime state the test is actually about — the exact
     // inverse of the wait in the dead-runtime counterpart below.
-    wait_for_stable_live_runtime(&record.tmux_name);
+    wait_for_stable_live_runtime(&shim, &record.tmux_name);
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -483,7 +494,7 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = session_resume(&client, &url, id.to_string()).await;
+    let result = with_tmux_binary(shim.into(), session_resume(&client, &url, id.to_string())).await;
 
     // Killed here, before the assertions, as it always has been. Dropping the
     // guard is now only the EARLIEST it can happen — an assertion failure or
@@ -511,20 +522,51 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     );
 }
 
+/// Block until the server behind `tmux_bin` answers for `session_name`.
+///
+/// Why (#6542): the stability waits below each allow 10 s for a pane to settle.
+/// On a private per-test server that window also absorbed the server's cold
+/// start and the shim's exec under load, and the live-runtime fixture failed
+/// 3 of 20 runs right after a rebuild. Server readiness now has its own
+/// budget, so the 10 s measures only the pane.
+/// What: polls `has-session -t =<name>` every 50 ms until it exits 0, or
+/// panics after 60 s naming the server, not the pane, as the cause.
+fn wait_for_server_answer(tmux_bin: &str, session_name: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let target = exact_session_target(session_name.trim());
+    while std::time::Instant::now() < deadline {
+        let answered = std::process::Command::new(tmux_bin)
+            .args(["has-session", "-t", &target])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if answered {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "fixture precondition: the tmux server behind '{tmux_bin}' never answered \
+         for session '{session_name}' within 60s"
+    );
+}
+
 /// Block until `session_name`'s panes read as a settled LIVE runtime (#3873).
 ///
 /// Why: the mirror of [`wait_for_stable_dead_runtime`] — see its doc. tmux
 /// launches a pane command through a shell, so a pane told to run a long-lived
 /// process still reports the shell for a moment; a test asserting about the
 /// Attach branch must not start until the fixture actually expresses it.
-/// What: polls until three consecutive probes report a live runtime, or panics
-/// at a 10-second deadline. Any dead reading resets the streak.
-fn wait_for_stable_live_runtime(session_name: &str) {
+/// What: waits for the server to answer ([`wait_for_server_answer`]), then
+/// polls until three consecutive probes report a live runtime, or panics at a
+/// 10-second deadline. Any dead reading resets the streak. Probes through
+/// `tmux_bin`, so a test on a private server (#6542) probes that server.
+fn wait_for_stable_live_runtime(tmux_bin: &str, session_name: &str) {
     const REQUIRED_AGREEING_READS: u32 = 3;
+    wait_for_server_answer(tmux_bin, session_name);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut streak = 0;
     while std::time::Instant::now() < deadline {
-        if crate::commands::guided_resume::session_runtime_live(session_name) {
+        if crate::commands::guided_resume::session_runtime_live_with_bin(tmux_bin, session_name) {
             streak += 1;
             if streak == REQUIRED_AGREEING_READS {
                 return;
@@ -552,13 +594,15 @@ fn wait_for_stable_live_runtime(session_name: &str) {
 /// What: polls until three consecutive probes report a dead runtime, or panics
 /// at a 10-second deadline rather than letting the caller proceed on an
 /// unsettled fixture (a silent proceed is what produced an intermittent
-/// failure). Any live reading resets the streak.
-fn wait_for_stable_dead_runtime(session_name: &str) {
+/// failure). Any live reading resets the streak. The 10 s clock starts only
+/// once the server answers ([`wait_for_server_answer`]).
+fn wait_for_stable_dead_runtime(tmux_bin: &str, session_name: &str) {
     const REQUIRED_AGREEING_READS: u32 = 3;
+    wait_for_server_answer(tmux_bin, session_name);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut streak = 0;
     while std::time::Instant::now() < deadline {
-        if crate::commands::guided_resume::session_runtime_live(session_name) {
+        if crate::commands::guided_resume::session_runtime_live_with_bin(tmux_bin, session_name) {
             streak = 0;
         } else {
             streak += 1;
@@ -683,8 +727,12 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // replaces never ran on that path — every such run leaked a real
     // `tm-deadrt<pid>-01` session permanently. `Drop` still cannot run on a
     // SIGKILL; `spawn` also sweeps what an earlier hard-killed run left behind.
-    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+    // #6542: on a private server, which the guard declared first outlives.
+    let server = PrivateTmuxServer::new(&tmux_bin, "resume-dead");
+    let shim = server.shim_bin();
+    let scratch = ScratchTmuxSession::spawn_on_socket(
         &tmux_bin,
+        Some(server.name()),
         &record.tmux_name,
         "sh",
     );
@@ -692,7 +740,7 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // dead" reading to be STABLE (three consecutive probes) before proceeding,
     // so a single transient child during pane setup cannot send this test down
     // the Attach branch it is not testing.
-    wait_for_stable_dead_runtime(&record.tmux_name);
+    wait_for_stable_dead_runtime(&shim, &record.tmux_name);
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -701,7 +749,7 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = session_resume(&client, &url, id.to_string()).await;
+    let result = with_tmux_binary(shim.into(), session_resume(&client, &url, id.to_string())).await;
 
     // The daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a
     // no-op and this guard is what actually tears the real session down.

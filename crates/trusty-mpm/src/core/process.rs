@@ -343,9 +343,9 @@ mod tests {
     /// resolve that grandchild through the wrapper.
     ///
     /// The session is created with the command inline (not `send-keys`, which
-    /// races zsh's line-editor startup) on the DEFAULT tmux socket (so the
-    /// production `find_claude_pid_in_tmux`, which shells out to a bare `tmux`,
-    /// can see it); cleanup kills only this session, never the server. The fake
+    /// races zsh's line-editor startup) on a private `-L` server (#6542); the
+    /// production `find_claude_pid_in_tmux` reaches it through a
+    /// `with_tmux_binary` shim scope, and the server dies with its guard. The fake
     /// `claude` is a SYMLINK to `/bin/sleep` — a copy would be SIGKILLed by
     /// macOS AMFI as an unsigned clone of a SIP binary, whereas the symlink
     /// execs the real signed `sleep` while `ps -o comm=` still reports the
@@ -393,13 +393,23 @@ mod tests {
         // process-unique, and a genuine duplicate is better surfaced as a failed
         // `new-session` than silently killed — that kill used a bare `-t` target,
         // which prefix-matches and can destroy an unrelated session.
-        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+        // #6542: on a private server, reached by the production lookup through
+        // a `with_tmux_binary` shim scope, never the operator's default one.
+        let server = crate::test_support::tmux_session::PrivateTmuxServer::new("tmux", "disclaim");
+        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn_on_socket(
             "tmux",
+            Some(server.name()),
             &session,
             &format!("sh {}", drv.display()),
         );
 
-        let pid = find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let pid = rt.block_on(crate::core::tmux::with_tmux_binary(
+            server.shim_bin().into(),
+            async { find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200)) },
+        ));
         // Verify the resolved pid IS the claude grandchild WHILE the session is
         // still alive — dropping the guard tears down the whole tree, so this
         // check must precede cleanup.

@@ -70,6 +70,22 @@ pub fn operator_home() -> Option<&'static Path> {
         .as_deref()
 }
 
+/// Give this integration target its own default tmux server, before `main`
+/// (#6542). Its spawned children inherit it: [`CHILD_STATE_ENV`] clears `TMUX`
+/// but keeps `TMUX_TMPDIR`. Aborts rather than let a test reach the operator's
+/// server. See `trusty_mpm::core::tmux_test_isolation`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// Redirect this test process's `$HOME` to a scratch directory, once (#6671).
 ///
 /// Returns the scratch home, so a caller may plant fixtures under it.
