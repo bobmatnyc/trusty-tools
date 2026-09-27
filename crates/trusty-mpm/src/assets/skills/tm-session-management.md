@@ -195,9 +195,18 @@ cleanup command is:
 
 ```bash
 tm session prune-worktrees                 # dry-run, this checkout's project only
-tm session prune-worktrees --force         # remove what the preview listed
+tm session prune-worktrees --force         # re-preview, then remove only what it lists
 tm session prune-worktrees --all-projects  # every registered project
 ```
+
+**What `--force` removes (#8782).** `--force` runs the preview again and
+prints it, then sends one removal request bounded by that re-preview's own
+lists, sent as the operator's allowlists: the orphan paths, the merged-PR
+paths, and the paths whose unsaved work the re-preview said `--discard-dirty`
+discards. The daemon removes nothing outside those lists and re-checks each
+path when it removes it. A tree the re-preview reported as holding no unsaved
+work, but which is dirty by then, is kept even under `--discard-dirty`. A
+daemon that does not echo the allowlists gets no removal request.
 
 Run this as part of session wrap-up when `tm doctor` reports orphaned
 worktrees, and always before ending a long working session that spawned

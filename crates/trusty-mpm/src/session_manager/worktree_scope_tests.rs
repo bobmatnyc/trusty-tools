@@ -302,20 +302,32 @@ fn the_scope_echo_names_the_project_and_the_allowlist_size() {
     let fx = GitWorktreeFixture::new();
     let orphan = vec!["/a".to_string(), "/b".to_string()];
     let merged = vec!["/c".to_string()];
-    let echo = PruneScope::from_request(fx.repo.to_str(), Some(&orphan), Some(&merged))
-        .expect("scope")
-        .echo(false);
+    let discard: Vec<String> = Vec::new();
+    let echo = PruneScope::from_request(
+        fx.repo.to_str(),
+        Some(&orphan),
+        Some(&merged),
+        Some(&discard),
+    )
+    .expect("scope")
+    .echo(false);
     assert_eq!(echo["project_root"], fx.repo.to_string_lossy().as_ref());
     assert_eq!(echo["project_known"], false);
     assert_eq!(echo["only_orphan_paths"], 2);
     assert_eq!(echo["only_merged_paths"], 1);
+    assert_eq!(echo["only_discard_paths"], 0);
     let all = PruneScope::default().echo(true);
-    assert!(
-        all["project_root"].is_null()
-            && all["only_orphan_paths"].is_null()
-            && all["only_merged_paths"].is_null(),
-        "{all}"
-    );
+    for key in [
+        "only_orphan_paths",
+        "only_merged_paths",
+        "only_discard_paths",
+    ] {
+        assert!(
+            all.get(key).is_some_and(serde_json::Value::is_null),
+            "{all}"
+        );
+    }
+    assert!(all["project_root"].is_null(), "{all}");
 }
 
 /// 🔴 #8782: each pass is bounded by what the preview listed for THAT pass.
@@ -331,6 +343,7 @@ fn a_per_pass_allowlist_bounds_each_pass_by_its_own_rows() {
         fx.repo.to_str(),
         Some(&[orphan.to_string_lossy().into_owned()]),
         Some(&[merged.to_string_lossy().into_owned()]),
+        None,
     )
     .expect("scope");
     let paths = |scope: &WorktreeScope| -> Vec<PathBuf> {
@@ -437,4 +450,83 @@ async fn the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys() {
     let rows = crate::daemon::managed_routes::prune::orphan_rows(&kept);
     assert!(reason_of(&rows, &dirty).is_none(), "{rows:?}");
     assert!(dirty.exists() && clean.exists(), "a dry run removed a tree");
+}
+
+/// 🔴 #8782: `--force --discard-dirty` keeps a tree its preview reported as
+/// holding no unsaved work but which is dirty by the time of the removal.
+///
+/// Why: the operator approved discarding only the work the preview named; the
+/// late work was never shown to them.
+/// What: previews two reclaimable orphans under `ForceDiscard` — one dirty,
+/// one clean — builds the allowlists from the preview rows exactly as the CLI
+/// does, dirties the clean tree, and runs the force pass. Fails when
+/// `allowed_dirt_verdict` ignores the discard allowlist: the late work is then
+/// discarded. The control tree, dirty at preview time and so listed, is still
+/// discarded, and the force reply's row names that discard.
+#[tokio::test]
+async fn a_tree_dirtied_after_a_clean_preview_is_not_discarded() {
+    use crate::daemon::managed_routes::prune::orphan_rows;
+    use crate::session_manager::{DirtyWorktreePolicy, SessionManager};
+    let store = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(
+        store.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let (late, listed) = (fx.add_worktree("late-8782"), fx.add_worktree("listed-8782"));
+    for wt in [&late, &listed] {
+        GitWorktreeFixture::stamp_reclaimable_sentinel(wt);
+    }
+    std::fs::write(listed.join("wip.rs"), "// named by the preview\n").expect("dirty listed");
+    let policy = DirtyWorktreePolicy::ForceDiscard;
+
+    let preview = mgr
+        .prune_orphaned_worktrees_in(&fx.repos_root, &[], true, policy, &[], &project(&fx))
+        .await
+        .expect("preview");
+    let rows = orphan_rows(&preview);
+    let path_of = |r: &serde_json::Value| r["path"].as_str().unwrap_or_default().to_owned();
+    let orphan: Vec<String> = rows.iter().map(path_of).collect();
+    let discard: Vec<String> = rows
+        .iter()
+        .filter(|r| r["discards_unsaved_work"] == true)
+        .map(path_of)
+        .collect();
+    let late_s = late.to_string_lossy().into_owned();
+    assert!(orphan.contains(&late_s), "{rows:?}");
+    assert_eq!(
+        discard,
+        vec![listed.to_string_lossy().into_owned()],
+        "{rows:?}"
+    );
+
+    std::fs::write(late.join("late.rs"), "// written after the preview\n").expect("dirty late");
+    let scope =
+        PruneScope::from_request(fx.repo.to_str(), Some(&orphan), Some(&[]), Some(&discard))
+            .expect("scope");
+    let out = mgr
+        .prune_orphaned_worktrees_in(&fx.repos_root, &[], false, policy, &[], &scope.orphan)
+        .await
+        .expect("force");
+
+    assert!(
+        late.join("late.rs").exists(),
+        "unsaved work the preview never named was discarded: {out:?}"
+    );
+    let blocked = out.skipped_dirty.iter().find(|d| d.path == late);
+    assert!(
+        blocked.is_some_and(|d| d.reason.contains("does not cover it")),
+        "the reply does not say the late tree was blocked: {out:?}"
+    );
+    assert_eq!(out.removed, vec![listed.clone()], "{out:?}");
+    assert!(!listed.exists(), "the listed discard did not run");
+    let reply = orphan_rows(&out);
+    assert!(
+        reply[0]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("discarded (--discard-dirty)")),
+        "{reply:?}"
+    );
 }

@@ -17,15 +17,21 @@
 //! Test: `prune_*` in `super::tests`.
 
 use chrono::{Duration, Utc};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_safety::{
-    DirtVerdict, DirtyWorktree, DirtyWorktreePolicy, dirt_verdict, git_worktree_list_agrees,
-    inspect_dirt,
+    DirtVerdict, DirtyWorktree, DirtyWorktreePolicy, git_worktree_list_agrees, inspect_dirt,
 };
+
+// #8782: the action-time half of the orphan sweep, split out for the cap.
+#[path = "prune_orphan_remove.rs"]
+mod orphan_remove;
+#[cfg(test)]
+use orphan_remove::{CANONICALIZE_FAILURE_STREAK_THRESHOLD, CanonicalizeFailureStreaks};
+use orphan_remove::{CandidateRemoval, allowed_dirt_verdict, fresh_in_use, remove_candidate};
 
 #[path = "prune_types.rs"]
 mod types;
@@ -58,118 +64,6 @@ pub(crate) use orphan_scan::{OrphanCandidates, find_orphaned_worktrees_in};
 /// Test: `reap_aged_ephemeral_picks_old_ephemeral_only` drives both the "too
 /// young" and "non-ephemeral" exclusions against this threshold.
 pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
-
-/// Consecutive REAL-SWEEP canonicalize failures on the same path before the
-/// #1845 F3 fallback escalates from `warn!` to `error!` (#3715 item 3).
-///
-/// Why: the F3 fallback WARN fired every minute for ~8h on the same path
-/// before the underlying vanished-workspace-root issue (#3715) was noticed —
-/// a per-tick WARN buried in a large log carries no signal that distinguishes
-/// "just started" from "sustained for hours". 10 is deliberately a count of
-/// consecutive OBSERVATIONS, not a wall-clock duration: `prune_orphaned_worktrees`
-/// (real, non-dry-run, deletion-capable) has THREE call sites —
-/// `orphan_gc_loop`'s periodic ~60s tick (`daemon/mod.rs`, spawned at line
-/// 132, via `reap_orphaned_worktrees`), the `prune_worktrees` MCP tool
-/// (`daemon/mcp_context.rs:182`, always real), and the
-/// `POST /sessions/managed/prune-worktrees` HTTP route
-/// (`daemon/managed_routes/prune.rs:111`, real whenever `dry_run` is
-/// `false`) — so an operator-triggered manual sweep or MCP call between
-/// periodic ticks advances the SAME streak. In the common case (only the
-/// periodic loop running) 10 observations is roughly 10 minutes; under
-/// interleaved manual sweeps it escalates sooner. Either way the count is
-/// still meaningful as "sustained past a single transient blip" — the
-/// interleaving only makes detection faster, never slower or wrong.
-/// What: the threshold [`CanonicalizeFailureStreaks::record_failure`] compares
-/// its return value against, to decide `warn!` vs `error!`.
-/// Test: `canonicalize_streak_escalates_at_threshold`.
-const CANONICALIZE_FAILURE_STREAK_THRESHOLD: u32 = 10;
-
-/// In-memory, per-path consecutive-failure counter for the #1845 F3
-/// canonicalize fallback (#3715 item 3).
-///
-/// Why: a lone per-tick WARN gives no sense of DURATION — the F3 fallback for
-/// the path behind #3715 fired unnoticed for ~8h because every occurrence
-/// looked identical in the log. Tracking a streak lets the sweep escalate to
-/// `error!` once failure has been sustained past
-/// [`CANONICALIZE_FAILURE_STREAK_THRESHOLD`] consecutive REAL-sweep
-/// observations (see that constant's doc for why this is observation-count,
-/// not wall-clock), making it greppable and a future alerting target,
-/// without adding persistence or an external alerting pipeline —
-/// deliberately kept as simple in-process state (reset on daemon restart,
-/// which is acceptable: a restart re-establishes a clean baseline for the
-/// same underlying condition to re-accumulate if it is still present).
-/// Entries are evicted once their path leaves the sweep's active-session set
-/// (`retain_active`, called every real sweep — #3715 finding-2 follow-up)
-/// so a decommissioned/deleted/moved session's streak does not linger
-/// forever.
-/// What: `record_failure` increments (or starts at 1) the counter for `path`
-/// and returns the new streak length; `record_success` clears any existing
-/// entry for `path` (a single successful canonicalize breaks the streak);
-/// `retain_active` drops every tracked path NOT in the caller-supplied active
-/// set.
-/// Test: `canonicalize_streak_escalates_at_threshold`,
-/// `canonicalize_streak_resets_on_success`,
-/// `canonicalize_streak_evicts_paths_no_longer_active`.
-#[derive(Debug, Default)]
-struct CanonicalizeFailureStreaks {
-    counts: std::collections::HashMap<std::path::PathBuf, u32>,
-}
-
-impl CanonicalizeFailureStreaks {
-    /// Record one more consecutive failure for `path`, returning the new streak length.
-    fn record_failure(&mut self, path: &std::path::Path) -> u32 {
-        let count = self.counts.entry(path.to_path_buf()).or_insert(0);
-        *count += 1;
-        *count
-    }
-
-    /// Record a success for `path`, resetting (removing) any existing streak.
-    fn record_success(&mut self, path: &std::path::Path) {
-        self.counts.remove(path);
-    }
-
-    /// Evict every tracked path NOT present in `active` (#3715 finding 2).
-    ///
-    /// Why: without this, a path whose session is decommissioned/deleted, or
-    /// whose `workspace_path` simply changes, leaves a permanent orphaned
-    /// entry in `counts` — unbounded growth over the daemon's lifetime.
-    /// What: called once per real sweep with the set of `workspace_path`s
-    /// actually observed THIS sweep; removes any tracked key absent from it.
-    fn retain_active(&mut self, active: &std::collections::HashSet<std::path::PathBuf>) {
-        self.counts.retain(|path, _| active.contains(path));
-    }
-}
-
-/// Process-global streak state backing [`CanonicalizeFailureStreaks`] (#3715
-/// item 3).
-///
-/// Why: exactly one [`CanonicalizeFailureStreaks`] instance should back all
-/// three real-sweep call sites (see [`CANONICALIZE_FAILURE_STREAK_THRESHOLD`]'s
-/// doc for why there are three, not one) so a streak observed via the MCP
-/// tool or the HTTP route counts toward the same escalation as the periodic
-/// loop — process-global state achieves that without adding a field (and
-/// constructor-init site) to the shared `SessionManager` struct in
-/// `manager.rs`, keeping this change confined to `prune.rs`. Deliberately
-/// unpersisted — see the type's own doc.
-/// What: lazily-initialized `Mutex`-guarded counter map, accessed only via
-/// [`canonicalize_failure_streaks`].
-/// Test: covered indirectly by `canonicalize_streak_escalates_at_threshold`,
-/// `canonicalize_streak_resets_on_success`, and
-/// `canonicalize_streak_evicts_paths_no_longer_active`, which exercise
-/// [`CanonicalizeFailureStreaks`] directly (no global state involved) to stay
-/// deterministic and independent of test execution order.
-static CANONICALIZE_FAILURE_STREAKS: std::sync::OnceLock<
-    std::sync::Mutex<CanonicalizeFailureStreaks>,
-> = std::sync::OnceLock::new();
-
-/// The process-global [`CanonicalizeFailureStreaks`] instance, locked. A
-/// poisoned lock is recovered: the map holds only counters.
-fn canonicalize_failure_streaks() -> std::sync::MutexGuard<'static, CanonicalizeFailureStreaks> {
-    CANONICALIZE_FAILURE_STREAKS
-        .get_or_init(|| std::sync::Mutex::new(CanonicalizeFailureStreaks::default()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 /// Whether a record is currently RUNNING (must not be auto-torn-down) — a REAL
 /// liveness probe, not a persisted-state check (#2022).
@@ -666,10 +560,11 @@ impl SessionManager {
     /// What: Phase 1 calls [`find_orphaned_worktrees_in`] inside `spawn_blocking`
     /// (git-derived since #4207, but still blocking — it spawns git per
     /// project); panics are propagated as `Err`. Phase 2
-    /// (real-delete only) takes ONE fresh `self.store` snapshot, then per candidate:
-    /// canonicalize (skip on error — item 8), check against snapshot, apply the
-    /// #3649 OWNERSHIP GATE (below), then call `remove_session_worktree` in its
-    /// own `spawn_blocking`. Returns an [`OrphanSweepOutcome`] rather than a bare
+    /// (real-delete only) takes ONE fresh `self.store` snapshot, then hands each
+    /// candidate that cleared the #3649 OWNERSHIP GATE (below) to
+    /// `orphan_remove::remove_candidate`, which re-checks the path's identity
+    /// (#8782: a path that no longer resolves to itself is skipped), the
+    /// snapshot, and the dirty gate, then removes it. Returns an [`OrphanSweepOutcome`] rather than a bare
     /// path list (#3649) so a caller can see BOTH what was (or would be) removed
     /// AND what was conservatively skipped for owner-unknown review.
     ///
@@ -753,9 +648,12 @@ impl SessionManager {
     /// [`Self::prune_orphaned_worktrees`], bounded by `scope` (#8782): a
     /// worktree outside it is never a candidate, so it is neither reported nor
     /// removed. The outcome also carries each candidate's registry root and,
-    /// under `ForceDiscard`, the unsaved work each removal destroys.
+    /// under `ForceDiscard`, the unsaved work each removal destroys. A scope
+    /// carrying a discard allowlist keeps every dirty tree it does not list.
     /// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`,
-    /// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+    /// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`,
+    /// `a_tree_dirtied_after_a_clean_preview_is_not_discarded`,
+    /// `a_scanned_path_replaced_by_a_symlink_is_not_removed`.
     pub async fn prune_orphaned_worktrees_in(
         &self,
         repos_root: &std::path::Path,
@@ -765,7 +663,6 @@ impl SessionManager {
         adopted: &[std::path::PathBuf],
         scope: &WorktreeScope,
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
-        use super::decommission::WorktreeRemoval;
         use super::worktree_ownership::SentinelOwner;
         use std::collections::HashSet;
 
@@ -780,7 +677,6 @@ impl SessionManager {
         // Propagate a spawn_blocking panic as Err (#1845 item 7) rather than
         // silently returning an empty candidate list.
         let adopted = adopted.to_vec();
-        let scope = scope.clone();
         let OrphanCandidates {
             paths: candidates,
             registry_roots,
@@ -788,6 +684,7 @@ impl SessionManager {
             let initial_in_use = initial_in_use.clone();
             // #8782: the scope bounds discovery, so an out-of-scope tree is
             // never classified, reported, or removed.
+            let scope = scope.clone();
             move || find_orphaned_worktrees_in(&repos_root, &initial_in_use, &adopted, &scope)
         })
         .await
@@ -857,8 +754,9 @@ impl SessionManager {
                         );
                         continue;
                     }
-                    // #4091: last gate — never destroy unsaved work.
-                    match dirt_verdict(&candidate, policy, "scan") {
+                    // #4091: last gate — never destroy unsaved work. #8782:
+                    // bounded by the operator's discard allowlist.
+                    match allowed_dirt_verdict(&candidate, policy, "scan", scope) {
                         DirtVerdict::Blocks(dirt) => {
                             skipped_dirty.push(dirt);
                             continue;
@@ -901,146 +799,19 @@ impl SessionManager {
         }
 
         // Phase 2 (real-delete path): ONE fresh snapshot immediately before the
-        // deletion loop (#1845 item 9). Each active path is inserted in BOTH its
-        // canonicalized form (for symlink-safe comparison) and its raw form
-        // (Finding 3 #1845: if canonicalize fails on the active side, keep the
-        // raw path as a protective fallback so a canonicalize failure can never
-        // cause an active worktree to be misidentified as an orphan and deleted).
-        let fresh_in_use: HashSet<std::path::PathBuf> = {
-            let mut set = HashSet::new();
-            // Raw `workspace_path`s actually observed THIS sweep, used below to
-            // evict stale streak entries (#3715 finding 2) — kept separate from
-            // `set` because `set` also accumulates canonicalized forms, which are
-            // not the keys `CanonicalizeFailureStreaks` tracks.
-            let mut checked_paths: HashSet<std::path::PathBuf> = HashSet::new();
-            // #4288: DELIBERATELY UNFILTERED by record state, exactly like the
-            // caller-supplied set this backstops. Do NOT add
-            // `if r.state != Active { continue; }` here — a `SessionRecord`'s
-            // state is bookkeeping, not a liveness signal (session
-            // `2eb72dca-…` was measured RUNNING in tmux pane `%981` while
-            // recorded `state: "stopped"`, holding 12 modified tracked files,
-            // 31 untracked files, and 1 unpushed commit).
-            //
-            // This read is the LAST thing standing between a reclaimable
-            // candidate and `remove_session_worktree`. It is what makes
-            // narrowing any single caller's active set survivable, so it is
-            // also the one whose loss is least visible: filter here and the
-            // callers' own unfiltered reads still hide the damage until one of
-            // them is tidied up too. Pinned by
-            // `reap_spares_a_stopped_records_workspace` (real sweep) — that
-            // test goes red once this read AND a caller's set are both narrowed.
-            for r in self.store.read().await.cached_all() {
-                let session_id = r.id;
-                let Some(p) = r.workspace_path else {
-                    continue;
-                };
-                checked_paths.insert(p.clone());
-                if let Ok(c) = std::fs::canonicalize(&p) {
-                    set.insert(c);
-                    // Success breaks any in-flight failure streak (#3715 item 3).
-                    canonicalize_failure_streaks().record_success(&p);
-                } else {
-                    let streak = canonicalize_failure_streaks().record_failure(&p);
-                    if streak >= CANONICALIZE_FAILURE_STREAK_THRESHOLD {
-                        error!(
-                            session = %session_id,
-                            path = %p.display(),
-                            streak,
-                            "prune-worktrees: active session path has failed to \
-                             canonicalize for {streak} consecutive real-sweep \
-                             observations — sustained failure, investigate before \
-                             a stop/reap silently reconstitutes this workspace \
-                             root (#3715)"
-                        );
-                    } else {
-                        warn!(
-                            path = %p.display(),
-                            "prune-worktrees: active session path failed to canonicalize; \
-                             using raw path as protective fallback (#1845 F3)"
-                        );
-                    }
-                }
-                // Always insert the raw path so the raw-form check below catches
-                // cases where the active side failed to canonicalize.
-                set.insert(p);
-            }
-            // #3715 finding 2: evict any tracked streak whose path is no longer
-            // among this sweep's active sessions (decommissioned, deleted, or
-            // workspace_path changed) so the counter map cannot grow unbounded
-            // across the daemon's lifetime.
-            canonicalize_failure_streaks().retain_active(&checked_paths);
-            set
-        };
-
+        // deletion loop (#1845 item 9), then the action-time re-check per
+        // candidate — identity, snapshot, dirt (#8782).
+        let fresh_in_use = fresh_in_use(self.store.read().await.cached_all());
         let mut removed = Vec::new();
         // #8782: a real run reports what the pre-removal re-check discarded.
         discarded_dirty.clear();
         for candidate in reclaimable {
-            // Item 8 (#1845): skip on canonicalize failure — a path that can't be
-            // resolved is left untouched rather than risk incorrect deletion.
-            let canonical_candidate = match std::fs::canonicalize(&candidate) {
-                Ok(c) => c,
-                Err(_) => {
-                    warn!(
-                        path = %candidate.display(),
-                        "prune-worktrees: skipping candidate — canonicalize failed"
-                    );
-                    continue;
+            match remove_candidate(&candidate, &fresh_in_use, policy, scope).await {
+                CandidateRemoval::Removed(discard) => {
+                    removed.push(candidate);
+                    discarded_dirty.extend(discard);
                 }
-            };
-            // Check both the canonicalized form (symlink-safe) AND the raw form
-            // (Finding 3 #1845: protects against active-path canonicalize failures
-            // — if the active side couldn't be canonicalized, its raw path is in
-            // the set and a raw-path match prevents accidental deletion).
-            if fresh_in_use.contains(&canonical_candidate) || fresh_in_use.contains(&candidate) {
-                info!(
-                    path = %candidate.display(),
-                    "prune-worktrees: skipping — active session appeared after initial snapshot"
-                );
-                continue;
-            }
-
-            // #4118 TOCTOU: the scan-time verdict is now minutes old. Re-ask
-            // immediately before THIS removal so the clean-to-deleted window is
-            // sub-millisecond again rather than the whole sweep's duration.
-            let discard = match dirt_verdict(&candidate, policy, "pre-removal") {
-                DirtVerdict::Blocks(dirt) => {
-                    skipped_dirty.push(dirt);
-                    continue;
-                }
-                DirtVerdict::Discards(dirt) => Some(dirt),
-                DirtVerdict::Clean => None,
-            };
-
-            info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
-            let candidate_clone = candidate.clone();
-            // #7885: name the route in the audit line, so an operator reading it
-            // after the fact can tell the orphan sweep from the merged-PR pass.
-            let outcome = tokio::task::spawn_blocking(move || {
-                // #8534: `--discard-dirty` discards gitignored output too.
-                super::decommission::remove_session_worktree(
-                    &candidate_clone,
-                    "prune-worktrees orphan sweep: no live session claims this worktree",
-                    policy,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("prune-worktrees: spawn_blocking panicked during removal: {e}");
-                WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
-            });
-            // #4732: the remover now reports WHY it kept a worktree — most
-            // often a deliberate refusal (a `git worktree lock`, a stale
-            // pointer), which used to be indistinguishable from a silent no-op.
-            if let Some(reason) = outcome.reason() {
-                warn!(
-                    path = %candidate.display(),
-                    "prune-worktrees: worktree kept — {reason}"
-                );
-            }
-            if outcome.removed() {
-                removed.push(candidate);
-                discarded_dirty.extend(discard);
+                CandidateRemoval::Kept(dirt) => skipped_dirty.extend(dirt),
             }
         }
         Ok(OrphanSweepOutcome {
@@ -1092,7 +863,8 @@ impl SessionManager {
     ///    — an absent, empty, or unparsable sentinel is reported, never removed;
     /// 5. `git worktree list` (asked at the candidate itself) agrees; and
     /// 6. the #4091/#4118 dirty gate finds no uncommitted or unpushed work,
-    ///    re-checked immediately before the removal.
+    ///    re-checked immediately before the removal; and
+    /// 7. at removal time the path still resolves to itself (#8782).
     ///
     /// Gates 2 and 4 are independent structural boundaries by design: neither is
     /// load-bearing alone.

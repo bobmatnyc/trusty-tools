@@ -305,8 +305,10 @@ fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
 /// `--all-projects`. Every run POSTs a preview first and prints it; `--force`
 /// then POSTs once more carrying each pass's previewed paths as
 /// `only_orphan_paths` / `only_merged_paths`, so neither pass removes anything
-/// the preview did not list for it. Each reply must echo the scope — a daemon
-/// that predates #8782 ignores it and runs daemon-global.
+/// the preview did not list for it, and the rows the preview marked as
+/// discarding unsaved work as `only_discard_paths`. Each reply must echo the
+/// scope — a daemon that predates #8782 ignores it and runs daemon-global —
+/// and a `--force` run also needs every allowlist key echoed.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
@@ -314,7 +316,8 @@ fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
 /// `prune_worktrees_sends_the_invoking_session`; the #8782 two-step by
 /// `force_sends_only_the_previewed_paths`,
 /// `force_sends_nothing_after_a_reply_without_the_scope_echo`,
-/// `force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo`.
+/// `force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo`,
+/// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
@@ -344,6 +347,7 @@ pub(crate) async fn session_prune_worktrees(
             "project_root": project_root,
             "only_orphan_paths": planned.map(|p| &p.orphan),
             "only_merged_paths": planned.map(|p| &p.merged),
+            "only_discard_paths": planned.map(|p| &p.discard),
         }));
         if merged_prs {
             // #5830: the merged-PR survey runs synchronously in the handler and
@@ -377,6 +381,11 @@ pub(crate) async fn session_prune_worktrees(
     let preview = post(true, None).await?;
     let project = project_root.as_deref();
     super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
+    if !dry_run {
+        // #8782: a daemon that drops an allowlist key would run that bound
+        // unrestricted, so it gets no removal request.
+        super::prune_preview::check_allowlist_echo(&preview, None)?;
+    }
     for line in super::prune_preview::preview_lines(&preview) {
         println!("{line}");
     }
@@ -392,6 +401,7 @@ pub(crate) async fn session_prune_worktrees(
     }
     let body = post(false, Some(&planned)).await?;
     super::prune_preview::check_scope_echo(&body, project, true)?;
+    super::prune_preview::check_allowlist_echo(&body, Some(&planned))?;
     print_prune_reply(&body, false, merged_prs);
     Ok(())
 }
@@ -437,23 +447,28 @@ pub(crate) async fn prune_worktrees_from(
 /// Why: split from [`session_prune_worktrees`] by #8782, which prints a preview
 /// reply and a removal reply through the same renderer.
 /// What: under `dry_run` the orphan paths are not repeated — the preview has
-/// listed them — and only the count is printed.
-/// Test: exercised by `prune_worktrees_sends_the_invoking_session`.
+/// listed them — and only the count is printed. A removal reply prints each
+/// orphan row with its reason, so every discard of unsaved work is named.
+/// Test: exercised by `prune_worktrees_sends_the_invoking_session`;
+/// the removal lines by `removed_lines_name_every_discard`.
 fn print_prune_reply(body: &serde_json::Value, dry_run: bool, merged_prs: bool) {
     let paths = body
         .get("paths")
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if !dry_run {
+        // #8782: the reason names any unsaved work the removal discarded.
+        for line in super::prune_preview::removed_lines(body) {
+            println!("{line}");
+        }
+    }
     let mut printed = 0usize;
     // Item 6 (#1845): non-string entries in the `paths` array are unexpected
     // (the server controls the format) but must not crash the CLI. Warn to
     // stderr so the operator is aware, rather than silently dropping the entry.
     for p in &paths {
-        if let Some(s) = p.as_str() {
-            if !dry_run {
-                println!("{s}");
-            }
+        if p.is_string() {
             printed += 1;
         } else {
             eprintln!("warning: prune-worktrees: unexpected non-string path entry: {p}");

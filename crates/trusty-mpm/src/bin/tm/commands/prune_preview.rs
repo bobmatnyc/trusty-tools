@@ -9,7 +9,8 @@
 //! What: [`preview_lines`] renders the rows the route returns, grouped by
 //! project, with a total; [`planned_paths`] is the per-pass sets a `--force`
 //! run hands back as its allowlists; [`check_scope_echo`] refuses a reply from
-//! a daemon that did not honour the requested scope.
+//! a daemon that did not honour the requested scope, and
+//! [`check_allowlist_echo`] one that would not honour the allowlists.
 //! Test: `prune_preview_tests`.
 
 use std::collections::BTreeMap;
@@ -67,6 +68,9 @@ pub(crate) struct PlannedPaths {
     pub(crate) orphan: Vec<String>,
     /// Sent as `only_merged_paths`.
     pub(crate) merged: Vec<String>,
+    /// Sent as `only_discard_paths`: the orphan rows the preview marked as
+    /// discarding unsaved work. `--discard-dirty` removes no other dirty tree.
+    pub(crate) discard: Vec<String>,
 }
 
 impl PlannedPaths {
@@ -80,19 +84,58 @@ impl PlannedPaths {
 /// (#8782).
 ///
 /// Why: a `--force` run sends each list back as that pass's allowlist, so
-/// neither pass can remove a path the preview listed only for the other.
+/// neither pass can remove a path the preview listed only for the other, and
+/// `--discard-dirty` discards only the work the preview named.
+/// What: `discard` is the orphan rows carrying `discards_unsaved_work: true`;
+/// a row without the field is not in it, so the daemon keeps that tree if it
+/// is dirty.
 /// Test: `planned_paths_keeps_each_pass_to_its_own_rows`.
 pub(crate) fn planned_paths(body: &Value) -> PlannedPaths {
-    let sorted = |rows: Vec<Row>| {
-        let mut paths: Vec<String> = rows.into_iter().map(|r| r.path).collect();
+    let sorted = |mut paths: Vec<String>| {
         paths.sort();
         paths.dedup();
         paths
     };
+    let paths = |rows: Vec<Row>| rows.into_iter().map(|r| r.path).collect::<Vec<_>>();
+    let discard = body
+        .get("orphan_rows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|r| r.get("discards_unsaved_work").and_then(Value::as_bool) == Some(true))
+        .filter_map(|r| r.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect();
     PlannedPaths {
-        orphan: sorted(rows(body.get("orphan_rows"))),
-        merged: sorted(merged_rows(body)),
+        orphan: sorted(paths(rows(body.get("orphan_rows")))),
+        merged: sorted(paths(merged_rows(body))),
+        discard: sorted(discard),
     }
+}
+
+/// The lines a `--force` reply prints for the orphan paths it removed (#8782).
+///
+/// Why: a removal that discarded unsaved work must name that discard to the
+/// operator, not print a bare path.
+/// What: one `removed  <path> — <reason>` line per `orphan_rows` entry; a reply
+/// without rows (a daemon older than #8782) prints its bare `paths`.
+/// Test: `removed_lines_name_every_discard`.
+pub(crate) fn removed_lines(body: &Value) -> Vec<String> {
+    if body.get("orphan_rows").is_none() {
+        return body
+            .get("paths")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    rows(body.get("orphan_rows"))
+        .into_iter()
+        .map(|r| format!("removed  {} — {}", r.path, r.reason))
+        .collect()
 }
 
 /// The preview, grouped by project, one line per path, with a total (#8782).
@@ -212,6 +255,54 @@ pub(crate) fn check_scope_echo(
         echoed.unwrap_or("every registered project"),
         project_root.unwrap_or("every registered project"),
     );
+    Ok(())
+}
+
+/// The allowlist keys a `--force` run needs the daemon to echo (#8782).
+const ALLOWLIST_KEYS: [&str; 3] = [
+    "only_orphan_paths",
+    "only_merged_paths",
+    "only_discard_paths",
+];
+
+/// Refuse a `--force` run against a daemon that does not echo every
+/// allowlist, and a force reply whose allowlists differ from the plan (#8782).
+///
+/// Why: a daemon that drops one of these request fields runs that bound
+/// unrestricted, so a preview without the keys must stop the run before the
+/// removal is sent. A key's presence, even as null, says the daemon reads it.
+/// What: on the preview (`planned` is `None`) every key in [`ALLOWLIST_KEYS`]
+/// must be present in the `scope` echo. On the force reply each echoed size
+/// must equal the length of the list sent.
+/// Test: `a_force_preview_without_the_allowlist_keys_is_refused`,
+/// `a_force_reply_whose_allowlist_sizes_differ_is_refused`,
+/// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`.
+pub(crate) fn check_allowlist_echo(
+    body: &Value,
+    planned: Option<&PlannedPaths>,
+) -> anyhow::Result<()> {
+    let after = if planned.is_some() {
+        "the removal has run; re-run without --force to see what remains"
+    } else {
+        "nothing destructive was sent; restart the daemon on the current binary and re-run"
+    };
+    let echo = body.get("scope");
+    // In `ALLOWLIST_KEYS` order.
+    let sizes = planned.map(|p| [p.orphan.len(), p.merged.len(), p.discard.len()]);
+    for (i, key) in ALLOWLIST_KEYS.into_iter().enumerate() {
+        let Some(echoed) = echo.and_then(|e| e.get(key)) else {
+            anyhow::bail!(
+                "the daemon's scope echo has no `{key}`, so it would not bound --force by this \
+                 preview (#8782); {after}"
+            );
+        };
+        if let Some(sent) = sizes.map(|s| s[i]) {
+            anyhow::ensure!(
+                echoed.as_u64() == u64::try_from(sent).ok(),
+                "the daemon echoed `{key}` as {echoed} but {sent} path(s) were sent (#8782); {after}"
+            );
+        }
+    }
     Ok(())
 }
 

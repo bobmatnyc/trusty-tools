@@ -3,7 +3,10 @@
 
 use serde_json::{Value, json};
 
-use super::{check_scope_echo, planned_paths, preview_lines, project_root_from};
+use super::{
+    PlannedPaths, check_allowlist_echo, check_scope_echo, planned_paths, preview_lines,
+    project_root_from, removed_lines,
+};
 use crate::cli::{Cli, Command, SessionAction};
 use crate::commands::managed_merged_prs::{prune_worktrees_from, session_prune_worktrees};
 use clap::Parser;
@@ -16,7 +19,8 @@ fn reply(project: Option<&str>) -> Value {
             "project_root": project,
             "project_known": true,
             "only_orphan_paths": null,
-            "only_merged_paths": null
+            "only_merged_paths": null,
+            "only_discard_paths": null
         },
         "paths": ["/r/a/.worktrees/o"],
         "orphan_rows": [
@@ -66,7 +70,79 @@ fn planned_paths_keeps_each_pass_to_its_own_rows() {
         vec!["/r/a/.claude/worktrees/m", "/r/b/.claude/worktrees/n"],
         "unknown rows are never planned"
     );
+    assert!(planned.discard.is_empty(), "no row discards unsaved work");
     assert!(planned_paths(&json!({})).is_empty());
+    // #8782: only a row marked as discarding unsaved work is in the discard list.
+    let rows = json!({ "orphan_rows": [
+        { "path": "/r/a/.worktrees/d", "discards_unsaved_work": true },
+        { "path": "/r/a/.worktrees/c", "discards_unsaved_work": false },
+        { "path": "/r/a/.worktrees/old" }
+    ] });
+    assert_eq!(planned_paths(&rows).discard, vec!["/r/a/.worktrees/d"]);
+}
+
+/// A force reply echoing the sizes of the allowlists `planned` sent.
+fn force_reply(project: Option<&str>, planned: &PlannedPaths) -> Value {
+    let mut body = reply(project);
+    body["scope"]["only_orphan_paths"] = json!(planned.orphan.len());
+    body["scope"]["only_merged_paths"] = json!(planned.merged.len());
+    body["scope"]["only_discard_paths"] = json!(planned.discard.len());
+    body
+}
+
+/// 🔴 #8782: a `--force` preview from a daemon that drops an allowlist key is
+/// refused before any removal is sent; null values are accepted.
+#[test]
+fn a_force_preview_without_the_allowlist_keys_is_refused() {
+    assert!(check_allowlist_echo(&reply(Some("/r/a")), None).is_ok());
+    for key in [
+        "only_orphan_paths",
+        "only_merged_paths",
+        "only_discard_paths",
+    ] {
+        let mut body = reply(Some("/r/a"));
+        body["scope"].as_object_mut().expect("echo").remove(key);
+        let err = check_allowlist_echo(&body, None).expect_err(key);
+        assert!(
+            err.to_string().contains(key) && err.to_string().contains("nothing destructive"),
+            "{err}"
+        );
+    }
+}
+
+/// 🔴 #8782: a force reply whose echoed allowlist sizes differ from what was
+/// sent is an error.
+#[test]
+fn a_force_reply_whose_allowlist_sizes_differ_is_refused() {
+    let planned = planned_paths(&reply(None));
+    let good = force_reply(Some("/r/a"), &planned);
+    assert!(check_allowlist_echo(&good, Some(&planned)).is_ok());
+    let mut unbounded = good.clone();
+    unbounded["scope"]["only_merged_paths"] = Value::Null;
+    assert!(check_allowlist_echo(&unbounded, Some(&planned)).is_err());
+    let mut wider = good;
+    wider["scope"]["only_orphan_paths"] = json!(planned.orphan.len() + 1);
+    let err = check_allowlist_echo(&wider, Some(&planned)).expect_err("size differs");
+    assert!(err.to_string().contains("only_orphan_paths"), "{err}");
+}
+
+/// 🔴 #8782: a removal reply names every discard of unsaved work.
+#[test]
+fn removed_lines_name_every_discard() {
+    let body = json!({
+        "paths": ["/r/a/.worktrees/d"],
+        "orphan_rows": [{ "path": "/r/a/.worktrees/d", "project": "/r/a",
+            "reason": "orphaned — it holds unsaved work (1 file) — discarded (--discard-dirty)" }]
+    });
+    assert_eq!(
+        removed_lines(&body),
+        vec![
+            "removed  /r/a/.worktrees/d — orphaned — it holds unsaved work (1 file) — \
+             discarded (--discard-dirty)"
+        ]
+    );
+    let old = json!({ "paths": ["/r/a/.worktrees/o"] });
+    assert_eq!(removed_lines(&old), vec!["/r/a/.worktrees/o"]);
 }
 
 /// #8782: a scoped run from a checkout the daemon does not scan says so,
@@ -264,7 +340,12 @@ async fn stub_daemon(replies: Vec<Value>) -> (String, tokio::task::JoinHandle<Ve
 /// per-pass allowlists, scoped to the same project.
 #[tokio::test]
 async fn force_sends_only_the_previewed_paths() {
-    let (url, server) = stub_daemon(vec![reply(Some("/r/a")), reply(Some("/r/a"))]).await;
+    let planned = planned_paths(&reply(None));
+    let (url, server) = stub_daemon(vec![
+        reply(Some("/r/a")),
+        force_reply(Some("/r/a"), &planned),
+    ])
+    .await;
     let client = reqwest::Client::new();
     let outcome =
         session_prune_worktrees(&client, &url, false, false, true, None, Some("/r/a".into())).await;
@@ -276,9 +357,31 @@ async fn force_sends_only_the_previewed_paths() {
     assert!(bodies[0]["only_merged_paths"].is_null());
     assert_eq!(bodies[1]["dry_run"], false);
     assert_eq!(bodies[1]["project_root"], "/r/a");
-    let planned = planned_paths(&reply(None));
     assert_eq!(bodies[1]["only_orphan_paths"], json!(planned.orphan));
     assert_eq!(bodies[1]["only_merged_paths"], json!(planned.merged));
+    assert_eq!(bodies[1]["only_discard_paths"], json!(planned.discard));
+}
+
+/// 🔴 #8782: a `--force` run whose preview echo lacks the allowlist keys sends
+/// no removal request.
+///
+/// Fails when `session_prune_worktrees` skips `check_allowlist_echo` on the
+/// preview: the daemon, which would ignore the allowlists, gets a second POST.
+#[tokio::test]
+async fn force_sends_nothing_after_a_preview_without_the_allowlist_keys() {
+    let mut older = reply(Some("/r/a"));
+    let echo = older["scope"].as_object_mut().expect("echo");
+    echo.remove("only_orphan_paths");
+    echo.remove("only_merged_paths");
+    echo.remove("only_discard_paths");
+    let (url, server) = stub_daemon(vec![older.clone(), older]).await;
+    let client = reqwest::Client::new();
+    let outcome =
+        session_prune_worktrees(&client, &url, false, false, true, None, Some("/r/a".into())).await;
+    let bodies = server.await.expect("stub");
+    let err = outcome.expect_err("an echo without the allowlist keys was accepted");
+    assert!(err.to_string().contains("only_orphan_paths"), "{err}");
+    assert_eq!(bodies.len(), 1, "a removal request was sent: {bodies:?}");
 }
 
 /// 🔴 #8782: a daemon that does not echo the scope gets no destructive call.
@@ -336,7 +439,9 @@ async fn force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_e
 async fn prune_worktrees_outside_a_repository_posts_nothing() {
     let (url, server) = stub_daemon(vec![reply(Some("/r/a"))]).await;
     let client = reqwest::Client::new();
-    let outside = tempfile::tempdir().expect("tempdir");
+    // #8782: hermetic, so a `TMPDIR` inside a git repository cannot make this
+    // directory a checkout and mask the error arm.
+    let outside = crate::test_support::hermetic_temp_dir();
     let outcome = prune_worktrees_from(
         &client,
         &url,

@@ -1405,3 +1405,53 @@ async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
         wt.display()
     );
 }
+
+/// 🔴 #8782: identity at action time. A scanned path replaced by a symlink
+/// before its removal is skipped, and the tree the symlink names is untouched.
+///
+/// Why: a path is not an identity. Every orphan-removing entry point — the
+/// PM-pause prune, the orphan-GC loop, `prune-worktrees --force` — reaches
+/// `remove_candidate`, so this pins all three.
+/// What: scans a reclaimable orphan, then moves its directory outside the
+/// project and leaves a symlink at the scanned path, and runs the action-time
+/// step on that path. Git's own worktree validation passes through the
+/// symlink, so this fails when `remove_candidate` accepts any path that
+/// canonicalizes: `git worktree remove` then empties the relocated tree.
+#[tokio::test]
+async fn a_scanned_path_replaced_by_a_symlink_is_not_removed() {
+    let fx = GitWorktreeFixture::new();
+    let scanned = fx.add_worktree("replaced-8782");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&scanned);
+    let found = orphans_all(&fx.repos_root, &std::collections::HashSet::new(), &[]);
+    assert!(found.contains(&scanned), "{found:?}");
+
+    let target = fx.repos_root.join("relocated-8782");
+    std::fs::rename(&scanned, &target).expect("move the scanned tree away");
+    std::os::unix::fs::symlink(&target, &scanned).expect("symlink the scanned path");
+    let entries = |dir: &std::path::Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let before = entries(&target);
+    assert!(!before.is_empty(), "the target starts populated");
+
+    let outcome = remove_candidate(
+        &scanned,
+        &std::collections::HashSet::new(),
+        DirtyWorktreePolicy::Skip,
+        &WorktreeScope::all(),
+    )
+    .await;
+    assert!(
+        matches!(outcome, CandidateRemoval::Kept(None)),
+        "{outcome:?}"
+    );
+    assert_eq!(entries(&target), before, "the symlink's target was touched");
+    assert!(
+        std::fs::symlink_metadata(&scanned).is_ok_and(|m| m.file_type().is_symlink()),
+        "the scanned path itself is left as found"
+    );
+}

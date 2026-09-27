@@ -188,6 +188,11 @@ pub struct PruneWorktreesRequest {
     /// merged-PR pass.
     #[serde(default)]
     pub only_merged_paths: Option<Vec<String>>,
+    /// The orphan paths that preview said `--discard-dirty` would discard
+    /// unsaved work from (#8782). When set, a dirty tree it does not list is
+    /// kept, even under `discard_dirty`.
+    #[serde(default)]
+    pub only_discard_paths: Option<Vec<String>>,
 }
 
 fn default_dry_run() -> bool {
@@ -249,6 +254,7 @@ pub(crate) async fn prune_worktrees_core(
         req.project_root.as_deref(),
         req.only_orphan_paths.as_deref(),
         req.only_merged_paths.as_deref(),
+        req.only_discard_paths.as_deref(),
     ) {
         Ok(scope) => scope,
         Err(msg) => {
@@ -439,7 +445,8 @@ pub(crate) async fn prune_worktrees_core(
 ///
 /// What: one row per `removed` path. The project is the registry root the
 /// scan carried, so this runs no `git`. A path whose unsaved work
-/// `--discard-dirty` destroys says so, with what the dirty check found.
+/// `--discard-dirty` destroys says so, with what the dirty check found, and
+/// carries `discards_unsaved_work: true` — the CLI's discard allowlist.
 /// Test: `orphan_rows_name_the_owning_checkout`,
 /// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
 pub(crate) fn orphan_rows(outcome: &OrphanSweepOutcome) -> Vec<serde_json::Value> {
@@ -451,7 +458,8 @@ pub(crate) fn orphan_rows(outcome: &OrphanSweepOutcome) -> Vec<serde_json::Value
                 || "(owning checkout unresolved)".to_string(),
                 |r| r.to_string_lossy().into_owned(),
             );
-            let reason = match outcome.discarded_dirty.iter().find(|d| d.path == *path) {
+            let dirt = outcome.discarded_dirty.iter().find(|d| d.path == *path);
+            let reason = match dirt {
                 Some(dirt) => format!(
                     "orphaned — its owning session has ended; it holds unsaved work ({}) — \
                      discarded (--discard-dirty)",
@@ -461,7 +469,12 @@ pub(crate) fn orphan_rows(outcome: &OrphanSweepOutcome) -> Vec<serde_json::Value
                     "orphaned — its owning session has ended and it holds no unsaved work".into()
                 }
             };
-            serde_json::json!({ "path": path.to_string_lossy(), "project": project, "reason": reason })
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "project": project,
+                "reason": reason,
+                "discards_unsaved_work": dirt.is_some(),
+            })
         })
         .collect()
 }
@@ -606,6 +619,7 @@ mod tests {
                 project_root: None,
                 only_orphan_paths: None,
                 only_merged_paths: None,
+                only_discard_paths: None,
             }),
         )
         .await
@@ -627,6 +641,7 @@ mod tests {
                 project_root: None,
                 only_orphan_paths: None,
                 only_merged_paths: None,
+                only_discard_paths: None,
             }),
         )
         .await
@@ -659,6 +674,7 @@ mod tests {
                 project_root: Some("/nonexistent/8782/project".into()),
                 only_orphan_paths: None,
                 only_merged_paths: None,
+                only_discard_paths: None,
             }),
         )
         .await
@@ -873,6 +889,7 @@ mod tests {
                     project_root: None,
                     only_orphan_paths: None,
                     only_merged_paths: None,
+                    only_discard_paths: None,
                 }),
             )
             .await

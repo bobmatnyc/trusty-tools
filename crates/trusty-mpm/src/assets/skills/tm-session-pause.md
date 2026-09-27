@@ -336,16 +336,20 @@ the CLI):
 
 ```bash
 tm session prune-worktrees                 # this checkout's project; preview only
-tm session prune-worktrees --force         # remove what that preview listed, sparing dirty ones
+tm session prune-worktrees --force         # re-preview, then remove only what it lists
 tm session prune-worktrees --all-projects  # every registered project (preview)
 ```
 
 The CLI acts on the project of the checkout it runs in unless you pass
 `--all-projects`; outside a git repository it refuses rather than widening.
 
-`--force` still refuses to delete a worktree with unsaved work; it lists them
-on stderr instead. Only `tm session prune-worktrees --force --discard-dirty`
-destroys that work, and it should be reached for only after reading that list.
+`--force` re-previews, prints that re-preview, and then removes only what the
+re-preview lists, bounded by the operator's allowlists sent with the removal
+request (#8782). It still refuses to delete a worktree with unsaved work; it
+lists them on stderr instead. Only `tm session prune-worktrees --force
+--discard-dirty` destroys that work, only for the trees the re-preview named as
+holding it, and it should be reached for only after reading that list. A tree
+that turns dirty after the re-preview is kept.
 
 `tm doctor`'s `worktrees` probe reports the orphan count and suggests this
 command; run it whenever that probe is non-zero, and always before ending a

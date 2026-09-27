@@ -22,13 +22,21 @@ use super::worktree_registry::ScannedWorktree;
 /// both bounds are canonical paths fixed when the request is parsed.
 /// What: `project` is the canonical checkout that owns the worktree registry;
 /// `only` is the canonical allowlist a `--force` run carries — the set its own
-/// preview listed.
+/// preview listed. `discard` is the subset whose unsaved work that preview
+/// named; `--discard-dirty` removes no other dirty tree.
 /// Test: `a_project_scope_admits_only_that_projects_worktrees`,
-/// `an_allowlist_admits_only_listed_paths`.
+/// `an_allowlist_admits_only_listed_paths`,
+/// `a_tree_dirtied_after_a_clean_preview_is_not_discarded`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorktreeScope {
     project: Option<PathBuf>,
     only: Option<BTreeSet<PathBuf>>,
+    discard: Option<BTreeSet<PathBuf>>,
+}
+
+/// Canonicalize each path of an optional allowlist (raw when it does not resolve).
+fn canonical_set(paths: Option<&[String]>) -> Option<BTreeSet<PathBuf>> {
+    paths.map(|paths| paths.iter().map(|p| canonical(Path::new(p))).collect())
 }
 
 /// Resolve a path's symlinks, keeping the raw path when it does not resolve.
@@ -49,7 +57,7 @@ impl WorktreeScope {
     pub fn for_project(root: &Path) -> std::io::Result<Self> {
         Ok(Self {
             project: Some(std::fs::canonicalize(root)?),
-            only: None,
+            ..Self::default()
         })
     }
 
@@ -74,8 +82,27 @@ impl WorktreeScope {
                 )
             })?),
         };
-        let only = only_paths.map(|paths| paths.iter().map(|p| canonical(Path::new(p))).collect());
-        Ok(Self { project, only })
+        Ok(Self {
+            project,
+            only: canonical_set(only_paths),
+            discard: None,
+        })
+    }
+
+    /// Bound `--discard-dirty` to `paths`: the trees whose unsaved work the
+    /// operator's preview named (#8782). `None` leaves it unbounded.
+    pub fn with_discard_only(mut self, paths: Option<&[String]>) -> Self {
+        self.discard = canonical_set(paths);
+        self
+    }
+
+    /// Whether a removal may discard `path`'s unsaved work: `true` when no
+    /// discard allowlist is set, else only when it lists `path` (#8782).
+    /// Test: `a_tree_dirtied_after_a_clean_preview_is_not_discarded`.
+    pub(crate) fn may_discard(&self, path: &Path) -> bool {
+        self.discard
+            .as_ref()
+            .is_none_or(|d| d.contains(&canonical(path)))
     }
 
     /// Whether `scanned` lies inside this scope.
@@ -162,16 +189,20 @@ pub struct PruneScope {
 
 impl PruneScope {
     /// Build both scopes from the route's request fields; see
-    /// [`WorktreeScope::from_request`] for the refusal rule.
+    /// [`WorktreeScope::from_request`] for the refusal rule. The discard
+    /// allowlist bounds the orphan pass only: the merged-PR pass never
+    /// discards unsaved work.
     ///
     /// Test: `a_project_root_that_does_not_resolve_is_refused`.
     pub fn from_request(
         project_root: Option<&str>,
         only_orphan_paths: Option<&[String]>,
         only_merged_paths: Option<&[String]>,
+        only_discard_paths: Option<&[String]>,
     ) -> Result<Self, String> {
         Ok(Self {
-            orphan: WorktreeScope::from_request(project_root, only_orphan_paths)?,
+            orphan: WorktreeScope::from_request(project_root, only_orphan_paths)?
+                .with_discard_only(only_discard_paths),
             merged: WorktreeScope::from_request(project_root, only_merged_paths)?,
         })
     }
@@ -180,7 +211,8 @@ impl PruneScope {
     /// honoured the scope from one that predates it (#8782).
     ///
     /// What: `project_root` (path or null), `project_known` (see
-    /// [`WorktreeScope::project_known`]), and each allowlist's size or null.
+    /// [`WorktreeScope::project_known`]), and each allowlist's size or null —
+    /// always present as keys, so a client can refuse a reply that lacks one.
     /// Test: `the_scope_echo_names_the_project_and_the_allowlist_size`.
     pub fn echo(&self, project_known: bool) -> serde_json::Value {
         serde_json::json!({
@@ -188,6 +220,7 @@ impl PruneScope {
             "project_known": project_known,
             "only_orphan_paths": self.orphan.only.as_ref().map(BTreeSet::len),
             "only_merged_paths": self.merged.only.as_ref().map(BTreeSet::len),
+            "only_discard_paths": self.orphan.discard.as_ref().map(BTreeSet::len),
         })
     }
 }

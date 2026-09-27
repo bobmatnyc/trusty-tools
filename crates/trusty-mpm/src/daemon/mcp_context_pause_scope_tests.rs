@@ -68,7 +68,9 @@ async fn a_pause_outside_a_checkout_prunes_nothing() {
     )
     .await
     .expect("manager");
-    let elsewhere = tempfile::tempdir().expect("non-repo dir");
+    // #8782: hermetic, so a `TMPDIR` inside a git repository cannot make this
+    // directory a checkout and mask the error arm.
+    let elsewhere = crate::test_support::hermetic_temp_dir();
     let (removed, _) = prune_for_pause(&mgr, &fx.repos_root, &[], elsewhere.path()).await;
     assert!(removed.is_empty(), "{removed:?}");
     assert!(wt.exists());
