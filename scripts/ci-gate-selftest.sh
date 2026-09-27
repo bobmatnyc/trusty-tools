@@ -65,9 +65,9 @@ assert_eq "tmux: website content"               "false" "$(rel tmux-targets 'web
 assert_eq "C-quoted path (fail closed)"         "true"  "$(rel teardown-guard '"crates/caf\303\251.rs"')"
 assert_eq "empty change set (fail closed)"      "true"  "$(rel tmux-targets '')"
 assert_eq "no usable base (fail closed)" "true" \
-  "$(EVENT_NAME=push PUSH_BEFORE='' bash scripts/ci-gate-relevance.sh teardown-guard 2>/dev/null)"
+  "$(env -u GITHUB_OUTPUT EVENT_NAME=push PUSH_BEFORE='' bash scripts/ci-gate-relevance.sh teardown-guard 2>/dev/null)"
 assert_eq "unresolvable base (fail closed)" "true" \
-  "$(EVENT_NAME=pull_request BASE_REF=no-such-branch-8378 bash scripts/ci-gate-relevance.sh tmux-targets 2>/dev/null)"
+  "$(env -u GITHUB_OUTPUT EVENT_NAME=pull_request BASE_REF=no-such-branch-8378 bash scripts/ci-gate-relevance.sh tmux-targets 2>/dev/null)"
 out="$(mktemp)"
 printf 'docs/a.md' | env -u EVENT_NAME GITHUB_OUTPUT="$out" bash scripts/ci-gate-relevance.sh tmux-targets >/dev/null 2>&1
 assert_eq "writes <mode>_relevant to GITHUB_OUTPUT" "tmux_targets_relevant=false" "$(cat "$out")"
@@ -100,7 +100,8 @@ needs_json() {
   done
   printf '%s' "$json"
 }
-verdict() { NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
+# env -u: a fixture verdict must not append its table to the real job summary.
+verdict() { env -u GITHUB_STEP_SUMMARY NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
 
 assert_eq "every context succeeded"                     "0" "$(verdict)"
 assert_eq "clippy failed (probe 7)"                     "1" "$(verdict clippy=failure)"
@@ -113,9 +114,9 @@ assert_eq "tmux skipped under the teardown verdict"     "1" "$(verdict tmux-exac
 assert_eq "an unfiltered job skipped (Clippy)"          "1" "$(verdict clippy=skipped out:docs_only=true)"
 assert_eq "a covered job missing from needs"            "1" "$(verdict drop:website-corpus)"
 assert_eq "NEEDS_JSON not an object"                    "2" \
-  "$(NEEDS_JSON='[]' bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
+  "$(env -u GITHUB_STEP_SUMMARY NEEDS_JSON='[]' bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
 assert_eq "NEEDS_JSON unset"                            "2" \
-  "$(env -u NEEDS_JSON bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
+  "$(env -u NEEDS_JSON -u GITHUB_STEP_SUMMARY bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
 summary="$(mktemp)"
 NEEDS_JSON="$(needs_json out:docs_only=true)" GITHUB_STEP_SUMMARY="$summary" \
   bash scripts/ci-gate-verdict.sh >/dev/null 2>&1

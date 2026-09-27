@@ -82,9 +82,20 @@ What still runs for such a diff: `tm-capabilities generated-skill drift check`
 (both roots are in trusty-mpm's build closure, so the job builds, which also
 proves every `include_str!` still compiles), its resident-budget tests, and —
 for a Cargo-inert diff that touches an instruction root — the
-`Asset-content lib tests` step: `cargo test --lib` for trusty-mpm and
-trusty-agents-common, reusing the drift check's build. The tmux gate also
-scans `crates/*/src/assets/**/*.md`, so it runs too.
+`Asset-content tests (filtered list, …)` step. It runs exactly the rows of
+`scripts/asset-content-tests.tsv`: every test, in any crate and target, that
+reads `crates/*/src/assets/**`. One `cargo test` runs per crate + target with
+the rows' name filters, and the step fails on a row that selects no test. The
+job runs on the push to main as well, so the merge of an asset-only PR runs the
+same list there, where the test shards skip it. The tmux gate also scans
+`crates/*/src/assets/**/*.md`, so it runs too.
+
+🔴 **A new test that reads an asset joins the list in the same PR.** The same
+job runs `scripts/check_asset_test_filter.py check` on every diff. It fails
+when test code reads an asset (an `include_str!` of an asset path, a
+`src/assets` literal, or an asset constant or loader it derives by search)
+outside the list. Add a row naming the test, or its module; `check --verbose`
+prints what it found.
 
 ## The agent resident-budget tests gate merge through the drift check
 

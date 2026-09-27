@@ -71,7 +71,9 @@ jobs:
     # acceptable here either: the job always runs; the relevance step inside
     # it (below) is what stays cheap on an inert diff.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # #8378: 35, not 20 — an asset-only diff also compiles the listed tests'
+    # targets (trusty-code, trusty-agents-common, the `tm` bin, `integration`).
+    timeout-minutes: 35
     env:
       SKIP_UI_BUILD: "1"
     steps:
@@ -150,18 +152,31 @@ jobs:
 
           # #8378: an instruction-content edit is Cargo-inert, so `Rust tests
           # (affected crates)` skips it. `asset_content=true` makes this job
-          # run the asset-content lib tests instead. Only a Cargo-inert diff
-          # that touches an instruction root sets it; a code diff leaves the
-          # tests to the affected-crates job. A failed classification sets it.
+          # run the listed asset-content tests (scripts/asset-content-tests.tsv)
+          # instead. Set by a Cargo-inert diff that touches an instruction
+          # root, by an edit to the list or its runner, and by a failed
+          # classification. A code diff leaves the tests to the affected-crates
+          # job. The trigger covers push to main too, so the merge of an
+          # asset-only PR runs the same list on main (base = the push's
+          # `before`). Setting it always makes the job relevant: a content/**
+          # diff sits outside trusty-mpm's closure.
           if ! verdict="$(env -u GITHUB_OUTPUT DOCS_ONLY_BASE="$merge_base" bash scripts/detect-docs-only.sh)"; then
             echo "asset_content=true" >> "$GITHUB_OUTPUT"
             echo "capabilities-drift: detect-docs-only.sh failed — asset-content tests run (fail closed)"
-          elif [ "$verdict" = "docs_only=true" ] &&
-             grep -qE '^(crates/trusty-mpm/src/assets/|crates/trusty-agents-common/src/assets/|content/)' "$changed_nl"; then
+            asset_content=true
+          elif { [ "$verdict" = "docs_only=true" ] &&
+                 grep -qE '^(crates/trusty-mpm/src/assets/|crates/trusty-agents-common/src/assets/|content/)' "$changed_nl"; } ||
+               grep -qxE 'scripts/(asset-content-tests\.tsv|check_asset_test_filter\.py)' "$changed_nl"; then
             echo "asset_content=true" >> "$GITHUB_OUTPUT"
-            echo "capabilities-drift: Cargo-inert instruction-content edit — asset-content tests run here"
+            echo "capabilities-drift: Cargo-inert instruction-content edit, or the test list changed — asset-content tests run here"
+            asset_content=true
           else
             echo "asset_content=false" >> "$GITHUB_OUTPUT"
+            asset_content=false
+          fi
+          if [ "$asset_content" = "true" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           # #8700: check_test_count.sh wraps the budget-test step, so an edit
           # to it must run that step too.
@@ -194,6 +209,16 @@ jobs:
           else
             echo "capabilities-drift: skipped — no changed path touches trusty-mpm, its dependency closure, the check script, or this workflow"
           fi
+
+      # #8378: the guard behind the asset-content list. Runs on EVERY diff, not
+      # only a relevant one: a new test that reads an asset can land in any
+      # crate, and it must join scripts/asset-content-tests.tsv in that same PR
+      # or run nowhere on the next asset-only diff. Static (python3 + the
+      # source tree), no toolchain; its fixture selftest runs first.
+      - name: Asset-content test list covers every asset-reading test
+        run: |
+          ./scripts/check_asset_test_filter_selftest.sh
+          python3 scripts/check_asset_test_filter.py check
 
       # MSRV floor is 1.94 (root Cargo.toml rust-version), matching ci.yml.
       - name: Install Rust toolchain (1.94)
@@ -280,13 +305,15 @@ jobs:
           fi
 
       # #8378 (owner ruling 2026-09-27, until PHASE_3): an instruction-content
-      # edit is Cargo-inert, so the affected-crates job no longer runs the lib
-      # tests that read the bundled assets — golden prompts, anchor checks,
-      # roster tables. They run here instead, and only for that diff class
-      # (`asset_content`, set by the relevance step). trusty-mpm's lib harness
-      # is the one built above; trusty-agents-common's is compiled here, in a
-      # separate invocation so trusty-mpm's feature set is not re-resolved.
-      - name: Asset-content lib tests (Cargo-inert instruction edits)
+      # edit is Cargo-inert, so neither the affected-crates job (on the PR) nor
+      # the test shards (on the push to main) run the tests that read the
+      # bundled assets. They run here instead, for that diff class
+      # (`asset_content`, set by the relevance step) on BOTH events: exactly
+      # the rows of scripts/asset-content-tests.tsv, one `cargo test` per
+      # crate + target with the rows' name filters. The runner fails on a
+      # failing test and on a row that selected no test. trusty-mpm's lib and
+      # env_serial harnesses are the ones built above.
+      - name: Asset-content tests (filtered list, Cargo-inert instruction edits)
         if: >-
           !cancelled() && steps.relevance.outputs.relevant != 'false'
           && steps.relevance.outputs.asset_content != 'false'
@@ -294,9 +321,4 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: |
-          set -uo pipefail
-          status=0
-          cargo test -p trusty-mpm --lib --locked --no-fail-fast || status=$?
-          cargo test -p trusty-agents-common --lib --locked --no-fail-fast || status=$?
-          exit "$status"
+        run: python3 scripts/check_asset_test_filter.py run

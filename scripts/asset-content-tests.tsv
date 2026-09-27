@@ -1,0 +1,96 @@
+# asset-content-tests.tsv — the tests that READ crates/*/src/assets/** (#8378).
+#
+# capabilities-drift.yml runs exactly these on a Cargo-inert instruction-content
+# diff, where `Rust tests (affected crates)` plans nothing (owner ruling
+# 2026-09-27, until PHASE_3). scripts/check_asset_test_filter.py `check` fails
+# that job when test code reads an asset outside this list; `run` executes it
+# and fails on a row that selects no test.
+#
+# Columns (TAB-separated): crate, target, filter, reason.
+#   target  lib | bin:<name> | test:<name>
+#   filter  `*` = the whole target; else a test-path prefix (module or test).
+# A module row covers every test in it, including ones added later; a test
+# row covers only that test. Prefer a test row in a large, slow module.
+trusty-agents-common	lib	agent_assets::tests	15 reads: AGENT_ASSETS, AGENT_ASSETS_DIR, BASE_AGENT, ...
+trusty-agents-common	lib	agents::roster_tools_tests	6 reads: AGENT_ASSETS, literal
+trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads AGENT_ASSETS
+trusty-agents-common	lib	harness_doc::tests	10 reads: agnostic, harness_understanding, mpm_session_manager, ...
+trusty-code	lib	agents::deploy::deploy_tests	2 reads: DEFAULT_AGENTS, materialize_skill_refs
+trusty-code	lib	agents::md_loader::tests::embedded_agent_skill_pointers_open_with_read_file	reads REFERENCED_SKILL_FILES
+trusty-code	lib	agents::protocol::tests::list_disk_only_entries_are_additive	reads DEFAULT_AGENTS
+trusty-code	lib	agents::protocol::tests::list_returns_embedded_when_disk_empty	reads DEFAULT_AGENTS
+trusty-code	lib	agents::protocol::tests::list_still_lists_other_agents_when_one_disk_file_is_unparseable	reads DEFAULT_AGENTS
+trusty-code	lib	agents::skill_refs::tests	4 reads: EMBEDDED_TM_AGENT_SOURCES, REFERENCED_SKILL_FILES, embedded_skill_ref, ...
+trusty-code	lib	assets::tests	16 reads: DEFAULT_AGENTS, DEFAULT_SKILLS, EMBEDDED_TM_AGENT_SOURCES, ...
+trusty-code	lib	agents::claude_tools::tests::translates_the_shared_version_control_grant	mirrors version-control.md's tools: grant (named by the #8378 critic)
+trusty-code	lib	events::tests::sm_harness_doc_documents_the_prefix_tcode_emits	reads agnostic
+trusty-code	lib	permissions::tests::gate_tests	1 reads: DEFAULT_AGENTS
+trusty-code	lib	run_task::tests::engineer_registry_reads_embedded_agent_skill_pointers	reads REFERENCED_SKILL_FILES
+trusty-code	lib	skills::protocol::tests	4 reads: DEFAULT_SKILLS
+trusty-code	lib	task::executor::tests::engineer_registry_reads_embedded_agent_skill_pointers	reads REFERENCED_SKILL_FILES
+trusty-code	lib	tools::fs::read::tests::skill_ref_pointer_is_served_outside_the_working_dir	reads REFERENCED_SKILL_FILES
+trusty-code	test:paths_import_mpm_catalog_e2e	*	1 reads: BASE_AGENT
+trusty-mpm	bin:tm	commands::pr::tests::body_headings_are_named_verbatim_in_the_assets	reads VERSION_CONTROL
+trusty-mpm	bin:tm	commands::pr::tests::metadata_multi_crate_diff	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'
+trusty-mpm	bin:tm	commands::pr::tests::open_applies_pr_metadata	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'
+trusty-mpm	bin:tm	commands::push_guard::tests::installs_into_a_fresh_repo_then_is_idempotent	reads inspect_pre_push_guard
+trusty-mpm	bin:tm	commands::push_guard::tests::retrofits_a_bare_repository	reads inspect_pre_push_guard
+trusty-mpm	bin:tm	commands::push_guard::tests::worktree_count_counts_linked_worktrees	reads inspect_pre_push_guard
+trusty-mpm	bin:tm	generate::skills::tests::skills_render_matches_the_declared_roster	reads framework_skill_categories
+trusty-mpm	bin:tm	tests_behavior_2890_skills::code_critic_skills_land_in_deployed_dot_claude_skills	reads CODE_REVIEW_STANDARDS
+trusty-mpm	bin:tm	tests_behavior_2903_skills::skill_port_batch1_sample_lands_in_deployed_dot_claude_skills	reads SYSTEMATIC_DEBUGGING_WORKFLOW
+trusty-mpm	bin:tm	tests_behavior_2911_documentation_style::documentation_style_lands_in_deployed_dot_claude_skills	reads DOCUMENTATION_STYLE_METHOD_FUNCTION
+trusty-mpm	bin:tm	tests_behavior_a::install_then_deploy_composes_agents	reads ALL
+trusty-mpm	bin:tm	tests_behavior_a::install_writes_all_artifacts	reads ALL
+trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_build_performance_lands_in_deployed_dot_claude_skills	reads RUST_BUILD_PERFORMANCE
+trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_delivery_workflow_lands_in_deployed_dot_claude_skills	reads RUST_DELIVERY_WORKFLOW
+trusty-mpm	lib	client::catalog::sm_tools::tests::sm_tools_md_matches_catalog_render	reads include of '../../assets/sm_instructions/SM_TOOLS.md'
+trusty-mpm	lib	core::agent_skill_codeploy::tests	2 reads: AGENT_ASSETS_DIR, literal
+trusty-mpm	lib	core::agent_source::tests	2 reads: ALL
+trusty-mpm	lib	core::bundle::tests	70 reads: AGENT_ASSETS_DIR, ALL, CODE_CRITIC_AGENT, ...
+trusty-mpm	lib	core::bundled_pm_package::tests	5 reads: PM_PACKAGE_JSON, SECTION_SEARCH, bundled_fallback_package, ...
+trusty-mpm	lib	core::claude_md_sections::tests	22 reads: OUTPUT_STYLES, bundled_fallback_package, include
+trusty-mpm	lib	core::delegation_authority::tests::every_bundled_non_base_agent_reaches_the_roster	reads AGENT_ASSETS_DIR
+trusty-mpm	lib	core::deploy_validate::tests	1 reads: OUTPUT_STYLES
+trusty-mpm	lib	core::doctor_repair::tests	4 reads: OUTPUT_STYLES
+trusty-mpm	lib	core::instruction_overrides::section_report::tests	7 reads: bundled_fallback_package, compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::instruction_package::tests	6 reads: SCHEMA_JSON, SECTION_PM_ALLOWLIST
+trusty-mpm	lib	core::instruction_pipeline::tests	6 reads: AGENT_DELEGATION, ALL, OUTPUT_STYLES, ...
+trusty-mpm	lib	core::instruction_safety_core::tests	5 reads: bundled_fallback_package, include, pinned_run
+trusty-mpm	lib	core::managed_config::tests::ensure_managed_config_dir_refreshes_stale_bundled_agents	reads BASE_AGENT
+trusty-mpm	lib	core::managed_config::tests::manual_static_verify_full_roster	reads literal 'src/assets/skills'
+trusty-mpm	lib	core::manifest::framework::tests	15 reads: bundled_agent_stems, bundled_skill_stems, detected_stack_engineers, ...
+trusty-mpm	lib	core::manifest::nested::tests	2 reads: framework_agent_categories
+trusty-mpm	lib	core::manifest::project_lang::tests	3 reads: framework_agent_categories
+trusty-mpm	lib	core::output_style::floor::tests::every_primary_directive_states_the_four_prohibitions_and_seven_override_phrases	reads OUTPUT_STYLES
+trusty-mpm	lib	core::output_style::floor::tests::the_bundled_styles_get_no_appended_floor	reads OUTPUT_STYLES
+trusty-mpm	lib	core::output_style::floor::tests::the_floor_is_cut_from_the_bundled_style	reads OUTPUT_STYLE
+trusty-mpm	lib	core::output_style_deployer::tests	7 reads: OUTPUT_STYLES
+trusty-mpm	lib	core::pm_prompt_golden_tests::golden_bundled_fallback_prompt	reads compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::pm_prompt_golden_tests::the_memory_section_claims_no_per_prompt_context_hook	reads compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::prompt_self_improvement::tests	7 reads: PM_ADDENDUM, append_to_pm_prompt, pm_addendum
+trusty-mpm	lib	core::push_guard::tests	12 reads: PREPARE_COMMIT_MSG_HOOK, PRE_PUSH_HOOK, inspect_pre_push_guard, ...
+trusty-mpm	lib	core::scaffold_gitignore::tests::a_project_style_stays_trackable_and_generated_styles_are_ignored	reads OUTPUT_STYLES
+trusty-mpm	lib	core::session_launch::tests::deploy_output_style_overwrites	reads OUTPUT_STYLE
+trusty-mpm	lib	core::session_launch::tests::deploy_output_style_writes_all_styles	reads OUTPUT_STYLES
+trusty-mpm	lib	core::session_launch::tests::deploy_output_style_writes_file	reads OUTPUT_STYLE
+trusty-mpm	lib	core::session_launch::tests_quarantine_4448::every_bundled_agent_roots_at_base_agent	reads AGENT_ASSETS_DIR
+trusty-mpm	lib	core::session_launch::tests_quarantine_4448::the_bundled_base_agent_carries_the_composition_marker	reads BASE_AGENT (asserts its heading)
+trusty-mpm	lib	core::skill_drift::tests::a_pristine_bundled_deploy_is_entirely_fresh	reads ALL
+trusty-mpm	lib	core::skill_overrides::tests::every_table_skill_is_bundled_or_vouched_for	reads framework_skill_categories
+trusty-mpm	lib	core::skill_overrides::tests::every_table_stack_is_a_detectable_stem	reads framework_agent_categories
+trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename	reads TM_CAPABILITIES_MCP_TOOLS
+trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_writes_all_skills	reads ALL
+trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_writes_nested_reference_files	reads SYSTEMATIC_DEBUGGING_WORKFLOW
+trusty-mpm	lib	core::sm::prompt::tests	17 reads: BASE_SM, assemble_sm_prompt, resolve_sm_prompt
+trusty-mpm	lib	core::standalone::global_config::tests::test_deploy_output_styles_idempotent_via_global_config	reads OUTPUT_STYLES
+trusty-mpm	lib	core::standalone::global_config::tests::test_deploy_output_styles_wired_into_config_dir	reads OUTPUT_STYLES
+trusty-mpm	lib	daemon::doctor::doctor_bundled_asset_lag::tests	11 reads: ALL, ASSET_DIR, check_bundled_asset_lag, ...
+trusty-mpm	lib	daemon::doctor::doctor_deploy_validate::tests::deployment_check_ok_when_complete	reads OUTPUT_STYLES
+trusty-mpm	lib	daemon::doctor::doctor_output_style::tests	4 reads: OUTPUT_STYLES
+trusty-mpm	lib	daemon::doctor::doctor_push_guard::tests::ok_once_installed	reads install_pre_push_guard
+trusty-mpm	lib	daemon::doctor::doctor_scaffold_tracking::tests::regenerated_paths_includes_all_output_styles	reads OUTPUT_STYLES
+trusty-mpm	lib	daemon::managed_routes::lifecycle::tests::ensure_deployment_complete_ok_when_already_complete	reads OUTPUT_STYLES
+trusty-mpm	test:env_serial	standalone_isolation::output_styles_deploy_to_config_dir_not_home	reads OUTPUT_STYLES
+trusty-mpm	test:integration	commit_stats_hook_budget	1 reads: PREPARE_COMMIT_MSG_HOOK
+trusty-mpm	test:integration	push_guard_hook	11 reads: install_pre_push_guard
