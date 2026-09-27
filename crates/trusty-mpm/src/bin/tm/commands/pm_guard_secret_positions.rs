@@ -169,7 +169,7 @@ pub(crate) fn for_word_list_start(segment: &str, argv: &[String]) -> Option<usiz
 /// nested `for` header reaches the scan behind the `do` or `then` of the
 /// command that contains it.
 /// Test: `allows_a_for_loop_word_list_of_branch_names`.
-const LIST_INTRODUCERS: &[&str] = &["do", "then", "else", "elif", "{"];
+pub(crate) const LIST_INTRODUCERS: &[&str] = &["do", "then", "else", "elif", "{"];
 
 /// The first path component of a conventional git BRANCH or REF name.
 ///
@@ -198,7 +198,7 @@ const LIST_INTRODUCERS: &[&str] = &["do", "then", "else", "elif", "{"];
 /// Test: `allows_a_for_loop_word_list_of_branch_names`,
 /// `denies_a_secret_file_in_a_for_loop_word_list`,
 /// `the_documented_residuals_still_allow`.
-const BRANCH_NAME_PREFIXES: &[&str] =
+pub(crate) const BRANCH_NAME_PREFIXES: &[&str] =
     &["feat", "fix", "docs", "hotfix", "release", "chore", "refs"];
 
 /// Whether `word`, inside a `for`/`select` word list, reads as a git BRANCH or
@@ -285,7 +285,7 @@ const REF_NAMING_GIT_SUBCOMMANDS: &[&str] = &["branch", "push"];
 /// token after it a ref: `-b`/`-B` for `checkout`, `-c`/`-C` for `switch`.
 /// Test: `allows_a_git_ref_name_carrying_a_word_family`,
 /// `denies_a_secret_file_in_a_git_ref_position`.
-const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
+pub(crate) const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
 
 /// Where a segment's git REF names begin, if it names refs at all (#7498
 /// round 3).
@@ -404,7 +404,7 @@ pub(crate) fn ref_name_start(segment: &str) -> Option<usize> {
 ///
 /// Test: `allows_a_filename_named_in_a_text_payload`,
 /// `denies_a_file_flag_beside_a_text_payload`.
-const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message", "--note"];
+pub(crate) const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message", "--note"];
 
 /// Which tokens of `argv` are a human-readable TEXT PAYLOAD (#7498 round 3).
 ///
