@@ -3,6 +3,7 @@
 use super::daemon_utils::daemon_base_url;
 use super::explicit_target::{
     classify_explicit_target, resolve_explicit_target, with_source, ExplicitTarget, IndexIdSource,
+    ParkedTargets,
 };
 use super::index_resolve::{print_index_header, resolve_index};
 use super::reindex_engine::run_reindex_opts;
@@ -49,7 +50,8 @@ pub async fn handle_reindex(
         // #8737: any failure here (down, 404, 503, mismatch) refuses before
         // the reindex POST is ever sent.
         let Some((id, root, via)) =
-            resolve_explicit_target("reindex", &client, &base, target).await?
+            resolve_explicit_target("reindex", &client, &base, target, ParkedTargets::Refuse)
+                .await?
         else {
             bail!("reindex target resolution returned no index");
         };

@@ -44,9 +44,10 @@ use super::daemon_utils::daemon_base_url;
 // #8737: the target-resolution rule moved to `explicit_target` so `reindex`,
 // `quantize` and `index relocate` share it; re-exported for existing callers.
 use super::explicit_target::{
-    classify_explicit_target, find_index_by_path, resolve_explicit_target, with_source,
+    classify_explicit_target, resolve_explicit_target, with_source, ParkedTargets,
 };
 pub(crate) use super::explicit_target::{ExplicitTarget as RemoveTarget, IndexIdSource};
+use super::index_remove_stale::registered_or_cleared;
 use crate::config::GlobalConfig;
 use crate::detect::detect_project;
 use anyhow::{bail, Context, Result};
@@ -111,15 +112,23 @@ pub async fn handle_index_remove(
 
     // #8175: resolve each shape against the daemon; PATH plus an id must agree
     // (see `resolve_explicit_target`), and `TRUSTY_INDEX` alone refuses.
-    let (index_id, registered_path, resolved_via) =
-        match resolve_explicit_target("remove", &client, &base, target).await? {
-            Some(resolved) => resolved,
-            None => {
-                let target_path = resolve_target_path(None)?;
-                let (id, root) = find_index_by_path(&client, &base, &target_path).await?;
-                (id, root, "the current working directory")
-            }
-        };
+    // #8687: a parked target resolves; a PATH (or CWD) nothing registers any
+    // more clears its stale rows instead of refusing.
+    let (index_id, registered_path, resolved_via) = match target {
+        RemoveTarget::CwdAutoDetect | RemoveTarget::Path(_) => {
+            let (path, via) = match target {
+                RemoveTarget::Path(p) => (p, "the PATH argument"),
+                _ => (resolve_target_path(None)?, "the current working directory"),
+            };
+            let Some((id, root)) = registered_or_cleared(&client, &base, &path).await? else {
+                return Ok(());
+            };
+            (id, root, via)
+        }
+        other => resolve_explicit_target("remove", &client, &base, other, ParkedTargets::Resolve)
+            .await?
+            .context("remove target resolution returned no index")?,
+    };
 
     // #8175: report how the target was resolved before anything destructive
     // happens, so a script's log (or a human re-reading a scrollback) can

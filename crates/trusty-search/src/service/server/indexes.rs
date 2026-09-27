@@ -272,20 +272,36 @@ pub(crate) async fn list_indexes_report(
                 vector_health,
             });
         }
-        serde_json::json!({ "indexes": entries })
+        // #8727: also every parked registration the overlap check consults.
+        let parked = super::root_overlap::parked_registrations(
+            &state.registry.list_handles(),
+            &state.cold_store.snapshot(),
+            identity_filter.as_ref(),
+        );
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": entries }), parked)
     } else if let Some(target) = &identity_filter {
         // Flat list, but scoped to one repo identity (DOC-37).
         let handles = state.registry.list_handles();
         let ids = resolve_identities(state, &handles);
+        // #8727: this repo's parked rows only.
+        let parked = super::root_overlap::parked_registrations(
+            &handles,
+            &state.cold_store.snapshot(),
+            Some(target),
+        );
         let indexes: Vec<String> = handles
             .into_iter()
             .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))
             .map(|h| h.id.0.clone())
             .collect();
-        serde_json::json!({ "indexes": indexes })
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": indexes }), parked)
     } else {
-        let indexes: Vec<String> = state.registry.list().into_iter().map(|id| id.0).collect();
-        serde_json::json!({ "indexes": indexes })
+        let handles = state.registry.list_handles();
+        let indexes: Vec<String> = handles.iter().map(|h| h.id.0.clone()).collect();
+        // #8727: `indexes` stays the resident set; `parked` lists the rest.
+        let parked =
+            super::root_overlap::parked_registrations(&handles, &state.cold_store.snapshot(), None);
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": indexes }), parked)
     }
 }
 

@@ -152,6 +152,35 @@ pub(super) async fn close_index_files(
         .map(|e| format!("vector store close failed: {e:#}")))
 }
 
+/// Close every handle to `index_id` this daemon knows about: the hot one, and
+/// each one an unfinished deferred-embed job holds (#8664).
+///
+/// Why: a cold-parked index has no hot handle, yet a queued embed job still
+/// holds the detached one, and with it `index.redb` and the HNSW mapping.
+/// What: closes the job handles first and the hot handle last, one per
+/// indexer, so an abandoning `Err` from a job handle leaves the registered
+/// index serving. Vector-close failures are joined into one reason.
+/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`,
+/// `a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index`.
+pub(super) async fn close_all_index_files(
+    index_id: &IndexId,
+    hot: Option<&Arc<IndexHandle>>,
+    rehydrate_budget: Duration,
+    budget: Duration,
+) -> Result<Option<String>, String> {
+    // `job_handles_for` already yields one handle per indexer.
+    let mut handles: Vec<Arc<IndexHandle>> = crate::service::reindex::job_handles_for(index_id)
+        .into_iter()
+        .filter(|job| !hot.is_some_and(|h| Arc::ptr_eq(&h.indexer, &job.indexer)))
+        .collect();
+    handles.extend(hot.cloned());
+    let mut vector_errors = Vec::new();
+    for handle in &handles {
+        vector_errors.extend(close_index_files(Some(handle), rehydrate_budget, budget).await?);
+    }
+    Ok((!vector_errors.is_empty()).then(|| vector_errors.join("; ")))
+}
+
 /// Close a deregistered index's files once the writer that outlived the
 /// delete's quiesce wait has finished.
 ///
@@ -167,12 +196,20 @@ pub(super) async fn close_index_files(
 /// or an ERROR naming what stayed open. A no-op when there was no hot handle.
 /// Test: `a_writer_outliving_the_quiesce_wait_closes_the_files_when_it_finishes`.
 pub(super) fn close_after_writer_drains(index_id: IndexId, handle: Option<Arc<IndexHandle>>) {
-    let Some(handle) = handle else {
+    // #8664: a cold-parked index has no hot handle, but a queued embed job
+    // may still hold one.
+    if handle.is_none() && crate::service::reindex::job_handles_for(&index_id).is_empty() {
         return;
-    };
+    }
     tokio::spawn(async move {
         let _quiesced = crate::service::reindex::acquire_index_teardown_write(&index_id).await;
-        match close_index_files(Some(&handle), REHYDRATE_WAIT_BUDGET, CLOSE_BUDGET).await {
+        let closed = close_all_index_files(
+            &index_id,
+            handle.as_ref(),
+            REHYDRATE_WAIT_BUDGET,
+            CLOSE_BUDGET,
+        );
+        match closed.await {
             Ok(None) => tracing::info!(
                 "delete[{index_id}]: deferred close done — the writer finished, and \
                  index.redb and hnsw.usearch are now closed (issue #8167)"

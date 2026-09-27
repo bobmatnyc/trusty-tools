@@ -613,3 +613,148 @@ async fn burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end() {
     // Leave the process-global queue as this test found it (#6574).
     wait_for_a_drained_queue("this test's own 27 jobs").await;
 }
+
+// ── #8664: `live_jobs` / `job_handles_for` / `LiveJob` ─────────────────────
+
+/// Whether job `seq` still has a [`live_jobs`] entry.
+fn is_live(seq: u64) -> bool {
+    live_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&seq)
+}
+
+/// Whether job `seq` is still on the heap, i.e. not yet claimed by its task.
+fn is_queued(seq: u64) -> bool {
+    queue_heap()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|j| j.seq == seq)
+}
+
+fn fresh_progress() -> StdArc<ReindexProgress> {
+    StdArc::new(ReindexProgress::new())
+}
+
+/// #8664: several unfinished jobs on one index share its indexer, and
+/// `job_handles_for` yields that indexer once, so the delete closes it once.
+/// A job on another index is never returned for this one.
+#[tokio::test]
+#[serial_test::serial]
+async fn job_handles_for_yields_each_indexer_once_across_concurrent_jobs() {
+    let id = IndexId::new("live-jobs-dedup-8664");
+    let shared = bare_handle(&id.0);
+    let twin = StdArc::new(IndexHandle::bare(
+        id.clone(),
+        StdArc::clone(&shared.indexer),
+        shared.root_path.clone(),
+    ));
+    let other = bare_handle("live-jobs-other-8664");
+    let gates = [&shared, &twin, &other];
+    for handle in gates {
+        handle.embedding_pause.pause();
+    }
+    let seqs = [
+        push_job(StdArc::clone(&shared), fresh_progress(), 1),
+        push_job(StdArc::clone(&shared), fresh_progress(), 1),
+        push_job(StdArc::clone(&twin), fresh_progress(), 1),
+        push_job(StdArc::clone(&other), fresh_progress(), 1),
+    ];
+
+    let handles = job_handles_for(&id);
+    let others = job_handles_for(&other.id);
+
+    // Settle before asserting, so a failure leaves no job on the global heap.
+    let tasks: Vec<_> = seqs
+        .iter()
+        .map(|&s| tokio::spawn(wait_for_turn(s)))
+        .collect();
+    for handle in gates {
+        handle.embedding_pause.drain();
+    }
+    for task in tasks {
+        assert!(
+            task.await.expect("job task").is_ok(),
+            "a drained job abandons"
+        );
+    }
+    assert_eq!(
+        handles.len(),
+        1,
+        "three jobs over one indexer must yield it once, got {}",
+        handles.len()
+    );
+    assert!(StdArc::ptr_eq(&handles[0].indexer, &shared.indexer));
+    assert_eq!(others.len(), 1, "the other index's job is its own");
+    assert!(job_handles_for(&id).is_empty(), "settled jobs hold nothing");
+    wait_for_a_drained_queue("the dedup test's four jobs").await;
+}
+
+/// #8664: every exit `wait_for_turn` can take drops the job's `live_jobs`
+/// entry — a completed pass, a drained pause, a delete seen while queued, a
+/// delete seen after the teardown lock, and a task cancelled while parked.
+/// The closed-semaphore exit is not driven: `background_reindex_semaphore` is
+/// process-global and never closed while tests run.
+#[tokio::test]
+#[serial_test::serial]
+async fn every_job_exit_drops_its_live_entry() {
+    // Completed pass.
+    let done = bare_handle("live-jobs-done-8664");
+    let seq = push_job(StdArc::clone(&done), fresh_progress(), 1);
+    assert!(is_live(seq), "a pushed job is live");
+    assert!(wait_for_turn(seq).await.is_ok(), "a completed pass is Ok");
+    assert!(!is_live(seq), "completed pass left its entry");
+
+    // Drained pause.
+    let drained = bare_handle("live-jobs-drained-8664");
+    drained.embedding_pause.pause();
+    drained.embedding_pause.drain();
+    let seq = push_job(StdArc::clone(&drained), fresh_progress(), 1);
+    assert!(wait_for_turn(seq).await.is_ok(), "a drained job is Ok");
+    assert!(!is_live(seq), "drained pause left its entry");
+
+    // Deleted while queued: the first `refuse_if_deleted`.
+    let queued = bare_handle("live-jobs-queued-8664");
+    let seq = push_job(StdArc::clone(&queued), fresh_progress(), 1);
+    let _ = queued.indexer.write().await.detach_for_delete();
+    let err = wait_for_turn(seq).await.expect_err("deleted while queued");
+    assert_eq!(err.index_id, queued.id.0);
+    assert!(!is_live(seq), "deleted-while-queued left its entry");
+
+    // Deleted after the teardown lock: the authoritative re-check. The job
+    // takes the background permit only once past the first check, then waits
+    // on the teardown lock this test holds.
+    let torn = bare_handle("live-jobs-teardown-8664");
+    let teardown = crate::service::reindex::acquire_index_teardown_write(&torn.id).await;
+    let seq = push_job(StdArc::clone(&torn), fresh_progress(), 1);
+    let task = tokio::spawn(wait_for_turn(seq));
+    assert!(
+        wait_until(|| background_reindex_semaphore().available_permits() == 0).await,
+        "the job never took the background permit"
+    );
+    let _ = torn.indexer.write().await.detach_for_delete();
+    drop(teardown);
+    let err = task
+        .await
+        .expect("job task")
+        .expect_err("deleted under the lock");
+    assert_eq!(err.index_id, torn.id.0);
+    assert!(!is_live(seq), "deleted-after-teardown left its entry");
+
+    // Cancelled while parked on a pause.
+    let parked = bare_handle("live-jobs-parked-8664");
+    parked.embedding_pause.pause();
+    let seq = push_job(StdArc::clone(&parked), fresh_progress(), 1);
+    let task = tokio::spawn(wait_for_turn(seq));
+    assert!(
+        wait_until(|| !is_queued(seq)).await,
+        "the parked job never claimed itself"
+    );
+    assert!(is_live(seq), "a parked job is still live");
+    task.abort();
+    let _ = task.await;
+    assert!(!is_live(seq), "a cancelled job left its entry");
+
+    wait_for_a_drained_queue("the exit-path test's five jobs").await;
+}

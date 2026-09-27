@@ -457,7 +457,9 @@ pub(super) async fn unregister_index(
     let mut errors: Vec<String> = Vec::new();
     if quiesced {
         let hot = state.registry.get(&index_id);
-        match super::delete_close::close_index_files(
+        // #8664: also the handles queued deferred-embed jobs hold.
+        match super::delete_close::close_all_index_files(
+            &index_id,
             hot.as_ref(),
             super::delete_close::REHYDRATE_WAIT_BUDGET,
             super::delete_close::CLOSE_BUDGET,
