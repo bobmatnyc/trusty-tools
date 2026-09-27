@@ -19,8 +19,8 @@
 //! What: [`query_registry`] runs `claude agents --json` — Claude Code's own
 //! machine-readable list of live sessions — under a hard time cap;
 //! [`attach_id_in_registry`] answers "is this `sessionId` a live background
-//! entry, and what is its short id?"; [`attach_command`] builds the `attach`
-//! pane command; [`relaunch_command`] makes the choice and is the single seam
+//! entry, and what is its short id?"; [`relaunch_spec`] makes the choice between
+//! `attach`, `--resume` and a fresh launch, and is the single seam
 //! `spawn_resume` calls.
 //!
 //! **Why a registry read and not the refusal text.** `claude_code_exit_hint`
@@ -51,11 +51,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tracing::debug;
 
-use super::claude_code_gh_env;
-use super::{
-    cd_and_group, env_bin_prefix, exit_dispatch_suffix, launch_clock_prefix,
-    session_id_export_prefix,
-};
+use super::super::launch_spec::LaunchSpec;
+use super::super::managed_launch::{self, ManagedLaunch};
 
 /// Ceiling on the `claude agents --json` wait. Resume is interactive, so the
 /// probe must never be the reason a pane sits blank; three seconds is far above
@@ -94,29 +91,6 @@ struct AgentEntry {
     session_id: Option<String>,
     kind: Option<String>,
     state: Option<String>,
-}
-
-/// The pane-command inputs `--resume` and `attach` share.
-///
-/// Why: [`relaunch_command`] picks between two builders that need almost the
-/// same eight values; passing them as one borrowed struct keeps the seam a
-/// single testable call rather than a twelve-argument function.
-/// What: plain borrows, no ownership and no I/O. `claude_bin` is already
-/// disclaim-wrapped by the caller — the field is the exact string that reaches
-/// the pane.
-/// Test: `attach_command_carries_the_resume_prefixes`.
-pub(super) struct RelaunchInputs<'a> {
-    pub cwd: &'a Path,
-    pub claude_bin: &'a str,
-    pub config_dir: Option<&'a Path>,
-    pub session_id: &'a str,
-    pub prompt_file: Option<&'a Path>,
-    pub oauth_token: Option<&'a str>,
-    pub gh_env_file: Option<&'a Path>,
-    pub mcp_env: &'a [(String, String)],
-    /// #7685: whether trusty-memory answered at launch. `false` keeps Claude
-    /// Code's auto memory on as the fallback — see [`super::env_bin_prefix`].
-    pub memory_reachable: bool,
 }
 
 /// Read Claude Code's live-session registry, or say why it could not be read.
@@ -216,42 +190,12 @@ pub(super) fn attach_id_in_registry(
     })
 }
 
-/// Build the `claude attach <short-id>` pane command.
-///
-/// Why: re-entering a live background session must otherwise look exactly like
-/// a resume — same `cd`, same `TM_MANAGED_SESSION_ID` export, same launch clock
-/// and exit dispatch (#6766), same `gh` identity file (#3025), same env scrub
-/// and `CLAUDE_CONFIG_DIR` (DOC-34), same disclaim-exec wrapper (#2997) — or
-/// the attached session loses whatever the differing piece carried.
-/// What: [`super::resume_command`]'s prefix chain with `attach <attach_id>` in
-/// place of the flags.
-///
-/// `prompt_file` is deliberately unused: `claude attach <id>` accepts no
-/// options (`claude attach --help` documents the bare form only), and the
-/// system prompt it would carry is already part of the conversation being
-/// re-entered. Passing it would make `claude` reject the invocation.
-/// Test: `attach_command_carries_the_resume_prefixes`,
-/// `attach_command_omits_flags_attach_cannot_take`,
-/// `attach_and_resume_share_a_byte_identical_prefix`.
-pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> String {
-    let body = format!(
-        "{}{}{}{} attach {attach_id}{}",
-        session_id_export_prefix(inputs.session_id),
-        launch_clock_prefix(),
-        claude_code_gh_env::gh_env_source_prefix(inputs.gh_env_file),
-        env_bin_prefix(
-            inputs.claude_bin,
-            inputs.config_dir,
-            inputs.oauth_token,
-            inputs.mcp_env,
-            inputs.memory_reachable,
-        ),
-        exit_dispatch_suffix(),
-    );
-    cd_and_group(inputs.cwd, &body)
-}
+// #8233: `attach_command` built a shell string out of the same five prefixes
+// `resume_command` used. Both are now spec builders in `managed_launch`, which
+// shares the whole environment between them by construction — see
+// `managed_launch::attach_spec`. The choice below is what stayed here.
 
-/// Choose and build the pane command for a resume: `attach`, `--resume`, or a
+/// Choose and build the launch spec for a resume: `attach`, `--resume`, or a
 /// fresh launch.
 ///
 /// Why: the choice and both builders belong at one seam so `spawn_resume` holds
@@ -260,8 +204,8 @@ pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> St
 /// pattern `session_id_exists`/`session_id_exists_in` already uses in this
 /// module).
 /// What: a `claude_session_id` that [`attach_id_in_registry`] reports live
-/// yields [`attach_command`]; otherwise the pre-#6863 path runs unchanged —
-/// [`super::resume_command`] with `effective_id` (the caller's
+/// yields [`managed_launch::attach_spec`]; otherwise the pre-#6863 path runs
+/// unchanged — [`managed_launch::resume_spec`] with `effective_id` (the caller's
 /// `session_id_exists`-filtered id), which is `--resume <uuid>` when that id
 /// survived and a fresh launch when it did not. `probe` returns `Err` whenever
 /// [`query_registry`] could not answer; the reason is logged at debug and the
@@ -278,12 +222,12 @@ pub(super) fn attach_command(inputs: &RelaunchInputs<'_>, attach_id: &str) -> St
 /// `relaunch_starts_fresh_without_a_usable_id`,
 /// `relaunch_never_probes_the_registry_without_a_session_id`,
 /// `relaunch_resumes_a_stopped_background_session`.
-pub(super) fn relaunch_command(
-    inputs: &RelaunchInputs<'_>,
+pub(super) fn relaunch_spec(
+    launch: &ManagedLaunch<'_>,
     claude_session_id: Option<&str>,
     effective_id: Option<&str>,
     probe: impl FnOnce() -> Result<String, String>,
-) -> String {
+) -> LaunchSpec {
     // #6863: no stored id means no registry lookup — the probe must not run.
     let attach_id = match claude_session_id.map(|id| (id, probe())) {
         Some((id, Ok(json))) => attach_id_in_registry(&json, id),
@@ -302,20 +246,9 @@ pub(super) fn relaunch_command(
                 attach_id = %short_id,
                 "stored claude_session_id is a live background session; attaching (#6863)"
             );
-            attach_command(inputs, &short_id)
+            managed_launch::attach_spec(launch, &short_id)
         }
-        None => super::resume_command(
-            inputs.cwd,
-            inputs.claude_bin,
-            inputs.config_dir,
-            effective_id,
-            inputs.session_id,
-            inputs.prompt_file,
-            inputs.oauth_token,
-            inputs.gh_env_file,
-            inputs.mcp_env,
-            inputs.memory_reachable,
-        ),
+        None => managed_launch::resume_spec(launch, effective_id),
     }
 }
 

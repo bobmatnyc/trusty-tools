@@ -47,6 +47,8 @@ fn handle(
     store: Arc<UsearchStore>,
 ) -> Arc<IndexHandle> {
     let mut indexer = CodeIndexer::new(id, root.to_path_buf())
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated)
         .with_components(Arc::new(MockEmbedder::new(8)), store);
     indexer.set_corpus_store(Arc::new(corpus));
     let mut handle = IndexHandle::bare(
@@ -214,7 +216,9 @@ async fn aborted_staging_preserves_live_schema_and_rows() {
 #[tokio::test]
 async fn failed_force_staging_preserves_live_schema_and_rows() {
     let (_root, handle) = fixture(CURRENT_SCHEMA_VERSION);
-    let tmp = super::staging_corpus_path(&handle, &handle.id).unwrap();
+    let tmp = super::staging_corpus_path(&handle, &handle.id)
+        .await
+        .unwrap();
     std::fs::create_dir(&tmp).unwrap();
     let before = handle.indexer.read().await.corpus_store().unwrap();
     let staged = begin_staged_corpus_swap(&handle, &handle.id, true, None, None)

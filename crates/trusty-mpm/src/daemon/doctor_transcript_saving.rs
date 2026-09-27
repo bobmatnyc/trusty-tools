@@ -107,17 +107,19 @@ const PROBE_TOKEN: &str = "probe-token-not-a-credential";
 fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
 
-    // Shell-string builders: parse the `-u` operands out of the `env` prefix.
-    // #7685: `memory_reachable: true` — this probe is about the `-u` scrub list,
-    // and the reachable branch is the one that carries every assignment, so it is
-    // the strictly wider line to check.
-    let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[], true);
+    // #8233: the daemon's spawn/resume/attach paths no longer build a shell
+    // string, so there is no `env -u` prefix to parse for them — they carry a
+    // STRUCTURED unset list in the launch spec. Reading that list directly is
+    // the same guarantee with one parse step removed: drop the scrub from
+    // `managed_env_unset` and this check fails.
+    // A `gh_env` of `&[]` matches the common unconfigured project; the #6668
+    // identity clears it adds are orthogonal to the marker scrub this probes.
+    let managed_unset = crate::runtime::managed_env_unset(&[]);
     // #4181: probe the RELOCATED shape — `tm launch` / `tm connect` now emit
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
     // `_with` keeps the probe hermetic (no ambient token resolution).
-    let launch_line = crate::core::model_inject::build_claude_command_with(
+    let launch_line = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),
@@ -126,22 +128,27 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         // #7422: the probe reads the env prefix only; a scoped MCP file would
         // add flags it does not inspect and a path that does not exist.
         None,
+        false,
     );
+    // #8405: the `false` renderer argument above and below is immaterial — the
+    // probe reads the `-u` scrub, which no renderer value changes.
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command();
-    let client_line = crate::core::model_inject::build_client_session_command(Some(
-        std::path::Path::new("/probe/prompt.txt"),
-    ));
+    let inplace_line = crate::core::model_inject::build_inplace_session_command_configured(false);
+    let client_line = crate::core::model_inject::build_client_session_command_configured(
+        Some(std::path::Path::new("/probe/prompt.txt")),
+        false,
+    );
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
     // #7422: `None` for the composed MCP file — this probe checks env scrubbing
     // and composes nothing, so it must not name a file that does not exist.
-    let run_cmd = crate::core::standalone::run::build_launch_command(
+    let run_cmd = crate::core::standalone::run::build_launch_command_configured(
         std::path::Path::new("/probe/repo"),
         &config_dir,
         None,
         None,
+        false,
     );
     let stream_cmd = crate::control::backend::stream_json::build_claude_command(
         std::path::Path::new("/probe"),
@@ -150,8 +157,8 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
 
     vec![
         (
-            "runtime::claude_code::env_bin_prefix (daemon spawn + resume)",
-            owned(parse_env_unset_vars(&prefix)),
+            "runtime::managed_launch::managed_env_unset (daemon spawn + resume + attach)",
+            managed_unset,
         ),
         (
             "core::model_inject::build_claude_command (tm launch / tm connect)",

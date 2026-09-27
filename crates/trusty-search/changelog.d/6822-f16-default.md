@@ -1,5 +1,0 @@
-Changed
-
-- **Default behaviour change for newly built indexes.** `TRUSTY_VECTOR_QUANT` now defaults to `f16` instead of `f32`, so every index created from this version on stores half-precision vectors — half the vector bytes in RAM and on disk. Recall@10 measures 1.00, the same as f32, on the `ooc_quick_wins` fixture's query set. Set `TRUSTY_VECTOR_QUANT=f32` to keep full precision; `i8` is unchanged and stays opt-in. An empty value now means "unset" and resolves to the default rather than to `f32`.
-- Existing indexes are untouched by the flip: usearch records the scalar kind in the snapshot header and rebuilds the metric from it on every open, so opening an f32 index under the new default reads it as f32 and rewrites no bytes. Converting one is the explicit `trusty-search quantize` backfill.
-- Corrected the `TRUSTY_VECTOR_QUANT` memory-tuning entry, which claimed a forced reindex adopts a new precision. It does not — the vector store is built once at warm-boot and a reindex upserts into it, so `reindex --force` re-embeds at the old precision.

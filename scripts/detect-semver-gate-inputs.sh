@@ -51,6 +51,11 @@
 #     scripts/detect-semver-gate-inputs.sh      this classifier — a change to
 #                                               the decision must be checked by
 #                                               the gate it decides for
+#     scripts/semver_ci_accept.sh               the accepted-break step the
+#     scripts/lib/semver_accepted_breaks.sh     enforce step runs on a BREAK,
+#     scripts/test-data/preflight-check5/       and the library and captured
+#       break-lints.out                         break its self-test cases replay
+#                                               (#8372)
 #
 #   `scripts/preflight-publish.sh` is deliberately NOT here. It runs the same
 #   check_semver.sh at publish time and has its own self-test
@@ -92,6 +97,9 @@ is_gate_input() {
     scripts/semver-checks-feature-exclusions.tsv) return 0 ;;
     scripts/test-data/semver-gate/*) return 0 ;;
     scripts/test-data/semver-types/*) return 0 ;;
+    scripts/semver_ci_accept.sh) return 0 ;;
+    scripts/lib/semver_accepted_breaks.sh) return 0 ;;
+    scripts/test-data/preflight-check5/break-lints.out) return 0 ;;
   esac
   return 1
 }

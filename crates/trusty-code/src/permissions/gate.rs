@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::agents::config::AgentConfig;
 use crate::tools::{
     CLEAR_GOAL_TOOL_NAME, DELEGATE_TO_AGENT_TOOL_NAME, FINISH_TASK_TOOL_NAME,
-    RECALL_SESSION_TOOL_NAME, SET_GOAL_TOOL_NAME, USE_SKILL_TOOL_NAME,
+    RECALL_SESSION_TOOL_NAME, SET_GOAL_TOOL_NAME, TODO_WRITE_TOOL_NAME, USE_SKILL_TOOL_NAME,
 };
 
 use super::config::RuleDecision;
@@ -72,7 +72,8 @@ pub const REMEMBERED_SOURCE: &str = "remembered";
 /// Test: `harness_registered_tool_bypasses_the_legacy_allowlist`,
 /// `stock_pm_agent_may_call_delegate_to_agent`,
 /// `explicit_deny_beats_the_harness_registered_exemption`,
-/// `harness_exemption_does_not_widen_an_ordinary_tool`.
+/// `harness_exemption_does_not_widen_an_ordinary_tool`,
+/// `stock_pm_agent_may_call_todo_write`.
 pub const HARNESS_REGISTERED_TOOLS: &[&str] = &[
     DELEGATE_TO_AGENT_TOOL_NAME,
     FINISH_TASK_TOOL_NAME,
@@ -80,6 +81,11 @@ pub const HARNESS_REGISTERED_TOOLS: &[&str] = &[
     CLEAR_GOAL_TOOL_NAME,
     RECALL_SESSION_TOOL_NAME,
     USE_SKILL_TOOL_NAME,
+    // #8235: the session checklist, wired unconditionally by
+    // `task::executor::run_and_record` exactly as the goal tools above are —
+    // no agent card lists it, so without this the gate refuses the agent's
+    // own plan tracking.
+    TODO_WRITE_TOOL_NAME,
 ];
 
 /// Whether `tool` is one [`HARNESS_REGISTERED_TOOLS`] names.

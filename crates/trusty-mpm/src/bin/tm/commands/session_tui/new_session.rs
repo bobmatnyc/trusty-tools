@@ -55,6 +55,7 @@ use crate::commands::picker_launch_new::LaunchIsolation;
 use crate::commands::projects::registry::RegisterInput;
 use crate::commands::tmux_attach::AttachOutcome;
 
+use super::new_session_name::NameStep;
 use super::state::Input;
 
 /// How many target rows the overlay shows at once.
@@ -153,6 +154,9 @@ pub(crate) struct NewSessionRequest {
     pub(crate) repo: String,
     /// The project's display name.
     pub(crate) label: String,
+    /// #8587: the slugged session name from the Ctrl-N name step; `None`
+    /// takes the daemon's default `tm-<project>-NN`.
+    pub(crate) name_hint: Option<String>,
 }
 
 /// What one keystroke did to the flow.
@@ -185,6 +189,8 @@ pub(crate) struct NewSessionFlow {
     typed: Option<String>,
     /// #7421: the substring the operator has typed to narrow the rows.
     filter: String,
+    /// #8587: `Some` while the Ctrl-N name step is open.
+    naming: Option<NameStep>,
     resolve: Resolver,
 }
 
@@ -200,6 +206,7 @@ impl PartialEq for NewSessionFlow {
             && self.selected == other.selected
             && self.typed == other.typed
             && self.filter == other.filter
+            && self.naming == other.naming
     }
 }
 
@@ -218,6 +225,7 @@ impl NewSessionFlow {
             selected: 0,
             typed: None,
             filter: String::new(),
+            naming: None,
             resolve,
         }
     }
@@ -238,6 +246,11 @@ impl NewSessionFlow {
     /// The free-text buffer, while the path entry is open.
     pub(crate) fn typed(&self) -> Option<&str> {
         self.typed.as_deref()
+    }
+
+    /// The Ctrl-N name step, while it is open (#8587).
+    pub(crate) fn naming(&self) -> Option<&NameStep> {
+        self.naming.as_ref()
     }
 
     /// The substring the operator has typed to narrow the rows (#7421).
@@ -337,9 +350,15 @@ impl NewSessionFlow {
     /// keys move over the target list. #7421 gives Esc one job first — a
     /// non-empty filter is cleared, and only an Esc with nothing left to clear
     /// cancels the flow.
+    /// #8587: an open name step takes every key first, Esc included, so Esc
+    /// there returns to the list without clearing the filter.
     /// Test: `new_session_escape_cancels_from_both_steps`,
-    /// `new_session_typing_filters_the_rows`.
+    /// `new_session_typing_filters_the_rows`,
+    /// `new_session_name_escape_returns_to_the_list_intact`.
     pub(crate) fn apply(&mut self, input: Input) -> Step {
+        if let Some(step) = super::new_session_name::route(&mut self.naming, input) {
+            return step;
+        }
         match input {
             // #7421: clear the filter before cancelling, so a mistyped filter
             // costs one key rather than the whole flow.
@@ -393,6 +412,10 @@ impl NewSessionFlow {
                 Some(Target::Other) => self.confirm_escape_row(),
                 None => Step::Ignore,
             },
+            // #8587: Ctrl-N opens the name step, or refuses the row at keypress.
+            Input::NameNew => {
+                super::new_session_name::open(&mut self.naming, self.targets.get(self.selected))
+            }
             _ => Step::Ignore,
         }
     }
@@ -520,6 +543,7 @@ pub(crate) fn request_for_registered(
         register: None,
         repo: path.to_string(),
         label: name.to_string(),
+        name_hint: None,
     })
 }
 
@@ -577,6 +601,7 @@ pub(crate) fn request_for_path(
         }),
         repo: id.root,
         label: id.name,
+        name_hint: None,
     })
 }
 
@@ -819,6 +844,8 @@ pub(crate) fn repo_is_session_project(repo: &str, session: &ManagedSessionSummar
 /// [`crate::commands::guided_launch::launch_new_session_and_attach`]. The
 /// create call is the picker's launch-new call, unnamed and with the default
 /// isolation, so the session lands exactly where `tm`'s own launch-new puts it.
+/// #8587: the request's `name_hint` passes through, so a Ctrl-N name travels
+/// the same wire key as the numbered picker's `n <name>`.
 /// Test: the ordering and the arguments are
 /// `new_session_unregistered_path_registers_before_creating` and
 /// `new_session_confirming_a_registered_project_creates_without_registering`,
@@ -834,26 +861,17 @@ pub(crate) async fn perform(
             crate::commands::projects::registry::register(
                 client,
                 url,
-                RegisterInput {
-                    name: project.name,
-                    repo_url: project.repo_url,
-                    default_branch: None,
-                    description: None,
-                    tags: Vec::new(),
-                    stack_hint: None,
-                    gh_user: None,
-                    gh_account: None,
-                    gh_config_dir: None,
-                },
+                // #8587: every optional field unset, as before.
+                RegisterInput::new(project.name, project.repo_url),
             )
             .await
         },
-        |repo: String| async move {
+        |repo: String, name_hint: Option<String>| async move {
             crate::commands::guided_launch::launch_new_session_and_attach(
                 client,
                 url,
                 &repo,
-                None,
+                name_hint.as_deref(),
                 LaunchIsolation::default(),
             )
             .await
@@ -870,11 +888,12 @@ pub(crate) async fn perform(
 /// rather than leaving a session pointing at an unregistered project. Taking
 /// both legs as arguments is what makes that ordering assertable with fakes.
 /// What: runs `register` only when the request carries one, then `create` with
-/// the request's `repo`. Returns whatever the create call resolved, which the
+/// the request's `repo` and `name_hint` (#8587). Returns whatever the create call resolved, which the
 /// caller reads for the #2678 terminal hand-off.
 /// Test: `new_session_unregistered_path_registers_before_creating`,
 /// `new_session_confirming_a_registered_project_creates_without_registering`,
-/// `new_session_a_failed_registration_never_creates`.
+/// `new_session_a_failed_registration_never_creates`,
+/// `new_session_name_reaches_the_create_leg`.
 pub(crate) async fn perform_with<R, RFut, C, CFut>(
     request: NewSessionRequest,
     register: R,
@@ -883,18 +902,19 @@ pub(crate) async fn perform_with<R, RFut, C, CFut>(
 where
     R: FnOnce(NewProject) -> RFut,
     RFut: Future<Output = anyhow::Result<()>>,
-    C: FnOnce(String) -> CFut,
+    C: FnOnce(String, Option<String>) -> CFut,
     CFut: Future<Output = anyhow::Result<AttachOutcome>>,
 {
     let NewSessionRequest {
         register: to_register,
         repo,
         label,
+        name_hint,
     } = request;
     if let Some(project) = to_register {
         register(project)
             .await
             .with_context(|| format!("could not register project '{label}'"))?;
     }
-    create(repo).await
+    create(repo, name_hint).await
 }

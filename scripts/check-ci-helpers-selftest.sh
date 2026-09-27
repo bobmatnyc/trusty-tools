@@ -681,9 +681,12 @@ assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Ava
 #
 # 5 -> 6: the `rustdoc-links` job (#5973) builds the whole workspace's
 # documentation, so it carries that disk pressure too.
+#
+# 6 -> 7: the `affected-test` legs (#7777) run `cargo test` for up to the
+# whole workspace, the same build `test-shard` does.
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
   "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
-assert_eq "all six disk-reclaim jobs call the helper" "6" \
+assert_eq "all seven disk-reclaim jobs call the helper" "7" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------
@@ -940,7 +943,8 @@ unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
-assert_eq "every apt step routes through the wrapper" "12" \
+# 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
+assert_eq "every apt step routes through the wrapper" "13" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1016,9 @@ assert_eq "the crate exclusions"      "true"  "$(gate_inputs_of 'scripts/semver-
 assert_eq "the feature exclusions"    "true"  "$(gate_inputs_of 'scripts/semver-checks-feature-exclusions.tsv')"
 assert_eq "a replayed tool capture"   "true"  "$(gate_inputs_of 'scripts/test-data/semver-gate/clean.out')"
 assert_eq "a rustdoc JSON fixture"    "true"  "$(gate_inputs_of 'scripts/test-data/semver-types/baseline.json')"
+assert_eq "the accepted-break step"   "true"  "$(gate_inputs_of 'scripts/semver_ci_accept.sh')"
+assert_eq "the accepted-break library" "true" "$(gate_inputs_of 'scripts/lib/semver_accepted_breaks.sh')"
+assert_eq "the break it replays"      "true"  "$(gate_inputs_of 'scripts/test-data/preflight-check5/break-lints.out')"
 assert_eq "crate source"              "false" "$(gate_inputs_of 'crates/trusty-common/src/lib.rs')"
 assert_eq "a manifest"                "false" "$(gate_inputs_of 'crates/trusty-common/Cargo.toml')"
 assert_eq "documentation"             "false" "$(gate_inputs_of 'docs/reference/semver-gate.md')"
@@ -1205,7 +1212,18 @@ assert_eq "capabilities-drift.yml has a relevance-classifying step" "1" \
   "$(grep -c '^        id: relevance$' "${cap_wf}" || true)"
 assert_eq "capabilities-drift.yml classifies relevance from the diff, not the event" "1" \
   "$(grep -c 'bash scripts/ci-crate-relevance.sh trusty-mpm' "${cap_wf}" || true)"
-assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "3" \
+# FOUR, not three, since PR #8263 added `Install tm` — the step that installs
+# the binary `scripts/lib/run_or_cargo.sh` prefers over `cargo run`, so the
+# drift check below never takes the shared build lock. The other three:
+# Install Rust toolchain, Cache cargo build, and the drift check itself. Every
+# one of them is worthless on an inert diff, and the last two would run
+# against a binary that was never installed if this count ever drops.
+#
+# ANCHORED ON `$`, for the same reason the semver-checks assertion below is
+# (#5501): unanchored, this is a substring match that a widened condition
+# would also satisfy, so it would keep counting the old total and report green
+# over the exact regression it exists to catch.
+assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "4" \
   "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
 # Structural, not string-matched on the old wording (#5407): no JOB the check
 # reports from may decide anything from the activity type. `concurrency:` may
@@ -1251,6 +1269,172 @@ assert_eq "semver-checks runs its self-tests when the gate itself changed" "4" \
   "$(grep -c "have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" .github/workflows/semver-checks.yml || true)"
 assert_eq "semver-checks classifies its own machinery from the diff" "1" \
   "$(grep -c 'bash scripts/detect-semver-gate-inputs.sh' .github/workflows/semver-checks.yml || true)"
+
+# ---------------------------------------------------------------------------
+# ci-website-relevance.sh, and website-tests.yml's use of it
+#
+# Same rule the capabilities-drift family asserts: the jobs whose check names
+# a PR reports ALWAYS RUN, and only their COSTLY steps are gated on a
+# relevance verdict computed from the diff. A `paths:` filter here would make
+# a promoted-to-required context unreachable, and an UNGATED costly step would
+# put the whole website suite back on every changelog fragment.
+# ---------------------------------------------------------------------------
+echo
+echo "ci-website-relevance.sh"
+
+relevance_of() { printf '%s\n' "$2" | bash scripts/ci-website-relevance.sh "$1" 2>/dev/null; }
+
+assert_eq "unit: website source is website code" "true" \
+  "$(relevance_of unit 'website/src/lib/changelog/site.ts')"
+assert_eq "unit: prose content under website/src/content is not" "false" \
+  "$(relevance_of unit 'website/src/content/tools/trusty-mpm.md')"
+assert_eq "unit: a changelog fragment is not (PR #8272)" "false" \
+  "$(relevance_of unit 'crates/trusty-common/changelog.d/8268-x.md')"
+assert_eq "unit: a docs/ page is not" "false" \
+  "$(relevance_of unit 'docs/reference/ci-gates.md')"
+assert_eq "unit: a crate version bump is not" "false" \
+  "$(relevance_of unit 'crates/trusty-common/Cargo.toml')"
+assert_eq "unit: a sibling directory never matches website/" "false" \
+  "$(relevance_of unit 'website-archive/src/app.ts')"
+assert_eq "unit: this workflow is its own input" "true" \
+  "$(relevance_of unit '.github/workflows/website-tests.yml')"
+assert_eq "unit: the classifier is its own input" "true" \
+  "$(relevance_of unit 'scripts/ci-website-relevance.sh')"
+assert_eq "unit: an empty change set fails closed" "true" "$(relevance_of unit '')"
+# The two Rust sources `site.test.ts` pins values out of. They were named in
+# website-tests.yml's old `paths:` filter, they are code rather than
+# documentation, and a change to either breaks the unit suite directly —
+# commit 819f55cc9 did exactly that on 2026-08-16.
+assert_eq "unit: stable_set.rs is a unit-suite input" "true" \
+  "$(relevance_of unit 'crates/trusty-installer/src/commands/stable_set.rs')"
+assert_eq "unit: platform.rs is a unit-suite input" "true" \
+  "$(relevance_of unit 'crates/trusty-installer/src/download/platform.rs')"
+# …and the list is exact, not a `crates/*/src/**` prefix. A prefix would put
+# the whole website suite back on most Rust PRs, which is the cost #8272 paid.
+assert_eq "unit: another file in the same crate is not" "false" \
+  "$(relevance_of unit 'crates/trusty-installer/src/download/mod.rs')"
+assert_eq "unit: another crate's source is not" "false" \
+  "$(relevance_of unit 'crates/trusty-common/src/host_metrics.rs')"
+assert_eq "unit: a crate CHANGELOG.md is not" "false" \
+  "$(relevance_of unit 'crates/trusty-search/CHANGELOG.md')"
+
+assert_eq "corpus: a changelog fragment is" "true" \
+  "$(relevance_of corpus 'crates/trusty-common/changelog.d/8268-x.md')"
+assert_eq "corpus: a crate CHANGELOG.md is" "true" \
+  "$(relevance_of corpus 'crates/trusty-search/CHANGELOG.md')"
+assert_eq "corpus: the changelog module is" "true" \
+  "$(relevance_of corpus 'website/src/lib/changelog/parse.ts')"
+assert_eq "corpus: the flagship list is" "true" \
+  "$(relevance_of corpus 'website/src/lib/tools.ts')"
+# A nested fragment is already a defect the changelog gate rejects; answering
+# "relevant" costs a run rather than hiding it.
+assert_eq "corpus: a nested fragment still counts" "true" \
+  "$(relevance_of corpus 'crates/trusty-common/changelog.d/sub/x.md')"
+assert_eq "corpus: an unrelated website route is not" "false" \
+  "$(relevance_of corpus 'website/src/routes/+page.svelte')"
+assert_eq "corpus: a crate source file is not" "false" \
+  "$(relevance_of corpus 'crates/trusty-common/src/host_metrics.rs')"
+# crates/*/src/**/*.md is code, never documentation: those assets compile into
+# binaries. It reaches no website suite either way, and says so here.
+assert_eq "corpus: a bundled agent asset is not a changelog" "false" \
+  "$(relevance_of corpus 'crates/trusty-mpm/src/assets/agents/engineer.md')"
+
+# The corpus job is the CONTENT gate (#8272). Since no test in the `unit`
+# project reads repository content any more, a docs, content, fragment or
+# crate-CHANGELOG change can only be caught here — and must be.
+assert_eq "corpus: a docs/ page is" "true" \
+  "$(relevance_of corpus 'docs/reference/ci-gates.md')"
+assert_eq "corpus: prose content under website/src/content is" "true" \
+  "$(relevance_of corpus 'website/src/content/tools/trusty-mpm.md')"
+assert_eq "corpus: the docs library is" "true" \
+  "$(relevance_of corpus 'website/src/lib/docs/site.ts')"
+assert_eq "corpus: the flagship library is" "true" \
+  "$(relevance_of corpus 'website/src/lib/flagship/content.ts')"
+assert_eq "corpus: a crate Cargo.toml is (the package name a record claims)" "true" \
+  "$(relevance_of corpus 'crates/trusty-common/Cargo.toml')"
+assert_eq "corpus: a crate source a fact card counts is" "true" \
+  "$(relevance_of corpus 'crates/trusty-memory/src/tools/mod.rs')"
+assert_eq "corpus: the project definition is" "true" \
+  "$(relevance_of corpus 'website/vite.config.ts')"
+
+# Root Cargo.toml, ONE line of it (#8272). `site.test.ts` pins the advertised
+# MSRV against `[workspace.package] rust-version`, and that test stayed in the
+# unit project, so the trigger belongs to the unit mode. Listing the whole file
+# would put the 7-minute unit suite back on every version-bump PR, because a
+# bump edits dependency rows in the same file — the exact trap this removes.
+relevance_of_root_cargo() {
+  printf 'Cargo.toml\n' |
+    ROOT_CARGO_DIFF="$1" bash scripts/ci-website-relevance.sh unit 2>/dev/null
+}
+assert_eq "unit: a root Cargo.toml dependency-row bump is not" "false" \
+  "$(relevance_of_root_cargo '+trusty-common = { version = "0.5.0" }')"
+assert_eq "unit: a root Cargo.toml rust-version change is" "true" \
+  "$(relevance_of_root_cargo '-rust-version = "1.94"
++rust-version = "1.95"')"
+# An indented declaration inside a table still counts; so does a pure deletion.
+assert_eq "unit: an indented rust-version line still counts" "true" \
+  "$(relevance_of_root_cargo '-  rust-version = "1.94"')"
+# No diff to read (no EVENT_NAME, so no base): the same fail-closed rule every
+# other error arm follows.
+assert_eq "unit: an uncomputable root Cargo.toml diff fails closed" "true" \
+  "$(relevance_of unit 'Cargo.toml')"
+# The carve-out is the unit mode's alone — root Cargo.toml reaches no corpus
+# suite, and a version bump must not pay for the content gate through it.
+assert_eq "corpus: root Cargo.toml is not" "false" \
+  "$(relevance_of corpus 'Cargo.toml')"
+
+assert_eq "lint: prose content still owes a Prettier run" "true" \
+  "$(relevance_of lint 'website/src/content/tools/trusty-mpm.md')"
+assert_eq "lint: a changelog fragment does not" "false" \
+  "$(relevance_of lint 'crates/trusty-common/changelog.d/8268-x.md')"
+
+assert_eq "an unknown mode is refused" "2" \
+  "$(printf '' | bash scripts/ci-website-relevance.sh bogus >/dev/null 2>&1; echo $?)"
+
+web_wf=".github/workflows/website-tests.yml"
+assert_eq "website-tests.yml: pull_request trigger has no paths filter" "0" \
+  "$(grep -cE '^    paths(-ignore)?:' <<<"$(pr_trigger_block "${web_wf}")" || true)"
+assert_eq "website-tests.yml: push trigger has no paths filter" "0" \
+  "$(grep -cE '^    paths(-ignore)?:' <<<"$(sed -n '/^  push:/,/^  pull_request:/p' "${web_wf}")" || true)"
+assert_eq "website-tests.yml: no job-level if: can skip a reporting job" "0" \
+  "$(grep -cE '^    if:' "${web_wf}" || true)"
+assert_eq "website-tests.yml classifies relevance in each job" "3" \
+  "$(grep -c '^        id: relevance$' "${web_wf}" || true)"
+assert_eq "website-tests.yml classifies from the diff, not the event" "3" \
+  "$(grep -c 'bash scripts/ci-website-relevance.sh ' "${web_wf}" || true)"
+# 16 = 6 in Vitest (unit + smoke) + 5 in Website content corpus + 5 in Prettier +
+# ESLint. Every pnpm/Node/Playwright install and every suite invocation is
+# gated; the two cheap steps (checkout-adjacent base refresh, reading the pnpm
+# pin) are not. Raise this ONLY together with a costly step that IS gated.
+assert_eq "website-tests gates its costly steps on relevance, not the job" "16" \
+  "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'\$" "${web_wf}" || true)"
+assert_eq "no gate in website-tests branches on the activity type" "0" \
+  "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' "${web_wf}")" || true)"
+# The three check names branch protection can list. Renaming one silently
+# drops its required context, so they are pinned here.
+assert_eq "website-tests keeps its three check names" "3" \
+  "$(grep -cE '^    name: (Vitest \(unit \+ smoke\)|Website content corpus|Prettier \+ ESLint)$' "${web_wf}" || true)"
+# The unit run must not re-acquire the corpus: `pnpm test` names its projects.
+assert_eq "the default website test script excludes the corpus project" "1" \
+  "$(grep -c '"test": "vitest run --project=unit --project=smoke"' website/package.json || true)"
+assert_eq "the corpus project has its own script" "1" \
+  "$(grep -c '"test:corpus": "vitest run --project=corpus"' website/package.json || true)"
+
+# test-count.yml is the other job that ran a real `cargo test` on a docs-only
+# PR. Same treatment: the job reports unconditionally, the guard's fixtures
+# still run, and only the toolchain, the cache and the two LIVE cargo steps
+# are gated on the Cargo-inert verdict.
+tc_wf=".github/workflows/test-count.yml"
+assert_eq "test-count.yml classifies from the diff, not the event" "1" \
+  "$(grep -c 'bash scripts/detect-docs-only.sh' "${tc_wf}" || true)"
+assert_eq "test-count.yml: no job-level if: can skip the gate" "0" \
+  "$(grep -cE '^    if:' "${tc_wf}" || true)"
+assert_eq "test-count gates its costly steps on relevance, not the job" "4" \
+  "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'\$" "${tc_wf}" || true)"
+assert_eq "test-count still runs the guard's fixtures unconditionally" "1" \
+  "$(grep -c '^        run: bash scripts/check_test_count_selftest.sh$' "${tc_wf}" || true)"
+assert_eq "no gate in test-count branches on the activity type" "0" \
+  "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' "${tc_wf}")" || true)"
 
 echo
 if [ "${FAILURES}" -gt 0 ]; then

@@ -473,6 +473,30 @@ fn provision_for_spawn_declines_a_non_relocated_spawn() {
     assert_eq!(provision_for_spawn(tmp.path(), None).unwrap(), None);
 }
 
+// #8233: the named-root form must write under the root it was given and
+// nowhere else — the seam the managed launch now uses.
+#[test]
+fn provision_for_spawn_at_writes_under_the_named_root() {
+    let tmp = TempDir::new().unwrap();
+    let (cwd, cfg, _out) = fixture(&tmp);
+    let root = tmp.path().join("state-root");
+    let written = provision_for_spawn_at(&root, &cwd, Some(&cfg))
+        .expect("provision")
+        .expect("a relocated spawn writes a file");
+    assert_eq!(written, session_mcp_path_at(&root, &cwd));
+    assert!(written.starts_with(&root), "{}", written.display());
+    assert!(written.is_file(), "{}", written.display());
+}
+
+#[test]
+fn provision_for_spawn_at_declines_a_non_relocated_spawn() {
+    let tmp = TempDir::new().unwrap();
+    assert_eq!(
+        provision_for_spawn_at(tmp.path(), tmp.path(), None).unwrap(),
+        None
+    );
+}
+
 /// The one hard-failure arm: an unwritable state dir aborts rather than
 /// degrading.
 ///

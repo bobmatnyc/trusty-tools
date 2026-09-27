@@ -10,6 +10,7 @@ use super::*;
 
 use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
 use crate::core::session::SessionId;
+use crate::daemon::rpc::managed::outcome::RouteBody;
 use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
 use crate::session_manager::worktree_ownership::{AgentWorktreeOwner, WorktreeSentinel};
 
@@ -180,6 +181,104 @@ async fn adopt_worktree_route_takes_a_dead_agents_tree_after_a_daemon_restart() 
     }
 }
 
+/// #8318, the reported case: after adoption the dead agent's harness lock is
+/// gone and the tree's branch is free for the next agent's own worktree.
+///
+/// Fails before #8318: adoption rewrote only the sentinel, so HEAD stayed on
+/// the branch, git refused to check it out anywhere else, and the lock stayed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn adopt_worktree_route_frees_the_branch_and_clears_a_dead_agents_lock() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits immediately");
+    let dead_pid = child.id();
+    child.wait().expect("reap the child");
+    let (fixture, tree) = harness_locked_tree("agent-8318-dead", dead_pid);
+    let state = Arc::new(DaemonState::new());
+
+    let outcome = adopt_worktree_core(
+        &state,
+        AdoptWorktreeRequest {
+            path: tree.clone(),
+            as_session: ManagedSessionId::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.status, 200, "body: {:?}", outcome.body);
+    let RouteBody::Json(body) = &outcome.body else {
+        panic!("a 200 must carry JSON: {:?}", outcome.body);
+    };
+    assert_eq!(body["branch_release"]["outcome"], "released", "{body}");
+    assert_eq!(body["harness_lock"]["outcome"], "cleared", "{body}");
+    assert_eq!(
+        harness_agent_lock_pid(&tree),
+        None,
+        "git must report no lock"
+    );
+    let successor = fixture.repo.join("successor-8318");
+    let added = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fixture.repo)
+        .args(["worktree", "add"])
+        .arg(&successor)
+        .arg("session/agent-8318-dead")
+        .status()
+        .expect("run git");
+    assert!(
+        added.success(),
+        "the next agent must be able to check the branch out"
+    );
+}
+
+/// 🔴 #8318 critic MEDIUM-1: the registry says the owning agent ended, but the
+/// harness lock names a pid that is still running. Adoption proceeds on the
+/// registry's word, yet the branch stays checked out and the response says
+/// which pid holds it. Fails before the fix, which detached HEAD anyway.
+#[tokio::test]
+async fn adopt_worktree_route_keeps_the_branch_while_the_lock_pid_runs() {
+    let running = std::process::id();
+    let agent = "agent-8318-lock-running";
+    let (_fixture, tree) = harness_locked_tree(agent, running);
+    let state = Arc::new(DaemonState::new());
+    // The registry's answer: every delegation naming the agent has ended.
+    state.upsert_delegation(delegation_for(
+        SessionId::new(),
+        agent,
+        DelegationStatus::Completed,
+    ));
+
+    let outcome = adopt_worktree_core(
+        &state,
+        AdoptWorktreeRequest {
+            path: tree.clone(),
+            as_session: ManagedSessionId::new(),
+        },
+    )
+    .await;
+
+    assert_eq!(outcome.status, 200, "body: {:?}", outcome.body);
+    let RouteBody::Json(body) = &outcome.body else {
+        panic!("a 200 must carry JSON: {:?}", outcome.body);
+    };
+    assert_eq!(body["harness_lock"]["outcome"], "left_running", "{body}");
+    assert_eq!(body["branch_release"]["outcome"], "kept", "{body}");
+    let reason = body["branch_release"]["reason"].as_str().unwrap_or("");
+    assert!(reason.contains(&running.to_string()), "{reason}");
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("run git");
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        format!("session/{agent}"),
+        "a running pid's branch must stay checked out"
+    );
+}
+
 /// #7974, the arm that must NOT move: the same daemon-restart state, but the
 /// lock names a pid that is running. The fallback supplies no death evidence,
 /// so ADR-0045's refusal stands and the sentinel is untouched.
@@ -190,6 +289,8 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
     let (_fixture, tree) = harness_locked_tree("agent-still-working", std::process::id());
     let state = Arc::new(DaemonState::new());
     let before = std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel");
+    // #8511: nor may the refusal's read move the marker into the git admin dir.
+    let admin = crate::session_manager::worktree_ownership_location::admin_sentinel_path(&tree);
 
     let outcome = adopt_worktree_core(
         &state,
@@ -208,6 +309,10 @@ async fn adopt_worktree_route_still_refuses_a_live_owner_after_a_daemon_restart(
         std::fs::read(tree.join(WORKTREE_SENTINEL_FILE)).expect("read sentinel"),
         before,
         "a refusal must write nothing"
+    );
+    assert!(
+        !admin.is_some_and(|a| a.exists()),
+        "a refusal wrote the admin-dir marker"
     );
 }
 

@@ -36,10 +36,37 @@ pub async fn handle_list(json: bool) -> Result<()> {
                         }
                     }
                 }
+                print_parked(&body);
             }
         }
         Ok(resp) => bail!("daemon returned {}", resp.status()),
         Err(e) => bail!("could not reach daemon at {}: {e}", base),
     }
     Ok(())
+}
+
+/// Print the `parked` rows of a `GET /indexes` body (#8727).
+///
+/// Why: a parked registration still owns its root for the create-time overlap
+/// check, so hiding it left a `409` pointing at an index `list` never showed.
+/// What: one line per row — id, root, and a marker when the root is gone.
+/// Nothing is printed when the daemon sent no parked rows.
+pub(crate) fn print_parked(body: &serde_json::Value) {
+    let Some(rows) = body.get("parked").and_then(|v| v.as_array()) else {
+        return;
+    };
+    if rows.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        "Parked (registered, not resident; still owns its root):".bold()
+    );
+    for row in rows {
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let root = row.get("root_path").and_then(|v| v.as_str()).unwrap_or("");
+        let gone = row.get("root_state").and_then(|v| v.as_str()) == Some("orphaned");
+        let marker = if gone { "  (root missing)" } else { "" };
+        println!("  • {id}  {}{}", root.dimmed(), marker.yellow());
+    }
 }

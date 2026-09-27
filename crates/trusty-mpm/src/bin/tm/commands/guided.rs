@@ -182,6 +182,7 @@ pub(crate) async fn run_guided_default(
                 record.clone(),
                 current_pane_id.as_deref(),
                 true,
+                &trusty_mpm::core::paths::FrameworkPaths::default(),
             )
             .await
             {
@@ -246,6 +247,7 @@ pub(crate) async fn run_guided_default(
                     record.clone(),
                     current_pane_id.as_deref(),
                     false,
+                    &trusty_mpm::core::paths::FrameworkPaths::default(),
                 )
                 .await
                 {
@@ -810,7 +812,10 @@ pub(crate) fn print_non_tty_hint(
     } else {
         let n = sessions.len();
         eprintln!("tm: {n} session(s) found for {source_id}");
-        eprintln!("tm: to resume: tmux attach-session -t {}", sessions[0].name);
+        eprintln!(
+            "tm: to resume: {}",
+            trusty_mpm::core::tmux::shell_attach_command(&sessions[0].name)
+        );
         eprintln!("tm: to launch: run `tm` from an interactive terminal");
     }
 }
@@ -1228,6 +1233,7 @@ pub(crate) async fn fallback_protected(
         url,
         cwd,
         &trusty_mpm::core::disk_usage_guard::DiskGate::MeasureTarget,
+        dirs::home_dir().as_deref(),
     )
     .await
 }
@@ -1250,6 +1256,7 @@ pub(crate) async fn fallback_protected_gated(
     url: &str,
     cwd: &std::path::Path,
     gate: &trusty_mpm::core::disk_usage_guard::DiskGate,
+    home: Option<&std::path::Path>, // #8545: the user home launch writes under
 ) -> anyhow::Result<()> {
     let git_root = match classify_cwd_project(cwd) {
         CwdProject::Usable(root) => root,
@@ -1314,7 +1321,7 @@ pub(crate) async fn fallback_protected_gated(
         // (or, when the project opted out of worktrees, to the repo root).
         super::origin_plan::OriginPlan::ManagedClone(raw_url) => {
             super::guided_protected::launch_protected_workspace(
-                client, url, &git_root, raw_url, gate,
+                client, url, &git_root, raw_url, gate, home,
             )
             .await
         }
@@ -1323,7 +1330,8 @@ pub(crate) async fn fallback_protected_gated(
         // here, which is what the old refusal told the operator to do by hand.
         super::origin_plan::OriginPlan::LiveCheckout => {
             eprintln!("{}", super::origin_plan::live_checkout_notice(&git_root));
-            super::launch::connect(client, url, Some(git_root.to_string_lossy().into_owned())).await
+            let dir = Some(git_root.to_string_lossy().into_owned());
+            super::launch::connect(client, url, dir, home).await
         }
         // Non-GitHub remote: refuse to write to the live tree.
         // NOTE: the daemon's reachability is irrelevant here — this branch is

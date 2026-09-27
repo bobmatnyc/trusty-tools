@@ -101,7 +101,9 @@ async fn fixture(name: &str) -> Fixture {
     let staging = store_dir.join("index.redb.tmp");
 
     let id = IndexId(name.to_string());
-    let mut indexer = CodeIndexer::new(id.0.clone(), root.path());
+    let mut indexer = CodeIndexer::new(id.0.clone(), root.path())
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
     assert_eq!(
         indexer.load_chunks_from_disk(&chunks_json).await.unwrap(),
         3

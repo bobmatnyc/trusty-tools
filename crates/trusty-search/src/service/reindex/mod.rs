@@ -120,6 +120,10 @@ pub use semaphore::background_reindex_queue_depth;
 /// Test: `defer_embed_queue`'s own tests cover the counters directly;
 /// `server::tests_health_degraded` covers the recompute consumer.
 pub use defer_embed_queue::{deferred_embed_completion_epoch, deferred_embed_queue_depth};
+// #8664: the delete path closes the handles queued embed jobs hold.
+pub(crate) use defer_embed_queue::job_handles_for;
+#[cfg(test)]
+pub(crate) use defer_embed_queue::{push_job, wait_for_turn};
 
 /// Re-export `background_reindex_semaphore` (test-only — see the
 /// `#[cfg(test)]` internal re-exports below) so
@@ -280,6 +284,9 @@ mod embed_pause_tests;
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]
 mod root_hijack_tests;
+// #8438: the swap and staging paths honour the registry's layout.
+#[cfg(test)]
+mod registry_layout_8438_tests;
 // Issue #3979: end-to-end interrupt/resume equivalence plus the corrupt- and
 // stale-checkpoint fallbacks. Isolated from `tests.rs` for the same reason
 // `root_hijack_tests` is — the 1500-SLOC test-file cap.

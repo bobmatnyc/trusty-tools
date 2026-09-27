@@ -73,13 +73,33 @@ pub(super) struct HnswSwapPaths {
     pub(super) staging: PathBuf,
 }
 
+/// Log an unresolvable HNSW path for [`begin_staged_hnsw_swap`].
+///
+/// #8438: a resolver refusal is a misconfiguration and logs at `error`; any
+/// other resolution failure keeps its `warn`.
+fn log_unresolved_path(kind: &str, index_id: &IndexId, e: &anyhow::Error) {
+    if crate::service::storage_layout::is_write_refusal(e) {
+        tracing::error!(
+            "staged hnsw swap: {kind} hnsw path for '{}' refused ({e:#}) — periodic \
+             checkpoints for this index are refused the same way",
+            index_id.0
+        );
+    } else {
+        tracing::warn!(
+            "staged hnsw swap: cannot resolve {kind} hnsw path for '{}' ({e:#}) — periodic \
+             checkpoints will keep writing directly to the live path",
+            index_id.0
+        );
+    }
+}
+
 /// Begin staged HNSW persistence for a reindex (issue #3970).
 ///
 /// Why: called once, before the batch loop starts, so every periodic
 /// checkpoint for the duration of the reindex redirects to staging instead of
 /// the live snapshot.
-/// What: resolves the live + staging HNSW paths (colocated or legacy,
-/// mirroring `begin_staged_corpus_swap`'s own routing), sets
+/// What: resolves the live + staging HNSW paths through the registry-named
+/// storage layout (#8438), sets
 /// `CodeIndexer::begin_reindex_staging`, and returns the pair. Returns `None`
 /// only when a path is unresolvable (e.g. an unwritable data dir) — in that
 /// case the reindexing flag is left untouched and the periodic persister
@@ -91,36 +111,20 @@ pub(super) async fn begin_staged_hnsw_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
 ) -> Option<HnswSwapPaths> {
-    let is_colocated = crate::service::colocated_storage::has_colocated_storage(&handle.root_path);
-    let live = if is_colocated {
-        crate::service::colocated_storage::colocated_hnsw_path(&handle.root_path)
-    } else {
-        crate::service::persistence::hnsw_path(&index_id.0)
-    };
-    let live = match live {
+    use crate::service::storage_layout::{handle_file, HNSW_FILE, HNSW_STAGING_FILE};
+    // #8438: both paths come from the registry-named layout. A #8438 guard
+    // refusal lands in the `Err` arms below and is logged as the error it is.
+    let live = match handle_file(handle, HNSW_FILE).await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(
-                "staged hnsw swap: cannot resolve live hnsw path for '{}' ({e}) — periodic \
-                 checkpoints will keep writing directly to the live path",
-                index_id.0
-            );
+            log_unresolved_path("live", index_id, &e);
             return None;
         }
     };
-    let staging = if is_colocated {
-        crate::service::colocated_storage::colocated_hnsw_staging_path(&handle.root_path)
-    } else {
-        crate::service::persistence::hnsw_staging_path(&index_id.0)
-    };
-    let staging = match staging {
+    let staging = match handle_file(handle, HNSW_STAGING_FILE).await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(
-                "staged hnsw swap: cannot resolve staging hnsw path for '{}' ({e}) — periodic \
-                 checkpoints will keep writing directly to the live path",
-                index_id.0
-            );
+            log_unresolved_path("staging", index_id, &e);
             return None;
         }
     };

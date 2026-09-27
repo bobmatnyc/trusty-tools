@@ -353,6 +353,25 @@ impl ProjectRegistry {
         Ok(active)
     }
 
+    /// Report project roots that already overlap each other (#4289).
+    ///
+    /// Why: The containment guard only covers registrations made through it.
+    /// A registry written before it can hold a project nested inside another,
+    /// and refusing to load such a registry would lock the operator out of
+    /// every project at once. So loading stays unconditional and the overlaps
+    /// are reported for deliberate cleanup instead.
+    /// What: Loads the map and delegates to
+    /// [`crate::registry::registry_overlaps`]. Propagates the load error
+    /// rather than reporting "no overlaps" for a registry it could not read —
+    /// the caller logs and continues, so a failed report never blocks startup.
+    /// Test: `overlap_report_surfaces_a_pre_existing_overlap`,
+    /// `overlap_report_errors_on_an_unreadable_registry`.
+    pub async fn overlap_report(&self) -> Result<Vec<super::RegistryOverlap>> {
+        let entries = self.load().await?;
+        let entries: Vec<ProjectEntry> = entries.into_values().collect();
+        Ok(super::registry_overlaps(&entries))
+    }
+
     /// Render a human-readable status summary for the `/status` command.
     ///
     /// Why: A single formatted string is easier for callers to log or display

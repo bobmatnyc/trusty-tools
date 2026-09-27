@@ -111,6 +111,23 @@
         </article>
       {/each}
       </fieldset>
+      <!-- #8187: an overlay whose global channel was deleted is on disk,
+           addresses nothing, and `load_at_with` drops it from `bindings` — so
+           without this row the operator's only sighting of it was the one
+           delete response that orphaned it. No control is offered because none
+           would work: `agent_channels::write_at` carries these records through
+           every save, and `validate_in` refuses one sent back. Re-declaring the
+           global is the whole repair, and it returns the binding to the list
+           above. -->
+      {#if configuration.inert_overlays?.length}
+        <section class="inert" role="status" aria-label="Inert channel bindings">
+          <h3>Bindings that address nothing</h3>
+          {#each configuration.inert_overlays as id (id)}
+            <p class="error">Global channel {id} was deleted; this binding is inert.</p>
+          {/each}
+          <p class="muted">Re-declare the channel in the Global scope and each binding returns to the list above, where it can be removed.</p>
+        </section>
+      {/if}
       <div class="row"><button on:click={add} disabled={saving||sending||configuration.providers.length===0}><Plus size={14}/>Add channel</button><button class="primary" on:click={save} disabled={!dirty||saving||sending}>{saving?'Saving…':'Save channels'}</button><button on:click={()=>load(viewAgent,true)} disabled={saving||sending}><RefreshCw size={14}/>{dirty?'Discard changes and reload':'Reload'}</button></div>
       {#if configuration.bindings.length>0||message.trim()}<section class="conversation"><h3>Channel messages</h3><div class="row"><select aria-label="Selected channel" bind:value={selected} on:change={selectChannel} disabled={sending}><option value="">Select a destination…</option>{#each configuration.bindings as binding}<option value={binding.id}>{binding.name}</option>{/each}</select><button on:click={read} disabled={reading||!selectedProvider?.configured||!selectedProvider?.can_read}>{reading?'Loading…':'Refresh messages'}</button></div>
       {#if selectedProvider&&!selectedProvider.can_read}<p class="muted">This service does not provide message history.</p>{/if}
@@ -123,5 +140,5 @@
   </div>
 </section>
 <style>
- .channels{display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;color:rgb(var(--color-text-primary));font-size:13px}header{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid rgb(var(--color-border))}h2,h3{font-weight:600}h2{font-size:16px}.body{overflow:auto;padding:20px;min-height:0}.scope{display:flex;gap:0}.scope button{border-radius:0}.scope button:first-child{border-radius:6px 0 0 6px}.scope button:last-child{border-radius:0 6px 6px 0;margin-left:-1px}.scope button.on{background:rgb(var(--color-primary));color:white}article,.conversation{padding:16px;margin:16px 0;border:1px solid rgb(var(--color-border));border-radius:10px}fieldset{border:0;padding:0;min-width:0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}.grow{flex:1}.muted{color:rgb(var(--color-text-muted));margin:8px 0}.error{color:#ba4520}label{display:block}label input[type=checkbox]{margin-right:6px}input:not([type=checkbox]),select,textarea{border:1px solid rgb(var(--color-border));border-radius:6px;padding:8px;background:rgb(var(--color-card-bg));color:inherit;max-width:100%}label input:not([type=checkbox]),label select,label textarea{display:block;width:100%;margin-top:5px}textarea{width:100%;resize:vertical}button{display:inline-flex;align-items:center;gap:6px;border:1px solid rgb(var(--color-border));border-radius:6px;padding:7px 10px}button:disabled{opacity:.45;cursor:default}.primary{background:rgb(var(--color-primary));color:white}.composer{display:flex;align-items:flex-end;gap:10px;margin-top:16px}.composer textarea{flex:1;min-width:0}.message{padding:10px 0;border-bottom:1px solid rgb(var(--color-border))}.message p{white-space:pre-wrap;overflow-wrap:anywhere}details label{margin-top:10px}summary{cursor:pointer}
+ .channels{display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;color:rgb(var(--color-text-primary));font-size:13px}header{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid rgb(var(--color-border))}h2,h3{font-weight:600}h2{font-size:16px}.body{overflow:auto;padding:20px;min-height:0}.scope{display:flex;gap:0}.scope button{border-radius:0}.scope button:first-child{border-radius:6px 0 0 6px}.scope button:last-child{border-radius:0 6px 6px 0;margin-left:-1px}.scope button.on{background:rgb(var(--color-primary));color:white}article,.conversation,.inert{padding:16px;margin:16px 0;border:1px solid rgb(var(--color-border));border-radius:10px}fieldset{border:0;padding:0;min-width:0}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}.grow{flex:1}.muted{color:rgb(var(--color-text-muted));margin:8px 0}.error{color:#ba4520}label{display:block}label input[type=checkbox]{margin-right:6px}input:not([type=checkbox]),select,textarea{border:1px solid rgb(var(--color-border));border-radius:6px;padding:8px;background:rgb(var(--color-card-bg));color:inherit;max-width:100%}label input:not([type=checkbox]),label select,label textarea{display:block;width:100%;margin-top:5px}textarea{width:100%;resize:vertical}button{display:inline-flex;align-items:center;gap:6px;border:1px solid rgb(var(--color-border));border-radius:6px;padding:7px 10px}button:disabled{opacity:.45;cursor:default}.primary{background:rgb(var(--color-primary));color:white}.composer{display:flex;align-items:flex-end;gap:10px;margin-top:16px}.composer textarea{flex:1;min-width:0}.message{padding:10px 0;border-bottom:1px solid rgb(var(--color-border))}.message p{white-space:pre-wrap;overflow-wrap:anywhere}details label{margin-top:10px}summary{cursor:pointer}
 </style>

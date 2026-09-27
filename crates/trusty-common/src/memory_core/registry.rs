@@ -13,6 +13,7 @@
 //! `registry_remove_clears_cached_handle` in this module.
 
 use crate::memory_core::community::KnowledgeGap;
+use crate::memory_core::maintenance_lease::MaintenanceLease;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
@@ -184,6 +185,9 @@ pub struct PalaceRegistry {
     /// [`PalaceRegistry::unopenable`] / [`PalaceRegistry::unopenable_reason`].
     /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
     unopenable: Arc<DashMap<PalaceId, String>>,
+    /// #8733: this data root's maintenance election. `None` (CLI, stdio,
+    /// tests) keeps the pre-#8733 behaviour of always maintaining.
+    maintenance: Option<Arc<MaintenanceLease>>,
 }
 
 impl Default for PalaceRegistry {
@@ -223,6 +227,7 @@ impl PalaceRegistry {
             open_locks: Arc::new(DashMap::new()),
             open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
             unopenable: Arc::new(DashMap::new()),
+            maintenance: None,
         }
     }
 
@@ -283,6 +288,50 @@ impl PalaceRegistry {
     #[must_use]
     pub fn open_intent(&self) -> OpenIntent {
         self.open_intent
+    }
+
+    /// Gate this registry's maintenance on `lease` (#8733).
+    ///
+    /// Why: several processes may open one data root; only the lease holder
+    /// may run dream passes and the open-time TTL purge.
+    /// What: consuming builder storing the lease that
+    /// [`Self::may_run_maintenance`] consults.
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    #[must_use]
+    pub fn with_maintenance_lease(mut self, lease: Arc<MaintenanceLease>) -> Self {
+        self.maintenance = Some(lease);
+        self
+    }
+
+    /// The maintenance lease this registry is gated on, if any.
+    #[must_use]
+    pub fn maintenance_lease(&self) -> Option<&Arc<MaintenanceLease>> {
+        self.maintenance.as_ref()
+    }
+
+    /// Whether this process may run maintenance on this registry's palaces now.
+    ///
+    /// Why (#8733): every maintenance entry point — the dream loop, the manual
+    /// dream run, the open-time purge — asks this one question.
+    /// What: `true` without a lease; otherwise tries to take (or confirms) the
+    /// lease, so a non-holder takes over once the holder exits.
+    /// Test: `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
+    #[must_use]
+    pub fn may_run_maintenance(&self) -> bool {
+        self.maintenance
+            .as_ref()
+            .is_none_or(|lease| lease.try_hold().is_held())
+    }
+
+    /// Open `palace` under this registry's intent without registering it.
+    ///
+    /// Why (#8733): the open-time TTL purge is maintenance, so every open the
+    /// registry performs, and the daemon's hydration, routes through here.
+    /// What: [`PalaceHandle::open_with_intent_purging`] with the purge gated
+    /// on [`Self::may_run_maintenance`].
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    pub fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
+        PalaceHandle::open_with_intent_purging(palace, self.open_intent, self.may_run_maintenance())
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
@@ -556,7 +605,7 @@ impl PalaceRegistry {
         // Issue #1487: honour the registry's open intent. On the HTTP daemon
         // (`Writer`) a second live instance holding the lock makes this fail
         // loud rather than returning a snapshot-mode (read-only) handle.
-        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        let handle = self.open_handle(&palace)?;
         // ADR-0027 T2: name the rooms this palace's drawers already sit in.
         Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
@@ -601,25 +650,58 @@ impl PalaceRegistry {
     /// no extra I/O beyond at most a few dozen inserts.
     /// What: snapshots the in-memory drawer table and delegates to the
     /// additive, insert-only, fail-open backfill. Never writes to `DRAWERS`.
+    /// #8314: read-first — when every room row and the default wing already
+    /// exist (every open after the first), no write transaction is begun. When
+    /// one is missing, the writes run through the bounded, single-flight
+    /// `run_open_write`, so a stuck kg.redb write cannot hold the open.
     /// Test: `store::room_backfill::tests::backfill_changes_no_drawer_rows`;
-    /// `registry_tests::registry_create_and_open` opens through this path.
+    /// `registry_tests::registry_create_and_open` opens through this path;
+    /// `a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time`.
     fn backfill_rooms(handle: &PalaceHandle) {
+        use crate::memory_core::store::{room_backfill, wings};
+        if handle.kg.is_read_only() {
+            return;
+        }
         let drawers = handle.drawers.read().clone();
-        crate::memory_core::store::room_backfill::backfill_rooms_fail_open(
-            handle.id.as_str(),
-            &handle.kg,
-            &drawers,
+        if !Self::open_writes_needed(&handle.kg, &drawers) {
+            return;
+        }
+        let (kg, palace) = (handle.kg.clone(), handle.id.clone());
+        let work = move || {
+            room_backfill::backfill_rooms_fail_open(palace.as_str(), &kg, &drawers);
+            // ADR-0027 T9: seed the default wing every room already points at.
+            // Ordered AFTER the room backfill only for log readability — the
+            // two are independent, because `RoomRecord::wing_id` has been
+            // `DEFAULT_WING_ID` since T1. Writes one row, never `ROOMS` or
+            // `DRAWERS`.
+            wings::ensure_default_wing_fail_open(palace.as_str(), &kg);
+        };
+        crate::memory_core::retrieval::open_sweep::run_open_write(
+            &handle.kg.store(),
+            &handle.id,
+            "room_backfill_at_open",
+            crate::memory_core::retrieval::open_sweep::OPEN_WRITE_BUDGET,
+            work,
         );
-        // ADR-0027 T9: seed the default wing every room already points at.
-        // Ordered AFTER the room backfill only for log readability — the two
-        // are independent, because `RoomRecord::wing_id` has been
-        // `DEFAULT_WING_ID` since T1, so no room row needs rewriting for its
-        // wing to exist. This writes exactly one row and never touches
-        // `ROOMS` or `DRAWERS`.
-        crate::memory_core::store::wings::ensure_default_wing_fail_open(
-            handle.id.as_str(),
-            &handle.kg,
-        );
+    }
+
+    /// Whether [`Self::backfill_rooms`] has anything to write (#8314).
+    ///
+    /// Read transactions only. A read error answers `true`, so the fail-open
+    /// writers run and report it as they always have.
+    fn open_writes_needed(
+        kg: &crate::memory_core::store::kg::KnowledgeGraph,
+        drawers: &[crate::memory_core::palace::Drawer],
+    ) -> bool {
+        let rooms_missing = crate::memory_core::store::plan_rooms(kg, drawers)
+            .map(|plan| plan.iter().any(|entry| entry.would_insert()))
+            .unwrap_or(true);
+        rooms_missing
+            || kg
+                .store()
+                .get_wing(crate::memory_core::room_identity::DEFAULT_WING_ID)
+                .map(|wing| wing.is_none())
+                .unwrap_or(true)
     }
 
     /// Resolve a palace-level alias, but ONLY when the requested palace is
@@ -678,7 +760,7 @@ impl PalaceRegistry {
         // Issue #1487: honour the registry's open intent (Writer on the HTTP
         // daemon) so a freshly-created palace is opened under the same
         // fail-loud contract as a re-opened one.
-        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        let handle = self.open_handle(&palace)?;
         // ADR-0027 T2: name the rooms this palace's drawers already sit in.
         Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
@@ -734,7 +816,7 @@ impl PalaceRegistry {
             // `Self::new()`, so this preserves the historical snapshot-fallback
             // behaviour while staying correct if a future caller hydrates a
             // writer registry.
-            match PalaceHandle::open_with_intent(&palace, registry.open_intent) {
+            match registry.open_handle(&palace) {
                 Ok(handle) => {
                     // ADR-0027 T2: same additive backfill on the eager path.
                     Self::backfill_rooms(&handle);

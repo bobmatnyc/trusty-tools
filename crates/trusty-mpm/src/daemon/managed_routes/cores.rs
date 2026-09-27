@@ -338,6 +338,9 @@ pub(crate) async fn resume_core(state: &Arc<DaemonState>, id_str: &str) -> Route
             RouteOutcome::text(404, format!("session {id} not found"))
         }
         Err(ResumeManagedError::InvalidState(reason)) => RouteOutcome::text(409, reason),
+        // #8233 item 1: nothing failed — another path holds this session's
+        // resume. A conflict, never a 500.
+        Err(e @ ResumeManagedError::AlreadyResuming(_)) => RouteOutcome::text(409, e.to_string()),
         Err(ResumeManagedError::WorkspaceGone(msg)) => {
             RouteOutcome::text(422, msg).with_rpc_code(CODE_WORKSPACE_GONE)
         }
@@ -381,6 +384,7 @@ pub(crate) async fn decommission_core(
     state: &Arc<DaemonState>,
     id_str: &str,
     record_only: bool,
+    dirt_policy: ProvisioningDirt,
 ) -> RouteOutcome {
     let id = match parse_id_neutral(id_str) {
         Ok(id) => id,
@@ -394,13 +398,25 @@ pub(crate) async fn decommission_core(
     let pre = mgr.get(&id).await.ok();
     let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
     let pre_ws = pre.and_then(|r| r.workspace_path);
+    // #7660: the full path reports why a removable workspace was kept.
     let outcome = if record_only {
-        mgr.decommission_record_only(&id).await
+        mgr.decommission_record_only(&id)
+            .await
+            .map(|(record, workspace_removed)| (record, workspace_removed, None, None))
     } else {
-        mgr.decommission(&id, None).await
+        mgr.decommission_reporting(&id, None, dirt_policy)
+            .await
+            .map(|r| {
+                (
+                    r.record,
+                    r.workspace_removed,
+                    r.workspace_kept_reason,
+                    r.workspace_kept_by_design,
+                )
+            })
     };
     match outcome {
-        Ok((record, workspace_removed)) => {
+        Ok((record, workspace_removed, workspace_kept_reason, workspace_kept_by_design)) => {
             // workspace_path_was: only meaningful for owned sessions.
             let workspace_path_was = if pre_owned {
                 pre_ws.map(|p| p.to_string_lossy().into_owned())
@@ -411,6 +427,8 @@ pub(crate) async fn decommission_core(
                 summary: record_to_summary(&record),
                 workspace_removed,
                 workspace_path_was,
+                workspace_kept_reason,
+                workspace_kept_by_design,
             })
         }
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => not_found(id_str),
@@ -521,7 +539,8 @@ mod cores_tests {
                 .expect("seed record");
         }
 
-        let outcome = decommission_core(&state, &target.to_string(), false).await;
+        let outcome =
+            decommission_core(&state, &target.to_string(), false, ProvisioningDirt::Refuse).await;
         assert_eq!(
             outcome.status, 409,
             "a guard refusal must be a client-side conflict, not a server fault"

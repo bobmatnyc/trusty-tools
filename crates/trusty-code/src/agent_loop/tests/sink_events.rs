@@ -729,3 +729,244 @@ async fn tools_without_telemetry_emit_no_telemetry_event() {
         sink.calls()
     );
 }
+
+// ── #8238: a turn must never end in silence ───────────────────────────────────
+
+/// An assistant turn with NO tool calls and NO text — the shape #8238's P8/P9
+/// transcripts ended on.
+///
+/// Why: every other fixture in this harness carries either a tool call or
+/// text, so none of them can reproduce "the turn just stops".
+fn silent_response() -> Value {
+    json!({
+        "id": "gen-silent",
+        "choices": [{
+            "message": { "role": "assistant", "content": "", "tool_calls": [] },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 9, "completion_tokens": 0, "total_tokens": 9 }
+    })
+}
+
+/// The text the model is scripted to produce once it is asked for a closing
+/// message — deliberately specific, so an assertion on it cannot be satisfied
+/// by an empty string or a daemon-authored placeholder.
+const CLOSING_TEXT: &str = "I read the deploy manifests and changed nothing — \
+this request moves payroll data, so I am declining it.";
+
+/// A run whose last turn carries no tool calls and no text must still deliver a
+/// real final message to the client (#8238).
+///
+/// Why: the loop read "no tool calls" as "the model is done", so an empty
+/// terminal turn ended the run with nothing said — no report, no question, no
+/// refusal (#8238). The client's only source of assistant text is
+/// `ToolEventSink::agent_message`, so "the user saw nothing" is exactly "the
+/// sink recorded no content delta"; asserting on the sink is asserting on what
+/// the client received.
+/// What: script tool call -> silent turn -> real closing text. Assert the
+/// concatenated non-terminal deltas carry `CLOSING_TEXT` and that the loop
+/// consumed all three scripted turns — pre-fix it stops after the second and
+/// the sink holds no content at all.
+/// Test: this test.
+#[tokio::test]
+async fn silent_terminal_turn_is_nudged_into_a_real_final_message() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "listing files"),
+        silent_response(),
+        stop_response(CLOSING_TEXT),
+    ]));
+    let sink = Arc::new(RecordingSink::new());
+
+    let output = make_loop(
+        Arc::clone(&llm),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    )
+    .with_tool_event_sink(sink.clone())
+    .with_agent("pm")
+    .run("sys", "task")
+    .await
+    .expect("loop should complete");
+
+    let spoken: String = sink
+        .messages()
+        .iter()
+        .filter(|m| !m.done)
+        .map(|m| m.delta.as_str())
+        .collect();
+    assert!(
+        spoken.contains(CLOSING_TEXT),
+        "the client must receive a real final message, not silence; \
+         sink deltas were {:?}",
+        sink.messages()
+    );
+    assert!(
+        output.content.contains(CLOSING_TEXT),
+        "the recorded run output must carry the closing message too, got {:?}",
+        output.content
+    );
+    assert_eq!(
+        llm.calls(),
+        3,
+        "the silent turn must cost exactly one extra round-trip"
+    );
+}
+
+/// The nudge fires at most ONCE per run (#8238).
+///
+/// Why: an unbounded "ask again" would let a model that answers every nudge
+/// with silence burn the whole turn budget, turning one silent turn into a
+/// long stall — a worse failure than the one being fixed.
+/// What: script two consecutive silent turns; assert the loop stops after the
+/// second (three round-trips would mean it nudged twice) and returns rather
+/// than erroring.
+/// Test: this test.
+#[tokio::test]
+async fn a_second_silent_turn_ends_the_run_instead_of_nudging_again() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        silent_response(),
+        silent_response(),
+        stop_response("unreachable"),
+    ]));
+    let sink = Arc::new(RecordingSink::new());
+
+    make_loop(
+        Arc::clone(&llm),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    )
+    .with_tool_event_sink(sink.clone())
+    .with_agent("pm")
+    .run("sys", "task")
+    .await
+    .expect("loop should complete rather than error");
+
+    assert_eq!(
+        llm.calls(),
+        2,
+        "one nudge per run — a second silent turn is accepted as the end"
+    );
+}
+
+/// The nudge request must carry NO empty assistant turn (#8238).
+///
+/// Why: the loop recorded the silent turn before appending the nudge, so the
+/// next request carried an assistant message with no text and no tool calls
+/// followed by a user message. Bedrock Converse builds each wire message from
+/// content blocks, drops the empty text, emits no message at all for that turn,
+/// and the surrounding tool result then merges with the nudge into two
+/// consecutive user messages — which Converse rejects. So on a `bedrock/*`
+/// model the nudge call FAILED and a run that used to end `Finished` ended
+/// `Failed`. Every existing #8238 test uses `ScriptedLlm`, which accepts any
+/// shape, so none of them can see this.
+/// What: asserts on the request list the loop actually sent — no assistant
+/// message contributes zero content, and once zero-content messages are
+/// impossible the merged user/assistant sequence alternates on every provider.
+/// Test: this test.
+#[tokio::test]
+async fn the_nudge_request_carries_no_empty_assistant_turn() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "listing files"),
+        silent_response(),
+        stop_response(CLOSING_TEXT),
+    ]));
+
+    make_loop(
+        Arc::clone(&llm),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    )
+    .with_agent("pm")
+    .run("sys", "task")
+    .await
+    .expect("loop should complete");
+
+    let nudge_request = llm
+        .requests()
+        .last()
+        .cloned()
+        .expect("the loop sent at least one request");
+    let empty_assistant = nudge_request.iter().find(|m| {
+        m.role == "assistant"
+            && m.tool_calls.as_ref().is_none_or(|c| c.is_empty())
+            && m.content.as_deref().unwrap_or_default().trim().is_empty()
+    });
+    assert!(
+        empty_assistant.is_none(),
+        "an assistant turn with no text and no tool calls contributes no content \
+         block, so the messages around it merge and alternation breaks: {:?}",
+        nudge_request
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        nudge_request
+            .last()
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default(),
+        crate::agent_loop::final_message::FINAL_MESSAGE_NUDGE,
+        "the nudge must be the last message in the request it triggers"
+    );
+}
+
+/// A silent turn with no budget left must NOT be nudged (#8238).
+///
+/// Why: a nudge on the final budgeted turn cannot be answered — the loop falls
+/// out of its range and reports `TurnCapExceeded` where the very same run used
+/// to return `Ok`. The run ends silent either way on that turn, so the nudge
+/// buys nothing and only changes the reported outcome.
+/// What: `max_turns = 1` plus a silent first turn. Assert the run returns `Ok`
+/// and spends exactly one round-trip.
+/// Test: this test.
+#[tokio::test]
+async fn a_silent_turn_with_no_budget_left_is_not_nudged() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        silent_response(),
+        stop_response("unreachable"),
+    ]));
+    let config = AgentLoopConfig {
+        max_turns: 1,
+        ..AgentLoopConfig::default()
+    };
+
+    make_loop(Arc::clone(&llm), registry_with_echo(false), config)
+        .with_agent("pm")
+        .run("sys", "task")
+        .await
+        .expect("a silent last turn must still return Ok, not TurnCapExceeded");
+
+    assert_eq!(
+        llm.calls(),
+        1,
+        "a nudge with no turn left to answer it is a pure cost"
+    );
+}
+
+/// A terminal turn that DOES carry text is returned untouched (#8238).
+///
+/// Why: the nudge must be invisible to every run that already ends properly;
+/// an extra round-trip on a healthy run is a real cost regression.
+/// Test: this test.
+#[tokio::test]
+async fn a_terminal_turn_with_text_is_never_nudged() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "hi"),
+        stop_response("all done"),
+        stop_response("unreachable"),
+    ]));
+    let sink = Arc::new(RecordingSink::new());
+
+    make_loop(
+        Arc::clone(&llm),
+        registry_with_echo(false),
+        AgentLoopConfig::default(),
+    )
+    .with_tool_event_sink(sink.clone())
+    .with_agent("pm")
+    .run("sys", "task")
+    .await
+    .expect("loop should complete");
+
+    assert_eq!(llm.calls(), 2, "a turn with text needs no nudge");
+}

@@ -69,10 +69,9 @@
 			against one lockfile.
 		</p>
 		<p class="text-foundry-secondary">
-			Each crate versions, tags, and publishes independently, and everything is MIT licensed. Five
-			of the seven flagship tools below speak the Model Context Protocol, so they plug into Claude
-			Code and any other MCP client without a bespoke integration; the other two are command-line
-			tools.
+			Each crate versions, tags, and publishes independently, and everything is MIT licensed. All
+			five flagship tools below speak the Model Context Protocol, so they plug into Claude Code and
+			any other MCP client without a bespoke integration.
 		</p>
 	</div>
 </section>
@@ -80,10 +79,20 @@
 <!-- FLAGSHIP TOOLS -->
 <section class="mx-auto max-w-content px-4 pb-16 sm:px-6">
 	<h2 id="flagships" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">
-		Seven flagship tools
+		Five flagship tools
 	</h2>
 	<p class="mt-3 max-w-2xl text-foundry-secondary">
 		Each one has its own page — what it does, how it works, and how to install it.
+	</p>
+	<!-- #8507: switch the link to https://tga.trustytools.dev once bobmatnyc/trusty-git-analytics#127 is live -->
+	<p class="mt-3 max-w-2xl text-sm text-foundry-secondary">
+		trusty-git-analytics (tga) and trusty-audit have moved to their own site, tga.trustytools.dev.
+		Until it is live, see
+		<a
+			href="https://github.com/bobmatnyc/trusty-git-analytics"
+			rel="noreferrer noopener"
+			class="text-foundry-primary underline underline-offset-2">the repository</a
+		>.
 	</p>
 	<div class="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
 		{#each FLAGSHIPS as flagship (flagship.name)}
@@ -204,12 +213,8 @@
 <section class="mx-auto max-w-content px-4 py-16 sm:px-6">
 	<h2 id="install" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">Install</h2>
 	<p class="mt-3 max-w-2xl text-foundry-secondary">
-		A bare <code class="text-sm">tctl install</code> brings up the eight managed crates in
-		dependency order. Name one to install just that crate and whatever it needs at runtime.
-		trusty-audit is not one of them — it
-		<a href="/tools/trusty-audit" class="text-foundry-primary underline underline-offset-2"
-			>installs itself</a
-		>.
+		A bare <code class="text-sm">tctl install</code> brings up the eight managed crates in dependency
+		order. Name one to install just that crate and whatever it needs at runtime.
 	</p>
 	<div class="mt-8 grid gap-6 lg:grid-cols-3">
 		{#each INSTALL_OPTIONS as option (option.id)}
@@ -240,7 +245,7 @@
 		Installing one specific product? The
 		<a href="/install" class="text-foundry-primary underline underline-offset-2"
 			>install walkthrough</a
-		> has the exact sequence for each of the nine, what it needs first, and the macOS permission it asks
+		> has the exact sequence for each of the eight, what it needs first, and the macOS permission it asks
 		for.
 	</p>
 </section>

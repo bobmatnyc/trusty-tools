@@ -769,8 +769,10 @@ async fn manager_decommission_removes_workspace() {
         .join("repo")
         .join("abc-session-id");
     std::fs::create_dir_all(&workspace_path).unwrap();
-    // Write a sentinel file so we can verify the dir was removed.
-    std::fs::write(workspace_path.join("sentinel.txt"), "exists").unwrap();
+    // Write a file so we can verify the dir was removed. #8663: build output,
+    // since a user file would (correctly) keep the workspace.
+    std::fs::create_dir_all(workspace_path.join("target")).unwrap();
+    std::fs::write(workspace_path.join("target/sentinel.txt"), "exists").unwrap();
 
     // Create the session with `owned=true` (atomic: mirrors what `spawn_managed`
     // does for clone-provisioned workspaces after Fix 1).

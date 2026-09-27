@@ -1,9 +1,9 @@
 ## A sidecar, on purpose
 
 trusty-analyze does not index anything. It pulls the chunk corpus trusty-search
-has already built, runs static analysis over it, and serves the results on its
-own port. One parse of your repository feeds both, and a crash in either does
-not take the other down.
+has already built, runs static analysis over it, and serves the results over
+its own Unix socket. One parse of your repository feeds both, and a crash in
+either does not take the other down.
 
 That coupling is explicit rather than best-effort: the analyzer health-checks
 trusty-search at startup and exits rather than come up half-useful. There is no
@@ -35,11 +35,12 @@ per-language dialect of the truth.
 
 ## Two ways in
 
-An HTTP API serves complexity hotspots, smells, quality grades, clusters, and
-the facts store; an MCP server exposes the same analysis to an agent over stdio
-or SSE. A deep-analysis pass will additionally write a prose narrative over an
-analyzed index, routed through OpenRouter or AWS Bedrock depending on the model
-id you configure — it is opt-in, and nothing else in the crate calls an LLM.
+An MCP server exposes complexity hotspots, smells, quality grades, clusters,
+and the facts store to an agent over stdio; the same methods answer over the
+daemon's own JSON-RPC Unix socket for a CLI or another in-process caller. A
+deep-analysis pass will additionally write a prose narrative over an analyzed
+index, routed through OpenRouter or AWS Bedrock depending on the model id you
+configure — it is opt-in, and nothing else in the crate calls an LLM.
 
 The default build links no ONNX runtime and downloads no model. One install
 command works on every supported host.

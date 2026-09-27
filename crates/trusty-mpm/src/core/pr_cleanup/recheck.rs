@@ -1,9 +1,9 @@
 //! Re-reading a worktree immediately before it is removed (#7275 round 4).
 //!
-//! Why: [`super::remove_one`] probes for unsaved work FIRST and removes the
+//! Why: [`super::remove::remove_one`] probes for unsaved work FIRST and removes the
 //! tree LAST, and between those two points it makes several `gh` and `git`
 //! round trips — the merged-pull-request lookup, the merge-tree comparison, the
-//! claim read, the claim tombstone. Ending a claim is record-only (see
+//! claim reads. Ending a claim is record-only (see
 //! [`super::driver::ClaimEnder`]), so nothing stops the agent that held it from
 //! writing a file or making a commit during that window, and on the round-3
 //! code the first probe's answer was still what authorised the removal seconds

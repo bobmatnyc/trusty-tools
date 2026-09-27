@@ -110,6 +110,10 @@ const CODE_INVALID_ARGUMENT: i64 = -32003;
 const CODE_ACTIVE_CONFLICT: i64 = -32008;
 /// HTTP 409 — `RpcError::already_exists`.
 const CODE_ALREADY_EXISTS: i64 = -32009;
+/// HTTP 503 — `RpcError::cancel_unconfirmed` (#8207): the cancel was accepted
+/// and the run has not stopped yet, so the webview must retry rather than render
+/// a fault.
+const CODE_CANCEL_UNCONFIRMED: i64 = -32010;
 /// HTTP 400 — JSON-RPC `Invalid params`.
 const CODE_INVALID_PARAMS: i64 = -32602;
 
@@ -161,6 +165,7 @@ impl BridgeError {
                 CODE_PERMISSION_DENIED => StatusCode::FORBIDDEN,
                 CODE_INVALID_ARGUMENT | CODE_INVALID_PARAMS => StatusCode::BAD_REQUEST,
                 CODE_ACTIVE_CONFLICT | CODE_ALREADY_EXISTS => StatusCode::CONFLICT,
+                CODE_CANCEL_UNCONFIRMED => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
         }
@@ -392,6 +397,9 @@ mod tests {
             RpcError::internal("x"),
             RpcError::active_conflict("ws-1"),
             RpcError::already_exists("dup"),
+            // #8207: the newest arm, and the one whose whole point is NOT being
+            // flattened into a 500.
+            RpcError::cancel_unconfirmed("s-1: still cancelling"),
             RpcError::new(-1, "custom"),
         ];
         for err in cases {

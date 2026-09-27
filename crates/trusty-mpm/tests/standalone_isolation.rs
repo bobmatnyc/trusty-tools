@@ -24,6 +24,9 @@
 //! Test: this file IS the test module; run with
 //! `cargo test -p trusty-mpm --test standalone_isolation`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use trusty_mpm::core::{

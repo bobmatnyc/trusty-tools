@@ -30,10 +30,28 @@ pub mod doctor;
 // sits AT the 500-SLOC production cap. `pub` because `tm doctor --fix` calls
 // `repair_auto_memory` from the `tm` binary.
 pub mod doctor_auto_memory;
+// #8236: declared here for the same reason — a credential in a user-readable
+// LaunchAgent plist. `pub` because `tm doctor --fix` calls
+// `repair_launchd_plist_secrets` from the `tm` binary.
+pub mod doctor_launchd_secrets;
+// #8236: the repair half, split from the row so neither file approaches the
+// 500-SLOC cap. `pub` for the same reason.
+pub mod doctor_launchd_secrets_repair;
+// #8236: `tm doctor --fix-launchd-secrets` — that repair alone, plus the chmod.
+pub mod doctor_launchd_secrets_scoped;
+// #8236 item 8: can the DAEMON's own resolver reach each credential it needs?
+// Read-only, key-only, and bounded so it can never hang on a Keychain dialog.
+pub mod doctor_credential_reach;
 // #7424: declared here rather than inside `doctor.rs` — that file sits AT the
 // 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
 // is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.
 mod doctor_startup_context;
+// #8415: the launchd `ProcessType` of the tm jobs that start tmux servers.
+// Declared here for the same cap reason as the rows above.
+pub mod doctor_launchd_process_type;
+// #8415: the observed priority of the RUNNING tmux server, which a plist fix
+// does not lift until the server restarts.
+mod doctor_tmux_priority;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
@@ -228,6 +246,18 @@ pub async fn serve_with_shutdown(
     let fw = watcher::FileWatcher::new(Arc::clone(&state));
     tokio::spawn(fw.spawn(cancel.child_token()));
 
+    // #8233 (owner ruling 2026-09-18): give the session manager the runtime
+    // relaunch its AUTOMATIC resume paths need, before anything can sweep. Until
+    // this is installed `resume_auto` prepares a pane and marks the record
+    // `Active` with nothing in it — the fleet state a daemon restart produced.
+    // The boot reconcile inside `session_manager()` defers its own auto-resume
+    // to the supervisor for exactly that reason; see `session_manager::reconcile`.
+    managed_routes::auto_relaunch::install_auto_relauncher(&state).await;
+    // #8233 review round 2 (finding 4): sweep launch specs abandoned by an
+    // earlier process. Each carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
+    // cleartext, and the per-launch sweep only runs when a NEXT launch happens.
+    crate::runtime::launch_spec::reap_orphans();
+
     // Spawn the periodic dead-session reaper with a cancel token.
     tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));
 
@@ -250,6 +280,7 @@ pub async fn serve_with_shutdown(
     // cadence and the spawn all live in the service module, which keeps this file
     // under its SLOC cap and keeps the policy next to the loop it governs.
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    project_adoption::spawn_startup_marker_migration(&state); // #8511
 
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
     // default host spawns nothing. A malformed section is reported here and

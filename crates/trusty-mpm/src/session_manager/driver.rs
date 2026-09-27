@@ -140,6 +140,46 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Send literal text followed by Enter to the session named `name`.
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError>;
 
+    /// Send a SHELL COMMAND line, refusing one the pane's tty would truncate
+    /// (#8233).
+    ///
+    /// Why: a pane's tty is in CANONICAL mode until its shell's line editor
+    /// takes over, and that line discipline holds at most `MAX_CANON` bytes —
+    /// 1024 on macOS. `tmux send-keys` writes into that buffer, so a longer
+    /// command loses its tail in the KERNEL, where nothing downstream can see
+    /// it: session `dd0e2fb8-…` died with a 1054-byte launch line cut off
+    /// mid-path. Every builder that types a command at a shell prompt goes
+    /// through here so an over-length line fails LOUDLY.
+    ///
+    /// Deliberately NOT applied to [`Self::send_line`] itself: `inject` and the
+    /// pending-decision answer share that primitive and type into Claude Code's
+    /// RAW-mode TUI, where `MAX_CANON` does not apply and a multi-kilobyte task
+    /// is routine. Guarding the shared primitive would break task delivery to
+    /// enforce a limit that is not in force there.
+    /// What: [`crate::core::tmux::refuse_oversized_pane_command`] first — on
+    /// refusal NOTHING is typed and the message comes back as an `InvalidInput`
+    /// I/O error — then [`Self::send_line_to_pane`] when `pane_id` is `Some`,
+    /// else [`Self::send_line`].
+    /// Test: `send_command_line_refuses_an_oversized_line`,
+    /// `send_command_line_targets_the_named_pane`.
+    fn send_command_line(
+        &self,
+        name: &str,
+        pane_id: Option<&str>,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        if let Some(msg) = crate::core::tmux::refuse_oversized_pane_command(text) {
+            return Err(ManagedError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                msg,
+            )));
+        }
+        match pane_id {
+            Some(pane) => self.send_line_to_pane(name, pane, text),
+            None => self.send_line(name, text),
+        }
+    }
+
     /// Send literal text to `name` WITHOUT a trailing Enter (#1461).
     ///
     /// Why: the harness-agnostic [`Submit::NoSubmit`](crate::core::sm::control::Submit::NoSubmit)
@@ -578,6 +618,77 @@ mod tests {
         fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
             Ok(Vec::new())
         }
+    }
+
+    /// #8233: a command line the pane's tty would truncate must be REFUSED, not
+    /// typed. `MinimalDriver::send_line` always succeeds, so a `Ok` here would
+    /// mean the guard never ran.
+    #[test]
+    fn send_command_line_refuses_an_oversized_line() {
+        let line = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES + 1);
+        let err = MinimalDriver
+            .send_command_line("sess", None, &line)
+            .expect_err("an over-length command line must be refused, never truncated");
+        let ManagedError::Io(io) = &err else {
+            panic!("expected an I/O refusal, got {err}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("#8233"), "{err}");
+    }
+
+    /// The guard must not change WHERE an accepted line lands: a `pane_id`
+    /// still routes through the pane-scoped send (sibling-window hijack, #2456).
+    #[test]
+    fn send_command_line_targets_the_named_pane() {
+        use std::sync::Mutex;
+
+        struct PaneRecorder(Mutex<Vec<(Option<String>, String)>>);
+        impl ManagedTmuxDriver for PaneRecorder {
+            fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+                Ok(())
+            }
+            fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+                Ok(())
+            }
+            fn send_line(&self, _n: &str, text: &str) -> Result<(), ManagedError> {
+                self.0.lock().expect("mutex").push((None, text.to_owned()));
+                Ok(())
+            }
+            fn send_line_to_pane(
+                &self,
+                _n: &str,
+                pane: &str,
+                text: &str,
+            ) -> Result<(), ManagedError> {
+                self.0
+                    .lock()
+                    .expect("mutex")
+                    .push((Some(pane.to_owned()), text.to_owned()));
+                Ok(())
+            }
+            fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+                Ok(String::new())
+            }
+            fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let driver = PaneRecorder(Mutex::new(Vec::new()));
+        driver
+            .send_command_line("sess", Some("%7"), "echo hi")
+            .expect("send");
+        driver
+            .send_command_line("sess", None, "echo ho")
+            .expect("send");
+        let log = driver.0.lock().expect("mutex").clone();
+        assert_eq!(
+            log,
+            vec![
+                (Some("%7".to_owned()), "echo hi".to_owned()),
+                (None, "echo ho".to_owned())
+            ]
+        );
     }
 
     #[test]

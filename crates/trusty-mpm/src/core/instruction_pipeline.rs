@@ -61,117 +61,44 @@ pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 // meaningful rather than a check of two copies of the same paste.
 // ---------------------------------------------------------------------------
 
-/// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
-pub(crate) const SECTION_IDENTITY: &str =
-    include_str!("../assets/instructions/sections/identity.md");
-/// The PM's core operating instructions. Tier `project`.
-pub(crate) const SECTION_CORE: &str = include_str!("../assets/instructions/sections/core.md");
-/// Memory (context-first) protocol guidance. Tier `project`.
-pub(crate) const SECTION_MEMORY: &str = include_str!("../assets/instructions/sections/memory.md");
-/// Code/architecture search protocol guidance. Tier `project`.
-pub(crate) const SECTION_SEARCH: &str = include_str!("../assets/instructions/sections/search.md");
-/// 5-phase workflow execution details, including the sprint/harden doctrine.
-///
-/// `pub(crate)` so the override resolver can use it when no `WORKFLOW.md`
-/// override is present.
-pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/workflow.md");
-/// Agent delegation routing doctrine (the live roster is appended at compose
-/// time, never authored here).
-///
-/// `pub(crate)` so the override resolver can use it when no
-/// `AGENT_DELEGATION.md` override is present.
-pub(crate) const AGENT_DELEGATION: &str =
-    include_str!("../assets/instructions/sections/agent-delegation.md");
-/// The canonical Prohibitions and Circuit Breakers tables. Floor, tier `fixed`.
-///
-/// Split out of `core.md` by #4573: both tables sat inside the `project`-tier
-/// core section, so a three-line `CORE` block in a project's `CLAUDE.md` deleted
-/// the PM's entire delegation-enforcement authority and still validated.
-pub(crate) const SECTION_ENFORCEMENT: &str =
-    include_str!("../assets/instructions/sections/enforcement.md");
-/// Absorbed BASE_PM non-overridable rules, the customization contract, and the
-/// Trusty tool-priority mandate. Floor, tier `fixed`.
-pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
-    include_str!("../assets/instructions/sections/non-overridable-rules.md");
-/// Absorbed BASE_PM framework-guaranteed conventions. Floor, tier `fixed`.
-pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
-    include_str!("../assets/instructions/sections/framework-guaranteed-conventions.md");
+// #8533: the section constants and `SECTION_SOURCES` live in a child module
+// (SLOC cap); re-exported so every existing path keeps resolving.
+#[path = "instruction_section_sources.rs"]
+mod section_sources;
+pub(crate) use section_sources::*;
 
-/// The compile-time table a schema-v2 `file` body resolves through.
-///
-/// Why: the instruction manifest (#4318) names its prose by path
-/// (`{"kind":"file","path":"sections/core.md"}`) so the bulk of the instructions
-/// keeps living in reviewable markdown rather than becoming one 23 KB JSON line
-/// — but a path resolved at *runtime* would put the delivered system prompt at
-/// the mercy of the filesystem and would let a renamed section ship as a silent
-/// content drop. Every entry here is an `include_str!` of a constant declared
-/// above, so the build stays hermetic and a missing section file is a compile
-/// error rather than a launch-time surprise.
-/// What: the nine canonical section sources, keyed by the path form the manifest
-/// uses — relative to `assets/instructions/`. Table order is irrelevant; the
-/// manifest's `blocks` array alone decides emission order.
-/// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
-    ("sections/identity.md", SECTION_IDENTITY),
-    ("sections/core.md", SECTION_CORE),
-    ("sections/memory.md", SECTION_MEMORY),
-    ("sections/search.md", SECTION_SEARCH),
-    ("sections/workflow.md", WORKFLOW),
-    ("sections/agent-delegation.md", AGENT_DELEGATION),
-    ("sections/enforcement.md", SECTION_ENFORCEMENT),
-    (
-        "sections/non-overridable-rules.md",
-        SECTION_NON_OVERRIDABLE_RULES,
-    ),
-    (
-        "sections/framework-guaranteed-conventions.md",
-        SECTION_FRAMEWORK_CONVENTIONS,
-    ),
-];
-
-/// Resolve a manifest `file` body path to its embedded source.
-///
-/// Why: one lookup point means a path typo in the manifest becomes a named
-/// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
-/// instead of an empty block.
-/// What: a linear scan of [`SECTION_SOURCES`] — nine entries, called a handful
-/// of times per process, so a map would buy nothing and would reintroduce the
-/// iteration-order hazard the package format exists to avoid.
-/// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) fn section_source(path: &str) -> Option<&'static str> {
-    SECTION_SOURCES
-        .iter()
-        .find(|(key, _)| *key == path)
-        .map(|(_, body)| *body)
-}
-
-/// The former `PM_INSTRUCTIONS.md` body, rebuilt from its three sections.
+/// The former `PM_INSTRUCTIONS.md` body, rebuilt from the PM-body sections.
 ///
 /// Why: the legacy override assembly
 /// ([`crate::core::instruction_overrides::assemble_sections`]) treats the PM body
 /// as one section it may be fully replaced by `PM_INSTRUCTIONS_DEPLOYED.md`. It
-/// still needs that single string, but the *authored* source is now three files.
-/// Reconstituting here — rather than keeping a fourth copy on disk — is what
+/// still needs that single string, but the *authored* source is now four files.
+/// Reconstituting here — rather than keeping a fifth copy on disk — is what
 /// stops the legacy path and the packaged path from delivering different
 /// content once a section is edited (#4183).
-/// What: Core, Memory and Search joined with a paragraph break, in that order,
-/// with the trailing newline a file would have carried. The paragraph break is
-/// deliberately [`crate::core::instruction_package::Join::Blank`]'s literal, so
-/// this string is byte-identical to what the packaged composer emits for the
-/// same three blocks.
-/// Test: `pm_instructions_is_its_three_sections`,
+/// What: the `PM_BODY_SECTIONS` run — Identity through Search, every section
+/// before the stack profile (#8533) — joined with a paragraph break, in block
+/// order, with the trailing newline a file would have carried.
+/// The paragraph break is deliberately
+/// [`crate::core::instruction_package::Join::Blank`]'s literal, so this string
+/// is byte-identical to what the packaged composer emits for the same blocks.
+/// #8361 added the autonomy section here: it is inside this opaque blob on the
+/// legacy path, so leaving it out would have dropped the rule from every
+/// roster-absent prompt.
+/// Test: `pm_instructions_is_the_pm_body_sections`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
 pub(crate) fn pm_instructions() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let run = manifest_run(&[SectionId::Core, SectionId::Memory, SectionId::Search])
-            .unwrap_or_else(|| {
-                format!(
-                    "{}\n\n{}\n\n{}",
-                    SECTION_CORE.trim(),
-                    SECTION_MEMORY.trim(),
-                    SECTION_SEARCH.trim()
-                )
-            });
+        // #8533: Identity opens the prompt and `core` was split into nine
+        // sections, so the PM body is every section before the stack profile.
+        let run = manifest_run(&PM_BODY_SECTIONS).unwrap_or_else(|| {
+            PM_BODY_SECTIONS
+                .iter()
+                .filter_map(|id| fallback_source(*id))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        });
         format!("{run}\n")
     });
     &JOINED
@@ -187,7 +114,7 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// as the retained fallback for the case where the manifest itself is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
-/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_four_sections`.
+/// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
 fn manifest_run(sections: &[SectionId]) -> Option<String> {
     crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
 }
@@ -227,14 +154,15 @@ pub(crate) fn delegation_doctrine() -> &'static str {
     &JOINED
 }
 
-/// The non-overridable framework floor, rebuilt from its three sections.
+/// The prompt tail, rebuilt from its three sections.
 ///
 /// Why: the floor is appended last under *every* override branch, including full
 /// PM replacement, so the resolver needs it as one opaque string. Same
 /// no-duplicate-copy argument as [`pm_instructions`].
-/// What: Identity, Enforcement (the Prohibitions and Circuit Breakers tables),
-/// Non-Overridable Rules (which now carries the Trusty tool-priority mandate) and
-/// Framework-Guaranteed Conventions, joined with a paragraph break.
+/// What: Enforcement (the Prohibitions and Circuit Breakers tables),
+/// Non-Overridable Rules (which carries the Trusty tool-priority mandate) and
+/// Framework-Guaranteed Conventions, joined with a paragraph break. All three
+/// are tier `project` since #8533; Identity opens the prompt instead.
 ///
 /// #4573: `Enforcement` joins the floor here so the two authority tables reach
 /// EVERY legacy branch too — including the `PM_INSTRUCTIONS_DEPLOYED.md` full
@@ -248,19 +176,18 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// travels with the other non-overridable rules and consequently precedes the
 /// conventions. Position only — not one word of either block changed, and both
 /// remain inside the floor, so nothing about what is overridable moved.
-/// Test: `base_pm_is_its_four_sections`, `floor_carries_the_tool_priority_mandate`.
+/// Test: `base_pm_is_its_three_tail_sections`, `floor_carries_the_tool_priority_mandate`.
 pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        // #8533: Identity moved to the top of the prompt, out of this tail.
         let run = manifest_run(&[
-            SectionId::Identity,
             SectionId::Enforcement,
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
         ])
         .unwrap_or_else(|| {
             format!(
-                "{}\n\n{}\n\n{}\n\n{}",
-                SECTION_IDENTITY.trim(),
+                "{}\n\n{}\n\n{}",
                 SECTION_ENFORCEMENT.trim(),
                 SECTION_NON_OVERRIDABLE_RULES.trim(),
                 SECTION_FRAMEWORK_CONVENTIONS.trim()
@@ -594,6 +521,12 @@ pub fn remove_stale_bundled_instructions(dest: &std::path::Path) -> std::io::Res
 /// creates it exactly once and then never touches it again, so the operator
 /// can edit freely (issue #2170 — trusty-mpm must never modify a target
 /// project's `CLAUDE.md`).
+/// What: #8533: the `Tokens:` list names every overridable [`SectionId`] and
+/// the safety-core sentence names every overridable section with a core block;
+/// both are checked against `SectionId::CANONICAL` and `SAFETY_CORE`.
+/// Test: `the_stub_lists_exactly_the_overridable_section_tokens`.
+///
+/// [`SectionId`]: crate::core::instruction_package::SectionId
 pub(crate) const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 <!-- trusty-mpm: created by `trusty-mpm session start` — customize for your project -->
@@ -614,9 +547,16 @@ a section of the framework prompt, put the replacement between a marker pair —
 mechanism, so a worked example here would take effect as a real override — see
 `seeded_claude_md_declares_no_overrides`.)
 
-Tokens: `IDENTITY`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
-`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`.
-`CORE` is the one token that is always declined. Prose outside the markers is
+Tokens: `IDENTITY`, `PM-ALLOWLIST`, `DELEGATION-MECHANICS`, `AGENT-ROUTING`,
+`SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`, `GIT-FILE-TRACKING`,
+`TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`, `AUTONOMOUS-EXECUTION`,
+`MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
+`NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. `CORE` is the one
+token that is always declined. An override of `MEMORY`, `SEARCH` or
+`AGENT-DELEGATION` replaces that section but keeps its safety-core block: the
+memory protocol, the code search protocol, agent selection and the agent roster.
+`AUTONOMOUS-EXECUTION` is where a project sets how freely the PM runs — e.g.
+\"ask before dispatching after a resume\" (#8361). Prose outside the markers is
 project context — Claude Code loads it natively, so it is never copied into the
 composed prompt.
 

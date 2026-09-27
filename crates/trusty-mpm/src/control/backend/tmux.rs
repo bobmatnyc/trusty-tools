@@ -88,6 +88,31 @@ fn build_claude_command(claude_cmd: &str, prompt_file: Option<&std::path::Path>)
     }
 }
 
+/// The line typed into the control-plane backend's pane: [`build_claude_command`]
+/// behind an `env` carrying the config-decided renderer (#8405).
+///
+/// Why: this pane is a tmux pane like any other managed one, so without the
+/// assignment the tmux server's inherited `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`
+/// decided the renderer here too.
+/// What: `env <configured_shell_assignments> <build_claude_command>`, with the
+/// renderer [`crate::core::alt_screen::configured_alternate_screen_in`] reads
+/// from `config_root`. The operand values are `0`/`1` or the pinned
+/// `${NAME-default}` form, so nothing caller-supplied enters the prefix.
+/// Test: `pane_claude_line_follows_the_configured_renderer`.
+fn pane_claude_line(
+    config_root: Option<&std::path::Path>,
+    claude_cmd: &str,
+    prompt_file: Option<&std::path::Path>,
+) -> Result<String> {
+    let assignments = crate::core::alt_screen::configured_shell_assignments(
+        crate::core::alt_screen::configured_alternate_screen_in(config_root),
+    );
+    Ok(format!(
+        "env {assignments} {}",
+        build_claude_command(claude_cmd, prompt_file)?
+    ))
+}
+
 /// State for the tmux session backend.
 ///
 /// Why: the actor needs to know the tmux session name to issue subsequent
@@ -142,11 +167,21 @@ impl TmuxBackend {
         // Build the `claude` start command. #6197: `cmd_str` is typed into the
         // pane's shell as literal keystrokes (`send_line`), so both interpolated
         // fields are shell-quoted at the sink — see `build_claude_command`.
-        let cmd_str = build_claude_command(&claude_cmd, prompt_file.as_deref())
-            .with_context(|| format!("building claude command for session {session_id}"))?;
+        // #8405: the operator's config decides the renderer.
+        let cmd_str = pane_claude_line(
+            crate::core::alt_screen::operator_config_root().as_deref(),
+            &claude_cmd,
+            prompt_file.as_deref(),
+        )
+        .with_context(|| format!("building claude command for session {session_id}"))?;
         let target = TmuxTarget::session(&tmux_name);
+        // #8233 review round 2 (finding 5): `send_line` types straight into the
+        // pane's canonical-mode tty with no length guard, so a long `claude_cmd`
+        // or prompt-file path silently lost its tail here exactly as it did on
+        // the managed path. `send_command_line` refuses an over-length line
+        // instead of letting the kernel truncate it.
         driver
-            .send_line(&target, &cmd_str)
+            .send_command_line(&target, &cmd_str)
             .with_context(|| format!("failed to start claude in tmux session {tmux_name}"))?;
 
         debug!(
@@ -357,5 +392,26 @@ mod tests {
         // Expected assembled from parts so no literal launch line lives here.
         let expected = ["claude", "--append-system-prompt-file", pf].join(" ");
         assert_eq!(cmd, expected);
+    }
+
+    /// #8405: the backend's pane line carries the renderer its config root
+    /// decides, both directions, ahead of the still-quoted command.
+    #[test]
+    fn pane_claude_line_follows_the_configured_renderer() {
+        for (alternate_screen, want) in [
+            (true, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
+            (false, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                root.path().join("config.yaml"),
+                format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
+            )
+            .expect("write config");
+            let line =
+                pane_claude_line(Some(root.path()), "claude; rm -rf /", None).expect("quotable");
+            assert!(line.starts_with(want), "want {want:?} leading: {line}");
+            assert!(line.ends_with("'claude; rm -rf /'"), "still quoted: {line}");
+        }
     }
 }

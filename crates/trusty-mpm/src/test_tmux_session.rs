@@ -230,7 +230,14 @@ fn sweep_stale_reserved_sessions(tmux_bin: &str) {
         STALE_SESSION_AGE_SECS,
     ) {
         eprintln!("test-support: killing leaked test tmux session '{name}' (#6116)");
-        let _ = tmux_output(tmux_bin, &["kill-session", "-t", &format!("={name}")]);
+        let _ = tmux_output(
+            tmux_bin,
+            &[
+                "kill-session",
+                "-t",
+                &trusty_common::tmux::exact_session_target(&name),
+            ],
+        );
     }
 }
 
@@ -396,7 +403,7 @@ impl ScratchTmuxSession {
         let mut args = socket_prefix(socket);
         args.push("has-session".to_string());
         args.push("-t".to_string());
-        args.push(format!("={name}"));
+        args.push(trusty_common::tmux::exact_session_target(name));
         tmux_output_owned(tmux_bin, &args).is_ok_and(|out| out.status.success())
     }
 
@@ -415,7 +422,7 @@ impl Drop for ScratchTmuxSession {
         let mut args = socket_prefix(self.socket.as_deref());
         args.push("kill-session".to_string());
         args.push("-t".to_string());
-        args.push(format!("={}", self.name));
+        args.push(trusty_common::tmux::exact_session_target(&self.name));
         let _ = tmux_output_owned(&self.tmux_bin, &args);
     }
 }
@@ -559,9 +566,98 @@ impl Drop for FixtureTmuxSessions {
             let mut args = socket_prefix(self.socket.as_deref());
             args.push("kill-session".to_string());
             args.push("-t".to_string());
-            args.push(format!("={name}"));
+            args.push(trusty_common::tmux::exact_session_target(&name));
             let _ = tmux_output_owned(&self.tmux_bin, &args);
         }
+    }
+}
+
+/// A private tmux server for exactly one test, addressed by `-L <name>`
+/// so no other process on the host — a concurrent `tm` daemon, a sibling
+/// test binary, another engineer's `cargo test` run — can see, adopt, or
+/// kill what this test spawns.
+///
+/// Why: `a_session_outside_the_root_is_left_alone` and its siblings spawn
+/// a REAL session on the shared default tmux server to prove a guard
+/// leaves it alone. Observed 2026-09-14: a concurrent `tm` process swept
+/// or killed that session between the guard's drop and the assertion,
+/// failing the test for a reason unrelated to the property it checks. A
+/// private-per-test socket removes the shared surface entirely (#7848).
+/// What: mints a socket name from the same reserved-test constant
+/// [`reserved_session_name`] uses, unique per test and process so
+/// concurrent test binaries never collide, and tears down the WHOLE
+/// server — not just the sessions inside it — with `-L <name>
+/// kill-server` on drop. Best-effort: a server that never started (no
+/// session spawned before an early panic) yields a harmless failing
+/// `kill-server`.
+/// Test: every test below that spawns a real tmux session passes this
+/// fixture's `name()` as `-L` to every tmux call it makes.
+///
+/// #8443: lifted out of `mod tests` so production-path tests in both targets
+/// can reuse it; [`PrivateTmuxServer::shim_bin`] lets code that only accepts
+/// a tmux binary path reach this server.
+pub(crate) struct PrivateTmuxServer {
+    tmux_bin: String,
+    socket: String,
+    shim_dir: tempfile::TempDir,
+}
+
+#[allow(dead_code)] // Two targets include this file; each uses a subset.
+impl PrivateTmuxServer {
+    pub(crate) fn new(tmux_bin: &str, tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        Self {
+            tmux_bin: tmux_bin.to_string(),
+            socket: format!(
+                "{}sock-{tag}-{}-{nanos}",
+                trusty_common::session_naming::RESERVED_TEST_PREFIX,
+                std::process::id()
+            ),
+            shim_dir: tempfile::tempdir().expect("shim dir"),
+        }
+    }
+
+    /// The `-L` target every tmux call in this test must pass.
+    pub(crate) fn name(&self) -> &str {
+        &self.socket
+    }
+
+    /// Path to an executable that runs `tmux -L <socket> "$@"`, for code under
+    /// test that takes a tmux binary path and adds no `-L` itself (#8443). It
+    /// never reaches the default server.
+    pub(crate) fn shim_bin(&self) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.shim_dir.path().join("tmux-private");
+        if !path.exists() {
+            let script = format!(
+                "#!/bin/sh\nexec '{}' -L '{}' \"$@\"\n",
+                self.tmux_bin, self.socket
+            );
+            std::fs::write(&path, script).expect("write tmux shim");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod tmux shim");
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Run `args` on this server; trimmed stdout, or `None` on a non-zero exit.
+    pub(crate) fn query(&self, args: &[&str]) -> Option<String> {
+        let mut argv = socket_prefix(Some(&self.socket));
+        argv.extend(args.iter().map(|a| (*a).to_string()));
+        let out = tmux_output_owned(&self.tmux_bin, &argv).ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+}
+
+impl Drop for PrivateTmuxServer {
+    fn drop(&mut self) {
+        // See #7848: best-effort — `kill-server` fails harmlessly when no
+        // session was ever spawned on this socket.
+        let _ = tmux_output(&self.tmux_bin, &["-L", &self.socket, "kill-server"]);
     }
 }
 
@@ -586,60 +682,6 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         reserved_session_name(&format!("guard-{tag}-{nanos}"))
-    }
-
-    /// A private tmux server for exactly one test, addressed by `-L <name>`
-    /// so no other process on the host — a concurrent `tm` daemon, a sibling
-    /// test binary, another engineer's `cargo test` run — can see, adopt, or
-    /// kill what this test spawns.
-    ///
-    /// Why: `a_session_outside_the_root_is_left_alone` and its siblings spawn
-    /// a REAL session on the shared default tmux server to prove a guard
-    /// leaves it alone. Observed 2026-09-14: a concurrent `tm` process swept
-    /// or killed that session between the guard's drop and the assertion,
-    /// failing the test for a reason unrelated to the property it checks. A
-    /// private-per-test socket removes the shared surface entirely (#7848).
-    /// What: mints a socket name from the same reserved-test constant
-    /// [`reserved_session_name`] uses, unique per test and process so
-    /// concurrent test binaries never collide, and tears down the WHOLE
-    /// server — not just the sessions inside it — with `-L <name>
-    /// kill-server` on drop. Best-effort: a server that never started (no
-    /// session spawned before an early panic) yields a harmless failing
-    /// `kill-server`.
-    /// Test: every test below that spawns a real tmux session passes this
-    /// fixture's `name()` as `-L` to every tmux call it makes.
-    struct PrivateTmuxServer {
-        tmux_bin: String,
-        socket: String,
-    }
-
-    impl PrivateTmuxServer {
-        fn new(tmux_bin: &str, tag: &str) -> Self {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.subsec_nanos());
-            Self {
-                tmux_bin: tmux_bin.to_string(),
-                socket: format!(
-                    "{}sock-{tag}-{}-{nanos}",
-                    trusty_common::session_naming::RESERVED_TEST_PREFIX,
-                    std::process::id()
-                ),
-            }
-        }
-
-        /// The `-L` target every tmux call in this test must pass.
-        fn name(&self) -> &str {
-            &self.socket
-        }
-    }
-
-    impl Drop for PrivateTmuxServer {
-        fn drop(&mut self) {
-            // See #7848: best-effort — `kill-server` fails harmlessly when no
-            // session was ever spawned on this socket.
-            let _ = tmux_output(&self.tmux_bin, &["-L", &self.socket, "kill-server"]);
-        }
     }
 
     /// The spawn seam this file routes every tmux invocation through is a

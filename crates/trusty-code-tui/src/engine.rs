@@ -26,7 +26,7 @@
 //! - [`SPEC-TTUI-03~draft`](docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape; §3.2, Slice 1.5 generalization layer.
 
 use crate::event::ReplEvent;
-use crate::model::{CommandDescriptor, PermissionAnswer, PickerRequest};
+use crate::model::{CancelReply, CommandDescriptor, PermissionAnswer, PickerRequest};
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -112,11 +112,47 @@ pub trait TuiEngine: Send + Sync {
     /// a no-op lets engines without a cancellable backend operation (or test
     /// doubles) skip the override.
     /// What: implementations that support cancellation should call through
-    /// to their backend's cancel/abort API; the shared event loop calls this
-    /// exactly once per Ctrl-C while a request is in flight.
+    /// to their backend's cancel/abort API. This is the one-state form: it
+    /// says only whether the request was delivered, never whether the run
+    /// actually stopped. The shared event loop reaches it through
+    /// [`Self::cancel_session_reply`]'s default, so an engine whose backend
+    /// can report "not stopped yet" overrides that method instead of this one.
     /// Test: see `handle_input`.
     async fn cancel_session(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Cancel the in-flight request and report what the backend actually
+    /// CONFIRMED (#8207).
+    ///
+    /// Why: [`Self::cancel_session`]'s `Result<()>` has no way to say
+    /// "accepted, but the run has not stopped yet" — the state a cooperative
+    /// cancel really can be in. Flattening that into `Ok(())` is what let the
+    /// TUI print "cancelled" and reopen input while the daemon task was still
+    /// winding down, so the next prompt came back `-32003 already has a task
+    /// running` (#8207). Flattening it into `Err` is no better: a cancel that
+    /// did not land must not read as one that did, but neither should one that
+    /// was accepted read as a transport failure.
+    /// What: deliberately infallible — every failure is a
+    /// [`CancelReply::Failed`], so no arm can be forgotten by a caller doing a
+    /// total match. Each payload string is rendered verbatim to the user, so an
+    /// implementor strips protocol detail (an error code, a JSON-RPC envelope)
+    /// before returning it. The default lifts [`Self::cancel_session`]:
+    /// `Ok(())` becomes [`CancelReply::Stopped`] and an `Err` becomes
+    /// [`CancelReply::Failed`], so an engine with a one-state cancel — and
+    /// every test double — needs no override. The shared event loop calls this
+    /// exactly once per cancel gesture.
+    /// Test: `cancel_session_reply_defaults_to_stopped`,
+    /// `cancel_session_reply_default_reports_an_error_as_failed` (this
+    /// module); `crate::run::tests::dispatch_pending_cancel_holds_input_until_the_reply_lands`
+    /// covers the dispatch wiring.
+    async fn cancel_session_reply(&self) -> CancelReply {
+        match self.cancel_session().await {
+            Ok(()) => CancelReply::Stopped,
+            Err(e) => CancelReply::Failed {
+                error: format!("{e:#}"),
+            },
+        }
     }
 
     /// Answer one suspended permission request (#3422).
@@ -347,6 +383,54 @@ mod tests {
                 .respond_permission("req-1".to_string(), PermissionAnswer::Deny)
                 .await
                 .is_ok()
+        );
+    }
+
+    /// An engine whose `cancel_session` fails — the transport-gone shape
+    /// [`TuiEngine::cancel_session_reply`]'s default has to translate (#8207).
+    struct FailingCancelEngine;
+
+    #[async_trait::async_trait]
+    impl TuiEngine for FailingCancelEngine {
+        async fn handle_input(
+            &self,
+            _line: String,
+            _tx: UnboundedSender<ReplEvent>,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn setup(&self, _tx: UnboundedSender<ReplEvent>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn cancel_session(&self) -> Result<()> {
+            Err(anyhow::anyhow!("socket closed"))
+        }
+    }
+
+    /// #8207: an engine with a one-state cancel needs no override, and its
+    /// `Ok(())` must lift to `Stopped` — the arm that reopens input. Compile-
+    /// level as much as behavioural: `BareEngine` overrides nothing, so this
+    /// also proves the new method did not become a required one.
+    #[tokio::test]
+    async fn cancel_session_reply_defaults_to_stopped() {
+        assert_eq!(
+            BareEngine.cancel_session_reply().await,
+            CancelReply::Stopped
+        );
+    }
+
+    /// #8207: a failed `cancel_session` must lift to `Failed`, never `Stopped`
+    /// — the default is the fail-open hazard's first opportunity, so it is
+    /// asserted at the seam and not only in the reducer.
+    #[tokio::test]
+    async fn cancel_session_reply_default_reports_an_error_as_failed() {
+        assert_eq!(
+            FailingCancelEngine.cancel_session_reply().await,
+            CancelReply::Failed {
+                error: "socket closed".to_string()
+            }
         );
     }
 

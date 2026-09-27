@@ -15,6 +15,11 @@
 # It does NOT flag a crate with no markers — see
 # docs/reference/generated-doc-regions.md for why that is deliberate.
 #
+# A marked file outside crates/ needs its own explicit owner case (there is no
+# per-crate `tests/generated_docs.rs` to require). `docs/roadmap/*.md` is the
+# first such case: its owner is `scripts/roadmap/generate.test.mjs`, the
+# roadmap generator's splice test (docs/roadmap first PR).
+#
 # #5440-followup — this gate used to fail open two ways, both demonstrated:
 #   1. The whole marked-file set came from
 #        marked=$(git ls-files '*.md' | xargs grep -l -E '…' 2>/dev/null || true)
@@ -54,13 +59,14 @@ MIN_MD_FILES=200
 # the markdown enumeration stays at full strength, and the gate reports a clean
 # tree over zero checked regions.
 #
-# Set from the MEASURED tree: 5 marked files across 3 crates
-# (crates/trusty-analyze/{CLAUDE,README}.md, crates/trusty-memory/README.md,
-# crates/trusty-search/{CLAUDE,README}.md). Regions are only ever ADDED, so this
+# Set from the MEASURED tree: 6 marked files across 3 crates plus the first
+# docs/roadmap page (crates/trusty-analyze/{CLAUDE,README}.md,
+# crates/trusty-memory/README.md, crates/trusty-search/{CLAUDE,README}.md,
+# docs/roadmap/trusty-mpm.md). Regions are only ever ADDED, so this
 # is a ratchet: deliberately retiring one means lowering this constant in the
 # same PR, which puts the removal in front of a reviewer instead of silently
 # shrinking the gate's coverage to nothing.
-MIN_MARKED_FILES=5
+MIN_MARKED_FILES=6
 
 status=0
 
@@ -174,6 +180,14 @@ while IFS= read -r file; do
         status=1
       fi
       ;;
+    docs/roadmap/*.md)
+      # Owner: the roadmap generator's splice test (scripts/roadmap/generate.test.mjs).
+      if [ ! -f scripts/roadmap/generate.test.mjs ]; then
+        echo "ERROR: $file has generated regions but scripts/roadmap/generate.test.mjs does not exist,"
+        echo "       so nothing checks them. Ship the generator test with the page."
+        status=1
+      fi
+      ;;
     *)
       echo "ERROR: $file has generated regions but is outside crates/, where no test claims it."
       echo "       Move the region into a crate, or extend this script with an explicit owner."
@@ -183,6 +197,6 @@ while IFS= read -r file; do
 done < "$MARKED"
 
 if [ "$status" = 0 ]; then
-  echo "check_generated_regions: OK (opened ${opened} markdown file(s); ${marked_count} carry generated regions, all claimed by a generated_docs test)"
+  echo "check_generated_regions: OK (opened ${opened} markdown file(s); ${marked_count} carry generated regions, all claimed by a generated_docs test or an owner case)"
 fi
 exit "$status"

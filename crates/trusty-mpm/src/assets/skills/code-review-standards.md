@@ -133,6 +133,57 @@ containing the format's own escape or delimiter characters malforms the
 payload, and the system under test then answers the malformed input with a
 permissive default that reads exactly like a real pass (#7550, #7624).
 
+## Check Block Transient-State Coverage
+
+A Terraform `check` block validated only against the final steady-state plan
+misses failures that appear only during resource replacement. Two observed
+failures: `timecmp` raised on the empty `expire_time` a not-yet-issued
+certificate reports, and `timestamp()` deferred an entire plan to "could not
+be evaluated" where `plantimestamp()` was needed. Both passed a green
+steady-state plan and broke mid-replacement.
+
+Require a check block to be reviewed against the transient states a resource
+passes through during creation and replacement, not only the field values
+present once everything has settled (#8144).
+
+## Check Block Red-Path Coverage
+
+A check block on a scoped data source has two independent failure paths: an
+assertion failure (the read succeeds, the value is wrong) and a read failure
+(the host is unreachable). Terraform converts a read failure to a warning
+automatically, but that behavior is only proven by testing it. An
+`https_listener` check validated on a 404 response only left the
+unreachable-host path — the one carrying load during certificate
+provisioning — untested until a late review caught it.
+
+Require evidence for both paths, the happy-path assertion failure and the
+error-path read failure, before accepting a check block's coverage claim
+(#8143).
+
+## Lifecycle-Guard Escape-Path Verification
+
+An acceptance record marked a documented `prevent_destroy` recovery path MET
+on the strength of prose, without running it. The documented recovery was
+wrong in two independent ways when tried: re-creating a certificate under the
+same name returned 409, and destroying it while still attached to the target
+proxy returned 400 `resourceInUse`.
+
+For any change adding `prevent_destroy` or another lifecycle guard, require
+the acceptance record to state how the documented escape path was actually
+exercised — the command run and its result. Prose alone marks the criterion
+unverified, never MET (#8132).
+
+## Liveness Criteria Require a Sampled Check
+
+A single HTTPS request checked right after a managed certificate reports
+ACTIVE can still fail on a transient TLS handshake error. One failing request
+reports a false red; one lucky success reports a false green over an endpoint
+that is mostly failing.
+
+Require a liveness acceptance criterion — "the certificate is live", "the
+endpoint answers" — to cite a sample with a stated count, N/M requests over T
+seconds, never a single request (#8131).
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.

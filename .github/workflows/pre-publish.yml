@@ -446,7 +446,13 @@ jobs:
   # the next on `Lock acquisition failed: …/blobs/<sha>.lock`. That crate now
   # resolves the same shared cache dir, and hf-hub's `get()` reads the local
   # snapshot without touching the network when the file is present, so the
-  # pre-seed below now covers all eleven selected tests.
+  # pre-seed below now covers all eleven selected ONNX tests.
+  #
+  # #8643: two trusty-installer tests also run here. They read public GitHub
+  # releases (the API, and one tga asset download) rather than a model, so the
+  # run step passes the job's GITHUB_TOKEN, which trusty-installer sends as a
+  # Bearer header. Unauthenticated, the API allows 60 requests an hour per
+  # shared runner IP.
   # ==========================================================================
   ignored-tests:
     name: "Gate 4 — #[ignore]d ONNX/embedder tests"
@@ -597,6 +603,9 @@ jobs:
           key: ${{ steps.fastembed-key.outputs.key }}
 
       - name: Run the selected ignored tests + reconcile the rest
+        env:
+          # #8643: authenticates trusty-installer's live GitHub release reads.
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/check_ignored_tests.sh
 
   # ==========================================================================

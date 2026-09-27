@@ -32,6 +32,7 @@ versions, publishability, and targets.
 | `trusty-code-tui` | [`crates/trusty-code-tui/`](../../crates/trusty-code-tui/) | library | [crate README](../../crates/trusty-code-tui/README.md) |
 | `trusty-common` | [`crates/trusty-common/`](../../crates/trusty-common/) | library, supporting binaries | [crate README](../../crates/trusty-common/README.md), [extended docs](../trusty-common/README.md) |
 | `trusty-console` | [`crates/trusty-console/`](../../crates/trusty-console/) | library, `trusty-console` | [crate README](../../crates/trusty-console/README.md), [extended docs](../trusty-console/README.md) |
+| `trusty-crate-contracts` | [`crates/trusty-crate-contracts/`](../../crates/trusty-crate-contracts/) | test-only, never published — the home for tests spanning two production crates (#8341) | [crate README](../../crates/trusty-crate-contracts/README.md) |
 | `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |
 | `trusty-embedderd` | [`crates/trusty-embedderd/`](../../crates/trusty-embedderd/) | library; bundled binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd/README.md), [extended docs](../trusty-embedderd/README.md) |
 | `trusty-embedderd-py` | [`crates/trusty-embedderd-py/`](../../crates/trusty-embedderd-py/) | library, `trusty-embedderd-py` | [crate README](../../crates/trusty-embedderd-py/README.md) |

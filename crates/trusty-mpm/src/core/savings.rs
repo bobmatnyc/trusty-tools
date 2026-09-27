@@ -370,6 +370,7 @@ pub fn default_savings_log() -> PathBuf {
 /// non-fatal, since a missing savings row must never cost a session its launch.
 /// Test: `append_then_fold_round_trips`, `append_creates_the_usage_directory`.
 pub fn append_row(ledger: &Path, row: &SavingsRow) -> std::io::Result<()> {
+    crate::core::home_write_fence::check(ledger); // #8545
     if let Some(parent) = ledger.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -494,6 +495,7 @@ pub enum AppendOnce {
 /// `append_row_once_skips_an_unreadable_ledger`,
 /// `append_row_once_still_records_a_different_basis`.
 pub fn append_row_once(ledger: &Path, row: &SavingsRow) -> std::io::Result<AppendOnce> {
+    crate::core::home_write_fence::check(ledger); // #8545
     // #7658: the ledger's parent must exist before the lock sidecar can be
     // created beside it. `append_row` creates it too, but that is inside the
     // critical section and too late for the lock file itself.

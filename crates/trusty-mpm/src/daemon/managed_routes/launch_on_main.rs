@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use super::deployment_check::ensure_deployment_complete;
+use super::deployment_check::{RepairHost, ensure_deployment_complete};
 use super::lifecycle::{
     SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env,
 };
@@ -218,7 +218,7 @@ pub(super) async fn spawn_managed_on_main(
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        memory_reachable,
+        RepairHost::new(memory_reachable, state.user_home()),
     ) {
         warn!(
             id = %session_id,
@@ -235,8 +235,17 @@ pub(super) async fn spawn_managed_on_main(
 
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
+    // #8233: the post-send launch check below needs the driver after the adapter
+    // has taken ownership of its Arc.
+    let tmux_driver = tmux_arc.clone();
     // #7685: hand the adapter what preparation resolved, so it does not re-probe.
-    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, memory_reachable);
+    // #8233: the daemon's own framework root, never the process home.
+    let adapter = crate::runtime::build_adapter(
+        record.runtime,
+        tmux_arc,
+        memory_reachable,
+        state.framework_root(),
+    );
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -254,12 +263,11 @@ pub(super) async fn spawn_managed_on_main(
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
             .await;
     } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            path = %local_path.display(),
-            "managed session spawned successfully (launch-on-main, no worktree)"
-        );
+        // #8233: the third `adapter.spawn` site, and until now the only one with
+        // no post-send check — `spawn` returning Ok means tmux took the
+        // keystrokes, not that `claude` started, so this path could leave the
+        // record Active with no runtime behind it until the ~60 s reaper.
+        super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), &record).await;
     }
 
     emit(ProvisioningStage::Complete);

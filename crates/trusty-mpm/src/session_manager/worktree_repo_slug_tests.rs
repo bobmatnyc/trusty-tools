@@ -644,3 +644,95 @@ fn an_unknown_named_remote_refuses_rather_than_answering_for_origin() {
         "acme/widgets"
     );
 }
+
+/// A checkout whose `origin` is the org repository and whose branch pushes to
+/// the operator's fork remote — the #8403 `duettoresearch/jev-matching` shape.
+fn fork_push_checkout(root: &Path, origin: &str) -> PathBuf {
+    let repo = checkout_with_origin(root, "jev-matching", origin);
+    git_ok(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "bob-duetto",
+            "https://github.com/bob-duetto/jev-matching.git",
+        ],
+    );
+    git_ok(&repo, &["checkout", "-b", "fix/x"]);
+    git_ok(&repo, &["config", "remote.pushDefault", "bob-duetto"]);
+    repo
+}
+
+/// 🔴 REGRESSION (#8403): repository identity comes from `origin`. A branch
+/// pushed to a fork remote searches `origin` FIRST, then the fork; on
+/// origin/main it searched the fork (`<account>/<repo>`) alone.
+#[test]
+fn a_fork_branch_searches_origin_first_then_its_push_remote() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = fork_push_checkout(
+        tmp.path(),
+        "https://github.com/duettoresearch/jev-matching.git",
+    );
+    assert_eq!(
+        merged_pr_search_repos_with(&repo, "fix/x", &no_aliases()).expect("both resolve"),
+        vec![
+            "duettoresearch/jev-matching".to_string(),
+            "bob-duetto/jev-matching".to_string()
+        ]
+    );
+}
+
+/// 🔴 REGRESSION (#8403, fail-closed arm): an `origin` URL that names no
+/// repository refuses even when the push remote is valid. On origin/main the
+/// push remote replaced `origin`, so an unparseable `origin` was never read.
+#[test]
+fn an_unparseable_origin_refuses_even_with_a_valid_push_remote() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = fork_push_checkout(tmp.path(), "/srv/git/jev-matching.git");
+    let err = merged_pr_search_repos_with(&repo, "fix/x", &no_aliases())
+        .expect_err("an unparseable origin must refuse");
+    assert!(err.contains("names no GitHub"), "{err}");
+}
+
+/// #8403: a merged PR in `origin` grants even when the fork cannot be
+/// resolved — the reported failure, where the fork lookup errored. The fork is
+/// asked FIRST so its `Err` arm runs: a merged PR grants despite a failed
+/// sibling (#8403 review).
+#[test]
+fn a_merged_pr_in_origin_grants_when_the_fork_cannot_be_resolved() {
+    let repos = vec!["fork/r".to_string(), "org/r".to_string()];
+    let mut asked = Vec::new();
+    let found = first_merged(
+        &repos,
+        |repo| {
+            asked.push(repo.to_string());
+            match repo {
+                "org/r" => Ok((1, repo.to_string())),
+                _ => Err("Could not resolve to a Repository".to_string()),
+            }
+        },
+        |(count, _)| *count > 0,
+    )
+    .expect("origin's merged PR is positive evidence");
+    assert_eq!(found, (1, "org/r".to_string()));
+    assert_eq!(asked, repos, "the failing fork must have been asked first");
+}
+
+/// #8403 (fail-closed arm): when no repository found a merge and one could not
+/// be asked, the lookup is an `Err` — an unanswerable repository is never read
+/// as "no merged PR".
+#[test]
+fn an_unanswerable_repository_denies_when_no_other_found_a_merge() {
+    let repos = vec!["org/r".to_string(), "fork/r".to_string()];
+    let err = first_merged(
+        &repos,
+        |repo| match repo {
+            "org/r" => Ok(0),
+            _ => Err(format!("gh timed out (repository searched: {repo})")),
+        },
+        |count| *count > 0,
+    )
+    .expect_err("an unanswerable repository must deny");
+    assert!(err.contains("fork/r"), "{err}");
+    assert_eq!(first_merged(&repos, |_| Ok(0), |c| *c > 0), Ok(0));
+}

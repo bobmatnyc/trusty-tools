@@ -56,7 +56,7 @@ pub(crate) use deliverables::{
 pub(crate) use divert::DivertAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
-pub(crate) use issue::IssueCmd;
+pub(crate) use issue::{EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;

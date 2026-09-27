@@ -1,6 +1,13 @@
 [package]
 name = "trusty-embedderd"
-version = "0.3.12"
+# 0.3.12 -> 0.4.0 (#7062, the 1.6.3 cut): MINOR, which is the breaking position
+# for a 0.x crate. `preflight-publish.sh` CHECK 5 refused 0.3.12 against 0.3.11
+# on five counts, all of them the retired `--http` listener: `struct_missing`
+# for `AppState`, `function_missing` for `embed_handler` and `health_handler`,
+# `struct_pub_field_missing` for `Args.http_addr`, `constructible_struct_adds_field`
+# for `Args.http`, and `feature_not_enabled_by_default` for `http-server`
+# leaving the default set. Consumers' floors move to `0.4` in the same cut.
+version = "0.4.0"
 publish = true
 edition = "2021"
 license.workspace = true

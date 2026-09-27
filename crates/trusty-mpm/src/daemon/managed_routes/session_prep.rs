@@ -6,7 +6,7 @@
 //! padding the lifecycle state machine.
 //! What: [`prepare_inproject_session`] (the #1913 preparation call the
 //! in-project spawn paths make directly) and
-//! [`refresh_resume_compiled_prompt`] (the #4752 fatal compiled-prompt
+//! [`refresh_resume_compiled_prompt_in`] (the #4752 fatal compiled-prompt
 //! write the resume path needs because it never runs `prepare_session*`).
 //! Test: `prepare_inproject_session_writes_statusline`,
 //! `prepare_inproject_session_emits_stage_events_in_order`,
@@ -114,28 +114,18 @@ pub(super) fn prepare_inproject_session(
 /// [`crate::core::instruction_pipeline::compiled_prompt_path`], and on failure
 /// returns the operator-facing message from
 /// [`crate::core::instruction_pipeline::instructions_failure_message`] —
-/// the caller refuses the resume with it.
-/// Test: `refresh_resume_compiled_prompt_writes_the_project_local_file`,
-/// `refresh_resume_compiled_prompt_reports_an_actionable_failure`.
-pub(super) fn refresh_resume_compiled_prompt(
-    workspace: &std::path::Path,
-    session_id: &ManagedSessionId,
-) -> Result<(), String> {
-    // #7514: a real resume, so the ambient framework root is the right ledger.
-    let root = crate::core::paths::FrameworkPaths::default().root;
-    refresh_resume_compiled_prompt_in(&root, workspace, session_id)
-}
-
-/// [`refresh_resume_compiled_prompt`] against a caller-named framework root.
+/// the caller refuses the resume with it — via
+/// [`crate::core::instruction_pipeline::refresh_compiled_prompt_in`] with the
+/// resumed session's own id as the scope, so the daemon-resume, fresh-start and
+/// bare-`tm` in-place relaunch paths cannot drift apart (#4752) and a resume
+/// refreshes the file the spawn will read rather than a sibling's (#4832).
 ///
-/// Why (#7514): the entry point above resolves its savings ledger from the
-/// process home directory, so the two tests that drive it left a
-/// `no-fold-warned` marker in the operator's own `~/.trusty-mpm/usage/`.
-/// What: [`crate::core::instruction_pipeline::refresh_compiled_prompt_in`] with
-/// the resumed session's own id as the scope — #4752's shared entry point, so
-/// the daemon-resume, fresh-start and bare-`tm` in-place relaunch paths cannot
-/// drift apart, and #4832's per-session write, so a resume refreshes the file
-/// the spawn will read rather than a sibling session's.
+/// #7514/#8233: the framework root is a PARAMETER, never re-derived from the
+/// process home. It anchors the usage/savings ledger, and the root-free wrapper
+/// that used to sit here wrote that ledger into the operator's own
+/// `~/.trusty-mpm/usage/` from every test that drove the resume route. The one
+/// production caller, `lifecycle::resume_managed`, passes
+/// `DaemonState::framework_root`, which IS `~/.trusty-mpm` in production.
 /// Test: `refresh_resume_compiled_prompt_writes_the_project_local_file`,
 /// `refresh_resume_compiled_prompt_reports_an_actionable_failure`.
 pub(super) fn refresh_resume_compiled_prompt_in(

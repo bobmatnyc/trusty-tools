@@ -36,9 +36,13 @@ use crate::core::symbol_graph::SymbolGraph;
 
 pub(crate) mod archive;
 pub(crate) mod corpus_fault;
+// #8167/#8232: closing an index's files when it is deleted.
+mod delete_close;
 pub(crate) mod docs_penalty;
 // #6581: the migration-in-progress window and the error a query lands on there.
 mod files;
+// #8266: grep's file set, read without rehydrating an evicted corpus.
+mod file_set;
 pub(crate) mod helpers;
 mod idle_evict;
 mod ingest;
@@ -98,6 +102,10 @@ pub(crate) use helpers::{
 
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
+pub use delete_close::IndexDeleted;
+// #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
+#[cfg(test)]
+pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #7979: the failed-migration record `GET /indexes/:id/status` reports.
 pub use migration_state::{
@@ -454,6 +462,11 @@ pub struct CodeIndexer {
     /// Test: `shutdown_flush_after_failed_reattach_leaves_chunks_json_byte_identical`.
     pub(super) corpus_ever_wired: bool,
 
+    /// #8167/#8232: `true` once `DELETE /indexes/{id}` has closed this
+    /// indexer's files. Set and cleared only by `delete_close`; while set,
+    /// search and `index_file` refuse with [`IndexDeleted`].
+    pub(super) deleted: bool,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -579,6 +592,12 @@ pub struct CodeIndexer {
     /// #7991: why the last staged reindex promotion was refused, reported by
     /// `GET /indexes/:id/status` as `promotion_deferred`.
     pub(super) promotion_deferral: Arc<promotion_state::PromotionDeferralRecord>,
+
+    /// #8438: where this index's storage lives, as its registry entry names
+    /// it. Set once by `persistence_loader::build_indexer_from_entry`; every
+    /// write path resolves its target through it, never through a probe of
+    /// `<root>/.trusty-search/`.
+    storage_layout: crate::service::storage_layout::StorageLayout,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -696,6 +715,7 @@ impl CodeIndexer {
             corpus_open_failed: false,
             corpus_open_failure: None,
             corpus_ever_wired: false,
+            deleted: false,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
@@ -705,6 +725,7 @@ impl CodeIndexer {
             snapshot_guard: Arc::new(snapshot_guard::SnapshotGuard::default()),
             migration_fault: Arc::new(migration_state::MigrationFaultRecord::default()),
             promotion_deferral: Arc::new(promotion_state::PromotionDeferralRecord::default()),
+            storage_layout: Default::default(),
         }
     }
 
@@ -991,6 +1012,26 @@ impl CodeIndexer {
     /// Test: `service::server::tests_components::patch_vector_off_stops_index_file_from_embedding`.
     pub fn set_skip_vector(&mut self, skip_vector: bool) {
         self.skip_vector = skip_vector;
+    }
+
+    /// The registry-named storage layout (#8438); see `service::storage_layout`.
+    pub(crate) fn storage_layout(&self) -> crate::service::storage_layout::StorageLayout {
+        self.storage_layout
+    }
+
+    /// Record the storage layout the registry entry names (#8438).
+    ///
+    /// Why: the layout is decided once, from `PersistedIndex::colocated`, and
+    /// never re-derived from what exists on disk.
+    /// What: overwrites the field and returns `self`.
+    /// Test: `service::storage_layout::storage_layout_8438_tests`.
+    #[must_use]
+    pub(crate) fn with_storage_layout(
+        mut self,
+        layout: crate::service::storage_layout::StorageLayout,
+    ) -> Self {
+        self.storage_layout = layout;
+        self
     }
 
     /// Returns a cheap `Arc` snapshot of the current symbol graph.

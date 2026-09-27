@@ -66,9 +66,19 @@ async fn launch_session_errors_when_daemon_unreachable() {
     // Why: `/connect <dir>` launches via `launch_session`; when the daemon
     // POST fails (port 0 never connects) the error must surface rather than
     // proceeding to spawn tmux against an unregistered session.
-    let client = DaemonClient::new("http://127.0.0.1:0");
+    // #8545: session prep runs before the POST and refreshes the framework
+    // skill source, so it must land under a temp home, never the operator's.
+    let home = crate::test_support::hermetic_temp_dir();
+    let client = DaemonClient::new("http://127.0.0.1:0").with_home(home.path());
     let result = client.launch_session("/tmp/no-such-project").await;
     assert!(result.is_err(), "expected launch to fail with no daemon");
+    // The refresh no-ops when a checkout's `agents/skills` submodule is the source.
+    let fw = crate::core::paths::FrameworkPaths::under(home.path());
+    assert!(
+        fw.skill_source_dir() != fw.skills || fw.skills.is_dir(),
+        "prep did not write the skill source under the pinned home: {}",
+        fw.skills.display()
+    );
 }
 
 #[tokio::test]
@@ -175,8 +185,10 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
         msg.contains(&sibling.to_string()),
         "the guard's reason must reach the CLI naming the blocking session, got: {msg}"
     );
+    // #7660: `(500` / `server error` is how `error_for_status` renders a 500;
+    // a bare "500" also matched the random UUIDs in the reason.
     assert!(
-        !msg.contains("500"),
+        !msg.contains("(500") && !msg.contains("server error"),
         "a guard refusal must never look like a server fault, got: {msg}"
     );
 }
@@ -784,13 +796,13 @@ fn managed_spawn_response_deserializes() {
         "name": "tmpm-x",
         "state": "running",
         "created_at": "2026-06-19T00:00:00Z",
-        "attach_cmd": "tmux attach-session -t tmpm-x",
+        "attach_cmd": "tmux attach-session -t '=tmpm-x'",
         "runtime": "claude-code",
     });
     let r: ManagedSpawnResponse = serde_json::from_value(json).unwrap();
     assert_eq!(r.id, "id-1");
     assert_eq!(r.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-x'");
     assert_eq!(r.runtime, "claude-code");
 
     // An absent `created_at` deserializes to `None`, while `attach_cmd` and
@@ -838,7 +850,7 @@ fn managed_adopt_response_deserializes() {
         "state": "active",
         "cwd": "/Users/op/work/proj",
         "runtime": "claude-code",
-        "attach_cmd": "tmux attach-session -t tmpm-hand-started",
+        "attach_cmd": "tmux attach-session -t '=tmpm-hand-started'",
     });
     let r: ManagedAdoptResponse = serde_json::from_value(json).unwrap();
     assert_eq!(r.id, "id-9");
@@ -846,7 +858,7 @@ fn managed_adopt_response_deserializes() {
     assert_eq!(r.state, "active");
     assert_eq!(r.cwd, "/Users/op/work/proj");
     assert_eq!(r.runtime, "claude-code");
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-hand-started");
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-hand-started'");
 
     // A lean response (only id/name/state) still deserializes; the defaulted
     // string fields fall back to empty.
@@ -882,10 +894,11 @@ fn managed_send_and_answer_round_trip() {
 
 #[test]
 fn managed_attach_cmd_response_deserializes() {
-    let r: ManagedAttachCmdResponse =
-        serde_json::from_value(serde_json::json!({"attach_cmd": "tmux attach-session -t tmpm-x"}))
-            .unwrap();
-    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+    let r: ManagedAttachCmdResponse = serde_json::from_value(
+        serde_json::json!({"attach_cmd": "tmux attach-session -t '=tmpm-x'"}),
+    )
+    .unwrap();
+    assert_eq!(r.attach_cmd, "tmux attach-session -t '=tmpm-x'");
 }
 
 #[test]

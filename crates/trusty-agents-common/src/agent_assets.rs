@@ -349,6 +349,33 @@ mod tests {
         );
     }
 
+    /// The ops agents that handle credentials name the non-printing form.
+    /// See #8596 (`local-ops` printed Keychain values while "checking" them)
+    /// and #8248 (`gcp-ops` ran `print-access-token` bare to see it work).
+    #[test]
+    fn ops_agents_state_the_non_printing_credential_forms() {
+        let local = LOCAL_OPS.replace('\n', " ");
+        assert!(
+            local.contains("find-generic-password -s <service> >/dev/null 2>&1")
+                && local.contains("Never add `-w` or `-g`")
+                && local.contains("#8596"),
+            "`local-ops.md` must state the exit-status-only Keychain check (#8596)"
+        );
+        // #8596 round 2: the value is consumed inline, as the `tm-secrets`
+        // skill says, never parked in a variable.
+        assert!(
+            local.contains("--password-stdin") && !local.contains("=$(security"),
+            "`local-ops.md` must consume a Keychain value inline, not via `FOO=$(…)`"
+        );
+        let gcp = GCP_OPS.replace('\n', " ");
+        assert!(
+            gcp.contains("Never run `gcloud auth [application-default] print-access-token`")
+                && gcp.contains("Bearer $(gcloud auth print-access-token)")
+                && gcp.contains("#8248"),
+            "`gcp-ops.md` must forbid a bare `print-access-token` run (#8248)"
+        );
+    }
+
     /// `ticketing` and `version-control` are sonnet-tier, never haiku.
     ///
     /// Why (#7274, owner ruling 2026-09-09): both agents carry judgment the
@@ -402,7 +429,9 @@ mod tests {
             "`BASE-AGENT.md` must forbid an agent removing a worktree (#5791)"
         );
         assert!(
-            flat.contains("tm session prune-worktrees"),
+            flat.contains("the PM removes the task-owned path")
+                && flat.contains("git worktree remove /absolute/repo/.claude/worktrees/task-name")
+                && flat.contains("ownership, clean state, merged status and no other live"),
             "`BASE-AGENT.md` must name the PM's replacement command, not just \
              refuse (#5791)"
         );

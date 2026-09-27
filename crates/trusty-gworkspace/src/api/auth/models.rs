@@ -23,7 +23,8 @@ fn default_token_type() -> String {
 /// What: Mirrors Google's token-endpoint response fields with our own
 /// `expires_at` (computed at storage time, not raw `expires_in`).
 /// Test: `is_expired_handles_buffer` in this module.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+// #8539: PartialEq (here and below) lets storage tell a shadow from a copy.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OAuthToken {
     pub access_token: String,
     #[serde(default)]
@@ -51,7 +52,7 @@ impl OAuthToken {
 /// we need to identify them for display and for the `account` MCP param.
 /// What: Mirrors Python `TokenMetadata` model.
 /// Test: Covered indirectly by the storage round-trip integration test.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct TokenMetadata {
     pub service_name: String,
     #[serde(default = "default_provider")]
@@ -74,7 +75,7 @@ fn default_provider() -> String {
 /// Why: Wraps token + metadata + version for forward-compatible migrations.
 /// What: A single entry in the `HashMap<String, StoredToken>` JSON object.
 /// Test: `tests/auth_models.rs` round-trips a fixture string.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StoredToken {
     #[serde(default = "default_version")]
     pub version: u32,

@@ -3,8 +3,9 @@
 //! Why (issue #4837): a thin translation layer — clap args in, library call
 //! out, report rendered. All import logic lives in
 //! [`trusty_mpm::core::memory_import`] so it is testable without a CLI.
-//! What: [`memory`] routes [`MemoryAction`] — `import` here, and
-//! `import-auto-memory` (#7685) in [`super::memory_auto_import`] — and renders
+//! What: [`memory`] routes [`MemoryAction`] — `import` here,
+//! `import-auto-memory` (#7685) in [`super::memory_auto_import`], and the no-MCP
+//! `recall`/`remember`/`note` verbs (#8352) in [`super::memory_verbs`] — and renders
 //! the result either as the machine-readable JSON report (`--json`) or a
 //! per-file human summary.
 //! Exits non-zero when any file failed, so a script can gate on it.
@@ -13,6 +14,8 @@
 
 use anyhow::Context as _;
 use trusty_mpm::core::memory_import::{ImportOptions, ImportReport, ImportStatus};
+// #8352: the no-MCP palace verbs share this dispatcher.
+use trusty_mpm::core::memory_verbs::MemoryVerb;
 
 use crate::cli::MemoryAction;
 
@@ -65,6 +68,52 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
         } => {
             super::memory_auto_import::import_auto_memory(project, palace, json, memory_socket)
                 .await
+        }
+        // #8352: the no-MCP verbs — their own file, see `memory_verbs`.
+        MemoryAction::Recall {
+            query,
+            palace,
+            top_k,
+            room,
+            wing,
+            min_score,
+            json,
+            memory_socket,
+        } => {
+            let verb = MemoryVerb::Recall {
+                query,
+                top_k,
+                room,
+                wing,
+                min_score,
+            };
+            super::memory_verbs::run(verb, palace, memory_socket, json).await
+        }
+        MemoryAction::Remember {
+            text,
+            palace,
+            room,
+            tags,
+            json,
+            memory_socket,
+        } => {
+            let verb = MemoryVerb::Remember { text, room, tags };
+            super::memory_verbs::run(verb, palace, memory_socket, json).await
+        }
+        MemoryAction::Note {
+            content,
+            palace,
+            room,
+            tags,
+            json,
+            memory_socket,
+        } => {
+            let verb = MemoryVerb::Note {
+                content,
+                room,
+                tags,
+            };
+            super::memory_verbs::run(verb, palace, memory_socket, json).await
         }
     }
 }

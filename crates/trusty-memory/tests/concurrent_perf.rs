@@ -24,14 +24,20 @@
 //! `#[ignore]` stays: these run for tens of seconds and report a latency
 //! distribution, which is a measurement rather than a gate.
 //!
+//! #8682: `test_burst` runs under [`run_bounded`], a wall-clock bound outside
+//! its runtime; `a_wedged_runtime_fails_the_bound_naming_the_stuck_call` is the
+//! one un-ignored test here, and proves that bound fires.
+//!
 //! Test: run them with
 //!   `cargo test -p trusty-memory --test concurrent_perf -- --include-ignored --nocapture`.
 
 use futures::future::join_all;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use trusty_common::uds::send_framed_request_capped;
@@ -64,6 +70,174 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// any. 120s is the room that question needs; the latency distribution the test
 /// prints is where the queue depth is actually reported.
 const BURST_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Wall-clock budget for all of `test_burst`, runtime teardown included.
+///
+/// Why it exceeds [`BURST_CALL_TIMEOUT`]: while the runtime can still run
+/// timers, a slow call fails on its own per-call timeout first. This budget is
+/// reached only when it cannot — see [`run_bounded`].
+const BURST_BUDGET: Duration = Duration::from_secs(300);
+
+// ---------------------------------------------------------------------------
+// The hang bound (#8682)
+// ---------------------------------------------------------------------------
+
+/// Where a bounded test body is, and which of its calls are still unanswered.
+///
+/// Why: a hang report that says only "timed out" sends the next reader back to
+/// a debugger. Naming the phase and the stuck request ids says which await
+/// never resolved.
+#[derive(Clone)]
+struct Probe {
+    phase: Arc<Mutex<&'static str>>,
+    in_flight: Arc<Mutex<BTreeMap<usize, &'static str>>>,
+}
+
+impl Probe {
+    fn new() -> Self {
+        Self {
+            phase: Arc::new(Mutex::new("runtime start")),
+            in_flight: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Record that the body has moved on to `phase`.
+    fn enter(&self, phase: &'static str) {
+        *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = phase;
+    }
+
+    /// Wrap one call so it is listed as in flight until it resolves.
+    ///
+    /// A call that never resolves is never removed — that is the point.
+    fn track<F: Future>(
+        &self,
+        id: usize,
+        method: &'static str,
+        call: F,
+    ) -> impl Future<Output = F::Output> {
+        let in_flight = Arc::clone(&self.in_flight);
+        in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, method);
+        async move {
+            let out = call.await;
+            in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            out
+        }
+    }
+
+    /// The failure message for a body that overran `budget`.
+    fn report(&self, name: &str, budget: Duration) -> String {
+        let phase = *self.phase.lock().unwrap_or_else(PoisonError::into_inner);
+        let stuck = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let first: Vec<String> = stuck
+            .iter()
+            .take(10)
+            .map(|(id, method)| format!("id {id} {method}"))
+            .collect();
+        format!(
+            "{name} did not finish within {budget:?}; stuck in phase `{phase}` with {} \
+             call(s) never resolved (first: [{}]). Its per-call timeouts did not fire \
+             either, so the runtime running it is wedged, not merely slow (#8682).",
+            stuck.len(),
+            first.join(", ")
+        )
+    }
+}
+
+/// Run an async test body on its own runtime and fail if it overruns `budget`.
+///
+/// Why (#8682): `test_burst` hung twice at 0% CPU. Its every call already
+/// carries a `tokio::time::timeout`, and none fired, so the runtime itself was
+/// wedged — and an outer `tokio::time::timeout` would run on that same runtime
+/// and never fire either. The bound has to live outside it.
+/// What: builds a `workers`-thread runtime on a dedicated OS thread, runs
+/// `body` to completion and then drops the runtime — whose wait for blocking
+/// tasks is itself a place to hang — and has the calling thread wait at most
+/// `budget` for the whole of that. A panic in the body is re-raised here; an
+/// overrun becomes `Err` carrying [`Probe::report`]. The abandoned thread dies
+/// with the test process.
+/// Test: `a_wedged_runtime_fails_the_bound_naming_the_stuck_call`.
+fn run_bounded<Fut>(
+    name: &str,
+    budget: Duration,
+    workers: usize,
+    body: impl FnOnce(Probe) -> Fut + Send + 'static,
+) -> Result<(), String>
+where
+    Fut: Future<Output = ()>,
+{
+    let probe = Probe::new();
+    let inner = probe.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("{name}-runtime"))
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(workers)
+                    .enable_all()
+                    .build()
+                    .expect("build the test runtime");
+                rt.block_on(body(inner.clone()));
+                inner.enter("runtime teardown (a spawn_blocking task never returned)");
+                drop(rt);
+            }));
+            let _ = tx.send(outcome);
+        })
+        .expect("spawn the test runtime thread");
+    match rx.recv_timeout(budget) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        Err(_) => Err(probe.report(name, budget)),
+    }
+}
+
+/// Why (#8682): the bound is only worth having if it fires when the runtime is
+/// wedged, which is exactly when an in-runtime timeout cannot.
+/// What: starves a one-worker runtime by blocking the thread polling the
+/// "burst" on a channel nobody sends to, with a 100 ms `tokio::time::timeout`
+/// around it that cannot fire. Asserts [`run_bounded`] returns `Err` well
+/// inside 10 s and that the message names the phase and the stuck call, then
+/// releases the blocked thread.
+/// Test: itself.
+#[test]
+fn a_wedged_runtime_fails_the_bound_naming_the_stuck_call() {
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let started = Instant::now();
+    let outcome = run_bounded(
+        "wedged",
+        Duration::from_secs(2),
+        1,
+        move |probe| async move {
+            probe.enter("burst join_all");
+            let stuck = probe.track(7, "memory_recall", async move {
+                // Synchronous block: nothing on this runtime can make progress.
+                let _ = blocked.recv();
+            });
+            let _ = join_all([tokio::time::timeout(Duration::from_millis(100), stuck)]).await;
+        },
+    );
+    let elapsed = started.elapsed();
+    drop(release);
+
+    let report = outcome.expect_err("a wedged runtime must fail the bound, not pass it");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the bound took {elapsed:?} to fire"
+    );
+    assert!(
+        report.contains("burst join_all") && report.contains("id 7 memory_recall"),
+        "the report must name the phase and the stuck call: {report}"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // The daemon under test
@@ -630,10 +804,21 @@ async fn test_concurrent_rw() {
 /// `memory_recall`), drives them through `join_all`, computes
 /// min/mean/p95/p99/max + error rate.
 /// Asserts: error rate < 1 %.
+///
+/// #8682: runs under [`run_bounded`], so a wedged runtime fails in
+/// [`BURST_BUDGET`] naming the stuck calls instead of hanging the gate.
 /// Test: this test.
 #[ignore]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_burst() {
+#[test]
+fn test_burst() {
+    if let Err(report) = run_bounded("test_burst", BURST_BUDGET, 8, burst_body) {
+        panic!("{report}");
+    }
+}
+
+/// The body of [`test_burst`], reporting its progress to `probe`.
+async fn burst_body(probe: Probe) {
+    probe.enter("daemon start and palace provisioning");
     let (_daemon, client, version) = perf_daemon().await;
     let palace = provision_palace(&client, "burst").await;
     // See `BURST_CALL_TIMEOUT`: the ordinary budget turns queue depth into
@@ -645,6 +830,11 @@ async fn test_burst() {
     for i in 0..n {
         let client = client.clone();
         let palace = palace.clone();
+        let method = if i.is_multiple_of(2) {
+            "memory_remember"
+        } else {
+            "memory_recall"
+        };
         let req = if i.is_multiple_of(2) {
             json!({
                 "jsonrpc": "2.0",
@@ -666,12 +856,14 @@ async fn test_burst() {
                 "params": {"palace": palace, "query": "burst test entry", "top_k": 5}
             })
         };
-        futs.push(async move { client.rpc(req).await });
+        futs.push(probe.track(i, method, async move { client.rpc(req).await }));
     }
 
+    probe.enter("burst join_all");
     let started = Instant::now();
     let results = join_all(futs).await;
     let total_elapsed = started.elapsed();
+    probe.enter("result assertions and post-burst health");
 
     let mut latencies = Vec::with_capacity(n);
     let mut transport_errors = 0usize;

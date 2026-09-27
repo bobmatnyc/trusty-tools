@@ -515,6 +515,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         summary: owned_summary,
         workspace_removed: true,
         workspace_path_was: Some("/workspaces/trusty-mpm/session-abc".into()),
+        workspace_kept_reason: None,
+        workspace_kept_by_design: None,
     };
     let json = serde_json::to_value(&resp_owned).unwrap();
     assert_eq!(json["workspace_removed"], true, "owned: must be true");
@@ -556,6 +558,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         summary: unowned_summary,
         workspace_removed: false,
         workspace_path_was: None,
+        workspace_kept_reason: None,
+        workspace_kept_by_design: None,
     };
     let json2 = serde_json::to_value(&resp_unowned).unwrap();
     assert_eq!(json2["workspace_removed"], false, "unowned: must be false");

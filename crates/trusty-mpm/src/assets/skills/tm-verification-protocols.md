@@ -23,6 +23,12 @@ work.
 **Correct sequence**: implementation → PM delegates to QA → PM waits for
 evidence → PM reports *with* the QA verification attached.
 
+QA checks the engineer's raw evidence against the project test ladder and
+current relevant source, command, features and environment. Matching evidence
+can be reused; a handoff alone does not require rerunning the same suite. Run
+missing coverage, changed-input checks and required independent high-risk
+gates. Keep live deployment evidence separate from source-test evidence.
+
 ## Verification Requirements by Work Type
 
 | Work Type | Agent / Tool | Required Evidence | Forbidden Claim |
@@ -93,9 +99,10 @@ A **task-completion report** carries four things:
 4. each claim mapped to its evidence source.
 
 In-flight responses answer the question instead; only a completion claim owes
-all four. Route each agent's **Improvement recommendations** block to
-`bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever project
-the agent ran in (#6935).
+all four. Route each agent's **Improvement recommendations** block to the
+`bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the parent
+issue — never a new issue — whatever project the agent ran in (#6935, owner
+ruling 2026-09-27).
 
 ## Example Good Report
 

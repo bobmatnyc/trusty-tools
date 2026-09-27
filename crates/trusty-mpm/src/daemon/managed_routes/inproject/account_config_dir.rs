@@ -39,67 +39,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Directory name under the tm state root holding one subdirectory per known
-/// account.
-///
-/// Test: `ensure_account_config_dir_places_it_under_gh_accounts`.
-pub(super) const GH_ACCOUNTS_DIR_NAME: &str = "gh-accounts";
-
-/// The `<state_root>/gh-accounts/<login>` path for `login`.
-///
-/// Why: split out so both [`ensure_account_config_dir`] and its callers can
-/// name the SAME path without recomputing the join.
-/// What: `state_root.join("gh-accounts").join(login)`.
-/// Test: `ensure_account_config_dir_places_it_under_gh_accounts`.
-pub(super) fn account_config_dir(state_root: &Path, login: &str) -> PathBuf {
-    state_root.join(GH_ACCOUNTS_DIR_NAME).join(login)
-}
-
-/// Reject a `login` value that would escape or corrupt the intended
-/// `<state_root>/gh-accounts/<login>` join (#7166 review follow-up MEDIUM).
-///
-/// Why: `is_name_segment` (`bin/tm/commands/register_args.rs`) only restricts
-/// the CHARACTER SET (alnum, `.`, `_`, `-`) — it does not reject the exact
-/// strings `.`/`..`, so `--account ..` passes CLI validation and resolves to
-/// `<state_root>/gh-accounts/..` = `<state_root>` itself. That this is
-/// currently unexploitable is incidental to a check written for a different
-/// purpose ([`crate::core::gh_account::GhAccountStatus::
-/// canonical_logged_in_login`] requires an exact, case-insensitive match
-/// against a real, already-logged-in `gh` account, and no GitHub login can be
-/// `.`/`..`) — not a guard at THIS path-construction site.
-/// What: refuses `login` when it is empty, exactly `.` or `..`, or contains a
-/// path separator (`/` or `\`), independent of whatever the caller already
-/// validated.
-/// Test: `ensure_account_config_dir_refuses_dot`,
-/// `ensure_account_config_dir_refuses_dotdot`,
-/// `ensure_account_config_dir_refuses_empty`,
-/// `ensure_account_config_dir_refuses_a_forward_slash`,
-/// `ensure_account_config_dir_refuses_a_backslash`.
-fn reject_unsafe_login_segment(login: &str) -> Result<(), String> {
-    if login.is_empty()
-        || login == "."
-        || login == ".."
-        || login.contains('/')
-        || login.contains('\\')
-    {
-        return Err(format!(
-            "'{login}' is not a valid account login for a config directory segment"
-        ));
-    }
-    Ok(())
-}
-
-/// `true` when `path` exists and is ITSELF a symlink (#7166 review follow-up
-/// LOW) — checked with `symlink_metadata`, which does NOT follow the link,
-/// unlike the `is_file`/`exists` calls used elsewhere in this module.
-/// Test: `ensure_account_config_dir_refuses_a_symlinked_dir`,
-/// `ensure_account_config_dir_refuses_a_symlinked_hosts_yml`.
-fn is_symlink(path: &Path) -> bool {
-    path.symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
 /// Restrict `dir` to owner-only access (#7166 review follow-up MEDIUM) —
 /// `gh`'s own `hosts.yml` is written 0600 because it normally holds a token;
 /// this directory never holds one, but it does reveal which GitHub accounts
@@ -150,8 +89,13 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
 /// `config.yml` when the operator has one (absent is not an error — `gh`
 /// tolerates a config dir with no `config.yml`), and writes a fresh
 /// `hosts.yml` naming ONLY the canonical spelling of `login` (no token —
-/// `gh`'s credential store keys by login independently of this file).
+/// `gh`'s credential store keys by login independently of this file). Both
+/// paths leave `config.yml` declaring `version: "1"` (#8510), via
+/// [`crate::core::gh_account_dir::ensure_config_version`].
 /// Test: `ensure_account_config_dir_builds_from_operator_hosts_yml`,
+/// `ensure_account_config_dir_writes_the_config_version`,
+/// `ensure_account_config_dir_adds_the_version_to_a_copied_config`,
+/// `ensure_account_config_dir_adds_the_version_to_a_reused_dir`,
 /// `ensure_account_config_dir_refuses_an_unknown_login`,
 /// `ensure_account_config_dir_reuses_an_existing_dir_untouched`,
 /// `ensure_account_config_dir_copies_config_yml_when_present`,
@@ -161,33 +105,15 @@ pub(super) fn ensure_account_config_dir(
     operator_gh_config_dir: &Path,
     login: &str,
 ) -> Result<PathBuf, String> {
-    // #7166 review follow-up MEDIUM: reject before the path is even joined —
-    // see the function's own doc for why the CLI's `is_name_segment` check is
-    // not a substitute for this.
-    reject_unsafe_login_segment(login)?;
-    let dir = account_config_dir(state_root, login);
-
-    // #7166 review follow-up LOW: refuse a pre-planted symlink before any
-    // create/write. Checked on `dir` itself AND on `hosts.yml` — the latter
-    // because `is_file()` below FOLLOWS a symlink, so a symlinked `hosts.yml`
-    // pointing at a real file would otherwise satisfy the "already built,
-    // reuse untouched" check without ever being detected as a symlink.
-    if is_symlink(&dir) {
-        return Err(format!(
-            "{} is a symlink — refusing to use it as a per-account gh config directory; \
-             remove it and retry",
-            dir.display()
-        ));
-    }
+    // #7166 review follow-ups: an unsafe login segment and a pre-planted
+    // symlink (dir or `hosts.yml`) are refused before any create/write. #8510:
+    // the refusals live in core so the account-dir borrow applies the same ones.
+    let dir = crate::core::gh_account_dir::tm_account_dir(state_root, login)?;
     let hosts_yml_path = dir.join("hosts.yml");
-    if is_symlink(&hosts_yml_path) {
-        return Err(format!(
-            "{} is a symlink — refusing to use it as a per-account gh config file; remove it \
-             and retry",
-            hosts_yml_path.display()
-        ));
-    }
     if hosts_yml_path.is_file() {
+        // #8510: a dir built before the version was written would make gh
+        // migrate it; `hosts.yml` itself stays untouched.
+        crate::core::gh_account_dir::ensure_config_version(&dir)?;
         return Ok(dir);
     }
 
@@ -235,6 +161,9 @@ pub(super) fn ensure_account_config_dir(
         })?;
         set_private_file_permissions(&copied_config_path)?;
     }
+    // #8510: gh migrates a config dir whose `config.yml` has no `version`, and
+    // that migration can overwrite a keyring slot. Always declare it.
+    crate::core::gh_account_dir::ensure_config_version(&dir)?;
 
     let hosts_yml = render_single_account_hosts_yml(&canonical);
     std::fs::write(&hosts_yml_path, hosts_yml)

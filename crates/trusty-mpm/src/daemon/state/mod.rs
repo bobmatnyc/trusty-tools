@@ -20,12 +20,15 @@ pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
 mod sm;
+// #8535, #8161: which records write in a given tree.
+mod tree_membership;
 
 #[cfg(test)]
 mod tests;
 
 pub use builder_slots::{
-    BUILDER_LEASE_TTL_SECS, BuilderHolder, BuilderLease, BuilderSlotCensus, builder_lease,
+    BUILDER_LEASE_TTL_SECS, BuilderHolder, BuilderLease, BuilderSlotCensus, BuilderSlotGrant,
+    builder_lease,
 };
 pub use core::{
     DaemonState, EVENT_CHANNEL_CAPACITY, HOOK_HISTORY_LIMIT, PAIR_CODE_TTL, ReapResult,

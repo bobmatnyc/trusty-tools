@@ -11,10 +11,16 @@
 pub mod adopt;
 pub mod create;
 pub mod decommission;
+// #7660: the in-project removal step, `--force` policy and kept reason.
+pub mod decommission_force;
+// #8663: the content gates on decommission's two `remove_dir_all` routes.
+mod decommission_owned;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
+pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
@@ -29,11 +35,14 @@ pub mod prune;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
+pub mod relaunch;
 pub mod rename;
 pub mod residency_state;
 pub mod restart_ops;
 /// #6568: the auto-resume circuit breaker's policy and its persisted counters.
 pub mod resume_breaker;
+/// #8233 item 4: the per-session in-flight resume guard.
+pub(crate) mod resume_in_flight;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;
@@ -59,14 +68,26 @@ pub mod workspace_guard;
 // #6497: the explicit ownership transfer for a tree whose owner is provably
 // dead — the compliant alternative to rebuilding the branch by hand.
 pub(crate) mod worktree_adopt;
+// #8318: frees an adopted tree's branch and a dead agent's harness lock.
+pub(crate) mod worktree_adopt_release;
+// #8534 critic round 3: which gitignored agent and skill files tm deployed.
+mod worktree_deployed_assets;
+// #8534: gitignored run output that `git worktree remove` would delete. `pub`
+// for the `tm pr cleanup` probe the binary wires in.
+pub mod worktree_ignored_output;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
 // #6927: the operator's standing "never propose these" list, applied as
 // `worktree_reclaim::classify`'s first gate.
 pub(crate) mod worktree_keep_list;
-mod worktree_nested;
+pub(crate) mod worktree_nested;
+// #7771, #8301: the session-safe ownership rule prune and `tm pr cleanup` share.
+pub(crate) mod worktree_owner_gate;
 pub(crate) mod worktree_ownership;
+// #8511: the marker's git-admin-dir location, its migration, and the fleet pass.
+pub mod worktree_marker_migration;
+pub(crate) mod worktree_ownership_location;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;
 // #6561: the `gh` runner `worktree_reclaim` calls, which reports WHY a lookup
@@ -101,6 +122,11 @@ mod worktree_reclaim_owner_liveness_tests;
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: gate 5's landed-content admission and its pre-delete re-check.
+pub(crate) mod worktree_reclaim_landed;
+// #8109: a branch with no pull request of its own needs the landed proof, and a
+// reclaimed tree's branch is deleted on that proof.
+pub(crate) mod worktree_reclaim_branch;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;
@@ -142,6 +168,26 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8663: the owned-workspace and unclaimed-directory content gates.
+#[cfg(test)]
+mod decommission_owned_tests;
+
+// #8663 critic round 1: the provisioning ledger, lock and force gates.
+#[cfg(test)]
+mod decommission_owned_ledger_tests;
+
+// #8534 critic round 2: the gitignored-output gate, route by route.
+#[cfg(test)]
+mod worktree_ignored_output_route_tests;
+
+// #8534 critic round 3: user agents and skills versus tm's deployed ones.
+#[cfg(test)]
+mod worktree_ignored_output_asset_tests;
+
+// #8511: the marker-location behaviour, through the pre-existing ownership API.
+#[cfg(test)]
+mod worktree_marker_behaviour_tests;
 
 #[cfg(test)]
 mod delete_tests;

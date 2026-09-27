@@ -57,28 +57,18 @@ function toolPages(): string[] {
 }
 
 /**
- * `tga audit`'s own page, nested under the tool that ships it.
- *
- * It is a route with no `TOOLS` record — `tga audit` is a subcommand, not a
- * crate — so `toolPages()` cannot see it and every assertion driven by that
- * list skips it silently.
- */
-const AUDIT_PAGE = 'tools/trusty-git-analytics/audit.html';
-const AUDIT_ROUTE = '/tools/trusty-git-analytics/audit';
-
-/**
  * The claude-mpm migration page (#6268).
  *
- * Like `AUDIT_PAGE`, it is a route with no `TOOLS` record, so `toolPages()`
- * cannot see it and every assertion driven by that list skips it silently.
+ * It is a route with no `TOOLS` record, so `toolPages()` cannot see it and
+ * every assertion driven by that list skips it silently.
  */
 const MIGRATION_PAGE = 'claude-mpm-migration.html';
 const MIGRATION_ROUTE = '/claude-mpm-migration';
 
 /**
- * The nine-audience install walkthrough (#5110).
+ * The eight-audience install walkthrough (#5110).
  *
- * Like the two above, it is a route with no `TOOLS` record. Its panels are
+ * Like the one above, it is a route with no `TOOLS` record. Its panels are
  * rendered into the prerendered HTML and hidden with the `hidden` attribute
  * rather than mounted on selection, so every audience's commands are in this
  * artifact whether or not JavaScript ever runs — which is what makes asserting
@@ -353,8 +343,7 @@ describe('production build', () => {
 			'trusty-memory': 'A place to put what was learned',
 			'trusty-mpm': 'One binary, one daemon, many sessions',
 			'trusty-analyze': 'A sidecar, on purpose',
-			'trusty-review': 'Context first, opinion second',
-			'trusty-git-analytics': 'Three stages, one command'
+			'trusty-review': 'Context first, opinion second'
 		};
 		for (const [slug, heading] of Object.entries(opening)) {
 			const file = `tools/${slug}.html`;
@@ -385,34 +374,6 @@ describe('production build', () => {
 		const docs = path.join(STATIC, 'docs/tools/trusty-mpm/statusline-savings.html');
 		expect(existsSync(docs), 'the same source has no /docs page').toBe(true);
 		expect(visibleText(readFileSync(docs, 'utf8'))).toContain(heading);
-	});
-
-	// Why: the failure mode a nested route actually has is a dead link — the
-	// teaser on the tool page points at a route that never prerendered, and
-	// nothing else here reads either file, so the site ships a 404 the build
-	// reported as green. Both halves are asserted together for that reason: the
-	// artifact exists AND the page that advertises it names that exact href.
-	// What: the audit page's own artifact, its own `<title>` (it does not use
-	// `ToolPage.svelte`, so nothing else pins that), the install prerequisite
-	// that is the reason it exists, and the round trip back to the tool page.
-	it('prerenders the tga audit page and links it from the tool page', () => {
-		expect(existsSync(path.join(STATIC, AUDIT_PAGE)), AUDIT_PAGE).toBe(true);
-		const audit = readFileSync(path.join(STATIC, AUDIT_PAGE), 'utf8');
-
-		const title = audit.match(/<title>([\s\S]*?)<\/title>/);
-		expect(title?.[1], 'audit page title').toContain('tga audit');
-
-		const text = visibleText(audit);
-		// The whole point of the page: `tga audit` cannot produce a report with
-		// tga alone, and the two install lines are what a reader came for.
-		expect(text).toContain('tctl install tga');
-		expect(text).toContain('tctl install trusty-review');
-		expect(audit, 'audit page does not link back to the tool page').toContain(
-			'href="/tools/trusty-git-analytics"'
-		);
-
-		const toolPage = readFileSync(path.join(STATIC, 'tools/trusty-git-analytics.html'), 'utf8');
-		expect(toolPage, 'tool page does not link the audit page').toContain(`href="${AUDIT_ROUTE}"`);
 	});
 
 	/**
@@ -474,7 +435,7 @@ describe('production build', () => {
 	 * Why: `src/lib/install/render.test.ts` proves the walkthrough renders in
 	 * jsdom. It cannot prove the route PRERENDERS — a page that only assembles
 	 * after hydration ships nothing to a reader with JavaScript off and nothing
-	 * to a crawler, and the whole point of holding the nine audiences in one
+	 * to a crawler, and the whole point of holding the eight audiences in one
 	 * static document is that they arrive as HTML.
 	 * What: the artifact, its own `<title>` (it does not use `ToolPage.svelte`,
 	 * so nothing else pins that), every install command from the data module,
@@ -526,7 +487,7 @@ describe('production build', () => {
 	 * What: every built tool page's visible text, checked for the alias.
 	 */
 	it('names no retired binary alias in any tool page', () => {
-		for (const name of [...toolPages(), AUDIT_PAGE]) {
+		for (const name of toolPages()) {
 			const text = visibleText(readFileSync(path.join(STATIC, name), 'utf8'));
 			expect(text, `${name} names the taudit alias`).not.toContain('taudit');
 		}
@@ -539,7 +500,6 @@ describe('production build', () => {
 		for (const name of [
 			'index.html',
 			'docs.html',
-			AUDIT_PAGE,
 			MIGRATION_PAGE,
 			INSTALL_PAGE,
 			...docPages(),
@@ -600,11 +560,27 @@ describe('production build', () => {
 
 	it('renders real landing-page content, not a shell', () => {
 		expect(landingPage).toContain('trusty-search');
-		expect(landingPage).toContain('Seven flagship tools');
+		expect(landingPage).toContain('Five flagship tools');
 		expect(landingPage).toContain('brew tap bobmatnyc/trusty');
 		for (const tool of TOOLS) {
 			expect(landingPage, tool.slug).toContain(`/tools/${tool.slug}`);
 		}
+	});
+
+	/**
+	 * #8507: tga and trusty-audit moved to their own site, not yet live. The
+	 * note must name the destination as plain text (no clickable link to a
+	 * domain that currently fails TLS) and link the repository instead.
+	 */
+	it('notes where tga and trusty-audit moved, linking the repository', () => {
+		const text = visibleText(landingPage);
+		expect(text).toContain('tga.trustytools.dev');
+		expect(landingPage, 'a live link to the not-yet-live domain').not.toContain(
+			'href="https://tga.trustytools.dev'
+		);
+		expect(landingPage, 'link to the repository').toContain(
+			'href="https://github.com/bobmatnyc/trusty-git-analytics"'
+		);
 	});
 
 	it('sets the theme class before first paint', () => {

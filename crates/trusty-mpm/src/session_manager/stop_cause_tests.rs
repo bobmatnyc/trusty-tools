@@ -291,12 +291,20 @@ async fn boot_reconcile_never_requeues_a_deliberately_stopped_session() {
     );
 }
 
-/// A session lost while the daemon was down is still restored.
+/// A session lost while the daemon was down is still restored, END TO END.
 ///
 /// Why: the other direction. After a reboot every session's tmux target is
 /// gone and nothing recorded a cause, which is precisely what `auto_resume`
 /// was built to restore. The fix must not turn that into a fleet that stays
 /// down.
+///
+/// #8233: boot reconcile no longer resumes inline — it runs INSIDE the
+/// daemon's `session_manager()` initialisation, before a runtime relauncher can
+/// be installed, so resuming there would mark the record `Active` behind a pane
+/// with nothing in it. It marks the session `Stopped` and the supervisor's very
+/// next sweep does the real resume. That hand-off is what has to work, so this
+/// drives BOTH halves and asserts the session ends up relaunched through the
+/// runtime adapter, not merely deferred.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
@@ -305,10 +313,39 @@ async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
     let id = record.id;
     let data = hermetic_temp_dir();
     let (mgr, fake) = manager_with(&data, record).await;
+    let mgr = Arc::new(mgr);
 
+    // Half one: boot reconcile sees the tmux target gone and stops the record
+    // without attributing a cause, which is what makes it auto-resumable.
     let report = mgr.reconcile_on_boot(true).await.expect("reconcile");
     assert_eq!(report.stopped, vec![id.to_string()]);
+    assert_eq!(
+        mgr.get(&id).await.expect("reload").state,
+        ManagedSessionState::Stopped,
+        "the record is handed to the supervisor as Stopped, never left Active"
+    );
 
+    // Half two: the supervisor sweep, with the runtime relauncher the daemon
+    // installs, actually brings it back.
+    let relauncher = Arc::new(CountingRelauncher::default());
+    assert!(mgr.install_relauncher(relauncher.clone()));
+    let cfg = crate::supervisor::SupervisorConfig {
+        auto_resume: true,
+        classify_idle: false,
+        ..Default::default()
+    };
+    let tick = crate::supervisor::run_tick::<NeverClassifies>(&mgr, &cfg, None).await;
+
+    assert_eq!(
+        tick.resumed,
+        vec![id.to_string()],
+        "the supervisor must pick up what boot reconcile deferred to it"
+    );
+    assert_eq!(
+        relauncher.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "and the restore must go through the runtime adapter, not just recreate a pane"
+    );
     let created = fake.create_cwd_calls.lock().unwrap().clone();
     assert_eq!(
         created.len(),
@@ -323,4 +360,31 @@ async fn boot_reconcile_still_auto_resumes_a_session_lost_with_the_daemon() {
         after.stop_cause, None,
         "a resumed session carries no stop cause"
     );
+}
+
+/// A relauncher that succeeds and counts, standing in for the daemon's.
+#[derive(Default)]
+struct CountingRelauncher {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::session_manager::relaunch::RuntimeRelauncher for CountingRelauncher {
+    async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// `run_tick` is generic over a classifier even when handed `None`; this names
+/// the type without ever being called (`classify_idle` is false here).
+struct NeverClassifies;
+
+impl crate::activity::monitor::LlmClassifier for NeverClassifies {
+    async fn classify(
+        &self,
+        _pane_text: &str,
+    ) -> Result<(crate::activity::ActivityVerdict, u32, u32), crate::activity::ActivityError> {
+        unreachable!("classify_idle is false in every test that names this type")
+    }
 }

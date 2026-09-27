@@ -386,8 +386,8 @@ fn echo_path_prefix(body: &mut serde_json::Value, scope: Option<&str>) {
 /// (`POST /grep`) handlers need the identical "for every file the index knows
 /// about, read it from disk and run the matcher" loop. Factoring it out keeps
 /// the two handlers thin and guarantees they behave identically.
-/// What: snapshots the index's `RawChunk` corpus to discover the distinct set
-/// of files (deduped, since one file produces many chunks), then for each file
+/// What: reads the index's distinct file set through
+/// `CodeIndexer::indexed_file_set` (no rehydrate of an evicted corpus), then for each file
 /// that passes the glob filter and lives within the index root, reads the file
 /// fresh from disk under `root_path` and runs [`grep::grep_file_content`]. Files
 /// that fail the glob, escape the root, or can't be read are skipped silently
@@ -413,15 +413,12 @@ async fn grep_one_index(
     if out.len() >= max_results {
         return Ok(counts);
     }
-    let chunks = {
+    // #8266: the sorted, distinct file set, read without rehydrating an
+    // evicted corpus — each file is then read and scanned exactly once.
+    let files = {
         let indexer = handle.indexer.read().await;
-        indexer.raw_chunks_snapshot().await?
+        indexer.indexed_file_set().await?
     };
-    // One file produces many chunks; dedupe to a sorted, distinct file set so
-    // each file is read and scanned exactly once in a deterministic order.
-    let mut files: Vec<String> = chunks.into_iter().map(|c| c.file).collect();
-    files.sort();
-    files.dedup();
     counts.corpus_files = files.len();
 
     for rel in files {

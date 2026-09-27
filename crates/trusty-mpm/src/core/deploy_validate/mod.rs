@@ -569,7 +569,31 @@ pub fn validate_and_repair_reusing_memory(
     repo_url: Option<&str>,
     memory_reachable: Option<bool>,
 ) -> RepairOutcome {
-    repair_with(fw, workspace, repo_url, None, memory_reachable)
+    repair_with(
+        fw,
+        workspace,
+        repo_url,
+        None,
+        memory_reachable,
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// [`validate_and_repair_reusing_memory`] with the user home named (#8545).
+///
+/// Why: the repair's session preparation writes the user-tier statusLine and
+/// trust seed under a home; a daemon pinned to a test home must not reach `$HOME`.
+/// What: the same repair, with `home` handed to
+/// [`crate::core::session_launch::prepare_session_for_repair_under`].
+/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+pub fn validate_and_repair_under(
+    fw: &FrameworkPaths,
+    workspace: &Path,
+    repo_url: Option<&str>,
+    memory_reachable: Option<bool>,
+    home: Option<&Path>,
+) -> RepairOutcome {
+    repair_with(fw, workspace, repo_url, None, memory_reachable, home)
 }
 
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
@@ -589,7 +613,14 @@ pub fn validate_and_repair_with_exe(
 ) -> RepairOutcome {
     // #7763: `None` is "probe the host" — the reachability-reusing entry point
     // above is the one that threads a resolved value.
-    repair_with(fw, workspace, repo_url, hook_exe, None)
+    repair_with(
+        fw,
+        workspace,
+        repo_url,
+        hook_exe,
+        None,
+        dirs::home_dir().as_deref(),
+    )
 }
 
 /// The shared body of the three `validate_and_repair*` entry points.
@@ -610,6 +641,7 @@ fn repair_with(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
     memory_reachable: Option<bool>,
+    home: Option<&Path>,
 ) -> RepairOutcome {
     let before = validate_workspace_with_exe(fw, hook_exe);
     if before.is_complete() {
@@ -645,12 +677,13 @@ fn repair_with(
 
     // #7763: the launch already asked whether trusty-memory answered; reuse that
     // verdict instead of paying a second `PROBE_TIMEOUT` here.
-    let repair_error = match crate::core::session_launch::prepare_session_for_repair(
+    let repair_error = match crate::core::session_launch::prepare_session_for_repair_under(
         fw,
         workspace,
         repo_url,
         hook_exe,
         memory_reachable,
+        home,
     ) {
         Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
         Ok(_) => None,

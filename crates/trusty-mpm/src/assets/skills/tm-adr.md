@@ -49,6 +49,11 @@ bump.
 If unsure, ask: "Would a new contributor in six months need to understand
 *why* this choice was made?" If no — skip it.
 
+A layout ADR (a workspace/directory scaffold such as `apps/` + `packages/`)
+records the **default** to apply while a project's layout is still undefined —
+it is framework-specific and never mandates restructuring a layout a project
+already has (owner ruling 2026-09-22, #8382).
+
 ---
 
 ## File Location Convention (this repo)

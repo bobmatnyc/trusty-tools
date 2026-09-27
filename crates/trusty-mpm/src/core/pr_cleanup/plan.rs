@@ -229,7 +229,8 @@ pub fn is_pr_branch(head: &str, name: &str) -> bool {
 /// Test: `worktree_targets_matches_branch_and_detached_head`,
 /// `worktree_targets_never_returns_the_main_checkout`,
 /// `worktree_targets_ignores_an_empty_head_oid`,
-/// `worktree_targets_includes_a_round_sibling`.
+/// `worktree_targets_includes_a_round_sibling`,
+/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`.
 pub fn worktree_targets<'a>(
     entries: &'a [WorktreeEntry],
     branch: &str,
@@ -240,13 +241,158 @@ pub fn worktree_targets<'a>(
     let oid = head_oid.trim();
     entries
         .iter()
-        .filter(|e| e.path != repo_root)
+        // #8489: git and the caller may spell one directory two ways.
+        .filter(|e| !same_tree(&e.path, repo_root))
         .filter(|e| {
             let by_branch = e.branch.as_deref().is_some_and(|b| is_pr_branch(branch, b));
             let by_head = !oid.is_empty() && e.head.eq_ignore_ascii_case(oid);
             by_branch || by_head
         })
         .collect()
+}
+
+/// Do two spellings name one directory (#8489)?
+///
+/// Why: `git worktree list` reports the path git recorded, while `repo_root`
+/// comes from `--show-toplevel` or a registry entry's cwd, and a symlink or
+/// case difference between them made the running checkout look like a target.
+/// What: plain equality, else `trusty_common::identifies_same_path`.
+fn same_tree(a: &Path, b: &Path) -> bool {
+    a == b || trusty_common::identifies_same_path(a, b)
+}
+
+/// The checkout cleanup runs in, when it holds this PR's branch (#8489).
+///
+/// Why: [`worktree_targets`] never returns the checkout the git commands run
+/// in, and the worktree step then reported "no worktree holds X" while that
+/// checkout still had X checked out — so `git branch -D` failed one step later.
+/// What: every entry naming `repo_root` whose checked-out branch is one step 4
+/// deletes — a branch belonging to the PR under [`is_pr_branch`], or a
+/// [`AGENT_BRANCH_PREFIX`] branch sitting on `head_oid` (#8489 round 2).
+/// Test: `cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head`,
+/// `cleanup_8489_a_symlinked_spelling_of_the_checkout_is_still_the_checkout`,
+/// `cleanup_8489_a_running_checkout_on_an_agent_branch_at_the_head_is_kept`.
+pub(crate) fn holders_run_from<'a>(
+    entries: &'a [WorktreeEntry],
+    branch: &str,
+    head_oid: &str,
+    repo_root: &Path,
+) -> Vec<&'a WorktreeEntry> {
+    let oid = head_oid.trim();
+    entries
+        .iter()
+        .filter(|e| same_tree(&e.path, repo_root))
+        .filter(|e| {
+            e.branch.as_deref().is_some_and(|b| {
+                is_pr_branch(branch, b)
+                    || (b.starts_with(AGENT_BRANCH_PREFIX)
+                        && !oid.is_empty()
+                        && e.head.eq_ignore_ascii_case(oid))
+            })
+        })
+        .collect()
+}
+
+/// The report line for a holder [`holders_run_from`] found (#8489).
+///
+/// `head_only` keeps the recovery inside a merge-chained run's scope (#8301):
+/// that run reaches only the head branch, so it never points at the wider
+/// `tm pr cleanup <n>`. The recovery names `git switch --detach`, which works
+/// in any worktree; `git switch main` fails in an agent tree because the main
+/// checkout already holds `main`.
+/// Test: `cleanup_8489_head_only_recovery_stays_in_scope`,
+/// `cleanup_8489_names_the_checkout_it_runs_from_when_that_holds_the_head`.
+pub(crate) fn kept_run_from(entry: &WorktreeEntry, pr: u64, head_only: bool) -> String {
+    let branch = entry.branch.as_deref().unwrap_or_default();
+    let recovery = if head_only {
+        format!(
+            "run `git switch --detach` in it, then `git branch -D {branch}` — this merge's \
+             cleanup reaches only {branch}"
+        )
+    } else {
+        format!(
+            "run `git switch --detach` in it, then `git branch -D {branch}`; or run \
+             `tm pr cleanup {pr}` from the main checkout"
+        )
+    };
+    format!(
+        "{}: holds {branch} and was kept — cleanup runs its git commands in this checkout and \
+         never removes it; {recovery}",
+        entry.path.display()
+    )
+}
+
+/// The standing worktree that has `branch` checked out, if any (#8489).
+///
+/// Why: git refuses `git branch -D` on a branch any worktree holds, and the
+/// refusal used to stop step 4 before the branches after it were deleted.
+/// What: the first entry of `standing` whose branch equals `branch`.
+/// Test: `cleanup_8489_local_branch_skips_the_held_head_and_deletes_the_rest`.
+pub(crate) fn holder_of<'a>(
+    standing: &'a [WorktreeEntry],
+    branch: &str,
+) -> Option<&'a WorktreeEntry> {
+    let branch = branch.trim();
+    standing
+        .iter()
+        .find(|e| e.branch.as_deref().map(str::trim) == Some(branch))
+}
+
+/// The step-4 report text for a branch [`holder_of`] found held (#8489).
+pub(crate) fn kept_branch(branch: &str, holder: &WorktreeEntry) -> String {
+    format!(
+        "kept {branch}: the worktree at {} has it checked out, and git refuses to delete a \
+         branch a worktree holds",
+        holder.path.display()
+    )
+}
+
+/// The step-4 report text when step 3 could not read the worktree listing.
+///
+/// Test: `cleanup_8489_a_failed_worktree_listing_deletes_no_branch`.
+pub(crate) const HOLDERS_UNKNOWN: &str = "no branch deleted — the worktree listing was not read, \
+     so which branches a worktree holds is unknown (#8489)";
+
+/// The report line for a worktree listing that named no tree at all (#8489).
+///
+/// Why: git lists the checkout it runs in on every successful call, so an
+/// empty parse means the listing was not read, never that nothing holds the
+/// branch.
+/// Test: `cleanup_8489_an_empty_worktree_listing_is_inconclusive`.
+pub(crate) fn inconclusive_listing(branch: &str) -> String {
+    format!(
+        "`git worktree list --porcelain` named no worktree, not even this checkout — the \
+         lookup is inconclusive, so whether a worktree holds {branch} is unknown"
+    )
+}
+
+/// Split cleanup targets into the PR head's own trees and the rest (#8301).
+///
+/// Why: `tm pr merge` removed a worktree the caller never named because it sat
+/// on the merged head commit. A merge names exactly one branch, so a
+/// merge-chained cleanup removes only the tree that has that branch checked
+/// out; everything else [`worktree_targets`] matched is left for an explicit
+/// `tm pr cleanup <n>`.
+/// What: `(named, left)` — `named` holds the entries whose checked-out branch
+/// equals `head` exactly; `left` holds the rest. An empty `head` names nothing.
+/// Test: `cleanup_8301_head_only_leaves_an_unnamed_tree_at_the_head_commit`.
+pub fn split_head_only<'a>(
+    targets: Vec<&'a WorktreeEntry>,
+    head: &str,
+) -> (Vec<&'a WorktreeEntry>, Vec<&'a WorktreeEntry>) {
+    let head = head.trim();
+    targets
+        .into_iter()
+        .partition(|e| !head.is_empty() && e.branch.as_deref().map(str::trim) == Some(head))
+}
+
+/// The report line for trees a head-only cleanup did not touch (#8301).
+pub fn left_in_place(left: &[&WorktreeEntry], pr: u64) -> String {
+    let paths: Vec<String> = left.iter().map(|e| e.path.display().to_string()).collect();
+    format!(
+        "left in place, not this PR's head worktree: {} — `tm pr cleanup {pr}` reclaims them",
+        paths.join(", ")
+    )
 }
 
 /// The local branches this pull request owns, head and round-N siblings.

@@ -325,18 +325,66 @@ mod tests {
     /// The stall is what makes the OPEN slow rather than instant: the request
     /// frame is larger than the socket's send and receive buffers combined, so
     /// the client's `write_all` cannot finish until this end starts reading.
+    ///
+    /// Built for a paused clock (#8271). The accept and the drain are real I/O,
+    /// so they run under `spawn_blocking`, which holds the paused clock still
+    /// until they return; only the stall lets it move. Awaited on the runtime
+    /// instead, a pending readiness wait leaves the runtime idle, and tokio
+    /// auto-advances past the budget while the kernel still holds the frame.
     fn stalls_then_drains(socket: PathBuf, drain_after: std::time::Duration) -> PathBuf {
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let listener = trusty_common::uds::bind_hardened(&socket)
+            .expect("bind")
+            .into_std()
+            .expect("listener into std");
+        // #8271: spawned before the caller dials, so the clock is already held
+        // while the dial waits for write readiness.
+        let accepted = tokio::task::spawn_blocking(move || accept_within(&listener));
         tokio::spawn(async move {
-            let Ok((mut conn, _)) = listener.accept().await else {
+            let Ok(Ok(conn)) = accepted.await else {
                 return;
             };
             tokio::time::sleep(drain_after).await;
-            let mut sink = Vec::new();
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut conn, &mut sink).await;
+            let drained = tokio::task::spawn_blocking(move || {
+                let mut conn = conn;
+                let mut sink = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut conn, &mut sink);
+                conn
+            })
+            .await;
+            // Keep the connection open and answer nothing: the silent first frame.
+            let _held = drained;
             std::future::pending::<()>().await;
         });
         socket
+    }
+
+    /// Wall-clock bound on each blocking step of [`stalls_then_drains`], so a
+    /// regression fails the test instead of wedging the blocking pool that
+    /// runtime shutdown joins.
+    const STUB_IO_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Accept one connection within [`STUB_IO_BOUND`], as a blocking stream.
+    fn accept_within(
+        listener: &std::os::unix::net::UnixListener,
+    ) -> std::io::Result<std::os::unix::net::UnixStream> {
+        let give_up = std::time::Instant::now() + STUB_IO_BOUND;
+        loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    // macOS hands the listener's O_NONBLOCK to the accepted socket.
+                    conn.set_nonblocking(false)?;
+                    conn.set_read_timeout(Some(STUB_IO_BOUND))?;
+                    return Ok(conn);
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < give_up =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// A request frame past what one socket can hold in flight.
@@ -361,8 +409,15 @@ mod tests {
     /// same shape through `stream_response`, whose first-frame read then waits
     /// for a frame that never comes: one shared deadline returns at about
     /// `BUDGET`, two separate ones would run to `DRAIN_AFTER + BUDGET`.
+    ///
+    /// Runs on tokio's paused clock, so the stall and both budgets are timers
+    /// and the work between them — encoding the 4 MiB frame, the kernel drain —
+    /// costs no time; [`stalls_then_drains`] says how the clock is held still
+    /// during real I/O. No assertion below depends on how fast the host is.
     /// Test: this is the test.
-    #[tokio::test(flavor = "multi_thread")]
+    // #8271: on a wall clock that work (~100 ms idle, 200-350 ms under load,
+    // more on a CI runner) ate the 400 ms margin and the open timed out.
+    #[tokio::test(start_paused = true)]
     async fn a_slow_open_and_a_silent_first_frame_share_one_budget() {
         const BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
         const DRAIN_AFTER: std::time::Duration = std::time::Duration::from_millis(600);
@@ -373,7 +428,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
 
         let slow = stalls_then_drains(tmp.path().join("slow-open.sock"), DRAIN_AFTER);
-        let started = std::time::Instant::now();
+        // #8271: the paused clock's `Instant`, not `std::time::Instant`.
+        let started = tokio::time::Instant::now();
         let opened = open_stream(
             &slow,
             super::super::METHOD_STATUS_STREAM,
@@ -390,7 +446,7 @@ mod tests {
         drop(opened);
 
         let silent = stalls_then_drains(tmp.path().join("silent-frame.sock"), DRAIN_AFTER);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let response = stream_response(
             &silent,
             super::super::METHOD_STATUS_STREAM,

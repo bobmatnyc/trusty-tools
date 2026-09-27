@@ -62,6 +62,7 @@
 //! [`authority`]: crate::credentials::authority
 
 pub mod authority;
+mod bounded_store;
 mod dotenv;
 // #3451: the single shared test-only `EnvVarGuard`, consolidated from three
 // prior copies (this module's `resolver::tests`, `memory_core::dream::tests`,
@@ -81,6 +82,11 @@ mod resolver;
 mod secret;
 
 pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
+// #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.
+pub use bounded_store::{
+    STORE_ERROR_CACHE_TTL, STORE_READ_TIMEOUT, SecretResolveError, StoreErrorKind, StoreFailure,
+    resolve_env_var_bounded, resolve_provider_bounded_with, store_get_bounded,
+};
 pub use dotenv::{
     env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
     read_var_from_env_local, user_env_local_path,
@@ -161,6 +167,26 @@ pub trait KeyStore: Send + Sync {
     /// Look up the stored credential for `provider`. `None` on any miss or
     /// backend failure — never panics, never logs the (absent) value.
     fn get(&self, provider: &str) -> Option<String>;
+
+    /// Look up `provider`, distinguishing "absent" from "the backend failed".
+    ///
+    /// Why (#8236): `get`'s `None` is the reason a daemon could not tell
+    /// "no credential is configured" from "the Keychain refused", and a
+    /// fail-closed caller has to log which one it hit. Provided, not required,
+    /// so no out-of-crate implementor breaks; the default keeps `get`'s
+    /// behaviour exactly.
+    /// What: `Ok(None)` for a genuine miss, `Err` for a backend failure.
+    /// Backends that can tell the two apart override this.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports. Never carries the value.
+    ///
+    /// Test: `a_failing_store_reports_its_kind`,
+    /// `an_absent_value_is_absent_not_an_error`.
+    fn try_get(&self, provider: &str) -> Result<Option<String>, KeyStoreError> {
+        Ok(self.get(provider))
+    }
 
     /// Store `value` under `provider`, overwriting any existing entry.
     fn set(&self, provider: &str, value: &str) -> Result<(), KeyStoreError>;

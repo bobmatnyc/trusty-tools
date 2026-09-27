@@ -91,6 +91,7 @@ use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::decommission::WorktreeRemoval;
+use crate::session_manager::worktree_ignored_output::ignored_output_refusal;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, find_agent_worktree,
@@ -206,6 +207,9 @@ pub(crate) fn delegation_state_for_agent(
 ///    This is #4091's check, reused — uncommitted files, untracked files, a
 ///    nested dirty checkout and unpushed commits are all one implementation, and
 ///    a second copy here would drift from it.
+///    5a. [`ignored_output_refusal`] finds gitignored files that are not build
+///    output, or cannot tell → refuse (#8534). Gate 5 never counts gitignored
+///    files, and gate 7's `--force` deletes them.
 /// 6. [`process_holding`] finds a live process standing in the tree → refuse.
 ///    Gates 3 and 5 are both REGISTRY reads: gate 3 asks what trusty-mpm
 ///    recorded, gate 5 asks what git recorded. Neither can see a process
@@ -214,8 +218,8 @@ pub(crate) fn delegation_state_for_agent(
 ///    worktree ran for a day in exactly that blind spot. This gate asks the
 ///    OS instead, and fails toward IN USE when it cannot get an answer.
 /// 7. `git worktree remove --force` — force because a clean tree can still hold
-///    gitignored build output that plain `remove` refuses, and because gates 5
-///    and 6 have already established there is nothing to lose. A non-zero exit
+///    gitignored build output that plain `remove` refuses, and because gates 5,
+///    5a and 6 have already established there is nothing to lose. A non-zero exit
 ///    (a git-`locked` worktree exits 128) refuses, and so does a ZERO exit that
 ///    left the directory on disk ([`reap_outcome_of`], #7652 critic round 2).
 ///
@@ -228,7 +232,10 @@ pub(crate) fn delegation_state_for_agent(
 /// `reap_refuses_a_worktree_a_live_process_is_standing_in`,
 /// `reap_refuses_a_path_whose_sentinel_names_another_agent`,
 /// `reap_refuses_a_path_with_no_sentinel`,
-/// `reap_never_reports_removed_while_the_path_survives`.
+/// `reap_never_reports_removed_while_the_path_survives`,
+/// `reap_keeps_gitignored_run_output_in_a_zero_commit_tree`,
+/// `reap_keeps_untracked_run_output_in_a_zero_commit_tree`,
+/// `reap_removes_a_zero_commit_tree_holding_only_build_output`.
 pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> ReapOutcome {
     if !path.exists() {
         return ReapOutcome::AlreadyGone;
@@ -287,6 +294,11 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
             dirt.dirty_files,
             dirt.unpushed_commits
         ));
+    }
+    // #8534: `--force` below also deletes gitignored files, which the dirt gate
+    // does not count — a zero-commit run's gitignored outputs were lost here.
+    if let Some(refusal) = ignored_output_refusal(path) {
+        return ReapOutcome::Refused(refusal);
     }
     // #4311: the only gate that asks the OS rather than a record trusty-mpm or
     // git wrote. Last, because it is the most expensive.

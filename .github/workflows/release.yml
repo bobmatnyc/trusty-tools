@@ -1072,6 +1072,12 @@ jobs:
     # no longer invisible: `release-completeness-audit` below reports it.
     continue-on-error: ${{ matrix.best_effort == true }}
 
+    # #8612: one ORT pin for the whole job — the AL2023 download step and the
+    # ORT-RUNTIME-NOTE.txt written by `Package binaries` both read it. Keep it
+    # equal to ORT_VERSION in al2023-build.yml, which load-checks it per PR.
+    env:
+      ORT_VERSION: "1.24.2"
+
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -1190,15 +1196,14 @@ jobs:
 
       # ── AL2023: download ONNX Runtime for load-dynamic builds ───────────────
       # Supplies the system libonnxruntime.so that the `ort` crate dlopen()s at
-      # runtime.  ORT 1.20.1 was built on Ubuntu 20.04 (glibc 2.31), so it
-      # loads cleanly on AL2023 (glibc 2.34).
-      # The ORT version here must match the version the workspace's ort-sys
-      # rc.12 expects (see al2023-build.yml for full rationale).
-      - name: Download ONNX Runtime 1.20.1 (AL2023 load-dynamic)
+      # runtime.  #8612: `ort` 2.0.0-rc.12 + `api-24` refuses a runtime below
+      # 1.24, so the pin is 1.24.2; its libonnxruntime.so references glibc
+      # <= 2.27 and loads on AL2023 (glibc 2.34). ORT_VERSION comes from the
+      # job-level `env:` above (#8612).
+      - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (AL2023 load-dynamic)
         if: matrix.variant == 'al2023'
         shell: bash
         env:
-          ORT_VERSION: "1.20.1"
           TARGET: ${{ matrix.target }}
         run: |
           # 2533 follow-up: the tarball name is architecture-specific. This step
@@ -1206,7 +1211,7 @@ jobs:
           # aarch64 AL2023 leg needs `linux-aarch64`, and a wrong-arch download
           # would fail late and confusingly (ORT_DYLIB_PATH set to a library the
           # loader rejects) rather than here. Upstream publishes both under the
-          # same v1.20.1 tag.
+          # same v${ORT_VERSION} tag.
           case "${TARGET}" in
             aarch64-*) ORT_ARCH="aarch64" ;;
             *)         ORT_ARCH="x64" ;;
@@ -1462,13 +1467,16 @@ jobs:
               printf 'REQUIRED at runtime:\n'
               printf '  export ORT_DYLIB_PATH=/path/to/libonnxruntime.so\n'
               printf '\n'
-              printf 'Compatible ORT build: 1.20.1 linux-%s (Ubuntu 20.04 / glibc 2.31)\n' "${ORT_ARCH}"
-              printf '  https://github.com/microsoft/onnxruntime/releases/tag/v1.20.1\n'
+              # #8612: ort 2.0.0-rc.12 (api-24) rejects any runtime below 1.24;
+              # the version comes from the job-level ORT_VERSION.
+              printf 'Compatible ORT build: 1.24.x linux-%s (%s tested; needs glibc >= 2.27)\n' "${ORT_ARCH}" "${ORT_VERSION}"
+              printf "Older runtimes fail at startup with: expected version >= '1.24.x'\n"
+              printf '  https://github.com/microsoft/onnxruntime/releases/tag/v%s\n' "${ORT_VERSION}"
               printf '\n'
               printf 'Example install:\n'
-              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-%s-1.20.1.tgz \\\n' "${ORT_ARCH}"
+              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v%s/onnxruntime-linux-%s-%s.tgz \\\n' "${ORT_VERSION}" "${ORT_ARCH}" "${ORT_VERSION}"
               printf '    | tar xz -C /opt\n'
-              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-%s-1.20.1/lib/libonnxruntime.so.1.20.1\n' "${ORT_ARCH}"
+              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-%s-%s/lib/libonnxruntime.so.%s\n' "${ORT_ARCH}" "${ORT_VERSION}" "${ORT_VERSION}"
             } > "${STAGING_DIR}/ORT-RUNTIME-NOTE.txt"
           fi
 

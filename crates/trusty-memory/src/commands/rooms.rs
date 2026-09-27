@@ -22,7 +22,9 @@ use trusty_common::memory_core::palace::Palace;
 use trusty_common::memory_core::retrieval::PalaceHandle;
 use trusty_common::memory_core::store::room_plan::{plan_rooms, RoomPlanAction, RoomPlanEntry};
 use trusty_common::memory_core::store::{backfill_rooms, OpenIntent};
-use trusty_common::memory_core::PalaceRegistry;
+use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
+
+use super::maintenance_gate::open_purging_under_lease;
 
 /// What one palace's audit found.
 #[derive(Debug, Clone)]
@@ -118,14 +120,18 @@ fn print_audits(audits: &[PalaceRoomAudit], apply: bool) {
 /// What: for each palace, opens a handle directly (see the module doc for why
 /// not through the registry), computes the plan, and — only when `apply` — runs
 /// the real backfill. A palace that fails to open is captured per-palace so one
-/// bad palace never aborts the sweep.
-/// Test: `dry_run_reports_without_writing`, `apply_writes_the_planned_rooms`.
+/// bad palace never aborts the sweep. The open-time TTL purge runs only on an
+/// `--apply` open while this process holds `data_root`'s maintenance lease.
+/// Test: `dry_run_reports_without_writing`, `apply_writes_the_planned_rooms`,
+/// `apply_under_a_lease_held_elsewhere_deletes_no_expired_row`.
 pub fn audit_palaces(
     data_root: &std::path::Path,
     palace_filter: Option<&str>,
     apply: bool,
 ) -> Result<Vec<PalaceRoomAudit>> {
     let palaces = PalaceRegistry::list_palaces(data_root).unwrap_or_default();
+    // #8733: one lease for the sweep; it does no I/O until the first open.
+    let lease = MaintenanceLease::new(data_root);
     let mut out = Vec::new();
     for palace in palaces {
         let id = palace.id.0.clone();
@@ -133,7 +139,7 @@ pub fn audit_palaces(
             continue;
         }
         out.push(
-            audit_one(&palace, apply).unwrap_or_else(|e| PalaceRoomAudit {
+            audit_one(&palace, apply, &lease).unwrap_or_else(|e| PalaceRoomAudit {
                 palace_id: id,
                 entries: Vec::new(),
                 inserted: None,
@@ -145,16 +151,18 @@ pub fn audit_palaces(
 }
 
 /// Audit (and optionally back-fill) a single palace.
-fn audit_one(palace: &Palace, apply: bool) -> Result<PalaceRoomAudit> {
+fn audit_one(palace: &Palace, apply: bool, lease: &MaintenanceLease) -> Result<PalaceRoomAudit> {
     // NOT `registry.open_palace` — that path runs the backfill itself, which
     // would make `--dry-run` write. See the module doc.
-    let intent = if apply {
-        OpenIntent::Writer
+    // #8733: registering rooms is additive, not maintenance, so `--apply`
+    // goes ahead without the lease and only the open-time purge is skipped.
+    // A dry run never purges.
+    let handle = if apply {
+        open_purging_under_lease(palace, OpenIntent::Writer, lease)?
     } else {
-        OpenIntent::ReadOnlyClient
+        PalaceHandle::open_with_intent_purging(palace, OpenIntent::ReadOnlyClient, false)
+            .with_context(|| format!("open palace {}", palace.id))?
     };
-    let handle = PalaceHandle::open_with_intent(palace, intent)
-        .with_context(|| format!("open palace {}", palace.id))?;
     let drawers = handle.drawers.read().clone();
     let entries = plan_rooms(&handle.kg, &drawers).context("plan rooms")?;
     let inserted = if apply {

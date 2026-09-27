@@ -1,0 +1,13 @@
+crate   trusty-mpm
+version 1.7.0
+reason  Owner ruling 2026-09-22: "accept the breaking API changes on main and keep the existing release plan. Override the semver gate (CHECK 5) so 1.x releases can publish with them" because "the user base is small, and it does not dictate the release model."
+accept  constructible_struct_adds_field           BuildersConfig
+accept  constructible_struct_adds_field           BuilderSlotResponse
+accept  derive_trait_impl_removed                 BuildersConfig Eq
+accept  enum_marked_non_exhaustive                ManagedError
+accept  enum_marked_non_exhaustive                ResumeManagedError
+accept  enum_no_repr_variant_discriminant_changed  SectionId
+accept  enum_variant_added                        AutonomousExecution
+accept  function_parameter_count_changed          build_adapter
+accept  method_parameter_count_changed             ClaudeCodeAdapter::new
+accept  struct_marked_non_exhaustive               Delegation

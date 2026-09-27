@@ -140,8 +140,9 @@ pub(crate) async fn correlate_session_start(
                     // sidecar is what lets the statusline fold across all of
                     // them. Best-effort — a link that cannot be written costs a
                     // status-bar figure, never a session start.
+                    // #8545: the daemon's own root, never the process home.
                     crate::core::session_links::record_link(
-                        &crate::core::paths::FrameworkPaths::default().root,
+                        state.framework_root(),
                         &id.to_string(),
                         claude_session_id,
                     );

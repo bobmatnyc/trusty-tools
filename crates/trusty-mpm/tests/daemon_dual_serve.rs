@@ -22,6 +22,9 @@
 
 #![cfg(feature = "daemon")]
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 

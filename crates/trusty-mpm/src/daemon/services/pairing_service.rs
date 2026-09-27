@@ -104,7 +104,9 @@ mod tests {
 
     #[test]
     fn request_code_has_ttl() {
-        let state = DaemonState::new();
+        // #8545: a temp root, so the pending code never lands in `~/.trusty-mpm`.
+        let root = crate::test_support::hermetic_temp_dir();
+        let state = DaemonState::with_root(root.path().to_path_buf());
         let svc = PairingService::new(&state);
         let code = svc.request_code();
         assert_eq!(code.code.len(), 6);

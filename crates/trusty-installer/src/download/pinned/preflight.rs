@@ -22,7 +22,7 @@
 //! `super::tests::preflight_names_the_tool_whose_version_was_never_published`,
 //! `super::tests::preflight_downloads_nothing`.
 
-use super::{Endpoints, PinnedError, PinnedTool};
+use super::{EndpointSource, Endpoints, PinnedError, PinnedTool};
 use crate::download::{platform, release};
 
 /// What a preflight found for one pinned tool.
@@ -73,7 +73,8 @@ pub async fn preflight_pinned_set(
     client: &reqwest::Client,
     tools: &[PinnedTool],
 ) -> Vec<PinnedPreflight> {
-    preflight_pinned_set_at(client, &Endpoints::default(), tools).await
+    // #8642: each tool resolves from its own release repo.
+    preflight_pinned_set_at(client, EndpointSource::PerCrate, tools).await
 }
 
 /// [`preflight_pinned_set`], against caller-supplied endpoints.
@@ -82,7 +83,7 @@ pub async fn preflight_pinned_set(
 /// provable against the loopback fixture rather than against real GitHub.
 pub(crate) async fn preflight_pinned_set_at(
     client: &reqwest::Client,
-    endpoints: &Endpoints<'_>,
+    endpoints: EndpointSource<'_>,
     tools: &[PinnedTool],
 ) -> Vec<PinnedPreflight> {
     let mut checked = Vec::with_capacity(tools.len());
@@ -90,7 +91,9 @@ pub(crate) async fn preflight_pinned_set_at(
         checked.push(PinnedPreflight {
             crate_name: tool.crate_name.clone(),
             version: tool.version.clone(),
-            problem: resolve_pin(client, endpoints, tool).await.err(),
+            problem: resolve_pin(client, &endpoints.for_crate(&tool.crate_name), tool)
+                .await
+                .err(),
         });
     }
     checked

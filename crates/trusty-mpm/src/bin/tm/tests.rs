@@ -131,10 +131,35 @@ fn cli_parses_internal_spawn_disclaimed() {
     // var-arg, including hyphen-led flags — exactly the pane-command shape.
     let cli =
         Cli::try_parse_from(["trusty-mpm", "internal-spawn-disclaimed", "claude", "-p"]).unwrap();
-    let Some(Command::InternalSpawnDisclaimed { argv }) = cli.command else {
+    let Some(Command::InternalSpawnDisclaimed { launch_spec, argv }) = cli.command else {
         panic!("expected internal-spawn-disclaimed");
     };
     assert_eq!(argv, ["claude", "-p"]);
+    assert!(launch_spec.is_none(), "the argv form carries no spec");
+}
+
+/// #8233: the managed form names a launch spec and carries no trailing argv —
+/// that is what keeps the typed pane line a fixed size.
+#[test]
+fn cli_parses_internal_spawn_disclaimed_launch_spec() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "internal-spawn-disclaimed",
+        "--launch-spec",
+        "/specs/abc.json",
+    ])
+    .unwrap();
+    let Some(Command::InternalSpawnDisclaimed { launch_spec, argv }) = cli.command else {
+        panic!("expected internal-spawn-disclaimed");
+    };
+    assert_eq!(
+        launch_spec.as_deref(),
+        Some(std::path::Path::new("/specs/abc.json"))
+    );
+    assert!(
+        argv.is_empty(),
+        "the spec form takes no trailing argv: {argv:?}"
+    );
 }
 
 #[test]
@@ -396,6 +421,7 @@ fn cli_parses_doctor() {
                 prune_stale_skills: false,
                 fix_skills: false,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -415,6 +441,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 prune_stale_skills: true,
                 fix_skills: false,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -441,6 +468,7 @@ fn cli_parses_doctor_fix_skills() {
                 prune_stale_skills: false,
                 fix_skills: true,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
@@ -1150,6 +1178,62 @@ fn cli_account_flag_after_subcommand() {
         "--account",
         "bob-duetto",
         "bobmatnyc/trusty-tools",
+    ])
+    .unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert!(matches!(cli.command, Some(Command::Run { .. })));
+}
+
+/// 🔴 #5850 REGRESSION: `--user <login>` must bind the same field as
+/// `--account <login>`.
+///
+/// Why this is the assertion: the owner's report was
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto`
+/// failing at clap parsing. `--user` is the spelling `gh` itself uses for the
+/// same concept (`gh auth token -u`), so it has to be accepted, and it has to
+/// land on `cli.account` — an alias that parsed into a SECOND field would give
+/// the two spellings different behaviour downstream.
+#[test]
+fn cli_parses_user_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #5850 REGRESSION (fail-open): a blank `--user`/`--account` given BEFORE
+/// the repository is refused at parse time.
+///
+/// Why this is the assertion: `tm --user= <url>` parsed as `Some("")`, and
+/// `resolve_account` reads a blank flag as absent, so the clone ran as the
+/// machine's global `gh` account. Same refusal text as the trailing form
+/// (`bare_form_rejects_an_empty_account_value`).
+#[test]
+fn cli_rejects_a_blank_account_flag_before_the_repository() {
+    for argv in [
+        &["trusty-mpm", "--user=", "acme/widget"][..],
+        &["trusty-mpm", "--account=", "acme/widget"][..],
+        &["trusty-mpm", "--user", "", "acme/widget"][..],
+        &["trusty-mpm", "--account", "   ", "acme/widget"][..],
+        &["trusty-mpm", "--user=  ", "run", "acme/widget"][..],
+    ] {
+        let err = Cli::try_parse_from(argv)
+            .expect_err("a blank account flag must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{argv:?}: {err}"
+        );
+    }
+}
+
+/// The alias inherits `global = true`, so it also parses AFTER the positional
+/// — the exact shape the owner typed (`tm <url> --user <login>`).
+#[test]
+fn cli_user_alias_after_subcommand() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "run",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
     ])
     .unwrap();
     assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
@@ -2132,6 +2216,220 @@ fn cli_parses_issue_audit_single_and_window() {
     );
 }
 
+/// #8447: `tm issue epic create --from <plan>` carries the filing inputs a plan
+/// document cannot supply — milestone, component, project, session.
+#[test]
+fn cli_parses_issue_epic_create() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "docs/research/tm-epic-cli/epic-plan.md",
+        "--milestone",
+        "Issue management",
+        "--component",
+        "trusty-mpm",
+        "--project",
+        "3",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    from,
+                    milestone,
+                    component,
+                    phase_type,
+                    project,
+                    session,
+                    tracker,
+                    dry_run,
+                }),
+            ..
+        } => {
+            assert_eq!(
+                from.to_string_lossy(),
+                "docs/research/tm-epic-cli/epic-plan.md"
+            );
+            assert_eq!(milestone.as_deref(), Some("Issue management"));
+            assert_eq!(component, vec!["trusty-mpm".to_string()]);
+            assert_eq!(phase_type, "enhancement", "the default type label");
+            assert_eq!(project, Some(3));
+            assert!(session.is_none());
+            assert!(tracker.is_none());
+            assert!(dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+}
+
+/// #8447: `--component` is repeatable, and `--tracker` resumes an interrupted
+/// run into an existing tracker.
+#[test]
+fn cli_parses_issue_epic_create_repeatable_components() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "plan.md",
+        "--milestone",
+        "Backlog · mpm/core",
+        "--component",
+        "trusty-mpm",
+        "--component",
+        "trusty-common",
+        "--phase-type",
+        "refactor",
+        "--session",
+        "tm-trusty-tools-15",
+        "--tracker",
+        "8445",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    component,
+                    phase_type,
+                    session,
+                    tracker,
+                    dry_run,
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(
+                component,
+                vec!["trusty-mpm".to_string(), "trusty-common".to_string()]
+            );
+            assert_eq!(phase_type, "refactor");
+            assert_eq!(session.as_deref(), Some("tm-trusty-tools-15"));
+            assert_eq!(tracker, Some(8445));
+            assert!(!dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+    // `--from` names the schema the whole verb reads; it is not optional.
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "create"]).is_err(),
+        "--from must be required"
+    );
+}
+
+/// #8447: `tm issue epic sync <epic#>` takes the tracker positionally.
+#[test]
+fn cli_parses_issue_epic_sync() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Sync { epic: 8445 }),
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync"]).is_err(),
+        "the tracker number must be required"
+    );
+}
+
+#[test]
+fn cli_parses_issue_epic_defer() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "defer",
+        "8445",
+        "--item",
+        "the gap",
+        "--why",
+        "later",
+        "--where",
+        "unscheduled",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Defer {
+                    epic,
+                    item,
+                    why,
+                    destination,
+                }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(item, "the gap");
+            assert_eq!(why, "later");
+            assert_eq!(destination, "unscheduled");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // All three cells are required flags.
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "issue",
+            "epic",
+            "defer",
+            "8445",
+            "--item",
+            "x"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_parses_issue_epic_close() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "close",
+        "8445",
+        "--evidence",
+        "O1: PR #1",
+        "--evidence",
+        "O2: PR #2",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic, evidence }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(evidence, vec!["O1: PR #1", "O2: PR #2"]);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // `--evidence` is repeatable and optional at parse time; the verb itself
+    // refuses when the declared outcomes are not all covered.
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "close", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic: 8445, .. }),
+            ..
+        }
+    ));
+}
+
 #[test]
 fn cli_parses_watch_poll_minimal() {
     // Why: the minimal `tm watch poll <project>` must parse with safety defaults
@@ -2623,6 +2921,184 @@ fn cli_parses_memory_import_dry_run_json() {
             );
         }
         other => panic!("expected Memory/Import, got {other:?}"),
+    }
+}
+
+/// Why (#8352): `tm memory recall` is the fallback a PM reaches for when the
+/// `mcp__trusty-memory__*` tools are dead, so the verb, its bare form, and every
+/// flag that mirrors the `memory_recall` schema must parse. Before #8352 this
+/// argv was `error: unrecognized subcommand 'recall'` (exit 2).
+#[test]
+fn cli_parses_memory_recall() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "memory", "recall", "who owns the ledger"])
+        .expect("`tm memory recall <query>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Recall {
+                    query,
+                    palace,
+                    top_k,
+                    room,
+                    wing,
+                    min_score,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(query, "who owns the ledger");
+            assert!(palace.is_none(), "the palace defaults to the session's own");
+            assert!(top_k.is_none(), "top_k defaults to trusty-memory's own");
+            assert!(room.is_none());
+            assert!(wing.is_none());
+            assert!(min_score.is_none());
+            assert!(!json);
+            assert!(memory_socket.is_none());
+        }
+        other => panic!("expected Memory/Recall, got {other:?}"),
+    }
+}
+
+/// Why (#8352): the overrides are what make the verb usable from a script — the
+/// palace override, the machine-readable envelope, and the socket a test rig or
+/// a second daemon is reached on.
+#[test]
+fn cli_parses_memory_recall_with_overrides() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "recall",
+        "q",
+        "--palace",
+        "other-palace",
+        "--top-k",
+        "3",
+        "--room",
+        "Planning",
+        "--min-score",
+        "0.4",
+        "--json",
+        "--memory-socket",
+        "/tmp/trusty-memory.sock",
+    ])
+    .expect("every recall flag must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Recall {
+                    palace,
+                    top_k,
+                    room,
+                    min_score,
+                    json,
+                    memory_socket,
+                    ..
+                },
+        } => {
+            assert_eq!(palace.as_deref(), Some("other-palace"));
+            assert_eq!(top_k, Some(3));
+            assert_eq!(room.as_deref(), Some("Planning"));
+            assert_eq!(min_score, Some(0.4));
+            assert!(json);
+            assert_eq!(
+                memory_socket.as_deref(),
+                Some(std::path::Path::new("/tmp/trusty-memory.sock"))
+            );
+        }
+        other => panic!("expected Memory/Recall, got {other:?}"),
+    }
+}
+
+/// Why (#8352): `--wing` and `--room` scope the same search two ways, and
+/// trusty-memory refuses them together — so the CLI refuses them at parse time
+/// rather than spending a round trip to be told.
+#[test]
+fn cli_refuses_memory_recall_wing_with_room() {
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "recall",
+        "q",
+        "--room",
+        "Planning",
+        "--wing",
+        "engineer",
+    ])
+    .expect_err("wing and room together must be refused at parse time");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+/// Why (#8352): the write verbs are the other half of the fallback. `--tag`
+/// repeats, because a drawer carries several.
+#[test]
+fn cli_parses_memory_remember_with_tags() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "remember",
+        "the ledger is owned by ops",
+        "--tag",
+        "ownership",
+        "--tag",
+        "ledger",
+        "--room",
+        "Planning",
+    ])
+    .expect("`tm memory remember <text>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Remember {
+                    text,
+                    palace,
+                    room,
+                    tags,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(text, "the ledger is owned by ops");
+            assert!(palace.is_none());
+            assert_eq!(room.as_deref(), Some("Planning"));
+            assert_eq!(tags, vec!["ownership".to_string(), "ledger".to_string()]);
+            assert!(!json);
+            assert!(memory_socket.is_none());
+        }
+        other => panic!("expected Memory/Remember, got {other:?}"),
+    }
+}
+
+/// Why (#8352): `note` takes `content`, not `text` — the same split the MCP
+/// schema draws, so a caller who knows one surface knows the other.
+#[test]
+fn cli_parses_memory_note() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "note",
+        "deploy target is prod-east",
+        "--palace",
+        "p",
+        "--json",
+    ])
+    .expect("`tm memory note <content>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Note {
+                    content,
+                    palace,
+                    tags,
+                    json,
+                    ..
+                },
+        } => {
+            assert_eq!(content, "deploy target is prod-east");
+            assert_eq!(palace.as_deref(), Some("p"));
+            assert!(tags.is_empty());
+            assert!(json);
+        }
+        other => panic!("expected Memory/Note, got {other:?}"),
     }
 }
 

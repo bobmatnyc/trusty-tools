@@ -244,6 +244,29 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
     );
 }
 
+/// 🔴 #7884: a daemon that accepts the request and never answers ends the call
+/// in an error that names the timeout — never a hang, never success.
+#[tokio::test]
+async fn prune_worktrees_reports_a_timeout_as_an_error() {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(250))
+        .build()
+        .expect("build a short-bounded test client");
+    // Answers long after the client's bound, so the call must time out.
+    let (url, server) = slow_prune_server(Duration::from_secs(3)).await;
+    let outcome = session_prune_worktrees(&client, &url, false, false, false, None).await;
+    server.abort();
+    let err = outcome.expect_err("a timed-out prune must be an error, never success");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("timed out waiting for the daemon (#7884)"),
+        "{msg}"
+    );
+    assert!(msg.contains("Nothing is reported as removed"), "{msg}");
+}
+
 /// A one-shot HTTP server that answers a prune-worktrees POST after `delay`.
 ///
 /// Why: reproducing "the daemon is still working when the client's clock runs
@@ -381,6 +404,79 @@ async fn capturing_prune_server() -> (String, tokio::task::JoinHandle<serde_json
         body
     });
     (url, handle)
+}
+
+/// 🔴 #8347 critic MEDIUM-4: a console gateway on another host is refused, and
+/// the local daemon is never resolved in its place. Fails before the fix,
+/// which redirected every gateway URL to the local daemon.
+#[tokio::test]
+async fn prune_endpoint_refuses_a_remote_gateway() {
+    let client = reqwest::Client::new();
+    let err = super::prune_endpoint(&client, "http://10.20.30.40:7788/api/mpm", || {
+        panic!("a remote gateway must never resolve the local daemon")
+    })
+    .await
+    .expect_err("a remote gateway must be refused");
+    assert!(
+        err.to_string()
+            .contains("will not run through the console gateway"),
+        "{err}"
+    );
+}
+
+/// #8347: a loopback gateway resolves to the daemon itself, after a probe.
+#[tokio::test]
+async fn prune_endpoint_resolves_a_loopback_gateway_to_the_daemon() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let daemon = format!("http://{}", listener.local_addr().expect("addr"));
+    let router = axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let client = reqwest::Client::new();
+
+    let endpoint =
+        super::prune_endpoint(&client, "http://localhost:7788/api/mpm", || daemon.clone()).await;
+    server.abort();
+
+    assert_eq!(
+        endpoint.expect("a loopback gateway resolves"),
+        format!("{daemon}/api/v1/sessions/managed/prune-worktrees")
+    );
+}
+
+/// #8347: the direct daemon must answer its health probe before the POST.
+#[tokio::test]
+async fn prune_endpoint_errors_when_the_direct_daemon_does_not_answer() {
+    let client = reqwest::Client::new();
+    let err = super::prune_endpoint(&client, "http://127.0.0.1:7788/api/mpm", || {
+        "http://127.0.0.1:1".to_string()
+    })
+    .await
+    .expect_err("an unreachable daemon must stop the prune");
+    assert!(err.to_string().contains("127.0.0.1:1"), "{err}");
+}
+
+/// 🔴 #8347: a gateway base URL never reaches the wire as a doubled
+/// `/api/mpm/api/v1/` path — the request goes to the daemon itself.
+#[test]
+fn prune_worktrees_url_bypasses_the_gateway_prefix() {
+    const ENDPOINT: &str = "http://127.0.0.1:7880/api/v1/sessions/managed/prune-worktrees";
+    for gateway in [
+        "http://127.0.0.1:7788/api/mpm",
+        "http://127.0.0.1:7788/api/mpm/",
+    ] {
+        let url = super::prune_worktrees_url(gateway, "http://127.0.0.1:7880");
+        assert_eq!(url, ENDPOINT, "gateway base {gateway}");
+        assert!(!url.contains("/api/mpm"), "{url}");
+    }
+    // A direct base is used verbatim, a trailing slash included.
+    assert_eq!(
+        super::prune_worktrees_url("http://127.0.0.1:7880/", "unused"),
+        ENDPOINT
+    );
 }
 
 #[test]

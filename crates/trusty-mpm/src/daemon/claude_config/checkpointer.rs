@@ -156,6 +156,7 @@ impl ConfigCheckpointer {
             // Only files captured in the checkpoint are restored. A file absent
             // from `files` was absent at snapshot time and is left as-is.
             if let Some(content) = checkpoint.files.get(key) {
+                crate::core::home_write_fence::check(path); // #8545
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(Error::Io)?;
                 }

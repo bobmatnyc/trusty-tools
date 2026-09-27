@@ -41,11 +41,74 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # fetch-depth: 0 — the relevance classifier below needs `git merge-base`
+      # against the base branch (pull_request) or the push's `before` SHA.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@1.94
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
 
-      - uses: Swatinem/rust-cache@v2
+      # A documentation-only change cannot move a cargo result, so it does not
+      # owe the two LIVE cargo invocations below — the rule stated in
+      # docs/reference/ci-gates.md. The job still runs and still reports, and
+      # the guard's own fixtures still run: only the toolchain, the cache and
+      # the two cargo steps are gated. Every failure arm answers "relevant".
+      - name: Classify Cargo-inert change set
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+
+          fail_closed() {
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "test-count: $1 — running the live cargo cases (fail closed)"
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="origin/${BASE_REF}"
+          else
+            base="${PUSH_BEFORE}"
+          fi
+
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            fail_closed "no usable base SHA"
+          fi
+
+          # GITHUB_OUTPUT is unset for this call so the script's own
+          # `docs_only=` line does not also land in this step's output set.
+          if ! verdict="$(env -u GITHUB_OUTPUT DOCS_ONLY_BASE="$base" bash scripts/detect-docs-only.sh)"; then
+            fail_closed "detect-docs-only.sh failed"
+          fi
+
+          case "$verdict" in
+            docs_only=true)
+              echo "relevant=false" >> "$GITHUB_OUTPUT"
+              echo "test-count: skipped — every changed path is Cargo-inert"
+              ;;
+            docs_only=false)
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              echo "test-count: running — the change set can affect a cargo result"
+              ;;
+            *) fail_closed "detect-docs-only.sh printed an unusable verdict '${verdict}'" ;;
+          esac
+
+      - if: steps.relevance.outputs.relevant != 'false'
+        uses: dtolnay/rust-toolchain@1.94
+
+      - if: steps.relevance.outputs.relevant != 'false'
+        uses: Swatinem/rust-cache@v2
         with:
           key: test-count
 
@@ -58,6 +121,7 @@ jobs:
       # `trusty-progress` is the smallest crate in the workspace (two
       # dependencies), so both live cases below compile once and run in seconds.
       - name: A real zero-match filter must be refused (exit 3)
+        if: steps.relevance.outputs.relevant != 'false'
         run: |
           set +e
           bash scripts/check_test_count.sh -- \
@@ -70,4 +134,5 @@ jobs:
           fi
 
       - name: A real matching run must pass (exit 0)
+        if: steps.relevance.outputs.relevant != 'false'
         run: bash scripts/check_test_count.sh -- cargo test -p trusty-progress --lib

@@ -1834,6 +1834,30 @@ fn unresolved_target_is_none_once_home_expands_the_tilde() {
     }
 }
 
+/// #8572: a `$(…)` or backtick substitution survives resolution too, and
+/// every rule asking [`unresolved_target`] must see it.
+/// Test: itself.
+#[test]
+fn unresolved_target_reports_a_command_substitution() {
+    let env = PathEnv {
+        tmpdir: None,
+        tmp: None,
+        home: Some("/Users/bob".to_string()),
+    };
+    let base = Path::new("/repo/.claude/worktrees/agent-a");
+    for (token, expected) in [
+        ("$(cat /tmp/main)", "$("),
+        ("`cat /tmp/main`", "`"),
+        ("$(cat $MAIN)/sub", "$("),
+    ] {
+        let resolved = resolve_target_path(token, base, &env);
+        let unresolved =
+            unresolved_target(&resolved).unwrap_or_else(|| panic!("must be unresolved: {token}"));
+        assert_eq!(unresolved.token, expected, "token: {token}");
+        assert_eq!(unresolved.shown, resolved, "the whole path is quoted");
+    }
+}
+
 /// Whether any composition segment of `command` runs `git` as its command
 /// word — the question every git rule in this guard asks, resolved the way
 /// the production path resolves it (#6982).
@@ -2320,10 +2344,10 @@ fn an_unlexable_git_segment_keeps_every_deny_it_already_had() {
     );
 }
 
-// #7399: the write boundary decides on `shell_write_target`, so a redirect and
-// a git write option must both resolve to the file they name.
+// #7399: the write boundary decides on `shell_write_targets`, so a redirect
+// and a git write option must both resolve to the file they name.
 #[test]
-fn shell_write_target_reads_redirects_and_git_output() {
+fn shell_write_targets_reads_redirects_and_git_output() {
     for (command, target) in [
         ("echo hi > /tmp/o.diff", "/tmp/o.diff"),
         ("cat a >> /tmp/o.diff", "/tmp/o.diff"),
@@ -2340,8 +2364,8 @@ fn shell_write_target_reads_redirects_and_git_output() {
         ),
     ] {
         assert_eq!(
-            shell_write_target(command).as_deref(),
-            Some(target),
+            shell_write_targets(command),
+            Ok(vec![target.to_string()]),
             "{command}"
         );
     }
@@ -2350,7 +2374,7 @@ fn shell_write_target_reads_redirects_and_git_output() {
 // #7399: the boundary must not deny a read. Everything here either writes
 // nothing or names its file in a position that can also be a read.
 #[test]
-fn shell_write_target_ignores_reads() {
+fn shell_write_targets_ignores_reads() {
     for command in [
         "git diff HEAD~1 HEAD",
         "git diff --no-index /tmp/a.txt /tmp/b.txt",
@@ -2367,14 +2391,38 @@ fn shell_write_target_ignores_reads() {
         // Unlexable: withholds, never invents, a target.
         "git diff --output='/tmp/o.diff",
     ] {
-        assert_eq!(shell_write_target(command), None, "{command}");
+        assert!(
+            shell_write_targets(command).is_ok_and(|t| t.is_empty()),
+            "{command} -> {:?}",
+            shell_write_targets(command)
+        );
     }
     // A write that names no readable path still denies through
     // `classify_bash_segment`; it just gives the boundary nothing to place.
-    assert_eq!(shell_write_target("git diff --output"), None);
+    assert_eq!(shell_write_targets("git diff --output"), Ok(Vec::new()));
     assert_eq!(
         evaluate_bash_command("git diff --output"),
         Some(SHELL_EDIT_REASON)
+    );
+}
+
+// #8468 option B: every composition segment that names a write must be
+// judged, not only the first one found across the whole command. Before the
+// fix, a benign first write (`notes.md`) hid a later source write
+// (`crates/x/src/lib.rs`) from the boundary entirely.
+#[test]
+fn shell_write_targets_collects_every_segments_write() {
+    assert_eq!(
+        shell_write_targets("echo hi > notes.md && echo bye > crates/x/src/lib.rs"),
+        Ok(vec![
+            "notes.md".to_string(),
+            "crates/x/src/lib.rs".to_string()
+        ])
+    );
+    // A `cd` segment's own redirect is a write like any other segment's.
+    assert_eq!(
+        shell_write_targets("cd . > crates/x/src/lib.rs"),
+        Ok(vec!["crates/x/src/lib.rs".to_string()])
     );
 }
 
@@ -2384,13 +2432,13 @@ fn shell_write_target_ignores_reads() {
 // A `>` in here-document PROSE would therefore have named a write target and
 // driven a hard ADR-0044 deny on a command that writes nothing.
 #[test]
-fn shell_write_target_ignores_a_heredoc_body_redirect() {
+fn shell_write_targets_ignores_a_heredoc_body_redirect() {
     for command in [
         "cat <<'EOF'\nsee: git diff > crates/x/src/lib.rs\nEOF",
         "python3 <<'PY'\nprint([k for k in d if len(k) > 3])\nPY",
         "cat <<EOF\nthe pipeline is read -> parse -> write\nEOF",
     ] {
-        assert_eq!(shell_write_target(command), None, "{command}");
+        assert_eq!(shell_write_targets(command), Ok(Vec::new()), "{command}");
         assert_eq!(extract_shell_edit_target(command), None, "{command}");
         assert_eq!(evaluate_bash_command(command), None, "{command}");
     }
@@ -2398,12 +2446,12 @@ fn shell_write_target_ignores_a_heredoc_body_redirect() {
     // operator line, or after the terminator, still names its file — the
     // mirror of `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`.
     assert_eq!(
-        shell_write_target("python3 <<'PY' > out.rs\nprint(1)\nPY").as_deref(),
-        Some("out.rs")
+        shell_write_targets("python3 <<'PY' > out.rs\nprint(1)\nPY"),
+        Ok(vec!["out.rs".to_string()])
     );
     assert_eq!(
-        shell_write_target("python3 <<'PY'\nprint(1)\nPY\necho done > f.rs").as_deref(),
-        Some("f.rs")
+        shell_write_targets("python3 <<'PY'\nprint(1)\nPY\necho done > f.rs"),
+        Ok(vec!["f.rs".to_string()])
     );
 }
 
@@ -2480,4 +2528,32 @@ fn the_first_refusing_target_wins() {
         p.starts_with("/full").then(|| "over threshold".to_string())
     });
     assert_eq!(reason.as_deref(), Some("over threshold"));
+}
+
+/// #8439: `classify_bash_segment` and the worktree-add walker do not read an
+/// unknown git global option as "not this verb" — every later token is a
+/// candidate subcommand, so the deny still fires.
+/// Test: itself.
+#[test]
+fn an_unknown_git_global_option_does_not_hide_a_denied_verb() {
+    for command in [
+        "git --shallow-file x apply p.diff",
+        "git --shallow-file status diff --output=/tmp/o.diff",
+    ] {
+        assert!(
+            evaluate_bash_command(command).is_some(),
+            "must deny: {command}"
+        );
+    }
+    assert_eq!(
+        extract_shell_edit_target("git --shallow-file x diff --output=/tmp/o.diff").as_deref(),
+        Some("/tmp/o.diff")
+    );
+    assert_eq!(
+        evaluate_worktree_add_command(
+            "git --shallow-file x worktree add /tmp/wt",
+            Path::new("/Users/x/proj")
+        ),
+        Some(WORKTREE_TMP_REASON)
+    );
 }

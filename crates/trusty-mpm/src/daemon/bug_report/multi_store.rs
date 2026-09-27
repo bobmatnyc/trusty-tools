@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use trusty_common::error_capture::ErrorStore;
 
+use super::denials::{PM_GUARD_DENIALS_FILE, pm_guard_denials_path};
 use super::types::AggregatedError;
 
 /// Well-known app names whose JSONL stores we aggregate.
@@ -58,6 +59,7 @@ fn store_path_for(app_name: &str) -> Option<PathBuf> {
 /// over the socket. A caller holding its own base passes it here and never
 /// consults process state.
 /// What: `<base>/<app_name>/errors.jsonl` for every [`DAEMON_APP_NAMES`] entry,
+/// then the pm-guard denial store `<base>/trusty-mpm/`[`PM_GUARD_DENIALS_FILE`],
 /// mirroring the layout `resolve_data_dir` produces. Creates nothing — a missing
 /// file reads as no records.
 /// Test: `store_paths_under_names_every_daemon`.
@@ -66,6 +68,8 @@ pub fn store_paths_under(base: &Path) -> Vec<PathBuf> {
     DAEMON_APP_NAMES
         .iter()
         .map(|app_name| base.join(app_name).join("errors.jsonl"))
+        // #8722: pm-guard denials are recorded beside the daemon's own errors.
+        .chain([base.join("trusty-mpm").join(PM_GUARD_DENIALS_FILE)])
         .collect()
 }
 
@@ -75,7 +79,8 @@ pub fn store_paths_under(base: &Path) -> Vec<PathBuf> {
 ///      need a merged, deduplicated view across every daemon. This function is
 ///      the single entry point so both tools stay in sync.
 /// What: reads up to [`PER_STORE_LIMIT`] records from each daemon's JSONL
-///       store (using [`ErrorStore::read_records`]), merges them into a
+///       store and from the pm-guard denial store (through
+///       [`aggregate_errors_from_paths`]), merges them into a
 ///       `HashMap` keyed by fingerprint (most-recent record wins; occurrence
 ///       count accumulates), then returns the values sorted descending by
 ///       `timestamp_secs`. The result is truncated to `limit` entries.
@@ -83,33 +88,13 @@ pub fn store_paths_under(base: &Path) -> Vec<PathBuf> {
 ///       `tests::sorts_by_most_recent_timestamp`.
 #[must_use]
 pub fn aggregate_errors(limit: usize) -> Vec<AggregatedError> {
-    let mut map: HashMap<String, AggregatedError> = HashMap::new();
-
-    for app_name in DAEMON_APP_NAMES {
-        let Some(path) = store_path_for(app_name) else {
-            continue;
-        };
-        let records = ErrorStore::read_records(&path, PER_STORE_LIMIT);
-        for record in records {
-            let fp = record.fingerprint.clone();
-            map.entry(fp)
-                .and_modify(|existing| {
-                    existing.occurrences += 1;
-                    if record.timestamp_secs > existing.record.timestamp_secs {
-                        existing.record = record.clone();
-                    }
-                })
-                .or_insert(AggregatedError {
-                    record,
-                    occurrences: 1,
-                });
-        }
-    }
-
-    let mut result: Vec<AggregatedError> = map.into_values().collect();
-    result.sort_by_key(|b| std::cmp::Reverse(b.record.timestamp_secs));
-    result.truncate(limit);
-    result
+    // #8722: the pm-guard denial store is read alongside every daemon's errors.
+    let paths: Vec<PathBuf> = DAEMON_APP_NAMES
+        .iter()
+        .filter_map(|app_name| store_path_for(app_name))
+        .chain(pm_guard_denials_path())
+        .collect();
+    aggregate_errors_from_paths(&paths, limit)
 }
 
 /// Aggregate errors from explicit file paths (used in tests / custom setups).
@@ -257,10 +242,15 @@ mod tests {
         let base = Path::new("/tmp/does-not-exist-6505");
         let paths = store_paths_under(base);
 
-        assert_eq!(paths.len(), DAEMON_APP_NAMES.len());
+        assert_eq!(paths.len(), DAEMON_APP_NAMES.len() + 1);
         for (path, app_name) in paths.iter().zip(DAEMON_APP_NAMES) {
             assert_eq!(path, &base.join(app_name).join("errors.jsonl"));
         }
+        // #8722: and the pm-guard denial store, last.
+        assert_eq!(
+            paths.last(),
+            Some(&base.join("trusty-mpm").join(PM_GUARD_DENIALS_FILE))
+        );
         // An absent base is a read of no records, never an error.
         assert!(aggregate_errors_from_paths(&paths, 100).is_empty());
     }

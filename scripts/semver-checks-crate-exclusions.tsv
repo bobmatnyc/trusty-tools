@@ -28,7 +28,15 @@
 # <crate> is the package name (`tga`), not the crates/ directory name.
 #
 # <crate>	<reason>
-trusty-mpm	binary-only consumer surface: installed as the `tm` executable via `cargo install trusty-mpm`, and a binary user gets a whole new executable, so library API compatibility is meaningless to them. Zero workspace packages depend on it (re-checked by the gate) and crates.io reported 0 reverse dependencies on 2026-08-12.
+# #8341: the `trusty-mpm` row is REMOVED, not commented out, for the same
+# reason the `tga` row below is. It claimed zero workspace packages depend on
+# trusty-mpm's library; #8341 gave the new test-only `trusty-crate-contracts`
+# crate a NORMAL `trusty-mpm` dependency, so that the cross-gate test it hosts
+# stops costing trusty-mpm a `[dev-dependencies]` edge on trusty-review. The
+# gate re-checked the premise, found the dependent, and refused the skip with
+# exit 3 on every trusty-mpm run. The claim is dead, and trusty-mpm is gated
+# like any other crate now. Do not re-add the row while that edge exists.
+#
 # #6300: the `tga` row is REMOVED, not commented out. It claimed zero workspace
 # packages depend on tga's library; #6294 gave trusty-analyze a `tga` Cargo edge,
 # so the gate refused the skip and exited 3 on every tga run. The claim is dead,

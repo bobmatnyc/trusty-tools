@@ -33,6 +33,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -43,6 +44,57 @@ use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 use crate::workstreams::SharedWorkstreamStore;
 
 use super::registry::SessionRegistry;
+
+/// How long [`cancel`] waits for a signalled run to actually stop before
+/// answering with an error instead of a cancelled snapshot (#8207).
+///
+/// Why: cancellation is observed at TURN boundaries, so the wait has to cover
+/// finishing whatever tool call is in flight — a `bash` step, a delegated
+/// sub-agent's turn — not just the flag check. The upper bound is not a taste
+/// question: this grace and EVERY in-repo client's per-call budget — the TUI's
+/// [`crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT`] and the CLI's
+/// [`crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT`] — are ONE contract,
+/// because the client's budget covers the daemon's whole wait. The first cut
+/// was thirty seconds against a fifteen-second client budget, so every cancel
+/// taking 15-30s reached the user as a transport timeout and the fail-closed
+/// `cancel_unconfirmed` reply was unreachable from the TUI. Ten seconds leaves
+/// the answer five seconds to be written and read.
+///
+/// It also bounds a second stall: `crate::serve::transport` awaits each
+/// dispatch inline, so a connection serving STDIO is blocked for exactly this
+/// long while a cancel is confirming. Shortening the grace is the whole of the
+/// mitigation here — restructuring that transport is not in #8207's scope.
+/// Test: `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`
+/// pins the fail-closed arm this bound exists to reach;
+/// `protocol::tests::the_cancel_grace_fits_inside_the_clients_call_budget`
+/// pins the contract with the client constant.
+const CANCEL_CONFIRM_GRACE: Duration = Duration::from_secs(10);
+
+/// #8207: a build-time stop on the two halves of the cancel contract being
+/// changed out of order — the daemon's wait must leave the client's call
+/// budget room to carry the answer back.
+const _: () = assert!(
+    CANCEL_CONFIRM_GRACE.as_secs() + CANCEL_ANSWER_HEADROOM.as_secs()
+        <= crate::tui_client::uds_rpc::DEFAULT_CALL_TIMEOUT.as_secs(),
+    "CANCEL_CONFIRM_GRACE must fit inside tui_client's DEFAULT_CALL_TIMEOUT \
+     with headroom for the reply — see #8207"
+);
+
+/// #8207: the SAME stop for the second client over the same call. `tcode`'s CLI
+/// subcommands reach `session.cancel` through
+/// [`crate::cli_client::stdio::StdioRpcClient`], which carries its own 15s
+/// budget — pinning only the TUI's left that one free to drop below the grace
+/// and turn every slow cancel into a transport timeout there instead.
+const _: () = assert!(
+    CANCEL_CONFIRM_GRACE.as_secs() + CANCEL_ANSWER_HEADROOM.as_secs()
+        <= crate::cli_client::stdio::DEFAULT_CALL_TIMEOUT.as_secs(),
+    "CANCEL_CONFIRM_GRACE must fit inside cli_client's DEFAULT_CALL_TIMEOUT \
+     with headroom for the reply — see #8207"
+);
+
+/// How much of the client's call budget is reserved for everything that is not
+/// the wait itself: dialling the socket, framing, and writing the reply.
+const CANCEL_ANSWER_HEADROOM: Duration = Duration::from_secs(5);
 
 /// Register every `session.*` method onto `router`, all sharing `registry`.
 ///
@@ -446,12 +498,32 @@ async fn detach(
 /// behaviour.
 /// What: idempotent either way. `-32007 session_not_found` if `session_id`
 /// is unknown. When `SessionRegistry::is_executing` is true, calls
-/// `request_cancel` (sets the flag) and returns the CURRENT snapshot — still
-/// `status: "running"` until the executor actually observes cancellation and
-/// transitions it. Otherwise falls back to `SessionRegistry::cancel` (the
-/// #2054 immediate `status: "cancelled"` path).
+/// `request_cancel` (sets the flag) and then BLOCKS on
+/// `SessionRegistry::await_cancelled` until the spawned run has actually
+/// stopped, returning the post-stop snapshot. Otherwise falls back to
+/// `SessionRegistry::cancel` (the #2054 immediate `status: "cancelled"` path).
+///
+/// (#8207) The wait is the fix for a client being told a task had stopped
+/// while it had not: this used to return the still-`running` snapshot the
+/// instant the flag was set, so the caller reopened its input and the next
+/// `task.run` was rejected with `-32003 invalid_argument` ("already has a task
+/// running"). The reply is now the answer to "did it stop", which makes
+/// "reported cancelled" and "actually stopped" one fact instead of two. The
+/// wait is FAIL-CLOSED: a run that outlives [`CANCEL_CONFIRM_GRACE`] answers
+/// with `await_cancelled`'s `-32010 cancel_unconfirmed` error, never a
+/// cancelled snapshot — see [`RpcError::cancel_unconfirmed`] for what each
+/// client in this repo does with that code.
+///
+/// KNOWN LIMITATION (#8207): the permission gate (`crate::permissions::gate`)
+/// waits up to its own `timeout` for an answer WITHOUT watching the cancel flag,
+/// so Esc at an open permission prompt cannot stop the run until the prompt
+/// resolves — that cancel spends the whole grace and answers `-32010`.
 /// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`,
-/// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`.
+/// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`,
+/// `protocol::tests::cancel_waits_for_the_task_to_stop_before_reporting`,
+/// `protocol::tests::a_prompt_right_after_cancel_is_accepted_not_rejected`,
+/// `protocol::tests::cancel_that_cannot_confirm_the_stop_is_an_error`,
+/// `protocol::tests::the_cancel_grace_fits_inside_the_clients_call_budget`.
 async fn cancel(
     registry: &SessionRegistry,
     params: Value,
@@ -460,6 +532,9 @@ async fn cancel(
     let p: SessionIdParams = parse(params, "session.cancel")?;
     if registry.is_executing(&p.session_id) {
         registry.request_cancel(&p.session_id)?;
+        registry
+            .await_cancelled(&p.session_id, CANCEL_CONFIRM_GRACE)
+            .await?;
         Ok(json!(registry.status(&p.session_id)?))
     } else {
         Ok(json!(registry.cancel(&p.session_id)?))

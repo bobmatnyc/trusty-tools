@@ -186,7 +186,9 @@ fn refused(v: &ReclaimVerdict, owner: &ManagedSessionId) -> String {
         ReclaimVerdict::Blocked { reason, .. } | ReclaimVerdict::BlockedByAgent { reason, .. } => {
             reason.clone()
         }
-        ReclaimVerdict::Reclaimable { .. } => {
+        // #7889: both grant kinds are the same failure here — gate 4b must
+        // refuse before either can be reached.
+        ReclaimVerdict::Reclaimable { .. } | ReclaimVerdict::ReclaimableLandedContent { .. } => {
             panic!("a session-owned tree whose owner is not proven gone was reclaimable: {v:?}")
         }
     };
@@ -311,6 +313,7 @@ fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,
@@ -345,6 +348,7 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,
@@ -392,6 +396,7 @@ async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
     let out = reclaim_with_probes(
         &s.fx.repos_root,
         &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
             keep_list: &KeepList::default,
             agent_state: &no_agents,

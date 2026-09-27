@@ -198,26 +198,32 @@ pub async fn register_index_reporting_collision(
             let refusal = format!("daemon returned {} for POST /indexes", resp.status());
             // #7758: only the root-collision 409 carries `existing_id`; it is
             // the sole refusal a reindex can satisfy instead.
-            let existing_id = if resp.status() == reqwest::StatusCode::CONFLICT {
-                resp.json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|body| {
-                        body.get("existing_id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    })
-                    .filter(|id| !id.is_empty())
+            let body = if resp.status() == reqwest::StatusCode::CONFLICT {
+                resp.json::<serde_json::Value>().await.ok()
             } else {
                 None
             };
-            match existing_id {
-                Some(existing_id) => Ok(RegisterOutcome::RootOwnedBy {
+            let field = |key: &str| {
+                body.as_ref()
+                    .and_then(|b| b.get(key))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            if let Some(existing_id) = field("existing_id") {
+                return Ok(RegisterOutcome::RootOwnedBy {
                     existing_id,
                     refusal,
-                }),
-                None => anyhow::bail!(refusal),
+                });
             }
+            // #8727: an overlap 409 names the blocking index and its root only
+            // in its body; print that text rather than the bare status line.
+            if field("existing_index_id").is_some() {
+                if let Some(reason) = field("error") {
+                    anyhow::bail!("{refusal}: {reason}");
+                }
+            }
+            anyhow::bail!(refusal)
         }
         Err(_) => Ok(RegisterOutcome::Unreachable),
     }

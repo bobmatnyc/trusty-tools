@@ -269,25 +269,27 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// `claude_command_includes_permission_mode`,
 /// `claude_command_scrubs_inherited_session_markers`,
 /// `claude_command_relocates_the_config_dir`.
-pub fn build_claude_command(
+pub fn build_claude_command_configured(
     model: Option<&str>,
     prompt_file: Option<&Path>,
     config_dir: Option<&Path>,
     mcp_env: &[(String, String)],
     scoped_mcp: Option<&Path>,
+    alternate_screen: bool,
 ) -> String {
     // #4181: a relocated spawn reads its credentials from a Keychain entry keyed
     // by a hash of CLAUDE_CONFIG_DIR, so it needs the token; a non-relocated one
     // already resolves the operator's own login and must not be handed a token
     // the operator did not ask this path to use (#2246).
     let token = config_dir.and_then(|_| crate::core::oauth_token::resolve_oauth_token());
-    build_claude_command_with(
+    build_claude_command_with_configured(
         model,
         prompt_file,
         config_dir,
         token.as_deref(),
         mcp_env,
         scoped_mcp,
+        alternate_screen,
     )
 }
 
@@ -310,11 +312,11 @@ pub fn build_claude_command(
 /// bypasses the Keychain entirely. `runtime::claude_code::env_bin_prefix` closes
 /// the same hole the same way for the daemon path; this is that mechanism, not a
 /// second one.
-/// #6495/#7160: the line also carries
-/// [`crate::core::alt_screen::managed_shell_assignments`] unconditionally, so
-/// a `tm launch` / `tm connect` pane starts on Claude Code's classic renderer
-/// with its own mouse capture off and keeps its scrollback. Each `${NAME-1}`
-/// expansion yields independently to a value the pane already exports.
+/// #6495/#7160/#8405: the line also carries
+/// [`crate::core::alt_screen::configured_shell_assignments`], so a `tm launch`
+/// / `tm connect` pane gets the renderer config `tmux.alternate_screen` asks
+/// for (`true` → `=0`, `false` → `=1`, whatever the tmux server inherited) and
+/// Claude Code's own mouse capture off, which still yields to the pane.
 /// What: composes `env`, the [`crate::core::claude_env_scrub::env_unset_flags`]
 /// `-u` operands, the alt-screen/mouse operands, then the optional
 /// `CLAUDE_CONFIG_DIR` and
@@ -329,15 +331,16 @@ pub fn build_claude_command(
 /// `claude_command_relocated_isolates_by_relocation_not_exclusion`,
 /// `claude_command_carries_a_non_empty_mcp_env`,
 /// `claude_command_scrubs_inherited_session_markers` (the non-relocated shape),
-/// `claude_command_defaults_the_alternate_screen_off`,
+/// `claude_command_assigns_the_configured_renderer`,
 /// `claude_command_defaults_the_mouse_capture_off`.
-pub fn build_claude_command_with(
+pub fn build_claude_command_with_configured(
     model: Option<&str>,
     prompt_file: Option<&Path>,
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
     mcp_env: &[(String, String)],
     scoped_mcp: Option<&Path>,
+    alternate_screen: bool,
 ) -> String {
     use crate::core::spawn_disclaim::pane::shell_single_quote;
 
@@ -345,11 +348,12 @@ pub fn build_claude_command_with(
     // `tm connect` / delegations keep native --resume/--continue/rewind. These
     // `-u` flags MUST precede every assignment below (POSIX `env` grammar).
     let mut cmd = format!("env{}", crate::core::claude_env_scrub::env_unset_flags());
-    // #6495/#7160: start on the classic renderer with mouse capture off, so
-    // the pane keeps native and tmux scrollback; each `${NAME-1}` yields
-    // independently to a value the pane already exports.
+    // #6495/#7160/#8405: config `tmux.alternate_screen` decides the renderer;
+    // the mouse-capture default still yields to the pane's own value.
     cmd.push(' ');
-    cmd.push_str(&crate::core::alt_screen::managed_shell_assignments());
+    cmd.push_str(&crate::core::alt_screen::configured_shell_assignments(
+        alternate_screen,
+    ));
     if let Some(dir) = config_dir {
         // #4181: point the session at the tm-owned config home so the `user`
         // settings tier resolves there instead of the operator's `~/.claude`.
@@ -417,8 +421,9 @@ pub fn build_claude_command_with(
 /// tier is the operator's own `~/.claude` — dropping it would change which
 /// settings and agents an in-place session loads. This fix scrubs the markers
 /// and changes nothing else.
-/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}"
-/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude --dangerously-skip-permissions`.
+/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=<0|1>
+/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude --dangerously-skip-permissions`,
+/// the renderer value decided by `alternate_screen` (#8405).
 /// The scrub flags lead the line and the two `NAME=VALUE` assignments follow
 /// them, as POSIX `env` grammar requires.
 ///
@@ -428,17 +433,16 @@ pub fn build_claude_command_with(
 /// operator's own `user` tier.
 /// Test: `inplace_session_command_scrubs_inherited_session_markers`,
 /// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`,
-/// `inplace_session_command_defaults_the_alternate_screen_off`,
+/// `inplace_session_command_assigns_the_configured_renderer`,
 /// `inplace_session_command_defaults_the_mouse_capture_off`.
-pub fn build_inplace_session_command() -> String {
+pub fn build_inplace_session_command_configured(alternate_screen: bool) -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
     format!(
         "env{} {} claude {}",
         crate::core::claude_env_scrub::env_unset_flags(),
-        // #6495/#7160: classic renderer + mouse capture off by default, each
-        // yielding independently to the pane's own value.
-        crate::core::alt_screen::managed_shell_assignments(),
+        // #6495/#7160/#8405: the configured renderer + mouse capture off.
+        crate::core::alt_screen::configured_shell_assignments(alternate_screen),
         PERMISSION_MODE_FLAG
     )
 }
@@ -458,8 +462,9 @@ pub fn build_inplace_session_command() -> String {
 /// as [`build_inplace_session_command`]: that would add [`SETTING_SOURCES_FLAG`]
 /// and drop the `user` settings tier on a path that does not relocate
 /// `CLAUDE_CONFIG_DIR`. This scrubs the markers and changes nothing else.
-/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN="${…-1}"
-/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude` plus
+/// What: `env <-u marker…> CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=<0|1>
+/// CLAUDE_CODE_DISABLE_MOUSE="${…-1}" claude` (renderer decided by
+/// `alternate_screen`, #8405) plus
 /// `--append-system-prompt-file <path>` when `prompt_file` is `Some`. The
 /// caller falls back to `None` when writing the prompt file failed, which is why
 /// the argument is optional. #6495 added the alt-screen assignment so a
@@ -467,17 +472,19 @@ pub fn build_inplace_session_command() -> String {
 /// #7160 added the mouse-capture one.
 /// Test: `client_session_command_scrubs_inherited_session_markers`,
 /// `client_session_command_appends_the_prompt_file`,
-/// `client_session_command_defaults_the_alternate_screen_off`,
+/// `client_session_command_assigns_the_configured_renderer`,
 /// `client_session_command_defaults_the_mouse_capture_off`.
-pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
+pub fn build_client_session_command_configured(
+    prompt_file: Option<&Path>,
+    alternate_screen: bool,
+) -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
     let mut cmd = format!(
         "env{} {} claude",
         crate::core::claude_env_scrub::env_unset_flags(),
-        // #6495/#7160: classic renderer + mouse capture off by default, each
-        // yielding independently to the pane's own value.
-        crate::core::alt_screen::managed_shell_assignments()
+        // #6495/#7160/#8405: the configured renderer + mouse capture off.
+        crate::core::alt_screen::configured_shell_assignments(alternate_screen)
     );
     if let Some(p) = prompt_file {
         cmd.push_str(" --append-system-prompt-file ");
@@ -497,11 +504,12 @@ pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
 /// [`build_claude_command`]'s round-2 note), so it is left non-relocating rather
 /// than given a `config_dir` parameter no caller would supply.
 /// Test: `agent_command_uses_config_model`.
-pub fn build_agent_command(
+pub fn build_agent_command_configured(
     config: &MpmConfig,
     agent: &AgentSummary,
     prompt_file: Option<&Path>,
     explicit: Option<&str>,
+    alternate_screen: bool,
 ) -> String {
     let model = crate::core::config::resolve_agent_model(
         config,
@@ -511,7 +519,113 @@ pub fn build_agent_command(
     );
     // #7422: a delegation inherits the parent session's config posture and
     // does not relocate `CLAUDE_CONFIG_DIR`, so it composes no scoped file.
-    build_claude_command(Some(&model), prompt_file, None, &[], None)
+    build_claude_command_configured(Some(&model), prompt_file, None, &[], None, alternate_screen)
+}
+
+// ── #8405: the 1.7.0 signatures, kept so the public API change is additive ──
+
+/// The 1.7.0 shape of [`build_claude_command_configured`] (#8405).
+///
+/// Why: trusty-mpm 1.7.x is published; removing this signature would fail the
+/// semver gate for a patch release.
+/// What: delegates with the renderer read from the operator's config
+/// ([`crate::core::alt_screen::configured_alternate_screen`]).
+///
+/// Superseded by [`build_claude_command_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_claude_command(
+    model: Option<&str>,
+    prompt_file: Option<&Path>,
+    config_dir: Option<&Path>,
+    mcp_env: &[(String, String)],
+    scoped_mcp: Option<&Path>,
+) -> String {
+    build_claude_command_configured(
+        model,
+        prompt_file,
+        config_dir,
+        mcp_env,
+        scoped_mcp,
+        crate::core::alt_screen::configured_alternate_screen(),
+    )
+}
+
+/// The 1.7.0 shape of [`build_claude_command_with_configured`] (#8405).
+///
+/// Why: see [`build_claude_command`].
+/// What: delegates with the renderer read from the operator's config.
+///
+/// Superseded by [`build_claude_command_with_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_claude_command_with(
+    model: Option<&str>,
+    prompt_file: Option<&Path>,
+    config_dir: Option<&Path>,
+    oauth_token: Option<&str>,
+    mcp_env: &[(String, String)],
+    scoped_mcp: Option<&Path>,
+) -> String {
+    build_claude_command_with_configured(
+        model,
+        prompt_file,
+        config_dir,
+        oauth_token,
+        mcp_env,
+        scoped_mcp,
+        crate::core::alt_screen::configured_alternate_screen(),
+    )
+}
+
+/// The 1.7.0 shape of [`build_inplace_session_command_configured`] (#8405).
+///
+/// Why: see [`build_claude_command`].
+/// What: delegates with the renderer read from the operator's config.
+///
+/// Superseded by [`build_inplace_session_command_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_inplace_session_command() -> String {
+    build_inplace_session_command_configured(crate::core::alt_screen::configured_alternate_screen())
+}
+
+/// The 1.7.0 shape of [`build_client_session_command_configured`] (#8405).
+///
+/// Why: see [`build_claude_command`].
+/// What: delegates with the renderer read from the operator's config.
+///
+/// Superseded by [`build_client_session_command_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
+    build_client_session_command_configured(
+        prompt_file,
+        crate::core::alt_screen::configured_alternate_screen(),
+    )
+}
+
+/// The 1.7.0 shape of [`build_agent_command_configured`] (#8405).
+///
+/// Why: see [`build_claude_command`].
+/// What: delegates with the renderer read from the operator's config.
+///
+/// Superseded by [`build_agent_command_configured`], which takes the renderer explicitly;
+/// kept un-`#[deprecated]` because that attribute is a minor-level change
+/// the 1.7.x patch semver gate refuses (#8405).
+pub fn build_agent_command(
+    config: &MpmConfig,
+    agent: &AgentSummary,
+    prompt_file: Option<&Path>,
+    explicit: Option<&str>,
+) -> String {
+    build_agent_command_configured(
+        config,
+        agent,
+        prompt_file,
+        explicit,
+        crate::core::alt_screen::configured_alternate_screen(),
+    )
 }
 
 // ──────────────────────────────────────────────
@@ -538,7 +652,7 @@ mod tests {
         format!(
             "env{} {} claude",
             crate::core::claude_env_scrub::env_unset_flags(),
-            crate::core::alt_screen::managed_shell_assignments()
+            crate::core::alt_screen::configured_shell_assignments(false)
         )
     }
 
@@ -546,14 +660,15 @@ mod tests {
     fn claude_command_bare() {
         // No model, no prompt file → the env-scrub head + the isolation flags.
         assert_eq!(
-            build_claude_command(None, None, None, &[], None),
+            build_claude_command_configured(None, None, None, &[], None, false),
             format!("{} {FLAGS}", head())
         );
     }
 
     #[test]
     fn claude_command_with_model() {
-        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None, &[], None);
+        let cmd =
+            build_claude_command_configured(Some("claude-opus-4-5"), None, None, &[], None, false);
         assert_eq!(cmd, format!("{} --model claude-opus-4-5 {FLAGS}", head()));
     }
 
@@ -563,7 +678,7 @@ mod tests {
     /// cannot go vacuous if the shared list is emptied.
     #[test]
     fn claude_command_scrubs_inherited_session_markers() {
-        let cmd = build_claude_command(None, None, None, &[], None);
+        let cmd = build_claude_command_configured(None, None, None, &[], None, false);
         assert!(
             cmd.starts_with("env -u "),
             "the launch line must carry an env scrub prefix: {cmd}"
@@ -605,7 +720,15 @@ mod tests {
     #[test]
     fn claude_command_relocated_never_scrubs_what_it_assigns() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"), &[], None);
+        let cmd = build_claude_command_with_configured(
+            None,
+            None,
+            Some(dir),
+            Some("tok"),
+            &[],
+            None,
+            false,
+        );
         for name in crate::core::claude_env_scrub::DELIBERATE_SPAWN_ENV {
             assert!(
                 cmd.contains(&format!(" {name}=")),
@@ -624,7 +747,15 @@ mod tests {
     #[test]
     fn claude_command_relocates_the_config_dir() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"), &[], None);
+        let cmd = build_claude_command_with_configured(
+            None,
+            None,
+            Some(dir),
+            Some("tok-abc"),
+            &[],
+            None,
+            false,
+        );
         assert_eq!(
             cmd,
             format!(
@@ -632,7 +763,7 @@ mod tests {
                  CLAUDE_CODE_OAUTH_TOKEN='tok-abc' claude \
                  --setting-sources user,project,local --dangerously-skip-permissions",
                 crate::core::claude_env_scrub::env_unset_flags(),
-                crate::core::alt_screen::managed_shell_assignments()
+                crate::core::alt_screen::configured_shell_assignments(false)
             )
         );
         // POSIX `env` stops parsing options at the first NAME=VALUE, so a
@@ -651,7 +782,8 @@ mod tests {
     #[test]
     fn claude_command_omits_the_oauth_token_when_absent() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
+        let cmd =
+            build_claude_command_with_configured(None, None, Some(dir), None, &[], None, false);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
             "the config dir must still be relocated: {cmd}"
@@ -674,7 +806,8 @@ mod tests {
     #[test]
     fn claude_command_quotes_a_config_dir_with_a_space() {
         let dir = Path::new("/Users/John Doe/.trusty-tools/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
+        let cmd =
+            build_claude_command_with_configured(None, None, Some(dir), None, &[], None, false);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/claude-config'"),
             "the config dir must be single-quoted: {cmd}"
@@ -699,13 +832,14 @@ mod tests {
             ),
             ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
         ];
-        let cmd = build_claude_command_with(
+        let cmd = build_claude_command_with_configured(
             None,
             None,
             Some(Path::new("/tm/claude-config")),
             None,
             &mcp_env,
             None,
+            false,
         );
 
         assert!(
@@ -734,7 +868,8 @@ mod tests {
     #[test]
     fn claude_command_relocated_isolates_by_relocation_not_exclusion() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None, &[], None);
+        let cmd =
+            build_claude_command_with_configured(None, None, Some(dir), None, &[], None, false);
         assert!(
             cmd.contains("--setting-sources user,project,local"),
             "the relocated line must load the user tier: {cmd}"
@@ -791,7 +926,7 @@ mod tests {
     /// line that silently saved no transcript.
     #[test]
     fn inplace_session_command_scrubs_inherited_session_markers() {
-        assert_scrubbed_launch_line(&build_inplace_session_command());
+        assert_scrubbed_launch_line(&build_inplace_session_command_configured(false));
     }
 
     /// This pin guards the FLAG list: adding `--setting-sources project,local`
@@ -800,7 +935,7 @@ mod tests {
     /// Pinned as a full string so a flag cannot creep in.
     ///
     /// #6495/#7160 changed the expected string by adding `env` operands
-    /// (`managed_shell_assignments()`) ahead of `claude`. That is deliberate and
+    /// (`configured_shell_assignments`) ahead of `claude`. That is deliberate and
     /// does not weaken what this test asserts: the guard is about which SETTINGS
     /// TIERS the line loads, an environment default changes none of them, and
     /// `--dangerously-skip-permissions` is still the only flag. The
@@ -808,15 +943,15 @@ mod tests {
     #[test]
     fn inplace_session_command_keeps_the_permission_flag_and_nothing_else() {
         assert_eq!(
-            build_inplace_session_command(),
+            build_inplace_session_command_configured(false),
             format!(
                 "env{} {} claude {PERMISSION_MODE_FLAG}",
                 crate::core::claude_env_scrub::env_unset_flags(),
-                crate::core::alt_screen::managed_shell_assignments()
+                crate::core::alt_screen::configured_shell_assignments(false)
             )
         );
         assert!(
-            !build_inplace_session_command().contains(SETTING_SOURCES_FLAG),
+            !build_inplace_session_command_configured(false).contains(SETTING_SOURCES_FLAG),
             "must not add --setting-sources: that would drop the user settings tier"
         );
     }
@@ -826,71 +961,82 @@ mod tests {
     /// not by review.
     #[test]
     fn client_session_command_scrubs_inherited_session_markers() {
-        assert_scrubbed_launch_line(&build_client_session_command(None));
-        assert_scrubbed_launch_line(&build_client_session_command(Some(Path::new("/tmp/p.txt"))));
+        assert_scrubbed_launch_line(&build_client_session_command_configured(None, false));
+        assert_scrubbed_launch_line(&build_client_session_command_configured(
+            Some(Path::new("/tmp/p.txt")),
+            false,
+        ));
     }
 
     #[test]
     fn client_session_command_appends_the_prompt_file() {
         let head = head();
-        assert_eq!(build_client_session_command(None), head);
+        assert_eq!(build_client_session_command_configured(None, false), head);
         assert_eq!(
-            build_client_session_command(Some(Path::new("/tmp/p.txt"))),
+            build_client_session_command_configured(Some(Path::new("/tmp/p.txt")), false),
             format!("{head} --append-system-prompt-file /tmp/p.txt")
         );
     }
 
-    /// #6495: every shell launch line this module owns must carry the
-    /// classic-renderer default, and must carry it in the form that yields to a
-    /// value the pane already exports. The `${NAME-1}` expansion IS the
-    /// operator-precedence mechanism, so asserting the exact operand asserts
-    /// both halves at once — a bare `NAME=1` would pass a "contains the
-    /// variable" check while silently overriding the operator.
+    /// Assert `cmd` assigns the renderer `alternate_screen` asks for as a plain
+    /// `NAME=value` — never the `${NAME-1}` form a tmux server that inherited
+    /// `=0` could override (#8405) — after every `-u` flag (POSIX `env`).
+    fn assert_assigns_the_configured_renderer(cmd: &str, alternate_screen: bool) {
+        let value = if alternate_screen { "0" } else { "1" };
+        let operand = format!("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN={value} ");
+        assert!(cmd.contains(&operand), "want {operand:?} in: {cmd}");
+        assert!(
+            !cmd.contains("${CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"),
+            "the renderer must not yield to the pane environment: {cmd}"
+        );
+        let first_assignment = cmd.find('=').expect("the line carries an assignment");
+        let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
+        assert!(
+            last_unset < first_assignment,
+            "the operand must follow every -u flag: {cmd}"
+        );
+    }
+
+    /// #8405: config `tmux.alternate_screen` decides the renderer on the
+    /// `tm launch` / `tm connect` line in both directions. Against fcfd38e71
+    /// the line carried `${CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN-1}` whatever the
+    /// config said, so an inherited `=0` or `=1` decided instead.
     #[test]
-    fn claude_command_defaults_the_alternate_screen_off() {
-        let operand = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
-        for cmd in [
-            build_claude_command(None, None, None, &[], None),
-            build_claude_command(Some("claude-opus-4-5"), None, None, &[], None),
-            build_claude_command_with(
-                None,
-                None,
-                Some(Path::new("/tm/claude-config")),
-                Some("tok"),
-                &[],
-                None,
-            ),
-        ] {
-            assert!(
-                cmd.contains(operand),
-                "the launch line must default the alternate screen off: {cmd}"
-            );
-            // POSIX `env`: an assignment before a `-u` makes `env` exec `-u`.
-            let first_assignment = cmd.find('=').expect("the line carries an assignment");
-            let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
-            assert!(
-                last_unset < first_assignment,
-                "the operand must follow every -u flag: {cmd}"
-            );
+    fn claude_command_assigns_the_configured_renderer() {
+        for alternate_screen in [true, false] {
+            for cmd in [
+                build_claude_command_configured(None, None, None, &[], None, alternate_screen),
+                build_claude_command_with_configured(
+                    None,
+                    None,
+                    Some(Path::new("/tm/claude-config")),
+                    Some("tok"),
+                    &[],
+                    None,
+                    alternate_screen,
+                ),
+            ] {
+                assert_assigns_the_configured_renderer(&cmd, alternate_screen);
+            }
         }
     }
 
-    /// #7160: the mouse-capture counterpart of
-    /// `claude_command_defaults_the_alternate_screen_off` — same launch lines,
-    /// same operand-form assertion, the other variable.
+    /// #7160: mouse capture keeps its yielding `${NAME-1}` operand on the
+    /// same launch lines — #8405 made only the renderer config-decided.
     #[test]
     fn claude_command_defaults_the_mouse_capture_off() {
         let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
         for cmd in [
-            build_claude_command(None, None, None, &[], None),
-            build_claude_command(Some("claude-opus-4-5"), None, None, &[], None),
-            build_claude_command_with(
+            build_claude_command_configured(None, None, None, &[], None, false),
+            build_claude_command_configured(Some("claude-opus-4-5"), None, None, &[], None, false),
+            build_claude_command_with_configured(
                 None,
                 None,
                 Some(Path::new("/tm/claude-config")),
                 Some("tok"),
                 &[],
                 None,
+                false,
             ),
         ] {
             assert!(
@@ -906,46 +1052,50 @@ mod tests {
         }
     }
 
-    /// #6495: the two builders that were assignment-free until now. Kept
-    /// separate from the pins above so a regression names the path it broke.
+    /// #8405: the `tm session start` line, both directions. Kept separate from
+    /// the pins above so a regression names the path it broke.
     #[test]
-    fn inplace_session_command_defaults_the_alternate_screen_off() {
-        let cmd = build_inplace_session_command();
-        assert!(
-            cmd.contains(crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT),
-            "the in-place session line must default the alternate screen off: {cmd}"
-        );
+    fn inplace_session_command_assigns_the_configured_renderer() {
+        for alternate_screen in [true, false] {
+            assert_assigns_the_configured_renderer(
+                &build_inplace_session_command_configured(alternate_screen),
+                alternate_screen,
+            );
+        }
     }
 
-    /// #7160: the mouse-capture counterpart of
-    /// `inplace_session_command_defaults_the_alternate_screen_off`.
+    /// #7160: the `tm session start` line keeps the yielding mouse operand.
     #[test]
     fn inplace_session_command_defaults_the_mouse_capture_off() {
-        let cmd = build_inplace_session_command();
+        let cmd = build_inplace_session_command_configured(false);
         assert!(
             cmd.contains(crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT),
             "the in-place session line must default mouse capture off: {cmd}"
         );
     }
 
+    /// #8405: the client `/connect` line, both directions, with and without a
+    /// prompt file.
     #[test]
-    fn client_session_command_defaults_the_alternate_screen_off() {
-        let operand = crate::core::alt_screen::ALT_SCREEN_SHELL_ASSIGNMENT;
-        assert!(build_client_session_command(None).contains(operand));
-        assert!(
-            build_client_session_command(Some(Path::new("/tmp/p.txt"))).contains(operand),
-            "the prompt-file shape must carry it too"
-        );
+    fn client_session_command_assigns_the_configured_renderer() {
+        for alternate_screen in [true, false] {
+            for prompt in [None, Some(Path::new("/tmp/p.txt"))] {
+                assert_assigns_the_configured_renderer(
+                    &build_client_session_command_configured(prompt, alternate_screen),
+                    alternate_screen,
+                );
+            }
+        }
     }
 
-    /// #7160: the mouse-capture counterpart of
-    /// `client_session_command_defaults_the_alternate_screen_off`.
+    /// #7160: the client `/connect` line keeps the yielding mouse operand.
     #[test]
     fn client_session_command_defaults_the_mouse_capture_off() {
         let operand = crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT;
-        assert!(build_client_session_command(None).contains(operand));
+        assert!(build_client_session_command_configured(None, false).contains(operand));
         assert!(
-            build_client_session_command(Some(Path::new("/tmp/p.txt"))).contains(operand),
+            build_client_session_command_configured(Some(Path::new("/tmp/p.txt")), false)
+                .contains(operand),
             "the prompt-file shape must carry it too"
         );
     }
@@ -953,7 +1103,7 @@ mod tests {
     #[test]
     fn claude_command_with_prompt() {
         let path = Path::new("/tmp/prompt.txt");
-        let cmd = build_claude_command(None, Some(path), None, &[], None);
+        let cmd = build_claude_command_configured(None, Some(path), None, &[], None, false);
         assert_eq!(
             cmd,
             format!(
@@ -966,7 +1116,14 @@ mod tests {
     #[test]
     fn claude_command_with_both() {
         let path = Path::new("/tmp/sys.txt");
-        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None, &[], None);
+        let cmd = build_claude_command_configured(
+            Some("claude-haiku-4-5"),
+            Some(path),
+            None,
+            &[],
+            None,
+            false,
+        );
         assert_eq!(
             cmd,
             format!(
@@ -981,13 +1138,14 @@ mod tests {
     #[test]
     fn claude_command_carries_the_mcp_config_flag_and_not_strict() {
         let scoped = Path::new("/state/session-mcp/ab12.json");
-        let cmd = build_claude_command_with(
+        let cmd = build_claude_command_with_configured(
             None,
             None,
             Some(Path::new("/tm/claude-config")),
             None,
             &[],
             Some(scoped),
+            false,
         );
         // #7892: strict would suppress the operator's user-scope servers.
         assert!(
@@ -1004,7 +1162,7 @@ mod tests {
     /// own `~/.claude.json` is not tm's to scope.
     #[test]
     fn claude_command_omits_the_mcp_config_flag_without_a_file() {
-        let cmd = build_claude_command(None, None, None, &[], None);
+        let cmd = build_claude_command_configured(None, None, None, &[], None, false);
         assert!(!cmd.contains("--strict-mcp-config"), "{cmd}");
         assert!(!cmd.contains("--mcp-config"), "{cmd}");
     }
@@ -1018,7 +1176,7 @@ mod tests {
         // isolation is proved by
         // `claude_command_relocated_isolates_by_relocation_not_exclusion`, which
         // is the same guarantee reached a different way, not a weaker one.
-        let cmd = build_claude_command(None, None, None, &[], None);
+        let cmd = build_claude_command_configured(None, None, None, &[], None, false);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "missing setting-sources isolation flag: {cmd}"
@@ -1034,7 +1192,7 @@ mod tests {
     fn claude_command_includes_permission_mode() {
         // Why: unattended orchestration sessions must not block on permission prompts;
         // bypass-permissions mode is required for fully automated multi-agent workflows.
-        let cmd = build_claude_command(Some("sonnet"), None, None, &[], None);
+        let cmd = build_claude_command_configured(Some("sonnet"), None, None, &[], None, false);
         assert!(
             cmd.contains("--dangerously-skip-permissions"),
             "missing bypass-permissions flag: {cmd}"
@@ -1086,7 +1244,7 @@ mod tests {
         // #4467: delegations go through `build_claude_command`, so they carry the
         // same `env <-u marker…>` head — an agent session that saved no
         // transcript was the same defect as a PM session that saved none.
-        let cmd = build_agent_command(&cfg, &agent, None, None);
+        let cmd = build_agent_command_configured(&cfg, &agent, None, None, false);
         assert_eq!(cmd, format!("{} --model claude-haiku-4-5 {FLAGS}", head()));
     }
 

@@ -163,15 +163,40 @@ const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
 /// (ADR-0048 decision 3) must not reach them.
 ///
 /// The list is exactly the built-ins whose published tool set excludes every
-/// write tool (`Edit`, `Write`, `NotebookEdit`). `general-purpose` is
-/// deliberately NOT here: it carries the full tool set, and in this project it
-/// is also the identity a failed named-agent dispatch degrades into (#4451), so
-/// a `general-purpose` delegation is routinely an engineer's work under another
-/// name. It stays `Unknown`, and stays isolated.
+/// write tool (`Edit`, `Write`, `NotebookEdit`). `claude-code-guide` qualifies
+/// on the same test as `Explore` and `Plan`: Claude Code 2.1.281 gives it
+/// `Read`/`Glob`/`Grep`/`WebFetch`/`WebSearch`, or `Bash` in place of
+/// `Glob`/`Grep`, and `Explore` and `Plan` carry `Bash` too. `general-purpose`
+/// and `claude` are deliberately NOT here: both carry the full tool set, and
+/// `general-purpose` is also the identity a failed named-agent dispatch
+/// degrades into (#4451), so a `general-purpose` delegation is routinely an
+/// engineer's work under another name. `statusline-setup` carries `Edit`. All
+/// three stay `Unknown`, and stay isolated.
 /// What: matched case-sensitively, ahead of the bundle scan, so a bundled agent
 /// could never be shadowed by one of these names without also colliding on it.
+/// Every entry is also in [`HARNESS_BUILTIN_AGENTS`].
 /// Test: `read_only_harness_builtins_are_not_isolated`.
-const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
+const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan", "claude-code-guide"];
+
+/// Every agent type the Claude Code harness itself provides, readers and
+/// writers alike (#8547).
+///
+/// Why: a dispatch in a main checkout is refused when its `subagent_type` is a
+/// name nothing defines. These six ship in no trusty-mpm bundle and in no
+/// deployed agent directory, yet Claude Code resolves them, so they are known
+/// names and must never be refused as unknown. Knowing a name is a separate
+/// question from whether it writes: [`READ_ONLY_HARNESS_AGENTS`] is the subset
+/// that reads only, and the rest still get a worktree.
+/// What: matched case-sensitively by [`agent_known_without_roster`].
+/// Test: `harness_builtins_are_known_names`.
+pub const HARNESS_BUILTIN_AGENTS: &[&str] = &[
+    "general-purpose",
+    "Explore",
+    "Plan",
+    "claude",
+    "claude-code-guide",
+    "statusline-setup",
+];
 
 /// Bundled agent `name:`s that write, and are still permitted to do so in a
 /// checkout they do not own (ADR-0056).
@@ -388,6 +413,21 @@ fn bundled_agent_metadata(
         .find(|meta| meta.name.as_deref() == Some(agent))
 }
 
+/// Is `agent` a name this binary knows without reading any agent directory
+/// (#8547)?
+///
+/// Why: the #8547 refusal must not reach a name that something defines. Two of
+/// the three sources that define names need no I/O — the compiled-in bundle and
+/// the harness built-ins — so they are checked here, and the caller reads the
+/// deployed roster only when both answer no.
+/// What: `true` when `agent` is in [`HARNESS_BUILTIN_AGENTS`] or names a bundled
+/// agent. Exact, case-sensitive match; an empty name is `false`.
+/// Test: `harness_builtins_are_known_names`.
+pub fn agent_known_without_roster(agent: &str) -> bool {
+    !agent.is_empty()
+        && (HARNESS_BUILTIN_AGENTS.contains(&agent) || bundled_agent_metadata(agent).is_some())
+}
+
 /// Does dispatching `agent` claim one of the machine's builder slots (#6892)?
 ///
 /// Why: "at most N concurrent builders" was a per-session rule held in PM
@@ -489,8 +529,9 @@ pub fn blocked_by_shared_tree(agent: &str, isolation: Option<&str>) -> bool {
 /// can never read different fields and disagree about which agent was
 /// dispatched.
 /// What: `tool_input.subagent_type` as a non-empty `&str`. An untyped
-/// dispatch — no `subagent_type` at all — yields `None` and therefore fails
-/// open; it is a separate defect, not this guard's to block.
+/// dispatch — no `subagent_type` at all — yields `None`. The shared-tree race
+/// lets it through; a main checkout refuses it (#8547, see
+/// `pm_guard_worktree_grant`).
 /// Test: `reads_subagent_type_and_isolation`.
 pub fn dispatch_agent(tool_input: Option<&Value>) -> Option<&str> {
     dispatch_field(tool_input, "subagent_type")
@@ -687,7 +728,8 @@ mod tests {
         // targets and ship in no bundle, so they classified `Unknown` and were
         // granted a worktree — which is cut from a COMMIT and therefore hides
         // the session's uncommitted work from the very agent asked to read it.
-        for agent in READ_ONLY_HARNESS_AGENTS {
+        // #8547 review: `claude-code-guide` has no Edit/Write/NotebookEdit either.
+        for agent in ["Explore", "Plan", "claude-code-guide"] {
             assert_eq!(
                 agent_write_risk(agent),
                 AgentWriteRisk::ReadsOnly,
@@ -698,16 +740,36 @@ mod tests {
                 "{agent} only reads and must read the session's own tree"
             );
         }
-        // `general-purpose` carries the full tool set and is also the identity a
-        // failed named-agent dispatch degrades into, so it stays a writer.
-        assert_eq!(agent_write_risk("general-purpose"), AgentWriteRisk::Unknown);
-        assert!(requires_own_worktree_in_main_checkout(
-            "general-purpose",
-            None
-        ));
+        // `general-purpose` and `claude` carry the full tool set, and
+        // `statusline-setup` carries `Edit`, so all three stay writers.
+        for agent in ["general-purpose", "claude", "statusline-setup"] {
+            assert_eq!(agent_write_risk(agent), AgentWriteRisk::Unknown, "{agent}");
+            assert!(
+                requires_own_worktree_in_main_checkout(agent, None),
+                "{agent}"
+            );
+        }
         // The read-only classification must not leak into #4480's question:
         // these were already allowed to share a tree, and still are.
         assert!(!shares_the_callers_tree("Explore", None));
+    }
+
+    #[test]
+    fn harness_builtins_are_known_names() {
+        // #8547 review: every harness built-in and every bundled agent is a
+        // known name; a name nothing defines, or a mis-cased one, is not.
+        for agent in HARNESS_BUILTIN_AGENTS
+            .iter()
+            .chain(&["rust-engineer", "research"])
+        {
+            assert!(agent_known_without_roster(agent), "{agent}");
+        }
+        for agent in ["", "some-project-custom-agent", "explore", "Rust-Engineer"] {
+            assert!(!agent_known_without_roster(agent), "{agent:?}");
+        }
+        for agent in READ_ONLY_HARNESS_AGENTS {
+            assert!(HARNESS_BUILTIN_AGENTS.contains(agent), "{agent}");
+        }
     }
 
     #[test]

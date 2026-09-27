@@ -1,4 +1,0 @@
-Fixed
-
-- A staged reindex promotion whose rename or re-open FAILED no longer reports `ReindexStatus::Complete`. That arm releases the staging store and quarantines the index, so the run ended holding no corpus while stamping `last_indexed_at` and a HEAD-SHA marker claiming the live corpus was current; the terminal status is now `Failed` and neither stamp is written. Only the refused-promotion arm was excluded before (#7991, #7920).
-- The unreadable-snapshot sidecar now claims its `.corrupt[.N]` slot atomically with `create_new` instead of probing with `exists()` and renaming afterwards. Two writers preserving the same snapshot could compute the same free name between the probe and the rename, and `rename(2)` replaces its destination silently — destroying the copy the first writer had just preserved (#7980).

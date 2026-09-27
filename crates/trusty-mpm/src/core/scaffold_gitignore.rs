@@ -82,21 +82,33 @@ pub const SCAFFOLD_GITIGNORE_END: &str = "# <<< trusty-mpm harness scaffolding <
 /// (`!/.claude/skills/cargo-commands/`, PR #7916) has a dead negation — the
 /// tracked file goes ignored the moment the block is regenerated. The glob
 /// ignores each child instead, which leaves the negation reachable. It applies
-/// only to `skills`: `agents` and `output-styles` have no tracked children in
-/// this repo (`git ls-files .claude`), so they stay in the cheaper directory
-/// form until one does.
-/// What: trailing-slash directory patterns, the one skills glob, the one stash
-/// FILE, and the two lock sidecars — so only the harness-owned subtrees and
-/// artifacts are ignored, not sibling config.
+/// only to `skills`: `agents` has no tracked children in this repo
+/// (`git ls-files .claude`), so it stays in the cheaper directory form until
+/// one does.
+/// #8533: `.claude/output-styles/` holds a project's own `<id>.md` style,
+/// which the committed `.trusty-mpm.toml` names, so the directory is not
+/// ignored. Only what tm writes there is: the bundled style files and the
+/// generated `*.tm-floor.md` composites. A block carrying the old directory
+/// line is re-rendered without it by [`refresh_block`]; the same line written
+/// by hand outside the block is the operator's and is left alone.
+/// What: trailing-slash directory patterns, the one skills glob, the generated
+/// style files, the one stash FILE, and the two lock sidecars — so only the
+/// harness-owned subtrees and artifacts are ignored, not sibling config.
 /// Test: `writes_block_to_fresh_gitignore`,
 /// `block_covers_session_output_but_not_project_config`,
 /// `lock_entries_match_the_settings_lock_sidecar`,
-/// `a_tracked_skill_survives_a_refresh_of_the_block`.
+/// `a_tracked_skill_survives_a_refresh_of_the_block`,
+/// `a_project_style_stays_trackable_and_generated_styles_are_ignored`,
+/// `an_old_block_ignoring_all_styles_is_migrated`.
 pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/agents/",
     // #7932: glob, never the directory form — see the constant's doc.
     ".claude/skills/*",
-    ".claude/output-styles/",
+    // #8533: one line per bundled style file (`OUTPUT_STYLES`), plus composites.
+    ".claude/output-styles/trusty-mpm.md",
+    ".claude/output-styles/trusty-mpm-teacher.md",
+    ".claude/output-styles/trusty-mpm-research.md",
+    ".claude/output-styles/*.tm-floor.md",
     ".claude/settings.json.lock",
     ".claude/settings.local.json.lock",
     ".trusty-mpm/sessions/",

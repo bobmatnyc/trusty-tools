@@ -269,6 +269,7 @@ fn apply_add_hooks(settings_path: &Path) -> Result<()> {
     }
     let pretty = serde_json::to_string_pretty(&json)
         .map_err(|e| Error::Protocol(format!("serialize settings.json: {e}")))?;
+    crate::core::home_write_fence::check(settings_path); // #8545
     std::fs::write(settings_path, pretty).map_err(Error::Io)?;
     Ok(())
 }

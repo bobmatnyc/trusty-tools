@@ -44,6 +44,9 @@
 use trusty_agents_common::compress::has_filter_for;
 // #7120: the #6986 source-read predicate, asked of the whole command.
 use trusty_agents_common::compress::tool_output::is_source_file_read;
+// #7477: the worktree resolver the `EnterWorktree` guard already uses.
+use std::path::{Path, PathBuf};
+use trusty_mpm::core::project_aliases::worktree_root;
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -160,6 +163,64 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
         "{} | tm compress --tool \"{tool}\"",
         crate::commands::compress::wrap_command_reporting_exit(trimmed)
     ))
+}
+
+/// [`rewrite_bash_command_for_compression`], unless the call runs in an
+/// isolation worktree.
+///
+/// Why (#7477): Claude Code's worktree-isolation classifier refuses the
+/// rewritten `{ …; printf …; } | tm compress --tool "…"` shape, so a wrapped
+/// `git diff`, `ls -la` or `cargo test` never runs in an agent's isolation
+/// worktree. The `SUB_AGENT_ENV` gate in `misc::hook` does not cover those
+/// agents: only trusty-agents' own spawns set that variable.
+/// What: `None` when `hook_cwd` sits in an isolation worktree
+/// ([`is_isolation_worktree`]), and also when `hook_cwd` is absent or empty —
+/// a cwd the hook cannot read cannot be shown to be outside one, and an
+/// unwrapped command never trips the classifier. Otherwise exactly
+/// [`rewrite_bash_command_for_compression`].
+/// Test: `no_rewrite_inside_an_isolation_worktree`,
+/// `rewrite_outside_an_isolation_worktree_is_unchanged`,
+/// `no_rewrite_when_the_cwd_is_undecidable`.
+pub(crate) fn rewrite_bash_command_unless_isolated(
+    command: &str,
+    hook_cwd: Option<&Path>,
+) -> Option<String> {
+    let cwd = hook_cwd.filter(|c| !c.as_os_str().is_empty())?;
+    if is_isolation_worktree(cwd) {
+        return None;
+    }
+    rewrite_bash_command_for_compression(command)
+}
+
+/// Whether `cwd` sits in a Claude Code isolation worktree (#7477).
+///
+/// Why: `isolation: "worktree"` provisions trees under `<repo>/.claude/worktrees/`
+/// (ADR-0020's harness store). A tm session worktree under `.worktrees/` hosts
+/// the PM itself, meets no isolation classifier, and keeps its compression.
+/// What: [`worktree_root`] — the resolver the `EnterWorktree` guard reads a
+/// caller's pinned tree from — names a tree whose container is
+/// `.claude/worktrees`. Purely lexical, like that guard.
+/// Test: `no_rewrite_inside_an_isolation_worktree`,
+/// `rewrite_outside_an_isolation_worktree_is_unchanged`.
+fn is_isolation_worktree(cwd: &Path) -> bool {
+    worktree_root(cwd)
+        .and_then(|root| root.parent().map(|p| p.ends_with(".claude/worktrees")))
+        .unwrap_or(false)
+}
+
+/// The directory a hook call runs in: the payload's `cwd`, else the hook's own.
+///
+/// Why (#7477): the same resolution `pm_guard` applies to its `hook_cwd`, so
+/// both hooks agree on which tree a call stands in.
+/// What: the payload's string `cwd`, else [`std::env::current_dir`], else
+/// `None` — which [`rewrite_bash_command_unless_isolated`] treats as isolated.
+/// Test: `hook_stays_silent_for_a_bash_call_in_an_isolation_worktree`.
+pub(crate) fn hook_cwd(payload: Option<&serde_json::Value>) -> Option<PathBuf> {
+    payload
+        .and_then(|v| v.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
 }
 
 /// Derive the `compress_tool_output` dispatch key from a Bash command.
@@ -606,6 +667,66 @@ mod tests {
             out.as_deref(),
             Some(expected_rewrite("git diff HEAD~1", "git diff").as_str())
         );
+    }
+
+    /// The three commands #7477 saw refused, each a covered tool.
+    const ISOLATION_REFUSED: [&str; 3] = ["git diff", "ls -la", "cargo test"];
+
+    #[test]
+    fn no_rewrite_inside_an_isolation_worktree() {
+        // #7477: the harness classifier refuses the wrapped shape here, so the
+        // command must reach Claude Code exactly as written.
+        for cwd in [
+            "/repo/.claude/worktrees/agent-a",
+            "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+            "/repo/.base/.worktrees/session-x/.claude/worktrees/agent-b",
+        ] {
+            for cmd in ISOLATION_REFUSED {
+                assert!(
+                    rewrite_bash_command_for_compression(cmd).is_some(),
+                    "{cmd} must be a covered tool, or this test proves nothing"
+                );
+                assert_eq!(
+                    rewrite_bash_command_unless_isolated(cmd, Some(Path::new(cwd))),
+                    None,
+                    "{cmd} in {cwd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rewrite_outside_an_isolation_worktree_is_unchanged() {
+        // A main checkout, a tm session worktree, and the `.claude/worktrees`
+        // container itself (which names no single tree) all keep the wrap.
+        for cwd in [
+            "/repo",
+            "/repo/crates/trusty-mpm",
+            "/repo/.base/.worktrees/session-x",
+            "/repo/.claude/worktrees",
+            "/repo/worktrees/agent-a",
+        ] {
+            for cmd in ISOLATION_REFUSED {
+                assert_eq!(
+                    rewrite_bash_command_unless_isolated(cmd, Some(Path::new(cwd))),
+                    rewrite_bash_command_for_compression(cmd),
+                    "{cmd} in {cwd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_rewrite_when_the_cwd_is_undecidable() {
+        // #7477 fail-open arm: no readable cwd means isolation cannot be ruled
+        // out, and the unwrapped command is the one the classifier accepts.
+        for cmd in ISOLATION_REFUSED {
+            assert_eq!(rewrite_bash_command_unless_isolated(cmd, None), None);
+            assert_eq!(
+                rewrite_bash_command_unless_isolated(cmd, Some(Path::new(""))),
+                None
+            );
+        }
     }
 
     #[test]

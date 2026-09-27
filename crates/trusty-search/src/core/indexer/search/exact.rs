@@ -63,7 +63,14 @@ const DEF_KEYWORDS: &[&str] = &[
 /// — after [`rank_hits`] has already ordered an exact path-suffix match ahead
 /// of a bare-basename-only one, so truncation keeps the most meaningful
 /// matches rather than an arbitrary id-ordered subset.
-/// Test: `a_common_basename_is_capped_and_does_not_bury_the_relevant_file`.
+///
+/// #7775: "most meaningful" was only true ACROSS the two tiers. Within one tier
+/// every hit tied, so the cap kept the alphabetically-first 8 and floored them
+/// above the semantic page. The cap is unchanged; what it now truncates is a
+/// list ordered by `HitInput::tie_score`, so the 8 it keeps are the 8 the other
+/// lanes ranked best.
+/// Test: `a_common_basename_is_capped_and_does_not_bury_the_relevant_file`,
+/// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
 pub(crate) const FILENAME_HIT_CAP: usize = 8;
 
 /// Extensions a bare token must carry to read as a filename rather than prose.
@@ -372,6 +379,12 @@ pub(crate) struct HitInput<'a> {
     /// archived, stale, legacy, deprecated, or docs-penalised. Always `false`
     /// in the corpus lane, which runs before that pass exists.
     pub(crate) downranked: bool,
+    /// The fused lane score this chunk already carries, used ONLY to order
+    /// [`LiteralShape::Filename`] hits that tie on every other key (#7775).
+    /// [`rank_hits`] zeroes it for every other shape, so supplying it is
+    /// always safe — see that function for why the other shapes must not
+    /// consult it. `0.0` when no lane surfaced the chunk at all.
+    pub(crate) tie_score: f32,
 }
 
 /// One chunk that carries the literal, with the signals that order it.
@@ -382,13 +395,16 @@ pub(crate) struct ExactHit {
     pub(crate) occurrences: usize,
     pub(crate) on_branch: bool,
     pub(crate) downranked: bool,
+    /// See [`HitInput::tie_score`]. Already zeroed for a non-`Filename` shape.
+    pub(crate) tie_score: f32,
 }
 
-/// Borrow a corpus chunk as a [`HitInput`]. The two ordering signals the corpus
-/// lane cannot know — the caller's branch preference and the archive verdict —
-/// are `false`; both are filled in by [`apply_floor`], which runs after the
-/// passes that compute them.
-fn as_hit_input(raw: &RawChunk) -> HitInput<'_> {
+/// Borrow a corpus chunk as a [`HitInput`], carrying `tie_score` as the
+/// chunk's fused lane score (`0.0` when no lane surfaced it). The two ordering
+/// signals the corpus lane cannot know — the caller's branch preference and the
+/// archive verdict — are `false`; both are filled in by [`apply_floor`], which
+/// runs after the passes that compute them.
+fn as_hit_input(raw: &RawChunk, tie_score: f32) -> HitInput<'_> {
     HitInput {
         id: raw.id.as_str(),
         file: raw.file.as_str(),
@@ -396,6 +412,7 @@ fn as_hit_input(raw: &RawChunk) -> HitInput<'_> {
         function_name: raw.function_name.as_deref(),
         on_branch: false,
         downranked: false,
+        tie_score,
     }
 }
 
@@ -468,16 +485,29 @@ fn occurrences_of(lit: &ExactLiteral, re: &Regex, input: &HitInput<'_>) -> usize
 /// `Identifier` shape already uses for a real declaration, so a path-shaped
 /// query (`indexer/search/exact.rs`) outranks every chunk that only shares its
 /// final segment, using the existing sort key rather than a new one.
+///
+/// #7775: that tier is the ONLY discriminator a `Filename` hit has — its
+/// occurrence count is always 1 — so 31 files ending `src/lib.rs` tied on every
+/// key and fell back to chunk id, and `FILENAME_HIT_CAP` then floored the
+/// alphabetically-first 8 above everything the semantic lanes ranked. `tie_score`
+/// (the fused lane score) breaks that tie BELOW the tier, so a strictly better
+/// suffix match still wins and chunk id still settles a genuine draw. The score
+/// is admitted for this shape ONLY: for the content-matching shapes, letting it
+/// pick WHICH occurrence wins reintroduces the #7675 failure, so `rank_hits`
+/// zeroes the field for them rather than trusting every caller to.
 /// Test: `hybrid_top_one_agrees_with_lexical_for_every_planted_identifier`,
 /// `an_archived_duplicate_ranks_below_the_live_definition`,
 /// `test_branch_boost_applied_to_matching_chunks`,
-/// `a_path_shaped_query_returns_its_file_first`.
+/// `a_path_shaped_query_returns_its_file_first`,
+/// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
 fn rank_hits<'a, I>(items: I, lit: &ExactLiteral, re: &Regex) -> Vec<ExactHit>
 where
     I: Iterator<Item = HitInput<'a>>,
 {
     // Built once per query, never per chunk — see [`DefinitionMatcher`].
     let definition = DefinitionMatcher::new(lit);
+    // #7775: only the path-matching shape may consult the lane score.
+    let scored_shape = matches!(lit.shape, LiteralShape::Filename);
     let mut hits: Vec<ExactHit> = items
         .filter_map(|input| {
             let occurrences = occurrences_of(lit, re, &input);
@@ -498,6 +528,7 @@ where
                 occurrences,
                 on_branch: input.on_branch,
                 downranked: input.downranked,
+                tie_score: if scored_shape { input.tie_score } else { 0.0 },
             })
         })
         .collect();
@@ -507,6 +538,9 @@ where
             .then_with(|| a.downranked.cmp(&b.downranked))
             .then_with(|| b.on_branch.cmp(&a.on_branch))
             .then_with(|| b.occurrences.cmp(&a.occurrences))
+            // #7775: zero for every non-`Filename` shape, so this is a no-op
+            // there and the key below stays exactly the #7675 one.
+            .then_with(|| b.tie_score.total_cmp(&a.tie_score))
             .then_with(|| a.id.cmp(&b.id))
     });
     hits
@@ -571,6 +605,9 @@ pub(crate) fn apply_floor(results: &mut [CodeChunk], lit: &ExactLiteral, re: &Re
             function_name: c.function_name.as_deref(),
             on_branch: c.on_branch,
             downranked: c.archive_reason.is_some(),
+            // #7775: the page's own pre-floor score is this stage's copy of the
+            // same fused signal the lane ranked its `Filename` hits by.
+            tie_score: c.score,
         }),
         lit,
         re,
@@ -680,10 +717,18 @@ impl CodeIndexer {
     /// truncation: a promoted hit the mode filter then deletes costs a `top_k`
     /// slot and returns nothing in its place, which is how this lane first
     /// emptied `test_code_mode_source_outranks_changelog_pre_truncation`.
+    ///
+    /// `tie_scores` (#7775) looks a candidate's fused lane score up by chunk
+    /// id. It orders same-tier [`LiteralShape::Filename`] hits — and nothing
+    /// else, see [`rank_hits`] — so the `FILENAME_HIT_CAP` truncation below
+    /// keeps the best-ranked members of a tie rather than the
+    /// alphabetically-first ones. `None` (every caller that has no fused list
+    /// yet) leaves every hit at `0.0`, which is the pre-#7775 chunk-id order.
     /// Test: `conceptual_ranking_is_unchanged_by_the_floor`,
     /// `exact_match_lane_degrades_observably_on_exhausted_retries`,
     /// `the_postings_candidate_path_and_the_full_scan_agree`,
-    /// `test_code_mode_source_outranks_changelog_pre_truncation`.
+    /// `test_code_mode_source_outranks_changelog_pre_truncation`,
+    /// `tied_filename_hits_are_ordered_by_lane_score_not_chunk_id`.
     pub(crate) async fn exact_match_lane(
         &self,
         lit: &ExactLiteral,
@@ -691,10 +736,12 @@ impl CodeIndexer {
         want: usize,
         mode: super::super::SearchMode,
         filter: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
+        tie_scores: Option<&(dyn Fn(&str) -> f32 + Send + Sync)>,
     ) -> ExactLaneOutcome {
         if want == 0 {
             return ExactLaneOutcome::default();
         }
+        let tie_score = |id: &str| tie_scores.map_or(0.0, |f| f(id));
         let mode_admits = |raw: &RawChunk| {
             if matches!(mode, super::super::SearchMode::Code)
                 && matches!(raw.chunk_type, crate::core::chunker::ChunkType::Docstring)
@@ -723,7 +770,7 @@ impl CodeIndexer {
                     ids.iter()
                         .filter_map(|id| chunks.get(id.as_str()))
                         .filter(|raw| admitted(raw))
-                        .map(as_hit_input),
+                        .map(|raw| as_hit_input(raw, tie_score(&raw.id))),
                     lit,
                     re,
                 ),
@@ -731,7 +778,7 @@ impl CodeIndexer {
                     chunks
                         .values()
                         .filter(|raw| admitted(raw))
-                        .map(as_hit_input),
+                        .map(|raw| as_hit_input(raw, tie_score(&raw.id))),
                     lit,
                     re,
                 ),

@@ -62,11 +62,12 @@ use crate::task::result_capture;
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
     FinishTaskTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RecallSessionTool, RunContext,
-    SetGoalTool, SkillResolver, ToolRegistry, TrustySearchTool, UseSkillTool, WriteFileTool,
-    WriteFilesTool,
+    SetGoalTool, SkillResolver, TodoWriteTool, ToolRegistry, TrustySearchTool, UseSkillTool,
+    WriteFileTool, WriteFilesTool,
 };
 
 use super::sink::SessionToolEventSink;
+use super::todo_store::SessionTodoStore;
 
 /// Default bash timeout for the engineer's tools, in seconds (mirrors
 /// `run_task::ENGINEER_BASH_TIMEOUT_SECS` — not exported, so duplicated as a
@@ -503,6 +504,18 @@ async fn run_and_record(
     pm_registry.register(Arc::new(FinishTaskTool::new()));
     pm_registry.register(Arc::new(SetGoalTool::new(Arc::clone(&goals))));
     pm_registry.register(Arc::new(ClearGoalTool::new(Arc::clone(&goals))));
+    // #8235: the session checklist, registered on this daemon-session registry
+    // only — same restriction as the goal tools above. The store is bound to
+    // THIS agent's `agent_id` (the same `pm-{session_id}` the loop below
+    // stamps on its events), so the tool cannot address another agent's list.
+    pm_registry.register(Arc::new(TodoWriteTool::new(Arc::new(
+        SessionTodoStore::new(
+            Arc::clone(&registry),
+            session_id.clone(),
+            params.agent_name.clone(),
+            format!("pm-{session_id}"),
+        ),
+    ))));
     if let Some((_, resolver)) = &skills_catalog {
         pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
     }

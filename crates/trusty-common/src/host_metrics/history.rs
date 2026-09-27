@@ -47,6 +47,23 @@ pub const HOST_HISTORY_CAPACITY: usize = 600;
 /// Test: `host_window_is_the_owner_ruling`.
 pub const HOST_SAMPLE_INTERVAL_SECS: u64 = 1;
 
+/// Seconds between DISK refreshes — 15, independent of the 1 s host cadence.
+///
+/// Why: a disk refresh is the one expensive part of a host sample. On macOS
+///      `sysinfo` walks every mounted volume through
+///      `CFURLCopyResourcePropertiesForKeys` and the CacheDelete free-space
+///      path, logging per volume, which held trusty-console at a continuous
+///      ~5% CPU when it ran once per second. CPU, memory and network stay at
+///      1 s (the owner's per-second graph ruling); free space changes on a
+///      human timescale, so 15 s loses nothing the dashboard shows.
+/// What: `15`. [`HostSampler::sample`](super::HostSampler::sample) refreshes
+///      disks on the first call and then only once this many seconds have
+///      elapsed, serving the cached [`DiskMetrics`](super::DiskMetrics) in
+///      between. The console mirrors the host flag with
+///      `--disk-sample-interval`, defaulting to this value.
+/// Test: `disk_cadence_is_slower_than_the_host_cadence`.
+pub const DISK_SAMPLE_INTERVAL_SECS: u64 = 15;
+
 /// A fixed-capacity FIFO of metric samples, oldest first (#6641).
 ///
 /// Why: an unbounded `Vec` of samples grows without limit in a daemon that runs
@@ -276,6 +293,26 @@ mod tests {
         let ring = MetricRing::<HostMetrics>::host_window();
         assert_eq!(ring.capacity(), HOST_HISTORY_CAPACITY);
         assert!(ring.is_empty());
+    }
+
+    /// Why: the disk cadence exists only because it is SLOWER than the host
+    ///      cadence; if a later edit equalised the two the sampler would be
+    ///      back to one volume walk per second and the CPU cost would return
+    ///      with no test going red.
+    /// What: pins the disk default at 15 s and asserts it is a strict multiple
+    ///      of — and strictly slower than — the host cadence.
+    /// Test: this test.
+    #[test]
+    fn disk_cadence_is_slower_than_the_host_cadence() {
+        // Both pinned by value rather than compared: two consts compared with
+        // `assert!` fold to a constant, which `clippy::assertions_on_constants`
+        // rejects. Equalising the two cadences changes one of these numbers and
+        // still turns this test red.
+        assert_eq!(
+            DISK_SAMPLE_INTERVAL_SECS, 15,
+            "a disk refresh is the expensive part of a sample; it must not run every host tick"
+        );
+        assert_eq!(HOST_SAMPLE_INTERVAL_SECS, 1, "the graph cadence is unmoved");
     }
 
     /// Why: a zero-capacity ring would drop every sample and report an empty

@@ -272,20 +272,36 @@ pub(crate) async fn list_indexes_report(
                 vector_health,
             });
         }
-        serde_json::json!({ "indexes": entries })
+        // #8727: also every parked registration the overlap check consults.
+        let parked = super::root_overlap::parked_registrations(
+            &state.registry.list_handles(),
+            &state.cold_store.snapshot(),
+            identity_filter.as_ref(),
+        );
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": entries }), parked)
     } else if let Some(target) = &identity_filter {
         // Flat list, but scoped to one repo identity (DOC-37).
         let handles = state.registry.list_handles();
         let ids = resolve_identities(state, &handles);
+        // #8727: this repo's parked rows only.
+        let parked = super::root_overlap::parked_registrations(
+            &handles,
+            &state.cold_store.snapshot(),
+            Some(target),
+        );
         let indexes: Vec<String> = handles
             .into_iter()
             .filter(|h| ids.get(&h.id.0).cloned().flatten().as_ref() == Some(target))
             .map(|h| h.id.0.clone())
             .collect();
-        serde_json::json!({ "indexes": indexes })
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": indexes }), parked)
     } else {
-        let indexes: Vec<String> = state.registry.list().into_iter().map(|id| id.0).collect();
-        serde_json::json!({ "indexes": indexes })
+        let handles = state.registry.list_handles();
+        let indexes: Vec<String> = handles.iter().map(|h| h.id.0.clone()).collect();
+        // #8727: `indexes` stays the resident set; `parked` lists the rest.
+        let parked =
+            super::root_overlap::parked_registrations(&handles, &state.cold_store.snapshot(), None);
+        super::root_overlap::with_parked(serde_json::json!({ "indexes": indexes }), parked)
     }
 }
 
@@ -443,6 +459,37 @@ pub(crate) async fn create_index_report(
         );
         return Err(root_path_collision_response(&existing_id, &req.root_path));
     }
+    // #4289: the guard above is EXACT-match only. A candidate that sits inside
+    // an existing index's root, or that encloses one, was accepted — and an
+    // overlapping root is how #402 / #2178 let a reindex prune another index's
+    // corpus. An unrunnable check is an error, never an implicit "no overlap".
+    match super::root_overlap::find_root_overlap(&handles, &cold_entries, &req.root_path, Some(&id))
+    {
+        Ok(None) => {}
+        Ok(Some(conflict)) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' at {} — that root overlaps \
+                 index '{}' at {} (#4289)",
+                req.id,
+                req.root_path.display(),
+                conflict.index_id,
+                conflict.root_path.display(),
+            );
+            return Err(super::root_overlap::root_overlap_response(
+                &conflict,
+                &req.root_path,
+            ));
+        }
+        Err(failure) => {
+            tracing::warn!(
+                "create_index: refusing to register '{}' — its root could not be \
+                 checked against the registered roots: {} (#4289)",
+                req.id,
+                failure.reason,
+            );
+            return Err(super::root_overlap::overlap_check_failed_response(&failure));
+        }
+    }
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -470,13 +517,12 @@ pub(crate) async fn create_index_report(
     // Fix #483/#485: use `build_indexer_from_entry` with `colocated: true`
     // instead of `build_indexer_with_persisted_state` (which hard-codes
     // `colocated: false`).  The entry-aware builder routes the corpus store
-    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`,
-    // and crucially `colocated_redb_path` → `colocated_storage_dir` calls
-    // `create_dir_all` — so the `.trusty-search/` directory exists on-disk
-    // BEFORE the first reindex.  Every write-path probe
-    // (`has_colocated_storage` in persist.rs / reindex.rs) then sees the dir
-    // and routes HNSW + corpus writes to the colocated path too.  Without this
-    // fix the writer used the app-data path while the loader used the colocated
+    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`.
+    // #8438: every write path takes its layout from
+    // `StorageLayout::for_entry(init_entry)`, carried on the indexer, so HNSW
+    // and corpus writes follow the registry flag — never a probe of whether
+    // `.trusty-search/` exists on disk.  Without the entry-aware builder the
+    // writer used the app-data path while the loader used the colocated
     // path (because `indexes.toml` recorded `colocated = true`), producing 0
     // chunks and no corpus store after the first restart.  A missing corpus
     // store also causes `write_schema_version` to return
@@ -770,6 +816,13 @@ pub(crate) async fn create_index_report(
     if restore_chunk_count == 0 {
         stages.lexical = crate::core::registry::StageState::pending();
     }
+    // #8134: vectors restored over an empty corpus are not a ready lane.
+    let restore_vectors = indexer.vector_count().await.unwrap_or(0);
+    crate::service::warm_boot::fail_semantic_over_empty_corpus(
+        &mut stages,
+        restore_chunk_count,
+        restore_vectors,
+    );
     tracing::info!(
         "create_index: '{}' registered — restored chunks={} hnsw_snapshot={} graph_nodes={} \
          lexical_only={} skip_kg={} skip_vector={} → stages(lexical={:?}, semantic={:?}, \

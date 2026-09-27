@@ -27,6 +27,11 @@
 //! Deliberately not JSON-RPC-aware: `Req` and `Resp` are whatever the caller
 //! names. The framing is the shared part; the envelope is not.
 //!
+//! #8267: every dial here runs under [`super::retry::ConnectRetry`]. A caller
+//! that needs a different bound — a stdio bridge's first dial, which may
+//! precede the daemon's own bind — passes one to
+//! [`send_framed_request_retrying`].
+//!
 //! Test: `send_framed_request_round_trips_a_typed_value`,
 //! `send_framed_request_reports_no_response_when_peer_hangs_up`,
 //! `send_framed_request_rejects_an_over_long_frame`,
@@ -45,6 +50,7 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use super::retry::ConnectRetry;
 use super::{UdsSecurityError, connect_hardened};
 
 /// Default largest response frame [`send_framed_request`] will buffer, in bytes.
@@ -182,6 +188,67 @@ pub enum UdsRpcError {
         /// The frame it sent, so the caller reads the server's own refusal.
         response: Box<crate::uds::server::RpcResponse>,
     },
+
+    /// Every dial in a bounded connect retry failed (#8267).
+    ///
+    /// Appended, never inserted — see the #6286 note above. Carries the count
+    /// so an operator reading one line knows the client did not give up after
+    /// one try, and boxes the last attempt's own error so the socket path and
+    /// the OS errno survive intact.
+    #[error("{path}: {attempts} connect attempts failed; last error: {source}")]
+    ConnectRetriesExhausted {
+        /// Socket that could not be dialled.
+        path: PathBuf,
+        /// How many dials were made, including the first.
+        attempts: u32,
+        /// The last attempt's failure, verbatim.
+        #[source]
+        source: Box<UdsRpcError>,
+    },
+
+    /// The request frame was written, but half-closing the write side failed
+    /// (#8267).
+    ///
+    /// Why it is not [`UdsRpcError::Write`]: `write_all` + `flush` failing
+    /// leaves the peer without a newline-terminated frame, so it never
+    /// dispatches and a redial repeats nothing. A `shutdown` failure is the
+    /// opposite — the frame is already on the wire. On macOS `soshutdown`
+    /// answers ENOTCONN once the peer has closed, which is exactly what a
+    /// server that framed on `read_until(b'\n')`, replied and dropped looks
+    /// like. Retrying that would deliver a second copy of a request the daemon
+    /// had already executed, so this variant is never transient.
+    ///
+    /// The request's fate is unknown: it may have been dispatched, and the
+    /// caller must not read this as "nothing was sent".
+    #[error("half-close {path} after writing the request frame: {source}")]
+    HalfClose {
+        /// Socket whose write side could not be shut down.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl UdsRpcError {
+    /// Whether this failure means the socket could not be dialled at all.
+    ///
+    /// Why (#8267): `matches!(err, UdsRpcError::Dial { .. })` used to be the
+    /// whole test for "nothing is serving this path", and the bounded retry
+    /// breaks it — a dial that failed every attempt arrives as
+    /// [`UdsRpcError::ConnectRetriesExhausted`] wrapping the `Dial`. A caller
+    /// that branches on the transport verdict wants one predicate rather than
+    /// a variant list that grows under it.
+    ///
+    /// Test: `is_dial_failure_sees_through_the_retry_wrapper`.
+    #[must_use]
+    pub fn is_dial_failure(&self) -> bool {
+        match self {
+            Self::Dial { .. } => true,
+            Self::ConnectRetriesExhausted { source, .. } => source.is_dial_failure(),
+            _ => false,
+        }
+    }
 }
 
 /// Send one JSON frame to `path` and decode the one frame that comes back.
@@ -252,9 +319,74 @@ where
     Req: Serialize + ?Sized,
     Resp: DeserializeOwned,
 {
+    send_framed_request_retrying(
+        path,
+        request,
+        timeout,
+        max_frame_bytes,
+        ConnectRetry::per_request(),
+    )
+    .await
+}
+
+/// [`send_framed_request_capped`] with an explicit connect-retry bound.
+///
+/// Why (#8267): a process's FIRST dial is a different question from its
+/// hundredth. A stdio MCP bridge launched before its daemon is listening has
+/// no socket to dial yet, and the per-request bound — sized to ride out a full
+/// accept queue, not a cold start — gives up long before the daemon binds.
+/// Handing the policy to the caller is what lets that one dial wait seconds
+/// while every later dial stays fast.
+///
+/// What: identical to [`send_framed_request_capped`] except that `retry`
+/// replaces [`ConnectRetry::per_request`]. The caller's `timeout` still bounds
+/// the whole sequence, retries included, so this can never extend a call past
+/// the budget its caller stated.
+///
+/// # Errors
+///
+/// The same [`UdsRpcError`] set as [`send_framed_request_capped`], plus
+/// [`UdsRpcError::ConnectRetriesExhausted`] once more than one dial was made.
+///
+/// Test: `uds_client_retries_transient_connect_refusal`,
+/// `uds_client_reports_the_attempt_count_after_the_retry_bound`.
+pub async fn send_framed_request_retrying<Req, Resp>(
+    path: &Path,
+    request: &Req,
+    timeout: Duration,
+    max_frame_bytes: u64,
+    retry: ConnectRetry,
+) -> Result<Resp, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    Resp: DeserializeOwned,
+{
+    send_framed_request_with_sleeper(path, request, timeout, max_frame_bytes, retry, tokio_sleep)
+        .await
+}
+
+/// [`send_framed_request_retrying`] with the retry's sleeper supplied.
+///
+/// The seam the #8267 regression tests drive: they assert an attempt count and
+/// a summed backoff, which against `tokio::time::sleep` would be a wall-clock
+/// assertion on a millisecond schedule.
+pub(super) async fn send_framed_request_with_sleeper<Req, Resp, S, SFut>(
+    path: &Path,
+    request: &Req,
+    timeout: Duration,
+    max_frame_bytes: u64,
+    retry: ConnectRetry,
+    sleep: S,
+) -> Result<Resp, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    Resp: DeserializeOwned,
+    S: Fn(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
     match tokio::time::timeout(
         timeout,
-        exchange::<Req, Resp>(path, request, max_frame_bytes),
+        exchange::<Req, Resp, S, SFut>(path, request, max_frame_bytes, retry, sleep),
     )
     .await
     {
@@ -264,6 +396,14 @@ where
             timeout,
         }),
     }
+}
+
+/// The retry driver's real sleeper.
+///
+/// A named function rather than a closure so it names one concrete `Future`
+/// type at every call site instead of a fresh opaque one per site.
+fn tokio_sleep(delay: Duration) -> tokio::time::Sleep {
+    tokio::time::sleep(delay)
 }
 
 /// Send one JSON frame to `path` and return without waiting for a reply.
@@ -369,6 +509,38 @@ pub(super) async fn dial_and_send<Req>(
 where
     Req: Serialize + ?Sized,
 {
+    dial_and_send_retrying(path, request, ConnectRetry::per_request(), tokio_sleep).await
+}
+
+/// [`dial_and_send`] under a caller-stated connect-retry bound (#8267).
+///
+/// Why here rather than around the whole exchange: a retry is only safe while
+/// the request bytes have provably not reached the peer, which is true of a
+/// failed dial and of the `ENOTCONN` first write, and false of everything
+/// after. `retry::with_connect_retry` owns that classification; this function
+/// owns only the attempt it repeats.
+pub(super) async fn dial_and_send_retrying<Req, S, SFut>(
+    path: &Path,
+    request: &Req,
+    retry: ConnectRetry,
+    sleep: S,
+) -> Result<UnixStream, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    S: Fn(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    super::retry::with_connect_retry(path, retry, sleep, |_attempt| {
+        dial_and_send_once(path, request)
+    })
+    .await
+}
+
+/// One dial-write-half-close, with no retry of its own.
+async fn dial_and_send_once<Req>(path: &Path, request: &Req) -> Result<UnixStream, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+{
     let frame = encode_frame(request).map_err(|source| UdsRpcError::Encode {
         path: path.to_path_buf(),
         source,
@@ -381,33 +553,51 @@ where
             source,
         })?;
 
-    let write = async {
+    // #8267: the send and the half-close are two error variants, not one.
+    // `write_all` + `flush` failing leaves the peer without a newline-terminated
+    // frame, so it never dispatches and a redial is safe. `shutdown` failing is
+    // the opposite: the frame is already on the wire, and on macOS ENOTCONN here
+    // means the peer closed AFTER reading it — the server frames on
+    // `read_until(b'\n')` and replies without waiting for our half-close. Folding
+    // both into `Write` made a retry re-send a request the daemon had executed.
+    let send = async {
         stream.write_all(&frame).await?;
-        stream.flush().await?;
-        // Half-close: the peer's `read_to_end`/`read_until` sees EOF and knows
-        // the request is complete. The read half stays open for the response.
-        stream.shutdown().await
+        stream.flush().await
     };
-    write.await.map_err(|source| UdsRpcError::Write {
+    send.await.map_err(|source| UdsRpcError::Write {
         path: path.to_path_buf(),
         source,
     })?;
+
+    // Half-close: the peer's `read_to_end`/`read_until` sees EOF and knows the
+    // request is complete. The read half stays open for the response.
+    stream
+        .shutdown()
+        .await
+        .map_err(|source| UdsRpcError::HalfClose {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     Ok(stream)
 }
 
 /// The un-timed body of [`send_framed_request_capped`], split out so the
 /// timeout wraps exactly one future and the error mapping stays readable.
-async fn exchange<Req, Resp>(
+async fn exchange<Req, Resp, S, SFut>(
     path: &Path,
     request: &Req,
     max_frame_bytes: u64,
+    retry: ConnectRetry,
+    sleep: S,
 ) -> Result<Resp, UdsRpcError>
 where
     Req: Serialize + ?Sized,
     Resp: DeserializeOwned,
+    S: Fn(Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
 {
-    let stream = dial_and_send(path, request).await?;
+    let stream = dial_and_send_retrying(path, request, retry, sleep).await?;
     read_one_frame(stream, path, max_frame_bytes).await
 }
 
@@ -687,9 +877,12 @@ mod tests {
         .await
         .expect_err("no listener means no delivery");
 
+        // #8267: an absent socket is retried, so the terminal error is the
+        // retry wrapper around the same `Dial`. `is_dial_failure` is the
+        // predicate that spans both.
         assert!(
-            matches!(err, UdsRpcError::Dial { .. }),
-            "expected Dial, got {err:?}"
+            err.is_dial_failure(),
+            "expected a dial failure, got {err:?}"
         );
     }
 
@@ -781,8 +974,8 @@ mod tests {
         .expect_err("no listener means no delivery");
 
         assert!(
-            matches!(err, UdsRpcError::Dial { .. }),
-            "expected Dial, got {err:?}"
+            err.is_dial_failure(),
+            "expected a dial failure, got {err:?}"
         );
     }
 
@@ -899,5 +1092,235 @@ mod tests {
             matches!(err, UdsRpcError::Read { .. }),
             "expected Read, got {err:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // #8267: the bounded connect retry, driven through an injected sleeper so
+    // the attempt count and the backoff schedule are asserted on the schedule
+    // itself rather than on wall time.
+    // ---------------------------------------------------------------------
+
+    /// The issue's named regression: a dial that fails transiently and then
+    /// succeeds must produce a working exchange, not a session-long failure.
+    ///
+    /// The injected sleeper is what makes the socket appear between attempt 1
+    /// and attempt 2 — the real sequence, with the race taken out of it.
+    ///
+    /// Fails before the fix: with `ConnectRetry::per_request()` at one attempt
+    /// (the pre-#8267 behaviour), the first `StatForConnect` ENOENT is the
+    /// caller's answer and there is never a second dial.
+    #[tokio::test]
+    async fn uds_client_retries_transient_connect_refusal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("stub.sock");
+        let sleeps = std::cell::Cell::new(0u32);
+
+        let got: Pong = send_framed_request_with_sleeper(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 5,
+            },
+            Duration::from_secs(5),
+            MAX_FRAME_BYTES,
+            ConnectRetry::per_request(),
+            |_delay| {
+                let n = sleeps.get() + 1;
+                sleeps.set(n);
+                if n == 1 {
+                    spawn_stub(
+                        tmp.path(),
+                        vec![StubReply::Bytes(b"{\"echoed\":5}\n".to_vec())],
+                    );
+                }
+                async {}
+            },
+        )
+        .await
+        .expect("a socket that appears after the first attempt must still be reached");
+
+        assert_eq!(got, Pong { echoed: 5 });
+        assert_eq!(
+            sleeps.get(),
+            1,
+            "one backoff, then the second attempt succeeds"
+        );
+    }
+
+    /// The bound is real, and the error says what it is.
+    ///
+    /// Fails before the fix: one attempt, no `ConnectRetriesExhausted`, and
+    /// nothing anywhere reporting how many dials were made.
+    #[tokio::test]
+    async fn uds_client_reports_the_attempt_count_after_the_retry_bound() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("absent.sock");
+        let policy = ConnectRetry::per_request();
+        let slept: std::cell::RefCell<Vec<Duration>> = std::cell::RefCell::new(Vec::new());
+
+        let err = send_framed_request_with_sleeper::<_, Pong, _, _>(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(30),
+            MAX_FRAME_BYTES,
+            policy,
+            |delay| {
+                slept.borrow_mut().push(delay);
+                async {}
+            },
+        )
+        .await
+        .expect_err("a socket nothing ever binds must fail, not hang");
+
+        let slept = slept.into_inner();
+        assert_eq!(
+            slept,
+            vec![Duration::from_millis(20), Duration::from_millis(40)],
+            "the schedule doubles, and there is one fewer sleep than attempts"
+        );
+        assert!(
+            slept.iter().sum::<Duration>() >= policy.backoff_floor(),
+            "elapsed backoff must reach the policy's floor"
+        );
+
+        let UdsRpcError::ConnectRetriesExhausted {
+            path,
+            attempts,
+            source,
+        } = &err
+        else {
+            panic!("expected ConnectRetriesExhausted, got {err:?}");
+        };
+        assert_eq!(*attempts, policy.attempts, "exactly N attempts, no more");
+        assert_eq!(path, &sock, "the error names the socket it could not reach");
+        assert!(
+            source.is_dial_failure(),
+            "the last attempt's own error is carried, got {source:?}"
+        );
+
+        // The Fail-Open Check: the failure is an `Err` that names the path, the
+        // count and the OS error — never a warning the caller reads as success.
+        let text = err.to_string();
+        assert!(text.contains(&sock.display().to_string()), "got {text}");
+        assert!(text.contains("3 connect attempts failed"), "got {text}");
+        assert!(
+            text.contains("No such file or directory"),
+            "the last OS error must survive: got {text}"
+        );
+    }
+
+    /// The policy is the caller's, and `single_attempt` really is one dial.
+    ///
+    /// Why it matters: `trusty_mcp::DaemonBridgeJsonRpc` spends
+    /// [`ConnectRetry::startup`] on its first forwarded request and
+    /// [`ConnectRetry::per_request`] thereafter. If the parameter were ignored,
+    /// both would silently be the default.
+    #[tokio::test]
+    async fn send_framed_request_retrying_honours_a_caller_supplied_bound() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("absent.sock");
+
+        let err = send_framed_request_with_sleeper::<_, Pong, _, _>(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(5),
+            MAX_FRAME_BYTES,
+            ConnectRetry::single_attempt(),
+            |_delay| async { panic!("a single-attempt policy must never sleep") },
+        )
+        .await
+        .expect_err("one attempt, one failure");
+
+        assert!(
+            matches!(err, UdsRpcError::Dial { .. }),
+            "a single attempt reports its own error unwrapped, got {err:?}"
+        );
+    }
+
+    /// The duplicate-delivery guard, end to end.
+    ///
+    /// Why: a peer that reads one frame and closes without replying is what a
+    /// daemon that dispatched the request and dropped looks like from here. The
+    /// client must count that as delivered — whatever error arm it lands on —
+    /// and never put a second copy on a fresh connection.
+    ///
+    /// The half-close error is timing-dependent at the OS level, so this
+    /// asserts the invariant that holds on every arm: exactly one dispatch, and
+    /// no retry wrapper. `a_failed_half_close_is_never_retried` pins the
+    /// classification that makes it hold when the shutdown does fail.
+    #[tokio::test]
+    async fn a_peer_that_reads_one_frame_and_closes_is_never_sent_a_second_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("once.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind");
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let counter = std::sync::Arc::clone(&dispatched);
+        tokio::spawn(async move {
+            // Two accepts on offer, so a second copy would be counted rather
+            // than refused by a listener that had already stopped.
+            for _ in 0..2 {
+                let Ok((conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut reader = BufReader::new(conn);
+                let mut line = Vec::new();
+                if reader.read_until(b'\n', &mut line).await.is_ok() && !line.is_empty() {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                // Drop without replying and without draining to EOF — the
+                // dispatch-then-hang-up shape.
+                drop(reader);
+            }
+        });
+
+        let err = send_framed_request::<_, Pong>(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("the peer never replies");
+
+        assert!(
+            !matches!(err, UdsRpcError::ConnectRetriesExhausted { .. }),
+            "a frame that reached the peer must never be redialled, got {err:?}"
+        );
+        assert_eq!(
+            dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the peer must see exactly one copy of the request"
+        );
+    }
+
+    #[test]
+    fn is_dial_failure_sees_through_the_retry_wrapper() {
+        let sock = PathBuf::from("/tmp/absent.sock");
+        let inner = UdsRpcError::Dial {
+            path: sock.clone(),
+            source: UdsSecurityError::Connect {
+                path: sock.clone(),
+                source: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            },
+        };
+        assert!(inner.is_dial_failure());
+        assert!(
+            UdsRpcError::ConnectRetriesExhausted {
+                path: sock.clone(),
+                attempts: 3,
+                source: Box::new(inner),
+            }
+            .is_dial_failure()
+        );
+        assert!(!UdsRpcError::NoResponse { path: sock }.is_dial_failure());
     }
 }

@@ -271,6 +271,15 @@ fn kind_matches_serde_tag_for_every_variant() {
             decision: "deny".into(),
             source: "client".into(),
         },
+        Event::TodosChanged {
+            session_id: "s".into(),
+            agent: "pm".into(),
+            agent_id: "pm-1".into(),
+            todos: vec![TodoItem {
+                content: "add a test".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
         Event::Ping,
     ];
     for ev in samples {
@@ -472,6 +481,48 @@ fn search_performed_hits_round_trip_through_json() {
             },
         ]
     );
+}
+
+/// `TodosChanged` must round-trip with the exact wire spelling of each
+/// status (#8235) — a UI client and the daemon agree on these three literals,
+/// so renaming one silently is a wire break.
+#[test]
+fn todos_changed_round_trips_through_json() {
+    let event = Event::TodosChanged {
+        session_id: "s1".into(),
+        agent: "pm".into(),
+        agent_id: "pm-s1".into(),
+        todos: vec![
+            TodoItem {
+                content: "add the --json flag".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoItem {
+                content: "add a test".into(),
+                status: TodoStatus::InProgress,
+            },
+            TodoItem {
+                content: "add a changelog line".into(),
+                status: TodoStatus::Pending,
+            },
+        ],
+    };
+    let envelope = SessionEventEnvelope::new("s1".into(), 7, Utc::now(), event);
+    let value = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(value["kind"], "todos_changed");
+    assert_eq!(value["event"]["agent_id"], "pm-s1");
+    assert_eq!(value["event"]["todos"][0]["status"], "completed");
+    assert_eq!(value["event"]["todos"][1]["status"], "in_progress");
+    assert_eq!(value["event"]["todos"][2]["status"], "pending");
+    assert_eq!(value["event"]["todos"][1]["content"], "add a test");
+
+    let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+    let Event::TodosChanged { todos, .. } = back.event else {
+        panic!("expected TodosChanged");
+    };
+    assert_eq!(todos.len(), 3);
+    assert_eq!(todos[1].status, TodoStatus::InProgress);
 }
 
 /// A `SearchPerformed` transcript recorded BEFORE `hits` existed (DOC-39

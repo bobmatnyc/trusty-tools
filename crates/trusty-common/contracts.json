@@ -3,6 +3,17 @@
   "crate": "trusty-common",
   "items": [
     {
+      "invariants": [],
+      "kind": "function",
+      "path": "trusty_common::atomic_file::write_atomic",
+      "postconditions": [
+        "On `Ok`, `path` holds exactly `bytes`, synced, and is not a symlink.",
+        "On `Err`, `path` is unchanged — absent, holding its prior bytes, or still the symlink it was.",
+        "No temp file is left behind in either case."
+      ],
+      "preconditions": []
+    },
+    {
       "invariants": [
         "Pure with respect to this value: no field is mutated and no file is written. For a fixed filesystem state the result is stable across calls.",
         "The ordering it induces is the ONE ordering used for both sorting and watermark membership; the two never diverge."
@@ -167,6 +178,30 @@
       "preconditions": [
         "None. `secrets` may be empty and may contain empty or short values; those are skipped by the guard rather than rejected."
       ]
+    },
+    {
+      "invariants": [],
+      "kind": "function",
+      "path": "trusty_common::launchd_secrets::is_credential_env_key",
+      "postconditions": [
+        "Pure and total: no I/O, no panic, no allocation of the input's content beyond one upper-cased copy.",
+        "Every registered credential env var returns `true`.",
+        "A key matching a reference suffix and absent from the registry is NEVER reported as a credential, whatever else it ends in."
+      ],
+      "preconditions": [
+        "None. Every `&str` is accepted, including the empty string."
+      ]
+    },
+    {
+      "invariants": [],
+      "kind": "function",
+      "path": "trusty_common::launchd_secrets::strip_credential_env",
+      "postconditions": [
+        "No element of the returned `Vec` is a credential value — only key names.",
+        "After the call, `pairs.iter().all(|(k, _)| !is_credential_env_key(k))`.",
+        "The relative order of the retained pairs is unchanged."
+      ],
+      "preconditions": []
     },
     {
       "invariants": [

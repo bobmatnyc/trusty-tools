@@ -26,10 +26,21 @@
 #   (with a per-file drift summary on stderr) when it does not. To fix:
 #   `cargo run -p trusty-mpm --bin tm -- generate capabilities` then commit
 #   the diff.
+#
+# Prefers an already-installed `tm` on PATH over `cargo run`, so this gate
+# never waits on the workspace build lock a concurrent agent build holds — see
+# scripts/lib/run_or_cargo.sh. CAVEAT: an installed `tm` reflects whatever
+# checkout last ran `cargo install`, not necessarily THIS checkout's
+# uncommitted trusty-mpm changes — a PR that edits the generator itself and
+# relies on this fast path could miss drift a fresh build would catch. Set
+# TRUSTY_SCRIPTS_TARGET_DIR and remove `tm` from PATH (or `hash -r` after
+# uninstalling it) to force the cargo-run fallback when that matters.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-exec cargo run --quiet -p trusty-mpm --bin tm -- generate capabilities --check
+# shellcheck source=lib/run_or_cargo.sh
+. "$REPO_ROOT/scripts/lib/run_or_cargo.sh"
+run_or_cargo tm trusty-mpm tm -- generate capabilities --check

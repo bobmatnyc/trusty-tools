@@ -75,6 +75,8 @@ use std::path::Path;
 /// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
 /// `build_prompt_file_refreshes_the_compiled_prompt`,
 /// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
+// #8545: the last production caller now names its root; only tests use this.
+#[cfg(test)]
 pub(super) fn build_prompt_file(
     project_dir: &Path,
     session_id: Option<&str>,

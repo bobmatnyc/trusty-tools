@@ -37,6 +37,7 @@ use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::persistence::{self, PersistedIndex};
 use crate::service::rpc::admin;
 use crate::service::rpc::error::CODE_NOT_FOUND;
+use crate::service::rpc::RestoreLimits;
 use crate::service::server::tests_components::IsolatedDataDir;
 use crate::service::server::{build_router_on, SearchAppState};
 
@@ -66,31 +67,8 @@ fn routers(ids: &[&str]) -> (Arc<SearchAppState>, Router, RpcRouter) {
     (state, http, rpc)
 }
 
-/// Restore both memory limits when a config-write case ends.
-///
-/// Why a guard rather than a trailing statement: an assertion that fails leaves
-/// the process-global cells wherever the case put them, and the next test in the
-/// binary would read them as its baseline.
-struct RestoreLimits {
-    memory_limit_mb: Option<u64>,
-    index_memory_limit_mb: Option<u64>,
-}
-
-impl RestoreLimits {
-    fn capture() -> Self {
-        Self {
-            memory_limit_mb: memory_limit_mb(),
-            index_memory_limit_mb: index_memory_limit_mb(),
-        }
-    }
-}
-
-impl Drop for RestoreLimits {
-    fn drop(&mut self) {
-        set_memory_limit_mb(self.memory_limit_mb);
-        set_index_memory_limit_mb(self.index_memory_limit_mb);
-    }
-}
+// #7665: the guard this file used to define privately now lives beside the two
+// test modules that need it — `super::RestoreLimits`, imported above.
 
 // ------------------------------------------------------------- transports ---
 

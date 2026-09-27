@@ -313,6 +313,13 @@ jobs:
           # repo was over it — see the note on the test-shard cache in ci.yml.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # scripts/lib/run_or_cargo.sh (used by check-version-parity.sh) prefers an
+      # already-installed `publish-guard` on PATH over `cargo run`, so
+      # installing it once here means the guard step below takes that fast
+      # path instead of invoking `cargo run` itself.
+      - name: Install publish-guard
+        run: cargo install --path crates/trusty-publish-guard --locked --force
+
       - name: Run version-parity guard
         run: bash scripts/check-version-parity.sh
 

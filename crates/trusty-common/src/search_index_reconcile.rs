@@ -243,15 +243,17 @@ pub(super) fn classify_create_failure(
 /// live case is a create that waited behind a cold-parked index's 3.8 s reload
 /// and was registered 2.8 s after the client's one-second budget elapsed, so
 /// reading silence as refusal withheld the id for an index that existed.
-/// What: `true` for the three transport shapes that leave the request's fate
+/// What: `true` for the four transport shapes that leave the request's fate
 /// unknown — [`UdsRpcError::Timeout`] (the client's own budget),
-/// [`UdsRpcError::NoResponse`] (the peer hung up), and [`UdsRpcError::Read`] (a
-/// read that failed after the frame was on its way). Everything else is `false`
-/// and stays `NotConfirmed`: a [`UdsRpcError::Dial`] means nothing was sent, and
-/// a [`UdsRpcError::Decode`] means the daemon answered with something this
-/// client cannot read — a reply, not a silence. `anyhow` searches the context
-/// chain, so the `with_context` `search_rpc::call_at` adds does not hide the
-/// variant.
+/// [`UdsRpcError::NoResponse`] (the peer hung up), [`UdsRpcError::Read`] (a
+/// read that failed after the frame was on its way), and
+/// [`UdsRpcError::HalfClose`] (#8267: the frame was written and the half-close
+/// failed, so the daemon may well have dispatched it). Everything else is
+/// `false` and stays `NotConfirmed`: a [`UdsRpcError::Dial`] and a
+/// [`UdsRpcError::Write`] both mean the daemon never saw a complete frame, and a
+/// [`UdsRpcError::Decode`] means the daemon answered with something this client
+/// cannot read — a reply, not a silence. `anyhow` searches the context chain, so
+/// the `with_context` `search_rpc::call_at` adds does not hide the variant.
 /// Test: `an_unanswered_create_is_not_a_refusal`,
 /// `a_dial_failure_is_not_an_unanswered_create`, plus
 /// `a_malformed_create_reply_is_not_a_registration` in `search_index_tests.rs`,
@@ -260,7 +262,10 @@ fn create_left_unanswered(err: &anyhow::Error) -> bool {
     matches!(
         err.downcast_ref::<UdsRpcError>(),
         Some(
-            UdsRpcError::Timeout { .. } | UdsRpcError::NoResponse { .. } | UdsRpcError::Read { .. }
+            UdsRpcError::Timeout { .. }
+                | UdsRpcError::NoResponse { .. }
+                | UdsRpcError::Read { .. }
+                | UdsRpcError::HalfClose { .. }
         )
     )
 }

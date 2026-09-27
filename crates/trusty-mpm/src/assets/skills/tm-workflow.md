@@ -2,7 +2,7 @@
 name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
-version: "2.0.0"
+version: "2.1.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -203,11 +203,32 @@ derived rules live here because they apply only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom.
 
+## Deterministic Work
+
+Use existing search tools and CLIs for extraction, counts, comparisons and
+explicit rules before model synthesis. If none fits, delegate a bounded,
+read-only disposable helper; spot-check its inputs and representative output.
+Use the model for ambiguity and judgment. Recurring tools follow the project's
+implementation policy. Batch related routine work within existing budgets,
+ownership and guards; this does not relax P10 or require new approval for
+work already authorized. See #8021.
+
+## Task-Owned Cleanup
+
+Inventory only the paths this task owns; preserve other sessions and dirty or
+unpushed work. Confirm the merged PR and live ownership before removal. Route
+the operation through the authorized `version-control` agent. Use literal
+paths with the supported guard, not shell-variable loops, for example:
+`git -C /absolute/repo worktree remove /absolute/repo/.claude/worktrees/task-name`.
+The paths are placeholders to replace with verified targets, never a glob.
+A refusal is a finding to resolve, not permission to use `rm -rf` or global
+`tm sessions prune-worktrees --merged-prs --force`. See #8021.
+
 ## Test Scope Widens by Stage
 
-Unit tests run on the new or changed code only while developing, on the full
-test files that changed when merging, and on the full corpus only when
-publishing.
+The project risk/stage test ladder takes precedence. Where it defines no
+ladder, use the following stage defaults; widen for affected consumers and
+high-risk contracts, not simply for an engineer-to-QA handoff.
 
 | Stage | Scope |
 |---|---|
@@ -217,7 +238,7 @@ publishing.
 
 - **Developing** is the inner loop: the targeted test that proves the change,
   re-run as you edit. Nothing wider is owed while the code is still moving.
-- **Merging** widens to whole files, never to the whole repository. Every test
+- **Merging** defaults to whole affected test files. Every test
   file the diff touched runs in full — including the cases you did not edit, and
   any normally-skipped test that lives in one of those files. A change to a
   public interface or to shared test infrastructure alters what a dependent
@@ -384,6 +405,17 @@ file-mutating agent, wait for it, dispatch the next. Serializing is always
 available and always correct. Hand-rolling a worktree in order to parallelize
 anyway is what this rule forbids.
 
+**A brief that needs a named branch names the BRANCH, never a second worktree
+(#8337).** An isolated agent that runs `git worktree add` for a ticket-named
+path gets the tree, then every Edit, `git -C`, `--git-dir` and removal against
+it is refused: Claude Code pins the agent to its assigned worktree, and no
+`tm` hook can move that pin. The sanctioned pattern: the agent stays in its
+assigned worktree and creates the target-convention local branch there,
+tracking the remote branch (`git checkout -b DE-2854 --track origin/DE-2854`),
+then pushes it. When the repository needs the directory itself to carry the
+ticket name, the PM creates that worktree before dispatch and serializes the
+work into it; the agent never creates it.
+
 The dispatch still forbids leaving the assigned tree into the main checkout, and
 forbids `git reset --hard`, `git checkout .`, and `git stash` against main.
 
@@ -417,7 +449,8 @@ tm session prune-worktrees --merged-prs --force    # reclaim
 That pass spares any worktree still holding unsaved work, still claimed by a
 managed session, or still owned by a live agent, and it reports each one it
 spared with the reason. It removes the checkout only — the local branch stays,
-and the remote branch is usually already gone via `gh pr merge --delete-branch`.
+and the remote branch is deleted by `tm pr cleanup <n>`; `--delete-branch`
+leaves it behind when a worktree holds the head (#8391).
 `tm hook --pm-guard` denies an agent-side `git worktree remove` and names this
 command as the remedy, so an agent that reaches for it gets redirected rather
 than silently blocked. BASE-AGENT's Git Workflow section states the agent's half.
@@ -562,6 +595,12 @@ never touch the same lines. A shared `## [Unreleased]` section guarantees a
 conflict instead. Release time assembles the fragments into `CHANGELOG.md` and
 deletes them; never hand-edit `CHANGELOG.md` in a package that uses fragments.
 
+The file goes DIRECTLY in `changelog.d/`, never a subdirectory; a `README.md`
+already sitting there is the directory's placeholder, not a fragment to copy.
+One category per fragment — the first line IS the category and everything after
+it belongs to it, so a second category word inside the body is a gate failure
+and two categories mean two files (#7287).
+
 If the package has no `changelog.d/`, add the bullet to `CHANGELOG.md` under the
 topmost `## [Unreleased]` heading (create it if absent), matching the file's
 existing style.
@@ -679,11 +718,24 @@ landing on `main`.
 
 ```bash
 tm pr merge <PR>                                  # validated body becomes the squash commit (#6808)
-gh pr merge <PR> --squash --delete-branch         # fallback on a host without `tm`
+tm pr cleanup <PR>                                # remote ref, worktree, local branch
+gh pr merge <PR> --squash                         # fallback on a host without `tm` — no --delete-branch
 ```
 
+`--delete-branch` fails post-merge whenever a worktree holds the base branch
+(#7104) or the head branch (#8391) — every `isolation: "worktree"` delivery
+holds the head, so treat this as the common case, not the exception. `tm pr
+merge` already tolerates the failure and exits 0; `tm pr cleanup <PR>` finishes
+the job. See version-control's delete-branch sequence for the fallback without
+`tm`.
+
 After a squash-merge the local feature branch shows as "unmerged" to git (the
-squashed commit has a different hash). That is expected, not a failed merge.
+squashed commit has a different hash). That is expected, not a failed merge —
+but it also means `git branch -d`/`-D` cannot rely on ancestry. Before
+deleting, `git fetch origin`, then confirm `git merge-tree --write-tree
+origin/<base> <head>` equals `git rev-parse origin/<base>^{tree}`; never
+compare the tip's tree against the squash commit's tree, which differ
+whenever `<base>` advanced after the merge.
 
 ## Merge-Queue Ownership — the Procedure
 
@@ -787,17 +839,44 @@ compile time via `bundled_pm_package.rs`. It declares section order and
 composition; the prose for each section is stored separately in
 `assets/instructions/sections/*.md`, pulled in as `include_str!` constants
 registered in the `SECTION_SOURCES` table (`core/instruction_pipeline.rs`) — a
-missing section file is a compile error, not a launch-time surprise. The nine
-marker tokens (`core/claude_md_sections.rs::section_token`) are `IDENTITY`,
-`CORE`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
-`NON-OVERRIDABLE-RULES`, and `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+missing section file is a compile error, not a launch-time surprise. The
+nineteen marker tokens (`core/claude_md_sections.rs::section_token`), in prompt
+order, are `IDENTITY`, `CORE`, `PM-ALLOWLIST`, `DELEGATION-MECHANICS`,
+`AGENT-ROUTING`, `SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`,
+`GIT-FILE-TRACKING`, `TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`,
+`AUTONOMOUS-EXECUTION`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
+`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, and `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+`IDENTITY` opens the prompt, so its override replaces the opening role
+statement in place (#8533).
 
-**`CORE` is the only one a project cannot replace.** Every other section,
-including `NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS`, can be
-overridden — there is no separate "floor" concept anymore (the
-`is_floor()`/`instruction_floor.sha256` machinery was retired by #4286, being the
-appearance of a control rather than one a project-owned `CLAUDE.md` could
-enforce).
+### The Safety Core (#8533)
+
+Every section is replaceable except a small safety core. The core is
+enumerated once in code, `core/instruction_safety_core.rs::SAFETY_CORE`; a test
+fails if this table and that list diverge.
+
+<!-- safety-core:start -->
+| Member | Section token | Kind |
+|---|---|---|
+| Memory & Instruction Sources | `CORE` | fixed section |
+| Customization Surface | `CORE` | fixed section |
+| Detected project stack | `CORE` | generated block |
+| Memory protocol | `MEMORY` | pinned block |
+| Code search protocol | `SEARCH` | pinned block |
+| Agent selection | `AGENT-DELEGATION` | pinned block |
+| Agent roster | `AGENT-DELEGATION` | generated block |
+<!-- safety-core:end -->
+
+- A **fixed section** declines a marker naming it. The decline is logged and
+  reported, and the bundled text stays.
+- A **pinned block** survives an override of its section; the project's text
+  replaces the rest of that section.
+- A **generated block** is computed at launch; no override can author or
+  remove it.
+
+There is no other floor: the `is_floor()`/`instruction_floor.sha256` machinery
+was retired by #4286, being the appearance of a control rather than one a
+project-owned `CLAUDE.md` could enforce.
 
 At session start, `core/instruction_overrides.rs::resolve_pm_prompt` (reached via
 `build_system_prompt_for*`) composes the final prompt. It is not a file a user
@@ -805,7 +884,7 @@ edits — it is composed fresh per launch.
 
 ### The One Customization Surface
 
-A project customizes any non-`CORE` section exactly one way: a named-section
+A project customizes any section outside the safety core exactly one way: a named-section
 marker, `<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `<!-- TRUSTY-MPM: <TOKEN> END
 -->`, in the project's root `CLAUDE.md` — the sole marker host
 (`core/claude_md_sections.rs::HOST_FILES`). This replaces exactly the matching
@@ -842,7 +921,9 @@ optional or absent (#4069).
 | "remember/always/never/for this project" | Plain prose in `CLAUDE.md` (no marker needed) |
 | "use X agent for Y" / "route/change agent" | `<!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->` block in `CLAUDE.md` |
 | "add/change workflow phase" | `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` block in `CLAUDE.md` |
+| "stop and check with me more/less often" | `<!-- TRUSTY-MPM: AUTONOMOUS-EXECUTION START v=1 -->` block in `CLAUDE.md` — e.g. tightening it to "ask before dispatching after a resume" (#8361) |
 | "memory behavior" | `<!-- TRUSTY-MPM: MEMORY START v=1 -->` block in `CLAUDE.md` |
+| "this project's voice / output style" | `.claude/output-styles/<id>.md`, selected by `[style] active = "<id>"` in `.trusty-mpm.toml` |
 
 After writing an override, confirm the marker to the user and note it "takes
 effect at next session startup" — the resolved prompt is assembled at
@@ -857,7 +938,25 @@ cat .trusty-mpm/last-instructions.md   # the exact stash resolve_pm_prompt wrote
 
 `tm sessions instructions` reports every applied, declined, and shadowed marker
 on **stderr**, so `tm sessions instructions >/dev/null` alone answers "why didn't
-my override apply?". `last-instructions.md` is written by `prepare_session` every
+my override apply?". Below the markers it prints one row per section — `core`,
+`overridable`, or `overridden-by-project` — and the output style the launch
+uses (#8533).
+
+### Output Style Selection (#8533)
+
+The style id resolves in this order: `tm launch --style <id>`, then
+`[style] active` in the committed `.trusty-mpm.toml`, then the host config's
+`[style] active`, then the harness manifest. A bundled id means the shipped
+style; any other id names `.claude/output-styles/<id>.md` in the project. An
+unknown or unreadable id is a visible warning, and the launch falls back to the
+default style.
+
+A project style keeps its prose, and the launch appends the floor to it: the
+bundled style's **PRIMARY DIRECTIVE** and **Communication — Write Plainly**
+sections. The floor is not overridable, and `tm sessions instructions` names
+the style `<id> (project) + floor`. The launch writes that composite to
+`.claude/output-styles/<id>.tm-floor.md` and names it in `outputStyle`, so a
+bare `claude` in the project gets the floor too. `last-instructions.md` is written by `prepare_session` every
 time a prompt is assembled, so the inspectable copy can never diverge from what
 the PM received (#382).
 

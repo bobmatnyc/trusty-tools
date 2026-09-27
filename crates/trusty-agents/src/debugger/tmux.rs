@@ -23,7 +23,9 @@ use std::process::{Command, Output};
 
 use thiserror::Error;
 use tracing::{debug, trace, warn};
-use trusty_common::tmux::{TmuxCommand, managed_session_commands, tmux_argv};
+use trusty_common::tmux::{
+    TmuxCommand, exact_session_target, exact_window_target, managed_session_commands, tmux_argv,
+};
 
 #[derive(Error, Debug)]
 pub enum TmuxError {
@@ -82,6 +84,15 @@ impl TmuxAdapter {
         }
     }
 
+    /// An adapter bound to `tmux_path` — tests point it at a private `-L`
+    /// server shim (#8443).
+    #[cfg(test)]
+    pub(crate) fn with_tmux_path(tmux_path: impl Into<String>) -> Self {
+        Self {
+            tmux_path: tmux_path.into(),
+        }
+    }
+
     fn run(&self, args: &[&str]) -> Result<Output> {
         trace!(args = ?args, "tmux exec");
         let out = Command::new(&self.tmux_path).args(args).output()?;
@@ -102,11 +113,11 @@ impl TmuxAdapter {
     ///
     /// Why: The TUI must know whether to launch fresh or attach to an
     /// existing session (`--no-launch`).
-    /// What: `tmux has-session -t <name>` exits 0 when present.
+    /// What: `tmux has-session -t =<name>` (exact, #8443) exits 0 when present.
     /// Test: covered by manual integration; unit-tested via mock would
     /// require depending on the binary which we deliberately avoid.
     pub fn session_exists(&self, name: &str) -> bool {
-        let out = self.run(&["has-session", "-t", name]);
+        let out = self.run(&["has-session", "-t", &exact_session_target(name)]);
         matches!(out, Ok(o) if o.status.success())
     }
 
@@ -173,10 +184,10 @@ impl TmuxAdapter {
     ///
     /// Why: Used on `q` and to reset state when `--no-launch` is absent
     /// and a stale session exists.
-    /// What: `tmux kill-session -t <name>`. Missing session is mapped to
+    /// What: `tmux kill-session -t =<name>`. Missing session is mapped to
     /// `SessionNotFound`.
     pub fn kill_session(&self, name: &str) -> Result<()> {
-        let out = self.run(&["kill-session", "-t", name])?;
+        let out = self.run(&["kill-session", "-t", &exact_session_target(name)])?;
         if out.status.success() {
             Ok(())
         } else {
@@ -192,13 +203,14 @@ impl TmuxAdapter {
     /// Capture up to `lines` rows of scrollback from the first pane.
     ///
     /// Why: This is the data the left panel renders.
-    /// What: `tmux capture-pane -t <session> -p -S -<lines>` writes the
+    /// What: `tmux capture-pane -t =<session>: -p -S -<lines>` writes the
     /// joined scrollback (with ANSI codes if `-e` were set; we leave it off
     /// and strip what slips through downstream).
     /// Test: integration; downstream consumer trims/strips.
     pub fn capture_output(&self, session: &str, lines: u32) -> Result<String> {
         let lines_arg = format!("-{lines}");
-        self.run_checked(&["capture-pane", "-t", session, "-p", "-S", &lines_arg])
+        let target = exact_window_target(session);
+        self.run_checked(&["capture-pane", "-t", &target, "-p", "-S", &lines_arg])
     }
 
     /// Inject `text` followed by Enter into the first pane.
@@ -210,20 +222,22 @@ impl TmuxAdapter {
     /// would send the word "Enter" as text.
     /// Test: integration; manual round-trip with `echo`.
     pub fn send_line(&self, session: &str, text: &str) -> Result<()> {
+        let target = exact_window_target(session);
         // -l: send literally, treating the argument as raw input.
-        self.run_checked(&["send-keys", "-t", session, "-l", text])?;
+        self.run_checked(&["send-keys", "-t", &target, "-l", text])?;
         // Then a real Enter keypress to submit the line.
-        self.run_checked(&["send-keys", "-t", session, "Enter"])?;
+        self.run_checked(&["send-keys", "-t", &target, "Enter"])?;
         Ok(())
     }
 
     /// Return the first pane's id (e.g., `%0`).
     ///
     /// Why: Displayed in the status panel for operator visibility.
-    /// What: `tmux list-panes -t <session> -F "#{pane_id}"` and take first.
+    /// What: `tmux list-panes -t =<session>: -F "#{pane_id}"` and take first.
     /// Test: integration.
     pub fn get_pane_id(&self, session: &str) -> Result<String> {
-        let out = self.run_checked(&["list-panes", "-t", session, "-F", "#{pane_id}"])?;
+        let target = exact_window_target(session);
+        let out = self.run_checked(&["list-panes", "-t", &target, "-F", "#{pane_id}"])?;
         out.lines()
             .next()
             .map(|s| s.trim().to_string())

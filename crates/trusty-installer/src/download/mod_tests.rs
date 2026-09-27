@@ -263,6 +263,7 @@ async fn a_checksum_mismatch_is_reported_as_a_checksum_mismatch() {
         },
         name,
         dir.path(),
+        None,
     )
     .await;
 
@@ -318,6 +319,7 @@ async fn a_missing_asset_still_falls_back() {
         },
         name,
         dir.path(),
+        None,
     )
     .await;
 
@@ -325,4 +327,99 @@ async fn a_missing_asset_still_falls_back() {
         matches!(outcome, Outcome::Fallback { .. }),
         "an absent asset stays a routine fallback, got {outcome:?}"
     );
+}
+
+/// Why (#8642): `tctl upgrade` placed tga 8.0.0 over tga 8.0.0 and called it
+/// an upgrade. A release not newer than the installed floor must fall back
+/// BEFORE any byte is fetched or placed.
+/// What: publishes only `demo-tool-v1.2.3` (with a valid asset, so only the
+/// floor can stop it) and a floor of `1.2.3`; asserts `Fallback` naming both
+/// versions, and an empty install dir.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_release_not_newer_than_the_floor_falls_back_before_download() {
+    let Some(target) = tier1() else { return };
+    let (name, version) = ("demo-tool", "1.2.3");
+    let suffix = glibc::select_asset_suffix(name, target, glibc::host_glibc_version()).suffix;
+    let archive = release::asset_filename(name, version, &suffix);
+    let tarball = fake_tarball(name, &format!("{name} {version}"));
+    let digest = sha256_hex(&tarball);
+
+    let mut routes: Routes = std::collections::HashMap::new();
+    routes.insert(
+        "/releases".to_owned(),
+        (
+            200,
+            format!(r#"[{{"tag_name":"{name}-v{version}","prerelease":false}}]"#).into_bytes(),
+        ),
+    );
+    let key = format!("/dl/{name}-v{version}/{archive}");
+    routes.insert(
+        format!("{key}.sha256"),
+        (200, format!("{digest}  {archive}\n").into_bytes()),
+    );
+    routes.insert(key, (200, tarball));
+    let base = serve_fixture(routes).await;
+
+    let releases_url = format!("{base}/releases");
+    let download_base = format!("{base}/dl");
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = try_install_prebuilt_at(
+        &http_client(),
+        &pinned::Endpoints {
+            releases_url: &releases_url,
+            download_base: &download_base,
+        },
+        name,
+        dir.path(),
+        Some(version),
+    )
+    .await;
+
+    let Outcome::Fallback { reason } = &outcome else {
+        panic!("a same-version prebuilt must not be placed as an upgrade: {outcome:?}")
+    };
+    assert!(
+        reason.contains("not newer than installed 1.2.3"),
+        "{reason}"
+    );
+    let landed = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(landed, 0, "nothing may be placed below the floor");
+}
+
+/// Why (#8642): the floor compares against INSTALLED, not crates.io latest —
+/// a release newer than installed is an upgrade even if it lags latest.
+/// What: equal and older releases produce a reason naming both versions; a
+/// newer release, an absent floor, or an unparseable floor produce none.
+/// Test: This is the test.
+#[test]
+fn floor_reason_names_both_versions() {
+    let r = floor_fallback_reason("tga", "8.0.0", Some("8.0.0")).unwrap();
+    assert!(r.contains("8.0.0") && r.contains("installed 8.0.0"), "{r}");
+    assert!(floor_fallback_reason("tga", "7.9.0", Some("8.0.0")).is_some());
+    assert!(floor_fallback_reason("tga", "9.0.1", Some("8.0.0")).is_none());
+    assert!(floor_fallback_reason("tga", "8.0.0", None).is_none());
+    assert!(floor_fallback_reason("tga", "8.0.0", Some("unknown")).is_none());
+}
+
+/// Why (#8642): live proof that tga resolves, downloads and verifies from its
+/// own release repo, and that the floor does not block a real advance.
+/// What: installs tga into a temp dir with floor 8.0.0 (the old repo's
+/// newest); asserts `Installed` at >= 9.0.0 with a `tga` binary placed.
+/// Test: `cargo test -p trusty-installer -- --include-ignored tga_prebuilt_live`.
+#[tokio::test]
+#[ignore = "performs a live GitHub download; run with --include-ignored"]
+async fn tga_prebuilt_live_installs_past_the_old_repo_ceiling() {
+    if tier1().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = try_install_prebuilt_with_floor("tga", dir.path(), Some("8.0.0")).await;
+    let Outcome::Installed { paths, version } = &outcome else {
+        panic!("tga must install from trusty-git-analytics: {outcome:?}")
+    };
+    let v = semver::Version::parse(version).unwrap();
+    assert!(v >= semver::Version::new(9, 0, 0), "installed {version}");
+    assert!(paths.iter().any(|p| p.ends_with("tga")), "{paths:?}");
 }

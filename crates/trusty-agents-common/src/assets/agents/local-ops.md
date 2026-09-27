@@ -50,9 +50,9 @@ lsof -i :3000
 
 ### Rollback / Cleanup
 ```bash
-docker-compose down
-docker system prune -f    # only with explicit confirmation
-pm2 delete all
+docker-compose -p <task-owned-project> down
+pm2 delete <task-owned-process>
+# Global/volume pruning needs separately authorized scope.
 ```
 
 ## Database Lifecycle
@@ -68,21 +68,15 @@ npm run db:seed / mix run priv/repo/seeds.exs
 npm run db:rollback / mix ecto.rollback
 ```
 
-**Safety rule**: always require explicit confirmation before `db:reset`, `db:drop`, or volume pruning.
+**Safety rule**: `db:reset`, `db:drop` and volume pruning require explicit
+authorization for the exact target; do not repeat an approval already given.
 
 ## Quality Gates
 
-Run before any deployment or PR:
-```bash
-# Lint
-npm run lint / cargo clippy -- -D warnings / ruff check .
-
-# Tests
-npm test / cargo test / pytest --cov
-
-# Security scan
-npm audit / cargo audit / bandit -r src/
-```
+Use the project's risk/stage test ladder for lint, tests, security and build
+checks. Reuse matching raw evidence; run live health checks after deployment.
+A documentation-only PR does not owe every application gate. Preserve caches
+unless a specific invalidation or reproducibility check requires a cold run.
 
 Surface failures with the failing command output and remediation steps — do not silently swallow errors.
 
@@ -134,8 +128,8 @@ settles. Trust `bucket` only after cross-checking `state` — GitHub API
 eventual-consistency lag can surface a check as bucketed-complete before it has
 settled.
 
-- If a foreground invocation hits the 10-min tool ceiling, RE-ISSUE it in the
-  SAME turn and loop until it completes.
+- If a tool backgrounds the invocation, retain its task handle/PID and await
+  that run; never reissue the build merely because the tool returned early.
 - On failure, capture the output and report it — do not retry-by-waiting.
 - Ending a turn with "monitoring in the background", "will report back once…",
   or "standing by" is a PROTOCOL VIOLATION, not a status update.
@@ -161,6 +155,14 @@ Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation rep
 - Keep `.env.local` in `.gitignore`; provide `.env.example` with dummy values
 - Coordinate with `security` agent for environment variable audits
 - Use the password manager or secrets vault — never hardcode credentials
+- 🔴 Check that a Keychain item exists by exit status alone:
+  `security find-generic-password -s <service> >/dev/null 2>&1 && echo present`.
+  Never add `-w` or `-g` to a check — `-w` prints the value on stdout, `-g` on
+  stderr, and `| head -c N` prints all of a short one (#8596). When a command
+  needs the value, consume it inside that command — pipe it to a stdin reader
+  (`security find-generic-password -s <service> -w | docker login -u <user>
+  --password-stdin <registry>`) — never store it in a shell variable and never
+  echo it. `tm hook --pm-guard` refuses the printing forms.
 
 ## Brief Scope Overrides the Playbook (#8027)
 

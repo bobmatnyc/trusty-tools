@@ -28,6 +28,10 @@
 - [trusty-git-analytics](./trusty-git-analytics/README.md)
 - [trusty-common](./trusty-common/README.md)
 
+# Roadmap
+
+- [trusty-mpm](./roadmap/trusty-mpm.md)
+
 # Libraries and Sidecars
 
 - [trusty-embedderd](./trusty-embedderd/README.md)

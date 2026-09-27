@@ -8,6 +8,7 @@
 //!
 //! What: six sub-modules, each with a single responsibility:
 //!   - [`types`] — shared data types (`AggregatedError`, `FilingResult`, …).
+//!   - [`denials`] — the store every `tm hook --pm-guard` deny is recorded in.
 //!   - [`multi_store`] — reads JSONL stores from all known daemons, merges by
 //!     fingerprint, and returns a ranked `Vec<AggregatedError>`.
 //!   - [`scrubber`] — strips paths, tokens, JWTs, AWS/Google/Slack keys, PEM
@@ -38,6 +39,7 @@
 //! Test: each sub-module carries its own `#[cfg(test)]` suite. Run with
 //!       `cargo test -p trusty-mpm`.
 
+pub mod denials;
 pub mod github;
 pub mod github_client;
 pub mod multi_store;
@@ -49,6 +51,9 @@ pub mod types;
 
 // ── Convenience re-exports ─────────────────────────────────────────────────────
 
+pub use denials::{
+    DeniedCall, PM_GUARD_DENIALS_FILE, append_denial, denial_record, pm_guard_denials_path,
+};
 pub use github::{GithubFilingError, extract_fingerprint, file_issue, file_issue_with};
 // Re-export token providers from the token module (Phase 4).
 pub use multi_store::{aggregate_errors, aggregate_errors_from_paths, store_paths_under};

@@ -147,11 +147,11 @@ fn leaf_dirs(root: &Path, depth: usize) -> Vec<PathBuf> {
 /// `session_manager::decommission::WORKTREE_SENTINEL_FILE`), so a directory
 /// missing it was never provisioned by trusty-mpm regardless of how closely
 /// its shape matches.
-/// What: `path.join(WORKTREE_SENTINEL_FILE).is_file()`.
+/// What: the marker in either location — the git admin dir or the legacy
+/// in-tree file (#8511).
 /// Test: `new_root_leaf_without_marker_is_excluded`.
 fn has_worktree_marker(path: &Path) -> bool {
-    path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE)
-        .is_file()
+    crate::session_manager::worktree_ownership_location::sentinel_present(path)
 }
 
 /// Scan BOTH workspace roots and return the union of discovered workspaces.

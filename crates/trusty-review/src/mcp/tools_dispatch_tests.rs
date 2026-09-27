@@ -91,6 +91,9 @@ impl SearchClient for FakeSearchDispatch {
         })
     }
 
+    // #8649: no `list_index_identities` override on purpose. The default fails,
+    // so `review_pr` meets an unreadable registry and, with search not required,
+    // must degrade and reach auth — the no-token test exercises that path.
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
         Ok(vec![])
     }
@@ -389,6 +392,8 @@ async fn call_tool_review_diff_infra_unavailable_is_loud_even_via_mcp() {
 /// What: sets the auth override to `app` and blanks all App/PAT creds so there
 /// is no token to resolve; calls `call_tool("review_pr", ...)`; asserts the
 /// response is `isError: true` or `ToolError::InvalidParams` mentioning auth.
+/// #8649: `FakeSearchDispatch` reports no repo identities, so this also proves
+/// an unreadable registry degrades rather than stopping the review.
 /// Serialised (`#[serial]`) because it mutates the `TRUSTY_REVIEW_AUTH_MODE`
 /// env var shared with other auth-selection tests.
 /// Test: this test itself; failure is fast (token resolution fails before
@@ -452,6 +457,85 @@ async fn call_tool_review_pr_no_token_returns_error() {
         Err(ToolError::UnknownTool) => {
             panic!("review_pr must be a known tool");
         }
+    }
+}
+
+/// Search fake for #8649: a daemon that answers health but whose index list
+/// cannot be read (`connection refused`), with no identity support.
+struct UnreadableRegistry;
+
+#[async_trait]
+impl SearchClient for UnreadableRegistry {
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Ok(crate::integrations::search_client::IndexStatusResponse::ready(index_id))
+    }
+
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Ok(SearchHealth {
+            status: "ok".into(),
+            embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
+        })
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Err(SearchClientError::Transport("connection refused".into()))
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// #8649: with the index registry unreadable and `require_search = false`,
+/// `review_pr` gets past index resolution — a DEGRADED diff-only review — and
+/// stops at GitHub auth (forced App mode, no credentials) instead of
+/// returning the listing error.
+///
+/// Why: the interactive surface promises that a search outage degrades; the
+/// first #8649 cut turned it into a hard error.
+/// What: `UnreadableRegistry` fails every listing; the assertion requires the
+/// auth failure, which only a run past index resolution can produce.
+/// Serialised because it mutates `TRUSTY_REVIEW_AUTH_MODE`.
+/// Test: this test itself; no network.
+#[tokio::test]
+#[serial_test::serial]
+async fn call_tool_review_pr_degrades_past_an_unreadable_registry() {
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "app") };
+
+    let mut config = ReviewConfig::load(None);
+    config.github_token = String::new();
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    config.context.require_search = Some(false);
+    let state = AppState::new(
+        config,
+        Arc::new(ApproveLlm),
+        Arc::new(UnreadableRegistry),
+        None,
+    );
+
+    let args = json!({ "owner": "acme", "repo": "widget", "pr": 1 });
+    let result = call_tool("review_pr", &args, &state).await;
+
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    match result {
+        Err(ToolError::InvalidParams(msg)) => {
+            assert!(msg.contains("GitHub auth failed"), "{msg}");
+        }
+        Ok(envelope) => panic!("expected the auth error past index resolution, got {envelope}"),
+        Err(ToolError::UnknownTool) => panic!("review_pr must be a known tool"),
     }
 }
 

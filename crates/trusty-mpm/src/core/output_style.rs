@@ -319,7 +319,19 @@ pub const INJECTED_STYLE_HEADING: &str =
 /// and overrides are untouched — the style is purely additive and placed first.
 /// Test: `inject_prepends_style_block`, `inject_preserves_prompt`.
 pub fn inject_style_into_prompt(style: &BundledStyle, prompt: &str) -> String {
-    let body = strip_frontmatter(style.content).trim();
+    inject_style_text(style.content, prompt)
+}
+
+/// [`inject_style_into_prompt`] for a style's raw text, bundled or project (#8533).
+///
+/// Test: `inject_prepends_style_block`,
+/// `a_project_style_keeps_the_floor_with_and_without_native_support`.
+pub fn inject_style_text(content: &str, prompt: &str) -> String {
+    inject_body(strip_frontmatter(content).trim(), prompt)
+}
+
+/// `body` (frontmatter already stripped) under [`INJECTED_STYLE_HEADING`], then `prompt`.
+fn inject_body(body: &str, prompt: &str) -> String {
     format!(
         "{INJECTED_STYLE_HEADING}\n\n{body}{sep}{prompt}",
         sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
@@ -399,21 +411,62 @@ pub fn apply_output_style_to_prompt(
 /// broke `prepare_session_stash_reflects_override` on CI (issue #1409). This
 /// seam lets tests pin the decision BOTH ways while production still does real
 /// version detection (and fails safe to injection) via the wrapper above.
-/// What: loads [`MpmConfig::load_default`] and delegates to the pure
-/// [`maybe_inject_active_style`] core with the caller-supplied `native_supported`
-/// flag. `_project_dir` is accepted for symmetry / future project-scoped overrides.
-/// Test: `output_style_tests.rs` covers the pure core directly; the
+/// What: selects the style [`select_style_under`] picks for the default
+/// framework root. When `native_supported`, Claude Code delivers the style
+/// file itself, so `prompt` is returned unchanged — preceded by the
+/// [`style_floor`] for a project style whose composite is not active
+/// ([`composite_is_active`]). Otherwise the style's
+/// [`delivered_style_text`] (a project style's prose plus the floor) is
+/// injected ahead of `prompt`.
+/// #8533: the style is chosen by [`effective_style_id`] and resolved
+/// against the project's own style files too, so a project style reaches an
+/// older Claude Code; an unknown id warns and injects the default.
+/// Test: `a_project_style_keeps_the_floor_with_and_without_native_support`,
+/// `a_bundled_style_gets_no_second_floor_on_either_path`; the
 /// stash/launch invariant under both flag values is covered by
 /// `prepare_session_stash_reflects_override` in `session_launch/tests.rs`.
 pub fn apply_output_style_to_prompt_with_native(
-    _project_dir: &Path,
+    project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
     native_supported: bool,
 ) -> String {
-    let config = MpmConfig::load_default();
-    maybe_inject_active_style(&config, explicit, prompt, native_supported)
+    // #8533: the same selector the launch and `tm sessions instructions` use,
+    // manifest tier included.
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    let selected = select_style_under(&root, project_dir, explicit);
+    if native_supported {
+        // #8533: Claude Code reads the style file `outputStyle` names. When that
+        // is the current composite, the floor is already in it; otherwise the
+        // floor heads the appended prompt.
+        return match floor_for(&selected.style) {
+            Some(floor) if !composite_is_active(project_dir, &selected.style) => format!(
+                "{floor}{sep}{prompt}",
+                sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
+            ),
+            _ => prompt,
+        };
+    }
+    inject_body(&delivered_style_text(&selected.style), &prompt)
 }
+
+// #8533: the floor appended to a project style (owner ruling 2026-09-25).
+#[path = "output_style_floor.rs"]
+mod floor;
+pub use floor::{
+    COMPOSITE_STYLE_SUFFIX, FLOOR_SECTIONS, STYLE_FLOOR_HEADING, composite_is_active,
+    composite_path, composite_style_id, composite_style_text, delivered_style_text, floor_for,
+    is_composite_style_id, native_style_id, style_floor,
+};
+
+// #8533: project-local styles live in a child module (SLOC headroom).
+#[path = "output_style_project.rs"]
+mod project;
+pub use project::{
+    ActiveStyle, PROJECT_STYLES_DIR, ProjectStyleError, SelectedStyle, describe_effective_style,
+    effective_style_id, manifest_style_id, project_selected_style, project_style_ids,
+    resolve_or_default, resolve_style_in_project, select_style, select_style_under,
+};
 
 #[cfg(test)]
 #[path = "output_style_tests.rs"]

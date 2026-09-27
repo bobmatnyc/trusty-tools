@@ -188,6 +188,7 @@ impl KgStoreRedb {
                     let state = Arc::new(KgDbState {
                         db: std::sync::RwLock::new(db),
                         swap_lock: std::sync::RwLock::new(()),
+                        open_write_in_flight: std::sync::atomic::AtomicBool::new(false),
                         mode,
                         _snapshot_guard: snapshot_guard,
                     });
@@ -279,6 +280,27 @@ impl KgStoreRedb {
     #[cfg(test)]
     pub(crate) fn db_for_test(&self) -> Arc<Database> {
         self.db()
+    }
+
+    /// Claim this file's single slot for open-time maintenance writes (#8314).
+    ///
+    /// Why: an open-time write that waits past its budget leaves a helper
+    /// thread parked in `begin_write` until the stuck write ends. The work it
+    /// was doing is still undone, so every reopen of the same palace would park
+    /// one more thread. One slot per shared [`KgDbState`](super::types) caps
+    /// that at one, however many handles or reopens share the file.
+    /// What: `None` while an earlier claim is alive; otherwise a claim that
+    /// frees the slot when dropped.
+    /// Test: `reopens_behind_a_stuck_kg_write_park_at_most_one_sweep_helper`.
+    pub(crate) fn try_claim_open_write(&self) -> Option<OpenWriteClaim> {
+        use std::sync::atomic::Ordering;
+        self.state
+            .open_write_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| OpenWriteClaim {
+                state: Arc::clone(&self.state),
+            })
     }
 
     /// Begin a write transaction that the compaction swap cannot race.
@@ -389,5 +411,19 @@ impl KgStoreRedb {
         } else {
             Ok(())
         }
+    }
+}
+
+/// The held slot from [`KgStoreRedb::try_claim_open_write`]; dropping it frees
+/// the slot. Holds the shared state alive, so the slot outlives every handle.
+pub(crate) struct OpenWriteClaim {
+    state: Arc<KgDbState>,
+}
+
+impl Drop for OpenWriteClaim {
+    fn drop(&mut self) {
+        self.state
+            .open_write_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }

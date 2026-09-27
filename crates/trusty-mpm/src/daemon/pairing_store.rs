@@ -98,6 +98,7 @@ pub fn load(root: &Path) -> Option<PairingRecord> {
 /// renames it over the final path.
 /// Test: `save_then_load_round_trips`.
 pub fn save(root: &Path, record: &PairingRecord) -> std::io::Result<()> {
+    crate::core::home_write_fence::check(root); // #8545
     std::fs::create_dir_all(root)?;
     let path = pairing_path(root);
     let tmp = path.with_extension("json.tmp");
@@ -201,6 +202,7 @@ pub fn pending_path(root: &Path) -> PathBuf {
 /// creating `root` if needed.
 /// Test: `pending_round_trips`.
 pub fn save_pending(root: &Path, pending: &PendingPairCode) -> std::io::Result<()> {
+    crate::core::home_write_fence::check(root); // #8545
     std::fs::create_dir_all(root)?;
     let path = pending_path(root);
     let tmp = path.with_extension("json.tmp");

@@ -7,9 +7,10 @@
  * mechanism: one `docs/` file publishing at `/docs` and inside
  * `/tools/trusty-mpm` at once.
  *
- * What: one pass over the real corpus in this repository, then a temp-repo
- * fixture per gate — the same shape `../docs/site.test.ts` uses, including its
- * `TRUSTY_DOCS_COMMIT_SHA` seam so a fixture root needs no git history.
+ * What: a temp-repo fixture per gate — the same shape `../docs/site.test.ts`
+ * uses, including its `TRUSTY_DOCS_COMMIT_SHA` seam so a fixture root needs no
+ * git history. Nothing here reads the repository: the real-corpus pass lives in
+ * `content.corpus.test.ts` and runs as its own CI check (#8272).
  *
  * Test: this file.
  */
@@ -17,25 +18,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { DocBuildError } from '../docs/errors';
-import { findRepoRoot, readRepoFile } from '../docs/repo';
 import { clearDocSiteCache } from '../docs/site';
-import { TOOLS } from '../tools';
 import { buildFlagshipContent, CONTENT_DIR, clearFlagshipContentCache } from './content';
 
 const SHA = 'e'.repeat(40);
-
-/** The six slugs that render from markdown — trusty-audit stays Svelte. */
-const MARKDOWN_SLUGS = [
-	'trusty-analyze',
-	'trusty-git-analytics',
-	'trusty-memory',
-	'trusty-mpm',
-	'trusty-review',
-	'trusty-search'
-];
 
 /** Enough manifest for the doc site to build, so link resolution is real. */
 const MANIFEST = ['SECTION\tg\tGuides', 'PAGE\tg\tdocs/intro.md\t/\tIntroduction', ''].join('\n');
@@ -78,60 +67,6 @@ afterEach(() => {
 	clearFlagshipContentCache();
 	clearDocSiteCache();
 	for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
-describe('the real flagship corpus', () => {
-	let built: Map<string, { sources: string[]; html: string }>;
-
-	beforeAll(() => {
-		clearFlagshipContentCache();
-		clearDocSiteCache();
-		built = buildFlagshipContent();
-	});
-
-	it('renders one page per markdown source, and only those', () => {
-		expect([...built.keys()].sort()).toEqual(MARKDOWN_SLUGS);
-	});
-
-	it('gives every markdown slug a tool record, and leaves trusty-audit alone', () => {
-		const slugs = new Set(TOOLS.map((tool) => tool.slug));
-		for (const slug of MARKDOWN_SLUGS) expect(slugs.has(slug), slug).toBe(true);
-		expect(built.has('trusty-audit')).toBe(false);
-	});
-
-	it('renders real prose, not an empty frame', () => {
-		for (const [slug, content] of built) {
-			expect(content.html.length, slug).toBeGreaterThan(1000);
-			expect(content.html, slug).toContain('<h2');
-		}
-	});
-
-	/**
-	 * The include mechanism, end to end: the heading comes from a `docs/` file
-	 * this page never names in its own prose, and that file is published at
-	 * `/docs` in its own right. The expected heading text is read from that
-	 * source doc itself (renamed "Cost savings" -> "Token savings" by #7179)
-	 * rather than hardcoded a second time here.
-	 */
-	it('carries the Token savings section into the trusty-mpm page from docs/', () => {
-		const source = 'docs/trusty-mpm/statusline-savings.md';
-		const heading = readRepoFile(findRepoRoot(), source).match(/^##\s+(.+)$/m)?.[1];
-		expect(heading, `${source} has no level-2 heading`).toBeDefined();
-
-		const mpm = built.get('trusty-mpm');
-		expect(mpm?.sources).toContain(source);
-		expect(mpm?.html).toContain(`>${heading}</h2>`);
-	});
-
-	/** The included file's own `/docs` page title must not survive the include. */
-	it('drops the included file’s h1, leaving the hero as the only page title', () => {
-		expect(built.get('trusty-mpm')?.html).not.toContain('<h1');
-	});
-
-	it('rewrites root-relative links to real site routes', () => {
-		expect(built.get('trusty-mpm')?.html).toContain('href="/claude-mpm-migration"');
-		expect(built.get('trusty-review')?.html).toContain('href="/docs/guides/audit-instructions"');
-	});
 });
 
 describe('build gates', () => {

@@ -151,7 +151,21 @@ pub(super) async fn remember_within(
             }
             result
         }
-        Err(_) => Err(over_budget_error(handle, budget, elapsed)),
+        Err(_) => {
+            // #8314: the abort is logged server-side, naming palace and
+            // operation — a client that gave up first never sees the error,
+            // and a silent daemon is what made #8314 undiagnosable.
+            tracing::error!(
+                palace = %handle.id,
+                operation = "remember",
+                elapsed_ms = elapsed.as_millis(),
+                budget_ms = budget.as_millis(),
+                "#8314: write aborted after exceeding its budget; nothing was \
+                 acknowledged, and a commit already dispatched lands whole or \
+                 not at all"
+            );
+            Err(over_budget_error(handle, budget, elapsed))
+        }
     }
 }
 

@@ -61,7 +61,9 @@ fn make_root(files: &[(&str, &str)]) -> tempfile::TempDir {
 fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
     let db_path = crate::service::colocated_storage::colocated_redb_path(root).expect("redb path");
     let corpus = CorpusStore::open(&db_path).expect("open live corpus");
-    let mut indexer = CodeIndexer::new(id, root.to_path_buf());
+    let mut indexer = CodeIndexer::new(id, root.to_path_buf())
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
     indexer.set_corpus_store(Arc::new(corpus));
     let mut skip_dirs = crate::service::walker::default_extra_skip_dirs();
     // Never walk our own storage dir — a redb file is not source.

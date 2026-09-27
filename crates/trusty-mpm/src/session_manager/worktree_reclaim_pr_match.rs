@@ -35,6 +35,9 @@
 //! keeps the operator-facing reason stable: a worktree with no pull request
 //! still reports "no pull request found for this branch" when the network is
 //! down, rather than a lookup failure that is really about the widening.
+//! #8721: the one exception is a detached HEAD, whose `Unknown` gate 5 now
+//! lets reach the landed-content admission; its failed search is
+//! `LookupFailed`, which refuses.
 //!
 //! The extra `gh` and `git` calls ride on `per_branch_fallback`, so the
 //! `tm doctor` probe — which runs on a three-second budget and passes `false` —
@@ -139,18 +142,64 @@ pub(crate) fn resolve_landing(
     exact: BranchPrState,
     probe: &dyn LandingProbe,
 ) -> BranchPrState {
+    resolve_landing_parts(worktree, registry_root, branch, exact, probe).landing
+}
+
+/// What the ladder answered by the branch's NAME, and what it answered in the
+/// end (#8109).
+///
+/// Why: rung 3 matches a merged pull request by head COMMIT, so its `Merged`
+/// can belong to another branch entirely. On 2026-09-16 it matched PR #514
+/// (`…-v2`) for a `…-wt` branch that never had a pull request, and the tree was
+/// reclaimed with no proof its own content had landed. The reclaim sweep needs
+/// both answers to tell those two kinds of `Merged` apart.
+/// What: `by_name` is rungs 1 and 2 — the branch's own name or its `-rN` round
+/// stem, the one workstream equivalence `strip_round_suffix` defines.
+/// `landing` adds rung 3, and is what [`resolve_landing`] returns.
+/// Test: `worktree_8109_a_head_commit_match_is_not_the_branchs_own_pr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrResolution {
+    /// The answer for this branch's own name or round stem.
+    pub by_name: BranchPrState,
+    /// The answer after the head-commit widening.
+    pub landing: BranchPrState,
+}
+
+/// [`resolve_landing`], returning the by-name answer beside the final one
+/// (#8109).
+fn resolve_landing_parts(
+    worktree: &Path,
+    registry_root: &Path,
+    branch: Option<&str>,
+    exact: BranchPrState,
+    probe: &dyn LandingProbe,
+) -> PrResolution {
+    let settled = |state: BranchPrState| PrResolution {
+        by_name: state.clone(),
+        landing: state,
+    };
     // Rung 1: a settled answer about this branch is the answer. An OPEN pull
     // request on the branch itself is work in flight, and widening past it
     // would be the one mistake this ladder must not make.
     if !matches!(exact, BranchPrState::NoPr | BranchPrState::Unknown) {
-        return exact;
+        return settled(exact);
     }
     if let Some(pr) = merged_round_sibling(registry_root, branch, probe) {
-        return pr;
+        return settled(pr);
     }
-    match merged_by_head_commit(worktree, registry_root, probe) {
-        Some(pr) => pr,
-        None => exact,
+    // #8109: a rung-3 match is another branch's pull request, so `by_name`
+    // keeps rung 1's refusal.
+    let landing = match merged_by_head_commit(worktree, registry_root, probe) {
+        Ok(Some(merged)) => merged,
+        // #8721: a detached HEAD's `Unknown` reaches gate 5's landed-content
+        // admission, so a search that did not answer must not read as one
+        // that found nothing — `PrIndex::state_for`'s own split.
+        Err(reason) if branch.is_none() => BranchPrState::LookupFailed { reason },
+        Ok(None) | Err(_) => exact.clone(),
+    };
+    PrResolution {
+        by_name: exact,
+        landing,
     }
 }
 
@@ -204,8 +253,9 @@ fn merged_round_sibling(
 /// and this worktree's HEAD stand in an ancestor relationship either way round
 /// — the pull request was opened from this commit, from a descendant of it, or
 /// from an ancestor of it. A fork's row is skipped for the reason
-/// `PrIndex::from_json` skips it. `None` on every failure, and on a search that
-/// returned nothing this tree's HEAD belongs to.
+/// `PrIndex::from_json` skips it. `Ok(None)` on a search that returned nothing
+/// this tree's HEAD belongs to; `Err` when HEAD or the search did not answer
+/// (#8721).
 ///
 /// Content this tree holds BEYOND the matched pull request's head is not this
 /// gate's to catch and is not let through by it: `classify` gate 6 runs
@@ -214,12 +264,13 @@ fn merged_round_sibling(
 /// Test: `a_renamed_branch_matches_the_pr_opened_from_its_head_commit`,
 /// `a_fork_pull_request_containing_the_commit_is_ignored`,
 /// `an_unrelated_merged_pr_containing_no_ancestor_is_not_a_match`,
-/// `a_failed_ancestry_probe_leaves_the_refusal_standing`.
+/// `a_failed_ancestry_probe_leaves_the_refusal_standing`,
+/// `worktree_8721_a_detached_head_whose_search_failed_is_a_lookup_failure`.
 fn merged_by_head_commit(
     worktree: &Path,
     registry_root: &Path,
     probe: &dyn LandingProbe,
-) -> Option<BranchPrState> {
+) -> Result<Option<BranchPrState>, String> {
     let head = match probe.head_commit(worktree) {
         Ok(head) if !head.trim().is_empty() => head.trim().to_string(),
         Ok(_) => {
@@ -228,7 +279,7 @@ fn merged_by_head_commit(
                 "worktree-reclaim: this worktree named no HEAD commit, so the \
                  commit search cannot run (#7267)"
             );
-            return None;
+            return Err("`git rev-parse HEAD` named no commit to search for".to_string());
         }
         Err(e) => {
             tracing::warn!(
@@ -237,7 +288,7 @@ fn merged_by_head_commit(
                  pull request carrying this tree cannot be searched for — the \
                  branch-name answer stands (#7267): {e}"
             );
-            return None;
+            return Err(format!("the HEAD commit could not be read: {e}"));
         }
     };
     let rows = match probe.merged_prs_containing(registry_root, &head) {
@@ -249,7 +300,9 @@ fn merged_by_head_commit(
                 "worktree-reclaim: the merged-pull-request commit search did not \
                  answer — the branch-name answer stands (#7267): {e}"
             );
-            return None;
+            return Err(format!(
+                "the merged-pull-request commit search for `{head}` did not answer: {e}"
+            ));
         }
     };
     for row in rows {
@@ -270,10 +323,10 @@ fn merged_by_head_commit(
                 "worktree-reclaim: this worktree's HEAD is carried by a merged pull \
                  request opened from a different branch name (#7267)"
             );
-            return Some(BranchPrState::Merged { pr: row.number });
+            return Ok(Some(BranchPrState::Merged { pr: row.number }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Does the pull request whose head sat on `oid` vouch for `head`?
@@ -333,9 +386,14 @@ fn vouches_for_head(
 /// not resolve, then [`resolve_landing`]. With `per_branch_fallback` clear the
 /// index's answer is returned unchanged, which is what keeps the `tm doctor`
 /// probe inside its three-second budget.
+///
+/// #8109: returns the by-name answer beside the final one, so the sweep can
+/// tell whether a `Merged` is the branch's own — see [`PrResolution`].
+/// Without `per_branch_fallback` both fields hold the index's answer.
 /// Test: `resolve_with_index_without_fallback_never_calls_the_probe`,
 /// `resolve_with_index_retries_a_truncated_index_per_branch`,
-/// `survey_reclaims_a_round_sibling_of_a_merged_pr`.
+/// `survey_reclaims_a_round_sibling_of_a_merged_pr`,
+/// `worktree_8109_a_head_commit_match_is_not_the_branchs_own_pr`.
 pub(crate) fn resolve_with_index(
     worktree: &Path,
     registry_root: &Path,
@@ -343,10 +401,13 @@ pub(crate) fn resolve_with_index(
     index: &PrIndex,
     per_branch_fallback: bool,
     probe: &dyn LandingProbe,
-) -> BranchPrState {
+) -> PrResolution {
     let mut pr = index.state_for(branch);
     if !per_branch_fallback {
-        return pr;
+        return PrResolution {
+            by_name: pr.clone(),
+            landing: pr,
+        };
     }
     // #6561: a truncated or FAILED bulk lookup retries per-branch. The bulk
     // call and the targeted one can fail for different reasons (a page limit is
@@ -360,7 +421,7 @@ pub(crate) fn resolve_with_index(
     {
         pr = probe.state_for_head(registry_root, branch);
     }
-    resolve_landing(worktree, registry_root, branch, pr, probe)
+    resolve_landing_parts(worktree, registry_root, branch, pr, probe)
 }
 
 /// Ask GitHub, in an ALREADY-RESOLVED repository, for the MERGED pull requests
@@ -384,7 +445,7 @@ pub(crate) fn merged_prs_containing_in(
 ) -> Result<Vec<MergedPrHead>, String> {
     let stdout = worktree_reclaim_gh_gate::shared()
         .poll(registry_root, &format!("merged-sha:{repo}:{sha}"), || {
-            let gh_env = resolve_daemon_gh_env(registry_root);
+            let gh_env = resolve_daemon_gh_env(registry_root, repo)?;
             let mut cmd = gh_pr_list_command(registry_root, &gh_env, repo);
             cmd.args(["--state", "merged", "--search", sha, "--limit"])
                 .arg(COMMIT_SEARCH_LIMIT.to_string())

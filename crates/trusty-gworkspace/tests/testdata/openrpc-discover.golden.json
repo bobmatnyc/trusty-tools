@@ -146,7 +146,7 @@
       ]
     },
     {
-      "description": "Create, read, update, or delete Google Calendars.",
+      "description": "Create, read, update, or delete Google Calendars. update takes summary, description and time_zone flat, as an 'updates' object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_calendars",
       "params": [
         {
@@ -183,36 +183,38 @@
           }
         },
         {
-          "description": "",
+          "description": "Calendar description (create/update).",
           "name": "description",
           "required": false,
           "schema": {
+            "description": "Calendar description (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "Calendar title (create).",
+          "description": "Calendar title (create/update).",
           "name": "summary",
           "required": false,
           "schema": {
-            "description": "Calendar title (create).",
+            "description": "Calendar title (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "IANA time zone, e.g. 'America/New_York' (create/update). Maps to timeZone.",
           "name": "time_zone",
           "required": false,
           "schema": {
+            "description": "IANA time zone, e.g. 'America/New_York' (create/update). Maps to timeZone.",
             "type": "string"
           }
         },
         {
-          "description": "Patch body for update.",
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
-            "description": "Patch body for update.",
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }
@@ -864,7 +866,7 @@
       "x-google-scopes": []
     },
     {
-      "description": "CRUD Gmail labels.",
+      "description": "CRUD Gmail labels. update takes name, label_list_visibility, message_list_visibility and color flat, as an 'updates' object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_gmail_labels",
       "params": [
         {
@@ -892,42 +894,56 @@
           }
         },
         {
-          "description": "",
+          "description": "Label color {textColor, backgroundColor} (update).",
+          "name": "color",
+          "required": false,
+          "schema": {
+            "description": "Label color {textColor, backgroundColor} (update).",
+            "type": "object"
+          }
+        },
+        {
+          "description": "Label ID (required for update/delete).",
           "name": "label_id",
           "required": false,
           "schema": {
+            "description": "Label ID (required for update/delete).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "labelShow, labelShowIfUnread or labelHide (create/update). Maps to labelListVisibility.",
           "name": "label_list_visibility",
           "required": false,
           "schema": {
+            "description": "labelShow, labelShowIfUnread or labelHide (create/update). Maps to labelListVisibility.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "show or hide (create/update). Maps to messageListVisibility.",
           "name": "message_list_visibility",
           "required": false,
           "schema": {
+            "description": "show or hide (create/update). Maps to messageListVisibility.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Label name (create/update).",
           "name": "name",
           "required": false,
           "schema": {
+            "description": "Label name (create/update).",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }
@@ -4235,18 +4251,20 @@
           }
         },
         {
-          "description": "",
+          "description": "List title (create; update renames). Merged with 'updates'; a different value in both is an error.",
           "name": "title",
           "required": false,
           "schema": {
+            "description": "List title (create; update renames). Merged with 'updates'; a different value in both is an error.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Raw patch body (update). Merged with the flat 'title'.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat 'title'.",
             "type": "object"
           }
         }
@@ -4263,7 +4281,7 @@
       ]
     },
     {
-      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists.",
+      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists. create/update take task fields flat (title, notes, due, status, completed), as a 'task' (create) or 'updates' (update) object, or both: the two are merged, and a field set in both with different values is an error.",
       "name": "manage_tasks",
       "params": [
         {
@@ -4291,6 +4309,33 @@
               "move",
               "search"
             ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Completion time, RFC3339 (create/update).",
+          "name": "completed",
+          "required": false,
+          "schema": {
+            "description": "Completion time, RFC3339 (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Due date, RFC3339 (e.g. 2026-09-28T00:00:00Z) (create/update).",
+          "name": "due",
+          "required": false,
+          "schema": {
+            "description": "Due date, RFC3339 (e.g. 2026-09-28T00:00:00Z) (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Task notes/description (create/update).",
+          "name": "notes",
+          "required": false,
+          "schema": {
+            "description": "Task notes/description (create/update).",
             "type": "string"
           }
         },
@@ -4329,10 +4374,24 @@
           }
         },
         {
-          "description": "",
+          "description": "Task status (create/update).",
+          "name": "status",
+          "required": false,
+          "schema": {
+            "description": "Task status (create/update).",
+            "enum": [
+              "needsAction",
+              "completed"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw Task resource (create). Merged with the flat fields.",
           "name": "task",
           "required": false,
           "schema": {
+            "description": "Raw Task resource (create). Merged with the flat fields.",
             "type": "object"
           }
         },
@@ -4346,18 +4405,29 @@
           }
         },
         {
-          "description": "",
+          "description": "Task list ID. Defaults to '@default'.",
           "name": "tasklist_id",
           "required": false,
           "schema": {
+            "description": "Task list ID. Defaults to '@default'.",
             "type": "string"
           }
         },
         {
-          "description": "",
+          "description": "Task title (create/update).",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "description": "Task title (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw patch body (update). Merged with the flat fields.",
           "name": "updates",
           "required": false,
           "schema": {
+            "description": "Raw patch body (update). Merged with the flat fields.",
             "type": "object"
           }
         }

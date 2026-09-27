@@ -4,28 +4,48 @@
 //! workflows; one module each Python service module.
 //! What: Dispatches on the `action` field (list|create|update|delete) plus
 //! `query_free_busy` as a separate tool.
-//! Test: Integration only.
+//! Test: `manage_calendars` update request shapes pinned against `wiremock`
+//! in `tests` below; the rest is integration only.
 
 use anyhow::{Result, anyhow};
 use serde_json::{Map, Value, json};
 
 use crate::api::client::BaseClient;
 use crate::api::constants::CALENDAR_API_BASE;
-use crate::api::services::{account_of, opt_str, require_str};
+use crate::api::services::{account_of, merge_flat_fields, opt_str, require_str};
 
 /// CRUD operations against the calendarList collection.
 ///
 /// Why: The Google API splits Calendar into the resource (`/calendars`) and
 /// the user's subscription list (`/users/me/calendarList`). For listing we
 /// use `calendarList`; for create/update/delete we hit `/calendars`.
-/// What: `action` ∈ {"list", "create", "update", "delete"}.
-/// Test: Live calls only.
+/// What: `action` ∈ {"list", "create", "update", "delete"}. `update` takes
+/// `summary`/`description`/`time_zone` flat, an `updates` patch object, or
+/// both: the PATCH body is their union, a field set in both with different
+/// values is an error, and an update with no fields at all is an error.
+/// Test: `update_applies_flat_fields`, `update_applies_updates_object`,
+/// `update_merges_flat_and_object`, `update_conflict_is_refused_without_a_request`,
+/// `update_with_no_fields_names_both_shapes`; other actions live only.
 pub async fn manage_calendars(client: &BaseClient, args: Value) -> Result<Value> {
+    manage_calendars_at(client, args, CALENDAR_API_BASE).await
+}
+
+/// Calendar fields `manage_calendars` update accepts flat, paired with their
+/// API body keys (#8632).
+const CALENDAR_FLAT_FIELDS: [(&str, &str); 3] = [
+    ("summary", "summary"),
+    ("description", "description"),
+    ("time_zone", "timeZone"),
+];
+
+/// [`manage_calendars`] against an injectable API base (#8632: lets tests
+/// assert the exact request against a `wiremock` server).
+async fn manage_calendars_at(client: &BaseClient, args: Value, base: &str) -> Result<Value> {
     let action = require_str(&args, "action")?;
     let account = account_of(&args);
     match action {
         "list" => {
-            let url = format!("{CALENDAR_API_BASE}/users/me/calendarList");
+            let url = format!("{base}/users/me/calendarList");
             client.get(&url, account).await
         }
         "create" => {
@@ -35,18 +55,19 @@ pub async fn manage_calendars(client: &BaseClient, args: Value) -> Result<Value>
                 "description": args.get("description"),
                 "timeZone": args.get("time_zone"),
             });
-            let url = format!("{CALENDAR_API_BASE}/calendars");
+            let url = format!("{base}/calendars");
             client.post(&url, body, account).await
         }
         "update" => {
             let calendar_id = require_str(&args, "calendar_id")?;
-            let url = format!("{CALENDAR_API_BASE}/calendars/{calendar_id}");
-            let body = args.get("updates").cloned().unwrap_or_else(|| json!({}));
+            let url = format!("{base}/calendars/{calendar_id}");
+            // #8632: flat fields used to be ignored, PATCHing `{}`.
+            let body = merge_flat_fields(&args, "updates", &CALENDAR_FLAT_FIELDS)?;
             client.patch(&url, body, account).await
         }
         "delete" => {
             let calendar_id = require_str(&args, "calendar_id")?;
-            let url = format!("{CALENDAR_API_BASE}/calendars/{calendar_id}");
+            let url = format!("{base}/calendars/{calendar_id}");
             client.delete(&url, account).await
         }
         other => Err(anyhow!("unknown action for manage_calendars: {other}")),
@@ -436,5 +457,82 @@ mod tests {
         // A non-object escape hatch is discarded rather than corrupting the body.
         let body = build_event_body(json!("not-an-object"), &json!({}));
         assert_eq!(body, json!({}));
+    }
+
+    // #8632: the request-shape tests below drive the real handler against a
+    // wiremock server and pin the exact method, path and JSON body sent.
+    use crate::api::services::test_support::{mount_patch, with_args};
+    use wiremock::MockServer;
+
+    const CAL_PATH: &str = "/calendars/cal1";
+
+    /// Run `manage_calendars` update on `cal1` with `extra` added to the args.
+    async fn update(server: &MockServer, extra: Value) -> Result<Value> {
+        let args = with_args(json!({ "action": "update", "calendar_id": "cal1" }), extra);
+        let client = BaseClient::for_test_with_token("a");
+        manage_calendars_at(&client, args, &server.uri()).await
+    }
+
+    #[tokio::test]
+    async fn update_applies_flat_fields() {
+        let server = MockServer::start().await;
+        let body = json!({ "summary": "Team", "description": "D", "timeZone": "UTC" });
+        mount_patch(&server, CAL_PATH, Some(body), 1).await;
+        let extra = json!({ "summary": "Team", "description": "D", "time_zone": "UTC" });
+        let out = update(&server, extra).await;
+        assert_eq!(out.expect("flat update succeeds")["id"], "x1");
+    }
+
+    #[tokio::test]
+    async fn update_applies_updates_object() {
+        let server = MockServer::start().await;
+        let updates = json!({ "summary": "Team", "location": "NYC" });
+        mount_patch(&server, CAL_PATH, Some(updates.clone()), 1).await;
+        let out = update(&server, json!({ "updates": updates })).await;
+        assert_eq!(out.expect("object update succeeds")["id"], "x1");
+    }
+
+    #[tokio::test]
+    async fn update_merges_flat_and_object() {
+        let server = MockServer::start().await;
+        // Keys from both shapes survive; `timeZone` given in both with the
+        // SAME value is not a conflict.
+        let body = json!({ "summary": "Team", "timeZone": "UTC", "location": "NYC" });
+        mount_patch(&server, CAL_PATH, Some(body), 1).await;
+        let extra = json!({
+            "summary": "Team",
+            "time_zone": "UTC",
+            "updates": { "timeZone": "UTC", "location": "NYC" },
+        });
+        let out = update(&server, extra).await;
+        assert_eq!(out.expect("merged update succeeds")["id"], "x1");
+    }
+
+    #[tokio::test]
+    async fn update_conflict_is_refused_without_a_request() {
+        let server = MockServer::start().await;
+        // Any request at all would mean one of the two zones was dropped.
+        mount_patch(&server, CAL_PATH, None, 0).await;
+        let extra = json!({ "time_zone": "UTC", "updates": { "timeZone": "Asia/Tokyo" } });
+        let msg = update(&server, extra)
+            .await
+            .expect_err("conflicting time zone must be refused")
+            .to_string();
+        assert!(msg.contains("'time_zone'"), "error names the field: {msg}");
+        assert!(msg.contains("'updates'"), "error names the object: {msg}");
+    }
+
+    #[tokio::test]
+    async fn update_with_no_fields_names_both_shapes() {
+        let server = MockServer::start().await;
+        mount_patch(&server, CAL_PATH, None, 0).await;
+        let msg = update(&server, json!({ "updates": {} }))
+            .await
+            .expect_err("an update with no fields is refused")
+            .to_string();
+        assert!(
+            msg.contains("summary") && msg.contains("'updates'"),
+            "{msg}"
+        );
     }
 }

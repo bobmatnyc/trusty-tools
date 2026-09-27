@@ -467,7 +467,7 @@ pub(super) async fn probe_resume(
         );
         return None;
     }
-    let tmp_path = super::corpus_swap::staging_corpus_path(handle, index_id)?;
+    let tmp_path = super::corpus_swap::staging_corpus_path(handle, index_id).await?;
     if !tmp_path.exists() {
         return None;
     }

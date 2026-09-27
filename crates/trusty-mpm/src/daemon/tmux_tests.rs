@@ -515,3 +515,31 @@ fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
         "must surface as a Protocol error: {err:?}"
     );
 }
+
+/// #8233: `send_command_line` must refuse a line the pane's tty would truncate,
+/// and must spawn no tmux process doing so — this driver points at a path that
+/// does not exist, so a `send-keys` attempt surfaces as a DIFFERENT error and
+/// the two cases are distinguishable.
+#[test]
+fn driver_send_command_line_refuses_an_oversized_line() {
+    let driver = TmuxDriver {
+        tmux_path: "/nonexistent/definitely-not-tmux".to_owned(),
+    };
+    let target = crate::core::tmux::TmuxTarget::session("tm-sess");
+
+    let too_long = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES + 1);
+    let err = driver
+        .send_command_line(&target, &too_long)
+        .expect_err("an over-length command must be refused, never truncated");
+    assert!(err.to_string().contains("#8233"), "{err}");
+
+    // A line at the limit is NOT refused: it reaches the (missing) tmux binary.
+    let at_limit = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES);
+    let err = driver
+        .send_command_line(&target, &at_limit)
+        .expect_err("the nonexistent tmux path cannot be spawned");
+    assert!(
+        !err.to_string().contains("#8233"),
+        "a line at the limit must pass the guard: {err}"
+    );
+}

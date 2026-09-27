@@ -10,6 +10,7 @@
 //! Test: this file IS the tests.
 
 use super::*;
+use crate::memory_core::store::kg_store::NEXT_VECTOR_ID;
 use redb::Database;
 use tempfile::tempdir;
 use uuid::Uuid;

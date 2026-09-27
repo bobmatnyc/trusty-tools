@@ -45,15 +45,19 @@ pub(super) struct ConnectProjectRequest {
 /// CLI and HTTP entry points.
 /// What:
 ///   1. Validate and canonicalize `path`.
-///   2. Register in the global `~/.trusty-agents/projects.json` registry so
+///   2. #4289: refuse with `409` when the folder overlaps an already-registered
+///      project — same tree, inside one, or enclosing one — naming that project.
+///   3. Register in the global `~/.trusty-agents/projects.json` registry so
 ///      `GET /api/projects` sees it.
-///   3. If `adapter` is supplied, also call `ProjectConfigStore::find_or_create`
+///   4. If `adapter` is supplied, also call `ProjectConfigStore::find_or_create`
 ///      to materialize `.trusty-agents/projects/<name>.toml` and return
 ///      `{name, path, default_harness, created}`.
-///   4. If `adapter` is omitted, return the legacy `{id, path, name, created_at}`
+///   5. If `adapter` is omitted, return the legacy `{id, path, name, created_at}`
 ///      shape for backward compatibility with #405 callers.
-/// Test: `connect_project_persists_to_registry` (legacy shape) and
-/// `connect_project_creates_tm_config_when_adapter_supplied` (new shape).
+///
+/// Test: `connect_project_persists_to_registry` (legacy shape),
+/// `connect_project_creates_tm_config_when_adapter_supplied` (new shape) and
+/// `connect_project_refuses_a_folder_inside_a_registered_project` (#4289).
 pub(super) async fn connect_project(
     State(_state): State<AppState>,
     Json(req): Json<ConnectProjectRequest>,
@@ -91,6 +95,26 @@ pub(super) async fn connect_project(
             Json(serde_json::json!({"error":"Project registration could not be persisted"})),
         )
     })?;
+    // #4289: refuse a folder that duplicates or straddles a project already in
+    // the registry — the same tree under another spelling, a subdirectory of
+    // one, or an ancestor that would enclose one. A registry we cannot read is
+    // refused rather than overwritten: `register_pm_start` treats an unreadable
+    // map as empty, so registering past this point would drop every entry.
+    let known = registry.load().await.map_err(|e| {
+        tracing::warn!(error = %e, "connect_project: registry load failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"Existing projects could not be read"})),
+        )
+    })?;
+    let known: Vec<crate::registry::ProjectEntry> = known.into_values().collect();
+    if let Some(overlap) = crate::registry::find_project_overlap(&abs, &known) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": overlap.refusal()})),
+        ));
+    }
+
     registry.register_pm_start(&abs).await.map_err(|e| {
         tracing::warn!(error = %e, "connect_project: register_pm_start failed");
         (

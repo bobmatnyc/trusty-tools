@@ -15,7 +15,7 @@ How verification-before-completion integrates with other skills and common workf
 4. Implement fix (systematic-debugging Phase 4)
 5. ⚠️ GATE FUNCTION: Verify fix works (verification-before-completion)
    - Run reproduction case → Must pass
-   - Run full test suite → Must pass
+   - Run project-required gates (or reuse matching raw evidence) → Must pass
    - THEN claim "Bug fixed"
 ```
 
@@ -196,8 +196,8 @@ How verification-before-completion integrates with other skills and common workf
 **For every agent task completion:**
 ```
 [ ] Reviewed complete git diff
-[ ] Ran full test suite
-[ ] Checked build succeeds
+[ ] Verified project-required gates with matching raw evidence
+[ ] Build evidence covers the claim when the project ladder requires a build
 [ ] Verified requirements met
 [ ] No TODO/placeholder code
 [ ] No commented-out code

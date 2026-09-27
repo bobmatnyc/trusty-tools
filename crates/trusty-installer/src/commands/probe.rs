@@ -568,13 +568,11 @@ mod tests {
     }
 
     /// Write `body` as an executable `#!/bin/sh` script at `path`.
+    // #3782: written from a child process so no sibling fork inherits a
+    // writable fd to it (ETXTBSY on the later exec).
     #[cfg(unix)]
     fn write_script(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).expect("write script");
-        let mut perms = std::fs::metadata(path).expect("stat script").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).expect("chmod script");
+        crate::commands::test_support::write_exec_script(path, &format!("#!/bin/sh\n{body}\n"));
     }
 
     /// Why (#5805): `spawn_member_json` ran `Command::output()` with no

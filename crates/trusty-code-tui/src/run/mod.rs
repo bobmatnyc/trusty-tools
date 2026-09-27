@@ -80,6 +80,16 @@ pub const TICK: Duration = Duration::from_millis(100);
 /// to busy-loop.
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Ceiling on how many already-queued events [`drain_ready`] folds into one
+/// frame (#8240).
+///
+/// Why: a producer that outruns the terminal indefinitely would otherwise let
+/// the drain loop run forever and the screen never update at all — the
+/// opposite of the freeze this fix exists to cure. The bound guarantees a
+/// frame at least every `DRAIN_LIMIT` events while still collapsing any
+/// realistic streaming burst into a single draw.
+const DRAIN_LIMIT: usize = 512;
+
 /// Mouse-wheel scroll delta per notch, matching tagent's existing convention
 /// (`crates/trusty-agents/src/repl/tui/run.rs`): negative scrolls toward
 /// older history, positive toward newer.
@@ -148,29 +158,26 @@ pub trait TuiModel {
     }
 
     /// Called by [`run`]'s dispatch step immediately after a drained cancel
-    /// signal, before the `cancel_session` call is even dispatched.
+    /// signal, before the cancel RPC is even dispatched.
     ///
-    /// Why: the actual `TuiEngine::cancel_session` RPC is async and runs on
-    /// a spawned task (so a slow/hung backend never freezes the render
-    /// loop), but the visible "busy" state should clear the moment the user
-    /// asked to cancel, not whenever the RPC eventually resolves — direct
-    /// parity with tagent's real cancel path
-    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`), which
-    /// resets `thinking`/`busy_since` synchronously, before `h.abort()` even
-    /// runs. DOC-50 §5 Slice 5's "blocks user input until cancel completes"
-    /// is implemented literally, not reasoned away: `crate::app::ReplApp`'s
-    /// `submit_line` refuses a second turn while `busy` is `true`
-    /// ([`crate::app::ReplApp::submit_line`]'s doc comment), so this method
-    /// clearing `busy` is exactly the moment new input becomes acceptable
-    /// again — before that, Enter/Submit is a genuine no-op, not merely
-    /// cosmetically blocked. [`dispatch_pending`] separately bumps the
-    /// generation counter in the SAME cancel branch this method is called
-    /// from, so any output still in flight from the just-cancelled turn is
-    /// dropped rather than rendered once it eventually arrives (see that
-    /// function's doc comment for the generation mechanism).
-    /// What: default no-op — a model with no busy/streaming state to reset
-    /// needs no override.
-    fn on_cancelled(&mut self) {}
+    /// Why: the RPC is async and runs on a spawned task (so a slow or hung
+    /// backend never freezes the render loop), so the model needs a hook that
+    /// runs at REQUEST time — but #8207 is the proof that this hook must not
+    /// announce an outcome. An earlier revision cleared the busy state and
+    /// printed "cancelled" here; the daemon's cancel is cooperative, so the run
+    /// was often still executing, and the prompt the reopened input accepted
+    /// came back `-32003 already has a task running`. DOC-50 §5 Slice 5's
+    /// "blocks user input until cancel completes" is now literal in the strict
+    /// sense: input stays blocked until
+    /// [`crate::event::ReplEvent::CancelSettled`] reports a confirmed stop.
+    /// [`dispatch_pending`] separately bumps the generation counter in the SAME
+    /// cancel branch this method is called from, so any output still in flight
+    /// from the just-cancelled turn is dropped rather than rendered once it
+    /// eventually arrives (see that function's doc comment for the generation
+    /// mechanism).
+    /// What: default no-op — a model with no cancelling state to enter needs no
+    /// override.
+    fn on_cancel_requested(&mut self) {}
 
     /// Record the generation number [`dispatch_pending`] just assigned to a
     /// new turn (submit) or bumped past (cancel), so a later
@@ -325,15 +332,18 @@ pub fn spawn_key_reader(tx: UnboundedSender<ReplEvent>) -> KeyReaderGuard {
 /// against `ratatui::backend::TestBackend` — `run` itself requires a real
 /// TTY (via [`TerminalGuard::enter`]) and so cannot run in CI/sandboxes.
 /// What: draws once immediately, then loops a biased `tokio::select!` between
-/// the [`TICK`] interval (redraw only) and `rx.recv()` (apply the event via
-/// `apply`, then redraw). Exits when `model.should_quit()` becomes true or
-/// `rx` closes (all senders dropped — mirrors
+/// the [`TICK`] interval (redraw only) and `rx.recv()`. A received event is
+/// applied, and then every event ALREADY queued behind it is applied too
+/// (`try_recv`, which never waits) before the single redraw that follows —
+/// see [`drain_ready`] for why (#8240). Exits when `model.should_quit()`
+/// becomes true or `rx` closes (all senders dropped — mirrors
 /// `crates/trusty-agents/src/repl/tui/run.rs::event_loop`'s `None => return
 /// Ok(())`). Returns the final model so callers/tests can inspect it.
 /// Test: `tests::event_loop_applies_events_and_redraws`,
 /// `tests::event_loop_stops_when_model_requests_quit`,
 /// `tests::event_loop_stops_when_channel_closes`,
-/// `tests::event_loop_redraws_on_tick_even_without_events`.
+/// `tests::event_loop_redraws_on_tick_even_without_events`,
+/// `tests::event_loop_coalesces_a_burst_into_one_redraw`.
 pub async fn event_loop<B, M>(
     terminal: &mut Terminal<B>,
     mut model: M,
@@ -364,6 +374,11 @@ where
                 match ev {
                     Some(ev) => {
                         apply(&mut model, ev);
+                        // #8240: apply the backlog before drawing, not one
+                        // frame per event — see `drain_ready`.
+                        if !model.should_quit() {
+                            drain_ready(&mut model, &mut rx, &mut apply);
+                        }
                         terminal.draw(|f| render(f, &model))?;
                         if model.should_quit() {
                             return Ok(model);
@@ -372,6 +387,45 @@ where
                     None => return Ok(model),
                 }
             }
+        }
+    }
+}
+
+/// Apply every event already sitting in `rx` — without ever waiting for one
+/// more — so [`event_loop`] can draw the result as a single frame.
+///
+/// Why: #8240's render desync. One `terminal.draw` per event is fine for
+/// keystrokes and fatal for a streaming turn: `crate::layout::draw` rebuilds
+/// the WHOLE scrollback (`chat_line_count` and `draw_chat` each call
+/// `build_chat_lines`), so a frame costs O(transcript) and the transcript
+/// only grows. A daemon emitting chunks faster than a frame costs makes the
+/// loop fall permanently behind, and the pane shows minutes-old state while
+/// the daemon's own log shows the turn progressing normally. Coalescing
+/// bounds the frame count to the arrival RATE the terminal can sustain
+/// instead of the event count, and drops nothing: every event still reaches
+/// `apply`, in order, on the same serial task — only the intermediate frames
+/// nobody could have seen are skipped.
+/// What: `try_recv` in a loop, stopping on the first empty/closed channel, on
+/// [`TuiModel::should_quit`] (so a `Quit` is never followed by more work),
+/// and at [`DRAIN_LIMIT`]. A closed channel is not reported here — the next
+/// `rx.recv()` returns `None` and [`event_loop`] exits through its existing
+/// path.
+/// Test: `tests::event_loop_coalesces_a_burst_into_one_redraw`,
+/// `tests::event_loop_stops_draining_at_a_quit`.
+fn drain_ready<M: TuiModel>(
+    model: &mut M,
+    rx: &mut UnboundedReceiver<ReplEvent>,
+    mut apply: impl FnMut(&mut M, ReplEvent),
+) {
+    for _ in 0..DRAIN_LIMIT {
+        match rx.try_recv() {
+            Ok(ev) => {
+                apply(model, ev);
+                if model.should_quit() {
+                    return;
+                }
+            }
+            Err(_) => return,
         }
     }
 }
@@ -452,8 +506,9 @@ type Generation = Arc<std::sync::atomic::AtomicU64>;
 /// returned `Ok(true)` without ever producing a terminal signal (see
 /// `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy` deadlock
 /// that gap causes). A message dropped for generation mismatch does NOT set
-/// `saw_terminal` — that turn was already superseded/cancelled, and
-/// `TuiModel::on_cancelled` already reset `busy` for it independently.
+/// `saw_terminal` — that turn was already superseded/cancelled, and the
+/// cancel's own `ReplEvent::CancelSettled` reply is what resets `busy` for it
+/// (#8207), independently of this forwarder.
 /// Test: [`tests::forward_while_current_generation_drops_stale_generation_message`],
 /// [`tests::forward_while_current_generation_forwards_matching_generation_message`],
 /// [`tests::forward_while_current_generation_flags_terminal_assistant_output`],
@@ -522,10 +577,13 @@ async fn forward_while_current_generation(
 ///
 /// What: cancel is drained and dispatched FIRST — bumps `generation`
 /// (invalidating the in-flight turn's forwarder before anything else
-/// happens), calls [`TuiModel::on_cancelled`] synchronously so the UI's busy
-/// state clears immediately (see that method's doc comment for why), aborts
-/// the stashed `JoinHandle`, then relays `engine.cancel_session()` on its
-/// own task so a slow backend never blocks the render loop. Submit is
+/// happens), calls [`TuiModel::on_cancel_requested`] synchronously so the UI
+/// enters its cancelling state immediately (see that method's doc comment for
+/// why it announces no outcome there), aborts the stashed `JoinHandle`, then
+/// relays `engine.cancel_session_reply()` on its own task so a slow backend
+/// never blocks the render loop — that task's answer returns as
+/// `ReplEvent::CancelSettled`, the only thing entitled to end the turn
+/// (#8207). Submit is
 /// drained second: assigned the next generation, any previous task in
 /// `current_task` is aborted (defensive — busy-gating should prevent
 /// overlapping submits, same caveat as tagent's precedent) and replaced.
@@ -576,7 +634,10 @@ async fn forward_while_current_generation(
 /// leaves `busy == false` once no task is in flight, and a stale completion
 /// from a superseded turn never clobbers a newer one.
 /// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
-/// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
+/// [`tests::dispatch_pending_cancel_reaches_cancel_session_reply`],
+/// [`tests::dispatch_pending_cancel_holds_input_until_the_reply_lands`],
+/// [`tests::dispatch_pending_cancel_still_cancelling_keeps_input_closed`],
+/// [`tests::dispatch_pending_cancel_failure_never_reports_cancelled`],
 /// [`tests::dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task`],
 /// [`tests::dispatch_pending_noop_when_nothing_pending`],
 /// [`tests::forward_while_current_generation_drops_stale_generation_message`],
@@ -608,16 +669,21 @@ fn dispatch_pending<E, M>(
         // a spawned completion task's `TurnFinished` send.
         let new_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
         model.set_current_generation(new_gen);
-        model.on_cancelled();
+        model.on_cancel_requested();
         if let Some(handle) = current_task.lock().unwrap().take() {
             handle.abort();
         }
         let engine = Arc::clone(engine);
         let tx = tx.clone();
+        // #8207: the reply comes back as an event instead of being dropped on
+        // the floor. Only that reply can end the turn — the model is in its
+        // cancelling state until it lands, so no prompt reaches the backend
+        // while the run it would collide with may still be executing. Every
+        // outcome, failure included, is a `CancelReply`, so no arm can be
+        // forgotten here and leave the pane cancelling forever.
         tokio::spawn(async move {
-            if let Err(e) = engine.cancel_session().await {
-                let _ = tx.send(ReplEvent::StatusMessage(format!("cancel failed: {e:#}")));
-            }
+            let reply = engine.cancel_session_reply().await;
+            let _ = tx.send(ReplEvent::CancelSettled(reply));
         });
     }
 

@@ -21,6 +21,9 @@
 //! Test: this file IS the WI-5 gate. Run with
 //! `cargo test -p trusty-mpm --test auth_cost`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::path::Path;
 
 use serial_test::serial;

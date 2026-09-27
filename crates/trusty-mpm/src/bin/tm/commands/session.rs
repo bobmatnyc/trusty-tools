@@ -186,6 +186,19 @@ pub(crate) async fn session(
             // source of truth for what Claude received (issue #382).
             let (resolved_prompt, _output, _stash) = compose_session_instructions(&path)?;
             print!("{resolved_prompt}");
+            // #8533: per-section package / overridden / declined, checked
+            // against the prompt just printed, then the style it launches with.
+            eprint!(
+                "\n{}{}",
+                trusty_mpm::core::instruction_overrides::section_report_for(
+                    &path,
+                    &resolved_prompt
+                ),
+                trusty_mpm::core::output_style::describe_effective_style(
+                    &trusty_mpm::core::paths::FrameworkPaths::default().root,
+                    &path
+                )
+            );
             // #7422: the composed prompt goes to stdout so it can be piped; what
             // this project's sessions will NOT load goes to stderr beside it,
             // the same channel the override applied/declined markers use.
@@ -506,6 +519,11 @@ pub(crate) async fn session(
         // distinct store+tmux mutation, not a chat-core intent.
         SessionAction::Rename { arg1, arg2 } => {
             crate::commands::rename::session_rename(client, url, arg1, arg2).await?
+        }
+        // #7660: decommission prints the daemon's verdict itself so a kept
+        // workspace exits non-zero with the reason.
+        SessionAction::Decommission { id, force } => {
+            crate::commands::managed::session_decommission_routed(client, url, &id, force).await?
         }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).

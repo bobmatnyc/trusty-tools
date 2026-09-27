@@ -929,8 +929,8 @@ fn open_head_drives_the_preflight_diff_revision() {
 /// have that gate judge the checkout instead of the PR, and a source PR with no
 /// fragment would pass it — the changelog gate silently evaluating the wrong
 /// ref (#7282 round 5, code-critic HIGH). The refusal has to name the
-/// obligation, because the caller's next move is either `--docs-only` or a real
-/// checkout of the head. #7747 moved the decision from the branch NAME to the
+/// obligation, because the caller's next move is either `--docs-only` or a run
+/// from the worktree that holds the head (#8572). #7747 moved the decision from the branch NAME to the
 /// gate's verdict; the refusal itself is unchanged.
 /// Test target: `head_elsewhere_refusal`, through `plan`.
 #[test]
@@ -958,6 +958,12 @@ fn open_head_without_docs_only_is_refused() {
     assert!(
         failures[0].contains("chore/sessions-abc"),
         "the refusal must name the head it is about: {failures:?}"
+    );
+    // #8572: the refusal must send the caller to a worktree, never to a
+    // checkout of the head in whatever tree it stands in.
+    assert!(
+        failures[0].contains("worktree") && !failures[0].contains("` out"),
+        "the refusal must not tell the caller to check the head out: {failures:?}"
     );
 }
 
@@ -2275,9 +2281,15 @@ fn open_rejects_an_empty_body_file() {
 const REQUIRED: &str = "Clippy\nRust tests\n";
 
 /// A `gh pr view --json` payload with the given overrides folded in.
+///
+/// #8670: `mergeable`/`mergeStateStatus` default to the GitHub-clean happy
+/// path so every pre-existing caller of this helper stays admitted; tests of
+/// [`queue_check::stop_reason`]'s new mergeability gate override them via
+/// `extra`.
 fn view_json(extra: &str) -> String {
     format!(
         r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
               {{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}}],
@@ -2348,7 +2360,7 @@ fn queue_stop_order_prefers_draft() {
     // Draft AND a hold label AND changes requested AND a red check: draft wins.
     let json = r#"{"isDraft":true,"labels":[{"name":"do-not-merge"}],
         "reviewDecision":"CHANGES_REQUESTED",
-        "statusCheckRollup":[{"name":"Clippy","conclusion":"FAILURE"}],"comments":[]}"#;
+        "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"FAILURE"}],"comments":[]}"#;
     assert_eq!(first_reason(json), Some("draft".to_string()));
 }
 
@@ -2382,9 +2394,10 @@ fn queue_stop_order_prefers_critic_block() {
 #[test]
 fn queue_critic_block_then_approve_is_clear() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
-          {"name":"Rust tests","conclusion":"SUCCESS"}],
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
         "comments":[{"body":"code-critic: BLOCK"},{"body":"code-critic: APPROVE"}]}"#;
     assert_eq!(first_reason(json), None);
 }
@@ -2392,9 +2405,10 @@ fn queue_critic_block_then_approve_is_clear() {
 #[test]
 fn queue_critic_ignores_unrelated_comments() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
-          {"name":"Rust tests","conclusion":"SUCCESS"}],
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
         "comments":[{"body":"we should BLOCK bad merges in general"}]}"#;
     assert_eq!(first_reason(json), None);
 }
@@ -2402,7 +2416,8 @@ fn queue_critic_ignores_unrelated_comments() {
 #[test]
 fn queue_required_context_missing() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
-        "statusCheckRollup":[{"name":"Clippy","conclusion":"SUCCESS"}],"comments":[]}"#;
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+        "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}],"comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
     assert!(reason.contains("`Rust tests` is missing"), "{reason}");
 }
@@ -2410,8 +2425,9 @@ fn queue_required_context_missing() {
 #[test]
 fn queue_required_context_not_success() {
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
-          {"name":"Clippy","conclusion":"SUCCESS"},
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
           {"name":"Rust tests","status":"COMPLETED","conclusion":"SKIPPED"}],
         "comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
@@ -2422,11 +2438,209 @@ fn queue_required_context_not_success() {
 fn queue_accepts_status_context() {
     // A StatusContext entry carries `context`/`state`, not `name`/`conclusion`.
     let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"context":"Clippy","state":"SUCCESS"},
           {"context":"Rust tests","state":"SUCCESS"}],
         "comments":[]}"#;
     assert_eq!(first_reason(json), None);
+}
+
+/// A PR view whose `Clippy` is green and whose `Rust tests` ran as `runs`.
+///
+/// #8670: `mergeable`/`mergeStateStatus` default to GitHub-clean so the
+/// duplicate-run regressions this feeds keep exercising the required-context
+/// gate, not the new mergeability one.
+fn duplicate_run_view(runs: &str) -> String {
+    format!(
+        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
+            "statusCheckRollup":[
+              {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS",
+                "startedAt":"2026-09-25T22:40:00Z","completedAt":"2026-09-25T22:45:00Z"}},
+              {runs}],
+            "comments":[]}}"#
+    )
+}
+
+/// REGRESSION (#8638): PR #8637's rollup — a concurrency-cancelled run listed
+/// before the fresh SUCCESS on the same head SHA. The latest run decides.
+#[test]
+fn queue_duplicate_cancelled_then_success_is_mergeable() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"CANCELLED",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:51:10Z","completedAt":"2026-09-25T22:53:26Z"}"#,
+    );
+    assert_eq!(first_reason(&json), None);
+}
+
+/// REGRESSION (#8638): the fail-open order. A stale SUCCESS listed first must
+/// not shadow the later FAILURE of the same context.
+#[test]
+fn queue_duplicate_success_then_failure_is_blocked() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"FAILURE",
+            "startedAt":"2026-09-25T22:52:00Z","completedAt":"2026-09-25T22:55:00Z"}"#,
+    );
+    let reason = first_reason(&json).expect("a red latest run blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
+/// REGRESSION (#8638): a newer run still in flight is pending, not the older
+/// SUCCESS. `gh` prints a running check's `completedAt` as Go's zero time.
+#[test]
+fn queue_duplicate_success_then_running_is_pending() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"IN_PROGRESS","conclusion":"",
+            "startedAt":"2026-09-25T22:52:00Z","completedAt":"0001-01-01T00:00:00Z"}"#,
+    );
+    let reason = first_reason(&json).expect("a running latest run blocks");
+    assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+    assert!(
+        reason.ends_with("(IN_PROGRESS, started 2026-09-25T22:52:00+00:00)"),
+        "{reason}"
+    );
+}
+
+/// REGRESSION (#8638): a rerun still QUEUED carries no timestamps at all.
+/// Any run without a conclusion makes the context pending, so the older
+/// SUCCESS must not pass the PR.
+#[test]
+fn queue_duplicate_success_then_queued_is_pending() {
+    let json = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"},
+          {"name":"Rust tests","status":"QUEUED","conclusion":""}"#,
+    );
+    let reason = first_reason(&json).expect("a queued rerun blocks");
+    assert!(reason.contains("`Rust tests` is pending"), "{reason}");
+    assert!(reason.ends_with("(QUEUED, no startedAt)"), "{reason}");
+}
+
+/// REGRESSION (#8638): a CheckRun and a StatusContext that share a name are
+/// two requirements, and GitHub gates on both. A green CheckRun must not
+/// hide a red StatusContext of the same name.
+#[test]
+fn queue_check_and_status_same_name_both_required() {
+    let json = duplicate_run_view(
+        r#"{"__typename":"StatusContext","context":"Rust tests","state":"FAILURE",
+            "startedAt":"2026-09-25T22:50:00Z"},
+          {"__typename":"CheckRun","name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:51:00Z","completedAt":"2026-09-25T22:53:26Z"}"#,
+    );
+    let reason = first_reason(&json).expect("the red StatusContext blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
+/// #8638: a context that ran once is judged exactly as before.
+#[test]
+fn queue_single_run_is_unchanged() {
+    let green = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"}"#,
+    );
+    assert_eq!(first_reason(&green), None);
+    let red = duplicate_run_view(
+        r#"{"name":"Rust tests","status":"COMPLETED","conclusion":"FAILURE",
+            "startedAt":"2026-09-25T22:50:00Z","completedAt":"2026-09-25T22:51:15Z"}"#,
+    );
+    let reason = first_reason(&red).expect("red blocks");
+    assert!(reason.contains("`Rust tests` is not SUCCESS"), "{reason}");
+}
+
+/// A `gh pr view --json` payload past every earlier gate (not draft, no hold
+/// label, approved, no critic BLOCK), so only [`queue_check`]'s mergeability
+/// gate and the required-context loop remain live.
+fn mergeability_view(mergeable: &str, merge_state: &str) -> String {
+    format!(
+        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+            "mergeable":{mergeable},"mergeStateStatus":{merge_state},
+            "statusCheckRollup":[
+              {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
+              {{"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}}],
+            "comments":[]}}"#
+    )
+}
+
+/// REGRESSION (#8670): PRs #8667 and #8669 both had `mergeable: CONFLICTING`
+/// and still reported MERGEABLE, because queue-check never requested the
+/// field at all.
+#[test]
+fn queue_mergeable_conflicting_is_blocked() {
+    let json = mergeability_view(r#""CONFLICTING""#, r#""CLEAN""#);
+    let reason = first_reason(&json).expect("a real conflict blocks");
+    assert!(reason.contains("mergeable CONFLICTING"), "{reason}");
+}
+
+/// REGRESSION (#8670): `DIRTY` lives in `mergeStateStatus`, a separate enum
+/// from `mergeable` (mirrors `tm pr merge`'s `conflict_field`, #6808).
+#[test]
+fn queue_merge_state_dirty_is_blocked() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""DIRTY""#);
+    let reason = first_reason(&json).expect("dirty blocks");
+    assert!(reason.contains("mergeStateStatus DIRTY"), "{reason}");
+}
+
+/// `UNKNOWN` means GitHub has not finished computing mergeability — pending,
+/// never mergeable (#8670 acceptance criterion).
+#[test]
+fn queue_mergeable_unknown_is_pending() {
+    let json = mergeability_view(r#""UNKNOWN""#, r#""CLEAN""#);
+    let reason = first_reason(&json).expect("unknown is never mergeable");
+    assert!(reason.contains("mergeable is UNKNOWN"), "{reason}");
+}
+
+/// Same as [`queue_mergeable_unknown_is_pending`], for `mergeStateStatus`.
+#[test]
+fn queue_merge_state_unknown_is_pending() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""UNKNOWN""#);
+    let reason = first_reason(&json).expect("unknown is never mergeable");
+    assert!(reason.contains("mergeStateStatus is UNKNOWN"), "{reason}");
+}
+
+/// A `mergeable` field genuinely omitted from the payload fails CLOSED —
+/// never read as mergeable (#8670 acceptance criterion).
+#[test]
+fn queue_mergeable_field_missing_is_pending() {
+    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeStateStatus":"CLEAN",
+        "statusCheckRollup":[
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
+        "comments":[]}"#;
+    let reason = first_reason(json).expect("a missing field is never mergeable");
+    assert!(reason.contains("mergeable field is missing"), "{reason}");
+}
+
+/// Same as [`queue_mergeable_field_missing_is_pending`], for a genuinely
+/// omitted `mergeStateStatus`.
+#[test]
+fn queue_merge_state_field_missing_is_pending() {
+    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        "mergeable":"MERGEABLE",
+        "statusCheckRollup":[
+          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
+          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
+        "comments":[]}"#;
+    let reason = first_reason(json).expect("a missing field is never mergeable");
+    assert!(
+        reason.contains("mergeStateStatus field is missing"),
+        "{reason}"
+    );
+}
+
+/// The MERGEABLE/CLEAN happy path is still admitted (#8670 acceptance
+/// criterion) — this is the one shape that reaches `None`.
+#[test]
+fn queue_mergeable_clean_happy_path_is_admitted() {
+    let json = mergeability_view(r#""MERGEABLE""#, r#""CLEAN""#);
+    assert_eq!(first_reason(&json), None);
 }
 
 #[test]
@@ -2523,6 +2737,7 @@ fn merge_args() -> PrMergeArgs {
         pr: 42,
         auto: false,
         no_delete_branch: false,
+        no_cleanup: false,
         repo: None,
     }
 }
@@ -2749,6 +2964,7 @@ fn merge_argv_honours_auto_and_no_delete_branch() {
         pr: 42,
         auto: true,
         no_delete_branch: true,
+        no_cleanup: false,
         repo: Some("o/r".to_string()),
     };
     assert_eq!(merge::run(&gh, &args).expect("runs"), super::EXIT_OK);
@@ -2917,6 +3133,7 @@ fn pr_7945_no_delete_branch_never_downgrades_a_failure() {
         pr: 42,
         auto: false,
         no_delete_branch: true,
+        no_cleanup: false,
         repo: None,
     };
     let err = merge::run(&gh, &args).expect_err("no delete was asked for, so none can have failed");
@@ -3011,4 +3228,265 @@ fn pr_7945_an_unreadable_confirmation_still_fails() {
         "the read must be ATTEMPTED; only its failure keeps the original verdict: {:?}",
         gh.calls()
     );
+}
+
+/// #8366: the component labels come from a diff base verified against the
+/// remote — never from whatever `origin/<base>` the checkout last fetched.
+///
+/// Why: #8366 reported labels derived off a stale `origin/main`. Since #7748
+/// the run verifies the base with a fetch-capable probe before any diff; this
+/// pins that the label diff sits behind that probe, so moving the label step
+/// ahead of it (or giving it its own unverified read) turns this red.
+/// What: a base the probe had to refresh still yields labels, read after a
+/// `FetchOnDrift` probe; a base that stays stale refuses before the label diff
+/// is ever read.
+/// Test: this function IS the test.
+#[test]
+fn pr_8366_component_labels_are_read_only_from_a_remote_verified_base() {
+    use trusty_mpm::core::base_ref_freshness::{BaseFreshness, RefreshMode};
+
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let mut pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    pre.base_freshness = BaseFreshness::Refreshed {
+        was: "old111".to_string(),
+        now: "new222".to_string(),
+    };
+    let gh = FakeGh::new()
+        .on("label create", "")
+        .on("pr create", "https://github.com/o/r/pull/4242\n")
+        .on("pr edit 4242", "");
+    assert_eq!(open::run(&gh, &args, &pre).expect("create"), super::EXIT_OK);
+    assert_eq!(
+        pre.freshness_modes.borrow().as_slice(),
+        [RefreshMode::FetchOnDrift]
+    );
+    assert_eq!(pre.diff_heads.borrow().as_slice(), ["HEAD"]);
+    assert!(
+        gh.calls()
+            .iter()
+            .any(|c| c.join(" ").contains("--add-label trusty-mpm")),
+        "{:?}",
+        gh.calls()
+    );
+
+    let stale = FakePreflight::ok()
+        .with_diff(&["crates/trusty-mpm/src/lib.rs"])
+        .with_stale_base();
+    let gh = FakeGh::new();
+    assert_eq!(
+        open::run(&gh, &args, &stale).expect("a refusal is not an error"),
+        super::EXIT_CHECK_FAILED
+    );
+    assert!(
+        stale.diff_heads.borrow().is_empty(),
+        "no label diff may be read against an unverified base"
+    );
+}
+
+// ── #8431: a target repository without the `trusty-mpm` label ──────────────
+
+/// A `gh` fake whose answers are consumed in order, per argv substring.
+///
+/// Why: the #8431 recovery re-runs the SAME `gh pr create` argv after the label
+/// exists, so the first and second answers must differ — a static route table
+/// cannot say that.
+struct SeqGh {
+    answers: std::cell::RefCell<Vec<(String, GhRun)>>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl SeqGh {
+    fn new(answers: &[(&str, bool, &str, &str)]) -> Self {
+        let answers = answers
+            .iter()
+            .map(|(needle, success, stdout, stderr)| {
+                (
+                    (*needle).to_string(),
+                    GhRun {
+                        success: *success,
+                        stdout: (*stdout).to_string(),
+                        stderr: (*stderr).to_string(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            answers: std::cell::RefCell::new(answers),
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.borrow().clone()
+    }
+}
+
+impl GhRunner for SeqGh {
+    fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
+        let joined = args.join(" ");
+        self.seen.borrow_mut().push(joined.clone());
+        let mut answers = self.answers.borrow_mut();
+        let at = answers
+            .iter()
+            .position(|(needle, _)| joined.contains(needle.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("SeqGh: no answer left for `gh {joined}`"))?;
+        Ok(answers.remove(at).1)
+    }
+}
+
+const MISSING_CONVENTION: &str = "could not add label: 'trusty-mpm' not found";
+
+/// REGRESSION (#8431): the create no longer fails on a repository that lacks
+/// the `trusty-mpm` label — the label is created (without `--force`) and the
+/// create retried with it.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_missing_convention_label_is_created_and_the_create_retried() {
+    assert_eq!(
+        super::missing_label::missing_label(MISSING_CONVENTION),
+        Some("trusty-mpm")
+    );
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        ("label create trusty-mpm", true, "", ""),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let seen = gh.seen();
+    let seed = seen
+        .iter()
+        .find(|c| c.starts_with("label create trusty-mpm"))
+        .expect("the missing label was created");
+    assert!(
+        !seed.contains("--force"),
+        "never restyle a project's label: {seed}"
+    );
+    let creates: Vec<&String> = seen.iter().filter(|c| c.starts_with("pr create")).collect();
+    assert_eq!(creates.len(), 2, "{seen:?}");
+    assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
+}
+
+/// #8431: a label that cannot be created is dropped with a warning; the PR
+/// still opens with its other label.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_label_that_cannot_be_created_is_dropped_with_a_warning() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        (
+            "label create trusty-mpm",
+            false,
+            "",
+            "HTTP 403: Must have admin rights",
+        ),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let retry = gh
+        .seen()
+        .into_iter()
+        .filter(|c| c.starts_with("pr create"))
+        .nth(1)
+        .expect("a retried create");
+    assert!(!retry.contains("--label trusty-mpm"), "{retry}");
+    assert!(retry.contains("--label ws/tm-test-01"), "{retry}");
+}
+
+/// #8431 error arm: only "label not found" is recovered. Any other create
+/// failure — including a missing label the plan never applied — still fails,
+/// with no label created and no retry.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_other_create_failures_still_fail() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    for stderr in [
+        "GraphQL: Could not resolve to a Repository with the name 'o/r'",
+        "could not add label: 'someone-else' not found",
+    ] {
+        let gh = SeqGh::new(&[
+            ("label create ws/", true, "", ""),
+            ("pr create", false, "", stderr),
+        ]);
+        let err = open::run(&gh, &args, &FakePreflight::ok()).expect_err("still a failure");
+        assert!(format!("{err:#}").contains(stderr), "{err:#}");
+        let creates = gh
+            .seen()
+            .iter()
+            .filter(|c| c.starts_with("pr create") || c.starts_with("label create trusty"))
+            .count();
+        assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
+    }
+}
+
+/// Review follow-up on #8431: recovery covers ONLY the convention label. A
+/// missing `ws/<session>` label — seeded before create per #7513 — still
+/// fails `tm pr open` loudly, never silently dropped, even though it is one
+/// of the plan's own `create_labels()`.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_missing_workstream_label_still_fails_loudly() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let stderr = "could not add label: 'ws/tm-test-01' not found";
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", stderr),
+    ]);
+    let err = open::run(&gh, &args, &FakePreflight::ok()).expect_err("still a failure");
+    assert!(format!("{err:#}").contains(stderr), "{err:#}");
+    let creates = gh
+        .seen()
+        .iter()
+        .filter(|c| c.starts_with("pr create") || c.starts_with("label create trusty"))
+        .count();
+    assert_eq!(creates, 1, "one create, no seed, no retry: {:?}", gh.seen());
+}
+
+/// Review follow-up on #8431: `gh label create` losing a race — another
+/// process (or GitHub's own read-after-write lag) created the convention
+/// label first — reports "already exists" and a non-zero exit, but the
+/// label the retry needs is there either way, so the retry still proceeds.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8431_a_label_created_concurrently_counts_as_seeded() {
+    let (_d, path) = scratch_body(&full_body());
+    let args = open_args(&path.to_string_lossy());
+    let gh = SeqGh::new(&[
+        ("label create ws/", true, "", ""),
+        ("pr create", false, "", MISSING_CONVENTION),
+        (
+            "label create trusty-mpm",
+            false,
+            "",
+            "HTTP 422: Label \"trusty-mpm\" already exists",
+        ),
+        ("pr create", true, "https://github.com/o/r/pull/4242\n", ""),
+    ]);
+    assert_eq!(
+        open::run(&gh, &args, &FakePreflight::ok()).expect("the PR opens"),
+        super::EXIT_OK
+    );
+    let seen = gh.seen();
+    let creates: Vec<&String> = seen.iter().filter(|c| c.starts_with("pr create")).collect();
+    assert_eq!(creates.len(), 2, "{seen:?}");
+    assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
 }

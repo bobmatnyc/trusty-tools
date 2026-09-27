@@ -31,6 +31,14 @@ Requires MCP server installation. Good for isolated testing scenarios and unauth
 ### 3. Playwright MCP — LAST RESORT
 Best for comprehensive cross-browser testing (Chrome, Firefox, Safari). Heaviest resource usage.
 
+### Tab Group Recovery (#8022)
+Recommend the executor never close the last other tab in the MCP tab group
+mid-task — that drops the group, and the next `computer` call on a still-open
+tab then fails with a stale cross-extension error. On the first unexpected
+tool error, recommend calling `tabs_context_mcp` to check for a lost tab
+group before retrying; when the group is gone, recommend opening a fresh tab
+rather than reusing a stale id.
+
 ## UAT (User Acceptance Testing) Mode
 
 ### UAT Philosophy

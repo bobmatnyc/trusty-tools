@@ -84,7 +84,21 @@ pub(crate) struct DiskProbes<'a> {
     /// walk started late in a 30-second survey overran the survey and the
     /// console's stdio transport returned a 502 with no survey at all (#6929).
     pub measure: &'a dyn Fn(&Path, Option<Duration>) -> Option<DirSize>,
+    /// The clock every deadline gate in the pass reads.
+    ///
+    /// Why: it is injected for the same reason the probes above are. A `git`
+    /// probe that costs 40 ms on an idle machine costs seconds under a parallel
+    /// cargo build, so a test that crossed the deadline by SLEEPING crossed it
+    /// somewhere else — or not at all — on a loaded host, and three tests in
+    /// `super::survey_tests` failed for that and nothing else (#8277). A
+    /// hand-advanced clock makes the crossing a step.
+    /// What: [`SYSTEM_CLOCK`] everywhere but a test.
+    /// Test: `a_deadline_that_crosses_mid_inspection_yields_a_not_inspected_row`.
+    pub now: &'a dyn Fn() -> Instant,
 }
+
+/// The real clock — [`DiskProbes::now`] for every caller but a test.
+pub(crate) const SYSTEM_CLOCK: fn() -> Instant = Instant::now;
 
 /// What one deadline-gated measurement produced.
 ///
@@ -114,11 +128,11 @@ enum Budget {
     Spent,
 }
 
-/// Read [`Budget`] off `deadline` now.
-fn budget_at(deadline: Option<Instant>) -> Budget {
+/// Read [`Budget`] off `deadline` against the survey's own clock.
+fn budget_at(deadline: Option<Instant>, now: &dyn Fn() -> Instant) -> Budget {
     match deadline {
         None => Budget::Left(None),
-        Some(d) => match d.checked_duration_since(Instant::now()) {
+        Some(d) => match d.checked_duration_since(now()) {
             Some(left) if !left.is_zero() => Budget::Left(Some(left)),
             _ => Budget::Spent,
         },
@@ -197,7 +211,7 @@ pub(crate) fn run(
         // ONE clock read decides both halves. Reading it twice — once to ask
         // whether to measure, once to work out the budget — is the same split
         // the review found between `inspect`'s two phases.
-        match budget_at(deadline) {
+        match budget_at(deadline, probes.now) {
             Budget::Spent => {
                 partial.set(true);
                 Measured::DeadlineSpent
@@ -225,7 +239,7 @@ pub(crate) fn run(
         if !selected(&scanned, repos_root, project) {
             continue;
         }
-        let row = match budget_at(deadline) {
+        let row = match budget_at(deadline, probes.now) {
             // Fail closed, exactly as the reclaim survey does: a worktree we
             // ran out of time to inspect is LISTED and never advertised as
             // clearable.
@@ -462,7 +476,10 @@ fn row(
     owning_session: Option<String>,
 ) -> DiskWorktree {
     let (gate, reason) = match verdict {
-        ReclaimVerdict::Reclaimable { .. } => (None, None),
+        // #7889: both kinds of landing evidence report no blocking gate.
+        ReclaimVerdict::Reclaimable { .. } | ReclaimVerdict::ReclaimableLandedContent { .. } => {
+            (None, None)
+        }
         ReclaimVerdict::Blocked { gate, reason }
         | ReclaimVerdict::BlockedByAgent { gate, reason } => (Some(*gate), Some(reason.clone())),
     };

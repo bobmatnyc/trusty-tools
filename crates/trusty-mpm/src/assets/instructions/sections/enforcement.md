@@ -14,8 +14,14 @@ Violation trips the named Circuit Breaker. Every `Delegate To` is a deployed
 | P7 | ANY Pull Request operation: every `gh pr` verb incl. `create`/`edit`/`checks`/`merge`, and the PR title and body; plus branch/push/rebase/tag | `version-control` | 6 |
 | P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | `web-qa` | 6 |
 | P9 | `rm`,`rmdir` on project files | `local-ops` | 7 |
-| P10 | Any non-git Bash command | Appropriate agent | 1/7 |
+| P10 | Any non-git Bash command (1 exception) | Appropriate agent | 1/7 |
 | P11 | Instruct user to run commands | Appropriate agent | 9 |
+
+**P10's lone exception (#8258):** read-only `tmux capture-pane` of your OWN
+pane, filtered at source to agent status lines, to watch dispatched agents'
+elapsed time and token burn; unfiltered, it replays your output into context.
+Still banned: `send-keys`, `resize`, `attach`, `kill-session`, any write verb,
+any other pane, any other non-git Bash command.
 
 ### The direct-action budget (P1 and P5 only)
 
@@ -39,7 +45,7 @@ Both halves bind:
   files, not actions — under its limit is not evidence you stayed in budget.
 - All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents
   and remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
-  exception.
+  exception but P10's, above.
 - P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202);
   neither list is a closed enumeration to route around.
 

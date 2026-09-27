@@ -234,7 +234,7 @@ fn rederive_excludes_refuted_relaxes() {
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Refuted);
     // any_clean_refuted=true triggers path (b): drop to APPROVE baseline.
-    let verdict = rederive_verdict(Verdict::Block, false, true, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, true, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Approve,
@@ -247,7 +247,7 @@ fn rederive_keeps_confirmed_block() {
     // Path (a): one High finding, confirmed → survives → BLOCK floor.
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -259,12 +259,12 @@ fn rederive_keeps_confirmed_block() {
 /// FAILS the citability gate (uncited, non-diff-provable — the exact PR #84
 /// shape post-verification: `verified: Confirmed`, no `source_citation`, not
 /// `code_provable`) must NOT pin `primary_verdict` as a hard BLOCK floor via
-/// path (a) — `any_confirmed_high` now requires `drives_block_floor`, so this
+/// path (a) — `confirmed_floor_blocks` asks `derive_verdict` (#4044), so this
 /// routes to path (a2) instead, which independently re-derives via
 /// `derive_verdict` rather than treating the disqualified confirmation as an
 /// unconditional floor.
 ///
-/// Why: previously `any_confirmed_high` used a bare `f.effort == Effort::High`
+/// Why: previously the path (a) selector used a bare `f.effort == Effort::High`
 /// check, so this exact scenario selected path (a) and pinned `primary_verdict`
 /// (here, a self-reported BLOCK) regardless of citability.  `derive_verdict`'s
 /// own #PR84 RULE 2 gate provides a downstream safety net that already prevents
@@ -276,7 +276,7 @@ fn rederive_confirmed_but_disqualified_high_does_not_pin_block() {
     let mut f = finding(Effort::High, 0.95);
     f.code_provable = false; // disqualify: no citation, not diff-provable
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
     assert_ne!(
         verdict,
         Verdict::Block,
@@ -296,7 +296,7 @@ fn rederive_confirmed_medium_still_escalates_to_request_changes() {
     // REQUEST_CHANGES even though the baseline itself was capped.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med]);
+    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med], &[]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -317,7 +317,7 @@ fn rederive_confirmed_praise_keeps_clean_approve() {
     // APPROVE*) = APPROVE, so the verdict stays APPROVE and the grade stays A-.
     let mut praise = finding(Effort::Low, 1.0);
     apply_outcome(&mut praise, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise]);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise], &[]);
     assert_eq!(
         verdict,
         Verdict::Approve,
@@ -343,7 +343,7 @@ fn rederive_confirmed_high_effort_still_escalates_from_approve() {
     // keeps primary_verdict, and derive_verdict's BLOCK floor then escalates.
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high]);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -360,7 +360,13 @@ fn rederive_mixed_keeps_only_surviving_floor() {
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::ApproveWithReservations, true, true, &[high, med]);
+    let verdict = rederive_verdict(
+        Verdict::ApproveWithReservations,
+        true,
+        true,
+        &[high, med],
+        &[],
+    );
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -383,7 +389,7 @@ fn rederive_refuted_finding_does_not_clear_standing_medium_finding() {
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med]);
+    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med], &[]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -402,7 +408,7 @@ fn rederive_error_refuted_preserves_primary_verdict() {
             error_class: "ModelNotFound".to_string(),
         },
     );
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -415,12 +421,31 @@ fn rederive_truncation_refuted_preserves_primary_verdict() {
     // Path (c): all demotions are TruncationRefuted → preserve primary (#726).
     let mut f = finding(Effort::High, 0.85);
     apply_outcome(&mut f, VerifyOutcome::TruncationRefuted);
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
     assert_eq!(
         verdict,
         Verdict::Block,
         "all-TruncationRefuted must preserve primary_verdict (path c)"
     );
+}
+
+#[test]
+fn rederive_refuted_blocker_beside_truncated_low_nit_still_relaxes() {
+    // #8653 over-correction guard: the unverified floor carries only what the
+    // failed-verification finding drove, and a Low nit drove nothing.
+    let mut blocker = finding(Effort::High, 0.95);
+    apply_outcome(&mut blocker, VerifyOutcome::Refuted);
+    let nit_pre_demotion = finding(Effort::Low, 0.9);
+    let mut nit = nit_pre_demotion.clone();
+    apply_outcome(&mut nit, VerifyOutcome::TruncationRefuted);
+    let verdict = rederive_verdict(
+        Verdict::Block,
+        false,
+        true,
+        &[blocker, nit],
+        &[nit_pre_demotion],
+    );
+    assert_eq!(verdict, Verdict::Approve);
 }
 
 // ── End-to-end verification round ─────────────────────────────────────────────

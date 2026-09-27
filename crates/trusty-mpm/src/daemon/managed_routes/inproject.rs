@@ -419,6 +419,7 @@ pub fn ensure_base_clone(
     }
     info!(dest = %base_path.display(), "inproject: base clone complete");
     ensure_worktrees_gitignored(base_path)?;
+    crate::core::harness_exclude::ensure_and_log(base_path); // #8511
     // #7171: disable git's own background maintenance/gc on this FRESHLY
     // CLONED base — every worktree the base will ever host shares its
     // GIT_COMMON_DIR config, so one write here covers operator-run git in all
@@ -700,10 +701,10 @@ pub fn create_session_worktree_unchecked(
     // decommission.rs provides backward-compat, while the tolerant sentinel
     // parser treats an unwritten sentinel identically to a legacy one
     // (owner-unknown), never as an error.
-    let sentinel = worktree_path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
-    if let Err(e) = std::fs::write(
-        &sentinel,
-        crate::session_manager::worktree_ownership::sentinel_payload_bytes(*owner_session_id),
+    // #8511: written to the git admin dir, so the new tree stays clean.
+    if let Err(e) = crate::session_manager::worktree_ownership_location::write_sentinel_bytes(
+        &worktree_path,
+        &crate::session_manager::worktree_ownership::sentinel_payload_bytes(*owner_session_id),
     ) {
         warn!(
             worktree = %worktree_path.display(),

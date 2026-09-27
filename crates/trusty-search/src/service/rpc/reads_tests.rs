@@ -34,8 +34,10 @@ use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INVALID_PARAMS};
 
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::indexer::CodeIndexer;
+use crate::core::memguard::{set_index_memory_limit_mb, set_memory_limit_mb};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::rpc::error::{CODE_NOT_FOUND, CODE_UNAVAILABLE, CODE_UNAVAILABLE_PERMANENT};
+use crate::service::rpc::RestoreLimits;
 use crate::service::server::{build_router_on, SearchAppState};
 
 use crate::service::rpc::reads;
@@ -283,12 +285,41 @@ async fn index_config_over_the_socket_matches_the_http_body() {
 
 /// Why: both limits are process-global `AtomicU64` cells, so this is the one
 /// read where a divergence could only come from a second projection of them.
+///
+/// #7665: it read those cells LIVE, once per transport, so the two bodies were
+/// only equal while nothing wrote between the two reads. A concurrent
+/// `admin::tests` config-write did exactly that and the case failed with
+/// `{index: 8192, memory: 8192}` against `{index: 512, memory: 4096}` — the
+/// other test's values, not a transport disagreement. Both halves are fixed
+/// rather than tolerated: the limits are PINNED through the same
+/// `set_*_memory_limit_mb` seam the daemon's own `PATCH /config` writes, so the
+/// expected body is a stated input rather than whatever tier the host detects,
+/// and `#[serial]` excludes every writer (all of which already carry it) for the
+/// span of the two reads. The equality assertion is unchanged and unwidened.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
 async fn config_over_the_socket_matches_the_http_body() {
+    let _restore = RestoreLimits::capture();
     let (_state, http, rpc) = fixture().await;
 
+    // Two distinct values, neither the compiled-in 8192 default, so a body that
+    // silently fell back to live detection could not pass by coincidence, and a
+    // projection that crossed the two fields would be visible.
+    set_memory_limit_mb(Some(6144));
+    set_index_memory_limit_mb(Some(3072));
+
     let over_socket = rpc_ok(&rpc, reads::METHOD_CONFIG_GET, serde_json::json!(null)).await;
+    assert_eq!(
+        over_socket["memory_limit_mb"],
+        serde_json::json!(6144),
+        "the socket must report the pinned global limit"
+    );
+    assert_eq!(
+        over_socket["index_memory_limit_mb"],
+        serde_json::json!(3072),
+        "the socket must report the pinned indexing limit"
+    );
     assert_eq!(over_socket, http_json(&http, "/config").await);
 }
 

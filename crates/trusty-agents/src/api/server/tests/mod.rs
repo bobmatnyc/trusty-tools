@@ -421,6 +421,67 @@ async fn connect_project_persists_to_registry() {
 }
 
 #[tokio::test]
+async fn connect_project_refuses_a_folder_inside_a_registered_project() {
+    // Why: #4289 — registering a subdirectory of a project the registry
+    // already holds produces two entries over one tree, and every index and
+    // import decision downstream inherits the ambiguity. The refusal has to
+    // name the project in the way so the operator can act on it.
+    let _g = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: HOME_LOCK held for entire test body; restored before drop.
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+
+    let outer = tmp.path().join("outer");
+    let inner = outer.join("crates").join("api");
+    std::fs::create_dir_all(&inner).unwrap();
+    // The handler canonicalizes before it guards, so the refusal names the
+    // canonical root even though the request spells it differently.
+    let registered = outer.canonicalize().unwrap();
+
+    let post = |path: &std::path::Path| {
+        let body = serde_json::json!({"path": path.to_string_lossy()});
+        Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    };
+
+    let first = test_router().oneshot(post(&outer)).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK, "first registration wins");
+
+    let second = test_router().oneshot(post(&inner)).await.unwrap();
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(second.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = v["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("\"outer\"") && message.contains(&registered.display().to_string()),
+        "refusal must name the registered project and its path: {v}"
+    );
+
+    // Re-posting the registered root stays idempotent.
+    let again = test_router().oneshot(post(&outer)).await.unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+
+    // SAFETY: HOME_LOCK still held.
+    unsafe {
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn get_project_config_falls_back_to_registry_when_toml_missing() {
     // Why: #465 — projects added via `POST /api/projects` without an
     // `adapter` only land in `~/.trusty-agents/projects.json`. Before this fix,

@@ -281,6 +281,35 @@ impl PermissionResponse {
     }
 }
 
+/// What a backend actually confirmed about a dispatched cancel (#8207).
+///
+/// Why: a cooperative cancel has three outcomes, not two, and the TUI renders
+/// each differently. "The run stopped" ends the turn and reopens input; "the
+/// cancel was accepted but the run has not stopped yet" must keep the
+/// cancelling state on screen, because reopening input there is exactly how
+/// the next prompt earned a `-32003 already has a task running` refusal from
+/// the daemon (#8207's transcript); "the cancel could not be delivered at all"
+/// is a failure and must never read as either of the first two.
+/// What: produced by [`crate::engine::TuiEngine::cancel_session_reply`] and
+/// carried to the reducer as
+/// [`crate::event::ReplEvent::CancelSettled`]. Every payload string here is
+/// rendered VERBATIM into the scrollback, so an implementor owes a plain
+/// sentence — never a protocol code or a JSON-RPC envelope.
+/// Test: `crate::app::reduce::tests::apply_cancel_settled_stopped_reopens_input`
+/// and its siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelReply {
+    /// The backend confirmed the run has terminated. The turn is over.
+    Stopped,
+    /// The backend accepted the cancel; the run had not stopped yet. `detail`
+    /// is the backend's own account of what it is still waiting on.
+    StillCancelling { detail: String },
+    /// The cancel never landed — a transport failure, or a refusal that is not
+    /// "still cancelling". `error` is a plain sentence, already stripped of
+    /// protocol detail by the engine adapter.
+    Failed { error: String },
+}
+
 /// One entry in an engine-supplied slash-command registry.
 ///
 /// Why: DOC-50 §5 Slice 7 / Q4 splits slash commands into client-side

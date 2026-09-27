@@ -72,6 +72,14 @@ impl DaemonGuard {
     /// daemon has nothing left to assert.
     /// Test: as the type.
     pub fn spawn(data_dir: &Path) -> Self {
+        // #7085: the daemon watches this process (pid plus start time) and
+        // SIGTERMs itself once it is gone, so a SIGKILLed test that never runs
+        // `Drop` still loses its daemon within seconds. Rejected: a stdin pipe
+        // whose EOF means "parent gone" — any process that inherits the write
+        // end holds EOF off, the #8748 hang in another form; and a
+        // process-group reap, which needs a live reaper and the SIGKILL leaves
+        // none. Inert unless `TRUSTY_EXIT_WITH_PARENT` is set, so a launchd or
+        // hand-run daemon is unaffected.
         let child = trusty_common::parent_death::exit_with_parent(
             Command::new(binary())
                 .arg("serve")

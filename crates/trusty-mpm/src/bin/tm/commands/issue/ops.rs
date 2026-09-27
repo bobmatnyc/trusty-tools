@@ -96,6 +96,9 @@ fn apply_only_filters(desired: Vec<RepoLabel>, only: &[String]) -> anyhow::Resul
 /// Test: `ops_transition_happy_path`, `ops_transition_assignee_unchanged`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TransitionReport {
+    /// The issue's title, as `validate` read it (#8448: the epic hook decides
+    /// from it whether the issue is a phase, without a second read).
+    pub(crate) title: String,
     /// Resolved source state, or `None` for the `null → entry` creation edge.
     pub(crate) from: Option<String>,
     /// Destination state.
@@ -290,6 +293,7 @@ pub(crate) fn transition<S: TicketSystem>(
     // have swapped a label for itself.
     if from.as_deref() == Some(to) {
         return Ok(TransitionReport {
+            title: issue_obj.title,
             from,
             to: to.to_string(),
             assignee_changed: false,
@@ -363,6 +367,7 @@ pub(crate) fn transition<S: TicketSystem>(
     }
 
     Ok(TransitionReport {
+        title: issue_obj.title,
         from,
         to: to.to_string(),
         assignee_changed,

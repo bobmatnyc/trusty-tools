@@ -101,13 +101,20 @@ impl SessionStatus {
     /// authoritative "still resumable" gate (#2344 `Finished` + #3888
     /// `TurnCapExceeded`): both mean only THIS CALL ended, not the session,
     /// and `pm_transcript` is fully persisted either way, so the next call
-    /// continues the same conversation. `Cancelled`/`Failed`/
-    /// `DeadlineExceeded` are the genuinely dead-forever states.
-    /// Test: `model::tests::is_resumable_matches_finished_and_turn_cap_exceeded`.
+    /// continues the same conversation.
+    ///
+    /// (#8207) `Cancelled` joins them. A cancel is the USER stopping one run,
+    /// not a broken session — and the TUI holds ONE session for the whole
+    /// conversation (`tui_client::engine_state::run_chat_turn` reuses the same
+    /// id for every prompt), so treating a cancelled session as dead forever
+    /// is what made the prompt after Esc fail with `-32003`. `Failed` and
+    /// `DeadlineExceeded` stay dead-forever: those ended without the user
+    /// asking, in a state the daemon cannot describe.
+    /// Test: `model::tests::is_resumable_matches_finished_turn_cap_and_cancelled`.
     pub fn is_resumable(&self) -> bool {
         matches!(
             self,
-            SessionStatus::Finished | SessionStatus::TurnCapExceeded
+            SessionStatus::Finished | SessionStatus::TurnCapExceeded | SessionStatus::Cancelled
         )
     }
 }
@@ -255,9 +262,9 @@ mod tests {
     }
 
     /// `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`/`TurnCapExceeded`
-    /// are terminal-per-call; `Finished` and `TurnCapExceeded` remain
-    /// resumable through `SessionRegistry::begin_execution`'s narrower gate
-    /// (#3888) despite being terminal here.
+    /// are terminal-per-call; `Finished`, `TurnCapExceeded` and `Cancelled`
+    /// remain resumable through `SessionRegistry::begin_execution`'s narrower
+    /// gate (#3888, #8207) despite being terminal here.
     #[test]
     fn is_terminal_covers_terminal_states() {
         assert!(!SessionStatus::Created.is_terminal());
@@ -269,13 +276,13 @@ mod tests {
         assert!(SessionStatus::TurnCapExceeded.is_terminal());
     }
 
-    /// Only `Finished` and `TurnCapExceeded` are resumable (#3888) — the
-    /// authoritative gate `SessionRegistry::begin_execution` defers to.
+    /// `Finished`, `TurnCapExceeded` and (#8207) `Cancelled` are resumable —
+    /// the authoritative gate `SessionRegistry::begin_execution` defers to.
     #[test]
-    fn is_resumable_matches_finished_and_turn_cap_exceeded() {
+    fn is_resumable_matches_finished_turn_cap_and_cancelled() {
         assert!(!SessionStatus::Created.is_resumable());
         assert!(!SessionStatus::Running.is_resumable());
-        assert!(!SessionStatus::Cancelled.is_resumable());
+        assert!(SessionStatus::Cancelled.is_resumable());
         assert!(SessionStatus::Finished.is_resumable());
         assert!(!SessionStatus::Failed.is_resumable());
         assert!(!SessionStatus::DeadlineExceeded.is_resumable());

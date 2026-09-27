@@ -77,6 +77,13 @@ pub fn remove(storage: &TokenStorage, name: &str) -> Result<()> {
         ),
         None => println!("Removed profile '{name}'. (Google's grant is not revoked.)"),
     }
+    // #8539: a kept user-level entry for another account now serves `name`.
+    if outcome.user_entry_remains {
+        println!(
+            "Note: a user-level entry for '{name}' (a different or unrecorded account) was kept \
+             and now serves this profile."
+        );
+    }
     Ok(())
 }
 

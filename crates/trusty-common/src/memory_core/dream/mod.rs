@@ -25,6 +25,8 @@ mod semantic;
 #[cfg(test)]
 mod concurrency_tests;
 #[cfg(test)]
+mod maintenance_election_tests;
+#[cfg(test)]
 mod tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────

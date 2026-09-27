@@ -8,7 +8,10 @@ spelled the identifier right or only described it.
 - **Lexical.** A code-aware BM25 that splits `CodeIndexer` into `code` and
   `indexer`, so a half-remembered identifier still matches.
 - **Vector.** An HNSW index over usearch, holding 384-dimension embeddings
-  produced locally — no text leaves the machine to be indexed.
+  produced locally — no text leaves the machine to be indexed. Vectors are
+  stored as f16 by default, half the bytes of f32 at the same measured recall;
+  `trusty-search quantize` re-encodes an existing index in place for anyone who
+  indexed before the switch.
 - **Graph.** A petgraph symbol graph built from tree-sitter parses, walked one or
   two hops to pull in the callers and callees around a hit.
 
@@ -32,6 +35,12 @@ and sets the vector/lexical weights accordingly, before any search runs.
 Graph expansion is gated to Usage, where caller and callee chains are what you
 actually asked for. Everywhere else it would just add noise.
 
+A query naming a literal — a quoted string, a filename, an identifier with a
+clear word boundary, or an issue reference like `#1234` — skips the weighting
+table above: every chunk carrying that literal floors above every chunk that
+does not, so a search for `session_mcp_scope.rs` cannot lose to a chunk that
+only resembles it semantically. An unquoted phrase earns no floor.
+
 ## One daemon for the whole machine
 
 Install once, run one process, register as many named indexes as you have
@@ -46,7 +55,9 @@ the diff pays for embedding.
 - Don't need call chains? `--no-kg` skips the symbol-graph rebuild on every
   reindex.
 - Memory limits — chunk caps, batch sizes, cache sizes — are computed from
-  detected system RAM at startup rather than guessed at compile time.
+  detected system RAM at startup rather than guessed at compile time. Below
+  16 GB the daemon warns once and runs on a reduced tier rather than refusing
+  to start.
 
 ## Nothing is indexed until you say so
 
@@ -64,6 +75,12 @@ matched pattern named in the error, not silently skipped.
 The MCP server speaks stdio and HTTP/SSE and exposes each retrieval lane
 separately, so an agent can pick the one that fits the question instead of
 always paying for the fused search.
+
+Every result-returning tool folds its response to a 48 KiB ceiling by
+default — a hit is never cut mid-record, and the response reports what it
+withheld and how to fetch the rest. A `compact` flag on the five search tools
+trims each hit to the fields a caller who is about to open the file actually
+needs, about 63% fewer bytes.
 
 ```
 search · search_lexical · search_semantic · search_kg · search_all ·

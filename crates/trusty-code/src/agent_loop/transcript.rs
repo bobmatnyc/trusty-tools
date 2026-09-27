@@ -552,11 +552,28 @@ impl Transcript {
     /// Why: Callers usually have a `ChatResponse` in hand; this saves them
     /// destructuring `first_text`/`first_tool_calls` at the call site.
     /// What: Extracts the first choice's text and tool calls and delegates to
-    /// `push_assistant`.
-    /// Test: `transcript::tests::push_response_appends_assistant`.
+    /// `push_assistant` — EXCEPT for a turn that carries neither, which is
+    /// dropped (#8238).
+    ///
+    /// A response with no text and no tool calls has nothing to re-send, and
+    /// recording it makes the next request invalid on providers that build the
+    /// wire message from content blocks: Bedrock Converse drops the empty text
+    /// (`trusty_common::inference::bedrock`) and then emits NO message for
+    /// that turn, so the surrounding tool result and the following user turn
+    /// merge into two consecutive user messages and Converse rejects the
+    /// request. That is reachable from #8238's nudge, which appends a user
+    /// turn straight after exactly this shape. The direct-Anthropic request
+    /// builder already skips a wholly-empty assistant turn for the same
+    /// reason; dropping it here fixes every provider at once.
+    /// Test: `transcript_tests::push_response_appends_a_turn_that_says_something`,
+    /// `transcript_tests::push_response_drops_a_turn_with_no_text_and_no_calls`,
+    /// `agent_loop::tests::sink_events::the_nudge_request_carries_no_empty_assistant_turn`.
     pub fn push_response(&mut self, resp: &ChatResponse) {
         let text = resp.first_text();
         let calls = resp.first_tool_calls().to_vec();
+        if calls.is_empty() && text.as_deref().unwrap_or_default().trim().is_empty() {
+            return;
+        }
         self.push_assistant(text, &calls);
     }
 

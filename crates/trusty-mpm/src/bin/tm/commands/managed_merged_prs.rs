@@ -187,6 +187,101 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     out
 }
 
+/// Is `url` the trusty-console gateway base (`http://<console>/api/mpm`)? (#8347)
+fn is_gateway_url(url: &str) -> bool {
+    url.trim_end_matches('/')
+        .ends_with(trusty_mpm::core::discovery::GATEWAY_PATH)
+}
+
+/// The prune-worktrees endpoint, addressed to the daemon itself (#8347).
+///
+/// Why: `tm` resolves its base URL gateway-first, so with the console running
+/// the request went to `http://<console>/api/mpm/api/v1/…`. The console proxy
+/// cuts every forwarded call at its 30 s client timeout, and a merged-PR survey
+/// runs for minutes, so the proxy answered 502 for a healthy daemon.
+/// What: joins `/api/v1/sessions/managed/prune-worktrees` onto `direct` when
+/// `url` is the gateway base, else onto `url`, with any trailing `/` removed.
+/// The result always carries exactly one `/api/` prefix.
+/// Test: `prune_worktrees_url_bypasses_the_gateway_prefix`.
+pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
+    let base = if is_gateway_url(url) { direct } else { url };
+    format!(
+        "{}/api/v1/sessions/managed/prune-worktrees",
+        base.trim_end_matches('/')
+    )
+}
+
+/// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The prune-worktrees endpoint this invocation may POST to (#8347).
+///
+/// Why: the console gateway cuts a long survey at its 30 s proxy timeout, so a
+/// gateway base must be bypassed. But the bypass resolves the LOCAL daemon, and
+/// a gateway on another host fronts a different daemon: redirecting there would
+/// run a destructive prune against the wrong fleet, which #1737 forbids.
+/// What: a non-gateway `url` is used as given. A gateway on a loopback host is
+/// replaced by `direct()` (lock file, then default), which must answer
+/// `GET /health` before anything is posted. A gateway on any other host is an
+/// error that names the daemon URL to pass instead.
+/// Test: `prune_endpoint_refuses_a_remote_gateway`,
+/// `prune_endpoint_resolves_a_loopback_gateway_to_the_daemon`,
+/// `prune_endpoint_errors_when_the_direct_daemon_does_not_answer`.
+pub(crate) async fn prune_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    direct: impl FnOnce() -> String,
+) -> anyhow::Result<String> {
+    if !is_gateway_url(url) {
+        return Ok(prune_worktrees_url(url, url));
+    }
+    anyhow::ensure!(
+        is_loopback_url(url),
+        "prune-worktrees will not run through the console gateway at {url}: it cannot \
+         address that host's daemon directly, and it will not retarget the local one \
+         (#8347, #1737). Pass the daemon's own URL with --url or TRUSTY_MPM_URL."
+    );
+    let direct = direct();
+    // #8347: probe the daemon before a destructive POST is addressed to it.
+    let direct = trusty_mpm::core::resolve_daemon_url_probing(client, Some(&direct))
+        .await
+        .map_err(|e| anyhow::anyhow!("prune-worktrees bypasses the console gateway: {e}"))?;
+    Ok(prune_worktrees_url(url, &direct))
+}
+
+/// Turn a prune-worktrees transport failure into the operator's error (#7884).
+///
+/// Why: a timed-out sweep printed reqwest's bare "error sending request for
+/// url", which does not say the daemon went silent, or that removals may have
+/// happened before the client gave up.
+/// What: a timeout becomes an error naming the timeout, stating that nothing
+/// is reported as removed, and naming the dry run that shows what remains.
+/// Every other error passes through unchanged.
+/// Test: `prune_worktrees_reports_a_timeout_as_an_error`.
+fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
+    if !e.is_timeout() {
+        return e.into();
+    }
+    anyhow::anyhow!(
+        "prune-worktrees timed out waiting for the daemon (#7884): {e}. Nothing is reported \
+         as removed, but the daemon may still be sweeping — re-run without `--force` to see \
+         what remains."
+    )
+}
+
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
 ///
 /// Why: sessions decommissioned before Fix 1a (#1840), or where
@@ -219,18 +314,20 @@ pub(crate) async fn session_prune_worktrees(
     merged_prs: bool,
     invoking_session: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut request = client
-        .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
-        .json(&serde_json::json!({
-            "dry_run": dry_run,
-            "discard_dirty": discard_dirty,
-            // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
-            "merged_prs": merged_prs,
-            // #6806: the daemon occupies no pane and cannot discover who is
-            // asking, so the caller names itself. Absent outside a managed
-            // session, which leaves every claim foreign — the pre-#6806 gate.
-            "invoking_session": invoking_session,
-        }));
+    // #8347: a loopback gateway is bypassed for the local daemon; a remote one
+    // is refused rather than silently retargeted (#1737).
+    let endpoint =
+        prune_endpoint(client, url, || trusty_mpm::core::resolve_daemon_url(None)).await?;
+    let mut request = client.post(endpoint).json(&serde_json::json!({
+        "dry_run": dry_run,
+        "discard_dirty": discard_dirty,
+        // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
+        "merged_prs": merged_prs,
+        // #6806: the daemon occupies no pane and cannot discover who is
+        // asking, so the caller names itself. Absent outside a managed
+        // session, which leaves every claim foreign — the pre-#6806 gate.
+        "invoking_session": invoking_session,
+    }));
     if merged_prs {
         // #5830: the merged-PR survey runs synchronously in the handler and
         // takes minutes, so the client's 10s default aborted every invocation.
@@ -244,8 +341,13 @@ pub(crate) async fn session_prune_worktrees(
              finishes (#5830)"
         );
     }
-    let resp = request.send().await?;
-    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    // #7884: a timeout is a named error, never a generic transport line.
+    let resp = request.send().await.map_err(prune_transport_error)?;
+    let body: serde_json::Value = resp
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(prune_transport_error)?;
     let paths = body
         .get("paths")
         .and_then(serde_json::Value::as_array)

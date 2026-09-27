@@ -35,6 +35,25 @@
 //! answer is indistinguishable from a hang to a client that matches responses
 //! to requests by id (#6309), and the next request may well succeed.
 //!
+//! ## Recoverable inside one client session (#8351)
+//!
+//! An MCP client launches this bridge once and never re-spawns it. Three
+//! properties keep a session alive across a daemon outage:
+//!
+//! 1. [`DaemonBridgeJsonRpc::with_local_handler`] answers chosen methods — the
+//!    `initialize`/`tools/list` handshake, in practice — from THIS process, so
+//!    a daemon that is down at handshake does not make the client mark the
+//!    server failed for the rest of the session.
+//! 2. Every forwarded request dials afresh, so a tool call that failed while
+//!    the daemon was down succeeds on the next call after it returns, with no
+//!    bridge restart.
+//! 3. [`DaemonBridgeJsonRpc::with_socket_resolver`] re-resolves the daemon's
+//!    address per request rather than trusting the one resolved at process
+//!    start, so a bridge that resolved a stale or wrong path heals too.
+//!
+//! The bridge still never starts a daemon (#1152): recovering means answering
+//! what it can and reporting what it cannot, not spawning anything.
+//!
 //! STDOUT hygiene: nothing here writes to stdout except the JSON-RPC channel
 //! itself. Diagnostics go to stderr.
 //!
@@ -43,9 +62,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+use trusty_common::uds::ConnectRetry;
 
 use crate::{Request, Response, error_codes};
 
@@ -64,7 +85,7 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// What: `socket` is the daemon's Unix socket; `daemon_label` names the daemon
 /// in error text a human reads; `streaming_methods` is the refusal list (see
 /// [`DaemonBridgeJsonRpc::answer`]); `request_timeout` and `max_frame_bytes` are
-/// passed through to [`trusty_common::uds::send_framed_request_capped`].
+/// passed through to [`trusty_common::uds::send_framed_request_retrying`].
 /// Test: `config_defaults_are_the_documented_ones`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -79,6 +100,8 @@ pub struct UdsBridgeConfig {
     pub request_timeout: Duration,
     /// Response-frame budget handed to the framed client.
     pub max_frame_bytes: u64,
+    /// Build identifier for the bridge, quoted in transport-error text (#8351).
+    pub bridge_version: String,
 }
 
 impl UdsBridgeConfig {
@@ -91,7 +114,25 @@ impl UdsBridgeConfig {
             streaming_methods: Vec::new(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_frame_bytes: trusty_common::uds::MAX_FRAME_BYTES,
+            // #8351: this crate's version unless the consumer names its own.
+            bridge_version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Name the consumer's own build in transport-error text (#8351).
+    ///
+    /// Why: the #8351 incident produced an error naming a socket path no code
+    /// on the host could construct, and the binary that produced it had already
+    /// been replaced — so the report could not be attributed to a build. An
+    /// error that carries the bridge's version is attributable from its text
+    /// alone. The default is this crate's version, which is right for the
+    /// generic `trusty-mcp <service>` binary and wrong for a consumer that
+    /// builds its own bridge, so a consumer passes `env!("CARGO_PKG_VERSION")`.
+    /// Test: `a_named_bridge_version_appears_in_the_transport_error`.
+    #[must_use]
+    pub fn with_bridge_version(mut self, version: impl Into<String>) -> Self {
+        self.bridge_version = version.into();
+        self
     }
 
     /// Set the methods this daemon streams, which the bridge refuses.
@@ -128,6 +169,12 @@ impl UdsBridgeConfig {
 /// A caller-supplied rewrite applied to each request envelope before forwarding.
 type RequestRewriter = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
+/// A caller-supplied resolver run once per forwarded request (#8351).
+type SocketResolver = Arc<dyn Fn() -> anyhow::Result<PathBuf> + Send + Sync>;
+
+/// A caller-supplied answer produced without the daemon (#8351).
+type LocalHandler = Arc<dyn Fn(&Request) -> Option<Value> + Send + Sync>;
+
 /// The forwarder: stdio JSON-RPC in, framed UDS JSON-RPC out.
 ///
 /// Why: see the module docs — one implementation of the refuse/normalise/
@@ -139,6 +186,12 @@ type RequestRewriter = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 pub struct DaemonBridgeJsonRpc {
     config: UdsBridgeConfig,
     rewriter: Option<RequestRewriter>,
+    /// #8351: re-resolves the socket per request. See [`Self::resolve_socket`].
+    resolver: Option<SocketResolver>,
+    /// #8351: answers chosen methods in-process. See [`Self::answer`].
+    local: Option<LocalHandler>,
+    /// #8267: true until the first request is forwarded. See [`Self::forward`].
+    first_dial: AtomicBool,
 }
 
 impl std::fmt::Debug for DaemonBridgeJsonRpc {
@@ -146,6 +199,8 @@ impl std::fmt::Debug for DaemonBridgeJsonRpc {
         f.debug_struct("DaemonBridgeJsonRpc")
             .field("config", &self.config)
             .field("rewriter", &self.rewriter.is_some())
+            .field("resolver", &self.resolver.is_some())
+            .field("local", &self.local.is_some())
             .finish()
     }
 }
@@ -156,7 +211,64 @@ impl DaemonBridgeJsonRpc {
         Self {
             config,
             rewriter: None,
+            resolver: None,
+            local: None,
+            first_dial: AtomicBool::new(true),
         }
+    }
+
+    /// Re-resolve the daemon's socket for every forwarded request (#8351).
+    ///
+    /// Why: a bridge lives for a whole client session, and a `PathBuf` baked in
+    /// at process start is a fact that can go stale — a data-directory move, an
+    /// override that was set for one process, or a resolution that was simply
+    /// wrong. A stale path cannot heal while the process lives, so the session
+    /// stays broken even after the daemon is healthy. Re-resolving costs one
+    /// path join per request and turns "wrong forever" into "wrong until the
+    /// next call".
+    /// What: `resolve` runs before each forward and its answer is used for the
+    /// dial AND for the error text, so the path a failure names is the path the
+    /// bridge actually tried. A resolver that fails is reported as an error
+    /// carrying the request's id — never silently downgraded to the configured
+    /// path, which is the fallback ONLY when no resolver is attached.
+    /// Test: `a_resolver_is_consulted_on_every_request`,
+    /// `a_failing_resolver_is_an_error_not_a_fallback`.
+    #[must_use]
+    pub fn with_socket_resolver<F>(mut self, resolve: F) -> Self
+    where
+        F: Fn() -> anyhow::Result<PathBuf> + Send + Sync + 'static,
+    {
+        self.resolver = Some(Arc::new(resolve));
+        self
+    }
+
+    /// Answer chosen methods in this process instead of forwarding them (#8351).
+    ///
+    /// Why: an MCP client that cannot complete `initialize` marks the server
+    /// failed for the whole session and never re-spawns it, so one moment of
+    /// daemon downtime at handshake costs the session its tools — which is what
+    /// #8351 reported. trusty-search has never had that failure mode because it
+    /// answers the handshake in-process and forwards only tool bodies. This is
+    /// that seam, made available to a forwarding bridge.
+    /// What: `answer_locally` runs after notification suppression and before
+    /// anything is normalised, rewritten, resolved or dialled. `Some(result)`
+    /// becomes the response's `result` (carrying the request's own id);
+    /// `None` means "not mine" and the request is forwarded as before. The
+    /// handler must therefore answer only methods whose answer does not depend
+    /// on daemon state.
+    ///
+    /// Drift is the consumer's to prevent: the values a handler returns have to
+    /// come from the same in-process table the daemon serves them from, or the
+    /// two answers diverge silently.
+    /// Test: `a_local_handler_answers_without_a_daemon`,
+    /// `a_local_handler_that_declines_still_forwards`.
+    #[must_use]
+    pub fn with_local_handler<F>(mut self, answer_locally: F) -> Self
+    where
+        F: Fn(&Request) -> Option<Value> + Send + Sync + 'static,
+    {
+        self.local = Some(Arc::new(answer_locally));
+        self
     }
 
     /// Rewrite each request envelope before it is forwarded.
@@ -180,9 +292,28 @@ impl DaemonBridgeJsonRpc {
         self
     }
 
-    /// The socket this forwarder dials.
+    /// The configured socket.
+    ///
+    /// #8351: this is the CONFIGURED path, which is also the dialled one only
+    /// while no resolver is attached — see [`Self::with_socket_resolver`].
     pub fn socket(&self) -> &Path {
         &self.config.socket
+    }
+
+    /// The socket for the next forward, resolved now (#8351).
+    ///
+    /// Why: split out so the resolver's failure is one decision with one error
+    /// arm, rather than an `unwrap_or` at the dial site that would silently
+    /// dial the configured path after the resolver said it could not answer.
+    /// What: the resolver's answer when one is attached, the configured socket
+    /// otherwise. A resolver error is returned, never swallowed.
+    /// Test: `a_failing_resolver_is_an_error_not_a_fallback`.
+    fn resolve_socket(&self) -> Result<PathBuf, String> {
+        match &self.resolver {
+            // `{:#}` so an `anyhow` chain reaches the client, not just its head.
+            Some(resolve) => resolve().map_err(|e| format!("{e:#}")),
+            None => Ok(self.config.socket.clone()),
+        }
     }
 
     /// Answer exactly one MCP request.
@@ -204,10 +335,17 @@ impl DaemonBridgeJsonRpc {
     /// failure or a reply that is not a JSON-RPC response becomes an error of
     /// this bridge's own making, and each of those names its cause and carries
     /// the request's id.
+    /// #8351: two arms run before any of that. A method the local handler
+    /// claims is answered from this process, so the handshake survives a daemon
+    /// that is down; and the socket is re-resolved, so the path dialled and the
+    /// path named in a failure are both current rather than whatever startup
+    /// produced.
     /// Test: `a_dead_socket_answers_with_an_error_naming_the_daemon`,
     /// `a_silent_daemon_answers_with_a_timeout_error`,
     /// `a_malformed_daemon_reply_is_reported_rather_than_passed_through`,
-    /// `a_streaming_method_is_refused_before_the_socket_is_dialled`.
+    /// `a_streaming_method_is_refused_before_the_socket_is_dialled`,
+    /// `a_local_handler_answers_without_a_daemon`,
+    /// `a_failing_resolver_is_an_error_not_a_fallback`.
     pub async fn answer(&self, req: Request) -> Response {
         // MCP §4.1: an id-less request gets no reply. Decided from the REQUEST,
         // before the daemon is touched — forwarding a notification would earn a
@@ -220,7 +358,35 @@ impl DaemonBridgeJsonRpc {
         // no pending call, so the client waits instead of failing.
         let id = req.id.clone();
 
+        // #8351: answered here, never forwarded. A client that cannot complete
+        // `initialize` marks the server failed for the whole session.
+        if let Some(answer_locally) = &self.local
+            && let Some(result) = answer_locally(&req)
+        {
+            return Response::ok(id, result);
+        }
+
         let envelope = normalise_jsonrpc(request_to_value(&req));
+
+        // #8351: resolved per request, so a bridge that resolved a stale path
+        // once heals on the next call instead of for the life of the process.
+        // Resolved BEFORE the streaming refusal so the path that refusal tells
+        // an operator to dial is the current one.
+        let socket = match self.resolve_socket() {
+            Ok(socket) => socket,
+            Err(cause) => {
+                // Stderr only: stdout is the JSON-RPC channel.
+                eprintln!("daemon bridge: socket resolution failed: {cause}");
+                return Response::err(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    format!(
+                        "the {} socket path could not be resolved (bridge {}): {cause}",
+                        self.config.daemon_label, self.config.bridge_version
+                    ),
+                );
+            }
+        };
 
         if let Some(method) = effective_method(&envelope)
             && self.config.streaming_methods.iter().any(|m| m == method)
@@ -232,7 +398,7 @@ impl DaemonBridgeJsonRpc {
                     "{method} answers as a stream, which MCP stdio cannot carry \
                      (one response per request). Dial {} directly with a framed \
                      streaming client to read it.",
-                    self.config.socket.display()
+                    socket.display()
                 ),
             );
         }
@@ -245,8 +411,8 @@ impl DaemonBridgeJsonRpc {
             None => envelope,
         };
 
-        match self.forward(&envelope).await {
-            Ok(reply) => self.map_reply(id, reply),
+        match self.forward(&socket, &envelope).await {
+            Ok(reply) => self.map_reply(&socket, id, reply),
             Err(cause) => {
                 // Stderr only: stdout is the JSON-RPC channel. The crate has no
                 // `tracing` dependency and `daemon_bridge` reports the same way.
@@ -255,9 +421,14 @@ impl DaemonBridgeJsonRpc {
                     id,
                     error_codes::INTERNAL_ERROR,
                     format!(
-                        "the {} daemon at {} could not be reached: {cause}",
+                        // #8351: the version makes a report attributable to a
+                        // build; the #8351 incident's error was not.
+                        "the {} daemon at {} could not be reached (bridge {}): \
+                         {cause}. The next request is dialled fresh, so this \
+                         recovers on its own once the daemon is back.",
                         self.config.daemon_label,
-                        self.config.socket.display()
+                        socket.display(),
+                        self.config.bridge_version
                     ),
                 )
             }
@@ -270,14 +441,43 @@ impl DaemonBridgeJsonRpc {
     /// response struct: the bridge forwards envelopes it does not interpret, and
     /// [`Self::map_reply`] is where the shape is checked. A reply that is not
     /// JSON at all fails here, as `UdsRpcError::Decode`.
-    async fn forward(&self, envelope: &Value) -> Result<Value, trusty_common::uds::UdsRpcError> {
-        trusty_common::uds::send_framed_request_capped(
-            &self.config.socket,
+    ///
+    /// #8267: the FIRST forwarded request — the MCP `initialize`, in practice —
+    /// dials under [`ConnectRetry::startup`] rather than the per-request bound.
+    /// An MCP client launches this bridge and the daemon it forwards to in the
+    /// same instant, so the bridge's first dial can legitimately precede the
+    /// daemon's own bind; giving up on it the way a hundredth dial gives up is
+    /// what left a whole session with a dead memory server. Every later request
+    /// uses the ordinary bound, so a genuinely absent daemon still fails fast.
+    async fn forward(
+        &self,
+        socket: &Path,
+        envelope: &Value,
+    ) -> Result<Value, trusty_common::uds::UdsRpcError> {
+        trusty_common::uds::send_framed_request_retrying(
+            socket,
             envelope,
             self.config.request_timeout,
             self.config.max_frame_bytes,
+            self.next_retry_policy(),
         )
         .await
+    }
+
+    /// Take the connect-retry bound for the next dial, consuming the
+    /// first-dial flag.
+    ///
+    /// Split out of [`Self::forward`] so the selection is testable without a
+    /// socket: asserting it through `forward` would mean spending a real
+    /// startup floor on a dead path.
+    ///
+    /// Test: `the_first_dial_spends_the_startup_bound_and_later_dials_do_not`.
+    fn next_retry_policy(&self) -> ConnectRetry {
+        if self.first_dial.swap(false, Ordering::Relaxed) {
+            ConnectRetry::startup()
+        } else {
+            ConnectRetry::per_request()
+        }
     }
 
     /// Map the daemon's reply onto the response this bridge emits.
@@ -293,7 +493,7 @@ impl DaemonBridgeJsonRpc {
     /// — never passed through as an empty result.
     /// Test: `a_malformed_daemon_reply_is_reported_rather_than_passed_through`,
     /// `a_daemon_error_reaches_the_client_unaltered`.
-    fn map_reply(&self, request_id: Option<Value>, reply: Value) -> Response {
+    fn map_reply(&self, socket: &Path, request_id: Option<Value>, reply: Value) -> Response {
         let id = reply
             .get("id")
             .cloned()
@@ -324,7 +524,7 @@ impl DaemonBridgeJsonRpc {
                 "the {} daemon at {} replied with something that is not a JSON-RPC \
                  response (no result and no error): {reply}",
                 self.config.daemon_label,
-                self.config.socket.display()
+                socket.display()
             ),
         )
     }
@@ -426,152 +626,5 @@ fn effective_method(envelope: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn config() -> UdsBridgeConfig {
-        UdsBridgeConfig::new("/tmp/absent.sock", "trusty-test")
-    }
-
-    /// Why: the defaults are part of the contract a consumer relies on when it
-    /// names neither a timeout nor a budget.
-    /// What: asserts the constructed defaults are the documented ones.
-    /// Test: this test.
-    #[test]
-    fn config_defaults_are_the_documented_ones() {
-        let c = config();
-        assert_eq!(c.request_timeout, DEFAULT_REQUEST_TIMEOUT);
-        assert_eq!(c.max_frame_bytes, trusty_common::uds::MAX_FRAME_BYTES);
-        assert!(c.streaming_methods.is_empty());
-    }
-
-    /// Why: the #6286 trap — an omitted `jsonrpc` serialises as `null` and the
-    /// daemon's router refuses it.
-    /// What: an envelope with no `jsonrpc` gains `"2.0"`.
-    /// Test: this test.
-    #[test]
-    fn an_absent_jsonrpc_is_normalised() {
-        let out = normalise_jsonrpc(json!({"id": 1, "method": "ping"}));
-        assert_eq!(out["jsonrpc"], "2.0");
-    }
-
-    /// Why: a client that sends a version this transport does not speak should
-    /// still be forwarded, not failed on a field it did not choose.
-    /// What: `jsonrpc: "1.0"` and `jsonrpc: null` both become `"2.0"`.
-    /// Test: this test.
-    #[test]
-    fn a_wrong_jsonrpc_is_normalised() {
-        assert_eq!(
-            normalise_jsonrpc(json!({"jsonrpc": "1.0", "method": "ping"}))["jsonrpc"],
-            "2.0"
-        );
-        assert_eq!(
-            normalise_jsonrpc(json!({"jsonrpc": null, "method": "ping"}))["jsonrpc"],
-            "2.0"
-        );
-    }
-
-    /// Why: the wrapped form is the one a real MCP client sends, and missing it
-    /// is what makes a streamed call hang instead of erroring.
-    /// What: both the bare method and the `tools/call` envelope resolve to the
-    /// same name; a `tools/call` with no `params.name` falls back to the outer.
-    /// Test: this test.
-    #[test]
-    fn effective_method_sees_through_the_tools_call_envelope() {
-        assert_eq!(
-            effective_method(&json!({"method": "memory.chat"})),
-            Some("memory.chat")
-        );
-        assert_eq!(
-            effective_method(&json!({
-                "method": "tools/call",
-                "params": {"name": "memory.chat"}
-            })),
-            Some("memory.chat")
-        );
-        assert_eq!(
-            effective_method(&json!({"method": "tools/call"})),
-            Some("tools/call")
-        );
-        assert_eq!(effective_method(&json!({"id": 1})), None);
-    }
-
-    /// Why: MCP §4.1 — replying to a notification corrupts the stdio channel.
-    /// What: an id-less request and a `notifications/*` request are both
-    /// notifications; an ordinary call is not.
-    /// Test: this test.
-    #[test]
-    fn notifications_are_recognised_before_the_daemon_is_touched() {
-        let bare = Request {
-            jsonrpc: Some("2.0".into()),
-            id: None,
-            method: "ping".into(),
-            params: None,
-        };
-        assert!(is_notification(&bare));
-
-        let named = Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "notifications/initialized".into(),
-            params: None,
-        };
-        assert!(is_notification(&named));
-
-        let call = Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "ping".into(),
-            params: None,
-        };
-        assert!(!is_notification(&call));
-    }
-
-    /// Why: a notification must produce no wire write at all.
-    /// What: `answer` returns the suppressed sentinel without dialling — the
-    /// configured socket does not exist, so a dial would surface as an error.
-    /// Test: this test.
-    #[tokio::test]
-    async fn a_notification_is_suppressed_without_dialling() {
-        let bridge = DaemonBridgeJsonRpc::new(config());
-        let resp = bridge
-            .answer(Request {
-                jsonrpc: Some("2.0".into()),
-                id: None,
-                method: "ping".into(),
-                params: None,
-            })
-            .await;
-        assert!(resp.suppress);
-    }
-
-    /// Why: the daemon's error is the answer; wrapping it would hide the code
-    /// and message the client needs.
-    /// What: `map_reply` passes a daemon error through with its own code.
-    /// Test: this test.
-    #[test]
-    fn a_daemon_error_reaches_the_client_unaltered() {
-        let bridge = DaemonBridgeJsonRpc::new(config());
-        let resp = bridge.map_reply(
-            Some(json!(7)),
-            json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32601, "message": "no such tool"}}),
-        );
-        let err = resp.error.expect("the daemon's error survives the hop");
-        assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
-        assert_eq!(err.message, "no such tool");
-        assert_eq!(resp.id, Some(json!(7)));
-        assert_eq!(resp.jsonrpc, "2.0");
-    }
-
-    /// Why: a daemon that dropped the id would otherwise produce an unmatchable
-    /// answer, which a client cannot tell from a hang (#6309).
-    /// What: a reply with a null id falls back to the request's own id.
-    /// Test: this test.
-    #[test]
-    fn a_null_reply_id_falls_back_to_the_requests_own() {
-        let bridge = DaemonBridgeJsonRpc::new(config());
-        let resp = bridge.map_reply(Some(json!(42)), json!({"id": null, "result": {"ok": true}}));
-        assert_eq!(resp.id, Some(json!(42)));
-    }
-}
+#[path = "daemon_bridge_json_rpc_tests.rs"]
+mod tests;

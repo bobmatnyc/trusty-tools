@@ -164,24 +164,16 @@ fn implicit_table() -> Table {
 /// Why: Codex's config holds the operator's whole CLI configuration. A crash
 /// partway through a direct write would leave it truncated and unparseable —
 /// the same hazard `claude_config::write_json_atomic` exists to avoid.
-/// What: creates the parent directory, writes `<path>.tmp`, renames it onto
-/// `path`.
-/// Test: exercised by every filesystem test in this module.
+/// What: delegates to [`crate::atomic_file::write_atomic`], which is this
+/// function's own pattern hoisted into a shared module by #8236 so the
+/// LaunchAgent plist repair does not invent a second one. The shared helper
+/// additionally preserves the target's permission bits and cleans up its temp
+/// file on failure.
+/// Test: exercised by every filesystem test in this module, and directly by
+/// `atomic_file::tests::write_atomic_replaces_the_contents`.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent dir {}", parent.display()))?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, contents.as_bytes())
-        .with_context(|| format!("write temp file {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} onto {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::atomic_file::write_atomic(path, contents.as_bytes())
+        .with_context(|| format!("atomically write {}", path.display()))
 }
 
 #[cfg(test)]

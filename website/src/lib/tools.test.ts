@@ -1,6 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { installCommand, TOOLS } from './tools';
 import { STABLE_SET } from './site';
@@ -9,11 +6,13 @@ import { STABLE_SET } from './site';
  * Why: the flagship pages assert things about crates. The two claims most
  * likely to rot silently are the ones the reader will act on — the `-p` flag
  * they paste into `cargo test`, and the install command — because both look
- * plausible while being wrong. `crates/trusty-git-analytics` is package `tga`,
- * so the directory name is NOT the package name and cannot be assumed.
+ * plausible while being wrong. A crate's directory name is not guaranteed to
+ * be its package name and cannot be assumed.
  *
- * What: re-derives each record's crate directory, package name, install
- * target, and docs route from the repository rather than from prose.
+ * What: the record checks that need no filesystem. Nothing here reads the
+ * repository: the cases that re-derive a crate directory, package name, release
+ * state, docs route, page source or MCP tool count are `tools.corpus.test.ts`
+ * (#8272).
  *
  * Not covered here: the page copy itself. Prose claims were verified by hand
  * against each crate's clap enums and MCP descriptor tables; a unit test
@@ -22,34 +21,12 @@ import { STABLE_SET } from './site';
  * Test: this file.
  */
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(HERE, '../../..');
-
 describe('flagship tool records are grounded in the repository', () => {
-	it('names a crate directory that exists', () => {
-		expect(TOOLS.length).toBe(7);
-		for (const tool of TOOLS) {
-			expect(existsSync(path.join(REPO_ROOT, 'crates', tool.name, 'Cargo.toml')), tool.name).toBe(
-				true
-			);
-		}
-	});
-
-	it("cargoPackage matches that crate's Cargo.toml name field", () => {
-		for (const tool of TOOLS) {
-			const manifest = readFileSync(
-				path.join(REPO_ROOT, 'crates', tool.name, 'Cargo.toml'),
-				'utf8'
-			);
-			// Anchored: a `[dependencies]` entry further down also matches `name`.
-			const declared = manifest.match(/^name\s*=\s*"([^"]+)"/m)![1];
-			expect(tool.cargoPackage, tool.name).toBe(declared);
-		}
-	});
-
 	it('every tctl install command targets a stable-set member', () => {
 		const tctl = TOOLS.filter((tool) => tool.install.via === 'tctl');
-		expect(tctl.length).toBe(TOOLS.length - 1);
+		// #8507: tga and trusty-audit moved to their own site, and every
+		// remaining flagship installs via tctl.
+		expect(tctl.length).toBe(TOOLS.length);
 		for (const tool of tctl) {
 			const target = tool.install.via === 'tctl' ? tool.install.target : '';
 			expect(STABLE_SET, `${tool.name} installs ${target}`).toContain(target);
@@ -57,106 +34,6 @@ describe('flagship tool records are grounded in the repository', () => {
 			expect(installCommand(tool)).toContain(`\ntctl install ${target}`);
 		}
 	});
-
-	/**
-	 * The one tool tctl does not manage. `trusty-audit` is `publish = false` and
-	 * absent from `stable_set.rs`, so a `tctl install` line on its page would be
-	 * a command that cannot work. Its own bootstrap script is shipped by #5873;
-	 * this asserts the URL SHAPE rather than the file's presence, because the
-	 * script lands in a different PR from this page.
-	 */
-	it('installs trusty-audit from its own bootstrap script, not tctl', () => {
-		const audit = TOOLS.find((tool) => tool.name === 'trusty-audit')!;
-		expect(audit.install.via).toBe('script');
-		expect(installCommand(audit)).toBe(
-			'curl -fsSL https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/crates/trusty-audit/install.sh | sh'
-		);
-		expect(STABLE_SET).not.toContain('trusty-audit');
-	});
-
-	/**
-	 * `$lib/changelog/site` fails the build for a crate whose CHANGELOG.md
-	 * parses to zero releases, so `released` and the file have to agree: a
-	 * record claiming a release the changelog does not carry breaks the build
-	 * on `/whats-new`, and the reverse silently hides a shipped crate.
-	 */
-	it('marks a tool released only when its CHANGELOG.md carries a release', () => {
-		for (const tool of TOOLS) {
-			const changelog = readFileSync(
-				path.join(REPO_ROOT, 'crates', tool.name, 'CHANGELOG.md'),
-				'utf8'
-			);
-			const hasRelease = /^## \[(?!Unreleased\])/m.test(changelog);
-			expect(tool.released, `${tool.name} CHANGELOG.md`).toBe(hasRelease);
-		}
-	});
-
-	it('links only to doc pages the manifest actually publishes', () => {
-		const routes = readFileSync(path.join(REPO_ROOT, 'docs/public-manifest.tsv'), 'utf8')
-			.split('\n')
-			.filter((line) => line.startsWith('PAGE\t'))
-			.map((line) => `/docs${line.split('\t')[3]}`);
-		for (const tool of TOOLS) {
-			if (tool.docsPath === null) continue;
-			expect(routes, tool.name).toContain(tool.docsPath);
-		}
-	});
-
-	/**
-	 * Since #6960 a flagship page is served one of two ways, and a record that
-	 * matches NEITHER is a `/tools/<slug>` link on the landing page that leads
-	 * to a 404: markdown under `src/content/tools/`, served by the `[slug]`
-	 * route, or a hand-authored `+page.svelte` of its own (trusty-audit).
-	 */
-	it('has a page source for every slug, and no duplicate slugs', () => {
-		expect(new Set(TOOLS.map((t) => t.slug)).size).toBe(TOOLS.length);
-		for (const tool of TOOLS) {
-			const markdown = existsSync(path.join(HERE, '../content/tools', `${tool.slug}.md`));
-			const svelte = existsSync(path.join(HERE, '../routes/tools', tool.slug, '+page.svelte'));
-			expect(markdown || svelte, tool.slug).toBe(true);
-		}
-	});
-
-	/**
-	 * The "MCP tools: N" fact card was wrong on `/tools/trusty-memory` — it said
-	 * 45 against a dispatcher carrying 47, because a tool added to the crate
-	 * changes nothing on the page. The count is the one fact-card number that is
-	 * mechanically re-derivable, so it is derived here rather than trusted.
-	 *
-	 * Each crate exposes its tool set in a different shape, so the pattern is
-	 * per-crate: trusty-memory dispatches by name in a match, trusty-search
-	 * declares a descriptor table. Both are counted from the crate source the
-	 * daemon actually serves.
-	 */
-	const TOOL_COUNT_SOURCES = [
-		{
-			slug: 'trusty-memory',
-			source: 'crates/trusty-memory/src/tools/mod.rs',
-			// Each dispatch arm: `"memory_remember" => handle_memory_remember(...)`.
-			// The `other =>` catch-all carries no quotes and is not counted.
-			pattern: /^\s*"[a-z_]+" =>/gm
-		},
-		{
-			slug: 'trusty-search',
-			source: 'crates/trusty-search/src/mcp/tools/descriptors.rs',
-			// Each descriptor in the tools/list JSON: `"name": "search_lexical"`.
-			pattern: /"name": "[a-z_]+"/g
-		}
-	];
-
-	it.each(TOOL_COUNT_SOURCES)(
-		'$slug fact card names the tool count its crate actually serves',
-		({ slug, source, pattern }) => {
-			const declared = readFileSync(path.join(REPO_ROOT, source), 'utf8').match(pattern);
-			expect(declared, source).not.toBeNull();
-
-			const tool = TOOLS.find((candidate) => candidate.slug === slug);
-			const card = tool?.facts.find((fact) => fact.label === 'MCP tools');
-			expect(card, `${slug} has an 'MCP tools' fact card`).toBeDefined();
-
-			expect(Number(card!.value), `${slug} fact card vs ${source}`).toBe(declared!.length);
-		}
-	);
 
 	it('never names a retired binary or a `cp` install', () => {
 		const prose = JSON.stringify(TOOLS);
@@ -167,10 +44,7 @@ describe('flagship tool records are grounded in the repository', () => {
 			'trusty-mpm-telegram',
 			'trusty-memory-core',
 			'TRUSTY_ALLOW_UNLISTED',
-			'search_code',
-			// The `taudit` alias still exists in the binary and is being dropped.
-			// No user-facing string may name it: `trusty-audit` everywhere.
-			'taudit'
+			'search_code'
 		]) {
 			expect(prose, banned).not.toContain(banned);
 		}

@@ -491,3 +491,39 @@ fn comment_stripping_keeps_code_and_drops_prose() {
          contents; got:\n{code}"
     );
 }
+
+/// #8545: the `common` constructor ran in this target and fenced a home.
+#[test]
+fn the_home_write_fence_is_armed_for_integration_targets() {
+    let roots = trusty_mpm::core::home_write_fence::armed_roots();
+    assert!(
+        roots.iter().any(|r| r.ends_with(".trusty-tools")),
+        "the home-write fence is not armed here: {roots:?}"
+    );
+}
+
+/// #8545: every integration crate root declares `mod common;`, whose
+/// constructor arms the home-write fence. A new target without it would run
+/// unfenced and could write the operator's home config unseen.
+#[test]
+fn every_integration_target_arms_the_home_write_fence() {
+    let root = tests_root();
+    let crate_roots: Vec<PathBuf> = test_sources()
+        .into_iter()
+        .filter(|p| p.parent() == Some(root.as_path()) || p.ends_with("main.rs"))
+        .collect();
+    assert!(crate_roots.len() > 20, "found only {crate_roots:?}");
+    let missing: Vec<String> = crate_roots
+        .iter()
+        .filter(|p| {
+            let text = std::fs::read_to_string(p).expect("read test source");
+            !code_only(&text).lines().any(|l| l.trim() == "mod common;")
+        })
+        .map(|p| p.display().to_string())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these integration targets never declare `mod common;`, so the #8545 \
+         home-write fence is not armed in them: {missing:?}"
+    );
+}

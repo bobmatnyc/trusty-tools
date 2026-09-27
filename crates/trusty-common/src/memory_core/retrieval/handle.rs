@@ -384,6 +384,23 @@ impl PalaceHandle {
     /// `writer_intent_open_fails_loud_on_locked_*` in the store tests, and
     /// `registry_tests::open_does_not_reset_idle_clock`.
     pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
+        Self::open_with_intent_purging(palace, intent, true)
+    }
+
+    /// [`Self::open_with_intent`], choosing whether the open-time TTL purge
+    /// deletes expired rows.
+    ///
+    /// Why (#8733): the purge is maintenance, which only the data root's
+    /// elected maintainer may run; `PalaceRegistry` passes `false` when this
+    /// process does not hold the `MaintenanceLease`.
+    /// What: with `purge_expired == false` expired drawers are still left out
+    /// of the in-memory table, but no row is deleted.
+    /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
+    pub fn open_with_intent_purging(
+        palace: &Palace,
+        intent: OpenIntent,
+        purge_expired: bool,
+    ) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
@@ -458,24 +475,38 @@ impl PalaceHandle {
         // condition D4 demanded at admission, not a lifetime — read-time expiry
         // already stops it being served, and deleting the row would contradict
         // D6's "demoted, never deleted". See `Drawer::is_tier_c`.
+        //
+        // #8314: the durable deletes are bounded — a reopen sharing a live
+        // handle's database must not wait forever on that handle's write.
         let now = chrono::Utc::now();
-        let mut pruned = 0usize;
+        let mut expired_ids = Vec::new();
         all_drawers.retain(|d| {
             let expired = d.is_expired_at(now) && !d.is_tier_c();
             if expired {
-                if let Err(e) = kg.delete_drawer_sync(d.id) {
-                    tracing::warn!(
-                        palace = %palace.id, id = %d.id,
-                        "purge_expired: delete_drawer failed: {e:#}"
-                    );
-                }
-                pruned += 1;
+                expired_ids.push(d.id);
             }
             !expired
         });
-        if pruned > 0 {
-            tracing::info!(palace = %palace.id, count = pruned, "purged expired drawers at open");
-        }
+        // #8733: only the data root's elected maintainer deletes the rows; a
+        // non-maintainer still hides them from this handle, as reads do, and
+        // writes no #8732 journal record because it deletes nothing.
+        let pruned = if purge_expired {
+            super::open_sweep::reclaim_expired_rows(
+                kg.store(),
+                expired_ids,
+                &palace.id,
+                Some(data_dir.clone()),
+                super::open_sweep::OPEN_WRITE_BUDGET,
+            )
+        } else {
+            0
+        };
+        // #8732: `warn`, so the purge shows at the daemon's default filter.
+        crate::memory_core::maintenance_log::warn_removed(
+            &palace.id,
+            "open-time TTL purge",
+            pruned,
+        );
 
         // Surface orphaned vectors so operators can re-ingest if needed.
         let index_count = vector_store.index_size();
@@ -1000,15 +1031,15 @@ impl PalaceHandle {
         // forget that failed or raced another writer used to inflate this.
         let mut count = 0usize;
         for id in expired_ids {
-            match self.forget(id).await {
+            // #8732: recorded as a maintenance deletion, summarised at `warn`.
+            let reason = crate::memory_core::maintenance_log::DeletionReason::ExpiredPurge;
+            match self.forget_for_maintenance(id, reason, None).await {
                 Ok(outcome) if outcome.is_deleted() => count += 1,
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?id, "purge_expired: forget failed: {e:#}"),
             }
         }
-        if count > 0 {
-            tracing::info!(palace = %self.id, count, "purged expired drawers");
-        }
+        crate::memory_core::maintenance_log::warn_removed(&self.id, "TTL purge", count);
         Ok(count)
     }
 

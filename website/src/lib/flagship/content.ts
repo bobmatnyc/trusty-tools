@@ -65,7 +65,7 @@ const LAYOUT_ANCHORS: readonly string[] = ['install'];
  * `TOOLS` record. `tests/build-smoke.test.ts` keeps its own list for the same
  * reason — these are routes, not data.
  */
-const EXTRA_ROUTES: readonly string[] = ['/', '/install', '/tools/trusty-git-analytics/audit'];
+const EXTRA_ROUTES: readonly string[] = ['/', '/install'];
 
 export interface FlagshipContent {
 	/** Route segment: the page is served at `/tools/<slug>`. */
@@ -151,8 +151,10 @@ export function buildFlagshipContentIfAvailable(): Map<string, FlagshipContent> 
  * The slugs served from markdown, from the directory listing rather than a
  * second table that could disagree with it. A file naming no flagship fails the
  * build; a flagship with no file is hand-authored Svelte and simply absent —
- * `trusty-audit` is the one such page, because its copy embeds a live
- * `CopyButton` component that markdown cannot express.
+ * `trusty-audit`, whose copy embedded a live `CopyButton` component that
+ * markdown cannot express, was the one such page before it moved to its own
+ * site in #8507. No current TOOLS entry takes that path, but the case stays
+ * possible for a future one.
  */
 function contentSlugs(repoRoot: string, failures: DocFailure[]): string[] {
 	const known = new Set(TOOLS.map((tool) => tool.slug));

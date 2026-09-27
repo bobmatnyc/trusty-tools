@@ -22,6 +22,8 @@ use ratatui::{
 };
 use trusty_mpm::client::ManagedSessionSummary;
 
+use crate::commands::session_picker_render::{StateColor, session_color};
+
 use super::layout::{self, Column, MARKER_WIDTH};
 use super::state::{Mode, Severity, TuiState};
 
@@ -164,7 +166,10 @@ fn render_table(
     let rows: Vec<Row> = sessions[start..start + len]
         .iter()
         .enumerate()
-        .map(|(offset, session)| row(&columns, session, start + offset == state.selected()))
+        .map(|(offset, session)| {
+            let selected = start + offset == state.selected();
+            row(&columns, session, selected, state.use_color())
+        })
         .collect();
     let header = Row::new(
         std::iter::once(String::new())
@@ -187,7 +192,15 @@ fn render_table(
 }
 
 /// Build one table row, marked and highlighted when it is the selected one.
-fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> Row<'static> {
+///
+/// #8506: an unselected row takes its whole-row color from the shared
+/// [`session_color`] mapping, and none at all when `use_color` is off.
+fn row(
+    columns: &[Column],
+    session: &ManagedSessionSummary,
+    selected: bool,
+    use_color: bool,
+) -> Row<'static> {
     let cells: Vec<String> = std::iter::once(if selected {
         "▸".to_string()
     } else {
@@ -195,16 +208,36 @@ fn row(columns: &[Column], session: &ManagedSessionSummary, selected: bool) -> R
     })
     .chain(columns.iter().map(|c| layout::cell(*c, session)))
     .collect();
-    let style = match (selected, session.attached, session.unresumable) {
-        (true, _, _) => Style::default()
+    let style = if selected {
+        Style::default()
             .fg(Color::Black)
             .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-        (false, _, true) => Style::default().fg(Color::Red),
-        (false, true, _) => Style::default().fg(Color::Cyan),
-        _ => Style::default(),
+            .add_modifier(Modifier::BOLD)
+    } else if use_color {
+        state_style(session_color(session))
+    } else {
+        Style::default()
     };
     Row::new(cells).style(style)
+}
+
+/// The ratatui style for a [`StateColor`] — the TUI's half of the shared
+/// mapping, whose ANSI half is `session_picker_render::colorize`.
+///
+/// Test: `render_paints_each_row_in_its_state_color`.
+pub(crate) fn state_style(color: StateColor) -> Style {
+    let style = Style::default();
+    match color {
+        StateColor::Green => style.fg(Color::Green),
+        StateColor::AttachedCyan => style.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        StateColor::Dim => style.add_modifier(Modifier::DIM),
+        StateColor::Red => style.fg(Color::Red),
+        StateColor::Yellow => style.fg(Color::Yellow),
+        StateColor::Blue => style.fg(Color::Blue),
+        StateColor::Magenta => style.fg(Color::Magenta),
+        StateColor::Cyan => style.fg(Color::Cyan),
+        StateColor::Plain => style,
+    }
 }
 
 /// Draw a centered modal with `title` over the list.
@@ -313,8 +346,25 @@ fn rename_body(was: &str, typed: &str) -> Vec<Line<'static>> {
 /// Test: `render_new_session_overlay_lists_the_registered_projects`,
 /// `render_new_session_overlay_shows_the_typed_path`,
 /// `render_new_session_overlay_truncates_a_long_row`,
-/// `render_new_session_overlay_shows_the_position_and_filter`.
+/// `render_new_session_overlay_shows_the_position_and_filter`,
+/// `new_session_name_overlay_shows_the_text_and_preview`.
 fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> Vec<Line<'static>> {
+    // #8587: the Ctrl-N name step — the typed text and the name it slugs to.
+    if let Some(naming) = flow.naming() {
+        let preview = naming
+            .preview()
+            .unwrap_or_else(|| "(type a letter or digit)".to_string());
+        return vec![
+            Line::from(fit(
+                &format!("Name the new session in {}:", naming.label()),
+                width,
+            )),
+            Line::from(String::new()),
+            Line::from(format!("> {}▌", naming.typed())),
+            Line::from(fit(&format!("session: {preview}"), width)),
+            Line::from("Enter creates it, Esc goes back to the list."),
+        ];
+    }
     if let Some(typed) = flow.typed() {
         return vec![
             // #7488: the entry takes a clone URL or owner/repo too, so the
@@ -340,7 +390,10 @@ fn new_session_body(flow: &super::new_session::NewSessionFlow, width: usize) -> 
     lines.push(Line::from(
         "Type to filter, or type owner/repo or a clone URL.",
     ));
-    lines.push(Line::from("Enter confirms, Esc cancels."));
+    // #8587: Ctrl-N is invisible unless the list says so.
+    lines.push(Line::from(
+        "Enter confirms, Ctrl-N names the session first, Esc cancels.",
+    ));
     lines
 }
 
@@ -365,6 +418,7 @@ fn help_body() -> Vec<Line<'static>> {
         "Enter          open (resume + attach) the selected session",
         "n              new session — pick a project, or type a path, a clone",
         "               URL, owner/repo, or domain/owner/repo",
+        "Ctrl-N         in that project list: name the new session first",
         "r              rename it",
         "d              delete it, with a confirm step",
         "R              refresh the list from the daemon",

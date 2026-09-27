@@ -481,7 +481,7 @@ pub(crate) async fn restore_one_index(
             .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
             .unwrap_or(false);
     let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
-    let stages = derive_warm_boot_stages(WarmBootInputs {
+    let mut stages = derive_warm_boot_stages(WarmBootInputs {
         chunk_count,
         hnsw_snapshot_ready,
         graph_node_count,
@@ -490,6 +490,9 @@ pub(crate) async fn restore_one_index(
         skip_vector,
         corpus_open_failure,
     });
+    // #8134: vectors restored over an empty corpus are not a ready lane.
+    let vectors = indexer.vector_count().await.unwrap_or(0);
+    crate::service::warm_boot::fail_semantic_over_empty_corpus(&mut stages, chunk_count, vectors);
     tracing::info!(
         "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
          graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failure={:?} → \
@@ -543,12 +546,16 @@ pub(crate) async fn restore_one_index(
     // #4390: an embed pass interrupted before it committed leaves the corpus
     // silently short its most recent vectors, and warm boot reports `Ready`
     // regardless because an older HNSW snapshot exists on disk. Re-arm it.
-    crate::service::boot_markers::rearm_deferred_embed_if_pending(
-        &registered,
-        deferred_embed_pending,
-        chunk_count,
-    )
-    .await;
+    // #8726: a snapshot on disk is not a complete one. A store short of the
+    // corpus is demoted and backfilled; that pass also settles the #4390 marker.
+    if !crate::service::vector_gap::reconcile_semantic_vector_gap(&registered).await {
+        crate::service::boot_markers::rearm_deferred_embed_if_pending(
+            &registered,
+            deferred_embed_pending,
+            chunk_count,
+        )
+        .await;
+    }
     // Issue #1621 (epic #1619 WI-2): activate the filesystem watcher for this
     // warm-booted index so subsequent saves are incrementally indexed within
     // the 500ms debounce window. No-op when the watcher is disabled

@@ -1,0 +1,13 @@
+crate   trusty-mpm
+version 1.7.7
+reason  PR #8672 (#8633/#8602 worktree data-loss fix) reshapes the worktree-removal core: LandedContent gains Conflicted and a landed_at field and changes Unavailable's discriminant, merge_residue is removed, and WorktreeRemovalProbe gains content_on_base while losing merge_into_base_is_a_noop. Owner ruling 2026-09-22 accepts breaking API changes on main without a major bump (small user base, does not dictate the release model); the supervisor reconfirmed on 2026-09-26 that this ruling covers all six CHECK 5 breaks below, per the same rationale as the 1.7.0/1.7.2/1.7.3/1.7.5 declarations.
+# release-notes: trusty-mpm 1.7.7 ships a disclosed, accepted API break in the
+# worktree-removal core (LandedContent, WorktreeRemovalProbe) landed by PR
+# #8672 (Refs #8633, #8602); no deprecated shims were added and the release
+# stays on the 1.x line per owner ruling 2026-09-22, reconfirmed 2026-09-26.
+accept  enum_no_repr_variant_discriminant_changed  LandedContent::Unavailable
+accept  enum_struct_variant_field_added  LandedContent::Landed landed_at
+accept  enum_variant_added  LandedContent:Conflicted
+accept  function_missing  merge_residue
+accept  trait_method_added  WorktreeRemovalProbe::content_on_base
+accept  trait_method_missing  WorktreeRemovalProbe merge_into_base_is_a_noop

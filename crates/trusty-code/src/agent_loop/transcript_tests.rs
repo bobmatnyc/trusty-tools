@@ -780,3 +780,114 @@ fn to_messages_goals_survive_aggressive_compaction() {
         msgs[1].content
     );
 }
+
+// ── #8238: a turn that says nothing is never recorded ─────────────────────────
+
+/// Build a `ChatResponse` fixture carrying `content` and no tool calls.
+///
+/// Why: `ChatResponse` is `Deserialize`-only, so a JSON fixture is the only way
+/// to hand `push_response` a real response.
+fn text_response(content: serde_json::Value) -> crate::llm::ChatResponse {
+    serde_json::from_value(serde_json::json!({
+        "id": "gen-1",
+        "choices": [{
+            "message": { "role": "assistant", "content": content, "tool_calls": [] },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1 }
+    }))
+    .expect("valid ChatResponse fixture")
+}
+
+/// A response carrying neither text nor tool calls must NOT be recorded
+/// (#8238).
+///
+/// Why: such an entry contributes no content block on a block-based provider,
+/// so Bedrock Converse emits no message for it and the turns around it merge
+/// into two consecutive user messages, which Converse rejects. #8238's nudge
+/// appends a user turn immediately after exactly this shape.
+/// What: seed, push the three shapes providers use for "this turn said
+/// nothing", assert the history is still just `[system, user]`.
+/// Test: this test.
+#[test]
+fn push_response_drops_a_turn_with_no_text_and_no_calls() {
+    let mut t = Transcript::seed("s", "task");
+    t.push_response(&text_response(serde_json::json!("")));
+    t.push_response(&text_response(serde_json::json!(null)));
+    t.push_response(&text_response(serde_json::json!("   \n ")));
+
+    let messages = t.messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "a turn with nothing in it must leave no entry: {messages:?}"
+    );
+}
+
+/// A response that DOES say something is recorded unchanged (#8238).
+///
+/// Why: the drop above must be scoped to the wholly-empty shape — dropping a
+/// real assistant turn would lose the conversation.
+/// Test: this test.
+#[test]
+fn push_response_appends_a_turn_that_says_something() {
+    let mut t = Transcript::seed("s", "task");
+    t.push_response(&text_response(serde_json::json!("here is the answer")));
+
+    let messages = t.messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2].role, "assistant");
+    assert_eq!(messages[2].content.as_deref(), Some("here is the answer"));
+}
+
+/// Build a `ChatResponse` fixture carrying one tool call and NO text.
+///
+/// Why: the shape `push_response`'s drop must not catch. It has to travel
+/// through `push_response` itself — the first cut of the test below called
+/// `push_assistant` directly, which is downstream of the guard, so widening the
+/// guard to drop tool-call turns left the test green.
+fn tool_call_response() -> crate::llm::ChatResponse {
+    serde_json::from_value(serde_json::json!({
+        "id": "gen-2",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": { "name": "echo", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1 }
+    }))
+    .expect("valid ChatResponse fixture")
+}
+
+/// An assistant turn with tool calls but no text is still recorded (#8238).
+///
+/// Why: that is the ordinary tool-calling shape — every provider builds a
+/// `ToolUse` block for it, and dropping it would orphan the tool results that
+/// answer it.
+/// Test: this test.
+#[test]
+fn push_response_keeps_a_tool_call_turn_with_no_text() {
+    let mut t = Transcript::seed("s", "task");
+    t.push_response(&tool_call_response());
+
+    let messages = t.messages();
+    assert_eq!(
+        messages.len(),
+        3,
+        "the guard must drop only turns with no calls AND no text: {messages:?}"
+    );
+    assert_eq!(messages[2].role, "assistant");
+    let calls = messages[2]
+        .tool_calls
+        .as_ref()
+        .expect("the tool call must survive the round trip");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].function.name, "echo");
+}

@@ -21,8 +21,9 @@
 //! `unexpanded_shell_variable_finds_both_spellings`,
 //! `unexpanded_shell_variable_is_none_for_ordinary_paths`,
 //! `unresolved_target_reports_a_surviving_tilde_as_written`,
-//! `unresolved_target_is_none_once_home_expands_the_tilde` in the sibling
-//! `tests` module.
+//! `unresolved_target_is_none_once_home_expands_the_tilde`,
+//! `unresolved_target_reports_a_command_substitution` in the sibling `tests`
+//! module.
 
 use std::path::{Path, PathBuf};
 
@@ -210,8 +211,9 @@ fn is_shell_name_char(c: char) -> bool {
 /// that exists — and quoting it is how the guard came to call an agent's
 /// launch directory a main checkout (#7234). For that case the honest path is
 /// the suffix from the tilde on, which is the token as the command wrote it.
-/// What: `token` is the expansion itself (`$WT`, `${WT}`, `~`, `~user`);
-/// `shown` is the path to name in the refusal.
+/// What: `token` is the expansion itself (`$WT`, `${WT}`, `~`, `~user`, or
+/// `$(`/`` ` `` for a command substitution); `shown` is the path to name in the
+/// refusal.
 /// Test: `unresolved_target_reports_a_surviving_tilde_as_written`,
 /// `unresolved_target_is_none_once_home_expands_the_tilde`.
 pub(super) struct UnresolvedTarget {
@@ -230,14 +232,26 @@ pub(super) struct UnresolvedTarget {
 /// and the refusal names a checkout the command never addressed (#7234).
 /// Routing both spellings through one detector is what keeps a rule added
 /// later from inheriting only half the answer.
-/// What: the `$NAME` answer first, then a path COMPONENT beginning with `~`.
-/// Fails CLOSED, in the direction this module tree already takes: a directory
-/// genuinely named `~backup` is reported unresolved and the caller refuses
-/// rather than clears it.
+/// What: a `$(…)` or backtick command substitution first (#8572), then the
+/// `$NAME` answer, then a path COMPONENT beginning with `~`. The first two
+/// quote the whole path. Fails CLOSED, in the direction this module tree
+/// already takes: a directory genuinely named `~backup`, or a single-quoted
+/// literal `$(x)`, is reported unresolved and the caller refuses rather than
+/// clears it.
 /// Test: `unresolved_target_reports_a_surviving_tilde_as_written`,
 /// `unresolved_target_is_none_once_home_expands_the_tilde`,
+/// `unresolved_target_reports_a_command_substitution`,
 /// `unexpanded_shell_variable_finds_both_spellings`.
 pub(super) fn unresolved_target(path: &Path) -> Option<UnresolvedTarget> {
+    // #8572: `git -C "$(cat /tmp/main)" reset --hard` from a worktree resolved
+    // to `<worktree>/$(cat …`, which reads as the worktree.
+    let text = path.to_string_lossy();
+    if let Some(token) = ["$(", "`"].into_iter().find(|t| text.contains(t)) {
+        return Some(UnresolvedTarget {
+            token: token.to_string(),
+            shown: path.to_path_buf(),
+        });
+    }
     if let Some(token) = unexpanded_shell_variable(path) {
         return Some(UnresolvedTarget {
             token,

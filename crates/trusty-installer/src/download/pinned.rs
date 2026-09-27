@@ -41,6 +41,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::download::{fetch, glibc, release};
+// #8642: endpoints now live beside the per-crate release-repo table.
+pub(crate) use crate::download::release::{EndpointSource, Endpoints};
 
 // #5970: "can this be installed without installing it" — the question a consumer
 // had to either install or grow a second resolver to answer. Its `resolve_pin` is
@@ -333,24 +335,6 @@ pub enum PinnedError {
     },
 }
 
-/// Where the pinned path fetches from. Crate-internal so tests can substitute a
-/// loopback fixture without a live network call.
-pub(crate) struct Endpoints<'a> {
-    /// GitHub Releases API URL.
-    pub releases_url: &'a str,
-    /// Base URL that release assets hang off.
-    pub download_base: &'a str,
-}
-
-impl Default for Endpoints<'_> {
-    fn default() -> Self {
-        Self {
-            releases_url: release::RELEASES_API,
-            download_base: release::RELEASE_DL_BASE,
-        }
-    }
-}
-
 /// Install ONE tool at its exact pinned version, or fail closed.
 ///
 /// Why: The single-tool shape of [`install_pinned_set`], for a caller fetching
@@ -431,7 +415,8 @@ pub async fn install_pinned_set(
     tools: &[PinnedTool],
     install_dir: &Path,
 ) -> Result<Vec<PinnedInstall>, PinnedError> {
-    install_pinned_set_at(client, &Endpoints::default(), tools, install_dir).await
+    // #8642: each tool resolves from its own release repo.
+    install_pinned_set_at(client, EndpointSource::PerCrate, tools, install_dir).await
 }
 
 /// [`install_pinned_set`], against caller-supplied endpoints.
@@ -446,7 +431,7 @@ pub async fn install_pinned_set(
 /// Test: All of `tests`.
 pub(crate) async fn install_pinned_set_at(
     client: &reqwest::Client,
-    endpoints: &Endpoints<'_>,
+    endpoints: EndpointSource<'_>,
     tools: &[PinnedTool],
     install_dir: &Path,
 ) -> Result<Vec<PinnedInstall>, PinnedError> {
@@ -500,11 +485,12 @@ struct Staged {
 /// Test: Each failure arm has a test in `tests`.
 async fn stage_one(
     client: &reqwest::Client,
-    endpoints: &Endpoints<'_>,
+    endpoints: EndpointSource<'_>,
     tool: &PinnedTool,
     dir: &Path,
 ) -> Result<Staged, PinnedError> {
     let (name, version) = (tool.crate_name.as_str(), tool.version.as_str());
+    let endpoints = &endpoints.for_crate(name);
 
     // Checks 1 and 2 — a prebuilt exists for this host, and the EXACT pinned
     // version is published. #5970 moved them into `preflight` so the dry-run

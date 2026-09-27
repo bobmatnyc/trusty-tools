@@ -198,6 +198,14 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a managed session risks the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop (issue #2246).",
     ),
     (
+        "launchd_secrets",
+        "Fails when a `com.trusty.*` LaunchAgent plist holds a plaintext credential, naming the file, the KEY and the file's mode and never the value. UNKNOWN rather than OK when a plist cannot be read, parsed, is a BINARY `bplist00` file, or is a symlink — a scan that did not run has not shown the host clean. `tm doctor --fix --yes` migrates each registered credential into the credential store, confirms a byte-equal read-back and only then strips the key; the credential still has to be rotated (issue #8236).",
+    ),
+    (
+        "credential_reach",
+        "Reports, for each credential the daemon consumes, whether it resolves: present, absent, the store's error kind, or timed out — never the value. A timeout means a macOS Keychain approval dialog may be on screen, which is the expected state after a `cargo install` rebuild; approve it once. Runs on the blocking pool and is bounded, so it can hang neither `tm doctor` nor the runtime (issue #8236).",
+    ),
+    (
         "hooks_contamination",
         "Warns when a project's `.claude/settings*.json` still carries tm hook entries from a pre-fix `tm install` — suggests `tm hooks clean` (issue #2940).",
     ),
@@ -242,6 +250,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the running binary is OLDER than the ledger's record for that same file or the two cannot be ordered as semver, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable, does not cover the binary (a prebuilt-installer or package-manager install), or records a version OLDER than what is running, which means the ledger no longer describes the file on disk (issue #4964). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
     ),
     (
+        "bundled_asset_lag",
+        "Warns when the RUNNING binary's embedded skill assets differ from the `origin/main` source tree they were compiled from — the only row that can see a stale binary at all. Bundled skills are `include_str!`-embedded at compile time, so an installed binary deploys the asset text as of its build: on 2026-09-23 a binary built at 07:26:46Z kept deploying pre-fix `tm-epic/references/manual-procedure.md` text for nine hours after the fix merged, and then REVERTED six files a newer build had already deployed correctly. `skill_staleness` cannot see this — it compares deployed files against these same embedded assets by design (#4604), so both sides of its comparison come from the same stale source — and `binary_provenance` compares a semver against cargo's registry ledger, not the repo. Applies ONLY in `bobmatnyc/trusty-tools`, resolved from the `origin` remote through the same derivation `rust_build_env` uses; anywhere else the row reports not applicable and issues no git command. Hashes every `skills/*` entry of the compiled-in bundle with `skill_bundle_stamp`'s own per-entry concatenation (the bundle path, a NUL byte, the contents, a newline), reads the same paths out of `origin/main`, and names the lagging keys, this binary's build-id timestamp, and the newest asset commit's. Reports UNKNOWN — never `Ok` — when the source tree could not be read (no `origin/main`, no git, not a repo, an empty asset tree, a non-UTF-8 blob): a staleness detector that passes when it cannot read the source converts \"unknown\" into \"fine\". Remedy: `cargo install --path <clean-checkout>/crates/trusty-mpm --locked` from a checkout whose porcelain status is empty (never `cp` a release binary on macOS — the next exec is SIGKILL'd as an invalid signature), then `tm restart`, then redeploy, which happens automatically on the next managed spawn or explicitly via `tm reinstall` or `tm doctor --fix-skills`. Read-only; it never fetches, installs, or deploys (issue #8482).",
+    ),
+    (
         "session_store",
         "Whether `~/.trusty-mpm/session-manager/sessions.json` still LOADS — validated against the same type the daemon deserializes, so this check can never call a store healthy that the daemon rejects. A store the daemon cannot read blocks every write (each write path reloads before it saves) while `tm ls` keeps serving the daemon's in-memory copy, so the condition is otherwise invisible until someone attempts a mutation. Fails with the byte offset where the valid document ends, and names `tm repair session-store` only when truncating there would actually leave a loadable store. An absent store is `Ok` (a machine that has never run a managed session has none); an unreadable one is UNKNOWN, never `Ok`. Read-only — it never truncates or writes (issue #5007).",
     ),
@@ -260,6 +272,14 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "tmux_options",
         "Whether the live tmux SERVER's globals still match tm's spec — `history-limit`, `mouse`, and the window-scoped `alternate-screen`. `create_managed_session` applies and verifies them before every pane tm creates, but a server tm did not start carries none of them: a tmux-continuum restore recreates `tm-*` sessions through tmux-resurrect's own bare `new-session`, so restored panes bake tmux's factory 2000-line scrollback and can enter the alternate screen (issue #6469). Warns naming each drifted option; UNKNOWN — never `Ok` — when no option could be read (no tmux binary, or no server running). A green row means NEW panes will be correct: `history-limit` is captured into a pane's ring buffer at creation and cannot be grown in place, so an affected session has to be restarted. Read-only — it reads options, never sets one.",
+    ),
+    (
+        "launchd_process_type",
+        "The launchd `ProcessType` of the two tm jobs that start tmux servers — the mpm agent and its supervisor (`trusty_common::launchd_labels::MPM` and `MPM_SUPERVISOR`), read from `~/Library/LaunchAgents`. A tmux server inherits the class of the job that started it, and so does every session inside it: the supervisor plist declared `Background`, which held tmux, the PM sessions and their `cargo` gates at Darwin priority 4 on efficiency cores with throttled I/O, a clamp `taskpolicy -B` cannot lift (issue #8415). FAILS on `Background`; warns on any other value short of `Interactive`, including an absent key, which is launchd's throttled `Standard` default. Each finding names the `plutil -replace` and `launchctl bootout`/`bootstrap` commands for the plist on disk, with the path single-quoted; a tmux server already running keeps its class until it exits. A duplicated key resolves to the last one, as CoreFoundation does. UNKNOWN when a plist exists but cannot be judged: a binary plist, an empty `<string/>`, or a non-string value. `Ok` when neither plist is installed. `TRUSTY_MPM_LAUNCH_AGENTS_DIR` points the row at another directory, and every message then names that directory. Read-only.",
+    ),
+    (
+        "tmux_priority",
+        "The Darwin scheduling priority of the RUNNING tmux server, read with `tmux display-message -p '#{pid}'` and `ps -o pri= -p <pid>`. A server keeps the class it started with, so fixing a plist `launchd_process_type` flagged does not lift a server that is already clamped (issue #8415). FAILS below priority 20 (a `Background` job's tree runs at 4), naming the server PID, the observed priority, and the remedy: fix the plist, then restart the tmux server (`tmux kill-server` ends every session in it; `tm` resumes them). WARNS from 20 to 30, launchd `Standard` throttling, pointing at the `launchd_process_type` row. `Ok` at 31 (an interactive shell's priority) or above, and when no tmux server is running. macOS only: on other platforms `ps -o pri` uses a different scale, so the row reports not applicable. UNKNOWN — never `Ok` — when tmux cannot be run, `ps` fails, or either answer cannot be parsed. Read-only.",
     ),
     (
         "pty_headroom",
@@ -334,6 +354,16 @@ mod tests {
     /// goes further by also asserting name equality, not just length.
     #[tokio::test]
     async fn doctor_checks_match_run_doctor_names() {
+        // #8415 owner rule: the bin builds the library without `cfg(test)`, so
+        // point the `launchd_process_type` row at a temp path that does not
+        // exist, never the operator's real `~/Library/LaunchAgents`. An
+        // injected override, not an env write (#5544).
+        trusty_mpm::daemon::doctor_launchd_process_type::override_launch_agents_dir(
+            std::env::temp_dir().join(format!(
+                "tm-bin-test-no-launch-agents-{}",
+                std::process::id()
+            )),
+        );
         let report = run_doctor(None, None, &[], None).await;
         let actual: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         let expected: Vec<&str> = DOCTOR_CHECKS.iter().map(|(name, _)| *name).collect();

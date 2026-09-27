@@ -241,7 +241,7 @@ pub(crate) async fn restore_index_on_demand(
             .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
             .unwrap_or(false);
     let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
-    let stages = derive_warm_boot_stages(WarmBootInputs {
+    let mut stages = derive_warm_boot_stages(WarmBootInputs {
         chunk_count,
         hnsw_snapshot_ready,
         graph_node_count,
@@ -250,6 +250,9 @@ pub(crate) async fn restore_index_on_demand(
         skip_vector,
         corpus_open_failure,
     });
+    // #8134: vectors restored over an empty corpus are not a ready lane.
+    let vectors = indexer.vector_count().await.unwrap_or(0);
+    crate::service::warm_boot::fail_semantic_over_empty_corpus(&mut stages, chunk_count, vectors);
 
     tracing::info!(
         "lazy-load: index '{}' restored — chunks={} hnsw_snapshot={} \
@@ -300,10 +303,14 @@ pub(crate) async fn restore_index_on_demand(
     // #4390: a cold-parked index reloaded on demand gets the same re-arm the
     // eager warm-boot path does — otherwise an interrupted pass on a parked
     // index would wait for an unrelated reindex, indefinitely on a quiet repo.
-    crate::service::boot_markers::rearm_deferred_embed_if_pending(
-        &registered,
-        deferred_embed_pending,
-        chunk_count,
-    )
-    .await;
+    // #8726: a snapshot on disk is not a complete one. A store short of the
+    // corpus is demoted and backfilled; that pass also settles the #4390 marker.
+    if !crate::service::vector_gap::reconcile_semantic_vector_gap(&registered).await {
+        crate::service::boot_markers::rearm_deferred_embed_if_pending(
+            &registered,
+            deferred_embed_pending,
+            chunk_count,
+        )
+        .await;
+    }
 }

@@ -1012,7 +1012,10 @@ mod tests {
         assert_eq!(high_water_target_mb(u64::MAX, 100), u64::MAX / 100);
     }
 
+    // #7665: the only writer of these process-global cells that was not
+    // serialized, so it could land between another test's two reads of them.
     #[test]
+    #[serial_test::serial]
     fn test_runtime_set_limit() {
         // Why: regression coverage for the AtomicU64 migration — the runtime
         // setters must take effect immediately on the next read, with no

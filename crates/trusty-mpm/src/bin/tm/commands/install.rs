@@ -6,8 +6,7 @@
 //! prompt; that is per-project and written at launch.)
 //! What: `install`, `install_claude_hooks` / `install_claude_hooks_at`,
 //! `mpm_hook_additions`, `install_to`, `install_one`, `deploy_report_lines`,
-//! `reset_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
-//! `write_project_hooks_for_dir`.
+//! `reset_report_lines`, `skill_report_lines`, `write_project_hooks_for_dir`.
 //! Test: `install_writes_all_artifacts`,
 //! `overwrite_artifact_refreshes_modified_file_without_force`,
 //! `seed_once_artifact_is_not_clobbered_without_force`,
@@ -367,22 +366,6 @@ fn install_claude_hooks_at(
             Err(e)
         }
     }
-}
-
-/// Strip trusty-mpm global hook entries from all discovered Claude settings files.
-///
-/// Why: `tm install` previously wrote hooks into every discovered global
-/// settings file. After switching to project-scoped hooks, these global
-/// entries must be cleaned up so hooks no longer fire in unrelated projects
-/// (mirrors `remove_global_trusty_memory_hooks` in trusty-memory). Non-fatal
-/// per-file errors are swallowed so one bad file does not abort cleanup.
-/// What: delegates to
-/// [`trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks`].
-/// Returns the count of files modified.
-/// Test: see `hooks.rs` tests for the underlying logic; this is a thin
-/// re-export.
-pub(crate) fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
-    trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks()
 }
 
 /// Write project-scoped MPM hooks into `<project_dir>/.claude/settings.json`.

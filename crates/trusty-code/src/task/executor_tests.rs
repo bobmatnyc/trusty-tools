@@ -1717,3 +1717,100 @@ async fn no_delegate_pm_prompt_names_its_gated_tools() {
         );
     }
 }
+
+/// A single `todo_write` tool call (#8235).
+fn todo_write_tool_call_response(call_id: &str, todos: Value) -> Value {
+    json!({
+        "id": "mock-todo-write",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "todo_write",
+                        "arguments": json!({"todos": todos}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    })
+}
+
+/// #8235 CLOSURE TEST: the daemon-session agent holds `todo_write` with a real
+/// advertised schema, and its call lands in `session.get_agents`'s `todos`.
+///
+/// Why: #4602's failure was a tool named in a prompt with no registered
+/// schema. This drives the OTHER direction through the real entry point
+/// (`spawn_task_run`, what `task.run` calls): the schema the model receives
+/// must carry `todo_write`, and calling it must change the roster the TUI
+/// reads. A registration that existed only in a unit test — or a schema that
+/// was never advertised — passes neither assertion.
+/// What: scripts one `todo_write` call then a natural stop; asserts (a)
+/// `todo_write` is among the advertised tool names, (b) the call emitted a
+/// `ToolStarted`, and (c) the roster row for this session's PM carries the
+/// three steps with their statuses. FAILS before #8235: the tool is not
+/// registered, so the call comes back `UnknownTool` and `todos` stays `[]`.
+/// Test: this test.
+#[tokio::test]
+async fn todo_write_is_registered_and_reaches_the_roster() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(ScriptedLlm::from_json(&[
+        todo_write_tool_call_response(
+            "call_1",
+            json!([
+                {"content": "add the --json flag", "status": "completed"},
+                {"content": "add a test", "status": "in_progress"},
+                {"content": "add a changelog line", "status": "pending"}
+            ]),
+        ),
+        stop_response("pm: planned the work"),
+    ]));
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
+    let p = params(&agents, &project, &session.id);
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    // (a) the model was actually offered the tool.
+    let advertised = mock.first_tool_names();
+    assert!(
+        advertised.contains(&"todo_write".to_string()),
+        "#8235: todo_write must be advertised to the session agent; got {advertised:?}"
+    );
+
+    // (b) the call ran rather than failing as an unknown tool.
+    let errors: Vec<String> = registry
+        .replay(&session.id)
+        .expect("session must exist")
+        .iter()
+        .filter_map(|e| match &e.event {
+            crate::events::Event::ToolFinished {
+                tool,
+                success,
+                result_preview,
+                ..
+            } if tool == "todo_write" && !success => Some(result_preview.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(errors.is_empty(), "todo_write call failed: {errors:?}");
+
+    // (c) the checklist reached the read path the TUI polls.
+    let roster = registry.get_agents(&session.id).expect("roster");
+    let row = roster
+        .iter()
+        .find(|a| a.agent_id == format!("pm-{}", session.id))
+        .unwrap_or_else(|| panic!("the PM's roster row must exist: {roster:?}"));
+    assert_eq!(row.todos.len(), 3, "got {:?}", row.todos);
+    assert_eq!(row.todos[1].content, "add a test");
+    assert_eq!(row.todos[1].status, crate::events::TodoStatus::InProgress);
+}

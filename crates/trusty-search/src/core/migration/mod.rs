@@ -337,9 +337,11 @@ impl Default for MigrationRegistry {
 /// index, spawns a task that takes the SHARED side of that index's teardown lock
 /// FIRST and holds it for the whole migration, so a concurrent delete waits or
 /// refuses. A failure is logged and leaves the index at its current schema
-/// version; the daemon keeps serving.
+/// version; the daemon keeps serving. A success is followed by
+/// `service::vector_gap::reconcile_semantic_vector_gap` (#8726).
 ///
-/// Test: `service::server::tests_3049::a_delete_cannot_destroy_an_index_mid_migration`.
+/// Test: `service::server::tests_3049::a_delete_cannot_destroy_an_index_mid_migration`,
+/// `m005_vector_gap_is_not_ready_and_is_backfilled`.
 pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
     if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() == Ok("1") {
         return;
@@ -351,11 +353,17 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
         };
         let reg = std::sync::Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(e) = run_migrations_exclusive(&handle, &reg).await {
-                tracing::warn!(
+            match run_migrations_exclusive(&handle, &reg).await {
+                // #8726: a migration can leave chunks with no vector — M005
+                // hands a stored vector only to text it already held — while
+                // warm boot has already published `semantic: ready`.
+                Ok(()) => {
+                    crate::service::vector_gap::reconcile_semantic_vector_gap(&handle).await;
+                }
+                Err(e) => tracing::warn!(
                     index_id = %handle.id,
                     "schema migration failed (index kept at current schema): {e:#}"
-                );
+                ),
             }
         });
     }

@@ -1158,6 +1158,12 @@ build_accel_mode_line "$BUILD_ACCEL_SCCACHE"
 # hypothetical. `env -u` neutralises it for this subprocess only and leaves the
 # caller's environment alone.
 #
+# CARGO_BUILD_TARGET_DIR is the same setting under its config-key name
+# (`build.target-dir`) and moves the directory identically, so it is unset too.
+# A `build.target-dir` in a .cargo/config.toml above the checkout cannot be
+# unset from here; it relocates the JSON the same way (see
+# docs/reference/semver-gate.md, "What it does not compare: types").
+#
 # `env -u`, NOT `CARGO_TARGET_DIR=`. An empty value is not "use the default" to
 # cargo — it is a hard error:
 #     error: the target directory is set to an empty string in the
@@ -1165,12 +1171,13 @@ build_accel_mode_line "$BUILD_ACCEL_SCCACHE"
 # (verified against `cargo metadata`, exit 101). Setting it empty would turn an
 # ambient variable into a failed gate.
 #
-# The vector always carries `env -u CARGO_TARGET_DIR SKIP_UI_BUILD=1`, so it is
+# The vector always carries `env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR
+# SKIP_UI_BUILD=1`, so it is
 # never empty and `"${envv[@]}"` is safe under `set -u` on bash 3.2.
 # ---------------------------------------------------------------------------
 semver_checks_run() {
   local -a envv
-  envv=(env -u CARGO_TARGET_DIR SKIP_UI_BUILD=1)
+  envv=(env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR SKIP_UI_BUILD=1)
   if [[ -n "$BUILD_ACCEL_SCCACHE" ]]; then
     envv+=("RUSTC_WRAPPER=${BUILD_ACCEL_SCCACHE}")
   fi

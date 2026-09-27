@@ -23,7 +23,10 @@
 use std::process::{Command, Output};
 
 use tracing::{debug, trace, warn};
-use trusty_common::tmux::{TmuxCommand, managed_session_commands, tmux_argv};
+use trusty_common::tmux::{
+    TmuxCommand, exact_pane_target, exact_session_target, exact_window_target,
+    managed_session_commands, tmux_argv,
+};
 
 use super::error::{Result, TmuxError};
 use super::session::{TmuxPane, TmuxSession};
@@ -87,6 +90,15 @@ impl TmuxOrchestrator {
         match version {
             Ok(o) if o.status.success() => Ok(path),
             _ => Err(TmuxError::NotFound),
+        }
+    }
+
+    /// An orchestrator bound to `tmux_path` — tests point it at a private
+    /// `-L` server shim (#8443).
+    #[cfg(test)]
+    pub(crate) fn with_tmux_path(tmux_path: impl Into<String>) -> Self {
+        Self {
+            tmux_path: tmux_path.into(),
         }
     }
 
@@ -186,7 +198,7 @@ impl TmuxOrchestrator {
             return Err(TmuxError::SessionNotFound(name.to_string()));
         }
 
-        self.run_tmux_checked(&["kill-session", "-t", name])?;
+        self.run_tmux_checked(&["kill-session", "-t", &exact_session_target(name)])?;
         Ok(())
     }
 
@@ -257,7 +269,7 @@ impl TmuxOrchestrator {
 
     /// Check if a session exists.
     pub fn session_exists(&self, name: &str) -> bool {
-        let output = self.run_tmux(&["has-session", "-t", name]);
+        let output = self.run_tmux(&["has-session", "-t", &exact_session_target(name)]);
         matches!(output, Ok(o) if o.status.success())
     }
 
@@ -266,13 +278,13 @@ impl TmuxOrchestrator {
         if !self.session_exists(old) {
             return Err(TmuxError::SessionNotFound(old.to_string()));
         }
-        self.run_tmux_checked(&["rename-session", "-t", old, new])?;
+        self.run_tmux_checked(&["rename-session", "-t", &exact_session_target(old), new])?;
         Ok(())
     }
 
     /// Get the current working directory of a session's active pane.
     ///
-    /// Uses `tmux display-message -p -t <session> '#{pane_current_path}'`.
+    /// Uses `tmux display-message -p -t =<session>: '#{pane_current_path}'`.
     pub fn get_session_path(&self, session: &str) -> Result<String> {
         if !self.session_exists(session) {
             return Err(TmuxError::SessionNotFound(session.to_string()));
@@ -281,7 +293,7 @@ impl TmuxOrchestrator {
             "display-message",
             "-p",
             "-t",
-            session,
+            &exact_window_target(session),
             "#{pane_current_path}",
         ])?;
         Ok(out.trim().to_string())
@@ -298,7 +310,7 @@ impl TmuxOrchestrator {
         }
 
         // Split the window to create a new pane.
-        self.run_tmux_checked(&["split-window", "-t", session])?;
+        self.run_tmux_checked(&["split-window", "-t", &exact_window_target(session)])?;
 
         // Newly created pane is the active one.
         let panes = self.list_panes(session)?;
@@ -317,7 +329,7 @@ impl TmuxOrchestrator {
         let output = self.run_tmux_checked(&[
             "list-panes",
             "-t",
-            session,
+            &exact_window_target(session),
             "-F",
             "#{pane_id}:#{pane_index}:#{pane_active}:#{pane_width}:#{pane_height}",
         ])?;
@@ -362,10 +374,11 @@ impl TmuxOrchestrator {
             }
         }
 
-        let target = match pane {
-            Some(p) => format!("{}:{}", session, p),
-            None => session.to_string(),
-        };
+        // #8443: `%N` stays bare, else `=<session>:<pane>` / `=<session>:`.
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         let n = lines.unwrap_or(50);
         let lines_arg = format!("-{}", n);
@@ -382,10 +395,10 @@ impl TmuxOrchestrator {
             return Err(TmuxError::SessionNotFound(session.to_string()));
         }
 
-        let target = match pane {
-            Some(p) => format!("{}:{}", session, p),
-            None => session.to_string(),
-        };
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         self.run_tmux_checked(&["send-keys", "-t", &target, keys])?;
         Ok(())
@@ -405,10 +418,10 @@ impl TmuxOrchestrator {
             return Err(TmuxError::SessionNotFound(session.to_string()));
         }
 
-        let target = match pane {
-            Some(p) => format!("{}:{}", session, p),
-            None => session.to_string(),
-        };
+        let target = pane.map_or_else(
+            || exact_window_target(session),
+            |p| exact_pane_target(session, p),
+        );
 
         // First: send text literally (no key-name interpretation).
         self.run_tmux_checked(&["send-keys", "-t", &target, "-l", text])?;

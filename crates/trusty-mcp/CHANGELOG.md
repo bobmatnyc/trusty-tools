@@ -9,6 +9,22 @@ This crate has not cut a release yet — everything written so far is pending in
 
 ---
 
+## [0.2.0] — 2026-09-23
+
+### Added
+
+- `DaemonBridgeJsonRpc::with_local_handler` answers chosen MCP methods in the bridge process instead of forwarding them, so a daemon that is down at handshake no longer makes an MCP client mark the server failed for the whole session (#8351).
+- `DaemonBridgeJsonRpc::with_socket_resolver` re-resolves the daemon's socket for every forwarded request, so a bridge that resolved a stale or wrong path heals on the next call rather than staying broken for the life of the process. A resolver that fails is reported as an error carrying the request's id, never downgraded to the configured path (#8351).
+- `UdsBridgeConfig::with_bridge_version` names the consumer's build in transport-error text, so the next report of an unreachable daemon is attributable to a binary (#8351).
+
+### Fixed
+
+- The stdio bridge's first forwarded request dials under the longer startup retry bound, so a bridge launched before its daemon has bound the socket reaches it once the daemon comes up instead of failing for the whole session. Later requests keep the fast per-request bound (#8267).
+
+### Changed
+
+- The unreachable-daemon error names the bridge's build and says the next request is dialled fresh, so an operator can tell a transient outage from a wedged bridge and can attribute the report to a binary (#8351).
+
 ## [0.1.5] — 2026-09-13
 
 ### Added

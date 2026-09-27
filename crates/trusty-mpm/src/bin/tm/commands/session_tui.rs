@@ -51,6 +51,7 @@
 pub(crate) mod layout;
 pub(crate) mod new_session;
 pub(crate) mod new_session_entry;
+pub(crate) mod new_session_name;
 pub(crate) mod new_session_order;
 pub(crate) mod render;
 pub(crate) mod state;
@@ -75,9 +76,10 @@ use state::{Action, Input, Severity, TuiState};
 /// while browsing and a literal `d` while typing a name, and only
 /// [`TuiState::apply`] knows which mode is open.
 /// What: `None` for a key with no meaning here (a release event, a function
-/// key, a Ctrl chord other than C/D), so the caller can skip the redraw.
-/// Test: `input_maps_ctrl_c_to_cancel`, `input_ignores_key_release`,
-/// `input_passes_characters_through_unresolved`.
+/// key, a Ctrl chord other than C/D/N), so the caller can skip the redraw.
+/// #8587: Ctrl-N (either case, so Ctrl-Shift-N too) is [`Input::NameNew`].
+/// Test: `input_maps_ctrl_c_to_cancel`, `input_maps_ctrl_n_to_name_new`,
+/// `input_ignores_key_release`, `input_passes_characters_through_unresolved`.
 pub(crate) fn map_key(key: KeyEvent) -> Option<Input> {
     // Windows reports both press and release; act on press only.
     if key.kind == KeyEventKind::Release {
@@ -86,6 +88,7 @@ pub(crate) fn map_key(key: KeyEvent) -> Option<Input> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('c' | 'd') if ctrl => Some(Input::Cancel),
+        KeyCode::Char('n' | 'N') if ctrl => Some(Input::NameNew),
         KeyCode::Char(_) if ctrl => None,
         KeyCode::Char(c) => Some(Input::Char(c)),
         KeyCode::Enter => Some(Input::Enter),
@@ -132,7 +135,11 @@ pub(crate) async fn run_session_tui(
     self_tmux_name: Option<String>,
 ) -> anyhow::Result<()> {
     let mut sessions = sessions;
-    let mut state = TuiState::new(self_session_id, self_tmux_name);
+    // #8506: the same stdout TTY + `NO_COLOR` gate the static table uses.
+    let use_color = super::session_picker_render::table_use_color(
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    );
+    let mut state = TuiState::new(self_session_id, self_tmux_name).with_color(use_color);
     let mut terminal = terminal::enter()?;
     // The guard restores cooked mode and the main screen on every exit path —
     // normal return AND panic unwind — so it is the SOLE teardown.
@@ -187,14 +194,15 @@ pub(crate) async fn run_session_tui(
             // first, exactly as it does for `Open` — both end in a tmux
             // hand-off that needs the real terminal in cooked mode.
             Action::Create(request) => {
-                let label = request.label.clone();
+                // #8587: names the session when Ctrl-N named it.
+                let created = new_session_name::created_message(&request);
                 terminal::suspend(&mut terminal)?;
                 match new_session::perform(client, url, request).await {
                     // #2678: the hand-off moved the operator's client away.
                     Ok(outcome) if outcome.ends_interactive_loop() => return Ok(()),
                     Ok(_) => {
                         terminal::resume(&mut terminal)?;
-                        state.set_message(format!("new session in {label}"), Severity::Info);
+                        state.set_message(created, Severity::Info);
                     }
                     Err(e) => {
                         terminal::resume(&mut terminal)?;

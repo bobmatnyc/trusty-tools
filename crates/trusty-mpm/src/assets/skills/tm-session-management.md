@@ -2,7 +2,7 @@
 name: tm-session-management
 description: PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration
 user-invocable: true
-version: "1.0.0"
+version: "1.1.0"
 category: pm-workflow
 tags: [session, context, pause, resume, worktree, pm-recommended]
 effort: medium
@@ -118,9 +118,12 @@ This renders a unified, newest-first digest across both the native
 `.trusty-mpm/sessions/` format and the legacy `.claude-mpm/sessions/` format
 (a cutover bridge — see `core/catchup/`, issue #1762 — that will be removed
 once migration off claude-mpm is complete). After running catchup: reconcile
-against `git log --oneline -5` / `git status`, present the digest, confirm
-which session to resume from if more than one is listed, restore todo state,
-and confirm with the user before continuing work.
+against `git log --oneline -5` / `git status`, present the digest, restore todo
+state, then continue under the Autonomous Execution rule — a resume is not
+itself a reason to stop and ask (#8361). The one question a resume may ask is
+which session to resume from, and only when more than one is listed. A project
+that wants a resume to pause anyway sets that in the `AUTONOMOUS-EXECUTION`
+marker section of its root `CLAUDE.md`.
 
 Manual `/tm-session resume` does **not** advance the internal watermark used
 by auto-inject-on-session-start — only the automatic injection path does.

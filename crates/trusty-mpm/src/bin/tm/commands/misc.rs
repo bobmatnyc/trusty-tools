@@ -10,7 +10,7 @@
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
 use crate::commands::hook_rewrite::{
-    build_pretooluse_rewrite_response, rewrite_bash_command_for_compression,
+    build_pretooluse_rewrite_response, hook_cwd, rewrite_bash_command_unless_isolated,
 };
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
@@ -551,7 +551,9 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == "PreToolUse"
         && tool_name == Some("Bash")
         && let Some(cmd) = bash_command
-        && let Some(rewritten) = rewrite_bash_command_for_compression(cmd)
+        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
+        && let Some(rewritten) =
+            rewrite_bash_command_unless_isolated(cmd, hook_cwd(stdin_payload.as_ref()).as_deref())
     {
         let response = build_pretooluse_rewrite_response(&rewritten);
         println!("{response}");

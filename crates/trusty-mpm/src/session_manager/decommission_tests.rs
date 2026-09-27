@@ -155,7 +155,7 @@ fn worktrees_dirname_delegates_to_the_shared_resolver() {
 /// this assertion tested `<path>/.trusty-mpm-worktree` on a hardcoded
 /// nonexistent path, which could never fail (#6556 critic round, MEDIUM 5).
 /// Test: this test; `removal_permitted_admits_all_three_tiers` covers the tier
-/// that does admit it, and `an_unattributed_agent_store_worktree_is_never_reclaimable`
+/// that does admit it, and `worktree_7771_a_hand_made_tree_is_reclaimed`
 /// covers what still refuses to delete it.
 #[test]
 fn configured_base_can_never_claim_a_claude_agent_worktree() {
@@ -195,7 +195,11 @@ fn is_session_worktree_absent_path_is_noop() {
     // is_session_worktree: true (immediate parent is `.worktrees`)
     assert!(is_session_worktree(absent));
     // remove_session_worktree: reports Removed idempotently (path already absent)
-    let result = remove_session_worktree(absent, "test");
+    let result = remove_session_worktree(
+        absent,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         result.removed(),
         "absent path should report Removed (idempotently removed)"
@@ -220,7 +224,11 @@ fn sentinel_gates_worktree_removal_refuses_non_worktrees_dir_without_sentinel() 
         !is_session_worktree(&wt_path),
         "test invariant: parent must NOT be .worktrees for this branch"
     );
-    let result = remove_session_worktree(&wt_path, "test");
+    let result = remove_session_worktree(
+        &wt_path,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         !result.removed(),
         "remove_session_worktree must refuse a non-worktrees dir without a sentinel"
@@ -257,7 +265,11 @@ fn sentinel_present_passes_safety_gate() {
     // The sentinel check must pass (not return false early). The git call will fail
     // because this is not a git worktree, but remove_session_worktree falls back
     // to remove_dir_all. Assert the observable outcome: the directory is gone.
-    remove_session_worktree(&wt_path, "test");
+    remove_session_worktree(
+        &wt_path,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         !wt_path.exists(),
         "sentinel present: safety gate must pass and directory must be removed"

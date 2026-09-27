@@ -93,6 +93,9 @@ pub struct DaemonClient {
     pub(in crate::client::http_client) base: String,
     /// Shared connection-pooling HTTP client.
     pub(in crate::client::http_client) http: reqwest::Client,
+    /// The user home `launch_session` prepares under; `None` resolves the
+    /// process home. #8545: only a test pins it.
+    pub(in crate::client::http_client) home: Option<std::path::PathBuf>,
 }
 
 impl DaemonClient {
@@ -127,7 +130,16 @@ impl DaemonClient {
         Self {
             base: base.into(),
             http: client,
+            home: None,
         }
+    }
+
+    /// Pin the user home `launch_session` prepares under (#8545), so a test
+    /// never deploys into the operator's home.
+    #[cfg(test)]
+    pub(crate) fn with_home(mut self, home: &std::path::Path) -> Self {
+        self.home = Some(home.to_path_buf());
+        self
     }
 
     /// The base URL this client targets.

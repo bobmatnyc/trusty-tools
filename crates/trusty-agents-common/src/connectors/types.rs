@@ -135,7 +135,7 @@ pub struct SessionStatus {
 /// contract visible to the caller.
 /// What: `ShellCommand` — a fully-formed command line the caller (a human
 /// operator, or code that shells out) runs directly, e.g.
-/// `"tmux attach -t tmpm-a1b2c3"`. `EventStream` — the replayed ring-buffer
+/// `"tmux attach -t '=tmpm-a1b2c3'"`. `EventStream` — the replayed ring-buffer
 /// events plus the URL a caller GETs (as SSE) for live events.
 /// Test: `types::tests::attach_handle_variants_are_distinct`.
 #[derive(Debug, Clone, PartialEq)]
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn attach_handle_variants_are_distinct() {
-        let shell = AttachHandle::ShellCommand("tmux attach -t x".into());
+        let shell = AttachHandle::ShellCommand("tmux attach -t '=x'".into());
         let stream = AttachHandle::EventStream {
             session_id: "abc".into(),
             stream_url: "/sessions/abc/events".into(),

@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.0] — 2026-09-19
+
+Includes the changes published as 0.3.11, which was released without a
+changelog section.
+
+### Breaking
+
+- **`--http` is gone, and with it the last TCP listener this daemon could open.** It defaulted to `127.0.0.1:7890`, and it defaulted to *on* — a bare `trusty-embedderd` with no flags took the port. ADR-0032 makes `trusty-console` the only HTTP surface in the workspace, and nothing in the repo dialled this one: the sole consumer was the env-gated `TRUSTY_EMBEDDER=http://…` path in trusty-search, with no plist, install script or workflow setting it. `--stdio` (the auto-spawn transport) and `--socket` (a `0600` socket in a `0700` directory, with a peer-uid check on every accept) are the two transports now, exactly one is required, and passing `--http` is refused with a message naming ADR-0032 rather than silently ignored. `axum` and `tower-http` leave the dependency graph; the `http-server` feature is renamed `daemon` and kept as a deprecated alias ([#6289](https://github.com/bobmatnyc/trusty-tools/issues/6289))
+  - **What to do instead.** Replace `--http <addr>` with `--socket <path>` and
+    point the client at `unix:<path>`; a client that let trusty-search spawn
+    the sidecar needs no change, because that path is `--stdio`. A Cargo
+    consumer naming the `http-server` feature keeps building — it forwards to
+    `daemon` — but it is no longer in the default set, so a
+    `default-features = false` build must name `daemon` explicitly.
+
+### Fixed
+
+- **The UDS listener bound a world-readable socket**
+  ([#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)).
+  `bind_uds_listener` called `UnixListener::bind` bare, so the socket was
+  created at the process umask (`0755` under the common `022`) in a directory
+  that was not narrowed either — despite ADR-0031 and ADR-0032 both resting
+  their access-control argument on a `0600` socket. It now binds through
+  `trusty_common::uds::bind_hardened` (`0700` directory, `0600` socket before
+  the first accept), and `run_uds_accept_loop` drops any connection whose peer
+  uid is not this process's own.
+- Version bumped to 0.3.11: 0.3.10 is already published on crates.io and this
+  PR changes `src/**`, so leaving it would turn main's version-parity workflow
+  red (#4421, #3366).
+- `run_uds_accept_loop` now accepts through `trusty_common::uds::accept_sized`
+  instead of `UnixListener::accept`
+  ([#6940](https://github.com/bobmatnyc/trusty-tools/issues/6940)). Linux builds
+  the server-side AF_UNIX socket from scratch and does not copy the listener's
+  `SO_SNDBUF`/`SO_RCVBUF` onto it, so the daemon was serving its multi-KiB
+  embedding frames over a socket at `net.core.wmem_default` however
+  `bind_uds_listener` had sized the listener. `accept_sized` shipped in
+  [#6942](https://github.com/bobmatnyc/trusty-tools/pull/6942) but converted
+  only trusty-common's own call sites. Throughput only; no wire or API change.
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+
 ## [0.3.10] — 2026-07-21
 
 ### Changed

@@ -96,17 +96,21 @@ pub(super) fn append(tools: &mut Vec<Value>) {
         }),
         &["body"],
     ));
+    // #8632: update applies the flat fields too; they were silently ignored.
     tools.push(tool(
         "manage_gmail_labels",
-        "CRUD Gmail labels.",
+        "CRUD Gmail labels. update takes name, label_list_visibility, \
+         message_list_visibility and color flat, as an 'updates' object, or both: the two \
+         are merged, and a field set in both with different values is an error.",
         json!({
             "account": account_schema(),
             "action": action_enum(&["list", "create", "update", "delete"]),
-            "label_id": { "type": "string" },
-            "name": { "type": "string" },
-            "label_list_visibility": { "type": "string" },
-            "message_list_visibility": { "type": "string" },
-            "updates": { "type": "object" },
+            "label_id": { "type": "string", "description": "Label ID (required for update/delete)." },
+            "name": { "type": "string", "description": "Label name (create/update)." },
+            "label_list_visibility": { "type": "string", "description": "labelShow, labelShowIfUnread or labelHide (create/update). Maps to labelListVisibility." },
+            "message_list_visibility": { "type": "string", "description": "show or hide (create/update). Maps to messageListVisibility." },
+            "color": { "type": "object", "description": "Label color {textColor, backgroundColor} (update)." },
+            "updates": { "type": "object", "description": "Raw patch body (update). Merged with the flat fields." },
         }),
         &["action"],
     ));

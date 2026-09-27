@@ -367,7 +367,7 @@ fn cli_parses_session_decommission() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "decommission", "abc"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Decommission { id },
+            action: SessionAction::Decommission { id, .. },
         } => assert_eq!(id, "abc"),
         other => panic!("expected session decommission, got {other:?}"),
     }
@@ -1702,7 +1702,9 @@ impl Drop for LocalTestServer {
 /// `status`; returns the server (keep it alive for the test's duration) and the
 /// session's id string.
 async fn spawn_with_local_session(status: SessionStatus) -> (LocalTestServer, String) {
-    let state = DaemonState::shared();
+    // #8545: a temp root, never the real `~/.trusty-mpm`.
+    let root = crate::test_support::hermetic_temp_dir().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root(root));
     let id = SessionId::new();
     let mut session = Session::new(id, "/tmp/2304-fixture", ControlModel::Tmux, None);
     session.status = status;

@@ -19,6 +19,17 @@ tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 - Use service accounts for CI/CD and production workloads
 - Prefer Workload Identity over key files for GKE deployments
 
+### Access Tokens — Never Printed
+🔴 Never run `gcloud auth [application-default] print-access-token` or
+`print-identity-token` as its own command, not even once to check that it
+works. Its stdout is the bearer token, and tool output is transcript text
+(#8248). Consume the token inside the command that needs it —
+`curl -H "Authorization: Bearer $(gcloud auth print-access-token)" …`, or pipe
+it to `docker login --password-stdin`. To check that ADC works, discard it:
+`gcloud auth application-default print-access-token >/dev/null && echo ok`.
+Prefer a `gcloud` subcommand over a raw REST call where one exists; it needs no
+token at all. `tm hook --pm-guard` refuses the printing forms.
+
 ### Service Account Management
 ```bash
 # Create service account with least-privilege roles

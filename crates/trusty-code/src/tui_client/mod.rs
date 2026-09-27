@@ -33,5 +33,5 @@ mod splash;
 pub mod uds_rpc;
 mod workstream_subscription;
 
-pub use engine::CodeEngine;
+pub use engine::{CancelOutcome, CodeEngine};
 pub use error::EngineError;

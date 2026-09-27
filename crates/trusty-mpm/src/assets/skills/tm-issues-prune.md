@@ -24,6 +24,12 @@ Organize/Prioritize/Suggest Next operate on the *surviving* open issues
 after any prune-close pass, so stale/duplicate/obsolete noise doesn't
 pollute the ranking or the suggestions.
 
+🔴 **The staleness policy this sweep applies — the day thresholds, the
+CLOSE/SUPERSEDE/KEEP dispositions and their evidence, the exempt labels, and
+the digest-per-epic rule that replaces a question per issue — belongs to
+`tm-ticketing` and to the project's root `TICKETING.md`, which overrides it.
+Read those for the thresholds; this skill is the sweep that runs them.
+
 ## Scope: gh-first, JIRA deferred
 
 This skill operates on **GitHub Issues only**, via the `gh` CLI. JIRA is

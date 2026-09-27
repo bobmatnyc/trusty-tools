@@ -121,10 +121,10 @@ trusty-code = { path = "crates/trusty-code", version = "0.7" }
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.8" }
-trusty-common = { path = "crates/trusty-common", version = "0.51" }
+trusty-common = { path = "crates/trusty-common", version = "0.52.3" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
-trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.2" }
+trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -136,7 +136,12 @@ trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.2" }
 #      (`http-server`, `bundled-ort`) unless this entry states the override
 #      too. No workspace member depends on `trusty-embedderd = { workspace =
 #      true }` today, so this has no effect on current feature resolution.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.11", default-features = false }
+# 0.4.0 (#7062, the 1.6.3 cut): the floor moves off `0.3.x` because
+# `preflight-publish.sh` CHECK 5 refused 0.3.12 against 0.3.11 on five counts —
+# `--http`'s removal took `AppState`, `embed_handler`, `health_handler` and
+# `Args.http_addr` with it, and `http-server` left the default feature set.
+# Under Cargo's 0.x rule a break needs the MINOR position.
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.4", default-features = false }
 # Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
 # per-palace subprocess never ran in any shipped configuration, and its index is
 # now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
@@ -173,14 +178,14 @@ trusty-review = { path = "crates/trusty-review", version = "0.36", default-featu
 # `^0.9.0` excluded the crate's own 0.11.0 — in-tree the path override hid it, so
 # only a crates.io consumer (or `cargo publish`) resolved wrong. Guarded now by
 # scripts/check_workspace_dep_versions.sh.
-trusty-console = { path = "crates/trusty-console", version = "0.11" }
+trusty-console = { path = "crates/trusty-console", version = "0.12" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
 # fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
 # `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.13" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.14" }
 # trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
 # (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
 # rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11
@@ -399,6 +404,9 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Testing
 tempfile = "3"
+# #8545: a pre-`main` constructor, so a test binary arms a process-wide guard
+# before any test thread exists. Already in the lockfile via tauri-utils.
+ctor = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads. Used by bug-report token tests.

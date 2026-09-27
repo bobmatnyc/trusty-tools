@@ -49,33 +49,58 @@
 // sibling rules ask, replacing the per-guard lexing and redirect/program-text
 // splitting that disagreed with the shell four different ways.
 mod bash_tokens;
+// #8596, #8248: a credential CLI whose printed value would reach tool output.
+mod credential_print;
 mod destructive_delete;
 // #7497: the disk-usage half of the worktree-add gate, beside the temp-root
 // half it shares a target resolver with.
 mod disk_usage;
+// #8572: an agent's branch switch in a dirty main checkout.
+mod head_switch;
 mod heredoc;
+// #8161: HEAD moves into a linked worktree a live agent stands in.
+mod linked_worktree_head_move;
 mod main_checkout;
 mod path_tokens;
 mod persistence;
+// #7648: an unscoped environment dump inside a Kubernetes pod.
+mod pod_env_dump;
+// #8439: a read-only dispatch runs only allowlisted command shapes.
+mod read_only_allow;
+// #8567: the `gh` read verbs a read-only dispatch may run.
+mod read_only_gh;
+mod read_only_git;
+mod read_only_lex;
+mod read_only_programs;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
 mod worktree_remove;
+mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
+// #8730: the files a command writes — `tee`, substitution and subshell bodies.
+mod write_targets;
 
+pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
+pub(crate) use head_switch::evaluate_main_checkout_head_switch;
+pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
 };
 pub(crate) use persistence::command_is_persistence_only;
+pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
+pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
+pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
+// #8723: and which tokens are prose a `printf`/`echo` writes into a file.
 pub(crate) use bash_tokens::{
-    TokenizeError, has_regex_quantifier, program_text_indices, tokenize,
+    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
     without_glob_metacharacters,
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
@@ -106,7 +131,8 @@ pub(crate) use shell_lex::git_argv_at_subcommand;
 pub(crate) use worktree_remove::{
     DispatchIdentity, WorktreeRemoveVerdict, evaluate_worktree_remove_command,
 };
-pub(crate) use worktree_remove_rechecks::evaluate_removal_rechecks;
+// #7889: the re-checks are reached only through their deadline.
+pub(crate) use worktree_remove_deadline::{print_deny_then_audit, removal_recheck_deny};
 
 use std::path::{Path, PathBuf};
 
@@ -374,6 +400,12 @@ fn split_shell_segments_raw(command: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
+        // #8730: the `|` of a `>|`/`>>|` clobber redirect is part of the
+        // operator, not a pipe — as a `>&` fd-dup is not a background `&`.
+        if bash_tokens::is_clobber_bar(bytes, i) {
+            i += 1;
+            continue;
+        }
         let two = command.get(i..i + 2);
         if two == Some("&&") || two == Some("||") {
             segments.push(&command[start..i]);
@@ -447,8 +479,9 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
             // two-token `effective_tool_name` matcher below cannot see past the
             // global flags. On unbalanced quotes `git_subcommand` yields `None`
             // and we simply don't treat it as `git apply` (matching the prior
-            // allow-on-ambiguous-git-command behaviour).
-            "git" if shell_lex::git_subcommand(trimmed).as_deref() == Some("apply") => {
+            // allow-on-ambiguous-git-command behaviour). #8439: an unknown
+            // global option makes every later token a candidate `apply`.
+            "git" if shell_lex::git_may_run(trimmed, "apply") => {
                 return Some(SHELL_EDIT_REASON);
             }
             // #7399: `git diff --output=<file>`, `git format-patch -o <dir>`,
@@ -597,15 +630,15 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
 /// (which name it directly in `tool_input.file_path`), a Bash command only has
 /// its target embedded in the command text itself.
 /// What: scans each composition segment ([`split_shell_segments`]) for a real
-/// file-write redirect ([`redirection_target`]), for the file a git write
-/// option names ([`shell_lex::git_file_write_target`], #7399), or, for a
+/// file-write redirect, a `tee` operand, or the file a git write option names
+/// ([`write_targets::segment_write_targets`], #7399, #8730), or, for a
 /// sed/awk-family/`patch`/`git apply` segment, the command's trailing
 /// non-flag token ([`trailing_file_token`]) — the conventional position of the
 /// target file for those verbs. Returns the first match found; `None` when no
 /// segment yields a plausible target (the caller then falls back to the
 /// generic delegation hint). The sed/awk-family half is a best-effort HINT
 /// only — its trailing token may name a file the command READS. The positively
-/// identified half is [`shell_write_target`], which the write boundary decides
+/// identified half is [`shell_write_targets`], which the write boundary decides
 /// on.
 /// Test: `extract_shell_edit_target_*`.
 pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
@@ -614,15 +647,18 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(target) = segment_write_target(trimmed) {
+        // #8730: the boundary's per-segment reader, so a `tee` operand routes too.
+        if let Some(target) = write_targets::segment_write_targets(trimmed)
+            .ok()
+            .and_then(|targets| targets.into_iter().next())
+        {
             return Some(target);
         }
         if let Some(program) = first_command_token(trimmed) {
             let program = program.as_str();
             let is_sed_awk_family =
                 matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
-            let is_git_apply =
-                program == "git" && shell_lex::git_subcommand(trimmed).as_deref() == Some("apply");
+            let is_git_apply = program == "git" && shell_lex::git_may_run(trimmed, "apply");
             if (is_sed_awk_family || is_git_apply)
                 && let Some(target) = trailing_file_token(trimmed)
             {
@@ -633,66 +669,11 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
     None
 }
 
-/// The file a Bash command would WRITE, when one is positively identified.
-///
-/// Why (#7399): the main-checkout write boundary (ADR-0044, enforced by
-/// ADR-0048) asks WHERE a write lands, and until now it could only ask that of
-/// the Edit/Write tools — a Bash write reached `SHELL_EDIT_REASON`, which asks
-/// WHO is writing and is budget-tiered, so `git diff --output=<file>` and
-/// `echo … > <file>` both landed a source file in a shared main checkout
-/// within budget. This is the half of [`extract_shell_edit_target`] the
-/// boundary can decide on: a redirect and a git write option each NAME the file
-/// git or the shell will create, with no reading arm. The sed/awk trailing
-/// token is deliberately excluded — `sed -n '1,5p' <file>` puts a file it only
-/// READS in that same position, so deciding a deny on it would refuse reads.
-/// What: the first [`segment_write_target`] across the command's composition
-/// segments ([`split_shell_segments`]). `None` when no segment names a write —
-/// which includes every command the guard cannot lex, so this can never turn an
-/// existing allow into a deny on a parse failure.
-/// Test: `shell_write_target_reads_redirects_and_git_output`,
-/// `shell_write_target_ignores_reads`, and end to end in
-/// `pm_guard_denies_a_git_output_write_in_a_main_checkout`.
-pub(crate) fn shell_write_target(command: &str) -> Option<String> {
-    split_shell_segments(command)
-        .into_iter()
-        .find_map(|segment| segment_write_target(segment.trim()))
-}
-
-/// The file ONE command segment would write, if its text names one.
-///
-/// Why: [`extract_shell_edit_target`] and [`shell_write_target`] ask the same
-/// question of a segment and must never drift apart — one rule about what a
-/// segment writes, read by the routing hint and by the write boundary alike.
-/// What: the redirect target ([`redirection_target`]) or, on a `git` segment,
-/// the file a git write option names ([`shell_lex::git_file_write_target`]).
-/// A git write that names no readable path (a valueless `--output`, a bare
-/// `format-patch`) yields an empty string from that function and is skipped
-/// here: the write is real and `classify_bash_segment` still denies it, but
-/// there is no path for the boundary to place.
-/// Test: `shell_write_target_reads_redirects_and_git_output`.
-fn segment_write_target(segment: &str) -> Option<String> {
-    if segment.is_empty() {
-        return None;
-    }
-    if let Some(target) = redirection_target(segment) {
-        return Some(target);
-    }
-    // #7399: a git write option names its file in the option, not in the
-    // trailing position the sed/awk verbs use.
-    if first_command_token(segment).as_deref() == Some("git")
-        && let Some(target) = shell_lex::git_file_write_target(segment)
-        && !target.is_empty()
-    {
-        return Some(target);
-    }
-    None
-}
-
-/// The file a real write redirect in `command` names, if any.
+/// Every file a real write redirect in `command` names, in order.
 ///
 /// Why (#7399 review, HIGH): this scan used to exist twice — once returning a
 /// bool for [`has_file_write_redirection`] and once returning the token for
-/// [`redirection_target`] — and only the bool copy learned #5356's heredoc
+/// the write boundary — and only the bool copy learned #5356's heredoc
 /// skip. Once the write boundary began deciding a hard, budget-exempt deny on
 /// the token copy, that drift meant a `>` in here-document PROSE denied a
 /// command that writes nothing. One scanner, two thin callers, so the two
@@ -700,17 +681,24 @@ fn segment_write_target(segment: &str) -> Option<String> {
 /// What: scans for `>` outside quotes ([`QuoteScan`]) and outside
 /// here-document bodies ([`heredoc::HeredocBodies`]); skips a second `>`
 /// (append) and any spaces, treats a following `&` as an fd-duplication
-/// (`2>&1`, `>&2`) and `/dev/null` as an output discard, and returns the
-/// target token of the first real file-write redirect. `Some("")` when the
-/// redirect is real but names no token (`cmd >|`, a trailing `>`): still a
-/// write for the bool caller, no path for the boundary.
+/// (`2>&1`, `>&2`) only when [`bash_tokens::is_descriptor_word`] accepts the
+/// word after it (#8730: `>&out.rs` opens `out.rs`), treats `/dev/null` as an
+/// output discard, and returns the
+/// target token of every real file-write redirect — bash opens each one, so
+/// `> notes.md > src/lib.rs` writes both (#8730). An empty entry when the
+/// redirect is real but names no token (a trailing `>` or `>|`): still a
+/// write for the bool caller, no path for the boundary. The target word ends
+/// at an unmatched `)` — the close of the subshell or substitution it sits in
+/// (#8730) — while a `$(…)` inside the word stays part of it.
 /// Test: `has_file_write_redirection_*`,
 /// `extract_shell_edit_target_from_redirection`,
-/// `shell_write_target_ignores_a_heredoc_body_redirect`.
-fn scan_file_write_redirect(command: &str) -> Option<String> {
+/// `shell_write_targets_ignores_a_heredoc_body_redirect`,
+/// `write_targets_reads_every_redirect_of_a_segment`.
+fn scan_file_write_redirects(command: &str) -> Vec<String> {
     let scan = QuoteScan::new(command);
     let bodies = heredoc::HeredocBodies::scan(command);
     let bytes = command.as_bytes();
+    let mut targets = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         if scan.balanced && !scan.is_unquoted(i) {
@@ -728,13 +716,25 @@ fn scan_file_write_redirect(command: &str) -> Option<String> {
             if j < bytes.len() && bytes[j] == b'>' {
                 j += 1;
             }
+            // #8730: `>|` (bash, zsh) and zsh's `>>|`, `>!`, `>>!` force a
+            // clobber; the `|`/`!` belongs to the operator, the file follows.
+            if j < bytes.len() && matches!(bytes[j], b'|' | b'!') {
+                j += 1;
+            }
             while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
                 j += 1;
             }
-            // `>&fd` / `2>&1` duplicate a descriptor — not a file write.
+            // `>&fd` / `2>&1` duplicate a descriptor — not a file write. #8730:
+            // but `>&word` opens `word` (bash), as zsh's `>&|`/`>&!` always do,
+            // so the word after the `&` decides, via the argv classifier's rule.
+            let mut dup = false;
             if j < bytes.len() && bytes[j] == b'&' {
-                i = j + 1;
-                continue;
+                j += 1;
+                dup = !matches!(bytes.get(j), Some(b'|' | b'!'));
+                j += usize::from(!dup);
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
             }
             // `/dev/null` is an output-discard sink, not a file write
             // (`which cargo 2>/dev/null`) — allow it and keep scanning.
@@ -744,35 +744,37 @@ fn scan_file_write_redirect(command: &str) -> Option<String> {
             // followed by a newline read as `/dev/null\n…`, missing the
             // discard and denying a benign command.
             let start = j;
-            while j < bytes.len()
-                && !matches!(
-                    bytes[j],
+            // #8730: `(echo x > src/lib.rs)` read its target as `src/lib.rs)`,
+            // which no extension check classifies as source.
+            let mut paren = 0usize;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'(' => paren += 1,
+                    b')' if paren == 0 => break,
+                    b')' => paren -= 1,
                     b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'<' | b'|' | b';' | b'&'
-                )
-            {
+                        if paren == 0 =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
                 j += 1;
             }
             let target = &command[start..j];
-            if target == "/dev/null" {
+            if dup && bash_tokens::is_descriptor_word(target) {
                 i = j;
                 continue;
             }
-            return Some(target.to_string());
+            if target != "/dev/null" {
+                targets.push(target.to_string());
+            }
+            i = j;
+            continue;
         }
         i += 1;
     }
-    None
-}
-
-/// The real file-write redirect target in `command`, if any (owned-string
-/// sibling of [`has_file_write_redirection`], for routing-hint extraction and
-/// for the write boundary rather than a pure yes/no classification).
-///
-/// What: [`scan_file_write_redirect`], with the no-token case dropped — a
-/// redirect that names nothing gives a caller asking "which file" no answer.
-/// Test: `extract_shell_edit_target_from_redirection`.
-fn redirection_target(command: &str) -> Option<String> {
-    scan_file_write_redirect(command).filter(|target| !target.is_empty())
+    targets
 }
 
 /// The trailing non-flag whitespace-separated token of `command`.
@@ -799,8 +801,8 @@ fn trailing_file_token(command: &str) -> Option<String> {
 /// redirection. But blanket-denying every `>` would false-positive on the very
 /// common `… 2>&1` / `>&2` fd redirects, which are not file writes, so those
 /// must be distinguished.
-/// What: `true` when [`scan_file_write_redirect`] — the one scanner this and
-/// [`redirection_target`] share since #7399 — finds a redirect. It skips a
+/// What: `true` when [`scan_file_write_redirects`] — the one scanner this and
+/// the write boundary share since #7399 — finds a redirect. It skips a
 /// second `>` (append) and any spaces, treats it as an fd-duplication (allow,
 /// keep scanning) only when the next non-space byte is `&`, then reads the
 /// redirect *target* token and treats `/dev/null` as benign (output discard,
@@ -829,7 +831,7 @@ fn trailing_file_token(command: &str) -> Option<String> {
 /// `has_file_write_redirection_detects_redirect_on_a_heredoc_operator_line`,
 /// `has_file_write_redirection_false_for_plain_command`.
 pub(crate) fn has_file_write_redirection(command: &str) -> bool {
-    scan_file_write_redirect(command).is_some()
+    !scan_file_write_redirects(command).is_empty()
 }
 
 /// Deny reason for `git worktree add` targeting a denylisted temp root.
@@ -1027,7 +1029,9 @@ fn worktree_add_targets_in(command: &str, cwd: &Path, env: &PathEnv) -> Vec<Path
             }
             continue;
         }
-        if shell_lex::git_subcommand(trimmed).as_deref() != Some("worktree") {
+        // #8439: `git_may_run`, not `git_subcommand`, so an unknown global
+        // option cannot hide the `worktree add` behind it.
+        if !shell_lex::git_may_run(trimmed, "worktree") {
             continue;
         }
         let Some(argv) = shlex::split(trimmed) else {

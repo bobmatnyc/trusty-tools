@@ -490,7 +490,11 @@ async fn execute_connect_errors_when_daemon_unreachable() {
 async fn execute_launch_errors_when_daemon_unreachable() {
     // `/launch` registers via `POST /sessions`; with no daemon the failure
     // surfaces as a renderable `Error`.
-    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    // #8545: the launch prepares under a temp home, never the operator's.
+    let home = crate::test_support::hermetic_temp_dir();
+    let executor = CommandExecutor {
+        client: DaemonClient::new("http://127.0.0.1:0").with_home(home.path()),
+    };
     match executor
         .execute(TrustyCommand::Launch {
             project: "/tmp/no-such-project".into(),
@@ -770,6 +774,18 @@ async fn decommission_managed_id_prunes_stale_worktree_bookkeeping() {
     std::fs::write(base.join("README.md"), "seed\n").unwrap();
     git(&base, &["add", "README.md"]);
     git(&base, &["commit", "--quiet", "-m", "seed"]);
+    // #8663: pushed, so the owned workspace holds no unpushed commit.
+    git(
+        &workspace_root,
+        &["init", "--quiet", "--bare", "tm-5913-remote.git"],
+    );
+    let remote = workspace_root.join("tm-5913-remote.git");
+    git(
+        &base,
+        &["remote", "add", "origin", &remote.to_string_lossy()],
+    );
+    git(&base, &["push", "--quiet", "origin", "HEAD"]);
+    git(&base, &["fetch", "--quiet", "origin"]);
 
     let id = ManagedSessionId::new();
     let leaf = format!("tm-5913-{id}");

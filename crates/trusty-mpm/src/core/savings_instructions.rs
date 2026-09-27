@@ -18,7 +18,7 @@
 //! session launch when, and only when, the delivered prompt is smaller.
 //!
 //! **What counts as "folded".** The source set is every instruction body the
-//! composer READ for this session: the nine bundled section sources, each
+//! composer READ for this session: the ten bundled section sources, each
 //! named-section override body it read from the project's `CLAUDE.md`, and the
 //! UNDEDUPED agent roster. Each is a candidate; only part of each reaches the
 //! output, so the delta is what the composer folded away.
@@ -369,7 +369,7 @@ fn session_and_root(dest: &Path) -> Option<(String, std::path::PathBuf)> {
 /// Why: see the module header — this is the "before" half of the fold, and it
 /// has to include the override bodies as well as the bundled sections, because
 /// an override is a source the composer read and (partly) discarded.
-/// What: the nine bundled section sources, every accepted named-section
+/// What: the ten bundled section sources, every accepted named-section
 /// override body found in the project's `CLAUDE.md`, and `roster_source_bytes`
 /// — the UNDEDUPED roster render (#7616). Rejected override blocks are excluded:
 /// the composer did not fold them, it declined them.

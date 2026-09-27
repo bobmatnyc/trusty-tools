@@ -21,6 +21,9 @@ pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;
+// #8270: the daemon reopens its stderr log after a newsyslog rotation.
+#[cfg(unix)]
+pub mod log_reopen;
 pub mod mcp_descriptor;
 pub mod metrics;
 pub mod network_fs;
@@ -45,8 +48,12 @@ pub mod shutdown_flush;
 pub mod rpc;
 pub mod socket;
 pub mod stall_tracker;
+// #8438: the registry-resolved storage layout every write path resolves through.
+pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
+// #8726: demote a `ready` semantic stage short of vectors and queue its backfill.
+pub mod vector_gap;
 pub mod walker;
 pub mod warm_boot;
 // #4213 / #4721: shared "run this one test alone in a child process with the

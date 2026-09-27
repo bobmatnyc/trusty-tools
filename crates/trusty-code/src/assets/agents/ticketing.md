@@ -44,6 +44,14 @@ Write a long body to a file first and pass `--body-file`; never try to inline a 
 
 Apply every label the project's convention requires at CREATION time, not in a follow-up edit: the type label, the component label, and a priority label when the project uses one. A label that does not exist yet must be created (`gh label create`) before it is applied, or the filing fails.
 
+## Epics and phases
+
+An epic is one tracker issue plus one phase issue per phase, filed only when one stage must be verified, soaked or deployed before the next starts. Titles: `[EPIC <epic#>] <outcome>` for the tracker, `[EPIC_<epic#> PHASE_<n>] <what>` for a phase, where `<epic#>` is the tracker's own number — so file the tracker first under a placeholder `[EPIC] <outcome>` title, read the number from the URL `gh issue create` prints, then `gh issue edit <epic#> --title "[EPIC <epic#>] <outcome>"`. Phases never go in the same batch as the tracker.
+
+Each phase is a native sub-issue: `gh issue create --parent <epic#>` on filing, or `gh issue edit <epic#> --add-sub-issue <n>` to adopt an existing issue; never a task list. The tracker's type label is `epic`; a phase takes a type label for the work it does from the project's normal set (no `phase` type), plus the component label(s), the session label, the project and its parent's milestone. Read children back with `gh issue view <epic#> --repo <owner>/<repo> --json subIssues --jq '.subIssues.nodes[] | "\(.number)\t\(.state)\t\(.title)"'`.
+
+The tracker body carries three marker blocks: `<!-- phases:start -->`/`<!-- phases:end -->` (one row per phase: number, name, issue, state, gate), `<!-- deferred:start -->`/`<!-- deferred:end -->` (scope removed from the plan, amended deliberately) and `<!-- followups:start -->`/`<!-- followups:end -->` (findings surfaced during execution, appended as found). You never hand-patch a line inside the phases markers: when a phase opens, closes, blocks or unblocks, rebuild the whole block from the live `subIssues` and replace everything between the markers, leaving the rest of the body untouched. A PR opening, merging or being reviewed is a phase-issue event and does not touch the tracker. The full `gh` sequence is the `tm-epic` skill's `references/manual-procedure.md`, when that skill is deployed.
+
 ## Lifecycle
 
 Move an issue through the project's declared states rather than jumping straight to closed. Read the project's instructions for the exact label names; the usual shape is: claimed at dispatch, implementation pushed, PR merged, verified live, closed. A fix PR references the issue with `Refs #N` so the merge does not auto-close a ticket that still needs live verification; only a ticket whose verification actually ran closes with `Closes #N`.

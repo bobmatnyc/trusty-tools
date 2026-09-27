@@ -84,6 +84,20 @@ pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 /// Test: `tmux_session::tests::the_spawn_seam_takes_the_path_lock`.
 pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
 
+/// Arm `core::home_write_fence` for the lib test binary, before `main` (#8545).
+///
+/// Why: the lib target wrote `~/.claude/settings.json`, `~/.claude.json` and
+/// `~/.trusty-mpm/{sessions,usage,projects}` during `cargo test -p trusty-mpm`.
+/// The `tm` bin target arms the same fence from its own `test_support`.
+/// What: a pre-`main` constructor, so the roots are recorded before libtest
+/// starts a test thread. A test that later repoints `$HOME` to a temp dir
+/// writes there freely; only the homes seen at startup are fenced.
+/// Test: `tests::the_home_write_fence_is_armed_for_the_lib_binary`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    crate::core::home_write_fence::arm_for_this_process();
+}
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the
@@ -404,6 +418,68 @@ pub(crate) fn isolated_daemon_home(allow_production: bool) -> (TempDir, DaemonHo
     (dir, override_guard)
 }
 
+/// A fake, executable `claude` first on `PATH`, plus the guard that restores
+/// `PATH` when the test ends (#7862).
+///
+/// Why: every route that reaches `ClaudeCodeAdapter::spawn_resume` resolves the
+/// `claude` binary before it types anything into the pane, so a test driving
+/// that route on a machine with no Claude Code install stops at the adapter and
+/// observes nothing past it — green on a developer laptop, red on every CI
+/// runner. Winning the lookup outright also stops a machine that DOES have
+/// `claude` from launching the operator's real one.
+/// What: writes `#!/bin/sh` + `exit 0` at `<tempdir>/claude`, mode 0755, and
+/// prepends that directory to `PATH` — `bin_resolve::resolve_binary` consults
+/// the live `PATH` before its well-known-dirs fallback. Both the directory and
+/// the previous `PATH` live in the returned guard, so the stub survives exactly
+/// as long as the test and `Drop` restores the environment on the unwind too.
+///
+/// Callers MUST be tagged `#[serial_test::serial]`: `PATH` is process-global.
+/// Test: `daemon::managed_routes::resume_claim_tests::the_claim_is_still_held_when_the_route_types_into_the_pane`.
+#[cfg(unix)]
+pub(crate) fn fake_claude_on_path() -> FakeClaudeOnPath {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = hermetic_temp_dir();
+    let exe = dir.path().join("claude");
+    std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write the fake claude");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod the fake claude");
+    let prev = std::env::var_os("PATH");
+    let mut entries = vec![dir.path().to_path_buf()];
+    if let Some(ref p) = prev {
+        entries.extend(std::env::split_paths(p));
+    }
+    let joined = std::env::join_paths(entries).expect("join PATH");
+    // SAFETY: callers are `#[serial]`, and `Drop` restores the previous value.
+    unsafe { std::env::set_var("PATH", joined) };
+    assert!(
+        trusty_common::bin_resolve::resolve_binary("claude").is_some_and(|found| found == exe),
+        "the planted stub must WIN the lookup, else the test it guards still \
+         depends on the host's own Claude Code install"
+    );
+    FakeClaudeOnPath { _dir: dir, prev }
+}
+
+/// The live half of [`fake_claude_on_path`] — see its doc.
+#[cfg(unix)]
+pub(crate) struct FakeClaudeOnPath {
+    /// Holds the stub's directory alive for the guard's lifetime.
+    _dir: TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(unix)]
+impl Drop for FakeClaudeOnPath {
+    fn drop(&mut self) {
+        // SAFETY: as in `fake_claude_on_path`.
+        unsafe {
+            match self.prev.take() {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
 /// Make `tracing` events reachable by a thread-local capturing subscriber, for
 /// the whole test process (#4931).
 ///
@@ -451,6 +527,26 @@ pub(crate) fn enable_event_capture() {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    /// #8545: the constructor ran and fences the operator's real home. Reads
+    /// the password-database home, which no sibling test repoints.
+    #[test]
+    fn the_home_write_fence_is_armed_for_the_lib_binary() {
+        use crate::core::home_write_fence::{armed_roots, fenced_root};
+        let home = crate::core::host_state_gate::passwd_home_dir().expect("a passwd home");
+        for dest in [
+            home.join(".trusty-mpm").join("usage"),
+            home.join(".claude").join("settings.json"),
+            home.join(".claude.json"),
+        ] {
+            assert!(
+                fenced_root(&dest, armed_roots()).is_some(),
+                "{} is not fenced; armed roots: {:?}",
+                dest.display(),
+                armed_roots()
+            );
+        }
+    }
 
     /// `real_system_tmp` must ignore `$TMPDIR` even when it points somewhere
     /// that would otherwise cause litter (e.g. a project tree).

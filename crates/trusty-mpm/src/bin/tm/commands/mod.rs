@@ -41,6 +41,8 @@ pub(crate) mod doctor_builder_cap;
 pub(crate) mod doctor_daemon_row;
 // #6649: `--fix-agents`, the agent mirror of `--fix-skills`.
 pub(crate) mod doctor_fix_agents;
+// #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
+pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
@@ -73,6 +75,8 @@ pub(crate) mod install;
 pub(crate) mod install_skills;
 pub(crate) mod issue;
 pub(crate) mod launch;
+// #8545: launch/connect user-home writes, under a caller-named home.
+pub(crate) mod launch_home;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
@@ -87,6 +91,9 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
+// #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
+// own file so the dispatcher stays a translation layer and stays under cap.
+pub(crate) mod memory_verbs;
 pub(crate) mod meta;
 pub(crate) mod misc;
 // #6276: the one decision about a repository's origin remote — a local-only
@@ -108,10 +115,17 @@ pub(crate) mod pm_guard_budget;
 pub(crate) mod pm_guard_builder_cap;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
+// #8722: the denial record and audit POST every pm-guard deny makes.
+pub(crate) mod pm_guard_deny_log;
 pub(crate) mod pm_guard_dispatch;
+pub(crate) mod pm_guard_dispatch_deny;
+// #8257: `tm repair delegation --list`.
+pub(crate) mod repair_delegation_list;
 // #7172: a worktree-pinned agent's `EnterWorktree` switch, refused rather than
 // left to succeed and wedge the agent — see its module doc for why the pin it
 // names belongs to the harness and cannot be moved from here.
+// #8547: which `subagent_type` names are known, and the refusal for the rest.
+pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_response;
@@ -123,6 +137,11 @@ pub(crate) mod pm_guard_secret_read;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
+// #7557: the word-list / ref / text-payload position rules, split out of
+// `pm_guard_secret_read` when the structure check pushed it over the cap.
+pub(crate) mod pm_guard_secret_positions;
+// #8523: a pm2 dump and a credential-carrying launchd plist hold a process env.
+pub(crate) mod pm_guard_secret_env_files;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.

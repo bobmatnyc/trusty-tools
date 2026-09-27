@@ -189,6 +189,158 @@ the guard will establish every precondition itself.
      one direction available: a pull request GitHub named no `headRefOid` for, a
      HEAD git could not resolve, and any mismatch all leave the pre-#7958
      decision standing.
+
+     Amended by #7889 — landed CONTENT is landing evidence of its own, on both
+     reclaim paths. A donor branch fast-forwarded onto a sibling's head and
+     squash-merged under THAT name never acquires a pull request carrying its
+     own name, so this check's refusal is permanent for a tree that holds
+     nothing: nineteen clean worktrees were stuck that way across 2026-09-21 and
+     2026-09-22 — `fix/8351-bridge-session-recovery-critic-r1`,
+     `fix/8261-pm-guard-oracle`, `fix/8236-cache-race`, `fix/8361-context-budget`
+     among them — each holding a 10–25 GB `target-*/` directory, and each
+     byte-identical to `origin/main`. Owner ruling 2026-09-22: admit them.
+     A new `landed-content` admission runs after this check has ANSWERED with no
+     merged pull request. It refreshes `origin` under the same 3 s bound, then
+     asks whether merging HEAD into the landing base would change any file
+     (`git merge-tree --write-tree <base> HEAD`, then `git diff --name-only
+     <base> <tree>`). An empty answer grants and names the base commit; a
+     non-empty one refuses and names the first residual path. The base is
+     `origin/HEAD`, or `origin/main`/`origin/master` when the repository
+     declares none. The same predicate — one implementation, in
+     `core::worktree_landed_content` — decides gate 5 of `tm session
+     prune-worktrees --merged-prs`. The two paths do not ask it in the same
+     places. The guard never asks it once its own or a round sibling's pull
+     request has matched, and never for a detached HEAD, so on those paths it
+     is stricter than the sweep. Where they disagree, one of them refuses.
+     Making them agree would add a fetch and a `gh` call to a guard already
+     short of time. That strictness is about the landing question only. Every
+     guard grant — merged pull request, landed content, `local-only-commits`
+     or detached head — now ends with the sweep's scan for nested repositories
+     holding work and high-value gitignored files, inside the deadline, because
+     `git worktree remove --force` deletes ignored content. The guard does not
+     check commits on `session/<leaf>` that HEAD cannot reach, because
+     `git worktree remove` deletes no branch, and it does not read the sweep's
+     keep-list. On the sweep, gate 6 counts a donor branch's commits as
+     unpushed, because the squash also carried a sibling's work and no patch id
+     matches. That count lets the tree reach the admission, which judges only
+     the commits reachable from HEAD. Every other place work can live refuses
+     before anything is compared: an uncommitted file, a dirty nested
+     repository, and a commit on `session/<leaf>` or `<leaf>` that HEAD cannot
+     reach, which the removal's `git branch -D` would orphan. The admission can
+     take up to 40 s on the sweep, so a grant re-reads that dirt, and HEAD,
+     before it is returned. The residue diff runs with `--ignore-submodules=none`,
+     so a `diff.ignoreSubmodules` or `submodule.<name>.ignore` setting cannot
+     hide a gitlink bump. The pre-delete re-check asks the admission again
+     rather than demanding a merged pull request.
+
+     When `landed-content` does not admit, a second route is asked:
+     `merged-pr-ancestry` admits when HEAD is the head commit of a MERGED pull
+     request, or an ancestor of it (`gh pr list --state merged --search
+     <HEAD>`, then `git merge-base --is-ancestor HEAD <headRefOid>`). That is
+     the donor shape itself, and it still admits a donor whose change the pull
+     request later superseded, or whose files `main` has since edited so the
+     merge conflicts. Only that one direction counts: a pull request whose head
+     is BEHIND HEAD leaves commits here the merge never saw. On the sweep the
+     same pair of routes also judges a donor that gate 5 matched to its
+     sibling's merged pull request through the #7267 commit search, whose
+     commits gate 6 would otherwise count as unpushed.
+
+     Ancestry against the squash commit is still never evidence: `git
+     merge-base --is-ancestor` and `git cherry` both answer "not merged" for a
+     squash-merged branch, and neither is consulted that way. Being a
+     relaxation, it inherits decision 6 in the one direction available — a
+     failed or expired refresh, a base that will not resolve, a `merge-tree`
+     that errored or conflicted, a residual path, a commit search that did not
+     answer and an ancestry check that could not run all refuse, and so does an
+     unanswerable `gh` branch lookup, which never reaches the admission at all.
+     An open pull request, a dirty tree and a live owner are decided before it,
+     exactly as before.
+
+     Because the admission lengthens the refusing path, the owner query and
+     every re-check must now decide within 3.5 s of the `tm` process starting,
+     and DENY on expiry, naming the check still running. The `PreToolUse` hook
+     is killed at 5 s, and a killed hook returns no decision, which is not a
+     deny. The deny is printed and flushed before its audit, and the audit must
+     end 4.5 s after process start. The admission reuses the
+     `local-only-commits` fetch when that fetch succeeded, instead of fetching
+     a second time.
+
+     This SUPERSEDES half of the #7275 round-2 finding. The never-pushed branch
+     holding one empty or self-reverting commit is now admitted — not because
+     evidence stopped being required, but because the ruling makes the evidence
+     CONTENT, and such a tree demonstrably holds none the remote lacks. What
+     round 2 established still holds for the merged-PR route: its merge-tree
+     comparison against a pull request's base is never asked until that pull
+     request is in evidence. The `landed-content` comparison is separate. It
+     can grant without any pull request, but only after a successful refresh of
+     `origin` and after the clean-tree and ownership checks.
+
+     Amended by #8633 — a `merge-tree` CONFLICT is a verdict, not a failure,
+     and the comparison may be made against an earlier commit on the base.
+     A squash-merged branch whose files the base edited afterwards conflicts
+     with the base's tip, so every such tree was refused — with an empty
+     reason, because `merge-tree` reports a conflict on stdout with exit 1.
+     PR #8655's worktree was refused that way on 2026-09-26. Both the
+     `landed-content` admission and the merged-pull-request residue check now
+     ask `core::worktree_landed_history::content_on_base`. A HEAD that is an
+     ancestor of the base — a plain merge or a fast-forward — is landed. Any
+     other HEAD needs a two-way landing commit `M` on the base: the base's
+     tip is tried first, then each first-parent base commit since the fork
+     point that touches a file HEAD changed (oldest first, capped). `M`
+     admits only when four checks pass. (1) Merging HEAD into `M` changes no
+     file, so HEAD's changes since the fork are all in `M`. That cannot see a
+     later branch commit that takes part of a landing back — a revert to the
+     fork's version, or the deletion of a file the squash added — because
+     relative to the fork that commit changes nothing. (2) `M`'s own patch
+     (`M^1..M`, first parent) changes at least one file HEAD changed since the
+     fork; a commit that does not proves nothing about HEAD and is skipped,
+     never admitted, the tip included. (3) Every path some commit in
+     `<fork>..HEAD` touched (merges included, renames split) is either in
+     `M`'s patch or byte-identical in HEAD and `M`. (4) Applying `M`'s patch
+     onto HEAD changes no file those commits touched, and conflicts nowhere.
+     Check 4 sees an undo, but only on the paths `M`'s patch changes; checks
+     2 and 3 make sure every branch path is one of those or needs no proof.
+     Without them, `main` pushing an unrelated `u.txt` after the squash made
+     the tip a "landing commit" whose check-4 residue (`u.txt`) was filtered
+     away, and an unpushed revert on `f.txt` was admitted and lost; and a
+     later landing of `f.txt` alone vouched for an undone `g.txt` it never
+     touched. Check 4 ignores residue on paths no branch commit touched —
+     HEAD holds the fork's version there, which is on the remote. The basis
+     for that scoping is the 2026-09-22 owner ruling above: the #7889 donor
+     squash also carries a sibling's files, which HEAD never had, and those
+     trees are admitted. The tip gets no shortcut: an empty merge into the
+     tip no longer admits a non-ancestor on its own, because when the base
+     has not moved since the squash, the tip IS the squash and the same blind
+     spot applies there. A rebase-merged branch is landed at its last
+     replayed commit, which carries all of its content and whose own patch
+     HEAD holds. Ancestry is sufficient, never necessary; the test is still
+     content, judged only against commits already on the remote. A branch
+     holding a different version of the change, or a later commit the squash
+     never carried, is not admitted, and neither is a later commit that
+     undid part of the squash, whether or not the base has moved since —
+     except in one known residual, which predates #8633: the pre-#8633
+     tip-only forward merge admitted it too. A later base commit whose own
+     patch HEAD holds, on the same files, can stand in as `M`, and an
+     unpushed undo of lines an EARLIER landing carried on those files is then
+     not seen. Two one-PR shapes reach it. (A) Rebase-merge: branch commits
+     one (`f.txt` line 1 a→b), two (adds `new.txt`) and three (`f.txt` line
+     10 c→d) are replayed as one', two', three', and an unpushed branch
+     commit then reverts line 1 to a. That is admitted as landed at three',
+     because three' changes `f.txt`, so it covers the file, and its own
+     patch touches only line 10, which HEAD holds. (B) A later revert commit
+     R on the base that touches the same file: an unpushed undo of a landed
+     line is admitted at R. A second pull request from the same branch, or a
+     cherry-pick of a branch commit onto the base, reaches it the same way.
+     The repository allows rebase merges today (`allow_rebase_merge=true`);
+     disabling rebase-merge is the owner's pending decision. Shape A is
+     pinned as current behaviour by
+     `known_residual_rebase_merge_then_unpushed_undo_on_a_file_the_last_replay_touches_reads_landed`,
+     so a fix shows up as a deliberate change. A conflict is told apart from a git error by the tree
+     id `merge-tree` prints first; a git error (it also exits 1 for a ref it
+     cannot merge) stays undeterminable and quotes git's stderr, and
+     any error in either direction refuses. Every refusal names the
+     conflicted or residual files and how many base commits were searched —
+     "the oldest N of M" when the cap cut the search short.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

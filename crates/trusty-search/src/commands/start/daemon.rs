@@ -312,6 +312,15 @@ pub async fn handle_start(
     crate::service::lazy_loader::log_resident_index_cap(policy.tier);
     let _ = foreground;
 
+    // #8270: under launchd fd 2 is `StandardErrorPath`, opened once; reopen it
+    // after newsyslog renames it. This spawns a task, so it sits below every
+    // `set_var` above. No-op for a tty, pipe or `/dev/null` stderr (the
+    // detached child above).
+    #[cfg(unix)]
+    if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
+        tracing::debug!("stderr log {} is reopened after a rotation", log.display());
+    }
+
     // Fast-path: bail before loading the 86 MB embedding model when
     // another daemon is already running.
     //

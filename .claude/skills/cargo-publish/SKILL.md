@@ -35,7 +35,8 @@ Every publish follows this exact sequence:
     tag names the commit cargo actually recorded
 7. Wait 60-120s for propagation
 8. Verify with curl to crates.io API
-9. cargo install --path crates/<dir> --locked (binaries only)
+9. cargo install <crate> --version <version> --locked (binaries only — from
+   the registry, run OUTSIDE this workspace; never --path, per ADR-0043)
 10. Verify <binary> --version
 ```
 
@@ -138,7 +139,9 @@ reaches for the full run as a substitute for the pre-tag one.
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
 🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
-— treat any nonzero exit as an absolute stop.** On 2026-07-08 a crate was
+— treat any nonzero exit as an absolute stop. CHECK 5 (semver) never blocks on
+a computed break; an infrastructure fault still stops it (owner ruling
+2026-09-26; see docs/reference/semver-gate.md).** On 2026-07-08 a crate was
 published to crates.io out-of-band — from an UNMERGED branch, under the
 WRONG gh account — burning crates.io version 0.22.0 with fix-less content
 (a burned version number can never be reused). `check-publish-ready.sh`
@@ -164,15 +167,25 @@ version instead). Runs six checks and fails loud on any of them:
    this is the exact guard that would have caught the 0.22.0 collision.
 5. **semver** (#5149): runs `scripts/check_semver.sh --crate <pkg>`, which
    compares the crate's public API against its latest non-yanked crates.io
-   release and fails when a break is not carried by a breaking version bump
-   (0.x crates break in the MINOR position). This is the ONLY place that can
-   block a bad publish — a crates.io upload is irreversible except by yank, and
-   #4088 is what a gate arriving afterwards costs. Requires
-   `cargo install cargo-semver-checks@0.50.0 --locked`; a missing tool is a
-   failure, not a skip. No override — the fix is to bump the breaking position,
-   which the gate then skips as an already-breaking release.
-   `.github/workflows/semver-checks.yml` runs the same check on the tag push
-   (step 4), so a red run there is visible before you reach step 6.
+   release. Owner ruling 2026-09-26: trusty-tools' internal numbering policy
+   means a public-API break never forces a major version, so this check
+   REPORTS a break rather than blocking on one — it still fails on an
+   INFRASTRUCTURE fault (missing `cargo-semver-checks`, unreachable registry,
+   a run that compared zero crates), which is a different fact from a
+   computed break. Requires `cargo install cargo-semver-checks@0.50.0
+   --locked`; a missing tool is a failure, not a skip. A computed break
+   prints `[WARN] semver: RECORDED BREAK` and a record on stdout, and
+   `semver_record_break` writes that record OUTSIDE the working tree
+   (`$PREFLIGHT_SEMVER_RECORD_DIR`, default
+   `${XDG_STATE_HOME:-~/.local/state}/trusty-tools/semver-breaks`, one
+   `<package>-<version>/` directory per release). Land it
+   in the post-release PR. An exit 1 that is not a readable `VERDICT: BREAK`,
+   or a record that cannot be written, is `[FAIL]`; see
+   `docs/reference/semver-gate.md`. (The pull-request-time `Public API /
+   SemVer` check still follows the 2026-09-22 declare-first rule and blocks a
+   PR on an undeclared break — unchanged, and out of scope for this ruling.)
+   `.github/workflows/semver-checks.yml` runs the same underlying comparison
+   on the tag push (step 4).
 
 6. **tag/publish-commit parity**: the release tag `<crate>-v<version>` must
    name EXACTLY the commit this publish will ship. For `trusty-git-analytics`,
@@ -294,11 +307,14 @@ zsh: killed (no output — looks exactly like OOM kill)
 
 **ALWAYS do this instead**:
 ```bash
-cargo install --path crates/<dir> --locked
+cargo install <crate> --version <version> --locked   # registry only — never --path (ADR-0043)
 ```
 
 `cargo install` writes to a temp file and renames atomically, keeping the
-kernel cache consistent. If a manual copy is ever unavoidable:
+kernel cache consistent, regardless of whether it reads from the registry or
+a path — but only the registry form is a sanctioned release install; a path
+install carries no provenance once its source worktree is reclaimed
+(ADR-0043, #8561). If a manual copy is ever unavoidable:
 ```bash
 cp target/release/<binary> ~/.cargo/bin/<binary>
 codesign --force --sign - ~/.cargo/bin/<binary>  # Regenerate signature
@@ -707,8 +723,8 @@ SKIP_UI_BUILD=1 cargo publish -p <crate>
 sleep 100
 curl -s https://crates.io/api/v1/crates/<crate>/<version> | head -c 200
 
-# 13. For binaries: install locally
-cargo install --path crates/<crate> --locked
+# 13. For binaries: install from the registry — never --path (ADR-0043)
+cargo install <crate> --version <version> --locked
 
 # 14. Verify binary version
 <binary> --version
@@ -773,8 +789,8 @@ cargo publish -p trusty-search
 sleep 100
 curl -s https://crates.io/api/v1/crates/trusty-search/0.13.1 | head -c 200
 
-# Install
-cargo install --path crates/trusty-search --locked
+# Install — from the registry, never --path (ADR-0043)
+cargo install trusty-search --version 0.13.1 --locked
 trusty-search --version
 ```
 
@@ -812,7 +828,8 @@ Release flow:
 4. Create tag: `git tag <crate-name>-v<version>`
 5. Push tag: `git push origin <crate-name>-v<version>`
 6. Publish: `cargo publish -p <crate>`
-7. Install binary (if applicable): `cargo install --path crates/<dir> --locked`
+7. Install binary (if applicable), from the registry, never `--path`
+   (ADR-0043): `cargo install <crate> --version <version> --locked`
 
 ## Cleanup After Publishing
 
@@ -847,10 +864,16 @@ Before declaring a publish complete:
       the tag exists — this is what binds the tag to the commit (CHECK 6)
 - [ ] `cargo publish` succeeded (status 200 OK)
 - [ ] Waited 100s and verified on crates.io API
-- [ ] Binary installed with `cargo install --path … --locked` (if applicable)
+- [ ] Binary installed with `cargo install <crate> --version <version>
+      --locked` from the registry (if applicable) — never `--path` (ADR-0043)
 - [ ] `<binary> --version` shows correct version
 - [ ] Worktree path and branch reported to the PM for its prune verb (#5791 — never removed by the agent)
 - [ ] Remote branch cleaned up
+- [ ] Milestone closed the same day, open issues moved to the next milestone
+      of the same kind (bugfix or feature); the release report names the
+      moved issues (owner ruling 2026-09-25). An issue only awaiting live
+      verification (`status:merged` or `status:tested`) stays in the closed
+      milestone.
 
 ## Connection-Safe Daemon Restart (issue #534)
 
@@ -879,8 +902,8 @@ socket close.
 # 1. Stop the daemon gracefully (SIGTERM → drain → exit)
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 
-# 2. Rebuild and install the new binary
-cargo install --path crates/<crate-dir> --locked
+# 2. Install the newly-published binary — from the registry, never --path (ADR-0043)
+cargo install <crate-dir> --version <version> --locked
 
 # 3. Restart the daemon
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist

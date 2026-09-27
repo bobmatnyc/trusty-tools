@@ -14,8 +14,10 @@
 //! Module layout (see #366 split):
 //! - `mod.rs` — `ProjectStatus`/`ProjectEntry` types + pure helpers
 //! - `store.rs` — the `ProjectRegistry` file-backed store
+//! - `overlap.rs` — root-containment classification (#4289)
 //! - `tests.rs` — unit tests for the types + pure helpers
 
+mod overlap;
 mod store;
 
 #[cfg(test)]
@@ -28,6 +30,12 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::fs;
 
+// #4289: root-containment guard shared by project registration and the
+// create-index path.
+pub use overlap::{
+    ProjectOverlap, RegistryOverlap, RootOverlap, classify_root_overlap, find_project_overlap,
+    registry_overlaps,
+};
 pub use store::ProjectRegistry;
 
 /// Lifecycle status of a tracked project.

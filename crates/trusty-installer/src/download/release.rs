@@ -22,10 +22,110 @@ use anyhow::{anyhow, Context};
 use semver::Version;
 use serde::Deserialize;
 
-pub(crate) const RELEASES_API: &str =
-    "https://api.github.com/repos/bobmatnyc/trusty-tools/releases";
-pub(crate) const RELEASE_DL_BASE: &str =
-    "https://github.com/bobmatnyc/trusty-tools/releases/download";
+/// A GitHub repository that publishes prebuilt release assets (#8642).
+///
+/// Why: prebuilts no longer all come from one repo — `tga` and `trusty-audit`
+/// publish from `bobmatnyc/trusty-git-analytics` (#8507). Carrying the two
+/// URLs as data keeps every fetch path reading the same pair.
+/// What: `releases_api` lists releases 100 per page (GitHub's default is 30,
+/// which hid older crates' tags); `download_base` is what asset URLs hang off.
+/// Test: `tests::release_repo_urls_name_their_slug_and_page_size`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReleaseRepo {
+    /// `owner/name` on GitHub.
+    pub slug: &'static str,
+    /// Releases API URL, including `per_page=100`.
+    pub releases_api: &'static str,
+    /// Base URL release assets are downloaded from.
+    pub download_base: &'static str,
+}
+
+/// The workspace repo, which publishes every crate not routed elsewhere.
+pub(crate) const TRUSTY_TOOLS_REPO: ReleaseRepo = ReleaseRepo {
+    slug: "bobmatnyc/trusty-tools",
+    releases_api: "https://api.github.com/repos/bobmatnyc/trusty-tools/releases?per_page=100",
+    download_base: "https://github.com/bobmatnyc/trusty-tools/releases/download",
+};
+
+/// The repo `tga` and `trusty-audit` have published from since #8507.
+pub(crate) const TRUSTY_GIT_ANALYTICS_REPO: ReleaseRepo = ReleaseRepo {
+    slug: "bobmatnyc/trusty-git-analytics",
+    releases_api:
+        "https://api.github.com/repos/bobmatnyc/trusty-git-analytics/releases?per_page=100",
+    download_base: "https://github.com/bobmatnyc/trusty-git-analytics/releases/download",
+};
+
+/// Which repo publishes `crate_name`'s prebuilt releases (#8642).
+///
+/// Why: `tctl upgrade` read the latest version from crates.io but fetched
+/// prebuilts from `trusty-tools` only, where tga stops at v8.0.0 — so it
+/// reinstalled 8.0.0 and reported an upgrade. The route is an explicit,
+/// reviewable table rather than crates.io `repository` metadata, which is
+/// operator-editable text and not a release-hosting contract.
+/// What: `tga` (either tag spelling) and `trusty-audit` →
+/// [`TRUSTY_GIT_ANALYTICS_REPO`]; every other crate → [`TRUSTY_TOOLS_REPO`].
+/// Add a row here when another crate moves its releases.
+/// Test: `tests::release_repo_routes_moved_crates_to_trusty_git_analytics`,
+/// `tests::release_repo_defaults_to_trusty_tools`.
+pub(crate) fn release_repo_for(crate_name: &str) -> ReleaseRepo {
+    match crate_name {
+        "tga" | "trusty-git-analytics" | "trusty-audit" => TRUSTY_GIT_ANALYTICS_REPO,
+        _ => TRUSTY_TOOLS_REPO,
+    }
+}
+
+/// Where one crate's release list and assets are fetched from.
+///
+/// Why: the offline test seam for both the prebuilt and the pinned paths — a
+/// test points both URLs at a loopback fixture.
+/// What: two borrowed URLs; [`Endpoints::for_crate`] is the production value.
+/// Test: `tests::pinned_endpoints_for_tga_use_its_release_repo`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Endpoints<'a> {
+    /// GitHub Releases API URL.
+    pub releases_url: &'a str,
+    /// Base URL that release assets hang off.
+    pub download_base: &'a str,
+}
+
+impl Endpoints<'static> {
+    /// The production endpoints for `crate_name`, from [`release_repo_for`].
+    pub(crate) fn for_crate(crate_name: &str) -> Self {
+        let repo = release_repo_for(crate_name);
+        Self {
+            releases_url: repo.releases_api,
+            download_base: repo.download_base,
+        }
+    }
+}
+
+/// Endpoint choice for a multi-crate operation (#8642).
+///
+/// Why: one pinned set mixes crates from different repos (`taudit install`
+/// fetches tga and trusty-analyze together), so a single [`Endpoints`] value
+/// cannot serve the whole set in production — but a test still wants one
+/// fixture for every crate.
+/// What: [`EndpointSource::PerCrate`] routes each crate through
+/// [`Endpoints::for_crate`]; [`EndpointSource::Fixed`] uses one value for all.
+/// Test: `tests::pinned_endpoints_for_tga_use_its_release_repo`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EndpointSource<'a> {
+    /// Production: each crate's own release repo.
+    PerCrate,
+    /// One set of endpoints for every crate (loopback fixtures).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(Endpoints<'a>),
+}
+
+impl<'a> EndpointSource<'a> {
+    /// The endpoints `crate_name` is fetched from under this source.
+    pub(crate) fn for_crate(self, crate_name: &str) -> Endpoints<'a> {
+        match self {
+            Self::PerCrate => Endpoints::for_crate(crate_name),
+            Self::Fixed(endpoints) => endpoints,
+        }
+    }
+}
 
 /// A resolved release tag for a given crate.
 ///
@@ -250,7 +350,9 @@ fn pick_agreeing(
 ///
 /// Test: `tests::asset_url_shape`, `tests::asset_url_shape_tga_alias`.
 pub fn asset_url(tag: &str, crate_name: &str, version: &str, target: &str) -> String {
-    asset_url_at_base(RELEASE_DL_BASE, tag, crate_name, version, target)
+    // #8642: the crate's own release repo, not a single hardcoded one.
+    let base = release_repo_for(crate_name).download_base;
+    asset_url_at_base(base, tag, crate_name, version, target)
 }
 
 /// [`asset_url`], against a caller-supplied download base.
@@ -345,7 +447,8 @@ fn github_token() -> Option<String> {
 /// download; the API is the authoritative source (no hardcoded BOM pin needed for
 /// the prebuilt path).
 ///
-/// What: Fetches `RELEASES_API`, deserialises the release list, delegates to
+/// What: Fetches the crate's [`release_repo_for`] releases API, deserialises
+/// the release list, delegates to
 /// [`select_highest_semver`]. Optionally adds a `Authorization: Bearer` header
 /// when a GitHub token is found in the environment.
 ///
@@ -355,7 +458,9 @@ pub async fn resolve_latest_tag(
     client: &reqwest::Client,
     crate_name: &str,
 ) -> anyhow::Result<ResolvedTag> {
-    resolve_latest_tag_from_url(client, RELEASES_API, crate_name).await
+    // #8642: route through the per-crate repo table.
+    let url = release_repo_for(crate_name).releases_api;
+    resolve_latest_tag_from_url(client, url, crate_name).await
 }
 
 /// Resolve the latest stable tag from a (possibly mock) releases URL.
@@ -487,7 +592,9 @@ pub async fn resolve_pinned_tag(
     crate_name: &str,
     version: &str,
 ) -> anyhow::Result<ResolvedTag> {
-    resolve_pinned_tag_from_url(client, RELEASES_API, crate_name, version)
+    // #8642: route through the per-crate repo table.
+    let url = release_repo_for(crate_name).releases_api;
+    resolve_pinned_tag_from_url(client, url, crate_name, version)
         .await
         .map_err(anyhow::Error::new)
 }
@@ -704,9 +811,10 @@ mod tests {
     #[test]
     fn asset_url_shape_tga_alias() {
         let url = asset_url("tga-v2.9.4", "tga", "2.9.4", "aarch64-apple-darwin");
+        // #8642: tga assets hang off its own release repo.
         assert_eq!(
             url,
-            "https://github.com/bobmatnyc/trusty-tools/releases/download/\
+            "https://github.com/bobmatnyc/trusty-git-analytics/releases/download/\
              tga-v2.9.4/trusty-git-analytics-2.9.4-aarch64-apple-darwin.tar.gz"
         );
     }
@@ -941,5 +1049,73 @@ mod tests {
         assert!(!rt.tag.is_empty());
         assert!(!rt.version.is_empty());
         assert!(rt.tag.starts_with("trusty-search-v"));
+    }
+
+    /// Why: #8642 — tga's releases moved; the old repo tops out at v8.0.0.
+    /// What: tga (both spellings) and trusty-audit route to trusty-git-analytics.
+    /// Test: This is the test.
+    #[test]
+    fn release_repo_routes_moved_crates_to_trusty_git_analytics() {
+        for c in ["tga", "trusty-git-analytics", "trusty-audit"] {
+            assert_eq!(release_repo_for(c), TRUSTY_GIT_ANALYTICS_REPO, "{c}");
+        }
+    }
+
+    /// Why: every crate not in the table must keep resolving where it did.
+    /// What: unlisted members route to trusty-tools.
+    /// Test: This is the test.
+    #[test]
+    fn release_repo_defaults_to_trusty_tools() {
+        for c in ["trusty-search", "trusty-analyze", "trusty-installer"] {
+            assert_eq!(release_repo_for(c), TRUSTY_TOOLS_REPO, "{c}");
+        }
+    }
+
+    /// Why: both URLs must name the repo they claim, and the list must ask for
+    /// 100 releases per page — GitHub's default 30 hid older crates' tags.
+    /// What: asserts slug containment and the `per_page=100` query per repo.
+    /// Test: This is the test.
+    #[test]
+    fn release_repo_urls_name_their_slug_and_page_size() {
+        for repo in [TRUSTY_TOOLS_REPO, TRUSTY_GIT_ANALYTICS_REPO] {
+            let api = format!("https://api.github.com/repos/{}/releases", repo.slug);
+            assert_eq!(repo.releases_api, format!("{api}?per_page=100"));
+            let dl = format!("https://github.com/{}/releases/download", repo.slug);
+            assert_eq!(repo.download_base, dl);
+        }
+    }
+
+    /// Why: the pinned path (`taudit install`) mixes crates from two repos in
+    /// one set, so its production endpoints must be chosen per crate.
+    /// What: `EndpointSource::PerCrate` gives tga the trusty-git-analytics URLs
+    /// and trusty-analyze the trusty-tools URLs; `Fixed` ignores the crate.
+    /// Test: This is the test.
+    #[test]
+    fn pinned_endpoints_for_tga_use_its_release_repo() {
+        let tga = EndpointSource::PerCrate.for_crate("tga");
+        assert_eq!(tga.releases_url, TRUSTY_GIT_ANALYTICS_REPO.releases_api);
+        assert_eq!(tga.download_base, TRUSTY_GIT_ANALYTICS_REPO.download_base);
+        let other = EndpointSource::PerCrate.for_crate("trusty-analyze");
+        assert_eq!(other.releases_url, TRUSTY_TOOLS_REPO.releases_api);
+        let fixed = Endpoints {
+            releases_url: "http://127.0.0.1/releases",
+            download_base: "http://127.0.0.1/dl",
+        };
+        let got = EndpointSource::Fixed(fixed).for_crate("tga");
+        assert_eq!(got.releases_url, fixed.releases_url);
+    }
+
+    /// Why: #8642 live proof — tga's newest prebuilt must come from the repo
+    /// that actually publishes it (the old one stops at 8.0.0).
+    /// What: resolves tga against the real API; asserts version ≥ 9.0.0.
+    /// Test: `cargo test -p trusty-installer -- --include-ignored resolve_latest_tga_live`.
+    #[tokio::test]
+    #[ignore = "performs a live GitHub API call; run with --include-ignored"]
+    async fn resolve_latest_tga_live() {
+        let rt = resolve_latest_tag(&reqwest::Client::new(), "tga")
+            .await
+            .expect("tga should resolve");
+        let v = Version::parse(&rt.version).expect("semver");
+        assert!(v >= Version::new(9, 0, 0), "resolved {rt:?}");
     }
 }

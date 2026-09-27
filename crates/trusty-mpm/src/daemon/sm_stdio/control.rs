@@ -217,15 +217,29 @@ impl SessionControl for DaemonSessionControl {
     /// `DELETE /sessions/{id}` + `/sessions/dead` reap path). The strongest
     /// in-process equivalent is `decommission` (kills runtime + tombstones the
     /// record); a plain `stop` would leave a resumable session, not a reaped one.
-    /// What: forwards to `SessionManager::decommission`; returns `{ ok: true }`.
-    /// Test: forwards to `decommission` (managed integration tests).
+    /// What: forwards to `SessionManager::decommission_reporting` (no
+    /// `--force`); returns `{ ok: true, workspace_removed, workspace_kept_reason,
+    /// workspace_kept_by_design }` — the last three additive (#8663), the
+    /// HTTP route's verdict fields, so a kept workspace is reported.
+    /// Test: `kill_reports_the_workspace_verdict`.
     async fn kill(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        mgr.decommission(&id, None)
+        let report = mgr
+            .decommission_reporting(
+                &id,
+                None,
+                crate::session_manager::decommission_force::ProvisioningDirt::Refuse,
+            )
             .await
             .map_err(Self::map_managed_err)?;
-        Ok(serde_json::json!({ "ok": true }))
+        Ok(serde_json::json!({
+            "ok": true,
+            "workspace_removed": report.workspace_removed,
+            "workspace_kept_reason": report.workspace_kept_reason,
+            // #8663 critic round 2: parity with the HTTP route.
+            "workspace_kept_by_design": report.workspace_kept_by_design,
+        }))
     }
 
     /// Inject text via the manager, dispatched per `Submit` (#1461).
@@ -398,5 +412,55 @@ mod tests {
         // so an exact `==` is fragile to float representation. 1e-6 is far
         // tighter than any meaningful confidence delta.
         assert!((s.confidence - 0.87).abs() < 1e-6);
+    }
+
+    /// #8663 critic round 1: `sm.sessions.kill` carries `workspace_removed`,
+    /// `workspace_kept_reason` and (critic round 2) `workspace_kept_by_design`
+    /// beside `ok`, as the HTTP route does. The kept-reason string itself is
+    /// covered by `session_decommission_reports_a_kept_workspace`.
+    #[tokio::test]
+    async fn kill_reports_the_workspace_verdict() {
+        let tmp = tempfile::tempdir().expect("daemon root");
+        let ws = tempfile::tempdir().expect("user directory");
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(tmp.path().to_path_buf()).await);
+        let id = ManagedSessionId::new();
+        state
+            .session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8663 sm kill".to_string(),
+                Some(ws.path().to_path_buf()),
+                None,
+                Some(ws.path().to_path_buf()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = DaemonSessionControl::new(state)
+            .kill(&id.to_string())
+            .await
+            .expect("kill");
+        assert_eq!(json["ok"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(
+            json.get("workspace_removed"),
+            Some(&serde_json::Value::Bool(false)),
+            "{json}"
+        );
+        assert_eq!(
+            json.get("workspace_kept_reason"),
+            Some(&serde_json::Value::Null),
+            "{json}"
+        );
+        let by_design = json["workspace_kept_by_design"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the by-design reason is a string: {json}"));
+        assert!(by_design.contains("kept by design"), "{by_design}");
     }
 }

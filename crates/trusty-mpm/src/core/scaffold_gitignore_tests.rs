@@ -316,6 +316,58 @@ fn a_tracked_skill_survives_a_refresh_of_the_block() {
     assert!(is_ignored(repo, ".claude/skills/deployed/SKILL.md"));
 }
 
+/// Every bundled style file tm deploys into the project is ignored, the
+/// generated composites too, and a project's own style is not (#8533).
+#[test]
+fn a_project_style_stays_trackable_and_generated_styles_are_ignored() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let repo = tmp.path();
+    real_git_repo(repo);
+    assert!(ensure_scaffold_gitignored(repo).unwrap());
+
+    assert!(!is_ignored(repo, ".claude/output-styles/fleet-voice.md"));
+    assert!(is_ignored(
+        repo,
+        ".claude/output-styles/fleet-voice.tm-floor.md"
+    ));
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        let path = format!(".claude/output-styles/{}", style.file_name);
+        assert!(is_ignored(repo, &path), "{path} must be ignored");
+    }
+}
+
+/// A block written before #8533 ignored the whole styles directory; a refresh
+/// drops that line, so the project's own style becomes trackable (#8533).
+#[test]
+fn an_old_block_ignoring_all_styles_is_migrated() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let repo = tmp.path();
+    real_git_repo(repo);
+    let gitignore_path = repo.join(".gitignore");
+    std::fs::write(
+        &gitignore_path,
+        format!(
+            "node_modules/\n{SCAFFOLD_GITIGNORE_BEGIN}\n\
+             .claude/agents/\n.claude/skills/*\n.claude/output-styles/\n\
+             {SCAFFOLD_GITIGNORE_END}\n"
+        ),
+    )
+    .unwrap();
+    assert!(is_ignored(repo, ".claude/output-styles/fleet-voice.md"));
+
+    assert!(ensure_scaffold_gitignored(repo).unwrap(), "must refresh");
+
+    let content = std::fs::read_to_string(&gitignore_path).unwrap();
+    assert_eq!(
+        rule_count(&content, ".claude/output-styles/"),
+        0,
+        "{content}"
+    );
+    assert!(!is_ignored(repo, ".claude/output-styles/fleet-voice.md"));
+    assert!(is_ignored(repo, ".claude/output-styles/trusty-mpm.md"));
+    assert!(content.starts_with("node_modules/\n"), "{content}");
+}
+
 /// An entry the project already spells outside the block is not re-added
 /// (#7875).
 ///

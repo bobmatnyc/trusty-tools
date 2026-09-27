@@ -1007,31 +1007,6 @@ mod tests {
 
     // -- #7377: an empty compression falls back to the raw output -----------
 
-    /// Raise the process-global tracing level so the thread-local capture below
-    /// can see `warn!` (#4931).
-    ///
-    /// Why: `tracing`'s macros short-circuit on a process-global `MAX_LEVEL`
-    /// that only a GLOBAL default subscriber raises, so a `with_default`
-    /// capture records nothing unless something else in the binary happened to
-    /// install one first. `trusty_mpm::test_support::enable_event_capture` is
-    /// the library's copy of this and is not reachable from this bin target.
-    /// What: installs a bare registry once per process, then asserts the
-    /// resulting level admits `WARN` so a filtered global installed elsewhere
-    /// fails here by name instead of as an empty capture.
-    /// Test: the capture test below is vacuous without it.
-    fn enable_event_capture() {
-        static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
-        RAISE_MAX_LEVEL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-        });
-        assert!(
-            tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
-            "the process-global tracing level is {:?}, which discards WARN before \
-             any subscriber sees it (#4931)",
-            tracing::level_filters::LevelFilter::current()
-        );
-    }
-
     /// Collects a subscriber's output so a test can read back what was logged.
     #[derive(Clone, Default)]
     struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1085,7 +1060,7 @@ mod tests {
     /// Run `body` with a thread-local capturing subscriber, returning its
     /// result and everything logged at `WARN` or above.
     fn with_captured_warnings<T>(body: impl FnOnce() -> T) -> (T, String) {
-        enable_event_capture();
+        crate::test_support::enable_event_capture();
         let capture = CaptureWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())

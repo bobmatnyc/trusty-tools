@@ -118,13 +118,12 @@ impl TmManager {
     /// Why: We can't `tmux attach` from inside the REPL (alt-screen/ratatui),
     /// so the manager returns a copy-pasteable command instead of trying to
     /// exec it.
-    /// What: Returns `tmux attach-session -t <tmux_session_name>`.
+    /// What: Returns `tmux attach-session -t '=<tmux_session_name>'` (exact, #8443).
     /// Test: covered by `test_attach_instructions_format` once tmux exists.
     pub fn attach_instructions(&self, name_or_id: &str) -> Result<String> {
         let session = self.resolve_session(name_or_id)?;
-        Ok(format!(
-            "tmux attach-session -t {}",
-            session.tmux_session_name
+        Ok(trusty_common::tmux::shell_attach_command(
+            &session.tmux_session_name,
         ))
     }
 

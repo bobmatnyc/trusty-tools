@@ -279,9 +279,10 @@ struct ParsedSynthesis {
 /// reproducible on this path even after `correctness_floor` was fixed:
 ///
 ///   **Tier 1 — escalation-eligible High finding → BLOCK:**
-///   ANY non-refuted High finding that is escalation-eligible
-///   (`grade::drives_block_floor` — cited or `code_provable`) must floor the
-///   verdict to at least BLOCK.  Critical, well-grounded findings cannot be
+///   ANY non-refuted High finding that is escalation-eligible and in a
+///   category the grader lets block (`grade::floors_verdict_to_block` — cited
+///   or `code_provable`, not informational, not conformance, #4044) must floor
+///   the verdict to at least BLOCK.  Critical, well-grounded findings cannot be
 ///   forgiven by synthesis — that would be a safety hole.
 ///
 ///   **Tier 1.5 — disqualified High finding, confident → REQUEST_CHANGES:**
@@ -314,7 +315,8 @@ struct ParsedSynthesis {
 /// `synthesis_block_without_high_finding_floors_to_request_changes`,
 /// `synthesis_mechanical_rc_allows_full_softening`,
 /// `synthesis_pr84_uncited_high_does_not_block` (adversarial-review follow-up),
-/// `synthesis_confident_uncited_high_floors_to_request_changes` in
+/// `synthesis_confident_uncited_high_floors_to_request_changes`,
+/// `synthesis_floor_blocks_only_on_categories_the_grader_blocks_on` (#4044) in
 /// synthesis_tests.rs.
 pub(crate) fn apply_synthesis_floor(
     synthesized: Verdict,
@@ -323,7 +325,7 @@ pub(crate) fn apply_synthesis_floor(
 ) -> Verdict {
     use crate::models::VerifyOutcome;
     use crate::pipeline::grade::{
-        drives_block_floor, floor_min_confidence, is_escalation_eligible, is_high_severity,
+        floor_min_confidence, floors_verdict_to_block, is_escalation_eligible, is_high_severity,
     };
 
     let not_refuted = |f: &&Finding| {
@@ -339,7 +341,11 @@ pub(crate) fn apply_synthesis_floor(
     // unrefuted High finding floors to BLOCK — mirrors `correctness_floor`
     // Tier 1 exactly.  A refuted finding is disproven — never counts toward any
     // floor, gated or not.
-    let has_unrefuted_high = findings.iter().filter(not_refuted).any(drives_block_floor);
+    // #4044: category-aware, so a High style/coverage/conformance finding cannot block here.
+    let has_unrefuted_high = findings
+        .iter()
+        .filter(not_refuted)
+        .any(floors_verdict_to_block);
 
     if has_unrefuted_high {
         // Tier 1: BLOCK is the minimum for a critical, well-grounded finding —

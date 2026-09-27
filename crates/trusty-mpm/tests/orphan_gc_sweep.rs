@@ -10,6 +10,9 @@
 //! the killed-name list across passes.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm --test orphan_gc_sweep`.
 
+// #8545: `common` arms the home-write fence before `main`.
+mod common;
+
 use std::sync::Mutex;
 
 use trusty_mpm::daemon::orphan_gc::{

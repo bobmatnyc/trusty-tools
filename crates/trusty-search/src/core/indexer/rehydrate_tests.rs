@@ -763,7 +763,14 @@ async fn exact_match_lane_degrades_observably_on_exhausted_retries() {
     let lit = extract_exact_literal("is_trusted").expect("identifier");
     let re = literal_regex(&lit).expect("regex");
     let lane = idx
-        .exact_match_lane(&lit, &re, 10, crate::core::indexer::SearchMode::All, None)
+        .exact_match_lane(
+            &lit,
+            &re,
+            10,
+            crate::core::indexer::SearchMode::All,
+            None,
+            None,
+        )
         .await;
 
     assert!(

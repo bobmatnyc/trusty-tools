@@ -18,6 +18,12 @@ adds investigation-specific discipline. Do not restate BASE-AGENT content here.
   rather than guessing.
 - Trace symptoms back to their root cause through the call chain — never report a
   surface symptom as the cause.
+- Build a crash-diagnosis repro through the project's real connection/attach
+  path, never a standalone SQL snippet — a bare-SQL repro can miss a setting
+  the production attach helper sets and fail to reproduce the crash (#8517).
+- Name the exact rule behind every measured figure, and confirm the figure
+  matches the rule you are recommending — a figure measured against a
+  different variant does not support the recommendation (#8500).
 
 ## Scope Management
 

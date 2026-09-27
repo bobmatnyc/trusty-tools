@@ -321,6 +321,8 @@ impl CodeIndexer {
     /// `skip_vector_false_index_file_still_embeds`, and
     /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
+        // #8167: a handle that outlived DELETE must not write into it.
+        self.refuse_if_deleted()?;
         if self.refuse_incremental_write("index_file", file_path) {
             anyhow::bail!(
                 "index '{}' is write-quarantined: its durable corpus failed to open, so \

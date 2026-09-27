@@ -208,6 +208,88 @@ async fn event_loop_stops_when_model_requests_quit() {
     );
 }
 
+/// #8240's render-desync regression. One `terminal.draw` per event is what
+/// made the pane fall minutes behind a streaming turn: `crate::layout::draw`
+/// rebuilds the whole transcript per frame, so the loop could not keep up
+/// with the arrival rate and the backlog grew without bound. Every event
+/// must still be applied, in order — only the frames nobody could have seen
+/// are skipped. Pre-fix this drew 52 times for 50 events; post-fix it draws
+/// a handful, independent of the burst size.
+#[tokio::test]
+async fn event_loop_coalesces_a_burst_into_one_redraw() {
+    const BURST: usize = 50;
+
+    let backend = TestBackend::new(20, 5);
+    let mut terminal = Terminal::new(backend).expect("construct terminal");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+
+    for i in 0..BURST {
+        tx.send(ReplEvent::StatusMessage(format!("chunk {i}")))
+            .expect("queue the burst before the loop starts");
+    }
+    drop(tx); // the loop exits once the backlog is drained
+
+    let redraws = Arc::new(AtomicUsize::new(0));
+    let redraws_in_render = redraws.clone();
+
+    let model = event_loop(
+        &mut terminal,
+        CountingModel::default(),
+        rx,
+        |m, _ev| m.events_seen += 1,
+        move |f, m| {
+            redraws_in_render.fetch_add(1, Ordering::SeqCst);
+            render_counts(f, m);
+        },
+    )
+    .await
+    .expect("event_loop must succeed");
+
+    assert_eq!(
+        model.events_seen, BURST,
+        "coalescing must drop nothing — every event still reaches `apply`"
+    );
+    let drawn = redraws.load(Ordering::SeqCst);
+    assert!(
+        drawn < BURST,
+        "a burst of {BURST} events must not cost {BURST} frames; drew {drawn}"
+    );
+}
+
+/// The drain must honour `should_quit` mid-backlog, exactly as the one-event-
+/// per-frame loop did — a `Quit` sitting third in the queue stops the loop
+/// there rather than applying the seven events behind it (#8240).
+#[tokio::test]
+async fn event_loop_stops_draining_at_a_quit() {
+    let backend = TestBackend::new(20, 5);
+    let mut terminal = Terminal::new(backend).expect("construct terminal");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+
+    for _ in 0..10 {
+        tx.send(ReplEvent::StatusMessage("x".into())).unwrap();
+    }
+
+    let model = event_loop(
+        &mut terminal,
+        CountingModel::default(),
+        rx,
+        |m, _ev| {
+            m.events_seen += 1;
+            if m.events_seen == 3 {
+                m.quit = true;
+            }
+        },
+        render_counts,
+    )
+    .await
+    .expect("event_loop must succeed");
+
+    assert_eq!(
+        model.events_seen, 3,
+        "the drain must stop at the quit, not finish the backlog"
+    );
+}
+
 #[tokio::test]
 async fn event_loop_stops_when_channel_closes() {
     let backend = TestBackend::new(20, 5);
@@ -308,6 +390,7 @@ async fn run_type_checks(engine: Arc<NoopEngine>) -> anyhow::Result<()> {
 
 use crate::app::{ChatRole, ReplApp, apply as app_apply};
 use crate::event::{KeyCode, KeyInput, KeyModifiers};
+use crate::model::CancelReply;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::Notify;
 
@@ -358,6 +441,18 @@ struct MockEngine {
     /// `Err(...)` — the wedged/disconnected-backend shape (#3422), where the
     /// answer never reaches the suspended call.
     respond_permission_returns_err: AtomicBool,
+    /// When `Some`, `cancel_session_reply` sets [`Self::cancel_dispatched`] and
+    /// then blocks on this `Notify` before answering (#8207) — the held-open
+    /// cancel future a test needs in order to observe the unconfirmed window at
+    /// all, rather than only the state after the reply has already landed.
+    hold_cancel_until: Option<Arc<Notify>>,
+    /// Set by `cancel_session_reply` immediately before it waits on
+    /// [`Self::hold_cancel_until`] — polled (not slept on) by a test that needs
+    /// the RPC to have genuinely started.
+    cancel_dispatched: AtomicBool,
+    /// What `cancel_session_reply` answers once released (#8207). `None` — the
+    /// default — answers [`CancelReply::Stopped`], the confirmed stop.
+    cancel_reply: StdMutex<Option<CancelReply>>,
 }
 
 #[async_trait]
@@ -391,9 +486,21 @@ impl TuiEngine for MockEngine {
         Ok(())
     }
 
-    async fn cancel_session(&self) -> anyhow::Result<()> {
+    /// #8207: the dispatch layer calls this, not `cancel_session` — the
+    /// one-state form cannot express "accepted, not stopped yet", which is the
+    /// whole point of the fix. Left un-overridden so the double also proves the
+    /// trait default is reachable for an engine that has no two-state cancel.
+    async fn cancel_session_reply(&self) -> CancelReply {
         self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        if let Some(notify) = &self.hold_cancel_until {
+            self.cancel_dispatched.store(true, Ordering::SeqCst);
+            notify.notified().await;
+        }
+        self.cancel_reply
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or(CancelReply::Stopped)
     }
 
     async fn respond_permission(
@@ -430,13 +537,14 @@ fn ctrl_c() -> ReplEvent {
 }
 
 /// The acceptance criterion this whole slice exists for: pressing Ctrl-C
-/// must reach `TuiEngine::cancel_session`, not just clear local UI state
-/// (thin-client axiom, DOC-50 §5 Slice 5). Drives the real reducer
-/// (`crate::app::apply`) so this proves the FULL path — key press to
-/// `pending_cancel` to `dispatch_pending` to the engine — not just
-/// `dispatch_pending` in isolation.
+/// must reach the engine's cancel, not just clear local UI state (thin-client
+/// axiom, DOC-50 §5 Slice 5). Drives the real reducer (`crate::app::apply`) so
+/// this proves the FULL path — key press to `pending_cancel` to
+/// `dispatch_pending` to the engine — not just `dispatch_pending` in isolation.
+/// #8207 moved the dispatched method to `cancel_session_reply`, the only one
+/// that can report whether the run actually stopped.
 #[tokio::test]
-async fn dispatch_pending_cancel_reaches_cancel_session() {
+async fn dispatch_pending_cancel_reaches_cancel_session_reply() {
     let engine = Arc::new(MockEngine::default());
     let mut app = ReplApp::new("demo", "u");
     app.busy = true;
@@ -450,7 +558,13 @@ async fn dispatch_pending_cancel_reaches_cancel_session() {
     dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
 
     assert!(!app.pending_cancel, "must be drained synchronously");
-    assert!(!app.busy, "on_cancelled must clear busy synchronously");
+    // #8207: `busy` deliberately survives the request — only the reply clears
+    // it. See `TuiModel::on_cancel_requested`.
+    assert!(
+        app.cancelling,
+        "the request must enter the cancelling state"
+    );
+    assert!(app.busy, "input stays closed until the cancel is confirmed");
 
     // The RPC itself runs on a spawned task; wait for it to actually run
     // rather than asserting immediately after `dispatch_pending` returns.
@@ -463,7 +577,173 @@ async fn dispatch_pending_cancel_reaches_cancel_session() {
     assert_eq!(
         engine.cancel_calls.load(Ordering::SeqCst),
         1,
-        "Ctrl-C must reach engine.cancel_session() exactly once"
+        "Ctrl-C must reach engine.cancel_session_reply() exactly once"
+    );
+}
+
+/// Drive one cancel through the real reducer and dispatch layer, then wait for
+/// the spawned RPC to have genuinely started (#8207).
+async fn dispatch_cancel(
+    app: &mut ReplApp,
+    engine: &Arc<MockEngine>,
+    tx: &UnboundedSender<ReplEvent>,
+    current_task: &CurrentTask,
+    generation: &Generation,
+) {
+    app_apply(app, ctrl_c());
+    dispatch_pending(app, engine, tx, current_task, generation);
+    for _ in 0..500 {
+        if engine.cancel_dispatched.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        engine.cancel_dispatched.load(Ordering::SeqCst),
+        "the cancel RPC must be in flight, or this test proves nothing"
+    );
+}
+
+/// Drain the next event off `rx` and apply it, failing if none arrives.
+async fn next_event(app: &mut ReplApp, rx: &mut UnboundedReceiver<ReplEvent>) -> ReplEvent {
+    for _ in 0..500 {
+        if let Ok(ev) = rx.try_recv() {
+            app_apply(app, ev.clone());
+            return ev;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("no event reached the render loop");
+}
+
+fn scrollback(app: &ReplApp) -> String {
+    app.chat
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// #8207's headline regression, driven through the real dispatch layer with the
+/// cancel future HELD OPEN: for the whole window between the Ctrl-C and the
+/// reply, the TUI shows a cancelling state (not "cancelled"), refuses to accept
+/// a turn, and — the closure condition — sends nothing to the engine, so the
+/// daemon never answers `-32003 already has a task running`. Releasing the
+/// future then confirms the stop and reopens input.
+///
+/// A test that only inspected the final state would pass against the pre-fix
+/// code, which reported "cancelled" on request; the window is the whole point.
+#[tokio::test]
+async fn dispatch_pending_cancel_holds_input_until_the_reply_lands() {
+    let notify = Arc::new(Notify::new());
+    let engine = Arc::new(MockEngine {
+        hold_cancel_until: Some(Arc::clone(&notify)),
+        ..Default::default()
+    });
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    dispatch_cancel(&mut app, &engine, &tx, &current_task, &generation).await;
+
+    // The unconfirmed window.
+    assert!(
+        !app.accepts_submit(),
+        "input must stay closed while the cancel is unconfirmed"
+    );
+    let text = scrollback(&app);
+    assert!(text.contains("cancelling"), "{text}");
+    assert!(
+        !text.contains("cancelled"),
+        "nothing may claim the run stopped before the reply: {text}"
+    );
+
+    app_apply(&mut app, ReplEvent::Submit("q".to_string()));
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        engine.handle_input_calls.load(Ordering::SeqCst),
+        0,
+        "a prompt submitted inside the cancel window must never reach the engine"
+    );
+
+    // The daemon confirms the stop.
+    notify.notify_one();
+    let ev = next_event(&mut app, &mut rx).await;
+    assert_eq!(ev, ReplEvent::CancelSettled(CancelReply::Stopped));
+    assert!(app.accepts_submit(), "a confirmed stop reopens input");
+    assert!(scrollback(&app).contains("cancelled"));
+}
+
+/// #8207: the daemon's `-32010` answer (`CancelReply::StillCancelling`) reaches
+/// the pane as a plain sentence and leaves the cancelling state in place — input
+/// must NOT reopen as if the run had stopped, and no code may appear.
+#[tokio::test]
+async fn dispatch_pending_cancel_still_cancelling_keeps_input_closed() {
+    let engine = Arc::new(MockEngine {
+        hold_cancel_until: Some(Arc::new(Notify::new())),
+        cancel_reply: StdMutex::new(Some(CancelReply::StillCancelling {
+            detail: "session s-1: cancellation requested but the task did not stop within 10s"
+                .to_string(),
+        })),
+        ..Default::default()
+    });
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    dispatch_cancel(&mut app, &engine, &tx, &current_task, &generation).await;
+    if let Some(notify) = &engine.hold_cancel_until {
+        notify.notify_one();
+    }
+    next_event(&mut app, &mut rx).await;
+
+    assert!(
+        !app.accepts_submit(),
+        "an unconfirmed cancel must not reopen input"
+    );
+    let text = scrollback(&app);
+    assert!(text.contains("still cancelling"), "{text}");
+    assert!(!text.contains("cancelled"), "{text}");
+    assert!(!text.contains("-32010"), "{text}");
+}
+
+/// #8207's fail-open check at the dispatch layer: a cancel that fails outright
+/// (here via the trait default lifting an `Err`) must read as a failure, must
+/// not say "cancelled", and must not leave the pane cancelling forever.
+#[tokio::test]
+async fn dispatch_pending_cancel_failure_never_reports_cancelled() {
+    let engine = Arc::new(MockEngine {
+        hold_cancel_until: Some(Arc::new(Notify::new())),
+        cancel_reply: StdMutex::new(Some(CancelReply::Failed {
+            error: "no tcode daemon is answering on /tmp/tcode.sock".to_string(),
+        })),
+        ..Default::default()
+    });
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    dispatch_cancel(&mut app, &engine, &tx, &current_task, &generation).await;
+    if let Some(notify) = &engine.hold_cancel_until {
+        notify.notify_one();
+    }
+    next_event(&mut app, &mut rx).await;
+
+    assert!(!app.cancelling, "the pane must not stay cancelling forever");
+    let text = scrollback(&app);
+    assert!(text.contains("cancel failed"), "{text}");
+    assert!(
+        !text.contains("cancelled"),
+        "no failure arm may report cancelled: {text}"
     );
 }
 
@@ -715,7 +995,12 @@ async fn dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task() {
         current_task.lock().unwrap().is_none(),
         "cancel must take (and abort) the stashed handle"
     );
-    assert!(!app.busy, "on_cancelled must clear busy synchronously");
+    // #8207: the request enters the cancelling state; `busy` is the reply's to
+    // clear.
+    assert!(
+        app.cancelling,
+        "the request must enter the cancelling state"
+    );
 
     // The decisive check: release the gate the (supposedly aborted) task
     // was parked on. If `abort()` genuinely worked, the task is already gone

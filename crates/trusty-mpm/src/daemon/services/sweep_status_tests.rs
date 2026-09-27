@@ -11,6 +11,46 @@ use std::time::Duration;
 use super::{HYGIENE, RECLAIM, RECLAIM_NAME, SweepStatus, lane, rows};
 use crate::core::doctor::CheckStatus;
 
+/// Clears both sweep kill switches for one test; `Drop` restores them.
+///
+/// Why: the row tests assert "ON", and an operator shell that exports
+/// `TRUSTY_MPM_WORKTREE_RECLAIM=off` / `TRUSTY_MPM_INPROJECT_HYGIENE=0` turned
+/// them red. Every user is `#[serial]`, which is what makes the mutation safe.
+struct SweepSwitchesOn(Vec<(&'static str, Option<String>)>);
+
+impl SweepSwitchesOn {
+    fn new() -> Self {
+        let keys = [
+            super::super::merged_pr_reclaim::ENV_ENABLED,
+            crate::daemon::managed_routes::inproject_hygiene_sweep::ENV_ENABLED,
+        ];
+        let saved = keys
+            .into_iter()
+            .map(|key| {
+                let prev = std::env::var(key).ok();
+                // SAFETY: callers are `#[serial]`; restored in `Drop`.
+                unsafe { std::env::remove_var(key) };
+                (key, prev)
+            })
+            .collect();
+        Self(saved)
+    }
+}
+
+impl Drop for SweepSwitchesOn {
+    fn drop(&mut self) {
+        for (key, prev) in self.0.drain(..) {
+            // SAFETY: see `new`.
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
 /// A completed pass records its duration and clears the running flag.
 #[test]
 fn sweep_status_records_the_last_pass_duration() {
@@ -90,6 +130,7 @@ fn sweep_rows_report_each_sweeps_switch_and_last_pass() {
 #[test]
 #[serial_test::serial]
 fn background_sweeps_row_warns_on_a_slow_pass() {
+    let _on = SweepSwitchesOn::new();
     let root = tempfile::TempDir::new().expect("tempdir");
     // The statics are shared, so drive the real ones and release immediately.
     let check = {
@@ -113,6 +154,7 @@ fn background_sweeps_row_warns_on_a_slow_pass() {
 #[test]
 #[serial_test::serial]
 fn background_sweeps_row_is_ok_when_both_sweeps_are_idle() {
+    let _on = SweepSwitchesOn::new();
     assert!(
         !RECLAIM.is_running() && !HYGIENE.is_running(),
         "the serial guard must give this test an idle daemon"
@@ -145,6 +187,7 @@ fn background_sweeps_row_is_ok_when_both_sweeps_are_idle() {
 #[test]
 #[serial_test::serial]
 fn a_running_sweep_is_reported_by_a_process_that_did_not_run_it() {
+    let _on = SweepSwitchesOn::new();
     let root = tempfile::TempDir::new().expect("tempdir");
     // Exactly what the sweep's own guard writes when a pass begins; this
     // process is the live writer, standing in for the daemon.
@@ -183,6 +226,7 @@ fn a_running_sweep_is_reported_by_a_process_that_did_not_run_it() {
 #[test]
 #[serial_test::serial]
 fn a_row_with_no_marker_still_reports_this_processs_own_pass() {
+    let _on = SweepSwitchesOn::new();
     let root = tempfile::TempDir::new().expect("tempdir");
     let check = {
         let _hygiene = HYGIENE.begin(None);

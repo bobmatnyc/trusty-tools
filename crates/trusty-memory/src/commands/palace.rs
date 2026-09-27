@@ -18,6 +18,8 @@
 //! Test: `palace_stats_reports_a_hand_built_palace`,
 //! `palace_compact_dry_run_writes_nothing`.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use trusty_common::memory_core::dream::{kg_compact_pass, DreamConfig};
@@ -25,7 +27,9 @@ use trusty_common::memory_core::palace::Palace;
 use trusty_common::memory_core::retrieval::PalaceHandle;
 use trusty_common::memory_core::store::kg_redb::KgRedbStats;
 use trusty_common::memory_core::store::OpenIntent;
-use trusty_common::memory_core::PalaceRegistry;
+use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
+
+use super::maintenance_gate::{open_purging_under_lease, require_lease};
 
 /// Actions under `trusty-memory palace` (#6652).
 ///
@@ -34,6 +38,7 @@ use trusty_common::memory_core::PalaceRegistry;
 /// existing vector-only `palace_compact` MCP tool would have widened that
 /// tool's blast radius with nothing in its name to warn a caller.
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
+/// `LegacyKg` writes only with `--apply` (#8434). `Deletions` is read-only (#8732).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -68,6 +73,53 @@ pub enum PalaceAction {
         #[arg(long, value_name = "DAYS", default_value_t = 90)]
         history_days: i64,
     },
+    /// Report, and with `--apply` import, drawers stranded in a pre-redb
+    /// SQLite `kg.db` (#8434).
+    ///
+    /// Dry run by default: reads private copies of `kg.db` and kg.redb, so it
+    /// is safe with the daemon up. `--apply` needs the write lock (stop the
+    /// daemon first) and refuses a store it would have to recreate. A missing
+    /// drawer whose content a live drawer already holds under another id is
+    /// skipped and counted as `content_duplicates` unless
+    /// `--include-content-duplicates` is passed. Nothing is ever deleted or
+    /// renamed.
+    LegacyKg {
+        /// Palace id.
+        name: String,
+        /// Import the missing drawers (default: report only).
+        #[arg(long)]
+        apply: bool,
+        /// With `--apply`, skip embedding the imported drawers.
+        #[arg(long)]
+        no_embed: bool,
+        /// With `--apply`, also import missing drawers whose content a live
+        /// drawer already holds under another id (default: skip them).
+        #[arg(long, requires = "apply")]
+        include_content_duplicates: bool,
+        /// Skip the 8-token minimum alone, as `memory_note` does (#8434). The
+        /// secret, blocklist, word-count and noise-pattern gates still apply.
+        /// Works with and without `--apply`, so the dry run previews it.
+        #[arg(long)]
+        allow_short: bool,
+    },
+    /// List drawers the dream and purge passes deleted, with the reason and,
+    /// for dedup, the surviving drawer and score (#8732).
+    ///
+    /// READ-ONLY. Reads the palace's `maintenance_deletions.jsonl`; safe with
+    /// the daemon up. User deletions (`memory_forget`) are not listed.
+    Deletions {
+        /// Palace id.
+        name: String,
+        /// Only records naming this drawer, as removed or surviving side.
+        #[arg(long, value_name = "UUID")]
+        drawer: Option<uuid::Uuid>,
+        /// Show at most this many of the newest matching records.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -89,6 +141,45 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             dry_run,
             history_days,
         } => handle_palace_compact(name, dry_run, history_days).await,
+        PalaceAction::LegacyKg {
+            name,
+            apply,
+            no_embed,
+            include_content_duplicates,
+            allow_short,
+        } => {
+            let (data_root, palace) = resolve(&name)?;
+            let report = if apply {
+                super::legacy_kg::apply_report(
+                    &palace,
+                    &data_root,
+                    !no_embed,
+                    include_content_duplicates,
+                    allow_short,
+                )
+                .await?
+            } else {
+                super::legacy_kg::scan_report(&palace, allow_short)?
+            };
+            print!("{}", report.render());
+            // #8434: the import committed; print it before failing on embed.
+            match report.embed_error {
+                Some(e) => anyhow::bail!("embed imported drawers: {e}"),
+                None => Ok(()),
+            }
+        }
+        PalaceAction::Deletions {
+            name,
+            drawer,
+            limit,
+            json,
+        } => {
+            let (_, palace) = resolve(&name)?;
+            let report =
+                super::palace_deletions::deletions_report(&name, &palace, drawer, limit, json)?;
+            print!("{report}");
+            Ok(())
+        }
     }
 }
 
@@ -98,7 +189,7 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
 /// transaction; never runs an at-open migration.
 /// Test: `palace_stats_reports_a_hand_built_palace`.
 pub async fn handle_palace_stats(name: String, history_days: i64, json: bool) -> Result<()> {
-    let palace = resolve(&name)?;
+    let (_, palace) = resolve(&name)?;
     print!("{}", stats_report(&name, &palace, history_days, json)?);
     Ok(())
 }
@@ -135,13 +226,15 @@ pub(crate) fn stats_report(
 /// without writing a byte — no backup, no temp file, no rename. Without it, the
 /// full copy-then-swap runs; a daemon holding the file makes the handle
 /// read-only and the rewrite refuses rather than replacing the live store with
-/// a rewritten copy of a snapshot.
-/// Test: `palace_compact_dry_run_writes_nothing`.
+/// a rewritten copy of a snapshot. A real run also refuses while another
+/// process holds the data root's maintenance lease (#8733).
+/// Test: `palace_compact_dry_run_writes_nothing`,
+/// `compact_under_a_lease_held_elsewhere_refuses_and_deletes_nothing`.
 pub async fn handle_palace_compact(name: String, dry_run: bool, history_days: i64) -> Result<()> {
-    let palace = resolve(&name)?;
+    let (data_root, palace) = resolve(&name)?;
     print!(
         "{}",
-        compact_report(&name, &palace, dry_run, history_days).await?
+        compact_report(&name, &palace, &data_root, dry_run, history_days).await?
     );
     Ok(())
 }
@@ -152,22 +245,29 @@ pub async fn handle_palace_compact(name: String, dry_run: bool, history_days: i6
 /// step is `resolve`, so the work moves below it.
 /// What: opens the palace (Writer intent for a real run, read-only for a dry
 /// run), runs the phase with the idle size gate disabled, and renders.
-/// Test: `palace_compact_dry_run_writes_nothing`.
+/// `data_root` is the registry dir whose `maintenance.lock` elects the one
+/// maintainer.
+/// Test: `palace_compact_dry_run_writes_nothing`,
+/// `compact_under_a_lease_held_elsewhere_refuses_and_deletes_nothing`.
 pub(crate) async fn compact_report(
     name: &str,
     palace: &Palace,
+    data_root: &Path,
     dry_run: bool,
     history_days: i64,
 ) -> Result<String> {
-    let intent = if dry_run {
-        OpenIntent::ReadOnlyClient
+    let lease = MaintenanceLease::new(data_root);
+    let handle = if dry_run {
+        // #8733: a dry run deletes nothing, including the open-time purge.
+        PalaceHandle::open_with_intent_purging(palace, OpenIntent::ReadOnlyClient, false)
+            .with_context(|| format!("open palace {}", palace.id))?
     } else {
-        OpenIntent::Writer
+        // #8733: compaction is maintenance through and through, so without
+        // the lease it refuses rather than skipping; the lease stays held
+        // until the pass returns.
+        require_lease(&lease)?;
+        open_purging_under_lease(palace, OpenIntent::Writer, &lease)?
     };
-    let handle = std::sync::Arc::new(
-        PalaceHandle::open_with_intent(palace, intent)
-            .with_context(|| format!("open palace {}", palace.id))?,
-    );
     let cfg = DreamConfig {
         prune_history_after_days: history_days,
         // An operator asking for a compaction by name has already made the
@@ -187,16 +287,18 @@ pub(crate) async fn compact_report(
     Ok(out)
 }
 
-/// Look up one palace by id under the configured data root.
-fn resolve(name: &str) -> Result<Palace> {
+/// Look up one palace by id under the configured data root, returning that
+/// root (the registry dir, where `maintenance.lock` lives) with it.
+fn resolve(name: &str) -> Result<(PathBuf, Palace)> {
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")
         .context("resolve trusty-memory data dir")?;
     let root = crate::resolve_palace_registry_dir(data_dir);
-    PalaceRegistry::list_palaces(&root)
+    let palace = PalaceRegistry::list_palaces(&root)
         .unwrap_or_default()
         .into_iter()
         .find(|p| p.id.0 == name)
-        .with_context(|| format!("no palace named '{name}' under {}", root.display()))
+        .with_context(|| format!("no palace named '{name}' under {}", root.display()))?;
+    Ok((root, palace))
 }
 
 /// The plain-text report.
@@ -371,7 +473,8 @@ mod tests {
         };
         let before = rows(&kg_path);
 
-        let out = compact_report("dry-run-fixture", &palace, true, 90)
+        let root = palace.data_dir.parent().expect("root").to_path_buf();
+        let out = compact_report("dry-run-fixture", &palace, &root, true, 90)
             .await
             .expect("dry run");
         assert!(out.contains("dry-run:"), "{out}");
@@ -380,5 +483,39 @@ mod tests {
         assert_eq!(before, rows(&kg_path), "the dry run changed kg.redb");
         assert!(!palace.data_dir.join("kg.redb.pre-compact.bak").exists());
         assert!(!palace.data_dir.join("kg.redb.compacting").exists());
+    }
+
+    /// #8733: compaction is maintenance, so while another process holds the
+    /// data root's lease a real run refuses and neither run deletes the
+    /// expired row. Pre-fix the real run compacted and its Writer open purged.
+    #[tokio::test]
+    async fn compact_under_a_lease_held_elsewhere_refuses_and_deletes_nothing() {
+        use trusty_common::memory_core::palace::Drawer;
+        use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+        let (dir, palace) = fixture("lease-fixture", 2);
+        let kg_path = palace.data_dir.join("kg.redb");
+        let mut expired = Drawer::new(uuid::Uuid::new_v4(), "an expired drawer");
+        expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        KgStoreRedb::open(&kg_path)
+            .expect("open kg")
+            .upsert_drawer(&expired)
+            .expect("seed expired drawer");
+        let holder = MaintenanceLease::new(dir.path());
+        assert!(holder.try_hold().is_held());
+
+        compact_report("lease-fixture", &palace, dir.path(), true, 90)
+            .await
+            .expect("a dry run needs no lease");
+        let err = compact_report("lease-fixture", &palace, dir.path(), false, 90)
+            .await
+            .expect_err("a real run must refuse without the lease");
+        assert!(format!("{err:#}").contains("maintenance lease"), "{err:#}");
+
+        let ids = KgStoreRedb::open(&kg_path)
+            .expect("reopen kg")
+            .load_drawer_ids()
+            .expect("ids");
+        assert!(ids.contains(&expired.id), "the expired row was deleted");
+        assert!(!palace.data_dir.join("kg.redb.pre-compact.bak").exists());
     }
 }

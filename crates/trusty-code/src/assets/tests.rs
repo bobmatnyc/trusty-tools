@@ -671,3 +671,313 @@ fn delivery_workflow_names_resolve_to_exactly_one_body() {
         );
     }
 }
+
+// -- #8287 / #8227: PM routing table and supporting-agent delegability. --
+
+/// A directory path no `.claude/agents/` tier occupies, so
+/// [`crate::agents::resolve_agent`] always falls through to the embedded roster.
+///
+/// Why: `resolve_agent` is disk-first. Pointing it at a real directory would
+/// make these tests depend on whatever the developer's checkout happens to hold;
+/// pointing it at a path that cannot exist exercises exactly the tier
+/// `delegate_to_agent` reaches for a stock session.
+/// What: an absolute path under a name no filesystem root uses.
+/// Test: used by the tests below.
+const NO_DISK_AGENTS_DIR: &str = "/tcode-tests-no-such-agents-dir";
+
+/// Resolve `name` through the same path `delegate_to_agent` uses, or panic.
+///
+/// Why: a routing target that `resolve_agent` cannot return is not delegable,
+/// whatever `DEFAULT_AGENTS` says — the roster table and the resolver are two
+/// steps, and only the second one a delegation actually takes.
+/// What: calls [`crate::agents::resolve_agent`] against [`NO_DISK_AGENTS_DIR`].
+/// Test: used by the tests below.
+fn resolve_embedded(name: &str) -> crate::agents::AgentConfig {
+    crate::agents::resolve_agent(std::path::Path::new(NO_DISK_AGENTS_DIR), name)
+        .unwrap_or_else(|e| panic!("'{name}' is not delegable — resolve_agent failed: {e}"))
+}
+
+/// Every backtick-quoted agent-shaped token in `text`, in order.
+///
+/// Why: the routing block's whole content is agent names, and the test has to
+/// range over what the CARD actually says rather than a list transcribed beside
+/// it — a name added to the table but not to the roster must fail here.
+/// What: keeps the odd-indexed (inside-backtick) spans whose every character is
+/// a lowercase ASCII letter or `-`. No roster name carries an underscore, so a
+/// tool name (`finish_task`) is excluded by shape, and `ISSUE:`/`PR:` by case.
+/// Panics on unbalanced backticks, which would invert inside and outside.
+/// Test: `pm_routing_block_names_only_delegable_roster_agents`.
+fn backticked_agent_tokens(text: &str) -> Vec<&str> {
+    let spans: Vec<&str> = text.split('`').collect();
+    assert!(spans.len() % 2 == 1, "unbalanced backticks in: {text:?}");
+    spans
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .copied()
+        .filter(|token| {
+            !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        })
+        .collect()
+}
+
+/// The raw `.md` source behind a roster dispatch name.
+///
+/// Why: the #8227 test compares each agent's PROJECTED grant against what its
+/// own card declares, so it needs the card bytes — which live in two different
+/// tables depending on whether the agent is `Direct` or `Composed`.
+/// What: the `Direct` entry's `md` when one exists, else the
+/// [`EMBEDDED_TM_AGENT_SOURCES`] entry keyed `<name>.md`.
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn card_source(name: &str) -> &'static str {
+    DEFAULT_AGENTS
+        .iter()
+        .find_map(|a| match a {
+            EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
+            _ => None,
+        })
+        .or_else(|| {
+            let key = format!("{name}.md");
+            EMBEDDED_TM_AGENT_SOURCES
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                .map(|(_, md)| *md)
+        })
+        .unwrap_or_else(|| panic!("no embedded card source for '{name}'"))
+}
+
+/// A scalar frontmatter value from a raw agent card, trimmed.
+///
+/// Why/What: scans the card's leading `---` fence for `<key>:` and returns the
+/// remainder of that line. `None` when the key is absent, which for
+/// `tcode_tools:` is itself the declared grant (every tool allowed).
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn frontmatter_value(md: &str, key: &str) -> Option<String> {
+    let fenced = md.strip_prefix("---\n")?.split_once("\n---")?.0;
+    fenced
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}:")))
+        .map(|value| value.trim().to_string())
+}
+
+/// The tool allowlist a card declares, as [`crate::agents::AgentConfig`] would
+/// hold it.
+///
+/// Why/What: parses `tcode_tools: [a, b, c]` into the same `Option<Vec<String>>`
+/// shape `cfg.tools.allowed` carries — `None` when the card declares no
+/// `tcode_tools:` line at all.
+/// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
+fn declared_tool_grant(md: &str) -> Option<Vec<String>> {
+    let raw = frontmatter_value(md, "tcode_tools")?;
+    let inner = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    Some(
+        inner
+            .split(',')
+            .map(|tool| tool.trim().to_string())
+            .filter(|tool| !tool.is_empty())
+            .collect(),
+    )
+}
+
+/// `pm.md`'s routing block names `research` -> `engineer` -> `qa-agent` in that
+/// order, and every agent it names is delegable (#8287).
+///
+/// Why: this is #8287's acceptance test. A card that merely CONTAINS the word
+/// "research" proves nothing — the defect #8287 describes is that the PM has no
+/// basis to dispatch an agent, which needs the name to be (a) present as a
+/// routing target inside the routing block, (b) in the order DOC-75 §1 fixes,
+/// and (c) resolvable by the same `resolve_agent` call `delegate_to_agent`
+/// makes, with a real prompt and a way to report back. Each of those three is a
+/// separate way to be wrong, so each is asserted separately. The `bash`
+/// assertion on the verification target is what pins `qa-agent` over `qa`:
+/// DOC-75 §6 requires real test output in the transcript, and tcode's `qa` fork
+/// carries no `bash`.
+/// What: extracts the block from `PM_MD` via [`pm_routing_block`], asserts every
+/// backticked agent-shaped token in it resolves and is delegable, asserts
+/// [`PM_ROUTING_ORDER`]'s three names appear in that relative order, and asserts
+/// the third one can run commands.
+/// Test: this test.
+#[test]
+fn pm_routing_block_names_only_delegable_roster_agents() {
+    let block = pm_routing_block(PM_MD).unwrap_or_else(|| {
+        panic!(
+            "pm.md carries no routing block — #8287 requires one delimited by \
+             {PM_ROUTING_BLOCK_BEGIN:?} .. {PM_ROUTING_BLOCK_END:?}"
+        )
+    });
+
+    let named = backticked_agent_tokens(block);
+    assert!(
+        named.len() >= PM_ROUTING_ORDER.len(),
+        "the routing block names too few agents to route a coding task: {named:?}"
+    );
+    for name in &named {
+        assert!(
+            DEFAULT_AGENTS.iter().any(|a| a.name() == *name),
+            "the routing block names '{name}', which is not in DEFAULT_AGENTS — \
+             the PM would emit a delegation that fails agent resolution"
+        );
+        let cfg = resolve_embedded(name);
+        assert!(
+            !cfg.system_prompt.content.trim().is_empty(),
+            "'{name}' resolves to an empty prompt, so delegating to it is a no-op"
+        );
+        let allowed = cfg.tools.and_then(|t| t.allowed);
+        assert!(
+            allowed.as_ref().is_none_or(|tools| tools
+                .iter()
+                .any(|t| t == crate::tools::FINISH_TASK_TOOL_NAME)),
+            "'{name}' cannot call finish_task, so it can never report a result back"
+        );
+    }
+
+    let position = |target: &str| {
+        named
+            .iter()
+            .position(|name| *name == target)
+            .unwrap_or_else(|| {
+                panic!("the routing block names no '{target}' delegation target: {named:?}")
+            })
+    };
+    let mut previous = None;
+    for target in PM_ROUTING_ORDER {
+        let at = position(target);
+        if let Some((earlier_name, earlier_at)) = previous {
+            assert!(
+                earlier_at < at,
+                "the routing block must name '{earlier_name}' before '{target}' — \
+                 DOC-75 §1 fixes the order research -> engineer -> qa"
+            );
+        }
+        previous = Some((*target, at));
+    }
+
+    let verifier = PM_ROUTING_ORDER
+        .last()
+        .expect("PM_ROUTING_ORDER is never empty");
+    let verifier_tools = resolve_embedded(verifier)
+        .tools
+        .and_then(|t| t.allowed)
+        .unwrap_or_else(|| panic!("'{verifier}' declares no explicit tool grant"));
+    assert!(
+        verifier_tools
+            .iter()
+            .any(|t| t == crate::tools::BASH_TOOL_NAME),
+        "the verification target must be able to RUN the tests DOC-75 §6 wants \
+         quoted, so it needs bash: {verifier_tools:?}"
+    );
+}
+
+/// The PM card stays under DOC-75 §4b's 2x token-budget cap (#8287).
+///
+/// Why: token budget is a first-class axis for tcode (vision spec), and this
+/// card is resident in every delegate-mode turn. #8293 and #8294 both add to it
+/// next, so the cap needs a mechanical floor now rather than after the third
+/// edit.
+/// What: asserts `PM_MD.len()` is at most twice [`PM_CARD_BASELINE_BYTES`].
+/// Test: this test.
+#[test]
+fn pm_card_stays_within_the_doc_75_size_cap() {
+    let cap = PM_CARD_BASELINE_BYTES * 2;
+    assert!(
+        PM_MD.len() <= cap,
+        "pm.md is {} bytes, over DOC-75 §4b's cap of {cap} (2x the \
+         {PM_CARD_BASELINE_BYTES}-byte 2026-09-19 baseline)",
+        PM_MD.len()
+    );
+}
+
+/// The PM card instructs no tool a delegate-mode PM registry lacks, and names
+/// no harness tcode does not ship (#8287).
+///
+/// Why: the #4602 class of defect — a prompt naming a tool the run's registry
+/// never registered, so the model emits a call that fails validation. #4602
+/// closed it for the assembler's own gated sections; the PM card itself was
+/// never checked, and the routing block is new prose that could reintroduce it.
+/// The `tmux`/`Skill(` checks encode DOC-75 §4b's other half: tcode hosts
+/// neither, so wording borrowed from trusty-mpm's PM instructions is a defect
+/// here even though it is correct there.
+/// What: asserts every backticked `[a-z_]+` token in the card BODY is one of the
+/// six tools `task::executor`'s delegating path registers
+/// (`executor.rs`'s `pm_registry`, where `pm_prompt_tools` returns `None`), and
+/// that the card contains neither `tmux` nor a `Skill(` invocation.
+/// Test: this test.
+#[test]
+fn pm_card_names_no_tool_the_delegate_mode_pm_lacks() {
+    let body = resolve_embedded("pm").system_prompt.content;
+    let delegate_mode_tools = [
+        crate::tools::DELEGATE_TO_AGENT_TOOL_NAME,
+        crate::tools::FINISH_TASK_TOOL_NAME,
+        crate::tools::SET_GOAL_TOOL_NAME,
+        crate::tools::CLEAR_GOAL_TOOL_NAME,
+        crate::tools::USE_SKILL_TOOL_NAME,
+        crate::tools::RECALL_SESSION_TOOL_NAME,
+    ];
+
+    let spans: Vec<&str> = body.split('`').collect();
+    assert!(spans.len() % 2 == 1, "unbalanced backticks in pm.md");
+    let mut checked = 0usize;
+    for token in spans.iter().skip(1).step_by(2) {
+        if token.is_empty() || !token.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            continue;
+        }
+        if !token.contains('_') {
+            continue; // an agent name, checked by the routing test above
+        }
+        checked += 1;
+        assert!(
+            delegate_mode_tools.contains(token),
+            "pm.md names `{token}`, which a delegate-mode PM registry does not \
+             hold — the model would emit a call that fails validation (#4602)"
+        );
+    }
+    assert!(
+        checked > 0,
+        "pm.md names no tool at all, so this check proves nothing"
+    );
+    for absent in ["tmux", "Skill("] {
+        assert!(
+            !body.contains(absent),
+            "pm.md names {absent:?}, which tcode does not ship (DOC-75 §4b)"
+        );
+    }
+}
+
+/// Each of #8227's four supporting agents resolves, carries a real prompt with
+/// its card's role, and projects exactly the tool grant its card declares.
+///
+/// Why: this is #8227's deterministic half. #8129 verified roster PRESENCE only;
+/// what the PM's routing table now depends on is that each name resolves through
+/// `resolve_agent` and arrives with the grant its author wrote — the #8199 class
+/// of defect is precisely a frontmatter key silently dropped on the way through,
+/// leaving an agent with a grant nobody chose. Comparing against the card's OWN
+/// frontmatter rather than a transcribed list is what makes an edit to either
+/// side fail here.
+/// What: for `research`, `documentation`, `ticketing` and `version-control`:
+/// resolves each, asserts a non-empty prompt, asserts `cfg.agent.role` equals
+/// the card's `role:` line, and asserts `cfg.tools.allowed` equals the card's
+/// `tcode_tools:` list (or `None` where the card declares none — `research`,
+/// whose unrestricted grant is the 2026-07-18 owner ruling).
+/// Test: this test.
+#[test]
+fn supporting_agents_resolve_with_their_declared_tool_grant() {
+    for name in ["research", "documentation", "ticketing", "version-control"] {
+        let card = card_source(name);
+        let cfg = resolve_embedded(name);
+
+        assert!(
+            !cfg.system_prompt.content.trim().is_empty(),
+            "'{name}' resolves to an empty prompt"
+        );
+        assert_eq!(
+            cfg.agent.role,
+            frontmatter_value(card, "role"),
+            "'{name}' must arrive carrying the role its card declares"
+        );
+        assert_eq!(
+            cfg.tools.and_then(|t| t.allowed),
+            declared_tool_grant(card),
+            "'{name}' projects a tool grant its card did not declare (#8199)"
+        );
+    }
+}

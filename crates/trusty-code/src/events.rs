@@ -175,6 +175,43 @@ pub struct SearchHit {
     pub score: f64,
 }
 
+/// One session-checklist step's state (#8235).
+///
+/// Why: a checklist whose items were plain strings would force every reader
+/// (the roster, `Event::TodosChanged`, the future TUI panel) to re-parse a
+/// rendered mark out of the text — the client-side derivation DOC-39 §2.1
+/// C-1 forbids. The three states are Claude Code's `TodoWrite` vocabulary
+/// verbatim, so a model already trained on that tool needs no translation.
+/// What: serialises snake_case (`"pending"`, `"in_progress"`, `"completed"`).
+/// Test: `events_tests::todos_changed_round_trips_through_json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One step of an agent's session checklist (#8235).
+///
+/// Why: the element type of BOTH `Event::TodosChanged.todos` and
+/// `session.get_agents`'s `AgentRosterEntry.todos`, so the streamed change
+/// and the queryable roster can never drift on shape. `content` is the whole
+/// payload a reader needs; Claude Code's `activeForm` is deliberately absent
+/// — it doubles the text per item to carry a present-participle restatement
+/// no reader here renders, and tcode treats token cost as a first-class axis
+/// (`docs/trusty-code/vision-and-architecture-spec.md`).
+/// What: `content` is the step, trimmed and non-empty (enforced by
+/// `tools::checklist::parse_todos`, never by this struct). `status` is one of
+/// [`TodoStatus`].
+/// Test: `events_tests::todos_changed_round_trips_through_json`,
+/// `tools::checklist::tests::*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
 /// Real-time event types streamed to UI clients (browser, future Tauri).
 ///
 /// Why: A single tagged enum keeps wire-format evolution tractable —
@@ -932,6 +969,26 @@ pub enum Event {
         source: String,
     },
 
+    /// One agent replaced its session checklist (#8235).
+    ///
+    /// Why: `session.get_agents` is a poll, so without this event a client
+    /// learns about a checklist change only on its next roster read. The
+    /// event carries the WHOLE new list rather than a "re-read me" ping so a
+    /// subscriber needs no follow-up RPC.
+    /// What: emitted by `SessionRegistry::set_agent_todos` immediately after
+    /// it writes the roster row, carrying that same list, so the streamed
+    /// value and the queryable one can never disagree. `agent`/`agent_id`
+    /// identify the WRITER — the checklist is per-agent (DOC-39 §4.5), so a
+    /// delegated sub-agent's list never overwrites the PM's.
+    /// Test: `events_tests::todos_changed_round_trips_through_json`,
+    /// `session::registry_todos::tests::*`.
+    TodosChanged {
+        session_id: String,
+        agent: String,
+        agent_id: String,
+        todos: Vec<TodoItem>,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -1160,7 +1217,8 @@ impl Event {
             | Event::SessionAdded { session_id, .. }
             | Event::SessionActivityUpdate { session_id, .. }
             | Event::PermissionRequested { session_id, .. }
-            | Event::PermissionResolved { session_id, .. } => Some(session_id),
+            | Event::PermissionResolved { session_id, .. }
+            | Event::TodosChanged { session_id, .. } => Some(session_id),
             Event::WorkstreamActivationChanged { .. }
             | Event::WorkstreamStateInferred { .. }
             | Event::Ping => None,
@@ -1221,6 +1279,7 @@ impl Event {
             Event::WorkstreamStateInferred { .. } => "workstream_state_inferred",
             Event::PermissionRequested { .. } => "permission_requested",
             Event::PermissionResolved { .. } => "permission_resolved",
+            Event::TodosChanged { .. } => "todos_changed",
             Event::Ping => "ping",
         }
     }

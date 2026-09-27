@@ -18,6 +18,7 @@ mod embed_repair;
 mod embedder;
 mod handle;
 mod layers;
+pub(crate) mod open_sweep;
 // #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its
 // only length control.
 mod relevance;

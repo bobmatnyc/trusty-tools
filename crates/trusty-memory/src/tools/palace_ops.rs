@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::palace::{Palace, PalaceId};
 use uuid::Uuid;
 
-use super::helpers::{open_palace_handle, resolve_palace};
+use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
 // #6318: `palace_info` reads, so it falls back to a palace index; `palace_compact`,
 // `palace_reembed` and `palace_unalias` can write, so they keep the error.
 use super::palace_index::{resolve_palace_or_index, PalaceScope};
@@ -444,10 +444,14 @@ fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) 
 /// `kg.redb` would widen a narrowly-documented tool's blast radius with nothing
 /// in its name or schema to warn a caller, so the KG rewrite lives behind
 /// `palace_dream { compact: true }` and `trusty-memory palace compact` instead.
-/// What: delegates to `PalaceHandle::compact_vector_orphans`, unchanged.
-/// Test: `palace_compact_description_says_vector_index_only`.
+/// What: delegates to `PalaceHandle::compact_vector_orphans`, unchanged, once
+/// this process holds the data root's maintenance lease (#8733).
+/// Test: `palace_compact_description_says_vector_index_only`,
+/// `palace_compact_is_refused_without_the_maintenance_lease`.
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
+    // #8733: reclaiming vector rows is compaction, so only the maintainer runs it.
+    require_maintenance_lease(state)?;
     let handle = open_palace_handle(state, &palace)?;
     // #6208: route through the handle's locked reclamation. It snapshots the
     // valid-id set and reclaims orphans while holding the palace write mutex,

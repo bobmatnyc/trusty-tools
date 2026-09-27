@@ -363,6 +363,9 @@ pub struct UsearchStore {
     /// for why both readings are needed and
     /// [`Self::try_demote_after_write_cooldown`] for how they are used.
     pub(super) write_clock: Arc<super::usearch_demote::WriteClock>,
+    /// Set once by [`super::usearch_close`]'s close when the index is deleted
+    /// (#8232); every later use is refused. Never cleared.
+    pub(super) closed: AtomicBool,
     /// Outer gate for snapshot capture, publication, and every mutation (#6961).
     ///
     /// Graph/map/path locks are acquired only after this gate. Searches retain
@@ -469,6 +472,7 @@ impl UsearchStore {
             hnsw_path: Arc::new(RwLock::new(None)),
             dirty: Arc::new(AtomicBool::new(false)),
             write_clock: Arc::new(super::usearch_demote::WriteClock::new()),
+            closed: AtomicBool::new(false),
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
             removed_since_save: Arc::new(AtomicU64::new(0)),
         })
@@ -539,6 +543,9 @@ impl UsearchStore {
         // outer gate shared by all mutation entry points. Inner locks alone
         // permit a map update to race graph serialization.
         let _save_guard = self.save_lock.clone().lock_owned().await;
+        // #8232: a closed store holds an empty graph; saving it would replace
+        // the snapshot a deregister-only delete promised to preserve.
+        self.refuse_if_closed("save")?;
 
         // Retain the #6826 epoch check as defense in depth. The outer gate
         // now excludes writers across capture and publication; any future

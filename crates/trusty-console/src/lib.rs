@@ -216,6 +216,19 @@ pub struct ServeArgs {
         default_value_t = trusty_common::host_metrics::history::HOST_SAMPLE_INTERVAL_SECS
     )]
     pub host_sample_interval: u64,
+
+    /// Disk-metrics refresh interval in seconds (default: 15).
+    ///
+    /// The disk half of a host sample is the expensive half — on macOS
+    /// `sysinfo` walks every mounted volume — so it runs on its own slower
+    /// clock while CPU, memory and network keep `--host-sample-interval`.
+    /// Free space changes on a human timescale; lower this only to watch a
+    /// disk fill in near real time, and expect the CPU cost back.
+    #[arg(
+        long,
+        default_value_t = trusty_common::host_metrics::history::DISK_SAMPLE_INTERVAL_SECS
+    )]
+    pub disk_sample_interval: u64,
 }
 
 // ─── public entry point ────────────────────────────────────────────────────
@@ -471,9 +484,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // cadence rather than the service pollers' 15 s: a host sample is a local
     // sysinfo refresh, not an MCP round trip. #6642: the same loop also records
     // one per-service status + CPU sample per tick.
-    machine_history::sampler::start(
+    machine_history::sampler::start_with_disk_interval(
         state.clone(),
         Duration::from_secs(args.host_sample_interval),
+        Duration::from_secs(args.disk_sample_interval),
     );
 
     // #3269: trust the console's own non-loopback bind address(es) (e.g. the
@@ -666,6 +680,12 @@ mod tests {
                     args.host_sample_interval,
                     trusty_common::host_metrics::history::HOST_SAMPLE_INTERVAL_SECS
                 );
+                // The disk half keeps its own, slower default so the 1 s graph
+                // does not pay for a volume walk every tick.
+                assert_eq!(
+                    args.disk_sample_interval,
+                    trusty_common::host_metrics::history::DISK_SAMPLE_INTERVAL_SECS
+                );
             }
             other => panic!("expected Serve, got {other:?}"),
         }
@@ -684,6 +704,11 @@ mod tests {
             Commands::Serve(args) => {
                 assert_eq!(args.host_sample_interval, 10);
                 assert_eq!(args.poll_interval, 15, "the service poll is unaffected");
+                assert_eq!(
+                    args.disk_sample_interval,
+                    trusty_common::host_metrics::history::DISK_SAMPLE_INTERVAL_SECS,
+                    "the disk cadence is unaffected"
+                );
             }
             other => panic!("expected Serve, got {other:?}"),
         }

@@ -425,6 +425,9 @@ mod tests_unavailable;
 // #5264: structured `search_health` diagnostics.
 #[cfg(test)]
 mod tests_health;
+// #8229: the cwd fallback resolves by root, not by the bare basename id.
+#[cfg(test)]
+mod tests_health_cwd_8229;
 // #6317: the NO_INDEX_RESOLVED directory answer, and the write tools it spares.
 #[cfg(test)]
 mod tests_index_directory;

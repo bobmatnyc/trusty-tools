@@ -192,3 +192,75 @@ fn a_clean_project_produces_no_override_diagnostics() {
         );
     }
 }
+
+#[test]
+fn instructions_reports_section_status_and_project_style() {
+    // #8533: the per-section table and the project style reach stderr, and the
+    // prompt on stdout matches the table. Against origin/main the report and
+    // the `PM-ALLOWLIST` token do not exist.
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    write_project(tmp.path());
+    let claude_md = tmp.path().join("CLAUDE.md");
+    let mut text = std::fs::read_to_string(&claude_md).expect("read CLAUDE.md");
+    text.push_str(
+        "\n<!-- TRUSTY-MPM: IDENTITY START v=1 -->\n# Fixture Supervisor\n\
+         <!-- TRUSTY-MPM: IDENTITY END -->\n\n\
+         <!-- TRUSTY-MPM: PM-ALLOWLIST START v=1 -->\nFixture allowlist.\n\
+         <!-- TRUSTY-MPM: PM-ALLOWLIST END -->\n",
+    );
+    std::fs::write(&claude_md, text).expect("write CLAUDE.md");
+    let styles = tmp.path().join(".claude").join("output-styles");
+    std::fs::create_dir_all(&styles).expect("styles");
+    std::fs::write(
+        styles.join("fixture-voice.md"),
+        "---\nname: fixture-voice\n---\n\nVoice.\n",
+    )
+    .expect("style");
+    std::fs::write(
+        tmp.path().join(".trusty-mpm.toml"),
+        "[style]\nactive = \"fixture-voice\"\n",
+    )
+    .expect("project config");
+    let dir = tmp.path().to_string_lossy().into_owned();
+
+    let (stdout, stderr) = run_tm(&["sessions", "instructions", "--dir", &dir], None);
+
+    assert!(
+        stdout.contains("# Fixture Supervisor") && !stdout.contains("# PM Agent -- Trusty MPM"),
+        "the IDENTITY override must replace the package opening"
+    );
+    for needle in [
+        "instruction sections (core / overridable / overridden-by-project):",
+        "output style: fixture-voice (project) + floor",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "missing {needle:?} in stderr: {stderr}"
+        );
+    }
+    let row = |token: &str| {
+        stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("{token} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        row("IDENTITY").contains("overridden-by-project"),
+        "{stderr}"
+    );
+    assert!(
+        row("PM-ALLOWLIST").contains("overridden-by-project"),
+        "{stderr}"
+    );
+    assert!(
+        row("CORE").contains("core (project override declined:"),
+        "{stderr}"
+    );
+    assert!(row("SEARCH").contains("overridable"), "{stderr}");
+    assert!(!stderr.contains("NOT FOUND"), "{stderr}");
+    // #8533 owner ruling 2026-09-25: the project style keeps the floor, once,
+    // whether or not the host's Claude Code delivers the style natively.
+    let floor = trusty_mpm::core::output_style::style_floor();
+    assert_eq!(stdout.matches(floor.as_str()).count(), 1, "{stdout}");
+}
