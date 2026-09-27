@@ -610,6 +610,44 @@ async fn the_legacy_register_wrapper_still_bails_on_a_root_collision() {
     );
 }
 
+/// #8727: an overlap `409` carries the blocking index only in its body, and
+/// the CLI printed the bare status line, so the operator could not see which
+/// registration was in the way. The refusal must now name its id and root.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_overlap_conflict_names_the_blocking_index_and_root() {
+    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
+    seed_conflict_daemon(
+        tmp.path(),
+        axum::http::StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": "\"/repo\" contains the root of index 'agent-x' (\"/repo/wt/agent-x\")",
+            "overlap": "encloses_existing_root",
+            "existing_index_id": "agent-x",
+            "existing_root_path": "/repo/wt/agent-x",
+        }),
+    )
+    .await;
+
+    let got = register_index_reporting_collision(
+        "requested",
+        std::path::Path::new("/repo"),
+        &RegisterFilters::default(),
+    )
+    .await;
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let err = got
+        .expect_err("an overlap refusal must still fail")
+        .to_string();
+    assert!(
+        err.contains("agent-x") && err.contains("/repo/wt/agent-x"),
+        "the refusal must name the blocking id and root: {err}"
+    );
+}
+
 /// A plain `200` must still report whether the daemon created the index —
 /// the collision arm must not have changed the ordinary path.
 /// Test: this function IS the test.

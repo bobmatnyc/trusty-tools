@@ -115,6 +115,12 @@ mod tests_8134;
 // #8167: a delete releases the index's files while a handle clone survives.
 #[cfg(test)]
 mod tests_8167;
+// #8664: a delete closes the files a queued deferred-embed job holds.
+#[cfg(test)]
+mod tests_8664;
+// #8727: parked registrations are listed; an overlap 409 names its blocker.
+#[cfg(test)]
+mod tests_8727;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;

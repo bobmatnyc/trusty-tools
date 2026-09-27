@@ -1,0 +1,4 @@
+Fixed
+- `DELETE /indexes/{id}` on a cold-parked index now closes `index.redb` and the HNSW mapping that a queued deferred-embed job holds, and that job ends with `IndexDeleted` instead of running its embed pass against the deleted index (#8664).
+- `trusty-search index remove` no longer depends on other indexes' residency: a cold-parked target resolves from its parked row, and a PATH whose registration was already deleted has its stale `allowlist.toml` and config rows cleared instead of aborting (#8687).
+- `GET /indexes`, `trusty-search list`, `trusty-search status` and MCP `list_indexes` now list parked registrations (`parked`: id, root, root state) — the same set the create-time overlap check consults. An overlap `409` reports the blocking root's state and, for a deleted root, the command that removes the stale registration; the CLI prints the blocking id and root (#8727).

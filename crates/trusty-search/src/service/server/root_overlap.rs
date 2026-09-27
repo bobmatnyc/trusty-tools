@@ -27,6 +27,7 @@ use axum::http::StatusCode;
 
 use crate::core::registry::IndexHandle;
 use crate::core::IndexId;
+use crate::service::orphan_report::{classify_root, RootState};
 
 /// How a candidate root relates to a root some index already owns (#4289).
 ///
@@ -171,25 +172,93 @@ pub(crate) fn root_overlap_response(
         RootOverlap::InsideExistingRoot => ("is inside", "inside_existing_root"),
         RootOverlap::EnclosesExistingRoot => ("contains", "encloses_existing_root"),
     };
+    let root_state = classify_root(&conflict.root_path);
+    // #8727: a registration that outlived its directory still blocks — fail
+    // closed — but the refusal says so and names the command that clears it.
+    let remedy = if root_state == RootState::Orphaned {
+        format!(
+            "'{}' no longer exists on disk; remove the stale registration with \
+             `trusty-search index remove -i {} --keep-data`, then retry",
+            conflict.root_path.display(),
+            conflict.index_id,
+        )
+    } else {
+        format!(
+            "Attach to '{}' instead, or pick a directory outside it",
+            conflict.index_id
+        )
+    };
     (
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": format!(
                 "{:?} {} the root of index '{}' ({:?}); overlapping index roots let one \
-                 reindex prune the other's corpus. Attach to '{}' instead, or pick a \
-                 directory outside it",
+                 reindex prune the other's corpus. {remedy}",
                 requested.display(),
                 relation,
                 conflict.index_id,
                 conflict.root_path.display(),
-                conflict.index_id,
             ),
             "overlap": kind,
             "existing_index_id": conflict.index_id.0,
             "existing_root_path": conflict.root_path.display().to_string(),
+            "existing_root_state": root_state_label(&root_state),
             "requested_root_path": requested.display().to_string(),
         }),
     )
+}
+
+/// `present` / `orphaned` / `indeterminate`, the `/registry/orphans` census's
+/// own three answers (#6371).
+fn root_state_label(state: &RootState) -> &'static str {
+    match state {
+        RootState::Present => "present",
+        RootState::Orphaned => "orphaned",
+        RootState::Indeterminate(_) => "indeterminate",
+    }
+}
+
+/// The registrations the overlap check consults that `GET /indexes` would
+/// otherwise omit: every cold-store entry with no resident handle (#8727).
+///
+/// Why: `list` and `status` showed resident indexes only, while
+/// [`find_root_overlap`] also scans cold entries, so a parked registration —
+/// often one whose worktree was deleted — refused `create_index` from
+/// nowhere the operator could see.
+/// What: one row per parked id, sorted — `{id, root_path, root_state}`, where
+/// `root_state` is the `/registry/orphans` classification of its root.
+/// Test: `a_parked_registration_that_blocks_create_is_listed_and_named`.
+pub(crate) fn parked_registrations(
+    handles: &[Arc<IndexHandle>],
+    cold_entries: &[crate::service::persistence::PersistedIndex],
+) -> Vec<serde_json::Value> {
+    let mut rows: Vec<_> = cold_entries
+        .iter()
+        .filter(|e| !handles.iter().any(|h| h.id.0 == e.id))
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "root_path": e.root_path.display().to_string(),
+                "root_state": root_state_label(&classify_root(&e.root_path)),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    rows
+}
+
+/// Add `parked` to a `GET /indexes` body only when there is a parked row, so a
+/// daemon with none serves the pre-#8727 body byte-for-byte (#6699 pins it).
+/// Test: `a_parked_registration_that_blocks_create_is_listed_and_named`,
+/// `list_indexes_without_details_is_unchanged`.
+pub(crate) fn with_parked(
+    mut body: serde_json::Value,
+    parked: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    if !parked.is_empty() {
+        body["parked"] = serde_json::Value::Array(parked);
+    }
+    body
 }
 
 /// Build the `500` an unrunnable containment check returns (#4289).
