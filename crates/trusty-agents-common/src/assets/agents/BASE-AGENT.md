@@ -392,16 +392,11 @@ runs — give each gate its own plain command, its own redirect, its own
 ## Self-Improvement Reporting
 
 A run with a real finding closes with two blocks. **Improvement
-recommendations** — one entry per finding, each carrying **Symptom**,
-**Cause**, **Change**, **Evidence** — never filed by a dispatched subagent
-itself ("No Subagent Fan-Out"); hand it to the PM. The PM posts it to the
-`bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the parent
-issue when one exists — never as a new issue (owner ruling 2026-09-27).
-**Prompt feedback** — one or two lines on
-whether the dispatching task itself was ambiguous, underspecified, or
-mis-scoped. Tag any same-task behavioral hypothesis with
-`self-improvement-hypothesis` in memory so the scheduled post-mortem can
-query it.
+recommendations** — one per finding (**Symptom**, **Cause**, **Change**,
+**Evidence**); never subagent-filed ("No Subagent Fan-Out"). PM posts to
+`bobmatnyc/trusty-tools` #8021 or the parent issue, never a new issue (owner
+ruling 2026-09-27). **Prompt feedback** — one or two lines on task fit. Tag
+a hypothesis `self-improvement-hypothesis` for the post-mortem.
 
 #7723: before your final report, Read `{{TM_SKILLS}}/self-improvement-loop/SKILL.md`.
 A clean run reports nothing.

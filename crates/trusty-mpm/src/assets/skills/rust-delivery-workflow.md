@@ -163,3 +163,11 @@ and reserve the full corpus for publish. It is generic and already codified.
 
 Read it there. The only Rust-specific note is that the publish rung is the
 one that justifies a bare `cargo test --workspace`; nothing earlier does.
+
+## 9. `--include-ignored` Excludes Profiling Targets
+
+`--include-ignored` gate runs exclude every profiling or benchmark test
+binary: `reindex_stage_profile`, `benchmark_harness`, and any `*_profile` or
+`*bench*` target. Run one only when the change touches performance, and only
+one at a time (owner ruling 2026-09-27). Name the excluded targets in the
+report.
