@@ -14,8 +14,9 @@
 #      scripts/package_content.sh and uploads the tarball, its .sha256 sidecar
 #      and the release notes as a workflow artifact.
 #   2. `release` (contents: write) — skipped on a dry run. Re-verifies the
-#      sha256 and creates the release with `gh release create`, which also
-#      creates the tag at the packaged commit.
+#      sha256, re-checks that the tag is still unused, and creates the
+#      release with `gh release create` (--prerelease for an X.Y.Z-pre
+#      version), which also creates the tag at the packaged commit.
 #
 # TRIGGERS:
 #   - workflow_dispatch only, dry_run defaulting to true. A real cut must be
@@ -73,8 +74,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::version must be SemVer X.Y.Z[-pre] without a leading 'v', got '${VERSION}'"
+          # #8389: match the WHOLE string. A line-by-line `grep` passed a
+          # multi-line value when any one line was valid, and its extra lines
+          # then reached $GITHUB_OUTPUT and `::error::`. The charset guard
+          # refuses any newline or carriage return before the regex runs, and
+          # a refused value is echoed only with those bytes replaced by `?`.
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          case "$VERSION" in
+            *[!0-9A-Za-z.-]*) ok=false ;;
+            *) if [[ $VERSION =~ $semver_re ]]; then ok=true; else ok=false; fi ;;
+          esac
+          if [ "$ok" != true ]; then
+            echo "::error::version must be SemVer X.Y.Z[-pre] without a leading 'v', got '${VERSION//[!0-9A-Za-z.-]/?}'"
             exit 1
           fi
           if [ "$DRY_RUN" != "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
@@ -150,7 +161,8 @@ jobs:
         run: cd dist && sha256sum -c "${TAG}.tar.gz.sha256"
 
       # --latest=false: a content release must never displace a crate release
-      # as the repository's "Latest".
+      # as the repository's "Latest". A SemVer pre-release (`-` after the
+      # version core) is published with --prerelease.
       - name: Create release
         shell: bash
         env:
@@ -159,9 +171,22 @@ jobs:
           TAG: ${{ needs.package.outputs.tag }}
         run: |
           set -euo pipefail
+          # #8389: re-check the tag right before creating it. The package job's
+          # check can be stale by now, and with Immutable Releases on, a release
+          # attached to a hand-pushed tag at another commit cannot be repaired.
+          # Only a 404 proves the tag is unused; any other status fails closed.
+          resp="$(gh api --include "repos/${GH_REPO}/git/ref/tags/${TAG}" 2>/dev/null || true)"
+          status="$(printf '%s\n' "$resp" | awk 'NR == 1 { print $2; exit }')"
+          if [ "$status" != 404 ]; then
+            echo "::error::tag ${TAG} lookup returned HTTP '${status:-none}', not 404; refusing to create the release"
+            exit 1
+          fi
+          prerelease=false
+          case "${TAG#content-v}" in *-*) prerelease=true ;; esac
           gh release create "$TAG" \
             "dist/${TAG}.tar.gz" "dist/${TAG}.tar.gz.sha256" \
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --notes-file dist/release-notes.md \
+            --prerelease="$prerelease" \
             --latest=false

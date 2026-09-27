@@ -22,21 +22,25 @@ gh workflow run content-release.yml --ref main -f version=0.1.0 -f dry_run=false
 
 The workflow refuses to run when:
 
-- the version is not SemVer `X.Y.Z[-pre]` (no leading `v`);
+- the version is not SemVer `X.Y.Z[-pre]` (no leading `v`), checked against
+  the whole string, so a value holding a newline or carriage return fails;
 - the tag already exists, because a published content release is immutable;
 - a real cut (`dry_run=false`) was dispatched against any ref but `main`;
 - the packager selftest fails.
 
 The `release` job is the only one with `contents: write`. It re-verifies the
-sha256 and runs `gh release create`, which creates the tag at the packaged
-commit. The release is created with `--latest=false`, so it never replaces a
-crate release as the repository's "Latest".
+sha256, then checks the tag once more: only a 404 from
+`gh api repos/<repo>/git/ref/tags/<tag>` lets it continue, and any other
+status stops the job. It then runs `gh release create`, which creates the tag
+at the packaged commit. The release is created with `--latest=false`, so it
+never replaces a crate release as the repository's "Latest". A pre-release
+version (`X.Y.Z-pre`) is published with `--prerelease`.
 
-🔴 **Never push a `content-v*` tag by hand anyway.** `release.yml`,
-`pre-publish.yml` and `semver-checks.yml` explicitly exclude `content-v*` from
-their `*-v*` tag triggers (Refs #8389), so a hand-pushed tag starts nothing —
-but crate tags remain the supported release path; this channel has no
-`workflow_dispatch` fallback for a mistaken manual push to recover from.
+🔴 **Never push a `content-v*` tag by hand.** `release.yml`,
+`pre-publish.yml` and `semver-checks.yml` exclude `content-v*` from their
+`*-v*` tag triggers (Refs #8389), so a hand-pushed tag starts nothing. It
+still uses up the version: this workflow refuses a tag that already exists,
+so no release can be cut for it. Pick the next version.
 
 ## What the bundle holds
 

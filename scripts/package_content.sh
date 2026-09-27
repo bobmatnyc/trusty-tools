@@ -33,6 +33,7 @@
 #   bash scripts/package_content.sh --version 0.1.0
 #   bash scripts/package_content.sh --version 0.1.0 --out-dir dist \
 #     [--source-root <dir>]     # read <dir>/<class>/ instead of the table
+#   A relative --out-dir or --source-root resolves against the caller's cwd.
 #
 # Exit: 0 bundle written; 1 a source directory is missing, empty, or holds a
 #   non-regular file; 2 bad arguments.
@@ -74,25 +75,45 @@ usage() {
 VERSION=""
 OUT_DIR="${REPO_ROOT}/target/content-bundle"
 SOURCE_ROOT="${DEFAULT_SOURCE_ROOT}"
+SOURCE_ROOT_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) [ $# -ge 2 ] || usage; VERSION="$2"; shift 2 ;;
     --out-dir) [ $# -ge 2 ] || usage; OUT_DIR="$2"; shift 2 ;;
-    --source-root) [ $# -ge 2 ] || usage; SOURCE_ROOT="$2"; shift 2 ;;
+    --source-root) [ $# -ge 2 ] || usage; SOURCE_ROOT_ARG="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "package_content: unknown argument: $1" >&2; usage ;;
   esac
 done
 
 # SemVer 2.0 core plus an optional pre-release; no build metadata, since `+`
-# is not a safe character in a git tag consumers will type.
-if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
-  echo "package_content: --version must be SemVer X.Y.Z[-pre], got '${VERSION}'" >&2
+# is not a safe character in a git tag consumers will type. The whole string
+# must match: the charset guard refuses a newline or carriage return, which a
+# line-by-line `grep` let through when any one line was valid (#8389). A
+# refused value is echoed with every disallowed byte replaced by `?`.
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+case "$VERSION" in
+  *[!0-9A-Za-z.-]*) version_ok=false ;;
+  *) if [[ $VERSION =~ $SEMVER_RE ]]; then version_ok=true; else version_ok=false; fi ;;
+esac
+if [ "$version_ok" != true ]; then
+  echo "package_content: --version must be SemVer X.Y.Z[-pre], got '${VERSION//[!0-9A-Za-z.-]/?}'" >&2
   exit 2
 fi
 
-# Build the class list as <class>=<path> lines. A relative path resolves
-# against the repo root, so the result does not depend on the caller's cwd.
+# A relative --out-dir or --source-root names a path under the caller's cwd;
+# make it absolute before the `cd` to the repo root below.
+abs_path() {
+  case "$1" in
+    /*) printf '%s' "$1" ;;
+    *) printf '%s/%s' "$PWD" "$1" ;;
+  esac
+}
+OUT_DIR="$(abs_path "$OUT_DIR")"
+[ -z "$SOURCE_ROOT_ARG" ] || SOURCE_ROOT="$(abs_path "$SOURCE_ROOT_ARG")"
+
+# Build the class list as <class>=<path> lines. A relative table path (and
+# DEFAULT_SOURCE_ROOT) resolves against the repo root, not the caller's cwd.
 CLASSES=""
 for pair in $LEGACY_SOURCES; do
   class="${pair%%=*}"
@@ -114,11 +135,18 @@ import hashlib
 import io
 import json
 import os
+import re
 import stat
 import sys
 import tarfile
 
 version, schema_major, out_dir = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+# Backstop for the shell check: fullmatch, unlike `$`, refuses a trailing newline.
+if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?",
+                    version, re.ASCII):
+    print("package_content: --version is not SemVer X.Y.Z[-pre]; no bundle written",
+          file=sys.stderr)
+    sys.exit(2)
 tag = f"content-v{version}"
 name = f"{tag}.tar.gz"
 

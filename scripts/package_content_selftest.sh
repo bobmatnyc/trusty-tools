@@ -16,12 +16,16 @@
 #     metadata      gzip header mtime is 0; the first entry is
 #                   bundle-manifest.toml; entries are sorted; every entry has
 #                   mtime 0, uid/gid 0, empty owner names, mode 0644/0755
-#     manifest      carries bundle_version, tag and schema_major = 1
+#     manifest      carries bundle_version, tag and schema_major = 1;
+#                   file_count and each class's `files` match the fixture
 #     sha256        the sidecar verifies against the tarball
 #     fail-open     a missing class directory, an empty one, and a symlink
 #                   each exit 1 and leave no tarball behind (the missing
 #                   case runs into an out-dir that already held a bundle)
-#     usage         a non-SemVer --version exits 2
+#     usage         a non-SemVer --version, a multi-line one and one holding
+#                   a carriage return each exit 2 and write nothing
+#     relative      a relative --out-dir and --source-root resolve against
+#                   the caller's cwd, not the repo root
 #     live          the default path table packages every class of this
 #                   checkout with at least one file each
 #
@@ -135,6 +139,26 @@ for want in 'bundle_version = "1.2.3"' 'tag = "content-v1.2.3"' 'schema_major = 
     fail "manifest lacks '$want'; got: $manifest"
   fi
 done
+# new_tree writes 3 files per class (the skipped .DS_Store is not one of them).
+want_files=3
+want_total=0
+for c in $CLASSES; do want_total=$((want_total + want_files)); done
+if printf '%s\n' "$manifest" | grep -qxF "file_count = ${want_total}"; then
+  pass "manifest file_count = ${want_total}"
+else
+  fail "manifest file_count is not ${want_total}; got: $manifest"
+fi
+miscounted=""
+for c in $CLASSES; do
+  got="$(printf '%s\n' "$manifest" | awk -v n="name = \"$c\"" \
+    '$0 == n { f = 1; next } f && /^files = / { print $3; exit }')"
+  [ "$got" = "$want_files" ] || miscounted="$miscounted $c=${got:-none}"
+done
+if [ -z "$miscounted" ]; then
+  pass "every class has files = ${want_files}"
+else
+  fail "class file counts differ from ${want_files}:${miscounted}"
+fi
 
 echo "sha256:"
 if (cd "$TMP_ROOT/out1" && sha_check "$TARBALL.sha256" >/dev/null 2>&1); then
@@ -166,8 +190,32 @@ ln -s /etc/hosts "$TMP_ROOT/link/agents/escape.md"
 expect_refusal "symlink in a class" "$TMP_ROOT/link" "$TMP_ROOT/out-link"
 
 echo "usage:"
-rc="$(run_packer "$TMP_ROOT/out-bad" "$TMP_ROOT/tree" "v1.2")"
-if [ "$rc" = 2 ]; then pass "non-SemVer version -> exit 2"; else fail "non-SemVer version: exit $rc"; fi
+# expect_usage <label> <version>: exit 2 and nothing written to the out-dir.
+# grep checks each line on its own, so a multi-line value passed a
+# line-anchored check when any one line was valid.
+expect_usage() {
+  local rc out="$TMP_ROOT/out-usage-$CASES"
+  rc="$(run_packer "$out" "$TMP_ROOT/tree" "$2")"
+  if [ "$rc" = 2 ] && [ -z "$(find "$out" -type f 2>/dev/null)" ]; then
+    pass "$1 -> exit 2, nothing written"
+  else
+    fail "$1: exit $rc, out-dir holds: $(find "$out" -type f 2>/dev/null | tr '\n' ' ')"
+  fi
+}
+expect_usage "non-SemVer version" "v1.2"
+expect_usage "multi-line version" $'1.0.0\ntag=x'
+expect_usage "version with a carriage return" $'1.0.0\n1.0.0\r'
+
+echo "relative:"
+mkdir -p "$TMP_ROOT/cwd"
+rc=0
+(cd "$TMP_ROOT/cwd" && "$PACKER" --version 1.2.3 --out-dir rel-out --source-root ../tree) \
+  > "$TMP_ROOT/rel.log" 2>&1 || rc=$?
+if [ "$rc" = 0 ] && [ -f "$TMP_ROOT/cwd/rel-out/$TARBALL" ] && [ ! -e "$SCRIPT_DIR/../rel-out" ]; then
+  pass "relative --out-dir and --source-root resolve against the caller's cwd"
+else
+  fail "relative paths: exit $rc; $(cat "$TMP_ROOT/rel.log")"
+fi
 
 echo "live:"
 rc=0
