@@ -23,7 +23,8 @@ use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_safety::{
-    DirtyWorktree, DirtyWorktreePolicy, dirt_blocks_removal, git_worktree_list_agrees, inspect_dirt,
+    DirtVerdict, DirtyWorktree, DirtyWorktreePolicy, dirt_verdict, git_worktree_list_agrees,
+    inspect_dirt,
 };
 
 #[path = "prune_types.rs"]
@@ -39,9 +40,7 @@ mod orphan_scan;
 use super::worktree_scope::WorktreeScope;
 pub use orphan_scan::OrphanSweepOutcome;
 use orphan_scan::SweepClassification;
-#[cfg_attr(not(test), expect(unused_imports))]
-pub(crate) use orphan_scan::find_orphaned_worktrees;
-pub(crate) use orphan_scan::find_orphaned_worktrees_in;
+pub(crate) use orphan_scan::{OrphanCandidates, find_orphaned_worktrees_in};
 
 /// Maximum age an EPHEMERAL session may reach before the auto-reaper tears it
 /// down — default 24 hours (#1508).
@@ -163,10 +162,13 @@ static CANONICALIZE_FAILURE_STREAKS: std::sync::OnceLock<
     std::sync::Mutex<CanonicalizeFailureStreaks>,
 > = std::sync::OnceLock::new();
 
-/// Accessor for the process-global [`CanonicalizeFailureStreaks`] instance.
-fn canonicalize_failure_streaks() -> &'static std::sync::Mutex<CanonicalizeFailureStreaks> {
+/// The process-global [`CanonicalizeFailureStreaks`] instance, locked. A
+/// poisoned lock is recovered: the map holds only counters.
+fn canonicalize_failure_streaks() -> std::sync::MutexGuard<'static, CanonicalizeFailureStreaks> {
     CANONICALIZE_FAILURE_STREAKS
         .get_or_init(|| std::sync::Mutex::new(CanonicalizeFailureStreaks::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Whether a record is currently RUNNING (must not be auto-torn-down) — a REAL
@@ -661,7 +663,7 @@ impl SessionManager {
     /// window). Treat this as narrowing the window to near-zero, not eliminating it.
     /// Dry-run returns after Phase 1 (no deletion, no snapshot).
     ///
-    /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking`
+    /// What: Phase 1 calls [`find_orphaned_worktrees_in`] inside `spawn_blocking`
     /// (git-derived since #4207, but still blocking — it spawns git per
     /// project); panics are propagated as `Err`. Phase 2
     /// (real-delete only) takes ONE fresh `self.store` snapshot, then per candidate:
@@ -750,8 +752,10 @@ impl SessionManager {
 
     /// [`Self::prune_orphaned_worktrees`], bounded by `scope` (#8782): a
     /// worktree outside it is never a candidate, so it is neither reported nor
-    /// removed.
-    /// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`.
+    /// removed. The outcome also carries each candidate's registry root and,
+    /// under `ForceDiscard`, the unsaved work each removal destroys.
+    /// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`,
+    /// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
     pub async fn prune_orphaned_worktrees_in(
         &self,
         repos_root: &std::path::Path,
@@ -777,7 +781,10 @@ impl SessionManager {
         // silently returning an empty candidate list.
         let adopted = adopted.to_vec();
         let scope = scope.clone();
-        let candidates = tokio::task::spawn_blocking({
+        let OrphanCandidates {
+            paths: candidates,
+            registry_roots,
+        } = tokio::task::spawn_blocking({
             let initial_in_use = initial_in_use.clone();
             // #8782: the scope bounds discovery, so an out-of-scope tree is
             // never classified, reported, or removed.
@@ -792,6 +799,8 @@ impl SessionManager {
         let mut owner_unknown = Vec::new();
         let mut agent_owned = Vec::new();
         let mut skipped_dirty: Vec<DirtyWorktree> = Vec::new();
+        // #8782: dirty trees `ForceDiscard` removes anyway, for the preview.
+        let mut discarded_dirty: Vec<DirtyWorktree> = Vec::new();
         let mut reclaimable = Vec::new();
         // #4323: counted, not logged per path — see `SweepClassification`.
         let mut skipped_live = 0usize;
@@ -849,9 +858,13 @@ impl SessionManager {
                         continue;
                     }
                     // #4091: last gate — never destroy unsaved work.
-                    if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "scan") {
-                        skipped_dirty.push(dirt);
-                        continue;
+                    match dirt_verdict(&candidate, policy, "scan") {
+                        DirtVerdict::Blocks(dirt) => {
+                            skipped_dirty.push(dirt);
+                            continue;
+                        }
+                        DirtVerdict::Discards(dirt) => discarded_dirty.push(dirt),
+                        DirtVerdict::Clean => {}
                     }
                     reclaimable.push(candidate);
                 }
@@ -882,6 +895,8 @@ impl SessionManager {
                 owner_unknown,
                 skipped_dirty,
                 agent_owned,
+                registry_roots,
+                discarded_dirty,
             });
         }
 
@@ -923,15 +938,9 @@ impl SessionManager {
                 if let Ok(c) = std::fs::canonicalize(&p) {
                     set.insert(c);
                     // Success breaks any in-flight failure streak (#3715 item 3).
-                    canonicalize_failure_streaks()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record_success(&p);
+                    canonicalize_failure_streaks().record_success(&p);
                 } else {
-                    let streak = canonicalize_failure_streaks()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record_failure(&p);
+                    let streak = canonicalize_failure_streaks().record_failure(&p);
                     if streak >= CANONICALIZE_FAILURE_STREAK_THRESHOLD {
                         error!(
                             session = %session_id,
@@ -959,14 +968,13 @@ impl SessionManager {
             // among this sweep's active sessions (decommissioned, deleted, or
             // workspace_path changed) so the counter map cannot grow unbounded
             // across the daemon's lifetime.
-            canonicalize_failure_streaks()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain_active(&checked_paths);
+            canonicalize_failure_streaks().retain_active(&checked_paths);
             set
         };
 
         let mut removed = Vec::new();
+        // #8782: a real run reports what the pre-removal re-check discarded.
+        discarded_dirty.clear();
         for candidate in reclaimable {
             // Item 8 (#1845): skip on canonicalize failure — a path that can't be
             // resolved is left untouched rather than risk incorrect deletion.
@@ -995,10 +1003,14 @@ impl SessionManager {
             // #4118 TOCTOU: the scan-time verdict is now minutes old. Re-ask
             // immediately before THIS removal so the clean-to-deleted window is
             // sub-millisecond again rather than the whole sweep's duration.
-            if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "pre-removal") {
-                skipped_dirty.push(dirt);
-                continue;
-            }
+            let discard = match dirt_verdict(&candidate, policy, "pre-removal") {
+                DirtVerdict::Blocks(dirt) => {
+                    skipped_dirty.push(dirt);
+                    continue;
+                }
+                DirtVerdict::Discards(dirt) => Some(dirt),
+                DirtVerdict::Clean => None,
+            };
 
             info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
             let candidate_clone = candidate.clone();
@@ -1028,6 +1040,7 @@ impl SessionManager {
             }
             if outcome.removed() {
                 removed.push(candidate);
+                discarded_dirty.extend(discard);
             }
         }
         Ok(OrphanSweepOutcome {
@@ -1035,6 +1048,8 @@ impl SessionManager {
             owner_unknown,
             skipped_dirty,
             agent_owned,
+            registry_roots,
+            discarded_dirty,
         })
     }
 
@@ -1068,7 +1083,7 @@ impl SessionManager {
     ///    not a candidate) that is not main, bare, prunable, or `locked`;
     /// 2. it is a STRICT DESCENDANT of the managed project directory whose
     ///    registry named it, and lies under `repos_root`
-    ///    ([`super::worktree_registry::enumerate_registered_worktrees`]) — so
+    ///    ([`super::worktree_registry::enumerate_registered_worktrees_in`]) — so
     ///    the operator's own checkouts and anything parked beside a project are
     ///    structurally unreachable, not merely unlisted;
     /// 3. it is absent from both the initial and the pre-deletion active set;

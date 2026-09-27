@@ -5,14 +5,19 @@ use serde_json::{Value, json};
 
 use super::{check_scope_echo, planned_paths, preview_lines, project_root_from};
 use crate::cli::{Cli, Command, SessionAction};
-use crate::commands::managed_merged_prs::session_prune_worktrees;
+use crate::commands::managed_merged_prs::{prune_worktrees_from, session_prune_worktrees};
 use clap::Parser;
 
 /// A reply as a scoped daemon returns it: one orphan, one merged-PR reclaim,
 /// one unknown, all in `/r/a`, plus one reclaim in `/r/b`.
 fn reply(project: Option<&str>) -> Value {
     json!({
-        "scope": { "project_root": project, "only_paths": null },
+        "scope": {
+            "project_root": project,
+            "project_known": true,
+            "only_orphan_paths": null,
+            "only_merged_paths": null
+        },
         "paths": ["/r/a/.worktrees/o"],
         "orphan_rows": [
             { "path": "/r/a/.worktrees/o", "project": "/r/a", "reason": "orphaned — ended" }
@@ -53,15 +58,44 @@ fn cli_prune_worktrees_all_projects_is_opt_in() {
 }
 
 #[test]
-fn planned_paths_is_the_union_of_both_passes() {
+fn planned_paths_keeps_each_pass_to_its_own_rows() {
+    let planned = planned_paths(&reply(None));
+    assert_eq!(planned.orphan, vec!["/r/a/.worktrees/o"]);
     assert_eq!(
-        planned_paths(&reply(None)),
-        vec![
-            "/r/a/.claude/worktrees/m",
-            "/r/a/.worktrees/o",
-            "/r/b/.claude/worktrees/n"
-        ],
+        planned.merged,
+        vec!["/r/a/.claude/worktrees/m", "/r/b/.claude/worktrees/n"],
         "unknown rows are never planned"
+    );
+    assert!(planned_paths(&json!({})).is_empty());
+}
+
+/// #8782: a scoped run from a checkout the daemon does not scan says so,
+/// rather than printing a bare `total: 0`.
+#[test]
+fn preview_lines_say_when_the_daemon_does_not_scan_this_checkout() {
+    let unknown = json!({ "scope": { "project_root": "/r/z", "project_known": false } });
+    let text = preview_lines(&unknown).join("\n");
+    assert!(
+        text.contains("this checkout is not registered with the daemon"),
+        "{text}"
+    );
+    let known = preview_lines(&reply(Some("/r/a"))).join("\n");
+    assert!(!known.contains("not registered"), "{known}");
+}
+
+/// #8782: an older daemon's `--all-projects` preview has no rows, so the CLI
+/// prints that reply's orphan paths and says the per-project view is missing.
+#[test]
+fn preview_lines_fall_back_to_the_path_list_of_an_older_daemon() {
+    let stale = json!({ "dry_run": true, "paths": ["/r/a/.worktrees/o"] });
+    let lines = preview_lines(&stale);
+    assert!(
+        lines[0].contains("per-project preview is unavailable"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("/r/a/.worktrees/o")),
+        "{lines:?}"
     );
 }
 
@@ -227,7 +261,7 @@ async fn stub_daemon(replies: Vec<Value>) -> (String, tokio::task::JoinHandle<Ve
 }
 
 /// 🔴 #8782: `--force` previews, then sends exactly the preview's paths as
-/// `only_paths`, scoped to the same project.
+/// per-pass allowlists, scoped to the same project.
 #[tokio::test]
 async fn force_sends_only_the_previewed_paths() {
     let (url, server) = stub_daemon(vec![reply(Some("/r/a")), reply(Some("/r/a"))]).await;
@@ -238,10 +272,13 @@ async fn force_sends_only_the_previewed_paths() {
     assert!(outcome.is_ok(), "{outcome:?}");
     assert_eq!(bodies.len(), 2, "{bodies:?}");
     assert_eq!(bodies[0]["dry_run"], true, "the first call is the preview");
-    assert!(bodies[0]["only_paths"].is_null());
+    assert!(bodies[0]["only_orphan_paths"].is_null());
+    assert!(bodies[0]["only_merged_paths"].is_null());
     assert_eq!(bodies[1]["dry_run"], false);
     assert_eq!(bodies[1]["project_root"], "/r/a");
-    assert_eq!(bodies[1]["only_paths"], json!(planned_paths(&reply(None))));
+    let planned = planned_paths(&reply(None));
+    assert_eq!(bodies[1]["only_orphan_paths"], json!(planned.orphan));
+    assert_eq!(bodies[1]["only_merged_paths"], json!(planned.merged));
 }
 
 /// 🔴 #8782: a daemon that does not echo the scope gets no destructive call.
@@ -267,4 +304,90 @@ async fn force_sends_nothing_after_a_reply_without_the_scope_echo() {
         1,
         "a destructive call followed the refusal: {bodies:?}"
     );
+}
+
+/// 🔴 #8782: an `--all-projects --force` run gets no destructive call from a
+/// daemon that does not echo the scope, because it would ignore the allowlists.
+///
+/// Fails when `session_prune_worktrees` requires the echo only for a scoped run
+/// (`project.is_some()` without `|| !dry_run`): the stale preview is accepted
+/// and a second, destructive POST follows.
+#[tokio::test]
+async fn force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo() {
+    let stale = json!({ "dry_run": true, "paths": ["/r/a/.worktrees/o"] });
+    let (url, server) = stub_daemon(vec![stale.clone(), stale]).await;
+    let client = reqwest::Client::new();
+    let outcome = session_prune_worktrees(&client, &url, false, false, false, None, None).await;
+    let bodies = server.await.expect("stub");
+    assert!(outcome.is_err(), "a stale daemon's reply was accepted");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "a destructive call followed the refusal: {bodies:?}"
+    );
+    assert!(bodies[0]["project_root"].is_null(), "{bodies:?}");
+}
+
+/// 🔴 #8782: outside a git repository the dispatch posts nothing at all.
+///
+/// Fails when `prune_worktrees_from` reads an unresolvable project as "no
+/// project" (`.ok()` for `?`): the run widens to every project and posts.
+#[tokio::test]
+async fn prune_worktrees_outside_a_repository_posts_nothing() {
+    let (url, server) = stub_daemon(vec![reply(Some("/r/a"))]).await;
+    let client = reqwest::Client::new();
+    let outside = tempfile::tempdir().expect("tempdir");
+    let outcome = prune_worktrees_from(
+        &client,
+        &url,
+        outside.path(),
+        true,
+        false,
+        true,
+        false,
+        None,
+    )
+    .await;
+    let bodies = server.await.expect("stub");
+    let err = outcome.expect_err("no repository, no project, no request");
+    assert!(err.to_string().contains("--all-projects"), "{err}");
+    assert!(bodies.is_empty(), "a request was posted: {bodies:?}");
+}
+
+// Moved from `tests_behavior_d_tests.rs` by #8782 (test-file SLOC cap).
+/// #2919: the merged-pull-request reclaim pass requires its own explicit flag.
+///
+/// Why: it is the only reclaim path that acts on GitHub state, so an operator
+/// clearing stale directories must opt into it deliberately rather than
+/// inheriting it from `--force`. Pinning it as a third independent flag is what
+/// keeps anything automatic from ever reaching a merged-PR deletion.
+#[test]
+fn cli_prune_worktrees_merged_prs_is_opt_in() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "prune-worktrees",
+        "--force",
+        "--merged-prs",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::PruneWorktrees {
+                    force,
+                    discard_dirty,
+                    merged_prs,
+                    ..
+                },
+        } => {
+            assert!(force);
+            assert!(merged_prs, "--merged-prs must set merged_prs=true");
+            assert!(
+                !discard_dirty,
+                "#2919: --merged-prs must NOT imply discarding uncommitted work"
+            );
+        }
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
 }

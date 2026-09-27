@@ -505,6 +505,63 @@ pub async fn session_context_pause(
     .await
 }
 
+/// The pause's orphaned-worktree prune, bounded to the paused project (#8782).
+///
+/// Why: the pause ran the daemon-global prune with `dry_run: false` on every
+/// PM pause, so pausing in one repository reclaimed orphans in every project
+/// the daemon knows.
+/// What: scopes the sweep to the checkout that owns `project_path`; a
+/// directory outside any repository prunes nothing rather than widening.
+/// Always [`crate::session_manager::DirtyWorktreePolicy::Skip`] (#4091): no
+/// argument from the MCP tool can make a pause destroy unsaved work. Returns
+/// the removed paths and the dirty skips; a failed sweep is logged and empty.
+/// Test: `a_pause_prunes_only_its_own_projects_orphans`.
+async fn prune_for_pause(
+    mgr: &crate::session_manager::SessionManager,
+    repos_root: &Path,
+    adopted: &[PathBuf],
+    project_path: &Path,
+) -> (Vec<String>, Vec<crate::session_manager::DirtyWorktree>) {
+    use crate::session_manager::worktree_scope::{WorktreeScope, project_root_for};
+    let Some(scope) =
+        project_root_for(project_path).and_then(|r| WorktreeScope::for_project(&r).ok())
+    else {
+        tracing::info!(
+            "session_context_pause: {} is not in a git checkout; no worktree prune (#8782)",
+            project_path.display()
+        );
+        return (Vec::new(), Vec::new());
+    };
+    let in_use: Vec<PathBuf> = mgr
+        .list()
+        .await
+        .iter()
+        .filter_map(|r| r.workspace_path.clone())
+        .collect();
+    let policy = crate::session_manager::DirtyWorktreePolicy::Skip;
+    match mgr
+        .prune_orphaned_worktrees_in(repos_root, &in_use, false, policy, adopted, &scope)
+        .await
+    {
+        Ok(sweep) => (
+            sweep
+                .removed
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            sweep.skipped_dirty,
+        ),
+        Err(e) => {
+            tracing::warn!("session_context_pause: worktree prune failed: {e}");
+            (Vec::new(), Vec::new())
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_context_pause_scope_tests.rs"]
+mod pause_scope_tests;
+
 /// [`session_context_pause`] with `[session_refs].enabled` supplied explicitly.
 ///
 /// Why (#7830 review): the public entry point reads the flag from the
@@ -569,46 +626,15 @@ async fn session_context_pause_with(
     let receipt =
         publish_session_ref(&project_path, session_id, &outcome, session_refs_enabled).await;
 
-    let mut skipped_dirty = Vec::new();
-    let pruned_worktrees: Vec<String> = if prune_worktrees {
+    let (pruned_worktrees, skipped_dirty) = if prune_worktrees {
         let mgr = state.session_manager().await;
-        let records = mgr.list().await;
-        let active_workspace_paths: Vec<PathBuf> = records
-            .iter()
-            .filter_map(|r| r.workspace_path.clone())
-            .collect();
         let tt_config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
         let repos_root = crate::core::trusty_tools_config::workspace_root(&tt_config);
-        // #4091: the pause path ALWAYS uses the default skip-dirty policy —
-        // there is deliberately no argument threaded from the MCP tool that
-        // could turn this into a force-discard, so an ordinary
-        // `/tm-session-pause` can never destroy uncommitted work.
-        match mgr
-            .prune_orphaned_worktrees(
-                &repos_root,
-                &active_workspace_paths,
-                false,
-                crate::session_manager::DirtyWorktreePolicy::Skip,
-                // #7357: resolved here, at the MCP entry point.
-                &crate::project::adopted_anchors_under(state.framework_root()),
-            )
-            .await
-        {
-            Ok(sweep) => {
-                skipped_dirty = sweep.skipped_dirty;
-                sweep
-                    .removed
-                    .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect()
-            }
-            Err(e) => {
-                tracing::warn!("session_context_pause: worktree prune failed: {e}");
-                Vec::new()
-            }
-        }
+        // #7357: resolved here, at the MCP entry point.
+        let adopted = crate::project::adopted_anchors_under(state.framework_root());
+        prune_for_pause(&mgr, &repos_root, &adopted, &project_path).await
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     // #7282: the snapshot reaches `origin/main` through its own branch and PR.

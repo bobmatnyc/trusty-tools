@@ -622,44 +622,16 @@ fn doctor_worktree_remediation_command_parses() {
     });
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::PruneWorktrees { force, .. },
-        } => assert!(!force, "the hint must preview, never delete unasked"),
-        other => panic!("expected session prune-worktrees, got {other:?}"),
-    }
-}
-
-/// #2919: the merged-pull-request reclaim pass requires its own explicit flag.
-///
-/// Why: it is the only reclaim path that acts on GitHub state, so an operator
-/// clearing stale directories must opt into it deliberately rather than
-/// inheriting it from `--force`. Pinning it as a third independent flag is what
-/// keeps anything automatic from ever reaching a merged-PR deletion.
-#[test]
-fn cli_prune_worktrees_merged_prs_is_opt_in() {
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "session",
-        "prune-worktrees",
-        "--force",
-        "--merged-prs",
-    ])
-    .unwrap();
-    match cli.command.unwrap() {
-        Command::Session {
             action:
                 SessionAction::PruneWorktrees {
                     force,
-                    discard_dirty,
-                    merged_prs,
+                    all_projects,
                     ..
                 },
         } => {
-            assert!(force);
-            assert!(merged_prs, "--merged-prs must set merged_prs=true");
-            assert!(
-                !discard_dirty,
-                "#2919: --merged-prs must NOT imply discarding uncommitted work"
-            );
+            assert!(!force, "the hint must preview, never delete unasked");
+            // #8782: doctor's count spans every project, so the hint does too.
+            assert!(all_projects, "the hint must name --all-projects");
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }

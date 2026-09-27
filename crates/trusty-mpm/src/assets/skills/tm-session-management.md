@@ -194,8 +194,9 @@ decommissioned SM sessions. `tm doctor`'s `worktrees` probe flags these; the
 cleanup command is:
 
 ```bash
-tm session prune-worktrees          # dry-run by default
-tm session prune-worktrees --force  # actually remove
+tm session prune-worktrees                 # dry-run, this checkout's project only
+tm session prune-worktrees --force         # remove what the preview listed
+tm session prune-worktrees --all-projects  # every registered project
 ```
 
 Run this as part of session wrap-up when `tm doctor` reports orphaned

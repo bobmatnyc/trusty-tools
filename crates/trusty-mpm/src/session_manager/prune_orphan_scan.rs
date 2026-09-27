@@ -2,12 +2,13 @@
 //!
 //! Why: split out of `prune.rs` by #8782, which added the scoped scan and would
 //! otherwise have pushed that file past the 500-SLOC production cap.
-//! What: [`find_orphaned_worktrees`] and its scoped form
-//! [`find_orphaned_worktrees_in`], [`OrphanSweepOutcome`], and the one-line
-//! [`SweepClassification`] summary. `prune.rs` re-exports all of them, so no
-//! call site moved.
+//! What: [`find_orphaned_worktrees_in`] and its [`OrphanCandidates`],
+//! [`OrphanSweepOutcome`], and the one-line [`SweepClassification`] summary.
+//! `prune.rs` re-exports all of them, so no call site moved.
 //! Test: `find_orphaned_worktrees_discovers_worktree_at_unwalked_location`,
 //! `sweep_summary_is_silent_without_candidates`.
+
+use std::collections::BTreeMap;
 
 use super::super::worktree_safety::DirtyWorktree;
 use super::super::worktree_scope::WorktreeScope;
@@ -26,7 +27,7 @@ use super::super::worktree_scope::WorktreeScope;
 /// parent repo permanently unreclaimable (#4207). Git maintains the registry;
 /// deriving from it deletes the whole category of missed-location bug.
 /// What: delegates discovery to
-/// [`super::super::worktree_registry::enumerate_registered_worktrees`] — every
+/// [`super::super::worktree_registry::enumerate_registered_worktrees_in`] — every
 /// worktree git itself registers inside a managed project, wherever in that
 /// project it lives — then removes any whose path is in `active_set`.
 /// Candidates come back canonicalized (so the active-set comparison is
@@ -39,7 +40,7 @@ use super::super::worktree_scope::WorktreeScope;
 /// it is decisive at the project edge, so an operator checkout parked beside a
 /// project, or a worktree the operator registered outside it, is never a
 /// candidate. See
-/// [`super::super::worktree_registry::enumerate_registered_worktrees`].
+/// [`super::super::worktree_registry::enumerate_registered_worktrees_in`].
 ///
 /// A candidate here is still only a CANDIDATE: `prune_orphaned_worktrees`
 /// applies the #3649 ownership-sentinel gate and the #4091 dirty-tree gate
@@ -53,15 +54,17 @@ use super::super::worktree_scope::WorktreeScope;
 /// `git_worktree_list_agrees` refused every such path; the difference is that
 /// it is now also absent from the report. Reclaiming unregistered husks is a
 /// separate concern (#3715), deliberately not smuggled in here.
+///
+/// #8782: `scope` bounds the scan ([`WorktreeScope::all`] for every project),
+/// and each candidate keeps the checkout whose registry named it, so the prune
+/// preview can print its project without asking git again.
 /// Test: `prune_orphaned_worktrees_spares_active`,
 ///       `reap_orphaned_worktrees_removes_orphan_preserves_live`,
 ///       `find_orphaned_worktrees_discovers_worktree_at_unwalked_location`
 ///       (#4207 — fails against the five-shape walk),
-///       `find_orphaned_worktrees_ignores_plain_directory`.
-// #8782: every production caller passes a scope; the unscoped form serves the
-// tests and the module docs that name it.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) fn find_orphaned_worktrees(
+///       `find_orphaned_worktrees_ignores_plain_directory`,
+///       `an_orphan_sweep_scoped_to_one_project_spares_another`.
+pub(crate) fn find_orphaned_worktrees_in(
     repos_root: &std::path::Path,
     active_set: &std::collections::HashSet<std::path::PathBuf>,
     // #7357: the repos-root walk reaches a project only at
@@ -72,23 +75,28 @@ pub(crate) fn find_orphaned_worktrees(
     // worktrees it names. Entry points resolve; scans take. `&[]` is the
     // pre-#7357 behaviour exactly.
     adopted: &[std::path::PathBuf],
-) -> Vec<std::path::PathBuf> {
-    find_orphaned_worktrees_in(repos_root, active_set, adopted, &WorktreeScope::all())
+    scope: &WorktreeScope,
+) -> OrphanCandidates {
+    let mut found = OrphanCandidates::default();
+    let rows = super::super::worktree_registry::enumerate_registered_worktrees_in(
+        repos_root, adopted, scope,
+    );
+    for row in rows.into_iter().filter(|r| !active_set.contains(&r.path)) {
+        found
+            .registry_roots
+            .insert(row.path.clone(), row.registry_root);
+        found.paths.push(row.path);
+    }
+    found
 }
 
-/// [`find_orphaned_worktrees`], bounded by `scope` (#8782).
-///
-/// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`.
-pub(crate) fn find_orphaned_worktrees_in(
-    repos_root: &std::path::Path,
-    active_set: &std::collections::HashSet<std::path::PathBuf>,
-    adopted: &[std::path::PathBuf],
-    scope: &WorktreeScope,
-) -> Vec<std::path::PathBuf> {
-    super::super::worktree_registry::enumerate_registered_worktrees_in(repos_root, adopted, scope)
-        .into_iter()
-        .filter(|candidate| !active_set.contains(candidate))
-        .collect()
+/// The orphan scan's candidates, in removal order, with their registries (#8782).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OrphanCandidates {
+    /// Candidate paths, nested worktrees before their parents.
+    pub(crate) paths: Vec<std::path::PathBuf>,
+    /// The checkout whose `git worktree list` named each path.
+    pub(crate) registry_roots: BTreeMap<std::path::PathBuf, std::path::PathBuf>,
 }
 
 /// Outcome of an orphaned-worktree sweep (#3649): which candidates were (or
@@ -131,6 +139,15 @@ pub struct OrphanSweepOutcome {
     /// reported as unreclaimable.
     /// Test: `prune_orphaned_worktrees_skips_an_agent_owned_worktree`.
     pub agent_owned: Vec<std::path::PathBuf>,
+    /// The checkout whose registry named each candidate (#8782) — the prune
+    /// preview's project column, carried from the scan so the route runs no
+    /// `git` per row.
+    pub registry_roots: BTreeMap<std::path::PathBuf, std::path::PathBuf>,
+    /// Paths in `removed` whose unsaved work `--discard-dirty` discards (#8782).
+    /// Always empty under [`DirtyWorktreePolicy::Skip`](super::super::DirtyWorktreePolicy::Skip),
+    /// where such a tree lands in `skipped_dirty` instead.
+    /// Test: `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+    pub discarded_dirty: Vec<DirtyWorktree>,
 }
 
 /// Per-sweep classification counts for the orphan sweep's one log line (#4323).

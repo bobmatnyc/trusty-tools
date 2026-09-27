@@ -7,9 +7,9 @@
 //! prune until the preview names each path, its project, and its reason, and
 //! until the scope is the project the command was typed in.
 //! What: [`preview_lines`] renders the rows the route returns, grouped by
-//! project, with a total; [`planned_paths`] is the set a `--force` run hands
-//! back as its allowlist; [`check_scope_echo`] refuses a reply from a daemon
-//! that did not honour the requested scope.
+//! project, with a total; [`planned_paths`] is the per-pass sets a `--force`
+//! run hands back as its allowlists; [`check_scope_echo`] refuses a reply from
+//! a daemon that did not honour the requested scope.
 //! Test: `prune_preview_tests`.
 
 use std::collections::BTreeMap;
@@ -45,36 +45,72 @@ fn rows(value: Option<&Value>) -> Vec<Row> {
         .unwrap_or_default()
 }
 
+/// The merged-PR pass's reclaim rows.
+fn merged_rows(body: &Value) -> Vec<Row> {
+    rows(
+        body.get("merged_prs")
+            .and_then(|m| m.get("reclaimable_paths")),
+    )
+}
+
 /// The rows a reply would remove: the orphan pass's, then the merged-PR pass's.
 fn removal_rows(body: &Value) -> Vec<Row> {
     let mut out = rows(body.get("orphan_rows"));
-    out.extend(rows(
-        body.get("merged_prs")
-            .and_then(|m| m.get("reclaimable_paths")),
-    ));
+    out.extend(merged_rows(body));
     out
 }
 
-/// Every path a preview lists for removal, sorted and de-duplicated (#8782).
+/// What a preview listed for removal, one allowlist per pass (#8782).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PlannedPaths {
+    /// Sent as `only_orphan_paths`.
+    pub(crate) orphan: Vec<String>,
+    /// Sent as `only_merged_paths`.
+    pub(crate) merged: Vec<String>,
+}
+
+impl PlannedPaths {
+    /// Whether the preview listed nothing for either pass.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.orphan.is_empty() && self.merged.is_empty()
+    }
+}
+
+/// Every path a preview lists for removal, per pass, sorted and de-duplicated
+/// (#8782).
 ///
-/// Why: a `--force` run sends this back as `only_paths`, so it can remove
-/// nothing its own preview did not list.
-/// Test: `planned_paths_is_the_union_of_both_passes`.
-pub(crate) fn planned_paths(body: &Value) -> Vec<String> {
-    let mut paths: Vec<String> = removal_rows(body).into_iter().map(|r| r.path).collect();
-    paths.sort();
-    paths.dedup();
-    paths
+/// Why: a `--force` run sends each list back as that pass's allowlist, so
+/// neither pass can remove a path the preview listed only for the other.
+/// Test: `planned_paths_keeps_each_pass_to_its_own_rows`.
+pub(crate) fn planned_paths(body: &Value) -> PlannedPaths {
+    let sorted = |rows: Vec<Row>| {
+        let mut paths: Vec<String> = rows.into_iter().map(|r| r.path).collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    };
+    PlannedPaths {
+        orphan: sorted(rows(body.get("orphan_rows"))),
+        merged: sorted(merged_rows(body)),
+    }
 }
 
 /// The preview, grouped by project, one line per path, with a total (#8782).
 ///
-/// What: a scope line; then per project a header with its counts, a `remove`
-/// line per path the pass would remove and an `unknown` line per path kept
-/// because its pull-request state could not be read; then a total line.
+/// What: a scope line, plus a line when the daemon does not scan this
+/// checkout; then per project a header with its counts, a `remove` line per
+/// path the pass would remove and an `unknown` line per path kept because its
+/// pull-request state could not be read; then a total line. A reply with no
+/// `scope` echo comes from a daemon older than #8782: it has no rows, so the
+/// preview says so and lists that reply's orphan `paths` instead.
 /// Test: `preview_lines_group_every_path_by_project_with_a_count`,
-/// `preview_lines_report_an_empty_preview`.
+/// `preview_lines_report_an_empty_preview`,
+/// `preview_lines_say_when_the_daemon_does_not_scan_this_checkout`,
+/// `preview_lines_fall_back_to_the_path_list_of_an_older_daemon`.
 pub(crate) fn preview_lines(body: &Value) -> Vec<String> {
+    let Some(echo) = body.get("scope") else {
+        return legacy_preview_lines(body);
+    };
     let remove = removal_rows(body);
     let unknown = rows(body.get("merged_prs").and_then(|m| m.get("unknown_paths")));
     let scope = body
@@ -93,6 +129,13 @@ pub(crate) fn preview_lines(body: &Value) -> Vec<String> {
         by_project.entry(&r.project).or_default().1.push(r);
     }
     let mut out = vec![format!("prune-worktrees preview — scope: {scope} (#8782)")];
+    if echo.get("project_known").and_then(Value::as_bool) == Some(false) {
+        out.push(
+            "this checkout is not registered with the daemon, so it scans none of its \
+             worktrees and found nothing to prune there; pass --all-projects for every registered project (#8782)"
+                .to_string(),
+        );
+    }
     for (project, (rm, unk)) in &by_project {
         out.push(format!(
             "project {project}: {} to remove, {} unknown (kept)",
@@ -117,11 +160,30 @@ pub(crate) fn preview_lines(body: &Value) -> Vec<String> {
     out
 }
 
+/// The preview for a reply from a daemon that predates #8782 (#8782).
+///
+/// Why: such a daemon returns no per-project rows, only the orphan `paths`
+/// list, so the grouped preview would print `total: 0` over a non-empty list.
+fn legacy_preview_lines(body: &Value) -> Vec<String> {
+    let paths: Vec<&str> = body
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = vec![
+        "prune-worktrees preview — this daemon predates #8782, so the per-project preview \
+         is unavailable; restart it on the current binary for one. Orphan paths it reported:"
+            .to_string(),
+    ];
+    out.extend(paths.iter().map(|p| format!("  remove   {p}")));
+    out
+}
+
 /// Refuse a daemon reply that does not confirm the scope this run asked for
 /// (#8782).
 ///
 /// Why: the daemon is long-lived and a CLI upgrade never bounces it. A daemon
-/// that predates #8782 drops `project_root` and `only_paths` silently and runs
+/// that predates #8782 drops `project_root` and the allowlists silently and runs
 /// daemon-global — the exact behaviour this change removes — so its reply must
 /// be refused rather than printed as a scoped result.
 /// What: when `required`, the reply must carry a `scope` echo. When a project
@@ -174,11 +236,6 @@ pub(crate) fn project_root_from(dir: &std::path::Path) -> anyhow::Result<String>
         })?;
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     Ok(root.to_string_lossy().into_owned())
-}
-
-/// [`project_root_from`] for the process's working directory.
-pub(crate) fn current_project_root() -> anyhow::Result<String> {
-    project_root_from(&std::env::current_dir()?)
 }
 
 #[cfg(test)]

@@ -303,16 +303,18 @@ fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
 /// `commands::session` resolves the id.
 /// `project_root` (#8782) is the checkout this run is scoped to, or `None` for
 /// `--all-projects`. Every run POSTs a preview first and prints it; `--force`
-/// then POSTs once more carrying that preview's paths as `only_paths`, so it
-/// removes nothing the preview did not list. Each reply must echo the scope —
-/// a daemon that predates #8782 ignores it and runs daemon-global.
+/// then POSTs once more carrying each pass's previewed paths as
+/// `only_orphan_paths` / `only_merged_paths`, so neither pass removes anything
+/// the preview did not list for it. Each reply must echo the scope — a daemon
+/// that predates #8782 ignores it and runs daemon-global.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
 /// `merged_pr_request_outlives_the_default_client_timeout`; the caller id by
 /// `prune_worktrees_sends_the_invoking_session`; the #8782 two-step by
 /// `force_sends_only_the_previewed_paths`,
-/// `force_sends_nothing_after_a_reply_without_the_scope_echo`.
+/// `force_sends_nothing_after_a_reply_without_the_scope_echo`,
+/// `force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
@@ -327,7 +329,7 @@ pub(crate) async fn session_prune_worktrees(
     // is refused rather than silently retargeted (#1737).
     let endpoint =
         prune_endpoint(client, url, || trusty_mpm::core::resolve_daemon_url(None)).await?;
-    let post = |dry_run: bool, only_paths: Option<Vec<String>>| {
+    let post = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
         let mut request = client.post(&endpoint).json(&serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,
@@ -340,7 +342,8 @@ pub(crate) async fn session_prune_worktrees(
             // #8782: the project this run is bounded to, and on `--force` the
             // preview's own paths.
             "project_root": project_root,
-            "only_paths": only_paths,
+            "only_orphan_paths": planned.map(|p| &p.orphan),
+            "only_merged_paths": planned.map(|p| &p.merged),
         }));
         if merged_prs {
             // #5830: the merged-PR survey runs synchronously in the handler and
@@ -370,7 +373,7 @@ pub(crate) async fn session_prune_worktrees(
         );
     }
     // #8782: every run previews first. A `--force` run needs the echo too: a
-    // daemon without it would ignore `only_paths` as well as the scope.
+    // daemon without it would ignore the allowlists as well as the scope.
     let preview = post(true, None).await?;
     let project = project_root.as_deref();
     super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
@@ -387,10 +390,46 @@ pub(crate) async fn session_prune_worktrees(
         print_prune_reply(&preview, true, merged_prs);
         return Ok(());
     }
-    let body = post(false, Some(planned)).await?;
+    let body = post(false, Some(&planned)).await?;
     super::prune_preview::check_scope_echo(&body, project, true)?;
     print_prune_reply(&body, false, merged_prs);
     Ok(())
+}
+
+/// `tm session prune-worktrees`, scoped from the directory it runs in (#8782).
+///
+/// Why: outside a repository there is no project to scope to, and falling back
+/// to every project would turn a mistyped directory into a daemon-global sweep.
+/// What: `--all-projects` sends no project root; otherwise the checkout owning
+/// `cwd`, and outside a repository an error before any request is sent. Then
+/// [`session_prune_worktrees`], with `--force` as "not a dry run".
+/// Test: `prune_worktrees_outside_a_repository_posts_nothing`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prune_worktrees_from(
+    client: &reqwest::Client,
+    url: &str,
+    cwd: &std::path::Path,
+    force: bool,
+    discard_dirty: bool,
+    merged_prs: bool,
+    all_projects: bool,
+    invoking_session: Option<String>,
+) -> anyhow::Result<()> {
+    let project_root = if all_projects {
+        None
+    } else {
+        Some(super::prune_preview::project_root_from(cwd)?)
+    };
+    session_prune_worktrees(
+        client,
+        url,
+        !force,
+        discard_dirty,
+        merged_prs,
+        invoking_session,
+        project_root,
+    )
+    .await
 }
 
 /// Print one prune-worktrees reply: removed paths, dirty skips, merged-PR pass.

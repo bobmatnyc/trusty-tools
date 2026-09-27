@@ -22,7 +22,7 @@
 //! locked worktree regardless, so this re-check was the ONLY thing honouring
 //! the lock; it now refuses too, and this pass is the outer of two defences.
 //!
-//! So: [`reclaim_with_probes`] re-reads the live session set, git's own
+//! So: [`reclaim_scoped`] re-reads the live session set, git's own
 //! worktree registry, the ownership marker, the pull-request state, and the
 //! working tree PER CANDIDATE, immediately before that candidate's deletion —
 //! mirroring `prune_orphaned_worktrees`' Phase 2, whose comment warns against
@@ -252,7 +252,7 @@ fn survey_scanned(
             continue;
         }
         // #7889: the landing-ref refresh gate 6 depends on runs in
-        // `reclaim_with_probes`, on the destructive path only — a survey never
+        // `reclaim_scoped`, on the destructive path only — a survey never
         // mutates refs (#7652 critic round).
         let index = indexes
             .entry(scanned.registry_root.clone())
@@ -642,24 +642,13 @@ fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
 /// `reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey`,
 /// `reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey`,
 /// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`.
-// #8782: every production caller passes a scope; the unscoped form serves the
-// tests and the module docs that name it.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) fn reclaim_with_probes(
-    repos_root: &Path,
-    probes: &FreshProbes<'_>,
-    mode: ReclaimMode,
-    // #7357: the caller's adopted anchors, passed straight through.
-    adopted: &[PathBuf],
-) -> ReclaimOutcome {
-    reclaim_scoped(repos_root, probes, mode, adopted, &WorktreeScope::all())
-}
-
-/// [`reclaim_with_probes`], bounded by `scope` (#8782).
+///
+/// # Scope (#8782)
 ///
 /// Why: a run typed in one repository must neither survey nor reclaim another
 /// project's worktrees, and a `--force` run carries its preview's paths so it
-/// can remove nothing that preview did not list.
+/// can remove nothing that preview did not list. `adopted` (#7357) is passed
+/// straight through; [`WorktreeScope::all`] is every project.
 /// What: scans once through [`scan_registered_worktrees_in`]; the landing-ref
 /// refresh and the survey both read that one list.
 /// Test: `a_project_scope_admits_only_that_projects_worktrees`,
@@ -899,7 +888,7 @@ pub(crate) fn reclaim_scoped(
     out
 }
 
-/// [`reclaim_with_probes`] against the real `gh`-backed index and a live
+/// [`reclaim_scoped`] against the real `gh`-backed index and a live
 /// re-read of the session store (#2919).
 ///
 /// Why: the production entry point for the merged-PR reclaim — reached from the
@@ -914,7 +903,7 @@ pub(crate) fn reclaim_scoped(
 /// when the set cannot be read, which refuses; `keep_list` returns
 /// `KeepList::unreadable` when the config cannot be parsed, which keeps
 /// everything (#6927).
-/// Test: exercised through `reclaim_with_probes`' tests.
+/// Test: exercised through `reclaim_scoped`' tests.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::WorktreeScope;
+use super::{PruneScope, WorktreeScope};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_keep_list::KeepList;
 use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWorktreeOwner};
@@ -277,10 +277,15 @@ fn an_orphan_sweep_scoped_to_one_project_spares_another() {
         &adopted,
         &project(&a),
     );
-    assert!(found.contains(&wt_a), "{found:?}");
+    assert!(found.paths.contains(&wt_a), "{found:?}");
     assert!(
-        !found.contains(&wt_b),
+        !found.paths.contains(&wt_b),
         "another project's tree is a candidate: {found:?}"
+    );
+    assert_eq!(
+        found.registry_roots.get(&wt_a),
+        Some(&a.repo),
+        "the scan carries each candidate's registry: {found:?}"
     );
 }
 
@@ -295,17 +300,67 @@ fn a_project_root_that_does_not_resolve_is_refused() {
 #[test]
 fn the_scope_echo_names_the_project_and_the_allowlist_size() {
     let fx = GitWorktreeFixture::new();
-    let only = vec!["/a".to_string(), "/b".to_string()];
-    let echo = WorktreeScope::from_request(fx.repo.to_str(), Some(&only))
+    let orphan = vec!["/a".to_string(), "/b".to_string()];
+    let merged = vec!["/c".to_string()];
+    let echo = PruneScope::from_request(fx.repo.to_str(), Some(&orphan), Some(&merged))
         .expect("scope")
-        .echo();
+        .echo(false);
     assert_eq!(echo["project_root"], fx.repo.to_string_lossy().as_ref());
-    assert_eq!(echo["only_paths"], 2);
-    let all = WorktreeScope::all().echo();
+    assert_eq!(echo["project_known"], false);
+    assert_eq!(echo["only_orphan_paths"], 2);
+    assert_eq!(echo["only_merged_paths"], 1);
+    let all = PruneScope::default().echo(true);
     assert!(
-        all["project_root"].is_null() && all["only_paths"].is_null(),
+        all["project_root"].is_null()
+            && all["only_orphan_paths"].is_null()
+            && all["only_merged_paths"].is_null(),
         "{all}"
     );
+}
+
+/// 🔴 #8782: each pass is bounded by what the preview listed for THAT pass.
+///
+/// Fails when both passes share one allowlist: the orphan scope then admits
+/// the path the preview listed only for the merged-PR pass, and the reverse.
+#[test]
+fn a_per_pass_allowlist_bounds_each_pass_by_its_own_rows() {
+    let fx = GitWorktreeFixture::new();
+    let orphan = fx.add_worktree("orphan-only-8782");
+    let merged = fx.add_worktree("merged-only-8782");
+    let scope = PruneScope::from_request(
+        fx.repo.to_str(),
+        Some(&[orphan.to_string_lossy().into_owned()]),
+        Some(&[merged.to_string_lossy().into_owned()]),
+    )
+    .expect("scope");
+    let paths = |scope: &WorktreeScope| -> Vec<PathBuf> {
+        scan_registered_worktrees_in(&fx.repos_root, &[], scope)
+            .into_iter()
+            .map(|s| s.path)
+            .collect()
+    };
+    assert_eq!(paths(&scope.orphan), vec![orphan.clone()]);
+    assert_eq!(paths(&scope.merged), vec![merged.clone()]);
+}
+
+/// #8782: a scoped run from a checkout the scan never reaches is reported as
+/// such, so `total: 0` is not read as "nothing to prune".
+#[test]
+fn project_known_is_false_for_a_checkout_the_daemon_does_not_scan() {
+    let (a, b) = (GitWorktreeFixture::new(), GitWorktreeFixture::new());
+    assert!(
+        project(&a).project_known(&a.repos_root, &[]),
+        "a walk project"
+    );
+    assert!(
+        !project(&b).project_known(&a.repos_root, &[]),
+        "b is neither under a's repos root nor adopted"
+    );
+    assert!(
+        project(&b).project_known(&a.repos_root, std::slice::from_ref(&b.repo)),
+        "an adopted checkout is scanned"
+    );
+    assert!(WorktreeScope::all().project_known(&a.repos_root, &[]));
 }
 
 #[test]
@@ -317,14 +372,69 @@ fn project_root_for_a_linked_worktree_is_its_main_checkout() {
 
 #[test]
 fn orphan_rows_name_the_owning_checkout() {
-    let fx = GitWorktreeFixture::new();
-    let wt = fx.add_worktree("row-8782");
-    let rows = crate::daemon::managed_routes::prune::orphan_rows(std::slice::from_ref(&wt));
-    assert_eq!(rows[0]["path"], wt.to_string_lossy().as_ref());
-    assert_eq!(rows[0]["project"], fx.repo.to_string_lossy().as_ref());
+    let wt = PathBuf::from("/r/a/.worktrees/row-8782");
+    let outcome = crate::session_manager::prune::OrphanSweepOutcome {
+        removed: vec![wt.clone()],
+        registry_roots: [(wt.clone(), PathBuf::from("/r/a"))].into(),
+        ..Default::default()
+    };
+    let rows = crate::daemon::managed_routes::prune::orphan_rows(&outcome);
+    assert_eq!(rows[0]["path"], "/r/a/.worktrees/row-8782");
+    assert_eq!(rows[0]["project"], "/r/a");
     assert!(
         rows[0]["reason"]
             .as_str()
-            .is_some_and(|r| r.contains("orphaned"))
+            .is_some_and(|r| r.contains("orphaned") && r.contains("no unsaved work"))
     );
+}
+
+/// 🔴 #8782: under `--discard-dirty` the preview names the unsaved work each
+/// removal destroys, and never says "no unsaved work" for such a tree.
+///
+/// Fails when `orphan_rows` ignores `discarded_dirty`, or when the sweep stops
+/// recording the force-discard verdict: the dirty row then reads "holds no
+/// unsaved work". The `Skip` control keeps the dirty tree out of the rows.
+#[tokio::test]
+async fn the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys() {
+    use crate::session_manager::{DirtyWorktreePolicy, SessionManager};
+    let store = tempfile::tempdir().expect("store dir");
+    let mgr = SessionManager::new(
+        store.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let (dirty, clean) = (fx.add_worktree("dirty-8782"), fx.add_worktree("clean-8782"));
+    for wt in [&dirty, &clean] {
+        GitWorktreeFixture::stamp_reclaimable_sentinel(wt);
+    }
+    std::fs::write(dirty.join("wip.rs"), "// uncommitted\n").expect("dirty the tree");
+    let scope = project(&fx);
+    let sweep =
+        |policy| mgr.prune_orphaned_worktrees_in(&fx.repos_root, &[], true, policy, &[], &scope);
+    let reason_of = |rows: &[serde_json::Value], wt: &Path| -> Option<String> {
+        rows.iter()
+            .find(|r| r["path"] == wt.to_string_lossy().as_ref())
+            .and_then(|r| r["reason"].as_str().map(str::to_owned))
+    };
+
+    let forced = sweep(DirtyWorktreePolicy::ForceDiscard)
+        .await
+        .expect("sweep");
+    let rows = crate::daemon::managed_routes::prune::orphan_rows(&forced);
+    let dirty_reason = reason_of(&rows, &dirty).expect("the dirty tree is previewed");
+    assert!(
+        dirty_reason.contains("holds unsaved work")
+            && dirty_reason.contains("discarded (--discard-dirty)")
+            && !dirty_reason.contains("no unsaved work"),
+        "{dirty_reason}"
+    );
+    let clean_reason = reason_of(&rows, &clean).expect("the clean tree is previewed");
+    assert!(clean_reason.contains("no unsaved work"), "{clean_reason}");
+
+    let kept = sweep(DirtyWorktreePolicy::Skip).await.expect("sweep");
+    let rows = crate::daemon::managed_routes::prune::orphan_rows(&kept);
+    assert!(reason_of(&rows, &dirty).is_none(), "{rows:?}");
+    assert!(dirty.exists() && clean.exists(), "a dry run removed a tree");
 }

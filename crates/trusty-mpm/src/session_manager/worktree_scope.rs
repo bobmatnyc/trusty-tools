@@ -7,7 +7,8 @@
 //! What: [`WorktreeScope`], an optional project root and an optional allowlist
 //! of paths. A scanned worktree is in scope only when both admit it; the empty
 //! scope ([`WorktreeScope::all`]) admits everything, which is the pre-#8782
-//! daemon-global behaviour the automatic sweep and the MCP tool keep.
+//! daemon-global behaviour the automatic sweep keeps. [`PruneScope`] is one
+//! request's pair of them: one per pass, each with its own allowlist.
 //! Test: `worktree_scope_tests`.
 
 use std::collections::BTreeSet;
@@ -41,6 +42,17 @@ impl WorktreeScope {
         Self::default()
     }
 
+    /// The scope of one project's checkout, every path in it (#8782).
+    ///
+    /// What: `Err` when `root` does not resolve — never the unbounded scope.
+    /// Test: `a_pause_prunes_only_its_own_projects_orphans`.
+    pub fn for_project(root: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            project: Some(std::fs::canonicalize(root)?),
+            only: None,
+        })
+    }
+
     /// Build a scope from the prune route's request fields (#8782).
     ///
     /// Why: a named project root that does not resolve is a caller error. Treating
@@ -70,7 +82,17 @@ impl WorktreeScope {
     ///
     /// What: in the project bound when `project` is unset or equals either the
     /// registry root or the managed project directory the scan attributed; in
-    /// the path bound when `only` is unset or lists the path.
+    /// the path bound when `only` is unset or lists the path exactly.
+    ///
+    /// The two project arms are deliberately asymmetric for a walk project
+    /// `<repo>` with a `.base` clone. Scoped to `<repo>`, the `project` arm
+    /// admits the worktrees of BOTH registries, `<repo>` and `<repo>/.base`,
+    /// because the scan attributes both to the managed directory `<repo>` — one
+    /// project, two clones. Scoped to `<repo>/.base` (a run from inside the
+    /// `.base` clone), only the `registry_root` arm can match, so it admits
+    /// `.base`'s own worktrees and not `<repo>`'s. The narrower answer is the
+    /// safe one: a scope never reaches a registry the caller did not run from,
+    /// except the `.base` clone of the checkout the caller did run from.
     /// Test: `a_project_scope_admits_only_that_projects_worktrees`,
     /// `an_allowlist_admits_only_listed_paths`.
     pub(crate) fn admits(&self, scanned: &ScannedWorktree) -> bool {
@@ -84,15 +106,88 @@ impl WorktreeScope {
         in_project && listed
     }
 
+    /// Whether the daemon's scan reaches this scope's project at all (#8782).
+    ///
+    /// Why: a scoped run from a checkout the daemon does not scan finds
+    /// nothing, and `total: 0` alone reads as "nothing to prune".
+    /// What: `true` for the unbounded scope. Otherwise `true` when the project
+    /// is one of the scan's anchors — an adopted checkout, or a
+    /// `<repos_root>/<owner>/<repo>` directory or its `.base` clone. Reads
+    /// directories only; spawns no `git`.
+    /// Test: `project_known_is_false_for_a_checkout_the_daemon_does_not_scan`.
+    pub fn project_known(&self, repos_root: &Path, adopted: &[PathBuf]) -> bool {
+        let Some(project) = self.project.as_ref() else {
+            return true;
+        };
+        if adopted.iter().any(|a| canonical(a) == *project) {
+            return true;
+        }
+        let Ok(owners) = std::fs::read_dir(repos_root) else {
+            return false;
+        };
+        owners
+            .flatten()
+            .filter_map(|owner| std::fs::read_dir(owner.path()).ok())
+            .flat_map(|repos| repos.flatten())
+            .map(|repo| canonical(&repo.path()))
+            .any(|dir| {
+                dir == *project
+                    || dir.join(super::worktree_registry::BASE_CLONE_DIRNAME) == *project
+            })
+    }
+
+    /// The canonical project root, when the scope names one.
+    fn project_echo(&self) -> Option<String> {
+        self.project
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+}
+
+/// One prune request's scope: the same project bound for both passes, and a
+/// separate allowlist for each (#8782).
+///
+/// Why: a `--force` run hands back what its preview listed. One shared
+/// allowlist let the merged-PR pass remove a path the preview listed only as an
+/// orphan, and the reverse; one per pass bounds each pass by its own rows.
+/// What: `orphan` bounds the orphan sweep, `merged` the merged-PR pass.
+/// Test: `a_per_pass_allowlist_bounds_each_pass_by_its_own_rows`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneScope {
+    /// The orphan sweep's bounds.
+    pub orphan: WorktreeScope,
+    /// The merged-PR pass's bounds.
+    pub merged: WorktreeScope,
+}
+
+impl PruneScope {
+    /// Build both scopes from the route's request fields; see
+    /// [`WorktreeScope::from_request`] for the refusal rule.
+    ///
+    /// Test: `a_project_root_that_does_not_resolve_is_refused`.
+    pub fn from_request(
+        project_root: Option<&str>,
+        only_orphan_paths: Option<&[String]>,
+        only_merged_paths: Option<&[String]>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            orphan: WorktreeScope::from_request(project_root, only_orphan_paths)?,
+            merged: WorktreeScope::from_request(project_root, only_merged_paths)?,
+        })
+    }
+
     /// The echo the prune route returns, so a client can tell a daemon that
     /// honoured the scope from one that predates it (#8782).
     ///
-    /// What: `{ "project_root": <path or null>, "only_paths": <count or null> }`.
+    /// What: `project_root` (path or null), `project_known` (see
+    /// [`WorktreeScope::project_known`]), and each allowlist's size or null.
     /// Test: `the_scope_echo_names_the_project_and_the_allowlist_size`.
-    pub fn echo(&self) -> serde_json::Value {
+    pub fn echo(&self, project_known: bool) -> serde_json::Value {
         serde_json::json!({
-            "project_root": self.project.as_ref().map(|p| p.to_string_lossy().into_owned()),
-            "only_paths": self.only.as_ref().map(BTreeSet::len),
+            "project_root": self.orphan.project_echo(),
+            "project_known": project_known,
+            "only_orphan_paths": self.orphan.only.as_ref().map(BTreeSet::len),
+            "only_merged_paths": self.merged.only.as_ref().map(BTreeSet::len),
         })
     }
 }

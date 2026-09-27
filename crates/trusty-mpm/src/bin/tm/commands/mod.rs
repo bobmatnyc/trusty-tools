@@ -81,7 +81,6 @@ pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
 pub(crate) mod managed_merged_prs;
-// #8782: the per-project prune-worktrees preview and its scope checks.
 /// The `tm ls` table renderer, split out of `managed` for the SLOC cap.
 pub(crate) mod managed_render;
 pub(crate) mod managed_root;
@@ -90,6 +89,7 @@ pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod memory;
+// #8782: the per-project prune-worktrees preview and its scope checks.
 pub(crate) mod prune_preview;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;

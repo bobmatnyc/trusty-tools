@@ -317,8 +317,11 @@ Decommissioned managed sessions (`tm session new` / `mcp__trusty-mpm__session_ne
 can leave orphaned per-session git worktree directories behind. By default,
 `session_context_pause` prunes them as part of the call above (`prune_worktrees:
 true`, the default) — the same in-process engine `tm session prune-worktrees`
-uses. Only directories with **no** corresponding active session are ever
-touched; the tool returns the list of paths removed as `pruned_worktrees`.
+uses, bounded to the checkout that owns `project_dir` (#8782): a pause never
+touches another project's worktrees, and a `project_dir` outside any git
+checkout prunes nothing. Only directories with **no** corresponding active
+session are ever touched; the tool returns the list of paths removed as
+`pruned_worktrees`.
 
 **A worktree holding unsaved work is never removed** (#4091). Before deleting
 anything, the prune checks each candidate for uncommitted or staged changes,
@@ -332,9 +335,13 @@ Pass `prune_worktrees: false` to skip this step (e.g. to preview first with
 the CLI):
 
 ```bash
-tm session prune-worktrees          # dry-run by default (preview only)
-tm session prune-worktrees --force  # remove the orphaned dirs, sparing dirty ones
+tm session prune-worktrees                 # this checkout's project; preview only
+tm session prune-worktrees --force         # remove what that preview listed, sparing dirty ones
+tm session prune-worktrees --all-projects  # every registered project (preview)
 ```
+
+The CLI acts on the project of the checkout it runs in unless you pass
+`--all-projects`; outside a git repository it refuses rather than widening.
 
 `--force` still refuses to delete a worktree with unsaved work; it lists them
 on stderr instead. Only `tm session prune-worktrees --force --discard-dirty`

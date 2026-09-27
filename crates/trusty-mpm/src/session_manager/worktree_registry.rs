@@ -29,7 +29,7 @@
 //! [`scan_registered_worktrees`] (#4288 — EVERY registered worktree under the
 //! repos root, each carrying the [`Admission`] verdict that says whether it is
 //! a reclaim candidate and, when it is not, WHY), and
-//! [`enumerate_registered_worktrees`] (the admitted subset — every registered
+//! [`enumerate_registered_worktrees_in`] (the admitted subset — every registered
 //! worktree living INSIDE a managed project under the repos root; see that
 //! function's "positive assertion" section for the structural boundary that
 //! bounds the sweep).
@@ -43,7 +43,7 @@
 //! collapsing every `canonicalize()` error kind into "destroyed"; on
 //! 2026-07-21 a rule that loose would have told an operator to recreate ~70
 //! fully intact worktrees. Callers decide what a `None` means in their own
-//! direction of safety — [`enumerate_registered_worktrees`] treats it as "no
+//! direction of safety — [`enumerate_registered_worktrees_in`] treats it as "no
 //! candidates from this anchor" (nothing is proposed for deletion), while
 //! `git_worktree_list_agrees` keeps its long-standing best-effort `true`.
 //!
@@ -60,12 +60,12 @@ use super::worktree_scope::WorktreeScope;
 /// Why: a managed project has at most TWO git checkouts that can own a worktree
 /// registry — the project checkout itself and the `.base` clone
 /// `inproject::create_session_worktree` creates. Naming the segment
-/// once keeps [`enumerate_registered_worktrees`] from repeating the literal.
+/// once keeps [`enumerate_registered_worktrees_in`] from repeating the literal.
 /// This is NOT a worktree-location guess: it names a CHECKOUT to interrogate,
 /// and git then reports where that checkout's worktrees actually live.
 /// What: `".base"`.
 /// Test: `enumerate_finds_worktree_registered_to_base_clone`.
-const BASE_CLONE_DIRNAME: &str = ".base";
+pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
 
 /// One worktree exactly as `git worktree list --porcelain` reports it (#4207).
 ///
@@ -517,30 +517,23 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// other than `<repos_root>/<owner>/<repo>`; see
 /// [`scan_registered_worktrees`] for the containment rule they get. Pass `&[]`
 /// for the walk alone.
-// #8782: every production caller passes a scope; the unscoped form serves the
-// tests and the module docs that name it.
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) fn enumerate_registered_worktrees(
-    repos_root: &Path,
-    adopted: &[PathBuf],
-) -> Vec<PathBuf> {
-    enumerate_registered_worktrees_in(repos_root, adopted, &WorktreeScope::all())
-}
-
-/// [`enumerate_registered_worktrees`], bounded by `scope` (#8782).
 ///
+/// # Scope and rows (#8782)
+///
+/// `scope` bounds the scan ([`WorktreeScope::all`] for every project). Each
+/// admitted path comes back as its [`ScannedWorktree`] row, one row per path,
+/// so a caller keeps the registry that named it without asking git again.
 /// Test: `an_orphan_sweep_scoped_to_one_project_spares_another`.
 pub(crate) fn enumerate_registered_worktrees_in(
     repos_root: &Path,
     adopted: &[PathBuf],
     scope: &WorktreeScope,
-) -> Vec<PathBuf> {
-    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees_in(repos_root, adopted, scope)
+) -> Vec<ScannedWorktree> {
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut out: Vec<ScannedWorktree> = scan_registered_worktrees_in(repos_root, adopted, scope)
         .into_iter()
-        .filter(|s| s.admission == Admission::Admitted)
-        .map(|s| s.path)
+        .filter(|s| s.admission == Admission::Admitted && seen.insert(s.path.clone()))
         .collect();
-    let mut out: Vec<PathBuf> = admitted.into_iter().collect();
     sort_deepest_first(&mut out);
     out
 }
@@ -565,12 +558,13 @@ pub(crate) fn enumerate_registered_worktrees_in(
 /// sufficient for the containment property: a descendant always has strictly
 /// more components than its ancestor.
 /// Test: `enumerate_orders_nested_worktree_before_its_parent`.
-fn sort_deepest_first(paths: &mut [PathBuf]) {
-    paths.sort_by(|a, b| {
-        b.components()
+fn sort_deepest_first(rows: &mut [ScannedWorktree]) {
+    rows.sort_by(|a, b| {
+        b.path
+            .components()
             .count()
-            .cmp(&a.components().count())
-            .then_with(|| a.cmp(b))
+            .cmp(&a.path.components().count())
+            .then_with(|| a.path.cmp(&b.path))
     });
 }
 
@@ -673,7 +667,7 @@ pub(crate) struct ScannedWorktree {
 /// Every worktree BOTH managed anchors register under `repos_root`, admitted
 /// or not (#4288).
 ///
-/// Why: this is [`enumerate_registered_worktrees`] with the `continue`
+/// Why: this is [`enumerate_registered_worktrees_in`] with the `continue`
 /// statements turned into values, so reconciliation reports the excluded set
 /// instead of inheriting enumeration's blind spot. Sharing one traversal is
 /// the point — a second, parallel enumerator is exactly the drift that let the
@@ -702,7 +696,7 @@ pub(crate) struct ScannedWorktree {
 ///    projects.
 /// 2. An adopted checkout bounds its own candidates: containment is asserted
 ///    against the checkout itself (the same strict-descendant rule
-///    [`enumerate_registered_worktrees`]' "positive assertion" section
+///    [`enumerate_registered_worktrees_in`]' "positive assertion" section
 ///    describes), and a path some earlier anchor already produced is left with
 ///    the attribution it already has.
 ///
@@ -845,7 +839,7 @@ struct ScannedKey {
 /// every worktree, marking [`Admission::Admitted`] only for the non-bare,
 /// non-main, non-prunable, non-`locked` ones whose canonicalized path is a
 /// STRICT DESCENDANT of `canonical_project` (the managed project directory —
-/// see [`enumerate_registered_worktrees`]' "positive assertion" section) and
+/// see [`enumerate_registered_worktrees_in`]' "positive assertion" section) and
 /// also lies under `canonical_root`.
 ///
 /// Both containment checks are applied even though the first normally implies

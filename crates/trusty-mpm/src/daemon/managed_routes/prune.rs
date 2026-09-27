@@ -19,9 +19,10 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::prune::OrphanSweepOutcome;
 use crate::session_manager::worktree_reclaim::ReclaimMode;
 use crate::session_manager::worktree_reclaim_preview::preview_rows;
-use crate::session_manager::worktree_scope::WorktreeScope;
+use crate::session_manager::worktree_scope::PruneScope;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
@@ -179,10 +180,14 @@ pub struct PruneWorktreesRequest {
     /// as "absent", so a typo cannot widen a prune to every project.
     #[serde(default)]
     pub project_root: Option<String>,
-    /// The paths a `--force` run's own preview listed (#8782). When set, no
-    /// worktree outside it is surveyed or removed.
+    /// The orphan paths a `--force` run's own preview listed (#8782). When
+    /// set, the orphan sweep surveys and removes nothing outside it.
     #[serde(default)]
-    pub only_paths: Option<Vec<String>>,
+    pub only_orphan_paths: Option<Vec<String>>,
+    /// The merged-PR paths that preview listed (#8782); the same bound for the
+    /// merged-PR pass.
+    #[serde(default)]
+    pub only_merged_paths: Option<Vec<String>>,
 }
 
 fn default_dry_run() -> bool {
@@ -240,14 +245,17 @@ pub(crate) async fn prune_worktrees_core(
     }
     // #8782: resolved before any work, and a project root that does not
     // resolve is a 400 rather than a daemon-global sweep.
-    let scope =
-        match WorktreeScope::from_request(req.project_root.as_deref(), req.only_paths.as_deref()) {
-            Ok(scope) => scope,
-            Err(msg) => {
-                warn!("prune-worktrees route: {msg}");
-                return RouteOutcome::text(400, msg);
-            }
-        };
+    let scope = match PruneScope::from_request(
+        req.project_root.as_deref(),
+        req.only_orphan_paths.as_deref(),
+        req.only_merged_paths.as_deref(),
+    ) {
+        Ok(scope) => scope,
+        Err(msg) => {
+            warn!("prune-worktrees route: {msg}");
+            return RouteOutcome::text(400, msg);
+        }
+    };
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -298,6 +306,8 @@ pub(crate) async fn prune_worktrees_core(
     // under the daemon's own framework root — the root `project_register`
     // wrote them to. Every scan below takes them as a parameter.
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
+    // #8782: a checkout the scan never reaches finds nothing; say so.
+    let project_known = scope.orphan.project_known(&repos_root, &adopted);
     match mgr
         .prune_orphaned_worktrees_in(
             &repos_root,
@@ -305,7 +315,7 @@ pub(crate) async fn prune_worktrees_core(
             req.dry_run,
             policy,
             &adopted,
-            &scope,
+            &scope.orphan,
         )
         .await
     {
@@ -353,7 +363,7 @@ pub(crate) async fn prune_worktrees_core(
                     &repos_root,
                     mode,
                     req.invoking_session.clone(),
-                    scope.clone(),
+                    scope.merged.clone(),
                 )
                 .await
                 {
@@ -409,8 +419,8 @@ pub(crate) async fn prune_worktrees_core(
                 "dry_run": req.dry_run,
                 // #8782: echoed so a client can refuse a daemon that predates
                 // the scope and would have run daemon-global.
-                "scope": scope.echo(),
-                "orphan_rows": orphan_rows(&outcome.removed),
+                "scope": scope.echo(project_known),
+                "orphan_rows": orphan_rows(&outcome),
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
                 "agent_owned_paths": agent_owned_paths,
@@ -427,19 +437,31 @@ pub(crate) async fn prune_worktrees_core(
 
 /// The orphan pass's paths as preview rows: path, owning checkout, reason (#8782).
 ///
-/// Test: `orphan_rows_name_the_owning_checkout`.
-pub(crate) fn orphan_rows(paths: &[std::path::PathBuf]) -> Vec<serde_json::Value> {
-    paths
+/// What: one row per `removed` path. The project is the registry root the
+/// scan carried, so this runs no `git`. A path whose unsaved work
+/// `--discard-dirty` destroys says so, with what the dirty check found.
+/// Test: `orphan_rows_name_the_owning_checkout`,
+/// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+pub(crate) fn orphan_rows(outcome: &OrphanSweepOutcome) -> Vec<serde_json::Value> {
+    outcome
+        .removed
         .iter()
-        .map(|p| {
-            let project = crate::session_manager::worktree_scope::project_root_for(p)
-                .map(|r| r.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "(owning checkout unresolved)".to_string());
-            serde_json::json!({
-                "path": p.to_string_lossy(),
-                "project": project,
-                "reason": "orphaned — its owning session has ended and it holds no unsaved work",
-            })
+        .map(|path| {
+            let project = outcome.registry_roots.get(path).map_or_else(
+                || "(owning checkout unresolved)".to_string(),
+                |r| r.to_string_lossy().into_owned(),
+            );
+            let reason = match outcome.discarded_dirty.iter().find(|d| d.path == *path) {
+                Some(dirt) => format!(
+                    "orphaned — its owning session has ended; it holds unsaved work ({}) — \
+                     discarded (--discard-dirty)",
+                    dirt.reason
+                ),
+                None => {
+                    "orphaned — its owning session has ended and it holds no unsaved work".into()
+                }
+            };
+            serde_json::json!({ "path": path.to_string_lossy(), "project": project, "reason": reason })
         })
         .collect()
 }
@@ -582,7 +604,8 @@ mod tests {
                 merged_prs: false,
                 invoking_session: Some("not-a-uuid".into()),
                 project_root: None,
-                only_paths: None,
+                only_orphan_paths: None,
+                only_merged_paths: None,
             }),
         )
         .await
@@ -602,7 +625,8 @@ mod tests {
                 merged_prs: false,
                 invoking_session: None,
                 project_root: None,
-                only_paths: None,
+                only_orphan_paths: None,
+                only_merged_paths: None,
             }),
         )
         .await
@@ -612,6 +636,34 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "an absent caller id is legitimate and must be accepted"
         );
+    }
+
+    /// 🔴 #8782: a `project_root` that does not resolve is a 400, never a
+    /// daemon-global sweep.
+    ///
+    /// Fails when the route reads the unresolvable root as "no scope"
+    /// (`WorktreeScope::all()` in the `Err` arm): it then answers 200 over
+    /// every project. A dry run, so even that arm deletes nothing.
+    #[tokio::test]
+    async fn prune_worktrees_route_rejects_an_unresolvable_project_root() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let resp = prune_worktrees_route(
+            State(state),
+            Json(PruneWorktreesRequest {
+                dry_run: true,
+                discard_dirty: false,
+                merged_prs: false,
+                invoking_session: None,
+                project_root: Some("/nonexistent/8782/project".into()),
+                only_orphan_paths: None,
+                only_merged_paths: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Test: this function IS the test.
@@ -819,7 +871,8 @@ mod tests {
                     merged_prs: false,
                     invoking_session: None,
                     project_root: None,
-                    only_paths: None,
+                    only_orphan_paths: None,
+                    only_merged_paths: None,
                 }),
             )
             .await
