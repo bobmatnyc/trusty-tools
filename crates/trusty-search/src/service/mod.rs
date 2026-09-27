@@ -77,8 +77,9 @@ pub use constants::DEFAULT_PORT;
 pub use daemon::{
     bootstrap_process_env, daemon_env_path, daemon_lock_path, daemon_port_path, http_addr_path,
     is_already_running, load_daemon_env, load_daemon_env_early, load_daemon_env_early_for,
-    parse_daemon_env, run_daemon, running_daemon_pid, save_daemon_env, write_http_addr_file,
-    DaemonEnvPair, DaemonEnvReject, DaemonError, DaemonHandle, PERSISTED_ENV_VARS,
+    parse_daemon_env, remove_daemon_files_if_unheld, run_daemon, running_daemon_pid,
+    save_daemon_env, write_http_addr_file, DaemonEnvPair, DaemonEnvReject, DaemonError,
+    DaemonHandle, StaleLockRemoval, PERSISTED_ENV_VARS,
 };
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;

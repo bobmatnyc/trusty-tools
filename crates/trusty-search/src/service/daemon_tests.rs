@@ -433,6 +433,54 @@ async fn run_daemon_refuses_a_socket_another_process_is_serving() {
     );
 }
 
+/// The Fail-Open Check for the daemon lock (#8760): a contended lock stops
+/// `run_daemon` before it binds or publishes anything.
+///
+/// Why: `acquire_lock` returning `Err` proves nothing if `run_daemon` downgrades
+/// it to a warning and starts anyway. This drives the whole entry point.
+/// What: isolates every daemon path under tempdirs, takes the lock from another
+/// descriptor while the file names a dead pid, then calls `run_daemon`. It must
+/// return `AlreadyRunning` and leave no port or `http_addr` file behind.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial]
+async fn run_daemon_refuses_to_start_while_another_holder_has_the_lock() {
+    use crate::core::registry::IndexRegistry;
+
+    let override_tmp = tempfile::tempdir().unwrap();
+    let data_dir_tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
+    }
+    let lock_path = daemon_lock_path().expect("isolated lock path");
+    std::fs::write(&lock_path, "2000000000").unwrap();
+    let holder = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    holder.try_lock_exclusive().unwrap();
+
+    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), 0).await;
+
+    let port_written = daemon_port_path().map(|p| p.exists()).unwrap_or(false);
+    let addr_written = data_dir_tmp.path().join("http_addr").exists();
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+    }
+
+    assert!(
+        matches!(result, Err(DaemonError::AlreadyRunning(_))),
+        "a daemon that lost the lock must not start: {result:?}"
+    );
+    assert!(
+        !port_written && !addr_written,
+        "a refused daemon announced itself"
+    );
+}
+
 /// #4827: a line with no `=` used to be dropped in silence, so a typo cost the
 /// operator the setting and reported nothing. The parser must hand malformed
 /// lines back with their line numbers so the caller can warn.

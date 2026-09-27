@@ -6,7 +6,9 @@
 //! 1. **Singleton.** Only one daemon may run per machine. We enforce this
 //!    via an OS-level advisory exclusive lock on a lockfile in the user's
 //!    data-local dir. If the lock is held, `run_daemon` returns
-//!    [`DaemonError::AlreadyRunning`] and `main` exits 1.
+//!    [`DaemonError::AlreadyRunning`] and `main` exits 1. The exact
+//!    invariant, and the only sanctioned unlink of the lockfile, live in
+//!    `daemon_lock.rs` (#8760).
 //!
 //! 2. **Discoverable port.** The MCP server (and `trusty-search status`)
 //!    needs to know what port the daemon picked. We bind a `TcpListener`
@@ -15,8 +17,8 @@
 //!
 //! Graceful shutdown: axum's `with_graceful_shutdown` is wired to a tokio
 //! signal future that resolves on SIGTERM or SIGINT. On exit we delete the
-//! port file (the lockfile is unlinked by drop semantics on Unix; on
-//! Windows the `Drop` of `File` releases the lock).
+//! port file. Dropping the lockfile's `File` releases the lock; the file
+//! itself stays on disk and is reused by the next daemon.
 //!
 //! What:
 //! - [`daemon_lock_path`] / [`daemon_port_path`] resolve XDG-style paths.
@@ -553,10 +555,10 @@ pub fn running_daemon_pid() -> Option<u32> {
 
 /// Read the PID stored in the lockfile (if any). Returns `None` on parse failure.
 ///
-/// Why: the lockfile records the daemon PID so callers can detect stale
-/// lockfiles left over from SIGKILL'd or crashed daemons (where the OS may
-/// not have released the advisory lock cleanly, or the file persisted with
-/// a dead PID written inside).
+/// Why: the lockfile records the daemon PID for `running_daemon_pid` and
+/// operator diagnostics. It is never an input to lock acquisition (#8760):
+/// between a holder's flock and its pid write the file can still name a dead
+/// predecessor.
 fn read_lockfile_pid(lock_path: &Path) -> Option<u32> {
     let mut s = String::new();
     File::open(lock_path).ok()?.read_to_string(&mut s).ok()?;
@@ -605,50 +607,12 @@ pub fn pid_alive(_pid: u32) -> bool {
     true
 }
 
-/// Acquire an exclusive advisory lock on the daemon lockfile. The returned
-/// `File` must outlive the daemon — drop releases the lock.
-///
-/// Why stale-lock handling: when a daemon is SIGKILL'd mid-run, the file
-/// may persist with the dead PID recorded inside. On some platforms or
-/// filesystems the advisory lock can also outlive the process. Before
-/// reporting `AlreadyRunning`, we check whether the PID stored in the file
-/// is still alive — if not, we remove the stale file and retry once.
-fn acquire_lock(lock_path: &PathBuf) -> Result<File, DaemonError> {
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path)?;
-    if file.try_lock_exclusive().is_ok() {
-        return Ok(file);
-    }
-
-    // Lock is held — but is it stale? Inspect the PID written by the previous
-    // daemon. If the recorded PID is dead, treat the lockfile as abandoned
-    // and recreate it.
-    if let Some(prev_pid) = read_lockfile_pid(lock_path) {
-        if !pid_alive(prev_pid) {
-            tracing::warn!(
-                "stale lockfile at {} (pid {prev_pid} is dead) — removing and retrying",
-                lock_path.display()
-            );
-            drop(file);
-            let _ = std::fs::remove_file(lock_path);
-            let retry = OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(lock_path)?;
-            if retry.try_lock_exclusive().is_ok() {
-                return Ok(retry);
-            }
-        }
-    }
-
-    Err(DaemonError::AlreadyRunning(lock_path.clone()))
-}
+// #8760: acquisition and the only sanctioned unlink of `daemon.lock` live in
+// their own module, which states the singleton invariant.
+#[path = "daemon_lock.rs"]
+mod lock;
+use lock::acquire_lock;
+pub use lock::{remove_daemon_files_if_unheld, StaleLockRemoval};
 
 // Why: the shared `shutdown_signal` helper in trusty-common provides identical
 // SIGTERM + SIGINT handling for all trusty-* daemons (issue #534). Delegating
@@ -666,11 +630,9 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     let port_path = daemon_port_path()?;
 
     // Lock first — second daemon must error before binding a port.
-    let mut lock_file = acquire_lock(&lock_path)?;
-    let pid_string = std::process::id().to_string();
-    // Best-effort: write PID into the lockfile so `ps`/`lsof` can confirm.
-    let _ = lock_file.set_len(0);
-    let _ = lock_file.write_all(pid_string.as_bytes());
+    // #8760: `acquire_lock` writes our pid itself and fails closed; a
+    // contended lock is `AlreadyRunning` whatever pid the file names.
+    let lock_file = acquire_lock(&lock_path)?;
 
     let listener = bind_with_auto_port(requested_port, 64).await?;
     let addr = listener.local_addr()?;
