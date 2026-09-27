@@ -625,7 +625,7 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
 /// segment yields a plausible target (the caller then falls back to the
 /// generic delegation hint). The sed/awk-family half is a best-effort HINT
 /// only — its trailing token may name a file the command READS. The positively
-/// identified half is [`shell_write_target`], which the write boundary decides
+/// identified half is [`shell_write_targets`], which the write boundary decides
 /// on.
 /// Test: `extract_shell_edit_target_*`.
 pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
@@ -652,34 +652,44 @@ pub(crate) fn extract_shell_edit_target(command: &str) -> Option<String> {
     None
 }
 
-/// The file a Bash command would WRITE, when one is positively identified.
+/// Every file a Bash command would WRITE, one per composition segment that
+/// positively identifies one — including a `cd` segment's own redirect.
 ///
-/// Why (#7399): the main-checkout write boundary (ADR-0044, enforced by
-/// ADR-0048) asks WHERE a write lands, and until now it could only ask that of
-/// the Edit/Write tools — a Bash write reached `SHELL_EDIT_REASON`, which asks
-/// WHO is writing and is budget-tiered, so `git diff --output=<file>` and
-/// `echo … > <file>` both landed a source file in a shared main checkout
+/// Why (#7399, #8468 option B): the main-checkout write boundary (ADR-0044,
+/// enforced by ADR-0048) asks WHERE a write lands, and until now it could only
+/// ask that of the Edit/Write tools — a Bash write reached `SHELL_EDIT_REASON`,
+/// which asks WHO is writing and is budget-tiered, so `git diff --output=<file>`
+/// and `echo … > <file>` both landed a source file in a shared main checkout
 /// within budget. This is the half of [`extract_shell_edit_target`] the
 /// boundary can decide on: a redirect and a git write option each NAME the file
 /// git or the shell will create, with no reading arm. The sed/awk trailing
 /// token is deliberately excluded — `sed -n '1,5p' <file>` puts a file it only
 /// READS in that same position, so deciding a deny on it would refuse reads.
-/// What: the first [`segment_write_target`] across the command's composition
-/// segments ([`split_shell_segments`]). `None` when no segment names a write —
-/// which includes every command the guard cannot lex, so this can never turn an
-/// existing allow into a deny on a parse failure.
-/// Test: `shell_write_target_reads_redirects_and_git_output`,
-/// `shell_write_target_ignores_reads`, and end to end in
+/// #8468 round 1-3 tried resolving a later segment's relative target against a
+/// `cd` earlier in the same command; the final round-3 critic found a symlink
+/// shape that allowed a write main denies today, so #8468 ships the fallback
+/// instead: no segment's target is EVER resolved against anything but the hook
+/// cwd, and every segment is judged, not only the first that writes. Following
+/// `cd` moves to #8704.
+/// What: one [`segment_write_target`] per command composition segment
+/// ([`split_shell_segments`]) that names a write, in segment order. Empty when
+/// no segment names a write — which includes every command the guard cannot
+/// lex, so this can never turn an existing allow into a deny on a parse
+/// failure.
+/// Test: `shell_write_targets_reads_redirects_and_git_output`,
+/// `shell_write_targets_ignores_reads`,
+/// `shell_write_targets_collects_every_segments_write`, and end to end in
 /// `pm_guard_denies_a_git_output_write_in_a_main_checkout`.
-pub(crate) fn shell_write_target(command: &str) -> Option<String> {
+pub(crate) fn shell_write_targets(command: &str) -> Vec<String> {
     split_shell_segments(command)
         .into_iter()
-        .find_map(|segment| segment_write_target(segment.trim()))
+        .filter_map(|segment| segment_write_target(segment.trim()))
+        .collect()
 }
 
 /// The file ONE command segment would write, if its text names one.
 ///
-/// Why: [`extract_shell_edit_target`] and [`shell_write_target`] ask the same
+/// Why: [`extract_shell_edit_target`] and [`shell_write_targets`] ask the same
 /// question of a segment and must never drift apart — one rule about what a
 /// segment writes, read by the routing hint and by the write boundary alike.
 /// What: the redirect target ([`redirection_target`]) or, on a `git` segment,
@@ -688,7 +698,7 @@ pub(crate) fn shell_write_target(command: &str) -> Option<String> {
 /// `format-patch`) yields an empty string from that function and is skipped
 /// here: the write is real and `classify_bash_segment` still denies it, but
 /// there is no path for the boundary to place.
-/// Test: `shell_write_target_reads_redirects_and_git_output`.
+/// Test: `shell_write_targets_reads_redirects_and_git_output`.
 fn segment_write_target(segment: &str) -> Option<String> {
     if segment.is_empty() {
         return None;
@@ -725,7 +735,7 @@ fn segment_write_target(segment: &str) -> Option<String> {
 /// write for the bool caller, no path for the boundary.
 /// Test: `has_file_write_redirection_*`,
 /// `extract_shell_edit_target_from_redirection`,
-/// `shell_write_target_ignores_a_heredoc_body_redirect`.
+/// `shell_write_targets_ignores_a_heredoc_body_redirect`.
 fn scan_file_write_redirect(command: &str) -> Option<String> {
     let scan = QuoteScan::new(command);
     let bodies = heredoc::HeredocBodies::scan(command);

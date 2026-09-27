@@ -44,12 +44,26 @@
 //! budget-tiered and both subagent exemptions skip it, so `git diff
 //! --output=<file>` and `echo … > <file>` each landed a source file in a shared
 //! main checkout within budget. `Bash` now takes the same two halves as an edit
-//! tool, reading its target from
-//! [`pm_guard_bash::shell_write_target`](super::pm_guard_bash::shell_write_target)
+//! tool, reading its targets from
+//! [`pm_guard_bash::shell_write_targets`](super::pm_guard_bash::shell_write_targets)
 //! — the redirect-or-git-write-option half of the one detector `pm_guard_bash`
 //! already keeps, never a second parser. `SHELL_EDIT_REASON` is unchanged and
 //! still fires for the PM on every shell write; this rule adds the WHERE
 //! dimension ADR-0048's Consequences recorded as open.
+//!
+//! **Every segment is judged, none against anything but the hook cwd (#8468
+//! option B).** A command with several write-bearing segments used to be
+//! judged on only the FIRST segment `shell_write_targets` returned — a benign
+//! first write (`echo hi > notes.md`) hid a later source write
+//! (`&& echo … > src/lib.rs`) from this rule entirely. Three rounds tried
+//! resolving a later segment's relative target against an earlier `cd`
+//! instead, and the third round's critic found a symlink shape that allowed a
+//! write main denies today; under the supervisor's hard-exit rule, #8468
+//! ships this fallback instead: [`evaluate_main_checkout_write_with`] checks
+//! EVERY target `shell_write_targets` names — including a `cd` segment's own
+//! redirect, which was always one of those targets — and every one of them
+//! resolves against the hook's `cwd`, never a directory a `cd` moved to.
+//! Following `cd` moves to #8704.
 //!
 //! **A scratchpad-rooted clone is not a shared tree (#7778).** ADR-0044
 //! protects the checkout other sessions are standing in; a disposable
@@ -122,7 +136,7 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
-use super::pm_guard_bash::shell_write_target;
+use super::pm_guard_bash::shell_write_targets;
 
 /// Deny a source-file write whose target lives in a project's main checkout.
 ///
@@ -133,10 +147,11 @@ use super::pm_guard_bash::shell_write_target;
 /// [`is_source_code_path`], and the directory it resolves into
 /// [`main_checkout_root`] — except when that checkout is rooted under the
 /// session scratchpad ([`write_lands_in_a_scratchpad_clone`], #7778). The
-/// target comes from
+/// targets come from
 /// [`edit_tool_target_path`] for an [`EDIT_TOOLS`] member and from
-/// [`shell_write_target`] for `Bash` (#7399). `None` (ALLOW) in every other
-/// case.
+/// [`shell_write_targets`] for `Bash` (#7399); every target is judged, in
+/// order, and the first that qualifies denies (#8468 option B). `None`
+/// (ALLOW) when none does.
 /// Test: `denies_a_source_write_in_a_main_checkout`,
 /// `allows_a_source_write_in_a_scratchpad_rooted_clone`,
 /// `allows_documents_and_configuration`, `allows_a_write_inside_a_worktree`,
@@ -162,23 +177,41 @@ pub(crate) fn evaluate_main_checkout_write(
 /// races every sibling test in the binary — the failure #7746/#7989 fixed by
 /// adding seams rather than by locking the environment. So the ambient read
 /// happens once, in the wrapper above, and the decision itself is pure.
+///
+/// Why it loops (#8468 option B): this function used to decide on the single
+/// first target `pm_guard_bash` found across the whole command, so a benign
+/// first segment's write hid a source write in a later segment from this rule
+/// entirely. [`write_targets`] now names one candidate per write-bearing
+/// segment, each still resolved against `cwd` alone — never a directory a
+/// `cd` moved to — and the first one that qualifies denies.
 /// What: identical to [`evaluate_main_checkout_write`] except that `home` is
 /// supplied. `None` for `home` is the HOME-unset case, which makes a `~`- or
 /// `$HOME`-rooted target indeterminate.
 /// Test: `denies_a_leading_tilde_that_resolves_into_the_checkout`,
 /// `denies_a_dollar_home_first_segment_that_resolves_into_the_checkout`,
-/// `allows_a_leading_tilde_when_home_is_unknown`.
+/// `allows_a_leading_tilde_when_home_is_unknown`,
+/// `denies_a_second_segments_source_write_when_the_first_writes_elsewhere`.
 fn evaluate_main_checkout_write_with(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
     cwd: &Path,
     home: Option<&str>,
 ) -> Option<String> {
-    let target = write_target(tool_name, tool_input)?;
+    write_targets(tool_name, tool_input)
+        .into_iter()
+        .find_map(|target| deny_reason_for_target(&target, cwd, home))
+}
+
+/// [`evaluate_main_checkout_write_with`]'s per-target decision, unchanged from
+/// before #8468 except for its caller now supplying one of several targets
+/// instead of the command's only one.
+///
+/// Why/What/Test: see [`evaluate_main_checkout_write_with`].
+fn deny_reason_for_target(target: &str, cwd: &Path, home: Option<&str>) -> Option<String> {
     // #7838: only the part of the path that decides the BASE directory has to
     // be literal; an expansion deeper in the path lands under a base this
     // guard already knows.
-    let resolvable = expand_leading_base(&target, cwd, home)?;
+    let resolvable = expand_leading_base(target, cwd, home)?;
     if base_directory_is_unresolvable(&resolvable) {
         return None;
     }
@@ -194,7 +227,7 @@ fn evaluate_main_checkout_write_with(
         return None;
     }
     // The message quotes the spelling the caller used, not the expansion.
-    Some(deny_reason(&target))
+    Some(deny_reason(target))
 }
 
 /// The directory name the agent harness gives each session's scratch space.
@@ -305,27 +338,39 @@ fn scratchpad_root(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The file this tool call would write, whichever tool named it.
+/// Every file this tool call would write, whichever tool named it.
 ///
-/// Why (#7399): the boundary's question is WHERE a write lands, and the answer
-/// is the same question for an edit tool and for a shell write — only the place
-/// the path is written down differs. Resolving both here keeps one deny, one
-/// message and one pair of halves rather than a second rule for `Bash`.
-/// What: `tool_input.file_path` for an [`EDIT_TOOLS`] member, and for `Bash`
-/// the positively identified write target of its command
-/// ([`shell_write_target`]). `None` for every other tool, and for a command
+/// Why (#7399, #8468 option B): the boundary's question is WHERE a write
+/// lands, and the answer is the same question for an edit tool and for a
+/// shell write — only the place the path is written down differs. Resolving
+/// both here keeps one deny, one message and one pair of halves rather than a
+/// second rule for `Bash`. A `Bash` command can name several writes across its
+/// composition segments, and each must be judged — see
+/// [`evaluate_main_checkout_write_with`].
+/// What: `tool_input.file_path` for an [`EDIT_TOOLS`] member (at most one), and
+/// for `Bash` every positively identified write target of its command
+/// ([`shell_write_targets`]). Empty for every other tool, and for a command
 /// that names no write.
 /// Test: `denies_a_git_output_write_in_a_main_checkout`,
-/// `denies_a_shell_redirect_into_a_main_checkout`.
-fn write_target(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Option<String> {
+/// `denies_a_shell_redirect_into_a_main_checkout`,
+/// `denies_a_second_segments_source_write_when_the_first_writes_elsewhere`.
+fn write_targets(tool_name: &str, tool_input: Option<&serde_json::Value>) -> Vec<String> {
     if EDIT_TOOLS.contains(&tool_name) {
-        return edit_tool_target_path(tool_input).map(str::to_owned);
+        return edit_tool_target_path(tool_input)
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
     }
     if tool_name != "Bash" {
-        return None;
+        return Vec::new();
     }
-    let command = tool_input?.get("command")?.as_str()?;
-    shell_write_target(command)
+    let Some(command) = tool_input
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+    else {
+        return Vec::new();
+    };
+    shell_write_targets(command)
 }
 
 /// This process's home directory, read once at the ambient entry point.
@@ -630,6 +675,51 @@ mod tests {
         assert!(reason.contains("ADR-0044"), "{reason}");
     }
 
+    // #8468 option B: before the fix, `write_target` returned only the FIRST
+    // segment's write across the whole command, so a benign first write
+    // (`notes.md`) hid the second segment's source write from this rule
+    // entirely — a false ALLOW. Every segment's own write must be judged.
+    #[test]
+    fn denies_a_second_segments_source_write_when_the_first_writes_elsewhere() {
+        let dir = main_checkout();
+        let target = dir.path().join("crates/x/src/lib.rs");
+        let command = format!(
+            "echo hi > {}/notes.md && echo 'fn main() {{}}' > {}",
+            dir.path().display(),
+            target.display()
+        );
+        let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(&command)), dir.path())
+            .unwrap_or_else(|| {
+                panic!("`{command}`'s second segment writes source into the checkout")
+            });
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #8468 option B: a `cd` segment's own trailing redirect is a write like
+    // any other segment's, and — like every target this rule judges — it
+    // resolves against the hook's `cwd` alone, never a directory the `cd`
+    // moved to (following `cd` moved to #8704 after round 3's BLOCK).
+    #[test]
+    fn denies_a_cd_segments_own_redirect_in_a_main_checkout() {
+        let dir = main_checkout();
+        let command = "cd . > crates/x/src/lib.rs";
+        let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
+            .expect("a `cd` segment's own redirect into a main checkout's source must deny");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
+    // #8468 option B: no `cd` is followed, so a later segment's relative
+    // target still resolves against the hook `cwd` even though an earlier
+    // segment `cd`s elsewhere — the deny direction this rule always prefers.
+    #[test]
+    fn denies_a_later_segments_write_resolved_against_the_hook_cwd_not_a_preceding_cd() {
+        let dir = main_checkout();
+        let command = "cd /tmp && echo 'fn main() {}' > crates/x/src/lib.rs";
+        let reason = evaluate_main_checkout_write("Bash", Some(&bash_input(command)), dir.path())
+            .expect("the relative target must resolve against the hook cwd, not /tmp");
+        assert!(reason.contains("ADR-0044"), "{reason}");
+    }
+
     // #7399: the worktree is where the write is SUPPOSED to land.
     #[test]
     fn allows_a_git_output_write_inside_a_worktree() {
@@ -812,9 +902,10 @@ mod tests {
     fn denies_an_expansion_in_a_middle_segment() {
         let dir = main_checkout();
         // Through an edit tool, which carries the path verbatim. The shell
-        // route is the `${PKG}` spelling below: `shell_write_target` tokenizes
-        // on whitespace, so a `$( … )` carrying a space never reaches here as
-        // one target at all — a limit of that lexer, not of this rule.
+        // route is the `${PKG}` spelling below: `shell_write_targets`
+        // tokenizes on whitespace, so a `$( … )` carrying a space never
+        // reaches here as one target at all — a limit of that lexer, not of
+        // this rule.
         for input in [
             serde_json::json!({"file_path": "crates/$(echo trusty-mpm)/src/lib.rs"}),
             serde_json::json!({"file_path": "crates/${PKG}/src/lib.rs"}),

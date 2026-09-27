@@ -52,6 +52,8 @@ pub mod stall_tracker;
 pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
+// #8726: demote a `ready` semantic stage short of vectors and queue its backfill.
+pub mod vector_gap;
 pub mod walker;
 pub mod warm_boot;
 // #4213 / #4721: shared "run this one test alone in a child process with the

@@ -299,6 +299,13 @@ impl Dreamer {
             fading,
         };
         stats.update_compression_ratio();
+        // #8732: the full stats line below `log_cycle_outcome` is `info`; a cycle
+        // that deleted drawers must also show at the daemon's default filter.
+        crate::memory_core::maintenance_log::warn_removed(
+            &handle.id,
+            "dream cycle",
+            stats.merged + stats.pruned + stats.content_pruned,
+        );
 
         // ── Phase: kg.redb prune-and-compact (#6652) ──────────────────────────
         // This replaces the `handle.kg.checkpoint()` call that used to sit here.
