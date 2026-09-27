@@ -834,6 +834,33 @@ fn allows_the_round_five_neighbours() {
     );
 }
 
+/// #8676 round 6, code-critic CRITICAL on round 5: a plain input redirect's
+/// missing-file error names its target the same way round 5's bare `$T`
+/// does, but a command-substitution or backtick target has no `$NAME` for
+/// `expands_tainted` to match — the placeholder `lift_substitutions` leaves
+/// behind carries no `$`. Each row was allowed at c3778fa0b.
+#[test]
+fn denies_the_round_six_bypasses() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); wc -c < \"$(echo \"$T\")\"",
+            "T=$(gcloud auth print-access-token); : < \"$(echo \"$T\")\"",
+            "T=$(gcloud auth print-access-token); wc -c < \"`echo $T`\"",
+        ],
+    );
+}
+
+/// #8676 round 6: a `<(…)` target is a real descriptor bash always opens —
+/// never a missing-file error — so this sink must not flag it.
+#[test]
+fn allows_the_round_six_neighbours() {
+    check(
+        false,
+        &["T=$(gcloud auth print-access-token); wc -c < <(echo \"$T\")"],
+    );
+}
+
 /// #8676 round 3: bracket runs 100k wide scan in linear time. A scan from each
 /// opener to its close took minutes on the round-two nesting row; a nest
 /// deeper than the cap refuses.

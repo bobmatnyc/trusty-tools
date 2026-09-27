@@ -6,22 +6,32 @@
 //! `1<>/dev/tty` opens the terminal read-write. Round 5 found a plain input
 //! redirect (`wc -c < "$T"`): the shell's own "No such file" error names a
 //! carrying target on stderr when it fails to open, and nothing had ever
-//! parsed a bare `<`.
+//! parsed a bare `<`. Round 6 found the same missing-file leak through a
+//! command substitution or backtick target (`wc -c < "$(echo "$T")"`) —
+//! round 5's gate matched only a bare `$NAME` expansion, not the placeholder
+//! a lifted `$(…)`/backtick leaves behind.
 //! What: [`apply_redirections`] keeps a sink per descriptor 0-9. A copy of an
 //! untracked descriptor (fd 0, an fd never assigned, fd 10+) is
 //! [`Sink::Terminal`]; a copy from a descriptor chosen at run time
 //! (`>&$fd`) is refused as unreadable. [`terminal_name_sink`] maps a path that
 //! names a descriptor or the terminal to its sink. A plain input redirect
-//! whose target carries the value sets [`Routed::read_target_carries`]; the
-//! caller routes it to the stage's stderr.
+//! whose target carries the value — a bare `$NAME` expansion, or a
+//! [`SubKind::Command`] substitution that yields — sets
+//! [`Routed::read_target_carries`]; the caller routes it to the stage's
+//! stderr. A [`SubKind::Input`] (`<(…)`) target stays excluded: bash always
+//! opens that descriptor, so it never produces a missing-file error.
 //! Test: `credential_print_tests::denies_the_round_two_bypasses`,
 //! `credential_print_tests::denies_the_round_three_bypasses`,
-//! `credential_print_tests::denies_the_round_five_bypasses`.
+//! `credential_print_tests::denies_the_round_five_bypasses`,
+//! `credential_print_tests::denies_the_round_six_bypasses`,
+//! `credential_print_tests::allows_the_round_six_neighbours`.
 
 use super::super::bash_tokens::{RedirectRole, redirect_role};
 use super::credential_print_heredoc::HEREDOC_MARK;
 use super::credential_print_taint::expands_tainted;
-use super::{Lifted, MARK, Refusal, Sink, SubKind, carries, input_is_program_text, marks_in};
+use super::{
+    Lifted, MARK, Refusal, Sink, SubKind, carries, carries_kind, input_is_program_text, marks_in,
+};
 
 /// A stage's argv and routing after its redirections.
 pub(super) struct Routed {
@@ -37,8 +47,10 @@ pub(super) struct Routed {
     pub(super) here_program_text: bool,
     /// #8676: stdin is any here-string or here-document.
     pub(super) here_any: bool,
-    /// #8676 round 5: a plain input redirect (`<`, `N<`) names a target that
-    /// carries — a missing file's error would echo it on stderr.
+    /// #8676 round 5/6: a plain input redirect (`<`, `N<`) names a target
+    /// that carries — via a bare `$NAME` expansion or a yielding `$(…)`/
+    /// backtick substitution — and a missing file's error would echo it on
+    /// stderr.
     pub(super) read_target_carries: bool,
 }
 
@@ -143,11 +155,14 @@ pub(super) fn apply_redirections(
                 }
                 t => t,
             };
-            // #8676 round 5: a missing file's "No such file" error names
-            // `target` on stderr. Scoped to a tainted-name expansion, not
-            // `carries`' substitution marks — a `<(…)` target is a real
+            // #8676 round 5/6: a missing file's "No such file" error names
+            // `target` on stderr — a bare `$T` (round 5) and a command
+            // substitution's own filename (`$(…)`/backtick, round 6: the
+            // substitution's result IS the missing path bash reports, not a
+            // real descriptor). A `<(…)` target stays excluded — it is a real
             // descriptor bash always opens, never a missing-file error.
-            routed.read_target_carries |= expands_tainted(target, &lifted.names);
+            routed.read_target_carries |= expands_tainted(target, &lifted.names)
+                || carries_kind(target, lifted, Some(SubKind::Command));
             // A `<(…)`/`$(…)` target's file content becomes stdin, exactly
             // like a here-string (round 2's `sort < <(cred)`, `bash <
             // <(echo …)`) — this branch used to leave the target in `argv`,
