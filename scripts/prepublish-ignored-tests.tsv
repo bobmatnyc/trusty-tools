@@ -10,7 +10,7 @@
 # which the job authenticates with its own GITHUB_TOKEN, and the workspace
 # build. It must not need an API key, a live daemon, a compiled binary on disk,
 # a Python/torch venv, tmux, macOS hardware, or minutes of soak time. Those are
-# the reasons the other 124 ignored tests stay unselected; see the baseline
+# the reasons the other 126 ignored tests stay unselected; see the baseline
 # note at the bottom.
 #
 # ADDING A ROW is how you widen the gate, and it is always welcome. Removing one
@@ -49,15 +49,15 @@ trusty-search	migration_e2e_already_current_is_noop	loads the default ONNX embed
 trusty-search	migration_e2e_empty_corpus_advances_to_current	loads the default ONNX embedder in-process; temp redb corpus, no daemon
 trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 
-# THE UNSELECTED REMAINDER. 149 ignored tests are enumerable in this workspace
-# on the Linux runner; the 25 rows above run, and 124 do not. A macOS checkout
+# THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
+# on the Linux runner; the 25 rows above run, and 126 do not. A macOS checkout
 # enumerates one more (trusty-mpm's macOS-only
 # `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
-# local `--list-only` run there reads 125 against this Linux baseline. The gate
+# local `--list-only` run there reads 127 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
-# WHY 124 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# WHY 126 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
 # API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
 # TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
 # compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
@@ -77,9 +77,14 @@ trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the 
 # release cut is the one paying it down: 148 -> 151.
 #
 # The 2026-09-27 ignored-test sweep (baseline: docs/research/2026-09-27-test-audit.md)
-# ran every unselected test once: 14 now run by default, one empty placeholder was
-# deleted, 12 joined the rows above, and every remaining one outside trusty-mpm
-# carries a reason string: 151 -> 124.
+# ran every unselected test once: 13 now run by default and 12 joined the rows
+# above: 151 -> 126. Every remaining one outside trusty-mpm carries a reason
+# string except two whose crates cannot take a src/** edit in that PR under the
+# version-bump gate (#4421): tga's empty `effort_cross_validate` placeholder
+# (tga 8.0.0 is published and its release line lives in the trusty-git-analytics
+# repo) and trusty-review's `stage_c_live_bedrock`, whose reason string and the
+# paused-clock timeout test's un-ignore ride with the trusty-review 0.36.2 bump.
+# Once that lands the gate counts 125; lower the baseline to match then.
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 124
+# UNSELECTED-BASELINE: 126
