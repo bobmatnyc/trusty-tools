@@ -81,6 +81,7 @@ fn outcome_with(removal_failed: Vec<String>, removed: Vec<PathBuf>) -> ReclaimOu
         removed_bytes: 0,
         refused_at_recheck: Vec::new(),
         removal_failed,
+        partially_removed: Vec::new(),
     }
 }
 

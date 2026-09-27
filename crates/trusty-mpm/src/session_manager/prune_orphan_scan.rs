@@ -148,6 +148,9 @@ pub struct OrphanSweepOutcome {
     /// where such a tree lands in `skipped_dirty` instead.
     /// Test: `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
     pub discarded_dirty: Vec<DirtyWorktree>,
+    /// Candidates git failed on after deleting some or all of their content,
+    /// each as `"<path>: <report>"` (#8782). Neither removed nor kept.
+    pub partially_removed: Vec<String>,
 }
 
 /// Per-sweep classification counts for the orphan sweep's one log line (#4323).

@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 
 use super::super::decommission::WorktreeRemoval;
 use super::super::record::SessionRecord;
+use super::super::worktree_removal_integrity::identity_refusal;
 use super::super::worktree_safety::{
     DirtVerdict, DirtyWorktree, DirtyWorktreePolicy, dirt_verdict,
 };
@@ -252,6 +253,8 @@ pub(super) enum CandidateRemoval {
     Removed(Option<DirtyWorktree>),
     /// Kept; `Some` is reported in `skipped_dirty`.
     Kept(Option<DirtyWorktree>),
+    /// Git failed after deleting some or all of it (#8782); the report says what.
+    PartiallyRemoved(String),
 }
 
 /// Re-check one reclaimable candidate at action time, then remove it (#8782).
@@ -261,10 +264,13 @@ pub(super) enum CandidateRemoval {
 /// replaced, for instance by a symlink to another tree. Removing through a
 /// replaced path acts on whatever the path now names.
 /// What: in order, and keeping the candidate on the first refusal: the path
-/// must still resolve to itself (scanned candidates are canonical, so a
-/// difference means the path was replaced since the scan); no record in
-/// `fresh_in_use` may claim it (#1845); and [`allowed_dirt_verdict`] must not
-/// block it (#4118). Then `remove_session_worktree`.
+/// must still exist (#1845 item 8); no record in `fresh_in_use` may claim it
+/// (#1845); and [`allowed_dirt_verdict`] must not block it (#4118). Then
+/// `remove_session_worktree_guarded`, whose guard refuses a path that no
+/// longer resolves to itself (scanned candidates are canonical, so a
+/// difference means the path was replaced since the scan) immediately before
+/// git runs. A git failure that deleted content is
+/// [`CandidateRemoval::PartiallyRemoved`].
 /// Test: `a_scanned_path_replaced_by_a_symlink_is_not_removed`,
 /// `a_tree_dirtied_after_a_clean_preview_is_not_discarded`,
 /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion`.
@@ -274,21 +280,13 @@ pub(super) async fn remove_candidate(
     policy: DirtyWorktreePolicy,
     scope: &WorktreeScope,
 ) -> CandidateRemoval {
-    // #8782: identity at action time. A canonicalize error (the path is gone)
-    // is also a skip — #1845 item 8.
-    match std::fs::canonicalize(candidate) {
-        Ok(c) if c == candidate => {}
-        resolved => {
-            warn!(
-                path = %candidate.display(), resolved = ?resolved,
-                "prune-worktrees: skipping — the path no longer resolves to the \
-                 scanned worktree (#8782)"
-            );
-            return CandidateRemoval::Kept(None);
-        }
+    // #1845 item 8: a path that is gone is a skip, not a removal.
+    if !candidate.exists() {
+        return CandidateRemoval::Kept(None);
     }
-    // The path is its own canonical form, so one lookup covers both the
-    // canonical and the raw active entries (#1845 F3).
+    // The scanned path is canonical, so one lookup covers both the canonical
+    // and the raw active entries (#1845 F3); the guard below refuses a path
+    // that stopped being its own canonical form.
     if fresh_in_use.contains(candidate) {
         info!(
             path = %candidate.display(),
@@ -308,9 +306,11 @@ pub(super) async fn remove_candidate(
     // #7885: name the route in the audit line. #8534: `--discard-dirty`
     // discards gitignored output too.
     let outcome = tokio::task::spawn_blocking(move || {
-        super::super::decommission::remove_session_worktree(
+        // #8782: identity is asked in the guard, immediately before git.
+        super::super::decommission::remove_session_worktree_guarded(
             &owned,
             "prune-worktrees orphan sweep: no live session claims this worktree",
+            &|| identity_refusal(&owned),
             policy,
         )
     })
@@ -319,6 +319,11 @@ pub(super) async fn remove_candidate(
         error!("prune-worktrees: spawn_blocking panicked during removal: {e}");
         WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
     });
+    // #8782: git failed after deleting content — never reported as kept.
+    if let WorktreeRemoval::PartiallyRemoved(report) = outcome {
+        warn!(path = %candidate.display(), "prune-worktrees: {report}");
+        return CandidateRemoval::PartiallyRemoved(report);
+    }
     // #4732: the remover reports WHY it kept a worktree.
     if let Some(reason) = outcome.reason() {
         warn!(path = %candidate.display(), "prune-worktrees: worktree kept — {reason}");

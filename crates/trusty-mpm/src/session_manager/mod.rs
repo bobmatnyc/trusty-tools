@@ -134,6 +134,8 @@ pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
 // #7885: the one audit line every removal route writes before it deletes.
 pub(crate) mod worktree_removal_audit;
+// #8782: the path-identity refusal and the partial-delete report every removal shares.
+pub(crate) mod worktree_removal_integrity;
 // #7196: the machine an SSH config `Host` alias names, so an aliased origin
 // resolves to a real GitHub host before it becomes a `--repo` slug.
 pub(crate) mod ssh_host_alias;

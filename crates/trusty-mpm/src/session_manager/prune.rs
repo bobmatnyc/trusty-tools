@@ -795,6 +795,7 @@ impl SessionManager {
                 agent_owned,
                 registry_roots,
                 discarded_dirty,
+                partially_removed: Vec::new(),
             });
         }
 
@@ -803,6 +804,7 @@ impl SessionManager {
         // candidate — identity, snapshot, dirt (#8782).
         let fresh_in_use = fresh_in_use(self.store.read().await.cached_all());
         let mut removed = Vec::new();
+        let mut partially_removed = Vec::new();
         // #8782: a real run reports what the pre-removal re-check discarded.
         discarded_dirty.clear();
         for candidate in reclaimable {
@@ -812,6 +814,10 @@ impl SessionManager {
                     discarded_dirty.extend(discard);
                 }
                 CandidateRemoval::Kept(dirt) => skipped_dirty.extend(dirt),
+                // #8782: content was deleted, so it is neither removed nor kept.
+                CandidateRemoval::PartiallyRemoved(report) => {
+                    partially_removed.push(format!("{}: {report}", candidate.display()));
+                }
             }
         }
         Ok(OrphanSweepOutcome {
@@ -821,6 +827,7 @@ impl SessionManager {
             agent_owned,
             registry_roots,
             discarded_dirty,
+            partially_removed,
         })
     }
 

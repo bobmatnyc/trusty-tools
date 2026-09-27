@@ -1528,6 +1528,71 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     assert!(out.removal_failed.is_empty());
 }
 
+/// A scanned path replaced by a symlink to another registered worktree, after
+/// every other gate passed, is refused and the target is untouched (#8782).
+///
+/// Why: once git no longer lists the scanned path, `git worktree remove
+/// --force` matches it by its resolved path and removes the worktree the
+/// symlink points at. The swap lands in the guard's claim read, the last read
+/// before git. Fails on `e3503272d`, which deletes the target's unsaved work.
+#[test]
+fn a_merged_pr_path_replaced_by_a_symlink_is_not_removed() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("symlinked-8782");
+    land(&path);
+    let other = fx.add_worktree("other-8782");
+    std::fs::write(other.join("work.rs"), "// unsaved\n").expect("write");
+    let entries = |dir: &Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let before = entries(&other);
+    let calls = RefCell::new(0usize);
+    let in_use_now = || {
+        let mut n = calls.borrow_mut();
+        *n += 1;
+        // Read 1 is the survey's, 2 the re-check's, 3 the guard's.
+        if *n == 3 {
+            std::fs::remove_dir_all(&path).expect("remove the scanned tree");
+            let pruned = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&fx.repo)
+                .args(["worktree", "prune"])
+                .status()
+                .expect("run git worktree prune");
+            assert!(pruned.success(), "git worktree prune: {pruned}");
+            std::os::unix::fs::symlink(&other, &path).expect("symlink");
+        }
+        Some(nobody())
+    };
+    let out = reclaim_scoped(
+        &fx.repos_root,
+        &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
+            launched_from: &[],
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &in_use_now,
+            index_for: &|_: &Path| merged_index("session/symlinked-8782", 38),
+        },
+        ReclaimMode::Remove,
+        &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
+    );
+    assert_eq!(*calls.borrow(), 3, "the swap must land in the guard's read");
+    assert_eq!(entries(&other), before, "the symlink's target was touched");
+    assert!(out.removed.is_empty(), "{out:?}");
+    assert!(
+        out.refused_at_recheck
+            .iter()
+            .any(|r| r.contains("no longer resolves to the scanned worktree")),
+        "{out:?}"
+    );
+}
+
 /// A worktree a live process was launched from is spared, merged and clean
 /// though it is (#7504).
 ///

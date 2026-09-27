@@ -385,6 +385,8 @@ pub(crate) async fn prune_worktrees_core(
                             "removed_bytes": o.removed_bytes,
                             "refused_at_recheck": o.refused_at_recheck,
                             "removal_failed": o.removal_failed,
+                            // #8782: git failed after deleting content.
+                            "partially_removed": o.partially_removed,
                             // #5829: the agent-ownership gate has spared these
                             // since #5661, but reported nothing — so a run that
                             // protected a live agent's tree was indistinguishable
@@ -431,6 +433,8 @@ pub(crate) async fn prune_worktrees_core(
                 "owner_unknown_paths": owner_unknown_paths,
                 "agent_owned_paths": agent_owned_paths,
                 "skipped_dirty": outcome.skipped_dirty,
+                // #8782: git failed after deleting content.
+                "partially_removed": outcome.partially_removed,
                 "merged_prs": merged,
             }))
         }

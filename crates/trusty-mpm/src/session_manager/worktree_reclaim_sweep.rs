@@ -65,6 +65,7 @@ use super::worktree_registry::{
     ScannedWorktree, list_registered_worktrees, scan_registered_worktrees,
     scan_registered_worktrees_in,
 };
+use super::worktree_removal_integrity::identity_refusal;
 use super::worktree_safety::inspect_dirt;
 use super::worktree_scope::WorktreeScope;
 
@@ -641,7 +642,8 @@ fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
 /// `reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey`,
 /// `reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey`,
 /// `reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey`,
-/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`.
+/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`,
+/// `a_merged_pr_path_replaced_by_a_symlink_is_not_removed`.
 ///
 /// # Scope (#8782)
 ///
@@ -707,6 +709,7 @@ pub(crate) fn reclaim_scoped(
         removed_bytes: 0,
         refused_at_recheck: Vec::new(),
         removal_failed: Vec::new(),
+        partially_removed: Vec::new(),
         survey,
     };
     if mode == ReclaimMode::Report {
@@ -818,7 +821,10 @@ pub(crate) fn reclaim_scoped(
             &|| {
                 // #7771: a stale harness lock is released only once every
                 // gate has agreed, so a refused tree keeps its lock.
+                // #8782: identity last before the lock release, so a path
+                // replaced by a symlink is refused and nothing is unlocked.
                 let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref())
+                    .or_else(|| identity_refusal(&path))
                     .or_else(|| super::worktree_owner_gate::release_stale_lock(&path).err());
                 late_refusal.set(refusal.clone());
                 refusal
@@ -832,6 +838,13 @@ pub(crate) fn reclaim_scoped(
                  {reason} (#7652)"
             );
             out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
+        // #8782: git failed after deleting content — reported apart from kept.
+        if let super::decommission::WorktreeRemoval::PartiallyRemoved(reason) = &outcome {
+            tracing::warn!(path = %path.display(), "worktree-reclaim: {reason}");
+            out.partially_removed
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }

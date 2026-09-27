@@ -176,6 +176,10 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     for s in strings("removal_failed") {
         out.push(format!("  removal FAILED (still on disk): {s}"));
     }
+    // #8782: git failed after deleting content; what is left needs review.
+    for s in strings("partially_removed") {
+        out.push(format!("  PARTIALLY REMOVED: {s}"));
+    }
     // #6507: every candidate the survey refused, naming the gate. The three
     // families above disclose only what happened AFTER classification, so a
     // worktree refused during classification by any gate but 4 appeared
@@ -502,6 +506,17 @@ fn print_prune_reply(body: &serde_json::Value, dry_run: bool, merged_prs: bool) 
                 .unwrap_or("<no reason reported>");
             eprintln!("  {path}: {reason}");
         }
+    }
+
+    // #8782: git failed after deleting content — neither removed nor kept.
+    for entry in body
+        .get("partially_removed")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        eprintln!("PARTIALLY REMOVED: {entry}");
     }
 
     // #2919: the merged-PR pass reports separately, because its refusals have a

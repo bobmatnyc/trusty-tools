@@ -155,7 +155,8 @@ impl SweepReport {
             reclaimed: outcome.removed.len(),
             bytes: outcome.removed_bytes,
             refused: outcome.refused_at_recheck.len(),
-            failed: outcome.removal_failed.len(),
+            // #8782: a partial delete is a removal that did not complete.
+            failed: outcome.removal_failed.len() + outcome.partially_removed.len(),
         }
     }
 
@@ -393,7 +394,13 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
                     failed = report.failed,
                     "worktree-reclaim sweep: {} removal(s) did not complete: {}",
                     report.failed,
-                    outcome.removal_failed.join("; ")
+                    outcome
+                        .removal_failed
+                        .iter()
+                        .chain(&outcome.partially_removed)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
                 );
                 return;
             }
