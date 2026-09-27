@@ -398,6 +398,30 @@ pub struct Delegation {
     /// basis (#8257). `None` for every record no operator repaired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<DelegationRepair>,
+    /// Which stop released this builder's lease, while the agent may resume
+    /// (#8548).
+    ///
+    /// Why: a stopped agent can be resumed, and nothing tells the daemon at
+    /// once. Reissuing its slot index would put two builders in one directory.
+    /// What: set with [`DelegationStatus::Cancelled`] on a builder record by a
+    /// user stop or a `TaskStop`; cleared when evidence of a resume re-arms the
+    /// record to `Running`. `None` on every other record.
+    /// Test: `a_resumed_user_stopped_builder_keeps_its_slot_index_8548`,
+    /// `a_resumed_task_stopped_builder_keeps_its_slot_index_8548`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_release: Option<StopRelease>,
+}
+
+/// The stop that released a builder lease which may still resume (#8548).
+///
+/// Test: `a_resume_marker_rearms_the_released_lease_8548`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopRelease {
+    /// The user stopped the agent; its sidecar carried `stoppedByUser: true`.
+    UserStop,
+    /// The PM stopped the agent with `TaskStop`.
+    TaskStop,
 }
 
 /// The audit entry a `tm repair delegation` write leaves on the record (#8257).
@@ -451,6 +475,7 @@ impl Delegation {
             started_at: None,
             ended_at: None,
             repair: None,
+            stop_release: None,
         }
     }
 
@@ -497,6 +522,7 @@ impl Delegation {
             started_at: Some(now),
             ended_at: None,
             repair: None,
+            stop_release: None,
         }
     }
 }

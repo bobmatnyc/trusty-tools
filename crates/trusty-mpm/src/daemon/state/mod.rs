@@ -18,6 +18,9 @@ pub mod builder_slots;
 mod builder_slot_release;
 #[cfg(test)]
 mod builder_slot_release_tests;
+// #8548: a stopped builder's slot index is not reissued while it may resume.
+#[cfg(test)]
+mod builder_slot_quarantine_tests;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;

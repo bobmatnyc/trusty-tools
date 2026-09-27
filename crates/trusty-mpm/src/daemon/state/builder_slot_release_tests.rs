@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
 use crate::core::session::SessionId;
 
+use super::builder_slot_release::{Candidate, read_stop_marker};
 use super::core::DaemonState;
 
 const AGENT_ID: &str = "a403cdbc078b5c474";
@@ -140,6 +141,9 @@ fn a_stop_marker_for_another_dispatch_keeps_the_lease_8548() {
 fn a_traversing_transcript_path_reads_no_sidecar_8548() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = DaemonState::new();
+    // #8548 critic: `other` must exist, or the OS fails the traversal itself
+    // and this test would pass with the `..` guard removed.
+    std::fs::create_dir_all(tmp.path().join("other")).expect("other dir");
     let mut d = running_builder(&state, tmp.path());
     d.transcript_path = Some(
         tmp.path()
@@ -158,4 +162,95 @@ fn a_traversing_transcript_path_reads_no_sidecar_8548() {
 
     assert_eq!(state.builder_slot_holders(None).len(), 1);
     assert_eq!(status_of(&state, &d), DelegationStatus::Running);
+}
+
+/// The sidecar path of the fixture agent under `root`, with its directory made.
+fn sidecar_path(root: &Path) -> PathBuf {
+    let dir = root.join("proj").join("sess").join("subagents");
+    std::fs::create_dir_all(&dir).expect("sidecar dir");
+    dir.join(format!("agent-{AGENT_ID}.meta.json"))
+}
+
+/// A FIFO at the sidecar path must not hang the claim route: the read refuses
+/// it at once. The read runs on its own thread so a regression fails here
+/// rather than hanging the suite.
+#[test]
+fn a_fifo_sidecar_is_refused_without_blocking_8548() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = DaemonState::new();
+    let d = running_builder(&state, tmp.path());
+    let path = sidecar_path(tmp.path());
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probe = path.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_stop_marker(&probe, Some(TOOL_USE_ID)));
+    });
+    let answer = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("reading a FIFO sidecar must not block");
+
+    assert!(
+        answer
+            .as_ref()
+            .is_err_and(|e| e.contains("not a regular file")),
+        "{answer:?}"
+    );
+    state.sweep_delegations();
+    assert_eq!(status_of(&state, &d), DelegationStatus::Running);
+}
+
+/// Every error arm keeps the lease: an oversized sidecar, a JSON value that is
+/// not an object, and a directory at the sidecar path. Then the race arm: a
+/// record that turned terminal between the read and the write is not touched.
+#[test]
+fn each_unreadable_sidecar_keeps_the_lease_8548() {
+    let marker = format!(r#""toolUseId":"{TOOL_USE_ID}","stoppedByUser":true"#);
+    let oversized = format!(r#"{{{marker},"pad":"{}"}}"#, "x".repeat(70 * 1024));
+    let not_object = format!("[{{{marker}}}]");
+    let cases: [(&str, Option<&str>, &str); 3] = [
+        ("over the size cap", Some(&oversized), "sidecar cap"),
+        ("a JSON array", Some(&not_object), "not a JSON object"),
+        ("a directory", None, "not a regular file"),
+    ];
+    for (label, body, fault) in cases {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = DaemonState::new();
+        let d = running_builder(&state, tmp.path());
+        let path = sidecar_path(tmp.path());
+        match body {
+            Some(body) => std::fs::write(&path, body).expect("sidecar"),
+            None => std::fs::create_dir(&path).expect("sidecar dir"),
+        }
+
+        let answer = read_stop_marker(&path, Some(TOOL_USE_ID));
+        assert!(
+            answer.as_ref().is_err_and(|e| e.contains(fault)),
+            "{label}: {answer:?}"
+        );
+        state.sweep_delegations();
+        assert_eq!(status_of(&state, &d), DelegationStatus::Running, "{label}");
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = DaemonState::new();
+    let d = running_builder(&state, tmp.path());
+    let read = Candidate {
+        id: d.id,
+        agent_id: AGENT_ID.to_string(),
+        tool_use_id: Some(TOOL_USE_ID.to_string()),
+        marker: sidecar_path(tmp.path()),
+        released: false,
+    };
+    state.terminate_delegation(d.id, DelegationStatus::Completed);
+    assert!(
+        !state.cancel_if_still_held(&read),
+        "a record that ended after the read is not rewritten"
+    );
+    assert_eq!(status_of(&state, &d), DelegationStatus::Completed);
 }
