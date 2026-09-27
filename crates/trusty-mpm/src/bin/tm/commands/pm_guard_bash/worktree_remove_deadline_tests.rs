@@ -163,20 +163,22 @@ async fn print_deny_then_audit_measures_from_the_started_it_is_given() {
     let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", silent.local_addr().expect("addr"));
     let long_ago = Instant::now() - Duration::from_secs(10);
+    let store = tempfile::tempdir().expect("tempdir");
+    let payload = serde_json::json!({
+        "session_id": "11111111-1111-1111-1111-111111111111",
+        "tool_name": "Bash",
+    });
+    let mut refused = crate::commands::pm_guard_deny_log::DenyContext::from_payload(&url, &payload);
+    refused.store = Some(store.path().join("denials.jsonl"));
     let t = Instant::now();
-    super::print_deny_then_audit(
-        &url,
-        "11111111-1111-1111-1111-111111111111",
-        "Bash",
-        "test deny",
-        long_ago,
-    )
-    .await;
+    super::print_deny_then_audit(&refused, "worktree-remove-recheck", "test deny", long_ago).await;
     assert!(
         t.elapsed() < Duration::from_millis(500),
         "no budget left must skip the audit: {:?}",
         t.elapsed()
     );
+    // #8722: the skipped POST never skips the local record.
+    assert!(store.path().join("denials.jsonl").is_file());
     drop(silent);
 }
 

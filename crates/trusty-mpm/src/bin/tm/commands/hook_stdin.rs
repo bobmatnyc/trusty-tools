@@ -27,6 +27,8 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::commands::pm_guard_deny_log::DenyContext;
+
 /// How long an ADVISORY hook waits for Claude Code to close stdin.
 ///
 /// Why: a hook must never block the user's prompt if a caller leaves stdin
@@ -52,7 +54,7 @@ pub(crate) const HOOK_STDIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// [`trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT`] (500 ms) BEFORE
 /// dispatching, and the registered guard command carries no `--url`
 /// (`build_tree::PM_GUARD_SUFFIX`), so that probe is a fixed prefix on every
-/// invocation. 500 ms + 5 s + [`crate::commands::pm_guard::AUDIT_POST_TIMEOUT`]
+/// invocation. 500 ms + 5 s + [`crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT`]
 /// (2 s) = 7.5 s of the 10 s `REGISTERED_HOOK_TIMEOUT` Claude Code is told to
 /// allow, leaving 2.5 s for exec and classification.
 /// Test: `guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout`,
@@ -244,9 +246,12 @@ pub(crate) async fn read_stdin_payload_or_deny(url: &str) -> serde_json::Value {
     match read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await {
         Ok(payload) => payload,
         // Neither session nor tool name could be read, so the audit carries
-        // neither.
+        // neither: the context is read from an empty payload.
         Err(err) => {
-            audit_then_deny_and_exit(url, "", "", unreadable_payload_deny_reason(&err)).await
+            let empty = serde_json::Value::Null;
+            let refused = DenyContext::from_payload(url, &empty);
+            let reason = unreadable_payload_deny_reason(&err);
+            audit_then_deny_and_exit(&refused, "unreadable-payload", reason).await
         }
     }
 }
@@ -287,17 +292,9 @@ pub(crate) async fn guarded_tool_name_or_deny<'a>(
     let Some(detail) = unclassifiable_payload_detail(payload) else {
         return tool_name;
     };
-    let session_id = payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    audit_then_deny_and_exit(
-        url,
-        session_id,
-        tool_name,
-        unclassifiable_payload_deny_reason(detail),
-    )
-    .await
+    let refused = DenyContext::from_payload(url, payload);
+    let reason = unclassifiable_payload_deny_reason(detail);
+    audit_then_deny_and_exit(&refused, "unclassifiable-payload", reason).await
 }
 
 /// Audit `reason`, print its deny, and end the process without returning.
@@ -308,13 +305,8 @@ pub(crate) async fn guarded_tool_name_or_deny<'a>(
 /// What: best-effort audit POST, then the `permissionDecision: "deny"` object
 /// on stdout, then exit 0.
 /// Test: covered through its two callers' tests.
-async fn audit_then_deny_and_exit(
-    url: &str,
-    session_id: &str,
-    tool_name: &str,
-    reason: String,
-) -> ! {
-    crate::commands::pm_guard::audit_denied_tool(url, session_id, tool_name, &reason).await;
+async fn audit_then_deny_and_exit(refused: &DenyContext<'_>, check: &str, reason: String) -> ! {
+    crate::commands::pm_guard::audit_denied_tool(refused, check, &reason).await;
     println!(
         "{}",
         crate::commands::pm_guard_response::build_pm_guard_deny_response(&reason)
