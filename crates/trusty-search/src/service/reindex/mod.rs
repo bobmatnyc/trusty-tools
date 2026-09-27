@@ -123,7 +123,7 @@ pub use defer_embed_queue::{deferred_embed_completion_epoch, deferred_embed_queu
 // #8664: the delete path closes the handles queued embed jobs hold.
 pub(crate) use defer_embed_queue::job_handles_for;
 #[cfg(test)]
-pub(crate) use defer_embed_queue::{push_job, wait_for_turn};
+pub(crate) use defer_embed_queue::{push_job, wait_for_turn, LiveJob};
 
 /// Re-export `background_reindex_semaphore` (test-only — see the
 /// `#[cfg(test)]` internal re-exports below) so

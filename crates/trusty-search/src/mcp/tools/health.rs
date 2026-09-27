@@ -66,6 +66,13 @@ pub const HEALTH_INDEX_UNKNOWN: &str = "index_unknown";
 /// exactly that reindex, so the migration fault has to be checked first.
 pub const HEALTH_INDEX_MIGRATION_FAILED: &str = "index_migration_failed";
 
+/// The index is fine, but the daemon's embedder is not answering (#8348).
+///
+/// Why: searches still return lexical rows, flagged `meta.vector_unavailable`,
+/// so every other check passes — and `ok` hid a daemon serving no semantic
+/// results at all.
+pub const HEALTH_EMBEDDER_UNAVAILABLE: &str = "embedder_unavailable";
+
 /// Longest response-body excerpt echoed back in a diagnostic.
 const BODY_EXCERPT_CHARS: usize = 400;
 
@@ -282,6 +289,15 @@ pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> V
                      `trusty-search doctor --fix`, which reindexes every \
                      zero-chunk index.",
                 ),
+                // #8348: checked only once the index itself is healthy.
+                Some(chunks) if embedder_unavailable(&health) => report(
+                    HEALTH_EMBEDDER_UNAVAILABLE,
+                    daemon,
+                    index,
+                    format!("{answered} Index '{index_id}' ({source}) holds {chunks} chunks, but the embedder is not answering, so searches return lexical results only (`meta.vector_unavailable: true`)."),
+                    "Check that `trusty-embedderd` is installed and starts (`trusty-search doctor`), \
+                     then read `embedder_error` on `/health` and the daemon log.",
+                ),
                 Some(chunks) => report(
                     HEALTH_OK,
                     daemon,
@@ -309,6 +325,14 @@ pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> V
             }
         }
     }
+}
+
+/// Whether `/health` reports the embedder as failed or not answering (#8348).
+fn embedder_unavailable(health: &Value) -> bool {
+    matches!(
+        health.get("embedder").and_then(Value::as_str),
+        Some("error" | "stalled")
+    )
 }
 
 /// The failed migration stages the daemon reported, comma-joined (#7979).

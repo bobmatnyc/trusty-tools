@@ -423,28 +423,25 @@ pub(super) async fn health_handler(
     // health handler without risking the 30 s stall that blocked #1006.
     let embedder_last_ok_secs_ago = state.embedder_stall_tracker.last_ok_secs_ago();
     let embedder_recent_timeout_count = state.embedder_stall_tracker.recent_timeout_count();
-    let embedder_status = if state.is_embedder_ready() {
-        // The sidecar is alive and the slot is populated — but is it actually
-        // responding? Issue #1003: if recent timeouts > 0 and the last ok was
-        // more than 30 s ago, the sidecar is stalled (alive but unresponsive).
-        // Threshold: > 0 timeouts with no success yet (last_ok_secs_ago = None)
-        // OR timeout count >= 1 and no recovery. We use >= 1 to be sensitive —
-        // a single 30 s timeout on an interactive query is already disruptive.
-        let stalled = embedder_recent_timeout_count > 0;
-        if stalled {
-            "stalled"
-        } else {
-            "ready"
-        }
-    } else if state.embedder.is_some()
+    // #8348: a slot populated but not yet flagged ready is wired too, and a
+    // lazy sidecar that fails every spawn lives in exactly that state — it
+    // must read `stalled` there as well, not `ready`.
+    let embedder_wired = state.is_embedder_ready()
+        || state.embedder.is_some()
         || state
             .embedder_slot
             .try_read()
             .map(|g| g.is_some())
-            .unwrap_or(false)
-    {
-        // Slot populated but readiness flag not yet flipped — treat as ready.
-        "ready"
+            .unwrap_or(false);
+    let embedder_status = if embedder_wired {
+        // Issue #1003: wired but not answering — recent embed calls failed or
+        // timed out with no success since. `>= 1` is deliberate: a single
+        // failed interactive embed is already disruptive.
+        if embedder_recent_timeout_count > 0 {
+            "stalled"
+        } else {
+            "ready"
+        }
     } else if embedder_error.is_some() {
         // Init task failed or timed out (issue #121). Callers must not retry
         // forever — report a terminal error state so operators can intervene.
