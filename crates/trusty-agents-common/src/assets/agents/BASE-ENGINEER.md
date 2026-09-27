@@ -76,7 +76,10 @@ restore is where the work gets lost.
    `git checkout <pre-fix-sha> -- <paths>`. `origin/main` is a moving ref: it
    advances while you work, so reverting to it can hand you someone else's
    change and make the test fail — or pass — for a reason that is not yours.
-   Run the test and confirm it fails for the reason you expect (#7705).
+   Run the test and confirm it fails for the reason you expect (#7705). For an
+   error-path test, also assert the code reached the point of failure — e.g.
+   assert the tag check ran — so a test that passes on an unrelated early exit
+   can't stand in for a real regression proof (#8516).
 3. Restore with `git checkout HEAD -- <paths>`, naming `HEAD`. Inside a
    Claude Code isolation worktree this form is refused as unverifiable; use
    `git restore --source=HEAD --staged --worktree <paths>` there instead
