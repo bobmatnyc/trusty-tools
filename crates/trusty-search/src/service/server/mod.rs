@@ -14,6 +14,7 @@
 mod admin;
 mod components;
 mod contrib_graph;
+mod create_layout;
 // #8167/#8232: a delete closes the index's redb and HNSW files first.
 mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
@@ -106,6 +107,9 @@ mod tests_6380;
 // #8438: `delete_data` removes the directory the registry names, per source.
 #[cfg(test)]
 mod tests_8438;
+// #8499: indexing never modifies a tracked file; the index survives git clean.
+#[cfg(test)]
+mod tests_8499;
 // #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
 #[cfg(test)]
 mod tests_8148;

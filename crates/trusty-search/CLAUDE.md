@@ -243,6 +243,19 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 409** (#8499): the index store would land inside the repository
+  (for example `TRUSTY_DATA_DIR` under `<root_path>/.trusty-search`). Nothing
+  is registered and no repository file is written.
+
+**Storage placement (#8499).** A new index keeps its store in the data dir
+(`<data_dir>/indexes/<id>/`), outside the work tree, so `git reset --hard` plus
+`git clean -fdx` cannot delete it. Registration never reads or writes the
+repository's `.gitignore`. A root whose `.trusty-search/` already holds an
+index file (a pre-#8499 index, or an off-box artifact below) is adopted in
+place; that directory then carries its own `.gitignore` (`*`), which hides it
+from `git status` and `git clean -fd` but not from `git clean -fdx`. To move
+such an index out of the work tree, `DELETE /indexes/:id?delete_data=true`
+and register it again.
 
 ###### Off-box per-index delivery (issue #8135)
 

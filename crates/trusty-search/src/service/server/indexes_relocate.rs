@@ -281,51 +281,65 @@ pub(crate) async fn relocate_index_report(
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
     // the new root are opened (or created if missing — the directory existed
     // per validate_root_path above).
-    let mut new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
-        &existing_entry,
-        &embedder,
-    )
-    .await
-    {
-        Ok(idx) => idx,
-        Err(e) => {
+    //
+    // #8499: a data-dir store (every new index's layout) does not move with
+    // the root, and the live handle holds its redb open, so a rebuild fails on
+    // the second open. Rebind the live indexer to the new root instead.
+    let indexer = if !on_disk_colocated {
+        existing
+            .indexer
+            .write()
+            .await
+            .set_root_path(new_root.clone());
+        Arc::clone(&existing.indexer)
+    } else {
+        let mut new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
+            &existing_entry,
+            &embedder,
+        )
+        .await
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::error!(
+                    "relocate[{id}]: failed to rebuild indexer at {}: {e}",
+                    new_root.display()
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": format!("indexer rebuild failed: {e}") }),
+                ));
+            }
+        };
+        // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
+        // index's query + catch-up embeds route through Interactive/Background
+        // lanes instead of the raw embedder. Registers the daemon's own slot so
+        // a boot-race window self-heals (PR #3784 review finding 1).
+        new_indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
+
+        // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
+        // for a broken redb open (a raced collision, or an unrelated open
+        // error) — it must not be silently rebound to as a healthy
+        // `200 {"relocated": true}` handle.
+        if new_indexer.corpus_open_failed {
             tracing::error!(
-                "relocate[{id}]: failed to rebuild indexer at {}: {e}",
+                "relocate[{id}]: corpus open failed at {} — refusing to relocate to a broken \
+             index handle (issue #2336)",
                 new_root.display()
             );
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({ "error": format!("indexer rebuild failed: {e}") }),
+                serde_json::json!({
+                    "error": format!(
+                        "corpus open failed for root_path {:?}; refusing to relocate to a broken \
+                         index handle",
+                        new_root.display()
+                    )
+                }),
             ));
         }
+        Arc::new(tokio::sync::RwLock::new(new_indexer))
     };
-    // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
-    // index's query + catch-up embeds route through Interactive/Background
-    // lanes instead of the raw embedder. Registers the daemon's own slot so
-    // a boot-race window self-heals (PR #3784 review finding 1).
-    new_indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
-
-    // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
-    // for a broken redb open (a raced collision, or an unrelated open
-    // error) — it must not be silently rebound to as a healthy
-    // `200 {"relocated": true}` handle.
-    if new_indexer.corpus_open_failed {
-        tracing::error!(
-            "relocate[{id}]: corpus open failed at {} — refusing to relocate to a broken \
-             index handle (issue #2336)",
-            new_root.display()
-        );
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "corpus open failed for root_path {:?}; refusing to relocate to a broken \
-                     index handle",
-                    new_root.display()
-                )
-            }),
-        ));
-    }
 
     // Persist the updated entry to indexes.toml BEFORE replacing the handle,
     // so a daemon restart sees the new root even if the in-memory swap below
@@ -344,7 +358,7 @@ pub(crate) async fn relocate_index_report(
     // the existing handle (stage states, context embedding, …).
     let new_handle = IndexHandle {
         id: index_id.clone(),
-        indexer: Arc::new(tokio::sync::RwLock::new(new_indexer)),
+        indexer,
         root_path: new_root.clone(),
         include_paths: existing.include_paths.clone(),
         exclude_globs: existing.exclude_globs.clone(),

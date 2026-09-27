@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::core::registry::IndexHandle;
-use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+use crate::service::colocated_storage::{self, COLOCATED_DIR_NAME};
 use crate::service::persistence::{self, PersistedIndex};
 
 /// Live HNSW snapshot file name.
@@ -108,6 +108,30 @@ impl StorageLayout {
         }
     }
 
+    /// The layout a NEW registration of `index_id` at `root_path` gets.
+    ///
+    /// Why (#8499): an index inside the work tree does not survive
+    /// `git clean -fdx`, which removes ignored files too; on a shared mount
+    /// that deletion lands under a live mmap and SIGBUSes the daemon. No
+    /// ignore rule can prevent it, so a fresh index lives outside the work
+    /// tree. A repo that already holds a colocated artifact keeps it (#8135
+    /// off-box delivery); that directory hides itself from `git status` and
+    /// `git clean -fd` via its own `.gitignore`.
+    /// What: `Colocated` when `<root>/.trusty-search/` holds an own index file;
+    /// otherwise `DataDir`, after resolving (and creating) the data-dir store.
+    /// Fails closed: a store the #8438 guard refuses — one that would land in
+    /// the repository — is returned as the refusal, never redirected.
+    /// Test: `index_survives_git_reset_hard_and_clean_fdx`,
+    /// `create_refuses_when_the_store_would_land_in_the_work_tree`,
+    /// `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
+    pub(crate) fn for_new_registration(index_id: &str, root_path: &Path) -> Result<Self> {
+        if holds_colocated_artifact(root_path) {
+            return Ok(Self::Colocated);
+        }
+        Self::DataDir.storage_dir(index_id, root_path)?;
+        Ok(Self::DataDir)
+    }
+
     /// Resolve (and create) this index's storage directory — the one resolver.
     ///
     /// Why: see the module docs; every path helper below and every write site
@@ -188,9 +212,11 @@ fn is_own_index_file(name: &str) -> bool {
 /// `$HOME/.trusty-search/` with the daemon's own runtime files; deleting the
 /// index must not delete those.
 /// What: deletes every regular file in `dir` whose name starts with one of
-/// [`OWN_FILE_STEMS`], leaves every other entry, then removes `dir` only when
+/// [`OWN_FILE_STEMS`] and the #8499 self-ignore file when it still holds
+/// exactly `*`, leaves every other entry, then removes `dir` only when
 /// nothing is left. A missing `dir` is a no-op.
-/// Test: `delete_data_keeps_foreign_files_in_a_shared_trusty_search_dir`.
+/// Test: `delete_data_keeps_foreign_files_in_a_shared_trusty_search_dir`,
+/// `delete_data_on_a_live_colocated_index_removes_its_in_repo_dir`.
 fn remove_own_index_files(dir: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -204,6 +230,13 @@ fn remove_own_index_files(dir: &Path) -> Result<()> {
             let path = entry.path();
             std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
         }
+    }
+    // #8499: the self-ignore file is ours only while it holds exactly what
+    // `ensure_self_ignored` wrote; any other content is left alone.
+    let ignore = dir.join(colocated_storage::SELF_IGNORE_FILE);
+    if std::fs::read(&ignore).is_ok_and(|b| b == colocated_storage::SELF_IGNORE_CONTENT.as_bytes())
+    {
+        std::fs::remove_file(&ignore).with_context(|| format!("remove {}", ignore.display()))?;
     }
     match std::fs::remove_dir(dir) {
         Ok(()) => Ok(()),
@@ -234,13 +267,39 @@ fn colocated_dir_under_existing_root(index_id: &str, root: &Path) -> Result<Path
     }
     let dir = root.join(COLOCATED_DIR_NAME);
     match std::fs::create_dir(&dir) {
-        Ok(()) => Ok(dir),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(dir),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(missing()),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
         Err(e) => {
-            Err(e).with_context(|| format!("create colocated storage dir at {}", dir.display()))
+            return Err(e)
+                .with_context(|| format!("create colocated storage dir at {}", dir.display()));
         }
     }
+    // #8499: hide the directory with a `.gitignore` of its own — never the
+    // repository's. Best-effort: the index is untracked either way.
+    if let Err(e) = colocated_storage::ensure_self_ignored(&dir) {
+        tracing::warn!("could not hide {} from git: {e:#}", dir.display());
+    }
+    Ok(dir)
+}
+
+/// True when `<root>/.trusty-search/` already holds one of trusty-search's own
+/// index files — a colocated corpus a registration adopts rather than orphans.
+///
+/// Why (#8499, #8135): off-box delivery ships a colocated artifact that
+/// `POST /indexes` must serve without a re-walk; a bare directory or the
+/// daemon's `$HOME/.trusty-search/` runtime files are not a corpus.
+/// What: scans the directory's entries for an [`OWN_FILE_STEMS`] name. A
+/// missing or unreadable directory is `false`.
+/// Test: `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
+fn holds_colocated_artifact(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root.join(COLOCATED_DIR_NAME)) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_str().is_some_and(is_own_index_file)
+            && entry.file_type().is_ok_and(|t| t.is_file())
+    })
 }
 
 /// The write guard: refuse a `DataDir` target that lands under the root.
