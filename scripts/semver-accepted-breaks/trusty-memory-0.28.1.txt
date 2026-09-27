@@ -1,0 +1,5 @@
+crate   trusty-memory
+version 0.28.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_variant_added variant PalaceAction:Deletions
+accept  function_parameter_count_changed trusty_memory::commands::legacy_kg::apply_report now takes 5 parameters instead of 4

@@ -17,9 +17,72 @@ use crate::commands::session::{
     instructions::compose_session_instructions,
     instructions::compose_session_instructions_with_roster,
 };
-// #6542: teardown for the tmux sessions the guided-fallback tests cause
-// `fallback_protected` to launch.
-use crate::test_support::tmux_session::{FixtureTmuxSessions, ScratchTmuxSession};
+// #6542: the private tmux server every guided-fallback run launches onto, and
+// the default-server watch that proves nothing reached the operator's.
+use crate::test_support::tmux_session::{
+    FixtureTmuxSessions, PrivateTmuxServer, ScratchTmuxSession,
+};
+
+/// What one guided-fallback run returned, and what it left on its private
+/// tmux server before that server was killed (#6542).
+pub(crate) struct FallbackRun {
+    pub(crate) result: anyhow::Result<()>,
+    /// Sessions alive on the private server when the fallback returned.
+    pub(crate) private_sessions: Vec<String>,
+    /// The `-L` socket the run used; its server is gone once this is returned.
+    pub(crate) socket: String,
+}
+
+/// The one way a `tm`-bin test drives the guided fallback (#6542).
+///
+/// Why: the fallback launches a REAL tmux session, named from a uuid the test
+/// never sees, through a dozen call sites that each resolve the tmux binary
+/// themselves. A reap-afterwards guard on the shared default server leaked that
+/// session onto the operator's live server whenever the reap missed.
+/// What: runs `fallback_protected_gated` inside
+/// [`trusty_mpm::core::tmux::with_tmux_binary`] with a `tmux -L <private>`
+/// shim, so every tmux call the fallback makes lands on a server this call
+/// owns. It records that server's sessions, then kills the whole server on
+/// every exit path, panic and cancellation included.
+/// `every_guided_fallback_call_runs_on_a_private_tmux_server` fails any test
+/// that calls the fallback without this wrapper.
+/// Test: `guided_fallback_leaves_no_tmux_session_behind`.
+pub(crate) async fn run_fallback(
+    client: &reqwest::Client,
+    url: &str,
+    cwd: &std::path::Path,
+    gate: &trusty_mpm::core::disk_usage_guard::DiskGate,
+    home: Option<&std::path::Path>,
+) -> FallbackRun {
+    let server = PrivateTmuxServer::new(&fallback_tmux_bin(), "fallback");
+    let result = trusty_mpm::core::tmux::with_tmux_binary(
+        server.shim_bin().into(),
+        crate::commands::guided::fallback_protected_gated(client, url, cwd, gate, home),
+    )
+    .await;
+    let private_sessions = server
+        .query(&["list-sessions", "-F", "#{session_name}"])
+        .map(|out| out.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    FallbackRun {
+        result,
+        private_sessions,
+        socket: server.name().to_string(),
+    }
+}
+
+/// [`run_fallback`] with `fallback_protected`'s own defaults: the real disk
+/// gate and the process home.
+pub(crate) async fn run_fallback_default(
+    client: &reqwest::Client,
+    url: &str,
+    cwd: &std::path::Path,
+) -> anyhow::Result<()> {
+    let gate = trusty_mpm::core::disk_usage_guard::DiskGate::MeasureTarget;
+    run_fallback(client, url, cwd, &gate, dirs::home_dir().as_deref())
+        .await
+        .result
+}
 
 /// A disk gate pinned to an empty mount, for the fallback tests that provision
 /// a worktree (#7603).
@@ -1087,8 +1150,7 @@ async fn guided_fallback_never_pollutes_github_git_checkout() {
     // Call the protected fallback with an unreachable daemon URL and our fake
     // git project as the working directory.
     let client = reqwest::Client::new();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", project).await;
 
     // Restore the env var regardless of the outcome.
     unsafe {
@@ -1170,8 +1232,7 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
 
     // Call the protected fallback with an unreachable daemon URL.
     let client = reqwest::Client::new();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", project).await;
 
     // ── Acceptance criterion (#1724 residual gap) ────────────────────────────
     // None of the framework files must appear in the live git checkout.
@@ -1271,9 +1332,7 @@ async fn guided_fallback_untracked_ancestor_does_not_redirect() {
     std::fs::create_dir_all(&untracked).unwrap();
 
     let client = reqwest::Client::new();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", &untracked)
-            .await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", &untracked).await;
 
     // Must exit cleanly (non-git fallback), NOT Err (non-github refusal) and NOT
     // a redirect (which would network-fail cloning the github remote).
@@ -1317,8 +1376,7 @@ async fn guided_fallback_non_git_dir_reaches_launch_path() {
     // Call the protected fallback with any daemon URL — the non-git path now
     // exits cleanly without contacting the daemon (#1839 Fix 2).
     let client = reqwest::Client::new();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", project).await;
 
     // The result must be Ok(()) — no git repo means we print a help hint and exit 0.
     assert!(
@@ -1387,7 +1445,7 @@ async fn guided_fallback_non_git_dir_no_managed_env_is_fast() {
     // hang outright. Promptness itself is the connection count, never a clock.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::commands::guided::fallback_protected(&client, &url, project),
+        run_fallback_default(&client, &url, project),
     )
     .await;
 
@@ -1501,7 +1559,7 @@ async fn guided_fallback_non_git_dir_with_managed_env_settles_quickly_returns_pr
     // the poll count below, not on wall clock (#6230).
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::commands::guided::fallback_protected(&client, &url, project),
+        run_fallback_default(&client, &url, project),
     )
     .await;
 
@@ -1558,7 +1616,7 @@ async fn guided_fallback_non_git_dir_with_managed_env_unreachable_daemon_does_no
     let client = reqwest::Client::new();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project),
+        run_fallback_default(&client, "http://127.0.0.1:1", project),
     )
     .await;
 
@@ -1668,8 +1726,7 @@ async fn guided_fallback_blocks_github_git_from_subdirectory() {
     }
 
     let client = reqwest::Client::new();
-    let result =
-        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", &subdir).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", &subdir).await;
 
     // Restore the env var regardless of the outcome.
     unsafe {
@@ -1794,18 +1851,14 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
 
     let _repos_root_env = ReposRootEnv::set(repos_root.path());
 
-    // #6542: the fallback launches a REAL tmux session in the worktree it
-    // provisions, and this test never learns its name — the guard claims it by
-    // where its pane sits and kills it on every exit path.
-    let _tmux = fallback_tmux_guard(repos_root.path());
-
     let client = reqwest::Client::new();
     // #8545: the launch writes its user-home state under a temp home, never
     // the operator's.
     let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
-    // never anything about the host's volume.
-    let _result = crate::commands::guided::fallback_protected_gated(
+    // never anything about the host's volume. #6542: the session it launches
+    // lands on `run_fallback`'s private tmux server.
+    let _run = run_fallback(
         &client,
         "http://127.0.0.1:1",
         live_dir.path(),
@@ -1889,17 +1942,14 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
 
     let _repos_root_env = ReposRootEnv::set(&repos_root_path);
 
-    // #6542: same unnamed tmux session as the test above — see
-    // `fallback_tmux_guard`.
-    let _tmux = fallback_tmux_guard(&repos_root_path);
-
     let client = reqwest::Client::new();
     // #8545: the launch writes its user-home state under a temp home, never
     // the operator's.
     let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
-    // never anything about the host's volume.
-    let _result = crate::commands::guided::fallback_protected_gated(
+    // never anything about the host's volume. #6542: the session it launches
+    // lands on `run_fallback`'s private tmux server.
+    let _run = run_fallback(
         &client,
         "http://127.0.0.1:1",
         live_dir.path(),
@@ -1954,45 +2004,28 @@ async fn guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone
     );
 }
 
-/// The tmux binary the fallback's session-creation path resolves to.
-///
-/// The guard has to drive the same binary `create_managed_session` did, or it
-/// asks a different tmux server about a session it cannot see.
+/// The real tmux binary, resolved outside any `with_tmux_binary` scope.
 fn fallback_tmux_bin() -> String {
     trusty_mpm::core::tmux::resolve_tmux_binary_or_bare()
 }
 
-/// Kill-on-drop ownership of whatever tmux session the guided fallback launches
-/// under `repos_root` (#6542).
+/// The guided fallback launches onto its private tmux server, never the
+/// default one, and that server dies with the run (#6542).
 ///
-/// Why: `fallback_protected` provisions a worktree and launches a session named
-/// `tm-<session-uuid truncated>` — a name the test never sees, so
-/// `ScratchTmuxSession` (which owns a name it passed to `new-session`) does not
-/// fit. Before this guard, the two tests below each left one session behind on
-/// every run; 456 accumulated over five days and exhausted the host's
-/// pseudo-terminal pool (#6523).
-/// What: a [`FixtureTmuxSessions`] rooted at the repos-root temp dir, so it
-/// claims exactly the sessions this test's fallback created and nothing a
-/// concurrent suite owns. Construct it BEFORE the `fallback_protected` call —
-/// its snapshot is what separates "new" from "someone else's".
-/// Test: `guided_fallback_leaves_no_tmux_session_behind`.
-fn fallback_tmux_guard(repos_root: &std::path::Path) -> FixtureTmuxSessions {
-    FixtureTmuxSessions::watch(&fallback_tmux_bin(), repos_root)
-}
-
-/// The guided fallback's tmux session does not outlive the test (#6542).
-///
-/// Why: the two tests above assert on the FILESYSTEM — which directory got
-/// `.claude/`, which stayed clean — and both passed while leaking a live tmux
-/// session apiece. Nothing asserted on the session, so nothing noticed.
-/// What: drives the same fixture as
-/// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
-/// then asserts on the SESSION: the fallback must launch one under the fixture
-/// root (otherwise the teardown assertion proves nothing), and dropping the
-/// guard must leave none alive.
-/// Test: this is the test. RED before this commit: a bare run of the two tests
-/// above left `tm-0c31ecd7-bb7e-4389-b` and `tm-b0561168-a6ca-44d9-b` behind,
-/// their panes rooted in the deleted fixture worktrees.
+/// Why: #6579 reaped the fallback's session from the SHARED default server by
+/// matching its pane path under the fixture root. A reap that misses leaves a
+/// live `tm-<uuid>` session on the operator's server, and one did on
+/// 2026-09-27 (`tm-f6f37ec5-c119-4fd5-9`). Nothing asserted where the
+/// session was created, only that a reap ran.
+/// What: watches the default server for sessions whose pane sits under the
+/// fixture root, runs the fallback through [`run_fallback`], then asserts the
+/// launch reached tmux on the private server, created nothing under the root on
+/// the default server, and left no private session alive. `NestedTmuxPaneEnv`
+/// keeps the launched session alive past `launch()` so the first assertion has
+/// something to see; the default-server watch still reaps on drop if the second
+/// assertion fails.
+/// Test: this is the test. RED at 62b6f29e1's launch path (no
+/// `with_tmux_binary` scope): the session appears on the default server.
 #[tokio::test]
 #[serial_test::serial]
 async fn guided_fallback_leaves_no_tmux_session_behind() {
@@ -2019,7 +2052,9 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     fallback_git_remote(live_dir.path(), origin);
 
     let _repos_root_env = ReposRootEnv::set(&repos_root_path);
-    let guard = fallback_tmux_guard(&repos_root_path);
+    // Only sessions under this test's own root count, so the operator's other
+    // sessions coming and going cannot flake it.
+    let default_server = FixtureTmuxSessions::watch(&tmux, &repos_root_path);
 
     let client = reqwest::Client::new();
     // #8545: the launch writes its user-home state under a temp home, never
@@ -2027,7 +2062,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     let fw_home = crate::test_support::hermetic_temp_dir();
     // #7603: pin the measurement — this test asserts where the fallback deploys,
     // never anything about the host's volume.
-    let _result = crate::commands::guided::fallback_protected_gated(
+    let run = run_fallback(
         &client,
         "http://127.0.0.1:1",
         live_dir.path(),
@@ -2036,24 +2071,79 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     )
     .await;
 
-    let spawned = guard.spawned();
+    let leaked = default_server.spawned();
     assert!(
-        !spawned.is_empty(),
-        "fixture precondition: the fallback must have launched a tmux session \
-         under {}, or the teardown assertion below proves nothing. \
-         `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \
-         nested branch, fails closed, and leaves the session for this guard — \
-         an empty set means that branch was not taken",
+        leaked.is_empty(),
+        "the fallback created {leaked:?} on the DEFAULT tmux server under {} — \
+         this is #6542; every launch must land on run_fallback's private server",
         repos_root_path.display()
     );
-    drop(guard);
-    for name in &spawned {
+    assert!(
+        !run.private_sessions.is_empty(),
+        "fixture precondition: the fallback must have launched a tmux session on \
+         the private server, or the assertions around it prove nothing. \
+         `NestedTmuxPaneEnv::pin` sets $TMUX_PANE so `tmux_attach` takes its \
+         nested branch, fails closed, and leaves the session alive; an empty set \
+         means that branch was not taken. result: {:?}",
+        run.result
+    );
+    for name in &run.private_sessions {
         assert!(
-            !ScratchTmuxSession::exists(&tmux, name),
-            "session '{name}' outlived the test — this is #6542, the tm-<uuid> \
-             pty leak tracked in #6523"
+            !ScratchTmuxSession::exists_on_socket(&tmux, Some(&run.socket), name),
+            "session '{name}' outlived its private server — the tm-<uuid> pty \
+             leak tracked in #6523"
         );
     }
+}
+
+/// No `tm`-bin test calls the guided fallback except through [`run_fallback`]
+/// (#6542).
+///
+/// Why: #6579 fixed the leak per test, so the next test that called the
+/// fallback directly could leak again by forgetting a guard. Binding the call
+/// sites makes forgetting a test failure.
+/// What: scans every `.rs` file under `src/bin/tm/` except `commands/guided.rs`
+/// (the definitions and the production caller) for a call to either fallback
+/// entry point outside a `//` comment. The only one allowed is the single call
+/// inside `run_fallback` in this file.
+/// Test: this is the test. RED at 62b6f29e1: 11 direct calls in this file and
+/// 2 in `tests_behavior_c_tests.rs`.
+#[test]
+fn every_guided_fallback_call_runs_on_a_private_tmux_server() {
+    // Spelled in pieces so this test's own source does not match itself.
+    let needles = [
+        concat!("fallback_protected", "("),
+        concat!("fallback_protected_gated", "("),
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/tm");
+    let mut pending = vec![root.clone()];
+    let mut calls = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src/bin/tm is listable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(&root).expect("under root").to_path_buf();
+            if path.extension().is_none_or(|e| e != "rs") || rel.ends_with("commands/guided.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source is readable");
+            for (i, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if !code.starts_with("//") && needles.iter().any(|n| code.contains(n)) {
+                    calls.push(format!("{}:{}: {}", rel.display(), i + 1, code));
+                }
+            }
+        }
+    }
+    assert!(
+        calls.len() == 1 && calls[0].starts_with("tests_behavior_b_tests.rs:"),
+        "expected exactly one guided-fallback call, inside `run_fallback`; found \
+         {calls:#?}. Drive the fallback through `run_fallback` or \
+         `run_fallback_default` so its tmux session lands on a private server (#6542)"
+    );
 }
 
 /// A git repository with one empty commit at `path`, created or asserted.

@@ -1,0 +1,3 @@
+Fixed
+- Two `trusty-search` daemons started together on one data dir can no longer both hold the daemon lock. A starter that found the lock held, with the file still naming a dead predecessor (the winner's window between its flock and its pid write), unlinked the live lock file and locked a new one. A held lock now always means `AlreadyRunning`; the pid in the file is diagnostics only and is written before `acquire_lock` returns, and a pid-write failure stops startup. A lock taken on an inode the path no longer names is retried (#8760).
+- `trusty-search start`'s orphan reaper and `trusty-search doctor --fix` remove `daemon.lock` (and the reaper, `daemon.port`) only while holding the lock themselves, so neither can delete a live daemon's lock or port file (#8760).

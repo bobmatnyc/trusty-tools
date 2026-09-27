@@ -92,7 +92,161 @@ pub(super) fn current_rss_mb() -> usize {
     }
 }
 
+/// Default for `TRUSTY_EMBED_NO_PROGRESS_SECS`: how long one embed wave may run
+/// without completing before the pass aborts (#8600).
+const DEFAULT_WAVE_NO_PROGRESS_SECS: u64 = 600;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test-only override of [`wave_no_progress_deadline`], scoped to one task
+    /// so a short deadline never leaks into a concurrently running test.
+    pub(crate) static WAVE_DEADLINE_OVERRIDE: std::time::Duration;
+}
+
+/// The no-progress deadline for one embed wave (#8600).
+///
+/// Why: an embedder that never answers held the catch-up pass — and the one
+/// background permit behind it — forever, which is the "no progress" half of
+/// the #8600 livelock. Any per-call timeout lives below this crate and does not
+/// cover an in-process or pooled embedder.
+/// What: `TRUSTY_EMBED_NO_PROGRESS_SECS` (a positive integer), else 600 s.
+/// Test: `a_never_completing_embedder_aborts_the_pass_within_the_deadline`.
+fn wave_no_progress_deadline() -> std::time::Duration {
+    #[cfg(test)]
+    if let Ok(d) = WAVE_DEADLINE_OVERRIDE.try_with(|d| *d) {
+        return d;
+    }
+    let secs = std::env::var("TRUSTY_EMBED_NO_PROGRESS_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_WAVE_NO_PROGRESS_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Await one embed wave under the no-progress deadline and the shutdown drain
+/// (#8600).
+///
+/// Why: see [`wave_no_progress_deadline`] and
+/// [`crate::core::embed_pause::EmbeddingPause::drained`].
+/// What: `Ok(Some(results))` when the wave completes; `Ok(None)` when the gate
+/// drains first (the wave is dropped, cancelling its in-flight calls); `Err`
+/// when the deadline passes first.
+/// Test: `a_never_completing_embedder_aborts_the_pass_within_the_deadline`,
+/// `a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus`.
+async fn await_wave<F>(
+    wave: F,
+    pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+) -> Result<Option<Vec<WaveResult>>>
+where
+    F: std::future::Future<Output = Vec<WaveResult>>,
+{
+    let deadline = wave_no_progress_deadline();
+    let drained = async {
+        match pause {
+            Some(p) => p.drained().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        results = tokio::time::timeout(deadline, wave) => match results {
+            Ok(r) => Ok(Some(r)),
+            Err(_) => anyhow::bail!(
+                "embed wave made no progress for {}s — aborting the pass so it cannot \
+                 hold the background permit indefinitely (#8600; \
+                 TRUSTY_EMBED_NO_PROGRESS_SECS to adjust)",
+                deadline.as_secs()
+            ),
+        },
+        () = drained => Ok(None),
+    }
+}
+
+/// An embed pass's vectors, plus the abort that cut it short.
+///
+/// Why: #8600 — an abort used to be a bare `Err`, which discarded the waves
+/// that had already completed in the same pass.
+/// What: `embeddings` is 1:1 with the chunks; every completed sub-batch's
+/// slots are `Some`. `stalled` is the error that ended the pass: a wave that
+/// hit the no-progress deadline, or a sub-batch that failed.
+/// Test: `a_stalled_wave_commits_the_waves_before_it`,
+/// `a_failed_wave_commits_the_waves_before_it`.
+pub(crate) struct EmbedRun {
+    pub(crate) embeddings: Vec<Option<Vec<f32>>>,
+    pub(crate) stalled: Option<anyhow::Error>,
+}
+
+/// What an embed loop needs from its indexer, detached from the indexer lock.
+///
+/// Why: #8600 — a deferred-embed pass held the indexer read guard for the
+/// whole pass, so a queued writer blocked every later reader, including
+/// `GET /indexes/{id}/status`, until the pass ended. Owned clones let the pass
+/// embed with no guard held.
+/// What: `embedder` is `None` when the index has no embedder or no vector
+/// store (BM25-only), matching the old early return.
+/// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+pub(crate) struct EmbedContext {
+    index_id: String,
+    embedder: Option<Arc<dyn crate::core::embed::Embedder>>,
+    embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+}
+
 impl CodeIndexer {
+    /// Snapshot this indexer's embed dependencies (#8600).
+    ///
+    /// Why/What: see [`EmbedContext`]. The pool is resolved only when an
+    /// embedder and a store are both present, as before.
+    /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
+    pub(crate) async fn embed_context(&self) -> EmbedContext {
+        let embedder = match (&self.embedder, &self.store) {
+            (Some(embedder), Some(_)) => Some(Arc::clone(embedder)),
+            _ => None,
+        };
+        let embed_pool = match embedder {
+            Some(_) => self.resolve_embed_pool().await,
+            None => None,
+        };
+        EmbedContext {
+            index_id: self.index_id.clone(),
+            embedder,
+            embed_pool,
+        }
+    }
+
+    /// [`EmbedContext::embed_chunks_in_batches`] over this indexer's own context.
+    /// Test: `test_index_files_batch_*`.
+    pub(crate) async fn embed_chunks_in_batches(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        self.embed_context()
+            .await
+            .embed_chunks_in_batches(chunks, progress_tx, pause)
+            .await
+    }
+}
+
+impl EmbedContext {
+    /// [`Self::embed_chunks_keeping_prefix`], with an abort
+    /// reported as an `Err` — for callers that cannot use a partial result.
+    /// Test: `test_index_files_batch_*`.
+    pub(crate) async fn embed_chunks_in_batches(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+        pause: Option<&crate::core::embed_pause::EmbeddingPause>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        let run = self
+            .embed_chunks_keeping_prefix(chunks, progress_tx, pause)
+            .await?;
+        match run.stalled {
+            Some(stall) => Err(stall),
+            None => Ok(run.embeddings),
+        }
+    }
+
     /// Batched ONNX embed — multi-flight pipelined (issue #753).
     ///
     /// Why: serial loop left ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2)
@@ -107,20 +261,28 @@ impl CodeIndexer {
     /// here — the caller holds the process-wide background permit and this
     /// index's teardown guard, so parking would stall every other index's
     /// catch-up and any `DELETE` on this one. The caller commits the embedded
-    /// prefix and re-queues the rest.
+    /// prefix and re-queues the rest. A wave that hits the no-progress
+    /// deadline, or a sub-batch that fails, ends the loop the same way, with
+    /// the error in [`EmbedRun::stalled`] (#8600).
     /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`. The
     /// pause arm: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-    pub(crate) async fn embed_chunks_in_batches(
+    /// The stall arm: `a_stalled_wave_commits_the_waves_before_it`. The
+    /// error arm: `a_failed_wave_commits_the_waves_before_it`.
+    pub(crate) async fn embed_chunks_keeping_prefix(
         &self,
         chunks: &[RawChunk],
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
-    ) -> Result<Vec<Option<Vec<f32>>>> {
+    ) -> Result<EmbedRun> {
         use futures::StreamExt as _;
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
-        let (Some(embedder), Some(_store)) = (&self.embedder, &self.store) else {
-            return Ok(embeddings);
+        let mut stalled = None;
+        let Some(embedder) = &self.embedder else {
+            return Ok(EmbedRun {
+                embeddings,
+                stalled,
+            });
         };
         let chunk_total = chunks.len();
         // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
@@ -154,17 +316,15 @@ impl CodeIndexer {
         // instead of blocking behind the whole catch-up pass. `None` when no
         // pool is installed/resolvable (tests, CLI paths) — falls back to
         // the direct `embedder.embed_batch()` call this loop always used
-        // before. Resolved ONCE via `resolve_embed_pool` (self-healing
-        // boot-race fix, PR #3784 review) rather than per-wave: a hit self-
-        // heals `self.embed_pool`'s lock-free cache for every later call on
-        // this index, so this `.await` only ever costs a real lock read on
-        // the rare index still waiting to self-heal.
-        let embed_pool = self.resolve_embed_pool().await;
+        // before. Resolved ONCE in `CodeIndexer::embed_context` (self-healing
+        // boot-race fix, PR #3784 review) rather than per-wave.
+        let embed_pool = self.embed_pool.clone();
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
             // #6524: stop at this wave boundary while embedding is paused.
-            if pause.is_some_and(|p| p.is_paused()) {
+            // #8600: and once the daemon is draining for shutdown.
+            if pause.is_some_and(|p| p.is_paused() || p.is_drained()) {
                 tracing::info!(
                     index_id = %self.index_id,
                     embedded = batch_start,
@@ -190,7 +350,7 @@ impl CodeIndexer {
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
             let wave_embed_start = std::time::Instant::now();
             // Dispatch concurrently — `buffered` preserves order.
-            let wave_results: Vec<WaveResult> = {
+            let wave = {
                 let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
                     let emb = Arc::clone(embedder);
                     let pool = embed_pool.clone();
@@ -207,22 +367,66 @@ impl CodeIndexer {
                 });
                 futures::stream::iter(iter)
                     .buffered(inflight)
-                    .collect()
-                    .await
+                    .collect::<Vec<WaveResult>>()
+            };
+            // #8600: a wave is bounded by a no-progress deadline and abandoned
+            // on a shutdown drain. Its slots stay `None`, so the caller commits
+            // only the waves that completed — never a partial one.
+            let wave_results = match await_wave(wave, pause).await {
+                Ok(Some(results)) => results,
+                Ok(None) => {
+                    tracing::info!(
+                        index_id = %self.index_id,
+                        embedded = batch_start,
+                        chunk_total,
+                        "embed pass abandoned its in-flight wave: the daemon is shutting down (#8600)",
+                    );
+                    break;
+                }
+                // #8600: keep the completed waves; the caller commits them
+                // before it settles the pass `Failed`.
+                Err(stall) => {
+                    tracing::warn!(
+                        index_id = %self.index_id,
+                        embedded = batch_start,
+                        chunk_total,
+                        "embed pass stalled: {stall:#}",
+                    );
+                    stalled = Some(stall);
+                    break;
+                }
             };
 
             for (start_pos, expected_n, vecs) in wave_results {
-                let batch_vecs = vecs.context("batch embed_batch failed")?;
-                if batch_vecs.len() != expected_n {
-                    anyhow::bail!(
-                        "embed_batch returned {} vectors, expected {}",
-                        batch_vecs.len(),
-                        expected_n
+                // #8600: a failed sub-batch (e.g. the sidecar's per-call
+                // timeout) ends the pass like a stall. The sub-batches before
+                // it stay filled, so the caller commits a contiguous prefix.
+                let batch_vecs = match vecs.context("batch embed_batch failed").and_then(|v| {
+                    anyhow::ensure!(
+                        v.len() == expected_n,
+                        "embed_batch returned {} vectors, expected {expected_n}",
+                        v.len()
                     );
-                }
+                    Ok(v)
+                }) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            index_id = %self.index_id,
+                            embedded = start_pos,
+                            chunk_total,
+                            "embed pass failed: {err:#}",
+                        );
+                        stalled = Some(err);
+                        break;
+                    }
+                };
                 for (offset, vec) in batch_vecs.into_iter().enumerate() {
                     embeddings[start_pos + offset] = Some(vec);
                 }
+            }
+            if stalled.is_some() {
+                break;
             }
 
             // Fine-grained progress notification: fire once per wave when
@@ -260,7 +464,10 @@ impl CodeIndexer {
 
             batch_start = wave_pos;
         }
-        Ok(embeddings)
+        Ok(EmbedRun {
+            embeddings,
+            stalled,
+        })
     }
 }
 

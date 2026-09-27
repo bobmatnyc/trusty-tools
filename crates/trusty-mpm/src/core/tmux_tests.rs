@@ -116,6 +116,33 @@ fn resolve_tmux_binary_does_not_panic() {
     let _ = resolve_tmux_binary();
 }
 
+/// #6542: the override reaches every resolution inside the scoped future, and
+/// no resolution outside it — concurrent tests must keep the real binary.
+#[tokio::test]
+async fn with_tmux_binary_scopes_the_override_to_its_future() {
+    let shim = std::path::PathBuf::from("/nonexistent/tmux-shim-6542");
+    let (inner, inner_bare, spawned) = with_tmux_binary(shim.clone(), async {
+        tokio::task::yield_now().await;
+        let spawned = tokio::spawn(async { resolve_tmux_binary() })
+            .await
+            .expect("spawned task");
+        (
+            resolve_tmux_binary(),
+            resolve_tmux_binary_or_bare(),
+            spawned,
+        )
+    })
+    .await;
+    assert_eq!(inner, Some(shim.clone()));
+    assert_eq!(inner_bare, shim.to_string_lossy());
+    assert_ne!(
+        spawned,
+        Some(shim.clone()),
+        "another task must not inherit the override"
+    );
+    assert_ne!(resolve_tmux_binary(), Some(shim), "the scope must end");
+}
+
 #[test]
 fn resolve_tmux_binary_or_bare_never_empty() {
     // Even when resolution fails entirely, the bare "tmux" fallback keeps

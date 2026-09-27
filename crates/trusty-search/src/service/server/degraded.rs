@@ -388,6 +388,30 @@ pub(super) fn vector_lane_unavailable(
     ))
 }
 
+/// `503 vector_unavailable` for a pinned semantic query whose embed failed (#8348).
+///
+/// Why: the embed failure used to reach the caller as `500 internal search
+/// error`. The index is intact and the condition clears once the embedder
+/// recovers, so it is the retryable member of the #5068 `vector_unavailable`
+/// family, not an internal error.
+/// What: downcasts to `EmbedderUnavailable`; `None` for any other error.
+/// Test: `a_pinned_semantic_query_with_a_failed_embed_is_503_not_500`.
+pub(super) fn embedder_unavailable_from(
+    e: &anyhow::Error,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let fault = e.downcast_ref::<crate::core::indexer::EmbedderUnavailable>()?;
+    Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "vector_unavailable",
+            "reason": "embedder_unavailable",
+            "index_id": fault.index_id,
+            "retryable": true,
+            "message": fault.to_string(),
+        })),
+    ))
+}
+
 /// Verdict for an ingest whose contribution is durable but not yet merged into
 /// the serving graph (#5505).
 ///
