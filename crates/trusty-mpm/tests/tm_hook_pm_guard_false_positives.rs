@@ -14,9 +14,9 @@
 //! one `PreToolUse` payload, and asserts ALLOW (empty stdout) or DENY (one JSON
 //! line carrying `permissionDecision: "deny"`). Each issue contributes the
 //! reported command verbatim plus the deny that bounds the fix.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_false_positives`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_false_positives::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::Stdio;

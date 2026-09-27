@@ -8,9 +8,6 @@
 //! valid across refactors of the private helpers.
 //! Test: all tests in this file are the tests.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use trusty_mpm::content::CatalogSync;
 use trusty_mpm::provisioner::FakeGitBackend;
 

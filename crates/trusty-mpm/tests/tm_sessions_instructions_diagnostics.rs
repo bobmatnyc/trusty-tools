@@ -16,9 +16,9 @@
 //! `tests/tm_compress_pipe.rs` use — not by a unit test that could only
 //! assert the tracing call sites still exist.
 //!
-//! Test: `cargo test -p trusty-mpm --test tm_sessions_instructions_diagnostics`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_sessions_instructions_diagnostics::`.
 
-mod common;
+use crate::common;
 
 /// Run `tm` with `args` and `RUST_LOG`, returning `(stdout, stderr)` separately.
 ///

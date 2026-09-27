@@ -34,7 +34,7 @@ use trusty_mpm::project::Project;
 // #6671: `spawn_managed` reaches `DaemonState::project_registry()`, which seeds
 // from the config file under `$HOME`, so an isolated framework root alone still
 // admits the developer's registered projects.
-mod common;
+use crate::common;
 
 /// Env var the daemon reads to force-enable MCP spawning (mirrors
 /// `daemon::managed_routes::mcp_spawn_gate::ALLOW_MCP_SPAWN_ENV`, duplicated
