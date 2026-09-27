@@ -55,6 +55,12 @@ exclude = []
 # missing-toolchain skip (#3053). `trusty-audit-ui` (#5477) is the fourth crate
 # in this category and carries the same `--exclude` for the same two reasons.
 #
+# `tga` (crates/trusty-git-analytics) and `trusty-audit` are absent for a third
+# reason (owner ruling 2026-09-27): crates.io publishes both from
+# bobmatnyc/trusty-git-analytics, so this copy is `publish = false` and not
+# default-built. Both stay members only because trusty-audit-ui and
+# trusty-crate-contracts depend on them by path.
+#
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
 # lands under `crates/` (it is already a member via the `members` glob above
@@ -65,7 +71,6 @@ default-members = [
     "crates/trusty-agents",
     "crates/trusty-agents-common",
     "crates/trusty-analyze",
-    "crates/trusty-audit",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-code-tui",
@@ -74,7 +79,6 @@ default-members = [
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
-    "crates/trusty-git-analytics",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
     "crates/trusty-kb",
