@@ -8,32 +8,32 @@ operator interfaces in one Cargo workspace. The live package inventory comes
 from `cargo metadata`; the human-readable map is
 [docs/reference/crate-map.md](docs/reference/crate-map.md).
 
-## Three Flagship MCP Servers
+## Flagship Crates
 
-### trusty-search — Hybrid Code Search
+### trusty-mpm — Meta-Harness Multi-Agent Orchestration
 
-Machine-wide code search daemon with hybrid BM25 + vector + knowledge-graph fusion, fused via Reciprocal Rank Fusion. One install per machine, unlimited named project indexes.
+PM-style multi-agent orchestration over coding work: manages multi-project
+sessions, relays hooks, and exposes an MCP server to Claude Code sessions,
+delegating coding tasks to `trusty-code`.
 
 **What you get:**
-- Sub-10ms p50 warm query latency on 100k-chunk indexes
-- Intelligent query routing (Definition / Usage / Conceptual / BugDebt intent detection)
-- Knowledge graph expansion with caller/callee chains
-- Branch-aware search (boost results from your current feature branch)
-- Auto-tuned memory tiers (5 tiers from 8 GB to 64+ GB RAM)
-- Embedded Svelte 5 admin UI
-- OpenRouter-backed chat with auto-injected search context
+- The formerly separate `trusty-mpm-{core,client,mcp,daemon,cli,tui,telegram}`
+  crates unified into one package with a single `[[bin]]` target (`tm` /
+  `trusty-mpm`)
+- Multi-project session management, hook relaying, and an MCP server for
+  Claude Code sessions
+- Feature-gated modules (`cli`, `daemon`, `mcp`, `tui`, `telegram`, `gui`) so a
+  build pulls in only what it needs
+- A TUI dashboard (`tm tui`) and a Telegram bot (`tm telegram pair`)
 
 **Quick start:**
 ```bash
-cargo install trusty-search
-trusty-search start
-trusty-search index ~/Projects/myproj --name myproj
-trusty-search query "fn authenticate" --index myproj
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
+tm start
+tm launch
 ```
 
-**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`, `console_metrics`
-
-See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full documentation.
+See [crates/trusty-mpm/README.md](crates/trusty-mpm/README.md) for full documentation.
 
 ---
 
@@ -63,6 +63,59 @@ cargo run -p trusty-memory -- serve
 **MCP tools:** `memory_remember`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_note`, `memory_list`, `memory_forget`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`
 
 See [crates/trusty-memory/README.md](crates/trusty-memory/README.md) for full documentation.
+
+---
+
+### trusty-search — Hybrid Code Search
+
+Machine-wide code search daemon with hybrid BM25 + vector + knowledge-graph fusion, fused via Reciprocal Rank Fusion. One install per machine, unlimited named project indexes.
+
+**What you get:**
+- Sub-10ms p50 warm query latency on 100k-chunk indexes
+- Intelligent query routing (Definition / Usage / Conceptual / BugDebt intent detection)
+- Knowledge graph expansion with caller/callee chains
+- Branch-aware search (boost results from your current feature branch)
+- Auto-tuned memory tiers (5 tiers from 8 GB to 64+ GB RAM)
+- Embedded Svelte 5 admin UI
+- OpenRouter-backed chat with auto-injected search context
+
+**Quick start:**
+```bash
+cargo install trusty-search
+trusty-search start
+trusty-search index ~/Projects/myproj --name myproj
+trusty-search query "fn authenticate" --index myproj
+```
+
+**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`, `console_metrics`
+
+See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full documentation.
+
+---
+
+### trusty-review — LLM-backed PR Review
+
+Fast local PR-review service: LLM-backed code review with search and analysis
+context, reviewing GitHub PRs and unified diffs via AWS Bedrock or OpenRouter.
+
+**What you get:**
+- Fetches GitHub PR diffs, retrieves code context from trusty-search and
+  complexity data from trusty-analyze, then calls an LLM to produce a
+  structured review verdict
+- Ships as a one-shot CLI (`run` / `compare`), a JSON-RPC 2.0 / MCP stdio
+  service (`mcp`), and a per-delivery webhook drain spawned by trusty-console
+- Dry-run by default — posting a PR comment requires an explicit `--live` flag
+- Per-project config and named review templates
+
+**Quick start:**
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked
+trusty-review run owner repo 123
+```
+
+**MCP tools:** `review_pr`, `review_diff`, `review_health`
+
+See [crates/trusty-review/README.md](crates/trusty-review/README.md) for full documentation.
 
 ---
 
@@ -108,21 +161,19 @@ documentation.
 
 ---
 
-## Workspace Package Index
+## Other Crates
 
-This is an orientation map, not a second package registry. For package names,
-versions, publishability, and targets, use `cargo metadata --no-deps
---format-version 1`; for direct links from every package to its manifest,
-source, and documentation, use the [crate map](docs/reference/crate-map.md).
+The five flagship crates above have their own README links and quick starts.
+This is an orientation map for the rest of the workspace, not a second package
+registry. For package names, versions, publishability, and targets, use
+`cargo metadata --no-deps --format-version 1`; for direct links from every
+package to its manifest, source, and documentation, use the
+[crate map](docs/reference/crate-map.md).
 
-### Core Daemons / MCP Servers
+### Other Daemons / MCP Servers
 
 | Crate | Description | License |
 |---|---|---|
-| `trusty-search` | Hybrid code search (BM25 + vector + KG) + MCP server | MIT |
-| `trusty-memory` | Memory palace UI + MCP frontend (storage engine lives in `trusty-common`'s `memory-core` feature) | MIT |
-| `trusty-analyze` | Code-analysis sidecar daemon (complexity, smells, facts) + MCP server | MIT |
-| `trusty-review` | LLM-backed review pipeline with search and static-analysis context | MIT |
 | `trusty-console` | Web console for the local trusty service fleet | MIT |
 | `trusty-channels` | Native Slack and Telegram MCP servers | MIT |
 
@@ -143,8 +194,7 @@ source, and documentation, use the [crate map](docs/reference/crate-map.md).
 
 | Crate | Description |
 |---|---|
-| `trusty-mpm` | Core platform with embedded CLI, daemon, and MCP server |
-| `trusty-mpm-gui` | Desktop GUI (Tauri) |
+| `trusty-mpm-gui` | Desktop GUI (Tauri) for `trusty-mpm` |
 | `trusty-code` | Coding harness (`tcode`) |
 | `trusty-code-gui` | Desktop shell for `tcode` |
 
