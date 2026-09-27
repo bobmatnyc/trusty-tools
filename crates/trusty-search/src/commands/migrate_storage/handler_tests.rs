@@ -83,12 +83,15 @@ fn migrate_storage_moves_files_and_updates_registry() {
         "root must be registered in roots.toml after migration"
     );
 
-    // .gitignore must contain .trusty-search/.
-    let gitignore_content =
-        std::fs::read_to_string(project_root.path().join(".gitignore")).unwrap_or_default();
+    // #8499: the directory hides itself; the root .gitignore is not created.
+    assert_eq!(
+        std::fs::read_to_string(colocated.join(".gitignore")).unwrap_or_default(),
+        "*\n",
+        "the colocated dir must carry its own .gitignore after migration"
+    );
     assert!(
-        gitignore_content.contains(".trusty-search/"),
-        ".gitignore must contain .trusty-search/ after migration"
+        !project_root.path().join(".gitignore").exists(),
+        "#8499: migration must never write the repository's .gitignore"
     );
 
     // Registry must now have colocated=true.

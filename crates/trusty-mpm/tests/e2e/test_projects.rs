@@ -1,6 +1,6 @@
 //! E2E: project registry.
 
-use crate::harness::TestDaemon;
+use super::harness::TestDaemon;
 use serde_json::{Value, json};
 
 /// Registering a project makes it appear in `GET /projects`.

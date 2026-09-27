@@ -69,20 +69,21 @@ async fn mock_state_async() -> Arc<SearchAppState> {
 /// id) must be rejected with `409 Conflict` naming the existing index,
 /// instead of silently registering a second handle over the same redb file.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_rejects_duplicate_root_path() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-dup-root-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("first-id", root.clone())),
+        Json(create_req("first-id-2336", root.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("second-id", root.clone())),
+        Json(create_req("second-id-2336", root.clone())),
     )
     .await;
     assert_eq!(
@@ -95,7 +96,7 @@ async fn create_index_rejects_duplicate_root_path() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         v.get("existing_id").and_then(|x| x.as_str()),
-        Some("first-id"),
+        Some("first-id-2336"),
         "the 409 body must name the existing index that owns the root_path"
     );
 
@@ -112,20 +113,21 @@ async fn create_index_rejects_duplicate_root_path() {
 /// "already exists" path (unaffected by the new collision guard, since it is
 /// checked before the guard runs).
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_same_id_same_root_is_idempotent_not_a_collision() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-idempotent-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("same-id", root.clone())),
+        Json(create_req("same-id-2336", root.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK);
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("same-id", root.clone())),
+        Json(create_req("same-id-2336", root.clone())),
     )
     .await;
     assert_eq!(
@@ -141,6 +143,7 @@ async fn create_index_same_id_same_root_is_idempotent_not_a_collision() {
 /// Two indexes at genuinely distinct roots must both register successfully —
 /// the guard must not over-trigger on non-colliding paths.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_distinct_roots_both_succeed() {
     let state = mock_state_async().await;
     let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-2336-distinct-a-");
@@ -148,14 +151,14 @@ async fn create_index_distinct_roots_both_succeed() {
 
     let a = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("index-a", root_a)),
+        Json(create_req("index-a-2336", root_a)),
     )
     .await;
     assert_eq!(a.status(), StatusCode::OK);
 
     let b = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("index-b", root_b)),
+        Json(create_req("index-b-2336", root_b)),
     )
     .await;
     assert_eq!(
@@ -171,6 +174,7 @@ async fn create_index_distinct_roots_both_succeed() {
 /// `PATCH /indexes/:id` that would relocate onto a root_path already owned by
 /// a DIFFERENT registered index must be rejected with `409 Conflict`.
 #[tokio::test]
+#[serial_test::serial]
 async fn relocate_index_rejects_root_path_owned_by_another_index() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
 
@@ -180,14 +184,14 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
 
     let create_a = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("index-a", root_a.clone())),
+        Json(create_req("index-a-2336", root_a.clone())),
     )
     .await;
     assert_eq!(create_a.status(), StatusCode::OK);
 
     let create_b = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("index-b", root_b.clone())),
+        Json(create_req("index-b-2336", root_b.clone())),
     )
     .await;
     assert_eq!(create_b.status(), StatusCode::OK);
@@ -195,7 +199,7 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
     // Attempt to relocate index-b onto index-a's root — must be rejected.
     let relocate = relocate_index_handler(
         State(Arc::clone(&state)),
-        Path("index-b".to_string()),
+        Path("index-b-2336".to_string()),
         Json(RelocateIndexRequest {
             root_path: root_a.clone(),
         }),
@@ -210,14 +214,14 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(
         v.get("existing_id").and_then(|x| x.as_str()),
-        Some("index-a"),
+        Some("index-a-2336"),
         "the 409 body must name the index that already owns the target root_path"
     );
 
     // index-b's root_path must be unchanged after the rejected relocation.
     let handle_b = state
         .registry
-        .get(&crate::core::registry::IndexId::new("index-b"))
+        .get(&crate::core::registry::IndexId::new("index-b-2336"))
         .expect("index-b must still be registered");
     assert_eq!(
         handle_b.root_path, root_b,
@@ -228,6 +232,7 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
 /// Relocating an index onto ITS OWN current root_path (a no-op PATCH) must
 /// NOT be treated as a collision — the guard excludes the index's own id.
 #[tokio::test]
+#[serial_test::serial]
 async fn relocate_index_onto_own_current_root_is_not_a_collision() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
 
@@ -236,14 +241,14 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
 
     let create = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("self-relocate", root.clone())),
+        Json(create_req("self-relocate-2336", root.clone())),
     )
     .await;
     assert_eq!(create.status(), StatusCode::OK);
 
     let relocate = relocate_index_handler(
         State(Arc::clone(&state)),
-        Path("self-relocate".to_string()),
+        Path("self-relocate-2336".to_string()),
         Json(RelocateIndexRequest {
             root_path: root.clone(),
         }),
@@ -268,6 +273,7 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
 /// `200 {"created": true}`, since that would silently register two live
 /// handles over one on-disk corpus (the exact #2305/#2336 hazard).
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_concurrent_same_root_only_one_wins() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-race-");
@@ -278,8 +284,14 @@ async fn create_index_concurrent_same_root_only_one_wins() {
     let root_b = root.clone();
 
     let (resp_a, resp_b) = tokio::join!(
-        super::indexes::create_index_handler(State(state_a), Json(create_req("racer-a", root_a)),),
-        super::indexes::create_index_handler(State(state_b), Json(create_req("racer-b", root_b)),),
+        super::indexes::create_index_handler(
+            State(state_a),
+            Json(create_req("racer-a-2336", root_a)),
+        ),
+        super::indexes::create_index_handler(
+            State(state_b),
+            Json(create_req("racer-b-2336", root_b)),
+        ),
     );
 
     let statuses = [resp_a.status(), resp_b.status()];
@@ -316,13 +328,14 @@ async fn create_index_concurrent_same_root_only_one_wins() {
 /// `find_root_path_collision` must catch it.
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial]
 async fn create_index_rejects_case_variant_of_registered_root() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("TS-2336-CaseVariant-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("first-id", root.clone())),
+        Json(create_req("first-id-2336", root.clone())),
     )
     .await;
     assert_eq!(first.status(), StatusCode::OK, "first create must succeed");
@@ -374,7 +387,7 @@ async fn create_index_rejects_case_variant_of_registered_root() {
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
-        Json(create_req("second-id", case_variant_root)),
+        Json(create_req("second-id-2336", case_variant_root)),
     )
     .await;
     assert_eq!(

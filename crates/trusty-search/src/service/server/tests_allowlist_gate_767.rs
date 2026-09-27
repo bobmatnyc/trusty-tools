@@ -303,8 +303,8 @@ async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
     );
 
     // Reaching `create_index_handler`'s body at all is the leak: it calls
-    // `roots_registry::upsert_root`, `colocated_storage::ensure_gitignored`,
-    // and the colocated `.trusty-search/` builder. Assert none of it happened.
+    // `roots_registry::upsert_root` and the store builder. Assert none of it
+    // happened.
     assert!(
         state
             .registry

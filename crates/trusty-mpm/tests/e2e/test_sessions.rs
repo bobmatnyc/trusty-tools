@@ -5,7 +5,7 @@
 //! OpenAPI annotations document a *semantic* `201`, but the wire status is
 //! `200`). These tests assert the real wire behaviour.
 
-use crate::harness::TestDaemon;
+use super::harness::TestDaemon;
 use serde_json::{Value, json};
 
 /// Register a session, then confirm it appears in the listing with an id and

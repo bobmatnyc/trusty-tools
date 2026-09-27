@@ -1,14 +1,14 @@
 //! The daemon serves HTTP and the RPC socket at once, and ONE shutdown drains
 //! both (#6288 slice 1, acceptance criterion 1).
 //!
-//! Why its own test binary: the proof reassigns `$HOME` to a scratch directory
-//! so `core::host_state_gate` classifies this process as a scratch environment
-//! and the startup tmux/host-process adoption is skipped — without that, booting
-//! a daemon inside the lib test binary would adopt the operator's live Claude
-//! Code panes into a temp registry. `$HOME` is process-global, so it cannot be
-//! reassigned inside a binary that runs other tests concurrently; this file
-//! holds exactly ONE test, which is what makes the reassignment safe. Same
-//! rationale as `scratch_home_tmux_gate.rs`.
+//! Why the `env_serial` target: the proof reassigns `$HOME` to a scratch
+//! directory so `core::host_state_gate` classifies this process as a scratch
+//! environment and the startup tmux/host-process adoption is skipped — without
+//! that, booting a daemon inside the lib test binary would adopt the operator's
+//! live Claude Code panes into a temp registry. `$HOME` is process-global, so it
+//! cannot be reassigned while other tests run concurrently; `env_serial` runs
+//! one test at a time, and [`EnvRestore`] hands the next test the environment
+//! this one found (#8345). Same rationale as `scratch_home_tmux_gate.rs`.
 //!
 //! Why not the e2e harness: `tests/e2e/harness.rs` serves `api::router` on a
 //! bare `axum::serve`, so it never reaches `daemon::serve_with_shutdown` and
@@ -18,12 +18,9 @@
 //! place of SIGTERM, proves both answer, fires the single shutdown, and asserts
 //! both ended and the socket file is gone.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test daemon_dual_serve`.
+//! `cargo test -p trusty-mpm --test env_serial daemon_dual_serve::`.
 
 #![cfg(feature = "daemon")]
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +36,41 @@ use trusty_mpm::daemon::state::DaemonState;
 /// SIGTERM this test never sends. So this timeout is what turns that regression
 /// into a failure rather than a hung suite.
 const DRAIN_BUDGET: Duration = Duration::from_secs(30);
+
+/// Sets environment variables and restores their prior values on drop (#8345).
+///
+/// Why: this test shares the `env_serial` process with other tests, so a
+/// `$HOME` left pointing at a deleted scratch dir would change how the next
+/// test's `host_state_gate` classifies the host.
+struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestore {
+    fn set(pairs: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+        let prev = pairs
+            .iter()
+            .map(|(key, value)| {
+                let prev = std::env::var_os(key);
+                // SAFETY: `env_serial` runs one test at a time, so no other
+                // thread reads or writes the environment while this runs.
+                unsafe { std::env::set_var(key, value) };
+                (*key, prev)
+            })
+            .collect();
+        Self(prev)
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, prev) in self.0.drain(..) {
+            // SAFETY: as in `set`.
+            match prev {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+    }
+}
 
 /// Send one JSON-RPC frame over `socket` and read the answer back.
 async fn call_over_socket(
@@ -68,15 +100,15 @@ async fn call_over_socket(
 #[tokio::test(flavor = "multi_thread")]
 async fn serve_http_drains_both_listeners_on_shutdown() {
     let scratch_home = TempDir::new().expect("scratch home");
-    // SAFETY: this binary holds exactly one test, so nothing races these
-    // process-global writes. `$HOME` puts `host_state_gate` into its scratch
-    // arm; the two flags switch off the sweeps that would otherwise touch real
-    // repositories and managed-session state on a developer machine.
-    unsafe {
-        std::env::set_var("HOME", scratch_home.path());
-        std::env::set_var("TRUSTY_MPM_ORPHAN_GC", "0");
-        std::env::set_var("TRUSTY_MPM_INPROJECT_HYGIENE", "0");
-    }
+    // `$HOME` puts `host_state_gate` into its scratch arm; the two flags switch
+    // off the sweeps that would otherwise touch real repositories and
+    // managed-session state on a developer machine. Declared after
+    // `scratch_home`, so it restores `$HOME` before that directory is deleted.
+    let _env = EnvRestore::set(&[
+        ("HOME", scratch_home.path().as_os_str()),
+        ("TRUSTY_MPM_ORPHAN_GC", "0".as_ref()),
+        ("TRUSTY_MPM_INPROJECT_HYGIENE", "0".as_ref()),
+    ]);
 
     let tmp = TempDir::new().expect("tempdir");
     let paths = FrameworkPaths::under(tmp.path());
