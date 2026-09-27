@@ -282,7 +282,10 @@ async fn removing_a_parked_index_by_path_and_flag_succeeds() {
     ];
     let (code, output) = cli(&base, &args, fake_home.path());
 
-    assert_eq!(code, 0, "PATH and flag agree on parked X; output:\n{output}");
+    assert_eq!(
+        code, 0,
+        "PATH and flag agree on parked X; output:\n{output}"
+    );
     assert_eq!(
         mutations(&log),
         vec![("DELETE".to_string(), "/indexes/idx-x3-8687".to_string())],
@@ -343,6 +346,13 @@ async fn an_unreadable_status_refuses_instead_of_reporting_not_registered() {
         "PATH must not be reported unregistered:\n{output}"
     );
     assert!(mutations(&log).is_empty(), "{:?}", mutations(&log));
-    assert!(allowlisted(&file, &root_x), "X's row must survive a refusal");
-    assert_eq!(real, real_allowlist_bytes(), "the real allowlist is untouched");
+    assert!(
+        allowlisted(&file, &root_x),
+        "X's row must survive a refusal"
+    );
+    assert_eq!(
+        real,
+        real_allowlist_bytes(),
+        "the real allowlist is untouched"
+    );
 }

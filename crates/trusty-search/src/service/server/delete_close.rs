@@ -157,26 +157,22 @@ pub(super) async fn close_index_files(
 ///
 /// Why: a cold-parked index has no hot handle, yet a queued embed job still
 /// holds the detached one, and with it `index.redb` and the HNSW mapping.
-/// What: closes the job handles first and the hot handle last, deduplicated by
+/// What: closes the job handles first and the hot handle last, one per
 /// indexer, so an abandoning `Err` from a job handle leaves the registered
 /// index serving. Vector-close failures are joined into one reason.
-/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`.
+/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`,
+/// `a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index`.
 pub(super) async fn close_all_index_files(
     index_id: &IndexId,
     hot: Option<&Arc<IndexHandle>>,
     rehydrate_budget: Duration,
     budget: Duration,
 ) -> Result<Option<String>, String> {
-    let mut handles: Vec<Arc<IndexHandle>> = Vec::new();
-    for job in crate::service::reindex::job_handles_for(index_id) {
-        let seen = hot.into_iter().chain(handles.iter());
-        if !seen
-            .into_iter()
-            .any(|h| Arc::ptr_eq(&h.indexer, &job.indexer))
-        {
-            handles.push(job);
-        }
-    }
+    // `job_handles_for` already yields one handle per indexer.
+    let mut handles: Vec<Arc<IndexHandle>> = crate::service::reindex::job_handles_for(index_id)
+        .into_iter()
+        .filter(|job| !hot.is_some_and(|h| Arc::ptr_eq(&h.indexer, &job.indexer)))
+        .collect();
     handles.extend(hot.cloned());
     let mut vector_errors = Vec::new();
     for handle in &handles {

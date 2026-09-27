@@ -166,17 +166,25 @@ fn live_jobs() -> &'static Mutex<HashMap<u64, Weak<IndexHandle>>> {
 ///
 /// Why: the delete path closes each one's files, so no job keeps the deleted
 /// index's files open. See [`live_jobs`].
-/// What: upgrades each live entry for `id`; a job that already dropped its
-/// handle is skipped.
-/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`.
+/// What: upgrades each live entry for `id`, one handle per distinct indexer —
+/// several jobs on one index share it, and it is closed once. A job that
+/// already dropped its handle is skipped.
+/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`,
+/// `job_handles_for_yields_each_indexer_once_across_concurrent_jobs`.
 pub(crate) fn job_handles_for(id: &IndexId) -> Vec<Arc<IndexHandle>> {
     let live = live_jobs()
         .lock()
         .expect("defer-embed live-job lock poisoned");
-    live.values()
-        .filter_map(Weak::upgrade)
-        .filter(|handle| &handle.id == id)
-        .collect()
+    let mut handles: Vec<Arc<IndexHandle>> = Vec::new();
+    for handle in live.values().filter_map(Weak::upgrade) {
+        let seen = handles
+            .iter()
+            .any(|h| Arc::ptr_eq(&h.indexer, &handle.indexer));
+        if &handle.id == id && !seen {
+            handles.push(handle);
+        }
+    }
+    handles
 }
 
 /// Settles one job's bookkeeping however its task ends (#8664).

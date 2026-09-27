@@ -50,7 +50,7 @@ pub(crate) mod index_persist;
 pub mod index_relocate;
 pub mod index_remove;
 // #8687: residency-independent target lookup for `index remove`.
-mod index_remove_lookup;
+mod index_remove_stale;
 pub mod index_status;
 pub mod init;
 pub mod integrate;
