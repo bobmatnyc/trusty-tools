@@ -166,7 +166,7 @@ fn discover_blocking(project_root: &Path) -> Result<Vec<AliasDiscovery>> {
 /// What: Returns the raw pattern strings (typically `"crates/*"`). An absent
 /// or malformed `[workspace]` yields an empty `Vec`.
 /// Test: covered by `discovers_trusty_git_analytics_alias` (which exercises
-/// this against the live root manifest).
+/// this against a fixture root manifest).
 fn workspace_members(root_toml: &toml::Value) -> Vec<String> {
     root_toml
         .get("workspace")
@@ -189,8 +189,8 @@ fn workspace_members(root_toml: &toml::Value) -> Vec<String> {
 /// What: For each pattern: if it ends with `/*`, list every immediate
 /// subdirectory; otherwise treat it as a literal relative path. Skips entries
 /// without a `Cargo.toml`.
-/// Test: indirectly via `discovers_trusty_git_analytics_alias` (live workspace
-/// expansion).
+/// Test: indirectly via `discovers_trusty_git_analytics_alias` (fixture
+/// `crates/*` expansion).
 fn expand_members(root: &Path, patterns: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for pattern in patterns {
@@ -526,20 +526,46 @@ fn push_unique(
     }
 }
 
+/// Test-only Cargo workspace fixture for the alias-discovery tests.
+///
+/// Why: tga left this workspace (PR #8824), so no live directory carries a
+/// package name that differs from its directory. The discovery tests build
+/// that shape in a tempdir instead.
+/// What: Writes `<root>/Cargo.toml` with `members = ["crates/*"]` and
+/// `<root>/crates/trusty-git-analytics/Cargo.toml` with `name = "tga"`.
+/// Test: `discovers_trusty_git_analytics_alias`,
+/// `dispatch_discover_aliases_inserts_new_and_dedupes`.
+#[cfg(test)]
+pub(crate) fn write_tga_workspace_fixture(root: &Path) {
+    let member = root.join("crates").join("trusty-git-analytics");
+    std::fs::create_dir_all(&member).expect("mkdir fixture member");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    )
+    .expect("write fixture root Cargo.toml");
+    std::fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"tga\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write fixture member Cargo.toml");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Why: Smoke-test the live workspace — the prompt test in the task spec
-    /// pins `("tga", "trusty-git-analytics")` as a discovered alias.
-    /// What: Locates the workspace root (parent of this crate dir), runs the
-    /// blocking discovery, and asserts the canonical pair is present with
-    /// the `CargoPackageName` source.
+    /// Why: The task spec pins `("tga", "trusty-git-analytics")` as a
+    /// discovered alias.
+    /// What: Builds a one-member workspace fixture in a tempdir, runs the
+    /// blocking discovery on it, and asserts the pair is present with the
+    /// `CargoPackageName` source.
     /// Test: this test itself.
     #[test]
     fn discovers_trusty_git_analytics_alias() {
-        let root = workspace_root();
-        let discoveries = discover_blocking(&root).expect("discover");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_tga_workspace_fixture(tmp.path());
+        let discoveries = discover_blocking(tmp.path()).expect("discover");
         let hit = discoveries
             .iter()
             .find(|d| d.short == "tga" && d.full == "trusty-git-analytics");
