@@ -884,7 +884,6 @@ fn a_gh_config_dir_prefix_reaches_git_ls_remote() {
         true,
         &[
             incident,
-            "GH_CONFIG_DIR=~/.config/gh git ls-remote origin refs/heads/main",
             "GH_CONFIG_DIR=/cfg git -C /repo ls-remote origin refs/heads/main",
             "GH_CONFIG_DIR=/cfg git --no-pager ls-remote --heads origin",
             "cd /repo && GH_CONFIG_DIR=/cfg git ls-remote origin refs/heads/main",
@@ -910,6 +909,7 @@ fn a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote() {
             "GH_CONFIG_DIR=/cfg 'git' ls-remote origin",
             "GH_CONFIG_DIR=/cfg",
             "GH_CONFIG_DIR= git ls-remote origin",
+            "GH_CONFIG_DIR=~/.config/gh git ls-remote origin",
             "\"GH_CONFIG_DIR=/cfg\" git ls-remote origin",
             "GH_CONFIG_DIR=/cfg GIT_SSH_COMMAND=sh git ls-remote origin",
             "GIT_SSH_COMMAND=sh GH_CONFIG_DIR=/cfg git ls-remote origin",
