@@ -36,9 +36,11 @@
 #   prints semver_accept_blind_note below.
 #
 # Test: scripts/check_semver_selftest.sh, the `ci-accept/` cases — including the
-#   crate/version (b), reason (c), symlink/mode (j), committed-content (k) and
-#   two-clause arity (m) rules (#8699); scripts/preflight-check5-selftest.sh (r5)
-#   for the read-only report CHECK 5 makes over a committed declaration.
+#   crate/version (b), reason (c), symlink/mode (j), committed-content (k),
+#   two-clause arity (m), `in file /path` location-stripping (n), a spaced
+#   path (o), and a dangling `, previously` (p) rules (#8699);
+#   scripts/preflight-check5-selftest.sh (r5) for the read-only report CHECK 5
+#   makes over a committed declaration.
 #
 # Portability: bash 3.2 and bash 5; BSD and GNU awk/sed. Reads REPO_ROOT and
 #   CHECK_ONLY from the caller; sets SEMVER_ACCEPTED_BREAKS and
@@ -168,10 +170,30 @@ semver_break_entries() {
     }
     state == 1 && /^Failed in:/ { state = 2; next }
     state == 2 && /^  [^ ]/ {
-      # Strip EVERY ` in /<path>:<line>` suffix, not only the first: an arity
-      # lint prints `takes 2 parameters in /old:1, but now takes 3 parameters in
-      # /new:2`, and the second clause is part of the break.
-      e = substr($0, 3); gsub(/ in \/[^ ]*:[0-9]+/, "", e); sub(/ in \/[^ ]*$/, "", e)
+      # Strip EVERY ` in /<path>:<line>` and ` in file /<path>:<line>` suffix,
+      # not only the first: an arity lint prints `takes 2 parameters in
+      # /old:1, but now takes 3 parameters in /new:2`, and the second clause
+      # is part of the break. `previously in file /path:line` (function_missing,
+      # struct/field-missing and const-missing lints) is the same location
+      # shape with an extra `file ` word before the path — unstripped, it
+      # leaked absolute `/Users/...`/registry paths into accepted-break records.
+      #
+      # POSIX awk ERE has no lookahead/non-greedy match, so a location is
+      # matched by excluding `:` from the path class: the class can never
+      # cross the line numbers own colon, so it always stops there, then the
+      # boundary right after the digits must be a comma, a space, or end of
+      # line — a path can itself contain a space (a macOS "/Users/Jane
+      # Example/" home), so a plain `[^ ]*` class left that name in the
+      # record instead of matching through it. Three patterns, one per
+      # boundary, so a stray comma or space separating two clauses survives.
+      e = substr($0, 3)
+      gsub(/ in (file )?\/[^:]*:[0-9]+,/, ",", e)
+      gsub(/ in (file )?\/[^:]*:[0-9]+ /, " ", e)
+      sub(/ in (file )?\/[^:]*:[0-9]+$/, "", e)
+      sub(/ in (file )?\/[^:]*$/, "", e)
+      # A single-clause `X, previously in file /path:line` strips to a
+      # dangling `X, previously` once the location is gone.
+      sub(/, previously$/, "", e)
       sub(/,$/, "", e); print lint "\t" e; nent++; next
     }
     state == 2 { state = 0 }

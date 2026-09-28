@@ -75,6 +75,9 @@ pub fn unknown_key_paths<T: Serialize>(raw: &Value, parsed: &T) -> Vec<String> {
     };
     let mut out = Vec::new();
     diff_into(raw, &known, "", &mut out);
+    // #8261: `[builders]` also carries the build-lease keys, read by a separate
+    // struct so `BuildersConfig` keeps its published shape.
+    out.retain(|path| !crate::core::build_lease::config::LEASE_KEYS.contains(&path.as_str()));
     out
 }
 

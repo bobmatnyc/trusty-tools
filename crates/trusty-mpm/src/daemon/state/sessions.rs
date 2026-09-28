@@ -638,18 +638,6 @@ impl DaemonState {
         self.dispatch_record.lock()
     }
 
-    /// Hold the machine-wide builder-slot lock for one scan-and-claim (#6892).
-    ///
-    /// Why: see the `builder_claim` field's own doc. Exposed as a guard rather
-    /// than inlined so [`super::builder_slots`] — a sibling module of this one —
-    /// can take it without the field being `pub`.
-    /// What: blocks until the lock is free. `pub(crate)`: an internal invariant
-    /// between two modules of this crate, never a consumer API.
-    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
-    pub(crate) fn builder_claim_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
-        self.builder_claim.lock()
-    }
-
     /// Stops still waiting for the `agent_id` that names them (#4142).
     ///
     /// Why: `crate::daemon::services::delegation_tracker` is the ledger's only
@@ -1054,11 +1042,8 @@ impl DaemonState {
     /// nothing: the recovery window is long, not infinite, because the map must
     /// stay bounded. That bound is asserted, not incidental.
     /// It also ages the #4142 deferred-stop ledger on the same pass, for the
-    /// same reason: both are bounded off the hook path, never on it. #8548: and
-    /// it cancels a live builder lease whose agent the user stopped, and re-arms
-    /// one the user resumed, via [`Self::reconcile_builder_stop_markers`].
+    /// same reason: both are bounded off the hook path, never on it.
     /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
-    /// `a_user_stopped_builder_releases_its_slot_8548`,
     /// `declared_but_never_dispatched_goes_stale_quickly`,
     /// `terminal_delegations_are_evicted_after_retention`,
     /// `live_delegations_are_never_evicted`,
@@ -1086,9 +1071,6 @@ impl DaemonState {
         if expired > 0 {
             tracing::debug!(expired, "delegation: pruned expired deferred stops (#4142)");
         }
-        // #8548: a user stop emits no hook; its stop marker is read here, before
-        // the `retain` below takes the shard locks the release writes through.
-        self.reconcile_builder_stop_markers();
         self.delegations.retain(|_, d| {
             let age_from = d.started_at.unwrap_or(d.created_at);
             if d.status.is_live() {
@@ -1134,30 +1116,16 @@ impl DaemonState {
     /// race a concurrent update from another hook event.
     /// What: takes the entry's write guard and runs `f`. Returns `false` when no
     /// such delegation exists. `f` must not touch the delegation store — it runs
-    /// under a shard lock. #8819: a builder whose record leaves the live states
-    /// here has its slot lease removed, after the shard lock is released —
-    /// unless a stop released it, which keeps its lease until the TTL.
-    /// Test: `daemon::services::delegation_tracker` suite,
-    /// `a_completed_builder_frees_its_slot_across_a_restart_8819`,
-    /// `a_task_stopped_builder_keeps_its_slot_across_a_restart_8819`.
+    /// under a shard lock.
+    /// Test: `daemon::services::delegation_tracker` suite.
     pub fn mutate_delegation(&self, id: DelegationId, f: impl FnOnce(&mut Delegation)) -> bool {
-        let ended = match self.delegations.get_mut(&id.0) {
+        match self.delegations.get_mut(&id.0) {
             Some(mut entry) => {
-                let was_live = entry.value().status.is_live();
                 f(entry.value_mut());
-                let d = entry.value();
-                // #8819 critic round 2: a stopped builder may be resumed into its
-                // slot; its lease stands in for the in-memory #8548 quarantine.
-                (was_live && !d.status.is_live() && d.stop_release.is_none())
-                    .then(|| (d.builder_slot_dir.clone(), d.tool_use_id.clone()))
+                true
             }
-            None => return false,
-        };
-        // #8819: completion, a deny, a cancel — every terminal write lands here.
-        if let Some((Some(slot_dir), Some(holder))) = ended {
-            crate::core::builder_slot_pool::lease::clear_lease_of(&slot_dir, &holder);
+            None => false,
         }
-        true
     }
 
     /// Move one delegation to a terminal status, stamping `ended_at` (#2864).
