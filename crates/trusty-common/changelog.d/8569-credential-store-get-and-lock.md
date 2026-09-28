@@ -1,0 +1,3 @@
+Fixed
+- `FileKeyStore::try_get` now returns an `Io` or `Toml` error when the credential file exists but cannot be read or parsed, instead of reporting the credential as absent. A missing file still reads as an empty store, and `get` keeps its `None`-on-failure contract (#8569).
+- `FileKeyStore::set` and `unset` now hold an exclusive advisory lock on a `0600` `credentials.toml.lock` beside the store across the read, modify and atomic write, so concurrent writers in separate processes no longer lose each other's keys. A writer waits at most 10 seconds for a live holder, then fails with a `TimedOut` I/O error; the kernel releases the lock when a holder process dies (#8569).
