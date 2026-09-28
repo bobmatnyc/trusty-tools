@@ -707,14 +707,38 @@ mod tests {
         );
     }
 
-    /// #8736: a record naming a live pid that runs a different program — a
-    /// pid the kernel reused — frees the slot.
+    /// #8736 (critic CRITICAL): cargo execs an external subcommand, so a
+    /// `cargo nextest run` build's pid runs as `cargo-nextest`. A process name
+    /// that differs from the record's program must not free a live build.
     #[test]
-    fn a_recycled_pid_running_another_program_frees_the_slot() {
-        let (_tmp, slots) = dir();
-        let state = probe_live_sleep(&slots, |r| r.command = "cargo test -p x".into());
-        assert_eq!(state, SlotState::Free);
-        assert_eq!(slots.probe(), vec![(0, SlotState::Free)]);
+    fn an_exec_replaced_cargo_subcommand_keeps_its_slot() {
+        let (tmp, slots) = dir();
+        let nextest = tmp.path().join("cargo-nextest");
+        std::os::unix::fs::symlink(
+            which_sleep().expect("a sleep binary on this host"),
+            &nextest,
+        )
+        .expect("symlink");
+        let mut build = std::process::Command::new(&nextest)
+            .arg("30")
+            .spawn()
+            .expect("spawn a process named cargo-nextest");
+        let mut dead_holder = record(0);
+        dead_holder.command = "cargo nextest run".into();
+        dead_holder.child_pid = Some(build.id());
+        leave_record(&slots, &dead_holder);
+        let probed = slots.probe();
+        let _ = build.kill();
+        let _ = build.wait();
+        assert_eq!(probed, vec![(0, SlotState::Orphaned(dead_holder))]);
+    }
+
+    /// The `sleep` binary, for a symlink that gives a process another name.
+    fn which_sleep() -> Option<PathBuf> {
+        ["/bin/sleep", "/usr/bin/sleep"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
     }
 
     #[test]

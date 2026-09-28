@@ -13,15 +13,17 @@
 //! [`read_leftover`] classifies that file:
 //!
 //! - [`Leftover::Clear`] — empty, or its build is gone: the slot is free. A
-//!   pid the kernel reused is gone too: the live process must have started
-//!   within [`START_WINDOW_SECS`] of `started_at` AND run the recorded program
-//!   (process name or executable, #8736).
-//! - [`Leftover::Running`] — the recorded build is still alive: the slot
-//!   stays held.
-//! - [`Leftover::Unknown`] — the record is corrupt, or the pid, start time or
-//!   process name cannot be read. The slot reads `Broken` — never taken, and a
-//!   `tm doctor` FAIL — so an unreadable signal never reads as a free slot
-//!   (#8736).
+//!   pid that started outside [`START_WINDOW_SECS`] of `started_at` is a pid
+//!   the kernel reused, so it is gone too.
+//! - [`Leftover::Running`] — the pid is alive and started inside the window:
+//!   the slot stays held. The process name is deliberately NOT compared: cargo
+//!   execs external subcommands (`cargo nextest` runs as `cargo-nextest`), and
+//!   the rustup proxy, `sh -c` and `env -S` exec too, so a name check would
+//!   free a live build (#8736). A reused pid that started inside the window
+//!   holds the slot until it exits — the accepted fail-closed cost.
+//! - [`Leftover::Unknown`] — the record is corrupt, or the pid or its start
+//!   time cannot be read. The slot reads `Broken` — never taken, and a `tm
+//!   doctor` FAIL — so an unreadable signal never reads as a free slot (#8736).
 //!
 //! Test: the `#[cfg(test)]` suite below, the `slots` suite, and
 //! `a_sigkilled_holders_live_test_run_keeps_its_slot` in
@@ -76,24 +78,14 @@ pub fn read_leftover(path: &Path) -> Leftover {
     }
 }
 
-/// What the process table says about one pid.
-#[derive(Debug, Clone, Default)]
-struct ProcessFacts {
-    /// Start time in Unix seconds, when readable.
-    start_secs: Option<i64>,
-    /// The process name, when readable.
-    name: Option<String>,
-    /// The executable's file name, when readable.
-    exe_name: Option<String>,
-}
-
 /// The reads orphan detection needs; a seam so each failure arm is testable.
 trait ProcessTable {
     /// `Ok(true)` alive (another user's process included), `Ok(false)` gone,
     /// `Err` when the check itself failed.
     fn alive(&self, pid: u32) -> Result<bool, String>;
-    /// `None` when the table holds no entry for `pid`.
-    fn facts(&self, pid: u32) -> Option<ProcessFacts>;
+    /// `None` when the table holds no entry for `pid`; `Some(None)` when it
+    /// does but the start time is unreadable; else the Unix start seconds.
+    fn start_secs(&self, pid: u32) -> Option<Option<i64>>;
 }
 
 /// The live process table: `kill(2)` and `sysinfo`.
@@ -114,24 +106,17 @@ impl ProcessTable for LiveTable {
         }
     }
 
-    fn facts(&self, pid: u32) -> Option<ProcessFacts> {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    fn start_secs(&self, pid: u32) -> Option<Option<i64>> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
         let pid = Pid::from_u32(pid);
         let mut sys = System::new();
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
-            ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+            ProcessRefreshKind::nothing(),
         );
         let process = sys.process(pid)?;
-        Some(ProcessFacts {
-            start_secs: i64::try_from(process.start_time()).ok().filter(|s| *s > 0),
-            name: Some(process.name().to_string_lossy().into_owned()).filter(|n| !n.is_empty()),
-            exe_name: process
-                .exe()
-                .and_then(Path::file_name)
-                .map(|n| n.to_string_lossy().into_owned()),
-        })
+        Some(i64::try_from(process.start_time()).ok().filter(|s| *s > 0))
     }
 }
 
@@ -151,26 +136,17 @@ fn classify(record: HolderRecord, table: &dyn ProcessTable) -> Leftover {
             record.started_at
         ));
     };
-    let Some(facts) = table.facts(pid) else {
+    let Some(start) = table.start_secs(pid) else {
         // It may have exited between the two reads.
         return match table.alive(pid) {
             Ok(false) => Leftover::Clear,
             _ => Leftover::Unknown(format!("no process-table entry for live build pid {pid}")),
         };
     };
-    let Some(start) = facts.start_secs else {
+    let Some(start) = start else {
         return Leftover::Unknown(format!("start time of build pid {pid} unreadable"));
     };
-    if !starts_in_window(start, recorded.timestamp()) {
-        return Leftover::Clear;
-    }
-    let Some(program) = program_name(&record.command) else {
-        return Leftover::Unknown(format!("the record for build pid {pid} names no program"));
-    };
-    if facts.name.is_none() && facts.exe_name.is_none() {
-        return Leftover::Unknown(format!("process name of build pid {pid} unreadable"));
-    }
-    if runs_program(&facts, &program) {
+    if starts_in_window(start, recorded.timestamp()) {
         Leftover::Running(record)
     } else {
         Leftover::Clear
@@ -182,23 +158,6 @@ fn classify(record: HolderRecord, table: &dyn ProcessTable) -> Leftover {
 fn starts_in_window(start: i64, recorded: i64) -> bool {
     // The process table rounds to whole seconds; allow one either side.
     (recorded - 1..=recorded + START_WINDOW_SECS).contains(&start)
-}
-
-/// The basename of the recorded command's program word.
-fn program_name(command: &str) -> Option<String> {
-    let first = shlex::split(command)
-        .and_then(|argv| argv.into_iter().next())
-        .or_else(|| command.split_whitespace().next().map(str::to_string))?;
-    let base = first.rsplit('/').next().unwrap_or(&first);
-    (!base.is_empty()).then(|| base.to_string())
-}
-
-/// Whether `facts` names `program`, by process name or executable.
-fn runs_program(facts: &ProcessFacts, program: &str) -> bool {
-    // Linux truncates a process name to 15 bytes.
-    let name_matches =
-        |name: &String| name == program || (name.len() >= 15 && program.starts_with(name.as_str()));
-    facts.name.as_ref().is_some_and(name_matches) || facts.exe_name.as_deref() == Some(program)
 }
 
 #[cfg(test)]
@@ -216,26 +175,15 @@ mod tests {
     /// A process table with scripted readings.
     struct Fake {
         alive: Result<bool, String>,
-        facts: Option<ProcessFacts>,
+        start: Option<Option<i64>>,
     }
 
     impl ProcessTable for Fake {
         fn alive(&self, _pid: u32) -> Result<bool, String> {
             self.alive.clone()
         }
-        fn facts(&self, _pid: u32) -> Option<ProcessFacts> {
-            self.facts.clone()
-        }
-    }
-
-    fn live_cargo(started: i64) -> Fake {
-        Fake {
-            alive: Ok(true),
-            facts: Some(ProcessFacts {
-                start_secs: Some(started),
-                name: Some("cargo".into()),
-                exe_name: Some("cargo".into()),
-            }),
+        fn start_secs(&self, _pid: u32) -> Option<Option<i64>> {
+            self.start
         }
     }
 
@@ -289,79 +237,33 @@ mod tests {
         assert!(!starts_in_window(100 + START_WINDOW_SECS + 1, 100));
     }
 
-    /// #8736: identity by process name or executable, including a name the
-    /// kernel truncated; another program at the pid frees the slot.
-    #[test]
-    fn a_live_pid_holds_the_slot_only_while_it_runs_the_recorded_program() {
-        let now = chrono::Utc::now().timestamp();
-        assert!(matches!(
-            classify_now(&live_cargo(now)),
-            Leftover::Running(_)
-        ));
-        let mut other = live_cargo(now);
-        other.facts = Some(ProcessFacts {
-            start_secs: Some(now),
-            name: Some("postgres".into()),
-            exe_name: Some("postgres".into()),
-        });
-        assert_eq!(classify_now(&other), Leftover::Clear);
-        let truncated = ProcessFacts {
-            start_secs: Some(now),
-            name: Some("cargo-nextest-w".into()),
-            exe_name: None,
-        };
-        let rec = record(
-            "/x/cargo-nextest-wrapper run",
-            Some(42),
-            chrono::Utc::now().to_rfc3339(),
-        );
-        let table = Fake {
-            alive: Ok(true),
-            facts: Some(truncated),
-        };
-        assert!(matches!(classify(rec, &table), Leftover::Running(_)));
-    }
-
     /// #8736 fail-open arm: the pid check itself failed.
     #[test]
     fn a_failed_pid_check_is_unknown() {
         let table = Fake {
             alive: Err("EINVAL".into()),
-            facts: None,
+            start: None,
         };
         assert!(matches!(classify_now(&table), Leftover::Unknown(e) if e.contains("EINVAL")));
     }
 
-    /// #8736 fail-open arm: a live build whose start time cannot be read.
+    /// #8736 fail-open arms: a live build whose start time cannot be read, or
+    /// that the process table does not list.
     #[test]
     fn an_unreadable_start_time_is_unknown() {
-        let mut table = live_cargo(0);
-        table.facts = Some(ProcessFacts {
-            start_secs: None,
-            ..table.facts.clone().expect("facts")
-        });
-        assert!(matches!(classify_now(&table), Leftover::Unknown(e) if e.contains("start time")));
+        let unreadable = Fake {
+            alive: Ok(true),
+            start: Some(None),
+        };
+        assert!(
+            matches!(classify_now(&unreadable), Leftover::Unknown(e) if e.contains("start time"))
+        );
         let absent = Fake {
             alive: Ok(true),
-            facts: None,
+            start: None,
         };
         assert!(
             matches!(classify_now(&absent), Leftover::Unknown(e) if e.contains("no process-table"))
         );
-    }
-
-    /// #8736 fail-open arm: a live build whose name and executable cannot be
-    /// read.
-    #[test]
-    fn an_unreadable_process_name_is_unknown() {
-        let table = Fake {
-            alive: Ok(true),
-            facts: Some(ProcessFacts {
-                start_secs: Some(chrono::Utc::now().timestamp()),
-                name: None,
-                exe_name: None,
-            }),
-        };
-        assert!(matches!(classify_now(&table), Leftover::Unknown(e) if e.contains("process name")));
     }
 }
