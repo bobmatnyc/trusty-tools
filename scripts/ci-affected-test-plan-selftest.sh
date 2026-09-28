@@ -80,6 +80,19 @@ if [ "$(field "$out" count)" = 3 ] && [ "$(field "$out" crates)" = "alpha beta g
   pass "mixed selection -> 3 crates, 3 legs, Tauri crate dropped"
 else fail "mixed selection: $out"; fi
 
+# 4b. tga and trusty-audit test in bobmatnyc/trusty-git-analytics: dropped,
+#     alone or mixed (owner ruling 2026-09-27).
+stub 0 tga alpha trusty-audit
+out="$(plan -- --files x)"
+if [ "$(field "$out" count)" = 1 ] && [ "$(field "$out" crates)" = "alpha" ]; then
+  pass "tga + trusty-audit dropped from a mixed selection"
+else fail "tga/trusty-audit mixed selection: $out"; fi
+stub 0 tga trusty-audit
+out="$(plan -- --files x)"
+if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'trusty-git-analytics'; then
+  pass "tga + trusty-audit only -> count=0"
+else fail "tga/trusty-audit-only selection: $out"; fi
+
 # 5. More crates than legs -> capped at 8, every crate exactly once.
 names=(c01 c02 c03 c04 c05 c06 c07 c08 c09 c10 c11 c12)
 stub 0 "${names[@]}"

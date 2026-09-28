@@ -301,7 +301,8 @@
 #   whatever the WARN lines disclosed. Exit 0 is also returned when check 5
 #   recorded a computed break: the publish is PERMITTED, not called safe, and
 #   the final summary lists every break entry. Nonzero = at least one check
-#   failed — DO NOT PUBLISH. 2 = usage error (bad arguments).
+#   failed — DO NOT PUBLISH. 2 = usage error (bad arguments), or the crate
+#   is `publish = false` and is not published from this repository.
 #
 # Test: checks 1-4 are exercised manually — they are bound to the network, the
 #   real crates.io registry, and the logged-in gh account, none of which a
@@ -464,6 +465,18 @@ PKG_NAME="$(grep -m1 -E '^name[[:space:]]*=[[:space:]]*"' "$MANIFEST" \
   | sed -E 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
 if [ -z "$PKG_NAME" ]; then
   echo "preflight-publish: ERROR: could not read 'name' from ${MANIFEST}" >&2
+  exit 2
+fi
+
+# A `publish = false` crate never reaches crates.io from this workspace, so no
+# check below has anything to guard. Refuse up front rather than report a
+# green preflight that `cargo publish` then rejects. tga and trusty-audit sit
+# here: they publish from bobmatnyc/trusty-git-analytics (owner ruling
+# 2026-09-27). Same predicate as release.yml's `preflight` job.
+if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "$MANIFEST"; then
+  echo "preflight-publish: ERROR: ${PKG_NAME} is publish = false in ${MANIFEST}" >&2
+  echo "  — it is not published from this repository. tga and trusty-audit publish" >&2
+  echo "  from https://github.com/bobmatnyc/trusty-git-analytics." >&2
   exit 2
 fi
 

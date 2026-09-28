@@ -1,5 +1,7 @@
 # trusty-audit
 
+Published from [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics); this copy is not published from trusty-tools.
+
 The auditor client. A client company receives it, runs it against their own
 codebases, and returns a report. It installs the pinned tools it needs
 (`tga`, `trusty-analyze`, `trusty-review`) and drives the audit workflow —

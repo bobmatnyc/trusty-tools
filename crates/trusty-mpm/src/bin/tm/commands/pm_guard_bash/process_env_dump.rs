@@ -17,12 +17,28 @@
 //! value. A segment naming the shape that does not lex fails CLOSED.
 //! `launchctl list [label]`, `pm2 ls` and `pm2 logs` print no environment and
 //! allow.
+//!
+//! Round 3 (#8756) adds three more shapes that print another process's
+//! environment: `ps` with the BSD `e` or the `-E` option (`ps eww`, `ps
+//! auxe`, `ps -Eww`; the dashed `-e` selects every process and allows), a
+//! read of a `/proc/<pid>/environ` path, and `pm2 get` / `pm2 conf` (pm2's
+//! module config, which holds module credentials). An `ssh` remote command
+//! that prints the remote environment is read by [`remote`].
 //! Test: `refuses_a_launchctl_environment_dump`,
 //! `refuses_a_pm2_environment_dump`, `allows_process_manager_status_queries`,
-//! `refuses_what_it_cannot_read`.
+//! `refuses_what_it_cannot_read`, `refuses_a_ps_environment_listing`,
+//! `refuses_a_proc_environ_read`, `refuses_a_pm2_module_config_print`,
+//! `refuses_a_remote_environment_dump_over_ssh`,
+//! `allows_routine_ps_pm2_and_ssh_forms`.
+
+#[path = "process_env_dump_remote.rs"]
+mod remote;
 
 use super::bash_tokens::tokenize;
 use super::split_shell_segments;
+
+/// Words whose absence lets a command skip the parse entirely.
+const MARKERS: &[&str] = &["launchctl", "pm2", "ps", "environ", "ssh"];
 
 /// `launchctl` subcommands whose output carries an environment (#8756):
 /// `print` shows a service's (and a GUI domain's) environment block,
@@ -33,6 +49,7 @@ const LAUNCHCTL_DUMP_VERBS: &[&str] = &["print", "dumpstate", "export"];
 /// `jlist`/`prettylist` print each `pm2_env`, `env` lists one process's
 /// variables, and `describe` (aliases `desc`, `info`, `show`) prints a
 /// "Divergent env variables" table.
+// #8756: `get` / `conf` / `config` print pm2's module config (module keys).
 const PM2_DUMP_VERBS: &[&str] = &[
     "jlist",
     "prettylist",
@@ -41,14 +58,43 @@ const PM2_DUMP_VERBS: &[&str] = &[
     "desc",
     "info",
     "show",
+    "get",
+    "conf",
+    "config",
 ];
 
-/// `Some(reason)` when `command` prints a launchd or pm2 job's environment.
+/// `ps` option letters that take a value, dashed (`-o fmt`) and BSD-style
+/// (`o fmt`), across macOS and procps.
+const PS_DASH_VALUE_OPTIONS: &str = "CGgMNOopqstUu";
+const PS_BSD_VALUE_OPTIONS: &str = "kNOopTtU";
+const PS_LONG_VALUE_OPTIONS: &[&str] = &[
+    "--cols",
+    "--columns",
+    "--format",
+    "--group",
+    "--Group",
+    "--lines",
+    "--pid",
+    "--ppid",
+    "--quick-pid",
+    "--rows",
+    "--sid",
+    "--sort",
+    "--tty",
+    "--user",
+    "--User",
+    "--width",
+];
+
+/// `Some(reason)` when `command` prints a managed or remote process's
+/// environment.
 ///
 /// Test: `refuses_a_launchctl_environment_dump`,
-/// `refuses_a_pm2_environment_dump`, `allows_process_manager_status_queries`.
+/// `refuses_a_pm2_environment_dump`, `allows_process_manager_status_queries`,
+/// `refuses_a_ps_environment_listing`, `refuses_a_proc_environ_read`,
+/// `refuses_a_remote_environment_dump_over_ssh`.
 pub(crate) fn evaluate_process_env_dump_command(command: &str) -> Option<String> {
-    if !command.contains("launchctl") && !command.contains("pm2") {
+    if !MARKERS.iter().any(|marker| command.contains(marker)) {
         return None;
     }
     split_shell_segments(command)
@@ -57,10 +103,15 @@ pub(crate) fn evaluate_process_env_dump_command(command: &str) -> Option<String>
         .then(deny_reason)
 }
 
+/// A program word's basename, without an `npx`-style `@version`.
+fn program_name(word: &str) -> &str {
+    let program = word.rsplit('/').next().unwrap_or(word);
+    program.split_once('@').map_or(program, |(name, _)| name)
+}
+
 /// The dump-verb table for a program word, if it names `launchctl` or `pm2`.
 fn dump_verbs(word: &str) -> Option<&'static [&'static str]> {
-    let program = word.rsplit('/').next().unwrap_or(word);
-    match program.split_once('@').map_or(program, |(name, _)| name) {
+    match program_name(word) {
         "launchctl" => Some(LAUNCHCTL_DUMP_VERBS),
         // `npx pm2@latest jlist` names the same CLI.
         "pm2" => Some(PM2_DUMP_VERBS),
@@ -77,15 +128,84 @@ fn segment_dumps_process_env(segment: &str) -> bool {
             .collect();
         return words
             .iter()
-            .any(|w| dump_verbs(w).is_some_and(|verbs| words.iter().any(|v| verbs.contains(v))));
+            .any(|w| dump_verbs(w).is_some_and(|verbs| words.iter().any(|v| verbs.contains(v))))
+            || argv_dumps_env(&approximate_argv(segment));
     };
+    argv_dumps_env(&argv)
+}
+
+/// `segment` cut on whitespace with quote and substitution syntax trimmed: the
+/// fail-closed reading of a segment that does not lex (#8756).
+fn approximate_argv(segment: &str) -> Vec<String> {
+    segment
+        .split_whitespace()
+        .map(|w| w.trim_matches(['\'', '"', '(', ')', '$', '`', '<', '>', ';']))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether an argv prints a process's environment: a `launchctl`/`pm2` dump
+/// verb, `ps` showing environments, a `/proc/<pid>/environ` path, or an `ssh`
+/// remote command that dumps one.
+fn argv_dumps_env(argv: &[String]) -> bool {
     argv.iter().enumerate().any(|(at, word)| {
-        dump_verbs(word).is_some_and(|verbs| {
-            subcommands(&argv[at + 1..])
-                .into_iter()
-                .any(|sub| verbs.contains(&sub))
-        })
+        let rest = &argv[at + 1..];
+        dump_verbs(word)
+            .is_some_and(|verbs| subcommands(rest).into_iter().any(|sub| verbs.contains(&sub)))
+            // #8756: `ps e`/`ps -E`, `/proc/<pid>/environ`, `ssh host env`.
+            || (program_name(word) == "ps" && ps_shows_environment(rest))
+            || names_a_process_environ(word)
+            || (program_name(word) == "ssh" && remote::ssh_dumps_remote_env(rest))
     })
+}
+
+/// Whether `ps <args>` prints each process's environment (#8756).
+///
+/// What: the dashed `-E` (macOS) or a BSD-style option word — letters with no
+/// dash — holding `e` (macOS and procps) shows it; the dashed `-e` selects
+/// every process and does not. An option that takes a value (`-o user`, `-p
+/// 12`, `U steve`) consumes it, so a format or user name is never read as
+/// options.
+fn ps_shows_environment(args: &[String]) -> bool {
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        if arg.starts_with("--") {
+            i += usize::from(PS_LONG_VALUE_OPTIONS.contains(&arg.as_str()));
+            continue;
+        }
+        let (cluster, env, values) = match arg.strip_prefix('-') {
+            Some(cluster) => (cluster, 'E', PS_DASH_VALUE_OPTIONS),
+            None if arg.bytes().all(|b| b.is_ascii_alphabetic()) => {
+                (arg.as_str(), 'e', PS_BSD_VALUE_OPTIONS)
+            }
+            None => continue,
+        };
+        for (at, c) in cluster.char_indices() {
+            if c == env {
+                return true;
+            }
+            if values.contains(c) {
+                i += usize::from(at + 1 == cluster.len());
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `word` names a `/proc/<pid>/environ` file, or a glob over a
+/// `/proc/<pid>/` directory that can select one (#8756).
+fn names_a_process_environ(word: &str) -> bool {
+    let Some(at) = word.find("/proc/") else {
+        return false;
+    };
+    if word.chars().any(char::is_whitespace) {
+        return false; // prose, such as a commit message naming the path
+    }
+    let parts: Vec<&str> = word[at..].split('/').filter(|p| !p.is_empty()).collect();
+    let last = parts.last().copied().unwrap_or_default();
+    parts.len() >= 3 && (last == "environ" || last.contains(['*', '?', '[']))
 }
 
 /// Every word that can be the subcommand of `[options] <subcommand> …`.
@@ -117,12 +237,14 @@ fn subcommands(args: &[String]) -> Vec<&str> {
 
 /// The refusal, naming the status queries that print no environment.
 fn deny_reason() -> String {
-    "a process-manager query that prints a managed job's environment (`launchctl print`, \
-     `launchctl dumpstate`, `pm2 jlist`, `pm2 prettylist`, `pm2 env`, `pm2 describe|show|info`) \
-     is refused (issue #8756) — a launchd job's EnvironmentVariables and a pm2 process's env \
-     carry its API keys, so the dump prints them into the transcript, and a `| jq` or `| grep` \
-     filter after it cannot be proven to drop every value. For status, use `launchctl list \
-     <label>` (PID and LastExitStatus) or `pm2 ls` / `pm2 pid <name>`."
+    "a query that prints another process's environment (`launchctl print`, `launchctl \
+     dumpstate`, `pm2 jlist|prettylist|env|describe|show|info`, `pm2 get|conf`, `ps eww` / \
+     `ps -E`, a `/proc/<pid>/environ` read, or `ssh <host> env|printenv`) is refused (issue \
+     #8756) — a launchd job's EnvironmentVariables, a pm2 process's env or module config, and \
+     a server's environment carry its API keys, so the dump prints them into the transcript, \
+     and a `| jq` or `| grep` filter after it cannot be proven to drop every value. For \
+     status, use `launchctl list <label>` (PID and LastExitStatus), `pm2 ls` / `pm2 pid \
+     <name>`, `ps aux` / `ps -o pid,command`, or `ssh <host> <status command>`."
         .to_string()
 }
 
