@@ -133,6 +133,10 @@
 #     a source change and demanded a changelog fragment for a file that is, by
 #     construction, test input. This PR's own regeneration of
 #     crates/trusty-mpm/src/core/testdata/pm-prompt-*.md tripped exactly that.
+#   - the path is instruction content ADDED or MODIFIED under the Cargo-inert
+#     asset roots (is_inert_instruction_asset in lib/source_class.sh, the same
+#     list scripts/detect-docs-only.sh reads). Owner ruling 2026-09-27: these
+#     assets count as docs. A DELETE or type change there is still source.
 #
 #   There is deliberately NO "trivial change" escape hatch: adding a fragment is
 #   one new file, and the rule it enforces has never had one.
@@ -296,7 +300,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h | --help)
       # Through the author-mode notes — keep this range in step with the header.
-      sed -n '2,163p' "$0" >&2
+      sed -n '2,167p' "$0" >&2
       exit 0
       ;;
     *)
@@ -473,10 +477,26 @@ if [[ "$MODE" == "staged" ]]; then
   PRESENT="$(printf '%s\n%s\n' \
     "$(git diff --cached --name-only --no-renames --diff-filter=d "$MERGE_BASE")" "$UNTRACKED" |
     grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
+  # An untracked path is an add.
+  ADDED_OR_MODIFIED="$(printf '%s\n%s\n' \
+    "$(git diff --cached --name-only --no-renames --diff-filter=AM "$MERGE_BASE")" "$UNTRACKED" |
+    grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
 else
   CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
   PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
+  ADDED_OR_MODIFIED="$(git diff --name-only --no-renames --diff-filter=AM "$MERGE_BASE" HEAD)"
 fi
+
+# Instruction assets whose add or modify is Cargo-inert need no fragment. The
+# path list is is_inert_instruction_asset in lib/source_class.sh, the one
+# scripts/detect-docs-only.sh reads, so the two verdicts cannot drift apart.
+INERT_ASSETS=""
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  if is_inert_instruction_asset M "$path"; then
+    INERT_ASSETS="${INERT_ASSETS}${path}"$'\n'
+  fi
+done <<<"$ADDED_OR_MODIFIED"
 
 # #4618: the scan floor. "No changes at all against the base" used to exit 0 as
 # "nothing to check" — indistinguishable from a gate that examined the whole PR
@@ -817,6 +837,7 @@ while IFS= read -r path; do
   case "$path" in
     crates/*/src/*)
       is_test_path "$path" && continue
+      grep -Fxq -- "$path" <<<"$INERT_ASSETS" && continue
       # #4576: attribute by structure. A path this arm SELECTED but cannot
       # attribute is reported, never dropped — the silent drop is what made the
       # gate report success over a whole nested source tree.
