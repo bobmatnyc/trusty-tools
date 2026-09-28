@@ -565,13 +565,14 @@ jobs:
   # once and never rebuilds it, so a link that ships broken stays broken for
   # that version.
   #
-  # Covered by `CI gate` (#7288): a red, cancelled or skipped-without-cause
-  # `rustdoc-links` fails the gate exactly like any other covered context —
-  # see `ci-gate`'s `needs:` and the CONTEXTS table in
-  # scripts/ci-gate-verdict.sh. #8835 merged with this check red because
-  # nothing gated on it; the open-PR-backlog concern that previously kept it
-  # out (a PR cut before this row existed cannot retroactively produce this
-  # check run) no longer applies once the backlog is drained.
+  # Covered by `CI gate` (#7288): `rustdoc-links` is now in `ci-gate`'s
+  # `needs:` and the CONTEXTS table in scripts/ci-gate-verdict.sh, so a red,
+  # cancelled or skipped-without-cause result fails the gate like any other
+  # covered context. #8835 merged with this check red because nothing gated
+  # on it. This job already ran unconditionally on every PR (#5973); this
+  # change only wires its existing result into the gate. An open PR keeps
+  # its current gate result until it gets a new commit, which then picks up
+  # this row.
   #
   # docs_only short-circuit and `!cancelled()` for the same reasons the fmt and
   # clippy jobs carry them: a Cargo-inert PR pays runner startup and nothing
