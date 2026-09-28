@@ -636,3 +636,5 @@ After implementing quick wins, verify improvements:
 ---
 
 **Remember:** Start with 1-hour optimizations for immediate wins. These give the best ROI and build momentum for larger optimizations.
+
+<!-- CI gate probe; PR not for merge -->
