@@ -1416,7 +1416,7 @@ else
   #     the assertion is on the normalised record, not on total output.)
   main_decl "$DECL_OK"
   IN_FILE="${ACC}/in-file.out"
-  sed 's# in /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes# in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes#' \
+  sed 's# in /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes# in file /Users/example/.cargo/registry/src/index.crates.io-0000000000000000/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes#' \
     "$ONE" > "$IN_FILE"
   ci_enforce "(n) previously-in-file location dropped from the record" "$IN_FILE" trusty-mpm - 0 \
     "SemVer: ACCEPTED BREAK" - \
