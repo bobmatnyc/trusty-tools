@@ -10,7 +10,9 @@
 # whole product — a parity check that returns 0 unconditionally is exactly the
 # state the release path was already in on 2026-08-11, when tga-v2.17.0 was cut
 # at 246e4ca2 and the crate published from 7d5cf82e1 with every gate green. So
-# this job runs the self-test's fixtures, not the gate.
+# this job runs the self-test's fixtures, not the gate. (tga has left this
+# workspace; case 11 replays that commit through trusty-review-v0.15.0, cut at
+# the same 246e4ca2.)
 #
 # Pure git + shell, no Rust toolchain, so it stays a fast standalone job.
 #
@@ -53,7 +55,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 brings tags with it, which case 11 of the self-test uses
-      # to run the gate against the real tga-v2.17.0. That case self-skips when
+      # to run the gate against the real trusty-review-v0.15.0. That case self-skips when
       # the tag is absent, so a shallow clone degrades it to a skip rather than
       # a false failure — the synthetic cases carry the coverage either way.
       - uses: actions/checkout@v5

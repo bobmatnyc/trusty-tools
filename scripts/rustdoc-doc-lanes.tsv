@@ -57,7 +57,6 @@
 # bundled-ort coexist (only load-dynamic and cuda conflict with bundled-ort at
 # the ort-sys level), so the single lane carries both backends.
 # ---------------------------------------------------------------------------
-LANE	features	tga/bedrock
 LANE	features	trusty-analyze/http-server,trusty-analyze/ner,trusty-analyze/review
 LANE	features	trusty-common/axum-server,trusty-common/bedrock,trusty-common/bedrock-client,trusty-common/blocking-http,trusty-common/bm25,trusty-common/bug-capture,trusty-common/catchup,trusty-common/chat-attachments
 LANE	features	trusty-common/cli-help,trusty-common/codex-config,trusty-common/config-cli,trusty-common/console-metrics,trusty-common/crate-config,trusty-common/credentials,trusty-common/daemon-token

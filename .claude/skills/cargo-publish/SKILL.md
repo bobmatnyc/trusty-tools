@@ -531,7 +531,7 @@ grep "^name = " crates/<dir>/Cargo.toml
 Most match (`crates/trusty-search/` → `-p trusty-search`).
 
 **Exceptions** (always verify `Cargo.toml`):
-- `crates/trusty-git-analytics/` → `name = "tga"` → `-p tga`
+- `crates/trusty-agents/ui/src-tauri/` → `name = "trusty-agents-ui"` → `-p trusty-agents-ui`
 
 If `cargo -p <name>` returns "package not found":
 ```bash

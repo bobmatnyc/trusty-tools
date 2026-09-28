@@ -213,7 +213,7 @@ to satisfy it.
 **What happened on 2026-08-11.** `tga-v2.17.0` points at `246e4ca2`; the
 published crate's `.cargo_vcs_info.json` records `7d5cf82e1`, two
 `trusty-search` commits later. Every gate was green.
-`git diff 246e4ca2 7d5cf82e1 -- crates/trusty-git-analytics/` is empty, so that
+A `git diff 246e4ca2 7d5cf82e1` over the crate's directory is empty, so that
 tag misrepresents nothing — luck, not design. Had any intervening commit
 touched the crate, `git checkout tga-v2.17.0` would show a tree that is not
 what shipped. `trusty-review-v0.15.0`, cut at the same `246e4ca2`, is
