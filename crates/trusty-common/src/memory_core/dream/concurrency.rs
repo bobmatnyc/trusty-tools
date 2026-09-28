@@ -127,7 +127,7 @@ pub fn dream_cycles_in_flight() -> usize {
 /// [`dream_cycles_in_flight`] almost always misses it. The high-water mark is
 /// the only reading that survives long enough to be checked.
 /// What: monotonic in production; never decreases. `0` before the first
-/// cycle. The test-only [`reset_dream_cycles_peak_in_flight_for_test`] is the
+/// cycle. The test-only `reset_dream_cycles_peak_in_flight_for_test` is the
 /// one exception, scoped to `#[cfg(test)]` builds.
 /// Test: `the_in_flight_gauge_counts_a_held_cycle`.
 pub fn dream_cycles_peak_in_flight() -> usize {
