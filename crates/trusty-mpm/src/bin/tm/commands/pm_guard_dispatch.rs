@@ -476,14 +476,21 @@ pub(crate) async fn live_shared_tree_writers(
 /// for an ANSWERED reply. Every other arm is `Err(detail)`, carrying the
 /// daemon-side reason for the deny text.
 /// Test: `pm_guard_denies_version_control_a_removal_when_the_daemon_is_unreachable`
-/// in `tests/tm_hook_pm_guard.rs`.
+/// in `tests/tm_hook_pm_guard.rs`;
+/// `an_unbuildable_client_is_unavailable_and_the_owner_query_denies`.
 pub(crate) async fn live_shared_tree_writers_or_deny(
     url: &str,
     session_id: &str,
     cwd: &Path,
     payload: &Value,
 ) -> Result<Vec<String>, String> {
-    match post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await {
+    owners_or_deny(post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await)
+}
+
+/// #8492: the reply-to-verdict step of [`live_shared_tree_writers_or_deny`],
+/// split so a test can feed it the reply of an unbuildable client.
+fn owners_or_deny(reply: SharedTreeReply) -> Result<Vec<String>, String> {
+    match reply {
         SharedTreeReply::Answered(body) => Ok(writers_in(&body)),
         SharedTreeReply::Unavailable(detail) | SharedTreeReply::Unanswered(detail) => Err(detail),
     }
@@ -771,26 +778,74 @@ pub(crate) async fn post_shared_tree(
     payload: &Value,
     route: &str,
 ) -> SharedTreeReply {
+    post_shared_tree_with(shared_tree_client, url, session_id, cwd, payload, route).await
+}
+
+/// The shared-tree client: 500 ms to connect, 2 s for the whole request.
+fn shared_tree_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+}
+
+/// [`post_shared_tree`] with the client constructor supplied.
+///
+/// Why: #8492 — the constructor is the synchronous step a caller's deadline
+/// must be able to preempt, and only a supplied one can be made slow on demand.
+/// What: runs `build` on a detached thread and awaits it through a oneshot, then
+/// POSTs as [`post_shared_tree`]. Nothing joins that thread, so process exit
+/// never waits on a build a deadline gave up on. A build error, or a thread
+/// that cannot start, is [`SharedTreeReply::Unavailable`]; a build that panics
+/// panics here.
+/// Test: `a_deadline_fires_while_the_client_build_is_still_running`,
+/// `an_unbuildable_client_is_unavailable_and_the_owner_query_denies`,
+/// `a_panicking_client_build_panics_the_caller`.
+async fn post_shared_tree_with<B>(
+    build: B,
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+    route: &str,
+) -> SharedTreeReply
+where
+    B: FnOnce() -> reqwest::Result<reqwest::Client> + Send + 'static,
+{
     if session_id.is_empty() {
         return SharedTreeReply::Unavailable(
             "the hook payload carries no session id, so no session's delegations can be addressed"
                 .to_string(),
         );
     }
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        // #5923: a client that cannot be built never reached the network, and
-        // no retry in this process would change that — the guard is off, not
-        // uncertain.
-        Err(error) => {
+    // #8492: built on a detached thread, not inside this poll, so a caller's
+    // deadline (`tokio::time::timeout`) can fire while the build still runs. Not
+    // the blocking pool: runtime drop joins that pool, so the process could not
+    // exit before the build returned and the deny could meet the 5 s hook kill.
+    let (sender, built) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pm-guard-shared-tree-client".into())
+        .spawn(move || {
+            // A closed receiver means the caller's deadline already decided.
+            let _ = sender.send(build());
+        });
+    // #5923: a client that cannot be built never reached the network, and no
+    // retry in this process would change that — the guard is off, not uncertain.
+    if let Err(error) = spawned {
+        return SharedTreeReply::Unavailable(format!(
+            "the guard's HTTP client build thread could not be started: {error}"
+        ));
+    }
+    let client = match built.await {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             return SharedTreeReply::Unavailable(format!(
                 "the guard's HTTP client could not be built: {error}"
             ));
         }
+        // #8492: the sender only drops unsent when the build panicked, and a
+        // panicking build panics here, exactly as the inline build did.
+        Err(_) => panic!("the guard's HTTP client build panicked"),
     };
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
@@ -1327,21 +1382,116 @@ mod tests {
         assert!(writers_of(claim_against("http://127.0.0.1:1").await).is_empty());
     }
 
+    /// A bound listener that never accepts, and its base URL (#8492).
+    ///
+    /// Why: a dial completes its handshake into the kernel's accept queue with
+    /// no `accept` call, so whether anything dialled is a fact read afterwards
+    /// by [`was_dialled`] — not a stopwatch, which loses the race under load.
+    fn unaccepted_listener() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        (listener, url)
+    }
+
+    /// Did anything connect to `listener`? A queued connection accepts at once.
+    fn was_dialled(listener: &std::net::TcpListener) -> bool {
+        listener.set_nonblocking(true).expect("nonblocking");
+        listener.accept().is_ok()
+    }
+
     #[tokio::test]
     async fn claim_shared_tree_is_empty_without_a_session_id() {
         // A hook payload with no `session_id` cannot address a session's
-        // delegations at all. Fail open before dialling anything — an unroutable
-        // URL would cost a real (bounded) wait if this branch were removed.
-        let started = std::time::Instant::now();
-        let claim = claim_shared_tree(
-            "http://127.0.0.1:1",
-            "",
+        // delegations at all. Fail open before dialling anything.
+        let (listener, url) = unaccepted_listener();
+        let claim = claim_shared_tree(&url, "", Path::new("/repo"), &serde_json::json!({})).await;
+        // #8492: whether the daemon was dialled, not how long the call took.
+        assert!(!was_dialled(&listener), "no session id must not dial");
+        assert!(writers_of(claim).is_empty());
+    }
+
+    /// 🔴 REGRESSION (#8492): the client is built off the calling runtime, so a
+    /// caller's deadline fires while a slow build is still running. On
+    /// origin/main the build ran inside the first poll and held the runtime
+    /// thread until it returned, so no deadline could fire before it.
+    #[tokio::test]
+    async fn a_deadline_fires_while_the_client_build_is_still_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let built = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&built);
+        let slow_build = move || {
+            // Released only after the deadline decides; the bound only ends a
+            // run where the build held the runtime and nothing could release it.
+            let _ = gate.recv_timeout(std::time::Duration::from_secs(10));
+            flag.store(true, Ordering::SeqCst);
+            shared_tree_client()
+        };
+        let (_listener, url) = unaccepted_listener();
+        let payload = serde_json::json!({});
+        let post = post_shared_tree_with(
+            slow_build,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &payload,
+            SHARED_TREE_ROUTE,
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), post).await;
+        let built_before_the_deadline = built.load(Ordering::SeqCst);
+        let _ = release.send(());
+        assert!(
+            !built_before_the_deadline,
+            "the deadline fired only after the client build returned: the build held the runtime"
+        );
+        assert!(outcome.is_err(), "the caller's deadline must decide");
+    }
+
+    /// 🔴 REGRESSION (#8492): a client that cannot be built is `Unavailable`,
+    /// and the ADR-0057 owner query denies on it. An arm that read the build
+    /// error as an empty answer would tell the removal re-check "no owners".
+    #[tokio::test]
+    async fn an_unbuildable_client_is_unavailable_and_the_owner_query_denies() {
+        // reqwest rejects an unterminated IPv6 host, so the build fails.
+        let unbuildable = || {
+            reqwest::Proxy::all("http://[::1")
+                .and_then(|proxy| reqwest::Client::builder().proxy(proxy).build())
+        };
+        let (listener, url) = unaccepted_listener();
+        let reply = post_shared_tree_with(
+            unbuildable,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
             &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
         )
         .await;
-        assert!(writers_of(claim).is_empty());
-        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+        assert!(!was_dialled(&listener), "an unbuilt client must not dial");
+        let SharedTreeReply::Unavailable(detail) = &reply else {
+            panic!("a build error must be Unavailable");
+        };
+        assert!(detail.contains("could not be built"), "{detail}");
+        let denied = owners_or_deny(reply).expect_err("the owner query must deny");
+        assert!(denied.contains("could not be built"), "{denied}");
+    }
+
+    /// #8492: a build that panics on its detached thread still panics the
+    /// caller, as the inline build did, rather than reading as any reply.
+    #[tokio::test]
+    #[should_panic(expected = "client build panicked")]
+    async fn a_panicking_client_build_panics_the_caller() {
+        let panicking = || -> reqwest::Result<reqwest::Client> { panic!("build blew up") };
+        let (_listener, url) = unaccepted_listener();
+        let _ = post_shared_tree_with(
+            panicking,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1625,22 +1775,22 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_never_calls_the_daemon_for_a_non_dispatch_tool() {
-        // An unroutable URL would cost a real (bounded) wait if it were dialled;
-        // returning instantly proves the classify-first ordering holds.
+        // Classify first, ask second: a non-dispatch tool never reaches the
+        // daemon. #8492: proven by the listener's accept queue, not a stopwatch.
+        let (listener, url) = unaccepted_listener();
         let payload = serde_json::json!({"cwd": "/repo"});
-        let started = std::time::Instant::now();
         let verdict = evaluate(
-            "http://127.0.0.1:1",
+            &url,
             &payload,
             "Read",
             Some(&input("rust-engineer", None)),
             "11111111-1111-1111-1111-111111111111",
         )
         .await;
-        assert_eq!(verdict, None);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(400),
+            !was_dialled(&listener),
             "the daemon must not be dialled for a non-dispatch tool"
         );
+        assert_eq!(verdict, None);
     }
 }
