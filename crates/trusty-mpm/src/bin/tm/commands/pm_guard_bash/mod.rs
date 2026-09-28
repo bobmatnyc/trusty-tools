@@ -83,6 +83,8 @@ mod shell_lex;
 // #8756: one substitution scanner for the forbidden-verb and secret rules.
 mod substitutions;
 mod worktree_remove;
+// #8849: the removal guard's ancestry route for a HEAD behind its merged head.
+mod worktree_remove_ancestry;
 mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 // #8730: the files a command writes — `tee`, substitution and subshell bodies.

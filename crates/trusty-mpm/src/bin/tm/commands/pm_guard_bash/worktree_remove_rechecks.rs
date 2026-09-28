@@ -125,6 +125,11 @@
 //! answered with no match. An unresolvable HEAD or an unanswered search still
 //! denies without asking.
 //!
+//! **A HEAD behind the merged pull request's head is inside what merged
+//! (#8849).** Short of an exact head match, `worktree_remove_ancestry` grants
+//! when HEAD is an ancestor of that head and the merge commit is on the
+//! refreshed base; otherwise its reason rides on [`residue_deny`]'s refusal.
+//!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
 //! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
@@ -173,6 +178,7 @@
 
 use std::path::Path;
 
+use super::worktree_remove_ancestry::{MergedHead, head_inside_merged_pr};
 use trusty_mpm::core::worktree_landed_history::ContentOnBase;
 use trusty_mpm::core::worktree_removal_facts::{
     MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
@@ -436,6 +442,19 @@ fn landing_rechecks(
     if landed.is_own && head_is_the_merged_pr_head(target, &landed, probe) {
         return None;
     }
+    // #8849: a HEAD BEHIND that head — the earlier round of a branch whose last
+    // commits landed on `-rN` — is inside what merged, once the merge commit is
+    // proven on the refreshed base. Own or round-sibling alike: the proof is
+    // ancestry, and the name only found the pull request.
+    let merged = MergedHead {
+        pr_head: &landed.head_sha,
+        merge_commit: &landed.merge_commit,
+        base_ref: &landed.base_ref,
+    };
+    let ancestry_note = match head_inside_merged_pr(target, &merged, local_only.is_ok(), probe) {
+        Ok(()) => return None,
+        Err(note) => note,
+    };
     let ahead = matches!(upstream, UpstreamComparison::Ahead(n) if n > 0);
     // #8665: "own PR merged, not ahead" is no longer a grant on its own. The
     // merge deleted the remote branch, so a commit made here AFTER it is on no
@@ -450,6 +469,7 @@ fn landing_rechecks(
         after_merge = Some(after);
     }
     residue_deny(target, &branch, &landed, upstream, after_merge, probe)
+        .map(|deny| format!("{deny}{ancestry_note}"))
 }
 
 /// Commits on HEAD that the merged pull request did not carry and no `origin`
@@ -815,6 +835,9 @@ struct Landed {
     /// when GitHub named none, which never grants — see
     /// [`head_is_the_merged_pr_head`].
     head_sha: String,
+    /// That pull request's merge commit (#8849). Empty when GitHub named none,
+    /// which never grants on the ancestry route.
+    merge_commit: String,
 }
 
 /// Read the confirmed pull request's base, or deny when it carries none.
@@ -852,6 +875,8 @@ fn base_of(
         // #7958: carried, never required — a row without one simply cannot
         // grant on the head-sha route.
         head_sha: lookup.head_sha.trim().to_string(),
+        // #8849: likewise for the ancestry route.
+        merge_commit: lookup.merge_commit.trim().to_string(),
     })
 }
 
