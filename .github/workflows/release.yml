@@ -430,7 +430,9 @@ jobs:
             AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-mpm" ]]; then
-            # Binaries: tm, trusty-mpm
+            # Binaries: tm, trusty-mpm. `tm` is the one full CLI; `trusty-mpm` is a
+            # std-only alias that execs the `tm` beside it, so both must ship
+            # together (owner ruling 2026-09-27).
             # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm,
             # plus shim binaries not shipped in the distribution (trusty-mpmd, trusty-mpm-tui,
             # trusty-mpm-telegram) and Tauri GUI (trusty-mpm-gui, excluded — needs webview).
