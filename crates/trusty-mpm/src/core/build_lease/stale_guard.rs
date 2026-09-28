@@ -394,8 +394,16 @@ mod tests {
         // SAFETY: `held` owns a valid descriptor.
         assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
         assert!(cargo_lock_held(slot.path()), "a held lock");
+        // #8850: a child another test thread spawns holds a copy of this open
+        // file description until its exec, so a bare close can leave the flock
+        // held. The clone stands in for that copy; `LOCK_UN` releases the lock
+        // on the description itself, as `slots::unlock` does in production.
+        let inherited = held.try_clone().expect("dup");
+        // SAFETY: `held` owns a valid descriptor.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) }, 0);
         drop(held);
         assert!(!cargo_lock_held(slot.path()), "released");
+        drop(inherited);
     }
 
     #[test]
