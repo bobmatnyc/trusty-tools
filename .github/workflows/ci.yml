@@ -268,6 +268,14 @@ jobs:
       - name: Crate-relevance selftest (#7063)
         run: bash scripts/ci-crate-relevance-selftest.sh
 
+      # #8716: the rustdoc-links job's scope decision and the gate's own
+      # fail-closed arms. Neither needs a doc build; the gate's selftest scores
+      # captured cargo streams. It ran in no workflow before this step.
+      - name: Rustdoc scope + link-gate selftests (#8716)
+        run: |
+          bash scripts/rustdoc-links-scope-selftest.sh
+          bash scripts/check_rustdoc_links_selftest.sh
+
       # #7424: the startup-context size gate. It is a STEP of this existing job
       # rather than a job of its own — promoting a new required context wedges
       # every open PR that predates it (#5962), and this job already runs on
@@ -580,6 +588,13 @@ jobs:
   # skip. A `.rs` doc-comment edit is NOT docs-only — detect-docs-only.sh
   # classifies any `.rs` path as Cargo-relevant — so the change class this gate
   # exists for always runs it.
+  #
+  # #8716: except on a release candidate. A changelog-only release PR is
+  # Cargo-inert, so it skipped this job, and the trusty-mpm 1.7.8 cut met three
+  # broken links at the publish boundary. scripts/rustdoc-links-scope.sh picks
+  # the scope: `release` always runs and adds `--require-published` (every
+  # publishable crate in `cargo metadata` must be documented), `ordinary` runs
+  # as before, `skip` is the old docs_only short-circuit.
   # --------------------------------------------------------------------------
   rustdoc-links:
     name: Rustdoc intra-doc links
@@ -590,12 +605,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Title, branch and commit message are untrusted text: env only, never
+      # interpolated into the script body.
+      - name: Decide the rustdoc scope (#8716)
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: bash scripts/rustdoc-links-scope.sh
+
       - name: Free disk space
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         uses: dtolnay/rust-toolchain@stable
 
       # `libdbus-1-dev` is this job's alone (#7466). The `features` lane enables
@@ -608,7 +635,7 @@ jobs:
       # nine LANE-NOT-EXAMINED rows. No other job enables `keyring-store` — no
       # crate depends on it — so no other apt list needs this.
       - name: Install system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -619,7 +646,7 @@ jobs:
       # Its own cache key, for the same reason every other job has one: a doc
       # build's target dir is not interchangeable with clippy's or test's.
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         uses: Swatinem/rust-cache@v2
         with:
           key: rustdoc-links
@@ -640,8 +667,15 @@ jobs:
       # (#7633). Read that line, not the SUMMARY above it, when triaging a run
       # from the log.
       - name: cargo doc + broken-link ratchet
-        if: needs.changes.outputs.docs_only != 'true'
-        run: bash scripts/check_rustdoc_links.sh
+        if: steps.scope.outputs.scope != 'skip'
+        env:
+          SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$SCOPE" = "release" ]; then
+            bash scripts/check_rustdoc_links.sh --require-published
+          else
+            bash scripts/check_rustdoc_links.sh
+          fi
 
   # --------------------------------------------------------------------------
   # test-shard: run all unit + integration tests (stable, no --include-ignored),

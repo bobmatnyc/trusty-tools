@@ -333,8 +333,12 @@ jobs:
       # here — 1 (a link regressed), 3 (no verdict computable) and 4 (#7537: the
       # run examined fewer doc units than the workspace declares) all fail the
       # step. The last line of the output names which, as a `VERDICT` row.
+      # `--require-published` (#8716): every crate `cargo metadata` calls
+      # publishable must have a doc unit this run examined, so a published
+      # crate added to the gate's excluded set fails here instead of shipping
+      # undocumented.
       - name: cargo doc + broken-link ratchet
-        run: bash scripts/check_rustdoc_links.sh
+        run: bash scripts/check_rustdoc_links.sh --require-published
 
   # ==========================================================================
   # audit — GATE 2. Known-vulnerable dependencies.
