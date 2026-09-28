@@ -1175,3 +1175,136 @@ fn allows_the_8677_neighbours() {
         ],
     );
 }
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 1): a non-identifier
+/// assignment (`tmp+=`, `tmp[0]=`) rebinds a `$(mktemp)` name. Each row was
+/// allowed at d8d2ec909.
+#[test]
+fn denies_a_temp_name_rebound_by_a_non_identifier_assignment_8677() {
+    check(
+        true,
+        &[
+            "tmp=$(mktemp -d); tmp+=/../../../../../../../../dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); tmp[0]=/dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 2): a `$(mktemp)` name
+/// rebound through quoting, a function, a computed name, or a symlink planted
+/// on its file. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_a_temp_name_rebound_out_of_sight_8677() {
+    check(
+        true,
+        &[
+            "tmp=$(mktemp); declare t\\mp=/dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); read t''mp <<< /dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            "f() { tmp=/dev/stdout; }; tmp=$(mktemp); f; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); trap 't\\mp=/dev/stdout' DEBUG; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); ln -sf /dev/stdout \"$tmp\"; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); mv -f fake-link \"$tmp\"; gcloud auth print-access-token > \"$tmp\"",
+            "n=t; tmp=$(mktemp); printf -v \"${n}mp\" %s /dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); read t{m,}p <<< /dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 3): `security -i` behind a
+/// wrapper the guard does not know. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_interactive_security_behind_an_unknown_wrapper_8677() {
+    check(
+        true,
+        &[
+            "echo 'find-generic-password -s s -w' | arch -arm64 security -i",
+            "echo 'find-generic-password -s s -w' | script -q /dev/null security -i",
+            "echo 'find-generic-password -s s -w' | launchctl asuser 501 security -i",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 4): APFS matches `/DEV` to
+/// `/dev`. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_a_device_path_in_another_case_8677() {
+    check(
+        true,
+        &[
+            "gcloud auth print-access-token > /DEV/stdout",
+            "gcloud auth print-access-token > /Dev/Tty",
+            "gcloud auth print-access-token | tee /DEV/STDERR >/dev/null",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 5): a relative target whose
+/// directory the guard cannot know. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_a_relative_target_in_an_unknown_directory_8677() {
+    check(
+        true,
+        &[
+            "cd /dev && gcloud auth print-access-token > stdout",
+            "cd /dev; gcloud auth print-access-token > fake-out",
+            "pushd /dev/fd && gcloud auth print-access-token > 1",
+            "cd /dev && cd /tmp && gcloud auth print-access-token > ~-/stdout",
+            "gcloud auth print-access-token > ~+/stdout",
+            "gcloud auth print-access-token > stdout",
+            "gcloud auth print-access-token > fd/1",
+            "gcloud auth print-access-token > tty",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 6): a `tee`/`dd` file operand
+/// chosen at run time. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_a_tee_operand_chosen_at_run_time_8677() {
+    check(
+        true,
+        &[
+            "OUT=/dev/stdout; gcloud auth print-access-token | tee \"$OUT\" >/dev/null",
+            "gcloud auth print-access-token | tee -a \"$OUT\" >/dev/null",
+            "gcloud auth print-access-token | dd of=\"$OUT\" >/dev/null 2>&1",
+            "cd /dev; gcloud auth print-access-token | tee stdout >/dev/null",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677 review round 2, finding 7): a sibling CLI's
+/// subcommand chosen at run time. Each row was allowed at d8d2ec909.
+#[test]
+fn denies_a_cli_subcommand_chosen_at_run_time_8677() {
+    check(
+        true,
+        &[
+            "gh auth $(echo token)",
+            "gh $(echo auth) token",
+            "gh auth `echo token`",
+            "op $(echo read) op://fake-vault/fake-item/password",
+            "aws configure $(echo get) aws_secret_access_key",
+        ],
+    );
+}
+
+/// #8677 review round 2: the nearest benign forms stay allowed.
+#[test]
+fn allows_the_8677_round_two_neighbours() {
+    check(
+        false,
+        &[
+            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); gcloud auth print-access-token | tee \"$tmp\" >/dev/null",
+            "gcloud auth print-access-token | tee /tmp/fake-out >/dev/null",
+            "gcloud auth print-access-token | tee -a fake-out >/dev/null",
+            "gcloud auth print-access-token > ./fake-token.txt",
+            "grep security -i notes.txt",
+            "rg security -i notes.txt",
+            "git commit -m 'fix: never pipe to security -i or run gh auth $(echo token)'",
+            "gh pr create --title fake --body 'use gh auth token, not security -i'",
+            "GH_TOKEN=$(gh auth token) gh pr view \"$N\"",
+            "X=$(op read \"op://fake-vault/$ITEM/password\")",
+        ],
+    );
+}

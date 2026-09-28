@@ -13,3 +13,13 @@ Fixed
   `aws configure get` for a secret or token key, and
   `aws configure export-credentials`, unless the value is captured, piped to a
   consumer, or written to a file.
+- `tm hook --pm-guard` refuses the credential-print bypasses the #8677
+  review found (#8677). It refuses `security -i` behind any wrapper, such as
+  `arch -arm64`, unless the program only reads the word, as `grep` does. It
+  reads a device path such as `/DEV/stdout` in any letter case. It refuses a
+  relative target that may name a device, a relative target after `cd`,
+  `pushd` or `popd`, and a `~+` or `~-` target. It reads a `tee` or `dd of=`
+  output file like a redirect target, so `tee "$OUT"` refuses. It refuses a
+  `gh`, `op`, `aws` or `gcloud` subcommand chosen at run time. A name bound to
+  `$(mktemp)` names a file only when nothing else in the command can rebind
+  it or replace its file.

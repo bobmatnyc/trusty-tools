@@ -23,7 +23,9 @@
 //! #8677 (`credential_print_clis`): `security -i` refuses outright, a verbose
 //! `curl` given a credential routes its echo, four sibling CLIs print like
 //! `gcloud auth print-access-token`, and a redirect target chosen at run time
-//! refuses once a value reaches it.
+//! refuses once a value reaches it. Review round 2: a relative target in an
+//! unknown directory, a `tee`/`dd` output operand chosen at run time, and a
+//! credential CLI subcommand chosen at run time refuse too.
 //!
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
@@ -54,7 +56,9 @@
 //! 6. #8677: a credential named in no command text — an exported
 //!    `$GITHUB_TOKEN` under `curl -v`, a sibling CLI run by a `$`-named
 //!    program — and echo flags beyond `curl`'s (`wget -d`, `http -v`), or
-//!    set in a config file (`~/.curlrc`).
+//!    set in a config file (`~/.curlrc`). A symlink planted on a plain-file
+//!    target (`ln -sf /dev/stdout /tmp/f; gcloud … > /tmp/f`), or one left
+//!    there by an earlier command: the guard reads a literal path as a file.
 //!
 //! Why a denylist and not an allowlist: see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
@@ -88,7 +92,10 @@ use credential_print_programs::{
 };
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
-use credential_print_redirect::{apply_redirections, note_temp_files, terminal_name_sink};
+use credential_print_redirect::{
+    apply_redirections, changes_directory, note_temp_files, redirect_target_sink,
+    terminal_name_sink,
+};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
@@ -190,6 +197,9 @@ struct Lifted {
     /// #8677: names an earlier stage bound to `$(mktemp)`, so `> "$tmp"`
     /// names a file.
     temp_files: BTreeSet<String>,
+    /// #8677 round 2: the command changes directory, so no relative target's
+    /// directory is known.
+    changes_dir: bool,
 }
 
 /// Refuse a Bash command that prints a credential value: `Some(reason)` denies.
@@ -318,6 +328,7 @@ fn scan_pass(
     lifted: &mut Lifted,
 ) -> Result<(bool, Vec<String>), Refusal> {
     let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
+    lifted.changes_dir |= changes_directory(&text);
     let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);
     let cost = 1 + text.len() / BYTES_PER_UNIT;
@@ -329,7 +340,7 @@ fn scan_pass(
     let (mut stdin_carries, mut stdin_text) = (false, false);
     for (idx, (stage, piped, pipe_stderr)) in stages.iter().enumerate() {
         // #8677: `tmp=$(mktemp)` names a file for every later stage.
-        note_temp_files(stage, lifted);
+        note_temp_files(stage, &flat, lifted);
         let next_exists = stages.get(idx + 1).is_some();
         let out = if *piped && next_exists {
             Sink::Pipe
@@ -483,7 +494,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         return Err(Refusal::Unreadable("a program name chosen at run time"));
     }
     // #8677: `security -i` runs whatever commands its stdin carries.
-    if interactive_security(argv, kw, start) {
+    if interactive_security(argv, start) {
         return Err(Refusal::Unreadable(
             "the commands `security -i` reads from its input",
         ));
@@ -579,9 +590,21 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         fd1 = true;
         // #8596 round 3: a file operand naming a descriptor or the terminal
         // (`tee /dev/stderr`, `dd of=/dev/tty`, `tee >(cat)`).
-        for a in args {
+        for (n, a) in args.iter().enumerate() {
             let path = a.strip_prefix("of=").unwrap_or(a);
-            if let Some(sink) = terminal_name_sink(path, &routed.fds, lifted, ctx.out) {
+            // #8677 round 2: `tee`'s and `dd`'s own output files are read as
+            // redirect targets, so `tee "$OUT"` refuses.
+            let writes = match program.as_str() {
+                "tee" => !a.starts_with('-') || args[..n].iter().any(|b| b == "--"),
+                "dd" => a.starts_with("of="),
+                _ => false,
+            };
+            let sink = if writes {
+                Some(redirect_target_sink(path, &routed.fds, lifted, ctx.out))
+            } else {
+                terminal_name_sink(path, &routed.fds, lifted, ctx.out)
+            };
+            if let Some(sink) = sink {
                 route(sink, &mut emitted)?;
             }
         }

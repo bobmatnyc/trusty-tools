@@ -265,8 +265,11 @@ pub(super) fn terminal_name_sink(
 ///
 /// What: [`terminal_name_sink`] first; `/dev/stdin` (read lexically) opens
 /// fd 0 for writing; a target the shell expands at run time — a `$`, a
-/// backtick, a lifted substitution, a glob character — is [`Sink::Unknown`];
-/// anything else is a file, [`Sink::Discarded`].
+/// backtick, a lifted substitution, a glob character — is [`Sink::Unknown`],
+/// as is a relative target [`relative_target_is_unread`] flags; anything else
+/// is a file, [`Sink::Discarded`].
+/// Test: `credential_print_tests::denies_a_relative_target_in_an_unknown_directory_8677`,
+/// `credential_print_tests::denies_a_tee_operand_chosen_at_run_time_8677`.
 pub(super) fn redirect_target_sink(
     target: &str,
     fds: &[Sink; 10],
@@ -289,7 +292,44 @@ pub(super) fn redirect_target_sink(
     if target.contains(['$', '`', '*', '?', '[']) || target.contains(MARK) {
         return Sink::Unknown;
     }
+    if relative_target_is_unread(target, lifted.changes_dir) {
+        return Sink::Unknown;
+    }
     Sink::Discarded
+}
+
+/// Whether `text`, quotes removed, names `cd`, `pushd`, `popd` or `autocd`
+/// as a word: after one, no relative target's directory is known (#8677).
+pub(super) fn changes_directory(text: &str) -> bool {
+    unquoted(text)
+        .split(|c: char| c.is_whitespace() || ";&|(){}<>`$=".contains(c))
+        .any(|w| matches!(basename(w).as_str(), "cd" | "pushd" | "popd" | "autocd"))
+}
+
+/// Whether a relative target may name a device, since its working directory
+/// is unknown (#8677 review round 2).
+///
+/// What: a `~+`/`~-` prefix (the current or previous directory), any relative
+/// path when the command changes directory (`changes_dir`), and a relative
+/// path whose tail names a device — `stdout`, `stderr`, `stdin`, `console`,
+/// `tty…`, `fd/N`, `pts/N` — read in lowercase.
+fn relative_target_is_unread(target: &str, changes_dir: bool) -> bool {
+    if target.starts_with("~+") || target.starts_with("~-") {
+        return true;
+    }
+    if target.starts_with(['/', '~']) {
+        return false;
+    }
+    if changes_dir {
+        return true;
+    }
+    let lower = target.to_ascii_lowercase();
+    let mut tail = lower.rsplit('/').filter(|s| !s.is_empty() && *s != ".");
+    let last = tail.next().unwrap_or_default();
+    let parent = tail.next().unwrap_or_default();
+    matches!(last, "stdout" | "stderr" | "stdin" | "console")
+        || last.starts_with("tty")
+        || (matches!(parent, "fd" | "pts") && last.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Whether a `$(…)` body is a lone `mktemp` call, whose value is a new file's
@@ -308,35 +348,94 @@ pub(super) fn is_mktemp_call(body: &str) -> bool {
 ///
 /// Why: `tmp=$(mktemp); gcloud … > "$tmp"` is the safe way to keep a value in
 /// a file, and the run-time target rule would otherwise refuse it.
-/// What: only a stage made wholly of `NAME=VALUE` words binds in the current
-/// shell; a VALUE that is exactly one [`MARK`] placeholder of a mktemp
-/// substitution adds NAME, and any other VALUE removes it. Any other stage
-/// naming a recorded NAME outside a `$NAME`/`${NAME}` reference (`read tmp`,
-/// `for tmp in …`, `printf -v tmp`) removes it: it may rebind it.
-pub(super) fn note_temp_files(stage: &str, lifted: &mut Lifted) {
+/// What: fails closed. Any stage naming a recorded NAME outside a
+/// `$NAME`/`${NAME}` reference, quotes removed (`tmp+=…`, `read t''mp`),
+/// removes it. Only a stage made wholly of `NAME=VALUE` words binds in the
+/// current shell; a VALUE that is exactly one [`MARK`] placeholder of a mktemp
+/// substitution adds NAME when [`temp_name_is_plain`] holds over `whole`, the
+/// pass's full lifted text.
+pub(super) fn note_temp_files(stage: &str, whole: &str, lifted: &mut Lifted) {
     // A binding needs a lifted `$(mktemp)`; with none recorded, nothing to do.
     if lifted.temp_files.is_empty() && !stage.contains(MARK) {
         return;
     }
+    // #8677 round 2: every non-reference mention may rebind, so all forget it.
+    let flat = unquoted(stage);
+    lifted.temp_files.retain(|name| !names_bare(&flat, name));
     let words = tokenize(stage.trim()).unwrap_or_default();
     let binds: Vec<(&str, &str)> = words.iter().filter_map(|w| w.split_once('=')).collect();
     if words.is_empty() || binds.len() != words.len() {
-        lifted.temp_files.retain(|name| !names_bare(stage, name));
         return;
     }
     for (name, value) in binds {
-        if !is_identifier(name) {
-            return;
-        }
-        let temp = marks_in(value).next().is_some_and(|n| {
-            value == format!("{MARK}{n}__") && lifted.subs.get(n).is_some_and(|s| s.mktemp)
-        });
+        let temp = is_identifier(name)
+            && is_mktemp_mark(value, lifted)
+            && temp_name_is_plain(name, whole, lifted);
         if temp {
             lifted.temp_files.insert(name.to_string());
         } else {
             lifted.temp_files.remove(name);
         }
     }
+}
+
+/// `text` with every quote and backslash removed, as the name check reads it.
+fn unquoted(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
+}
+
+/// Whether `word` is exactly one [`MARK`] placeholder of a mktemp substitution.
+fn is_mktemp_mark(word: &str, lifted: &Lifted) -> bool {
+    marks_in(word).next().is_some_and(|n| {
+        word == format!("{MARK}{n}__") && lifted.subs.get(n).is_some_and(|s| s.mktemp)
+    })
+}
+
+/// Programs that can put a link, a fifo or another file at a path. A `trap`
+/// or function body is read with the rest of the text, so it needs no entry:
+/// the character rule refuses a body's `(`, `{` and computed names.
+const RETARGETS: &[&str] = &[
+    "ln", "link", "mv", "cp", "install", "rsync", "ditto", "tar", "unzip", "cpio", "mkfifo",
+    "mknod",
+];
+
+/// Whether `whole`, a pass's lifted text, leaves `name` bound to its
+/// `$(mktemp)` file for the whole command (#8677 review round 2).
+///
+/// Why: a name can be rebound out of sight — `declare t\mp=…`, a function body,
+/// `printf -v "${n}mp"`, brace or glob expansion — or its file replaced by a
+/// link (`ln -sf /dev/stdout "$tmp"`). A carve-out that denies too much is
+/// acceptable; one that allows a rebinding is not.
+/// What: quotes removed, the text holds only plain word characters, every
+/// `$` is a `$name`/`${name}` reference to `name` or a recorded temp name,
+/// every placeholder is a mktemp one, no word is a [`RETARGETS`] program, and
+/// `name` appears bare only as its own `name=<mktemp>` binding.
+/// Test: `credential_print_tests::denies_a_temp_name_rebound_out_of_sight_8677`,
+/// `credential_print_tests::allows_the_8677_round_two_neighbours`.
+fn temp_name_is_plain(name: &str, whole: &str, lifted: &Lifted) -> bool {
+    let mut flat = unquoted(whole);
+    for known in lifted.temp_files.iter().map(String::as_str).chain([name]) {
+        flat = flat
+            .replace(&format!("${{{known}}}"), " ")
+            .replace(&format!("${known}"), " ");
+    }
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./:=@%+,-;&|<> \t\n".contains(c);
+    if !flat.chars().all(plain) {
+        return false;
+    }
+    flat.split(|c: char| c.is_whitespace() || ";&|<>".contains(c))
+        .filter(|w| !w.is_empty())
+        .all(|w| {
+            let binding = w
+                .strip_prefix(name)
+                .and_then(|v| v.strip_prefix('='))
+                .is_some_and(|v| is_mktemp_mark(v, lifted));
+            let marks_ok = marks_in(w).all(|n| lifted.subs.get(n).is_some_and(|s| s.mktemp));
+            binding
+                || (marks_ok && !RETARGETS.contains(&basename(w).as_str()) && !names_bare(w, name))
+        })
 }
 
 /// Whether `stage` names `name` as a bare word, once every `$name` and
@@ -356,8 +455,10 @@ fn names_bare(stage: &str, name: &str) -> bool {
 /// What: resolves empty, `.` and `..` segments lexically, then reads the rest
 /// after a leading `dev`; `/proc/self/fd/N` reads as `fd/N`. A relative path
 /// is read as rooted, since its working directory is unknown: `../../dev/tty`
-/// is `tty`. `None` for any other path.
+/// is `tty`. #8677 round 2: read in lowercase, as APFS matches `/DEV/stdout`.
+/// `None` for any other path.
 fn device_name(path: &str) -> Option<String> {
+    let path = path.to_ascii_lowercase();
     let mut parts: Vec<&str> = Vec::new();
     for segment in path.split('/') {
         match segment {

@@ -21,8 +21,7 @@
 
 use super::credential_print_programs::basename;
 use super::credential_print_redirect::{Routed, redirect_target_sink};
-use super::{Emitted, Lifted, Refusal, Sink, carries, route};
-use crate::commands::hook_rewrite::COMMAND_WRAPPERS;
+use super::{Emitted, Lifted, MARK, Refusal, Sink, carries, route};
 
 /// Word sequences, in order, that name a sibling credential call.
 const WORD_TRIGGERS: &[&[&str]] = &[
@@ -89,22 +88,30 @@ fn security_is_interactive<S: AsRef<str>>(args: &[S]) -> bool {
     false
 }
 
+/// Programs that read or print a `security -i` operand and never run it.
+const NON_EXECUTING_READERS: &[&str] = &[
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "man", "info", "apropos", "whatis", "which",
+    "whereis", "echo", "printf",
+];
+
 /// Whether a stage runs `security` in interactive mode (#8677).
 ///
-/// What: a `security` word at the resolved program position `start`, or
-/// anywhere after a leading [`COMMAND_WRAPPERS`] word at `kw` (`sudo -u x
-/// security -i`, `timeout 5 security -i`), whose leading options are
-/// interactive. A `security` word that is another program's operand (`grep
-/// security -i notes.txt`) is not a call.
-pub(super) fn interactive_security(argv: &[String], kw: usize, start: usize) -> bool {
-    let wrapped = argv
-        .get(kw)
-        .is_some_and(|w| COMMAND_WRAPPERS.contains(&basename(w).as_str()));
-    argv.iter().enumerate().skip(start).any(|(at, w)| {
-        (at == start || wrapped)
-            && basename(w) == "security"
-            && security_is_interactive(argv.get(at + 1..).unwrap_or_default())
-    })
+/// What: a `security` word anywhere in `argv` whose leading options are
+/// interactive, since any unknown wrapper (`arch -arm64`, `script -q f`,
+/// `launchctl asuser N`) can run it (#8677 review round 2). The one exception
+/// is a stage whose program at `start` is in [`NON_EXECUTING_READERS`] (`grep
+/// security -i notes.txt`).
+/// Test: `credential_print_tests::denies_interactive_security_behind_an_unknown_wrapper_8677`,
+/// `credential_print_tests::allows_the_8677_round_two_neighbours`.
+pub(super) fn interactive_security(argv: &[String], start: usize) -> bool {
+    let reader = argv
+        .get(start)
+        .is_some_and(|w| NON_EXECUTING_READERS.contains(&basename(w).as_str()));
+    !reader
+        && argv.iter().enumerate().any(|(at, w)| {
+            basename(w) == "security"
+                && security_is_interactive(argv.get(at + 1..).unwrap_or_default())
+        })
 }
 
 /// Route every value a sibling credential CLI or a verbose `curl` echoes.
@@ -123,6 +130,23 @@ pub(super) fn judge_cli_echoes(
 ) -> Result<(), Refusal> {
     for (at, word) in argv.iter().enumerate() {
         let args = argv.get(at + 1..).unwrap_or_default();
+        // #8677 round 2: `gh auth $(echo token)` picks its subcommand at run time.
+        let slots = match basename(word).as_str() {
+            "gcloud" => 3,
+            "gh" | "aws" => 2,
+            "op" => 1,
+            _ => 0,
+        };
+        let dynamic = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .take(slots)
+            .any(|a| a.contains(['$', '`']) || a.contains(MARK));
+        if dynamic {
+            return Err(Refusal::Unreadable(
+                "a credential CLI subcommand chosen at run time",
+            ));
+        }
         let echoes = match basename(word).as_str() {
             "curl" if args.iter().any(|a| carries(a, lifted)) => curl_echoes(args),
             program => cli_echoes(program, args),
