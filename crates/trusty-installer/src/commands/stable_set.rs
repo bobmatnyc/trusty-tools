@@ -14,7 +14,10 @@
 //! trusty-console, trusty-mpm, and trusty-installer itself (#5805). Library
 //! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
 //! cargo dependencies of these binaries, so they are intentionally *not*
-//! listed here.
+//! listed here. `tga` is an EXTERNAL member: it builds and releases from
+//! `bobmatnyc/trusty-git-analytics`, and `crate::download::external` is where
+//! its prebuilts are fetched from. [`installable_members`] adds the external
+//! tools the default set omits (`trusty-audit`) for a by-name install.
 //!
 //! A member may ship more than one binary; [`StableMember::binary`] names the
 //! one probed for health, and [`StableMember::binaries`] enumerates the full
@@ -381,6 +384,38 @@ pub fn stable_set() -> Vec<StableMember> {
     ]
 }
 
+/// Every member `tctl install <name>` resolves: the [`stable_set`] plus each
+/// external tool it does not already carry.
+///
+/// Why: `tga` and `trusty-audit` build and release outside this workspace
+/// (ruling 2026-09-28). `tga` stays in the default set, but `trusty-audit`
+/// never was, so `tctl install taudit` answered `unknown member(s)` even
+/// though the installer already routes its prebuilts. Resolving names from
+/// `download::external::EXTERNAL_TOOLS` makes every external tool installable
+/// by name without adding it to the no-argument install or to any
+/// status/config/lifecycle fan-out, which all read [`stable_set`].
+///
+/// What: [`stable_set`] with each missing external tool inserted, in table
+/// order, just before the control-plane member so the installer still sorts
+/// last. An external row is a non-daemon, OPTIONAL member whose probe binary
+/// is its crate name; [`StableMember::binaries`] supplies aliases (`taudit`).
+///
+/// Test: `tests::external_tools_resolve_by_name_outside_the_default_set`.
+pub fn installable_members() -> Vec<StableMember> {
+    let mut all = stable_set();
+    let extra: Vec<StableMember> = crate::download::external::EXTERNAL_TOOLS
+        .iter()
+        .filter(|t| !all.iter().any(|m| m.crate_name == t.crate_name))
+        .map(|t| StableMember::new(t.crate_name, t.crate_name, false, false))
+        .collect();
+    let at = all
+        .iter()
+        .position(StableMember::is_control_plane)
+        .unwrap_or(all.len());
+    all.splice(at..at, extra);
+    all
+}
+
 /// The daemon subset of the stable set, in install order.
 ///
 /// Why: "which members are daemons?" is read by three surfaces — `tctl stack
@@ -469,8 +504,9 @@ pub struct TransitiveSelection {
 /// `tctl stop trusty-mpm` also stopping the shared trusty-search daemon) would
 /// surprise the operator rather than help them.
 ///
-/// What: Resolves `names` against [`stable_set`] exactly like [`select_members`]
-/// (empty = all, matched by crate name or binary), then runs
+/// What: Resolves `names` like [`select_members`] (empty = the full
+/// [`stable_set`], matched by crate name or binary), but against
+/// [`installable_members`], so a named external tool resolves too; then runs
 /// [`super::dependency_graph::transitive_closure`] over the resolved crate
 /// names and filters the master ordered list down to that closure — which is
 /// already a valid topological order because every dependency edge points to a
@@ -482,16 +518,18 @@ pub struct TransitiveSelection {
 ///
 /// Test: `tests::select_transitive_expands_mpm`,
 /// `tests::select_transitive_reports_unknown`,
-/// `tests::select_transitive_preserves_order_with_explicit_deps`.
+/// `tests::select_transitive_preserves_order_with_explicit_deps`,
+/// `tests::external_tools_resolve_by_name_outside_the_default_set`.
 pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
-    let all = stable_set();
     if names.is_empty() {
         return TransitiveSelection {
-            members: all,
+            members: stable_set(),
             unknown: Vec::new(),
             added: Vec::new(),
         };
     }
+    // Ruling 2026-09-28: a NAMED install also resolves external tools.
+    let all = installable_members();
 
     let mut explicit: Vec<String> = Vec::new();
     for n in names {
@@ -1194,5 +1232,39 @@ mod tests {
         assert_eq!(sel.members.len(), stable_set().len());
         assert!(sel.unknown.is_empty());
         assert!(sel.added.is_empty());
+    }
+
+    /// Why (ruling 2026-09-28): tga and trusty-audit left this workspace, so
+    /// the install catalogue must resolve them from the external-tool table,
+    /// never from a workspace member. `trusty-audit` is the proof: it is in no
+    /// hand-written stable-set row, so only that table can make it resolve.
+    /// What: `tga`, `trusty-audit` and its `taudit` alias each resolve by name
+    /// as non-daemon, OPTIONAL members; the no-argument set is unchanged (no
+    /// trusty-audit); the installer still sorts last.
+    /// Test: This is the test.
+    #[test]
+    fn external_tools_resolve_by_name_outside_the_default_set() {
+        for (name, crate_name) in [
+            ("tga", "tga"),
+            ("trusty-audit", "trusty-audit"),
+            ("taudit", "trusty-audit"),
+        ] {
+            let sel = select_members_transitive(&[name.to_owned()]);
+            assert!(sel.unknown.is_empty(), "{name} must resolve: {sel:?}");
+            let names: Vec<&str> = sel.members.iter().map(|m| m.crate_name.as_str()).collect();
+            assert_eq!(names, [crate_name], "{name}");
+            assert!(!sel.members[0].daemon && !sel.members[0].required, "{name}");
+        }
+        assert!(!stable_set().iter().any(|m| m.crate_name == "trusty-audit"));
+        let all = installable_members();
+        assert_eq!(
+            all.last().map(|m| m.crate_name.as_str()),
+            Some("trusty-installer")
+        );
+        assert_eq!(
+            all.len(),
+            stable_set().len() + 1,
+            "only trusty-audit is added"
+        );
     }
 }

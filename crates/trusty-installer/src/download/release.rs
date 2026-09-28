@@ -22,6 +22,8 @@ use anyhow::{anyhow, Context};
 use semver::Version;
 use serde::Deserialize;
 
+use super::external::external_tool;
+
 /// A GitHub repository that publishes prebuilt release assets (#8642).
 ///
 /// Why: prebuilts no longer all come from one repo — `tga` and `trusty-audit`
@@ -62,16 +64,13 @@ pub(crate) const TRUSTY_GIT_ANALYTICS_REPO: ReleaseRepo = ReleaseRepo {
 /// reinstalled 8.0.0 and reported an upgrade. The route is an explicit,
 /// reviewable table rather than crates.io `repository` metadata, which is
 /// operator-editable text and not a release-hosting contract.
-/// What: `tga` (either tag spelling) and `trusty-audit` →
-/// [`TRUSTY_GIT_ANALYTICS_REPO`]; every other crate → [`TRUSTY_TOOLS_REPO`].
-/// Add a row here when another crate moves its releases.
+/// What: an [`external_tool`] row's repo (`tga` under either tag spelling,
+/// `trusty-audit`); every other crate → [`TRUSTY_TOOLS_REPO`]. A crate that
+/// leaves the workspace gets a row in `super::external::EXTERNAL_TOOLS`.
 /// Test: `tests::release_repo_routes_moved_crates_to_trusty_git_analytics`,
 /// `tests::release_repo_defaults_to_trusty_tools`.
 pub(crate) fn release_repo_for(crate_name: &str) -> ReleaseRepo {
-    match crate_name {
-        "tga" | "trusty-git-analytics" | "trusty-audit" => TRUSTY_GIT_ANALYTICS_REPO,
-        _ => TRUSTY_TOOLS_REPO,
-    }
+    external_tool(crate_name).map_or(TRUSTY_TOOLS_REPO, |t| t.repo)
 }
 
 /// Where one crate's release list and assets are fetched from.
@@ -188,18 +187,14 @@ struct GhAsset {
 /// `trusty-git-analytics-<version>-<target>.tar.gz` — so a filename built
 /// from the crate name alone 404s even though the correct tag resolved fine.
 ///
-/// What: A small table of known aliases; falls through to `crate_name`
-/// unchanged for every crate whose asset prefix matches its crate name (the
-/// common case). Add a new entry here if another crate's release workflow
-/// ever diverges the same way.
+/// What: an [`external_tool`] row's `asset_prefix`; every workspace crate
+/// falls through to `crate_name` unchanged, because this repo's release
+/// workflow names each asset after its crate.
 ///
 /// Test: `tests::asset_name_for_tag_resolves_tga_alias`,
 /// `tests::asset_name_for_tag_defaults_to_crate_name`.
 fn asset_name_for_tag(crate_name: &str) -> &str {
-    match crate_name {
-        "tga" => "trusty-git-analytics",
-        other => other,
-    }
+    external_tool(crate_name).map_or(crate_name, |t| t.asset_prefix)
 }
 
 /// Every `<name>-v*` tag spelling that may carry this crate's releases (#6771).
@@ -212,17 +207,19 @@ fn asset_name_for_tag(crate_name: &str) -> &str {
 /// spelling instead of requiring a hand-pushed alias tag.
 ///
 /// What: returns the candidate names in preference order — the caller's own
-/// spelling first, then aliases. Every crate without an alias yields exactly
-/// its own name, so the common path is unchanged.
+/// spelling first, then the [`external_tool`] row's other spellings. Every
+/// crate without a row yields exactly its own name, so the common path is
+/// unchanged.
 ///
 /// Test: `tests::tag_name_candidates_covers_both_tga_spellings`,
 /// `tests::tag_name_candidates_defaults_to_crate_name`.
 fn tag_name_candidates(crate_name: &str) -> Vec<&str> {
-    match crate_name {
-        "tga" => vec!["tga", "trusty-git-analytics"],
-        "trusty-git-analytics" => vec!["trusty-git-analytics", "tga"],
-        other => vec![other],
+    let mut names = vec![crate_name];
+    if let Some(tool) = external_tool(crate_name) {
+        let spellings = std::iter::once(tool.crate_name).chain(tool.tag_aliases.iter().copied());
+        names.extend(spellings.filter(|n| *n != crate_name));
     }
+    names
 }
 
 /// Every stable release matching any tag spelling for `crate_name` (#6771).
