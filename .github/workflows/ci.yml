@@ -565,10 +565,13 @@ jobs:
   # once and never rebuilds it, so a link that ships broken stays broken for
   # that version.
   #
-  # NOT a required context. Adding one wedges every open PR that predates it
-  # (they cannot produce a check run that did not exist when they were cut —
-  # see CLAUDE.md, "What CI actually gates"), so promoting this row is the
-  # repo owner's call, made once the open-PR backlog is drained.
+  # Covered by `CI gate` (#7288): a red, cancelled or skipped-without-cause
+  # `rustdoc-links` fails the gate exactly like any other covered context —
+  # see `ci-gate`'s `needs:` and the CONTEXTS table in
+  # scripts/ci-gate-verdict.sh. #8835 merged with this check red because
+  # nothing gated on it; the open-PR-backlog concern that previously kept it
+  # out (a PR cut before this row existed cannot retroactively produce this
+  # check run) no longer applies once the backlog is drained.
   #
   # docs_only short-circuit and `!cancelled()` for the same reasons the fmt and
   # clippy jobs carry them: a Cargo-inert PR pays runner startup and nothing
@@ -2698,6 +2701,7 @@ jobs:
         mpm-gui,
         code-gui,
         search-daemon-smoke,
+        rustdoc-links,
         teardown-guard,
         tmux-exact-targets,
         parity-selftest,

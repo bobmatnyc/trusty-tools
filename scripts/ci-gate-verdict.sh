@@ -47,6 +47,7 @@ agents-ui|trusty-agents-ui clippy|-
 mpm-gui|trusty-mpm-gui clippy|-
 code-gui|trusty-code-gui clippy|-
 search-daemon-smoke|trusty-search daemon smoke test|-
+rustdoc-links|Rustdoc intra-doc links|-
 teardown-guard|Durable writes hold the teardown guard|teardown_guard_relevant
 tmux-exact-targets|Every tmux -t target is exact|tmux_targets_relevant
 parity-selftest|Parity gate self-test (must catch a drifted tag)|-
