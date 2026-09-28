@@ -91,8 +91,11 @@ where
 /// is missing, on a non-zero exit, on a spawn failure, or after 10 s — but the
 /// spawn goes through [`retry_on_etxtbsy`]. Returns the trimmed stdout line.
 ///
-/// Test: `tests::probe_retries_etxtbsy_and_reports_the_version_line`; the real
-/// spawn runs in `pinned::tests::documentation_files_are_not_installed`.
+/// Test: `tests::probe_retries_etxtbsy_and_reports_the_version_line`,
+/// `tests::probe_fails_closed_on_a_non_zero_exit`,
+/// `tests::probe_fails_closed_when_the_binary_hangs`,
+/// `tests::probe_fails_closed_when_the_binary_is_missing`; the real spawn runs
+/// in `pinned::tests::documentation_files_are_not_installed`.
 pub(crate) async fn probe_fresh_binary(bin_path: &Path) -> anyhow::Result<String> {
     probe_fresh_binary_with(bin_path, || async move {
         tokio::process::Command::new(bin_path)
@@ -115,9 +118,19 @@ where
             bin_path.display()
         );
     }
+    tracing::debug!(
+        bin_path = %bin_path.display(),
+        "probing installed binary with --version (concrete path, #3554)"
+    );
     match tokio::time::timeout(PROBE_TIMEOUT, retry_on_etxtbsy(spawn)).await {
         Ok(Ok(output)) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            let version_line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            tracing::info!(
+                bin_path = %bin_path.display(),
+                version = version_line,
+                "health gate passed"
+            );
+            Ok(version_line)
         }
         Ok(Ok(output)) => Err(anyhow::anyhow!(
             "`{} --version` exited with status {} — new binary may be broken",
@@ -241,5 +254,64 @@ mod tests {
         .expect("probe passes after the retry");
         assert_eq!(line, "tool-a 1.2.3");
         assert_eq!(calls.get(), 2);
+    }
+
+    /// A stub file the probe's existence check accepts; the spawn is faked.
+    fn stub(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let bin = tmp.path().join("tool-a");
+        std::fs::write(&bin, b"").expect("write stub");
+        bin
+    }
+
+    /// A binary that runs and exits non-zero fails the probe, never passes it.
+    #[tokio::test(start_paused = true)]
+    async fn probe_fails_closed_on_a_non_zero_exit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = stub(&tmp);
+        let err = probe_fresh_binary_with(&bin, || async {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: b"tool-a 1.2.3\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        })
+        .await
+        .expect_err("a non-zero exit must not pass the probe");
+        let prefix = format!("`{} --version` exited with status", bin.display());
+        assert!(err.to_string().starts_with(&prefix), "{err}");
+    }
+
+    /// A spawn that never finishes hits the 10 s bound and fails closed.
+    #[tokio::test(start_paused = true)]
+    async fn probe_fails_closed_when_the_binary_hangs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bin = stub(&tmp);
+        let start = tokio::time::Instant::now();
+        let err = probe_fresh_binary_with(&bin, std::future::pending::<io::Result<Output>>)
+            .await
+            .expect_err("a hung binary must not pass the probe");
+        let prefix = format!("`{} --version` timed out after 10 s", bin.display());
+        assert!(err.to_string().starts_with(&prefix), "{err}");
+        assert_eq!(start.elapsed(), PROBE_TIMEOUT);
+    }
+
+    /// A missing path fails before any spawn, even one that would succeed.
+    #[tokio::test(start_paused = true)]
+    async fn probe_fails_closed_when_the_binary_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("absent").join("tool-a");
+        let calls = Cell::new(0u32);
+        let err = probe_fresh_binary_with(&missing, || {
+            calls.set(calls.get() + 1);
+            async { Ok(version_output("tool-a 1.2.3\n")) }
+        })
+        .await
+        .expect_err("a missing binary must not pass the probe");
+        let prefix = format!(
+            "binary not found at expected install path {}",
+            missing.display()
+        );
+        assert!(err.to_string().starts_with(&prefix), "{err}");
+        assert_eq!(calls.get(), 0, "no spawn for a missing path");
     }
 }
