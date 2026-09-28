@@ -131,7 +131,7 @@ async fn build_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
 /// fire-and-forget, so the harness has to poll for the terminal status.
 async fn run_reindex(handle: Arc<IndexHandle>, force: bool) -> Value {
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), force);
+    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), force).expect("index is unclaimed");
 
     // Generous ceiling: a cold pass over ~400 real source files with a live
     // embedder is minutes, not seconds.

@@ -155,7 +155,15 @@ pub async fn run_reindex_with(
         );
     }
     if !kickoff.status().is_success() {
-        anyhow::bail!("daemon returned {} for reindex kickoff", kickoff.status());
+        // #8889: a 409 names the reindex already running; show it.
+        let status = kickoff.status();
+        let body: serde_json::Value = kickoff.json().await.unwrap_or_default();
+        match body.get("message").and_then(|m| m.as_str()) {
+            Some(message) => {
+                anyhow::bail!("daemon returned {status} for reindex kickoff: {message}")
+            }
+            None => anyhow::bail!("daemon returned {status} for reindex kickoff"),
+        }
     }
 
     let kickoff_body: serde_json::Value = kickoff

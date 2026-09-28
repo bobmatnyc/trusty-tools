@@ -584,6 +584,7 @@ async fn probe_hands_the_open_staging_corpus_to_the_adoption() {
         &IndexId::new("resume-single-open"),
         &canonical,
         &cp,
+        crate::service::storage_layout::REDB_TMP_FILE,
     )
     .await
     .expect("the planted checkpoint must be adoptable");
@@ -665,4 +666,36 @@ async fn promotion_clears_the_checkpoint_even_when_the_store_was_released_early(
         promoted.chunk_count().expect("chunk count") > 0,
         "the staged corpus must actually have been promoted"
     );
+}
+
+/// Why (#8889 b): a crashed run's leftover staging entry must not break the next
+/// run. Before #8889 every run staged into the one fixed `index.redb.tmp`, so a
+/// DIRECTORY left at that path made `open_fresh` fail and every later
+/// incremental reindex aborted with "carryover copy failed".
+/// What: completes one reindex, plants a directory at the legacy staging path,
+/// changes a file, and reindexes again; the run must complete with the change
+/// indexed. Uses only pre-#8889 APIs, so it fails at the assertion on the base.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_staging_directory_does_not_break_the_next_run() {
+    let root = make_root(FIXTURE);
+    let handle = make_handle(root.path(), "leftover-dir-8889");
+    reindex(&handle).await;
+
+    let leftover =
+        crate::service::colocated_storage::colocated_redb_tmp_path(root.path()).expect("tmp path");
+    std::fs::create_dir_all(leftover.join("junk")).expect("plant a leftover staging directory");
+    std::fs::write(root.path().join("e.rs"), "pub fn echo() -> u32 { 5 }\n").expect("new file");
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Complete,
+        "#8889: a leftover staging directory must not fail the next reindex"
+    );
+    let fingerprint = corpus_fingerprint(&handle).await;
+    assert!(fingerprint.contains("echo"), "the change must be indexed");
 }

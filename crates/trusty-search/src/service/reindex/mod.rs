@@ -46,6 +46,8 @@ mod batch;
 // Issue #3979: resume-from-checkpoint — durable "which run is building this
 // staging corpus" record plus the pure adopt/discard decision.
 mod checkpoint;
+// #8889: one reindex per index; per-run staging names.
+mod claim;
 mod completion;
 mod corpus_swap;
 mod finish;
@@ -80,6 +82,7 @@ mod hash_cache;
 mod prune;
 pub mod quarantine;
 mod staging;
+mod staging_leftovers;
 // #4951: `reindex_handlers` mirrors this module's #2178 trust gate at the HTTP
 // boundary so an accepted root override always gets the walk it depends on.
 pub(crate) mod validate;
@@ -246,6 +249,15 @@ pub(crate) use defer_embed::spawn_deferred_embed_pass;
 /// What: re-exports from `orchestrator` submodule.
 /// Test: `reindex_walks_directory_and_emits_events` (primary integration test).
 pub use orchestrator::{spawn_reindex, spawn_reindex_with_cleanup};
+
+/// The one-reindex-per-index guard (#8889).
+///
+/// Why: `reindex_report` claims before it touches anything, then spawns under
+/// that claim; library callers read the refusal type.
+/// Test: `a_second_claim_is_refused_and_names_the_running_job`,
+/// `a_second_reindex_request_is_refused_while_the_first_runs`.
+pub use claim::{try_claim_reindex, ReindexClaim, ReindexClaimError, RunningReindex};
+pub(crate) use orchestrator::spawn_claimed_reindex;
 
 // ── internal re-exports used by tests (via `use super::*` in tests.rs) ───────
 // Gated under #[cfg(test)] so clippy does not flag them as unused in release

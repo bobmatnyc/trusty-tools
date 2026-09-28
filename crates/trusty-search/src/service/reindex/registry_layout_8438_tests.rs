@@ -64,10 +64,17 @@ async fn hnsw_swap_writes_the_data_dir_not_the_repo() {
 async fn corpus_staging_and_commit_write_the_data_dir_not_the_repo() {
     let fx = Fixture::new(true);
     let handle = handle_with_corpus(&fx, "ts-8438-cswap").await;
-    let tmp = begin_staged_corpus_swap(&handle, &handle.id, true, None, None)
-        .await
-        .expect("staging")
-        .expect("staging must engage");
+    let tmp = begin_staged_corpus_swap(
+        &handle,
+        &handle.id,
+        true,
+        None,
+        None,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await
+    .expect("staging")
+    .expect("staging must engage");
     let data = fx.data_index_dir("ts-8438-cswap");
     assert_eq!(tmp, data.join(REDB_TMP_FILE));
     fx.assert_repo_dir_empty();
@@ -84,10 +91,17 @@ async fn corpus_staging_and_commit_write_the_data_dir_not_the_repo() {
 async fn corpus_abort_reopens_the_data_dir_not_the_repo() {
     let fx = Fixture::new(true);
     let handle = handle_with_corpus(&fx, "ts-8438-cabort").await;
-    let tmp = begin_staged_corpus_swap(&handle, &handle.id, true, None, None)
-        .await
-        .expect("staging")
-        .expect("staging must engage");
+    let tmp = begin_staged_corpus_swap(
+        &handle,
+        &handle.id,
+        true,
+        None,
+        None,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await
+    .expect("staging")
+    .expect("staging must engage");
     abort_staged_corpus_swap(&handle, &handle.id, &tmp).await;
     assert!(!tmp.exists(), "the abort must delete the staging file");
     assert!(

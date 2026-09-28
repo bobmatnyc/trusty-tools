@@ -425,7 +425,7 @@ pub(super) fn checkpoint_max_age_from(value: Option<&str>) -> u64 {
 /// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`,
 /// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`.
 pub(super) struct ResumeState {
-    /// Path of the staging corpus to adopt (`index.redb.tmp`).
+    /// Path of the staging corpus to adopt (this run's own staging path, #8889).
     pub(super) tmp_path: PathBuf,
     /// The open staging corpus, moved onto the indexer by the adoption (#4721).
     pub(super) staged: crate::core::corpus::CorpusStore,
@@ -441,7 +441,8 @@ pub(super) struct ResumeState {
 /// `index.redb.tmp`" into "that file is safe to continue". It is called before
 /// the hash-cache is loaded, because whether the cache comes from the live
 /// corpus or from the staged one is exactly what resuming changes.
-/// What: resolves the staging path, and — when it exists — opens it, reads and
+/// What: resolves this run's staging path, renames the newest leftover staging
+/// file onto it (#8889), and — when one existed — opens it, reads and
 /// [`evaluate`]s its checkpoint, and on `Resume` returns the staged file-hash
 /// table together with the still-open handle (#4721: the adoption reuses it
 /// rather than opening the same file a second time). Every discard path drops
@@ -459,6 +460,7 @@ pub(super) async fn probe_resume(
     index_id: &IndexId,
     canonical_root: &Path,
     current: &ReindexCheckpoint,
+    staging_name: &str,
 ) -> Option<ResumeState> {
     if !resume_enabled() {
         tracing::debug!(
@@ -467,8 +469,10 @@ pub(super) async fn probe_resume(
         );
         return None;
     }
-    let tmp_path = super::corpus_swap::staging_corpus_path(handle, index_id).await?;
-    if !tmp_path.exists() {
+    let tmp_path = super::corpus_swap::staging_corpus_path(handle, index_id, staging_name).await?;
+    // #8889: an interrupted run's staging file is taken over under THIS run's
+    // own name before it is opened, so only this run ever writes to it.
+    if !super::staging_leftovers::adopt_newest(&tmp_path, index_id).await {
         return None;
     }
 

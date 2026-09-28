@@ -443,7 +443,14 @@ async fn the_next_runs_probe_discards_a_deferred_runs_staging_corpus() {
         "test setup: the refusal keeps the staging file AND its open handle"
     );
 
-    let resumed = probe_resume(&handle, &handle.id, handle.root_path.as_path(), &current).await;
+    let resumed = probe_resume(
+        &handle,
+        &handle.id,
+        handle.root_path.as_path(),
+        &current,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await;
 
     assert!(
         resumed.is_none(),
