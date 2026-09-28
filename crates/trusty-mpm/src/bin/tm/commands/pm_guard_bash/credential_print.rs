@@ -92,6 +92,8 @@ use credential_print_programs::{
 };
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
+// #8869: the secret-read key-consumer rule reads an fd-0 key redirect with it.
+pub(crate) use credential_print_redirect::input_redirect_operand;
 use credential_print_redirect::{
     apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
 };

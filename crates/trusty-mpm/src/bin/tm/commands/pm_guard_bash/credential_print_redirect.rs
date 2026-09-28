@@ -448,7 +448,10 @@ fn read_write_operands(tok: &str) -> Option<(usize, &str)> {
 /// round 5) — never `<<`, `<<<`, `<>`, or `<&`, each already consumed by an
 /// earlier check before this one runs. Returns the descriptor (default 0) and
 /// the attached path, empty if it follows as the next token.
-fn input_redirect_operand(tok: &str) -> Option<(usize, &str)> {
+// #8869: shared with the secret-read key-consumer rule, which reads a
+// `gh secret set NAME < key.pem` key through it; each excluded form answers
+// `None` here as well, so that caller denies it.
+pub(crate) fn input_redirect_operand(tok: &str) -> Option<(usize, &str)> {
     let (left, right) = tok.split_once('<')?;
     if right.starts_with(['<', '>', '&']) {
         return None;
