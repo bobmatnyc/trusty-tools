@@ -178,25 +178,66 @@ impl SlotPool {
 /// Why: a finished builder's lease otherwise reads as held after a restart
 /// until the TTL, since its dispatching session outlives it. Only `holder`'s
 /// own lease goes, so a newer holder's lease is never deleted.
-/// What: a missing lease is a no-op; one naming another holder is left; a
-/// lease that cannot be read or removed is logged and left, which costs at
-/// most one TTL.
-/// Test: `a_completed_builder_frees_its_slot_across_a_restart_8819`.
+/// What: the lease is first renamed to a unique tomb path, which captures one
+/// file atomically, and only then read. `holder`'s tomb is removed; any other
+/// tomb is hard-linked back, which never replaces a lease a claim wrote in the
+/// meantime. Another holder's lease is off its path only until that link; a
+/// holder this daemon granted is covered by its record meanwhile. A missing
+/// lease is a no-op; one that is not a plain file, or that cannot be moved, is
+/// logged and left, which costs at most one TTL.
+/// Test: `a_completed_builder_frees_its_slot_across_a_restart_8819`,
+/// `clear_lease_of_never_removes_another_holders_lease_8819`.
 pub fn clear_lease_of(slot_dir: &Path, holder: &str) {
+    clear_captured_lease(slot_dir, holder, |_| {});
+}
+
+/// [`clear_lease_of`], running `between` once the lease is captured and before
+/// it is judged: the window a concurrent claim can write a new lease in.
+fn clear_captured_lease(slot_dir: &Path, holder: &str, between: impl FnOnce(&Path)) {
     let Some(path) = lease_path_of(slot_dir) else {
         return;
     };
-    match std::fs::read_to_string(&path) {
-        Ok(body) if parse_lease(&body).is_some_and(|lease| lease.holder == holder) => {
-            if let Err(err) = std::fs::remove_file(&path) {
-                tracing::warn!(lease = %path.display(), "could not remove a finished builder's lease: {err}");
+    let warn = |what: &str, err: std::io::Error| {
+        tracing::warn!(lease = %path.display(), "{what} a finished builder's lease: {err}");
+    };
+    // #8819 critic round 2: never capture unreadable evidence, e.g. a directory.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => return warn("could not inspect", err),
+    }
+    let mut tomb = path.clone().into_os_string();
+    tomb.push(format!(".tomb.{}.{}", std::process::id(), unique_nanos()));
+    let tomb = PathBuf::from(tomb);
+    // #8819 critic round 2: a read then a remove could delete a lease a claim
+    // wrote between the two; the rename takes exactly one file.
+    match std::fs::rename(&path, &tomb) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => return warn("could not capture", err),
+    }
+    between(&path);
+    let ours = std::fs::read_to_string(&tomb)
+        .ok()
+        .and_then(|body| parse_lease(&body))
+        .is_some_and(|lease| lease.holder == holder);
+    if !ours {
+        match std::fs::hard_link(&tomb, &path) {
+            Ok(()) => {}
+            // A claim wrote a newer lease meanwhile; it supersedes this one.
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                tracing::warn!(
+                    lease = %path.display(), tomb = %tomb.display(),
+                    "could not restore another holder's lease, left at the tomb: {err}"
+                );
+                return;
             }
         }
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => {
-            tracing::warn!(lease = %path.display(), "could not read a finished builder's lease: {err}");
-        }
+    }
+    if let Err(err) = std::fs::remove_file(&tomb) {
+        warn("could not remove the tomb of", err);
     }
 }
 
@@ -526,6 +567,40 @@ mod tests {
         assert!(pool.lease_path(0).is_file(), "another holder's lease stays");
         clear_lease_of(&pool.slot_path(0), "toolu_A");
         assert_eq!(pool.read_lease(0), LeaseRecord::Absent);
+    }
+
+    /// #8819 critic round 2: B's claim writes its lease after A's clear has
+    /// looked at the slot. A's clear leaves B's lease whether the lease it
+    /// captured was A's own or a third holder's, and leaves no tomb behind.
+    #[test]
+    fn clear_lease_of_never_removes_another_holders_lease_8819() {
+        let named = |holder: &str| SlotLease {
+            holder: holder.to_string(),
+            ..lease(Some(1), Some(1), 1)
+        };
+        for captured in ["toolu_A", "toolu_C"] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let pool = pool(root.path());
+            pool.seed(0, None).expect("a seeded slot 0");
+            pool.record_lease(0, &named(captured)).expect("lease");
+            let b = named("toolu_B");
+            clear_captured_lease(&pool.slot_path(0), "toolu_A", |_| {
+                pool.record_lease(0, &b)
+                    .expect("B's claim writes its lease");
+            });
+            assert_eq!(
+                pool.read_lease(0),
+                LeaseRecord::Leased(b),
+                "captured {captured}: B's lease survives A's clear"
+            );
+            let parent = pool.slot_path(0).parent().expect("repo dir").to_path_buf();
+            let tombs: Vec<_> = std::fs::read_dir(parent)
+                .expect("list")
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|name| name.contains(".tomb."))
+                .collect();
+            assert!(tombs.is_empty(), "captured {captured}: {tombs:?}");
+        }
     }
 
     fn unknown(_: &str) -> bool {

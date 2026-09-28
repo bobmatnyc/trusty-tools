@@ -1135,21 +1135,25 @@ impl DaemonState {
     /// What: takes the entry's write guard and runs `f`. Returns `false` when no
     /// such delegation exists. `f` must not touch the delegation store — it runs
     /// under a shard lock. #8819: a builder whose record leaves the live states
-    /// here has its slot lease removed, after the shard lock is released.
+    /// here has its slot lease removed, after the shard lock is released —
+    /// unless a stop released it, which keeps its lease until the TTL.
     /// Test: `daemon::services::delegation_tracker` suite,
-    /// `a_completed_builder_frees_its_slot_across_a_restart_8819`.
+    /// `a_completed_builder_frees_its_slot_across_a_restart_8819`,
+    /// `a_task_stopped_builder_keeps_its_slot_across_a_restart_8819`.
     pub fn mutate_delegation(&self, id: DelegationId, f: impl FnOnce(&mut Delegation)) -> bool {
         let ended = match self.delegations.get_mut(&id.0) {
             Some(mut entry) => {
                 let was_live = entry.value().status.is_live();
                 f(entry.value_mut());
                 let d = entry.value();
-                (was_live && !d.status.is_live())
+                // #8819 critic round 2: a stopped builder may be resumed into its
+                // slot; its lease stands in for the in-memory #8548 quarantine.
+                (was_live && !d.status.is_live() && d.stop_release.is_none())
                     .then(|| (d.builder_slot_dir.clone(), d.tool_use_id.clone()))
             }
             None => return false,
         };
-        // #8819: completion, a deny, a TaskStop — every terminal write lands here.
+        // #8819: completion, a deny, a cancel — every terminal write lands here.
         if let Some((Some(slot_dir), Some(holder))) = ended {
             crate::core::builder_slot_pool::lease::clear_lease_of(&slot_dir, &holder);
         }

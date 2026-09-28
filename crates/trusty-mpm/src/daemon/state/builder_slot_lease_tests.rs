@@ -296,3 +296,27 @@ fn a_lease_that_cannot_be_written_grants_no_slot_8819() {
     assert_eq!(record.builder_slot_dir, None);
     assert!(!lease_path(&pool, 0).exists() && !lease_path(&pool, 1).exists());
 }
+
+/// #8819 critic round 2, CRITICAL: A holds slot 0; a `TaskStop` ends A's
+/// record; the daemon restarts. A may be resumed into slot 0, and the #8548
+/// stop quarantine that kept slot 0 taken lived in memory only, so the lease
+/// is the only evidence left. At 3c9d57516 the stop cleared A's lease and B
+/// was handed slot 0 under A's resumed build.
+#[test]
+fn a_task_stopped_builder_keeps_its_slot_across_a_restart_8819() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let pool = seeded_pool(root.path());
+    let before = Arc::new(DaemonState::new());
+    assert_eq!(suggested_slot(&before, &pool, "toolu_A"), slot(&pool, 0));
+    let a = record_of(&before, "toolu_A");
+    assert!(before.cancel_task_stopped(a.id));
+    assert!(record_of(&before, "toolu_A").stop_release.is_some());
+    drop(before);
+
+    let after = Arc::new(DaemonState::new());
+    assert_eq!(
+        suggested_slot(&after, &pool, "toolu_B"),
+        slot(&pool, 1),
+        "a stopped builder may be resumed into slot 0, so it stays taken"
+    );
+}
