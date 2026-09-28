@@ -26,6 +26,7 @@ use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
 use trusty_common::memory_core::store::OpenIntent;
 
 use super::kg_rebuild::{scan_active_triples, STRUCTURAL_PREFIXES};
+use super::maintenance_gate::require_state_lease;
 use crate::kg_extract::{canonical_entity, is_stop_token, AUTO_PROVENANCE};
 use crate::AppState;
 
@@ -218,10 +219,14 @@ pub async fn report_merge(
 /// so the clean-looking exit-0 is reachable, not theoretical.
 /// What: iterates the registry, filters to one palace when asked, and captures
 /// a failing palace as a summary carrying `error` rather than propagating. A
-/// failure to list the palaces at all propagates instead.
+/// failure to list the palaces at all propagates instead. An applying pass
+/// first takes the data root's maintenance lease and holds it until every
+/// palace is done; without it the pass refuses and opens nothing (#8744).
 /// Test: `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
 /// `merge_dry_run_writes_nothing`,
-/// `merge_palaces_propagates_an_unreadable_data_root`.
+/// `merge_palaces_propagates_an_unreadable_data_root`,
+/// `merge_under_a_lease_held_elsewhere_refuses_and_repoints_nothing`,
+/// `destructive_passes_fail_closed_on_an_unavailable_lease`.
 pub async fn merge_palaces(
     state: &AppState,
     palace_filter: Option<&str>,
@@ -231,6 +236,9 @@ pub async fn merge_palaces(
     // #5401: an unreadable data root is a failed run, never an empty one.
     let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
+    // #8744: re-pointing retracts live rows, which is maintenance; refuse
+    // before any Writer open while another process holds the lease.
+    let _lease = apply.then(|| require_state_lease(state)).transpose()?;
     for palace in palaces {
         let id = palace.id.0.clone();
         if palace_filter.is_some_and(|filter| filter != id) {
