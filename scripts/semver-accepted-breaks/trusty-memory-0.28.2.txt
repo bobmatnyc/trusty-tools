@@ -1,11 +1,11 @@
 crate   trusty-memory
 version 0.28.2
 reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
-accept  function_missing function trusty_memory::commands::daemon_lock::acquire_lock, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:222
-accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:77
-accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path_for_dir, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:92
-accept  function_missing function trusty_memory::commands::daemon_lock::pid_alive, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:108
-accept  function_missing function trusty_memory::commands::daemon_lock::read_lock_pid, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:137
-accept  module_missing mod trusty_memory::commands::daemon_lock, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:1
-accept  pub_module_level_const_missing LOCK_FILENAME in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:34
-accept  struct_missing struct trusty_memory::commands::daemon_lock::DaemonLock, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-memory-0.28.1/src/commands/daemon_lock.rs:45
+accept  function_missing function trusty_memory::commands::daemon_lock::acquire_lock
+accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path
+accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path_for_dir
+accept  function_missing function trusty_memory::commands::daemon_lock::pid_alive
+accept  function_missing function trusty_memory::commands::daemon_lock::read_lock_pid
+accept  module_missing mod trusty_memory::commands::daemon_lock
+accept  pub_module_level_const_missing LOCK_FILENAME
+accept  struct_missing struct trusty_memory::commands::daemon_lock::DaemonLock
