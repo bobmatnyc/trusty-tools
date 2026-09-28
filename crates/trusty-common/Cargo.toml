@@ -121,7 +121,14 @@ name = "trusty-common"
 # burned (tags are immutable, #6178). No source change; republish under the
 # next version.
 # 0.52.7 (Refs #8736): patch — release-opening bump, no source change.
-version = "0.52.7"
+# 0.52.8 (PR #8736, Refs #8261, owner ruling 2026-09-28): patch — 0.52.7 is
+# already live on crates.io and #8736 changes `src/lib.rs` and
+# `src/memory_pressure.rs` (new opt-in `memory-pressure` module/feature, plus
+# a doc-comment fix), so the "PR version bump vs crates.io" gate (#4421)
+# requires a bump. Additive-only: no public item removed or changed shape, so
+# no semver-accepted-breaks record is needed; owner ruling directs PATCH
+# regardless of break status per docs/reference/semver-gate.md.
+version = "0.52.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
