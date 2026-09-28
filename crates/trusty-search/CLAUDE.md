@@ -772,6 +772,11 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
     "stream_url": "/indexes/my-project/reindex/stream"
   }
   ```
+- **Response 409** `index_write_quarantined` (#8105): the index's durable
+  corpus failed to open, so a reindex could persist nothing. Nothing is
+  queued. The body carries `index_id`, `failure_kind`, `queued: false`,
+  `retryable: false`, and a `message` naming the quarantine. Restart the
+  daemon to clear it: a successful corpus open lifts the quarantine.
 
 ##### `GET /indexes/:id/reindex/stream`
 
