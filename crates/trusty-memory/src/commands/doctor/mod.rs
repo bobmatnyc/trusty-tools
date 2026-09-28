@@ -26,17 +26,20 @@
 
 mod audit;
 mod checks;
+// #8751: doctor-side threshold for a palace lock held too long.
+mod lock_stall;
 mod mcp_registration;
+// #8751: the lock scan classifies the maintenance lease by its holder pid.
+mod palace_locks;
 mod tier_s;
 
 use audit::audit_palaces;
 pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
-use checks::{
-    check_daemon_health, check_fastembed_cache, check_kg_redb_size, check_stale_palace_locks,
-};
+use checks::{check_daemon_health, check_fastembed_cache, check_kg_redb_size};
 use mcp_registration::check_mcp_registrations;
+use palace_locks::check_stale_palace_locks;
 use tier_s::check_tier_s_reaffirmation;
 
 use anyhow::Result;

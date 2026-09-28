@@ -50,7 +50,11 @@ name = "trusty-memory"
 # 0.28.2 -> 0.28.3 (#8744, issue #4421): patch — 0.28.2 is already live on
 # crates.io and this PR changes `src/**`. No public item added, removed, or
 # changed shape.
-version = "0.28.3"
+# 0.28.3 -> 0.28.4 (#8744, issue #4421): patch — PR #8868 merged 0.28.3 to
+# main first; this branch reopens the next patch version above main and
+# crates.io (0.28.2) after the merge conflict. No public item added, removed,
+# or changed shape.
+version = "0.28.4"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

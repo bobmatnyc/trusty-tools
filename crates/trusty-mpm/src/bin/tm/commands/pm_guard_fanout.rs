@@ -37,10 +37,11 @@
 //! the behaviour that existed before this guard. Indeterminate is treated as
 //! "not a subagent" for that reason, and no future signal may invert it.
 //!
-//! `SendMessage` is never denied under any circumstance — it is not a member
-//! of `SUBAGENT_DISPATCH_TOOLS`, and it is how a blocked agent reports back
-//! to the PM and gets resumed. Denying it would strand the very agent this
-//! guard redirects.
+//! `SendMessage` is never denied by this rule — it is not a member of
+//! `SUBAGENT_DISPATCH_TOOLS`, and it is how a blocked agent reports back to
+//! the PM and gets resumed. Denying it would strand the very agent this guard
+//! redirects. (#8004: the PM's resume of an agent whose worktree is gone is
+//! refused separately, by `pm_guard_resume_worktree`.)
 //!
 //! Test: `denies_dispatch_tools_from_a_subagent`,
 //! `allows_dispatch_tools_from_the_pm`, `never_denies_send_message`,

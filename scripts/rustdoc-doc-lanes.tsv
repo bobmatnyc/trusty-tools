@@ -65,7 +65,16 @@ LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-
 LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/palace-resolve,trusty-common/redb-open,trusty-common/rpc,trusty-common/search-index,trusty-common/session-naming
 LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/symgraph-server,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
-LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon
+# #8616: `load-dynamic` joined this row once `ort_probe.rs` (mod-private,
+# `cfg(any(feature = "load-dynamic", feature = "cuda", test))`) gated a cfg
+# site on it, which rotted the prior NO-CFG row. `cargo doc` never runs the
+# final link step the crate's own Cargo.toml warns conflicts with the
+# default `bundled-ort` feature at the `ort-sys` level (that conflict is a
+# `cargo build`-time linker fact, per .github/workflows/al2023-build.yml) —
+# verified locally: `cargo doc -p trusty-embedderd --features load-dynamic`
+# exits 0 with defaults still on, so this LANE's additive-only `--features`
+# reaches the module cleanly.
+LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon
 LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
@@ -84,9 +93,7 @@ NO-CFG	trusty-common	embedder-coreml
 NO-CFG	trusty-common	embedder-load-dynamic
 NO-CFG	trusty-common	unconditional-only
 NO-CFG	trusty-embedderd	coreml
-NO-CFG	trusty-embedderd	cuda
 NO-CFG	trusty-embedderd	http-server
-NO-CFG	trusty-embedderd	load-dynamic
 NO-CFG	trusty-mpm	cli
 NO-CFG	trusty-mpm	gui
 NO-CFG	trusty-search	bundled-ort
@@ -98,3 +105,9 @@ NO-CFG	trusty-search	load-dynamic
 # SKIP — cannot be built on a stock runner. Reason mandatory.
 # ---------------------------------------------------------------------------
 SKIP	trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has; also mutually exclusive with embedder-bundled-ort, which the `features` lane carries. Matching row in scripts/semver-checks-feature-exclusions.tsv.
+# #8616: pass-through to trusty-common/embedder-cuda (dep:libloading is the
+# only other thing this feature adds). Verified locally: `cargo doc -p
+# trusty-embedderd --features cuda` fails the same way — cudarc's build.rs
+# panics on `nvcc --version` — which no CI runner here has. Matching row in
+# scripts/semver-checks-feature-exclusions.tsv.
+SKIP	trusty-embedderd	cuda	pass-through to trusty-common/embedder-cuda; cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has. Matching row in scripts/semver-checks-feature-exclusions.tsv.

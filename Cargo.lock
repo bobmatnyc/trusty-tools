@@ -6433,7 +6433,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11044,7 +11044,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11386,11 +11386,13 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "libloading 0.9.0",
+ "ort",
  "serde",
  "serde_json",
  "tempfile",
@@ -11402,7 +11404,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd-py"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "fs4 0.8.4",
@@ -11511,7 +11513,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.28.3"
+version = "0.28.4"
 dependencies = [
  "anyhow",
  "async-trait",
