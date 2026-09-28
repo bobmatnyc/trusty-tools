@@ -76,8 +76,12 @@ case "$event" in
     esac
     ;;
   push)
-    # The subject is the first line of the commit message.
-    subject="$(printf '%s\n' "${HEAD_COMMIT_MSG:-}" | head -n 1)"
+    # The subject is the first line of the commit message. Parameter
+    # expansion, NOT `printf … | head -n 1`: under `set -euo pipefail` `head`
+    # exits after its first line and printf's later write (a multi-line
+    # message) can then take SIGPIPE (#8716).
+    msg="${HEAD_COMMIT_MSG:-}"
+    subject="${msg%%$'\n'*}"
     if is_release_title "$subject"; then
       emit release "release commit subject"
       exit 0
