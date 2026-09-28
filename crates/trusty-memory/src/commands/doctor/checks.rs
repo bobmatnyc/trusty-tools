@@ -480,51 +480,6 @@ pub(super) fn summarize(results: &[CheckResult]) -> DoctorSummary {
 #[path = "checks_tests.rs"]
 mod checks_tests;
 
-/// Scan the data directory for stray `*.lock` files left over from a
-/// crashed daemon.
-///
-/// Why: redb leaves a sidecar lock file when a previous owner exits
-/// uncleanly; opening the palace from a fresh daemon then fails until the
-/// stale lock is removed. Surfacing this in `doctor` saves users from a
-/// confusing "palace won't load" symptom that has nothing to do with the
-/// palace itself.
-/// What: walks the trusty-memory data dir (one level deep into each palace
-/// directory) and lists any `*.lock` file. `Pass` when none found, `Warn`
-/// when at least one is present (the daemon may be running and using it,
-/// so we can't safely call this a `Fail`).
-/// Test: `stale_lock_check_warns_when_lock_present`.
-pub fn check_stale_palace_locks() -> CheckResult {
-    let label = "palace locks".to_string();
-    let data_dir = match trusty_common::resolve_data_dir("trusty-memory") {
-        Ok(d) => d,
-        Err(e) => return CheckResult::fail(label, format!("could not resolve data dir: {e}")),
-    };
-    let root = crate::resolve_palace_registry_dir(data_dir);
-    let locks = find_lock_files(&root);
-    if locks.is_empty() {
-        CheckResult::pass(label, format!("{} clean", root.display()))
-    } else {
-        let preview = locks
-            .iter()
-            .take(3)
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if locks.len() > 3 {
-            format!(" (+{} more)", locks.len() - 3)
-        } else {
-            String::new()
-        };
-        CheckResult::warn(
-            label,
-            format!(
-                "{} lock file(s) found: {preview}{suffix} — if the daemon is stopped, these can be removed",
-                locks.len()
-            ),
-        )
-    }
-}
-
 /// Collect `*.lock` files one level deep beneath `root`.
 ///
 /// Why: keeps the scan cheap (no recursive walk) while still catching the
