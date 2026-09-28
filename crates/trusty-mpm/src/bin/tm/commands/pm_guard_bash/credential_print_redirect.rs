@@ -17,18 +17,23 @@
 //! names a descriptor or the terminal to its sink. A plain input redirect
 //! whose target carries the value — a bare `$NAME` expansion, or a
 //! [`SubKind::Command`] substitution that yields — sets
-//! [`Routed::read_target_carries`]; the caller routes it to the stage's
+//! [`Routed::target_carries`]; the caller routes it to the stage's
 //! stderr. A [`SubKind::Input`] (`<(…)`) target stays excluded: bash always
 //! opens that descriptor, so it never produces a missing-file error.
-//! Test: `credential_print_tests::denies_the_round_two_bypasses`,
+//! #8677: an output target is read the same way, a device path is read with
+//! its `//`, `.` and `..` segments resolved, and a target chosen at run time
+//! (`> "$OUT"`) is [`Sink::Unknown`], which refuses once a value reaches it.
+//! Test: `credential_print_tests::denies_a_credential_redirected_to_an_unread_target_8677`,
+//! `credential_print_tests::denies_the_round_two_bypasses`,
 //! `credential_print_tests::denies_the_round_three_bypasses`,
 //! `credential_print_tests::denies_the_round_five_bypasses`,
 //! `credential_print_tests::denies_the_round_six_bypasses`,
 //! `credential_print_tests::allows_the_round_six_neighbours`.
 
-use super::super::bash_tokens::{RedirectRole, redirect_role};
+use super::super::bash_tokens::{RedirectRole, redirect_role, tokenize};
 use super::credential_print_heredoc::HEREDOC_MARK;
-use super::credential_print_taint::expands_tainted;
+use super::credential_print_programs::basename;
+use super::credential_print_taint::{expands_tainted, is_identifier};
 use super::{
     Lifted, MARK, Refusal, Sink, SubKind, carries, carries_kind, input_is_program_text, marks_in,
 };
@@ -50,8 +55,8 @@ pub(super) struct Routed {
     /// #8676 round 5/6: a plain input redirect (`<`, `N<`) names a target
     /// that carries — via a bare `$NAME` expansion or a yielding `$(…)`/
     /// backtick substitution — and a missing file's error would echo it on
-    /// stderr.
-    pub(super) read_target_carries: bool,
+    /// stderr. #8677: an output target does too.
+    pub(super) target_carries: bool,
 }
 
 /// Split a stage's words into argv and its output routing.
@@ -82,7 +87,7 @@ pub(super) fn apply_redirections(
         here_carries: false,
         here_program_text: false,
         here_any: false,
-        read_target_carries: false,
+        target_carries: false,
     };
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
@@ -122,9 +127,8 @@ pub(super) fn apply_redirections(
                 Source::Close => Sink::Discarded,
                 Source::Fd(n) if n < 10 && assigned[n] => fds[n],
                 Source::Fd(_) => Sink::Terminal,
-                Source::Path(p) => {
-                    terminal_name_sink(p, &fds, lifted, out).unwrap_or(Sink::Discarded)
-                }
+                // #8677: a device read with its extra segments resolved.
+                Source::Path(p) => redirect_target_sink(p, &fds, lifted, out),
             };
             assign(&mut fds, &mut assigned, &[fd], sink);
             continue;
@@ -140,7 +144,9 @@ pub(super) fn apply_redirections(
                 }
                 t => t,
             };
-            let sink = terminal_name_sink(target, &fds, lifted, out).unwrap_or(Sink::Discarded);
+            // #8677: an open error names a carrying target, as for `<`.
+            routed.target_carries |= target_names_a_value(target, lifted);
+            let sink = redirect_target_sink(target, &fds, lifted, out);
             assign(&mut fds, &mut assigned, &[fd], sink);
             continue;
         }
@@ -161,8 +167,7 @@ pub(super) fn apply_redirections(
             // substitution's result IS the missing path bash reports, not a
             // real descriptor). A `<(…)` target stays excluded — it is a real
             // descriptor bash always opens, never a missing-file error.
-            routed.read_target_carries |= expands_tainted(target, &lifted.names)
-                || carries_kind(target, lifted, Some(SubKind::Command));
+            routed.target_carries |= target_names_a_value(target, lifted);
             // A `<(…)`/`$(…)` target's file content becomes stdin, exactly
             // like a here-string (round 2's `sort < <(cred)`, `bash <
             // <(echo …)`) — this branch used to leave the target in `argv`,
@@ -186,7 +191,9 @@ pub(super) fn apply_redirections(
             }
             RedirectRole::Target(t) => t,
         };
-        let sink = terminal_name_sink(target, &fds, lifted, out).unwrap_or(Sink::Discarded);
+        // #8677: `echo x > "/nonexistent/$T"` names `$T` in its open error.
+        routed.target_carries |= target_names_a_value(target, lifted);
+        let sink = redirect_target_sink(target, &fds, lifted, out);
         let prefix = tok.split('>').next().unwrap_or_default();
         let targets: Vec<usize> = match prefix {
             "" => vec![1],
@@ -217,36 +224,162 @@ fn assign(fds: &mut [Sink; 10], assigned: &mut [bool; 10], targets: &[usize], si
 /// `None` for an ordinary file.
 ///
 /// What: `/dev/stdout` and `/dev/stderr` are the current fd 1 and fd 2,
-/// `/dev/fd/N` (N 0-9) is fd N, any other `/dev/fd/…` and `/dev/tty` are the
-/// terminal, and a `>(…)` target writes where the stage's own stdout
-/// (`stage_out`, before its redirections) goes.
-/// Test: `credential_print_tests::denies_the_round_three_bypasses`.
+/// `/dev/fd/N` (N 0-9) is fd N, any other `/dev/fd/…` is the terminal, and a
+/// `>(…)` target writes where the stage's own stdout (`stage_out`, before its
+/// redirections) goes. #8677: the path is read by [`device_name`], so extra
+/// `/`, `.` and `..` segments change nothing, and `/proc/self/fd/N` is fd N.
+/// Any other device but `/dev/null`, `zero`, `random`, `urandom` and `stdin`
+/// — `tty`, a `ttys…`/`pts/…` terminal — is the terminal.
+/// Test: `credential_print_tests::denies_the_round_three_bypasses`,
+/// `credential_print_tests::denies_a_credential_redirected_to_an_unread_target_8677`.
 pub(super) fn terminal_name_sink(
     path: &str,
     fds: &[Sink; 10],
     lifted: &Lifted,
     stage_out: Sink,
 ) -> Option<Sink> {
-    let fd_path = path
-        .strip_prefix("/dev/fd/")
-        .map(|n| n.parse::<usize>().ok().filter(|&n| n < 10));
-    match path {
-        "/dev/stdout" => Some(fds[1]),
-        "/dev/stderr" => Some(fds[2]),
-        "/dev/tty" => Some(Sink::Terminal),
-        _ => match fd_path {
-            Some(Some(n)) => Some(fds[n]),
-            Some(None) => Some(Sink::Terminal),
-            None => marks_in(path)
-                .any(|m| {
-                    lifted
-                        .subs
-                        .get(m)
-                        .is_some_and(|s| s.kind == SubKind::Output)
-                })
-                .then_some(stage_out),
-        },
+    let output_sub = marks_in(path).any(|m| {
+        lifted
+            .subs
+            .get(m)
+            .is_some_and(|s| s.kind == SubKind::Output)
+    });
+    if output_sub {
+        return Some(stage_out);
     }
+    let device = device_name(path)?;
+    let fd = |n: &str| n.parse::<usize>().ok().filter(|&n| n < 10);
+    match device.as_str() {
+        "null" | "zero" | "random" | "urandom" | "stdin" => None,
+        "stdout" => Some(fds[1]),
+        "stderr" => Some(fds[2]),
+        d => Some(match d.strip_prefix("fd/").and_then(fd) {
+            Some(n) => fds[n],
+            None => Sink::Terminal,
+        }),
+    }
+}
+
+/// The sink an output target writes to: a redirect's word, or a path a CLI
+/// flag names (#8677).
+///
+/// What: [`terminal_name_sink`] first; `/dev/stdin` (read lexically) opens
+/// fd 0 for writing; a target the shell expands at run time — a `$`, a
+/// backtick, a lifted substitution, a glob character — is [`Sink::Unknown`];
+/// anything else is a file, [`Sink::Discarded`].
+pub(super) fn redirect_target_sink(
+    target: &str,
+    fds: &[Sink; 10],
+    lifted: &Lifted,
+    stage_out: Sink,
+) -> Sink {
+    if let Some(sink) = terminal_name_sink(target, fds, lifted, stage_out) {
+        return sink;
+    }
+    if device_name(target).as_deref() == Some("stdin") {
+        return fds[0];
+    }
+    let name = target
+        .strip_prefix("${")
+        .and_then(|t| t.strip_suffix('}'))
+        .or_else(|| target.strip_prefix('$'));
+    if name.is_some_and(|n| lifted.temp_files.contains(n)) {
+        return Sink::Discarded;
+    }
+    if target.contains(['$', '`', '*', '?', '[']) || target.contains(MARK) {
+        return Sink::Unknown;
+    }
+    Sink::Discarded
+}
+
+/// Whether a `$(…)` body is a lone `mktemp` call, whose value is a new file's
+/// path (#8677): no other command, redirection or expansion rides along.
+pub(super) fn is_mktemp_call(body: &str) -> bool {
+    let body = body.trim();
+    !body.contains([';', '|', '&', '<', '>', '$', '`', '\n', '(', ')'])
+        && body
+            .split_whitespace()
+            .next()
+            .is_some_and(|w| basename(w) == "mktemp")
+}
+
+/// Record the names an assignment-only stage binds to a lone `$(mktemp)`, and
+/// forget any it binds to anything else (#8677).
+///
+/// Why: `tmp=$(mktemp); gcloud … > "$tmp"` is the safe way to keep a value in
+/// a file, and the run-time target rule would otherwise refuse it.
+/// What: only a stage made wholly of `NAME=VALUE` words binds in the current
+/// shell; a VALUE that is exactly one [`MARK`] placeholder of a mktemp
+/// substitution adds NAME, and any other VALUE removes it. Any other stage
+/// naming a recorded NAME outside a `$NAME`/`${NAME}` reference (`read tmp`,
+/// `for tmp in …`, `printf -v tmp`) removes it: it may rebind it.
+pub(super) fn note_temp_files(stage: &str, lifted: &mut Lifted) {
+    // A binding needs a lifted `$(mktemp)`; with none recorded, nothing to do.
+    if lifted.temp_files.is_empty() && !stage.contains(MARK) {
+        return;
+    }
+    let words = tokenize(stage.trim()).unwrap_or_default();
+    let binds: Vec<(&str, &str)> = words.iter().filter_map(|w| w.split_once('=')).collect();
+    if words.is_empty() || binds.len() != words.len() {
+        lifted.temp_files.retain(|name| !names_bare(stage, name));
+        return;
+    }
+    for (name, value) in binds {
+        if !is_identifier(name) {
+            return;
+        }
+        let temp = marks_in(value).next().is_some_and(|n| {
+            value == format!("{MARK}{n}__") && lifted.subs.get(n).is_some_and(|s| s.mktemp)
+        });
+        if temp {
+            lifted.temp_files.insert(name.to_string());
+        } else {
+            lifted.temp_files.remove(name);
+        }
+    }
+}
+
+/// Whether `stage` names `name` as a bare word, once every `$name` and
+/// `${name}` reference is taken out.
+fn names_bare(stage: &str, name: &str) -> bool {
+    let text = stage
+        .replace(&format!("${{{name}}}"), "")
+        .replace(&format!("${name}"), "");
+    let ident = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    text.match_indices(name).any(|(at, _)| {
+        !ident(text[..at].chars().next_back()) && !ident(text[at + name.len()..].chars().next())
+    })
+}
+
+/// The device a path names under `/dev`, as `tty` or `fd/1` (#8677).
+///
+/// What: resolves empty, `.` and `..` segments lexically, then reads the rest
+/// after a leading `dev`; `/proc/self/fd/N` reads as `fd/N`. A relative path
+/// is read as rooted, since its working directory is unknown: `../../dev/tty`
+/// is `tty`. `None` for any other path.
+fn device_name(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    match parts.as_slice() {
+        ["dev", rest @ ..] if !rest.is_empty() => Some(rest.join("/")),
+        ["proc", "self", "fd", n] => Some(format!("fd/{n}")),
+        _ => None,
+    }
+}
+
+/// Whether a redirect target carries a value an open error would print: a
+/// bare `$NAME` expansion or a yielding `$(…)`/backtick substitution
+/// (#8676 round 5/6, #8677 for output targets).
+fn target_names_a_value(target: &str, lifted: &Lifted) -> bool {
+    expands_tainted(target, &lifted.names) || carries_kind(target, lifted, Some(SubKind::Command))
 }
 
 /// What a descriptor copy reads from.

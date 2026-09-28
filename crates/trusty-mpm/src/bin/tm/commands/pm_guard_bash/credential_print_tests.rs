@@ -994,3 +994,184 @@ fn deny_reason_never_echoes_the_command() {
     assert!(!reason.contains("ya29.fake-literal"), "{reason}");
     assert!(!reason.contains("cd \""), "{reason}");
 }
+
+/// 🔴 REGRESSION (#8677): `security -i` (or `-p`, which implies it) runs the
+/// commands its stdin carries. Each row was allowed at 27ec6fa20.
+#[test]
+fn denies_security_reading_commands_on_stdin_8677() {
+    check(
+        true,
+        &[
+            // The issue's reproduction.
+            "echo 'find-generic-password -s s -w' | security -i",
+            "printf 'find-generic-password -s fake-svc -w\\n' | security -i",
+            "security -i <<< 'find-generic-password -s fake-svc -w'",
+            "security -i <<'EOF'\nfind-generic-password -s fake-svc -w\nEOF",
+            "echo 'dump-keychain -d' | /usr/bin/security -vi",
+            "echo 'find-generic-password -s fake-svc -w' | security -q -p 'kc> '",
+            "echo 'find-generic-password -s fake-svc -w' | sudo -u fake security -i",
+            "echo 'find-generic-password -s fake-svc -w' | timeout 5 security -i",
+            "echo 'find-generic-password -s fake-svc -w' | bash -c 'security -i'",
+            // No credential subcommand is spelled out, so only `-i` shows it.
+            "printf 'find-%s-password -s fake-svc -w\\n' generic | security -i",
+            "security -i < fake-cmds.txt",
+        ],
+    );
+}
+
+/// #8677 error arm: a `security -i` whose input the guard cannot read — a
+/// run-time file, broken quoting — refuses as unreadable, never allows.
+#[test]
+fn refuses_an_unclassifiable_interactive_security_8677() {
+    for command in [
+        "security -i < \"$FAKE_CMDS\"",
+        "security -i <<< 'find-generic-password -s fake-svc -w",
+        "security -p \"$PROMPT\" <&3",
+    ] {
+        let reason = evaluate_credential_print_command(command).unwrap_or_default();
+        assert!(
+            reason.contains("cannot read"),
+            "{command:?} must refuse as unreadable: {reason:?}"
+        );
+    }
+}
+
+/// 🔴 REGRESSION (#8677): `curl -v` (and `--trace*`/`--libcurl`) echoes the
+/// request headers, so a credential in any argument reaches tool output. Each
+/// row was allowed at 27ec6fa20.
+#[test]
+fn denies_a_verbose_curl_carrying_a_credential_8677() {
+    check(
+        true,
+        &[
+            // The issue's reproduction.
+            "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -v",
+            "curl -v -H \"Authorization: Bearer $(gcloud auth print-access-token)\" https://example.test",
+            "curl --verbose -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl -sSv -o /dev/null -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl -vsH \"x: $(gcloud auth print-access-token)\" https://example.test 2>&1 | head",
+            "curl -v -u \"fake:$(security find-generic-password -s fake-svc -w)\" https://example.test",
+            "T=$(gcloud auth print-access-token); curl -v -H \"Authorization: Bearer $T\" https://example.test",
+            "timeout 5 curl -v -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl --trace-ascii - -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl --trace % -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl --trace /dev/tty -H \"x: $(gcloud auth print-access-token)\" https://example.test >/dev/null 2>&1",
+            "curl --libcurl - -H \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl -v --stderr - -H \"x: $(gcloud auth print-access-token)\" https://example.test 2>/dev/null",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677): a credential written to a redirect target the guard
+/// cannot read (`> "$OUT"`), or to a device spelled with extra `/`, `.` or
+/// `..` segments. Each row was allowed at 27ec6fa20.
+#[test]
+fn denies_a_credential_redirected_to_an_unread_target_8677() {
+    check(
+        true,
+        &[
+            // The issue's reproductions.
+            "security find-generic-password -s fake-svc -w > \"$OUT\"",
+            "security find-generic-password -s fake-svc -w > /dev//stdout",
+            "security find-generic-password -s fake-svc -w > /dev/./tty",
+            "gcloud auth print-access-token > $OUT",
+            "gcloud auth print-access-token >> \"${OUT}/token\"",
+            "gcloud auth print-access-token > `echo /dev/tty`",
+            "security find-generic-password -g -s fake-svc 2> \"$ERR\"",
+            // A `$(mktemp)` name rebound, or a body that is not a lone mktemp.
+            "tmp=$(mktemp); tmp=/dev/tty; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); read tmp < fake-list; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); for tmp in /dev/tty; do gcloud auth print-access-token > \"$tmp\"; done",
+            "tmp=$(mktemp; echo /dev/tty); gcloud auth print-access-token > \"$tmp\"",
+            "gcloud auth print-access-token > /dev/../dev/tty",
+            "gcloud auth print-access-token > //dev/stderr",
+            "gcloud auth print-access-token >/dev//fd//1",
+            "gcloud auth print-access-token > ../../../../../../dev/tty",
+            "gcloud auth print-access-token > /dev/ttys001",
+            "gcloud auth print-access-token > /dev/pts/0",
+            "gcloud auth print-access-token > /dev/tt?",
+            "gcloud auth print-access-token > /dev/stdin",
+            "gcloud auth print-access-token > /proc/self/fd/2",
+            "gcloud auth print-access-token 1<>/dev//tty",
+            "gcloud auth print-access-token | tee /dev//tty >/dev/null",
+            // A missing directory's error names the carrying target.
+            "T=$(gcloud auth print-access-token); echo x > \"/nonexistent/$T\"",
+            // A wrapped call's stderr piped on to a printing reader.
+            "sh -c 'security find-generic-password -g -s fake-svc' 2>&1 | cat",
+            "sh -c 'security find-generic-password -g -s fake-svc' 2>\"$ERR\"",
+        ],
+    );
+}
+
+/// 🔴 REGRESSION (#8677): the sibling secret-printing CLIs the issue lists.
+/// Each row was allowed at 27ec6fa20.
+#[test]
+fn denies_the_sibling_credential_clis_8677() {
+    check(
+        true,
+        &[
+            "gcloud secrets versions access latest --secret=fake-secret",
+            "gcloud secrets versions access 1 --secret fake-secret | head -c 10",
+            "gcloud secrets versions access latest --secret=fake --out-file=/dev/stdout",
+            "gh auth token",
+            "gh auth token --hostname github.example.test",
+            "/opt/homebrew/bin/gh auth status --show-token",
+            "gh auth status -t",
+            "op read op://fake-vault/fake-item/password",
+            "op read --out-file /dev/stdout op://fake-vault/fake-item/password",
+            "aws configure get aws_secret_access_key",
+            "aws configure get aws_session_token --profile fake",
+            "aws configure export-credentials --profile fake",
+            "echo \"$(gh auth token)\"",
+            "T=$(op read op://fake-vault/fake-item/password); echo \"$T\"",
+        ],
+    );
+}
+
+/// #8677: the nearest benign forms of each refused shape stay allowed.
+#[test]
+fn allows_the_8677_neighbours() {
+    check(
+        false,
+        &[
+            // curl with no credential, or a credential with no echo flag.
+            "curl -v https://example.test",
+            "T=$(gcloud auth print-access-token); curl -v https://example.test >/dev/null",
+            "curl -sS -H \"Authorization: Bearer $(gcloud auth print-access-token)\" https://example.test/v1",
+            "curl -sSH \"x: $(gcloud auth print-access-token)\" https://example.test",
+            "curl -H \"x: $(gcloud auth print-access-token)\" -d -v https://example.test",
+            "curl -s -H \"x: $(gcloud auth print-access-token)\" --trace /tmp/fake-trace https://example.test",
+            // security with no `-w`/`-g`, no `-i`, or help only.
+            "security -h",
+            "security -h; security find-generic-password -s fake-svc >/dev/null 2>&1",
+            "security -v find-generic-password -s fake-svc >/dev/null 2>&1",
+            "security find-generic-password -s fake-svc",
+            "security find-generic-password -s fake-svc > \"$OUT\"",
+            "grep security -i notes.txt; gcloud auth print-access-token > /tmp/fake-token",
+            "echo 'security -i' > notes.md",
+            // Ordinary redirects of non-secret output, and plain files.
+            "gcloud config list > \"$OUT\" && gcloud auth print-access-token > /tmp/fake-token",
+            "echo done > \"$LOG\"; T=$(gcloud auth print-access-token)",
+            "printf '%s\\n' 'never run gcloud auth print-access-token bare' > \"$OUT\"",
+            "gcloud auth print-access-token > /tmp//fake-token-file",
+            "gcloud auth print-access-token > ./dev-token.txt",
+            "gcloud auth print-access-token > /dev//null 2>&1",
+            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp -t fake) && gcloud auth print-access-token > \"${tmp}\" && wc -c \"$tmp\"",
+            // #8730 / #8763: clobber redirects to an ordinary file.
+            "security find-generic-password -s x -w >|/tmp/fake-out",
+            "security find-generic-password -s x -w >>!/tmp/fake-out",
+            // Sibling CLIs that print no secret, or capture it.
+            "gh auth status",
+            "gh auth token | docker login ghcr.io -u fake --password-stdin",
+            "GH_TOKEN=$(gh auth token) gh pr list",
+            "aws configure get region",
+            "aws configure list",
+            "op read --out-file /tmp/fake-out op://fake-vault/fake-item/password",
+            "gcloud secrets versions access latest --secret=fake --out-file=/tmp/fake-out",
+            "gcloud secrets list",
+            "X=$(gcloud secrets versions access latest --secret=fake)",
+            "git commit -m 'docs: never run gh auth token or op read bare'",
+        ],
+    );
+}

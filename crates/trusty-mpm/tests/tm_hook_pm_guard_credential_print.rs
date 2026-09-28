@@ -89,6 +89,20 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "gcp-ops",
             "for t in $(gcloud auth print-access-token); do echo $t; done",
         ),
+        // #8677: the three reproductions, and a sibling CLI.
+        (
+            "local-ops",
+            "echo 'find-generic-password -s s -w' | security -i",
+        ),
+        (
+            "gcp-ops",
+            "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -v",
+        ),
+        (
+            "local-ops",
+            "security find-generic-password -s fake-svc -w > /dev/./tty",
+        ),
+        ("local-ops", "gh auth token"),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();
@@ -138,6 +152,13 @@ fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
         (
             "gcp-ops",
             "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+        ),
+        // #8677: the nearest benign forms of the three reproductions.
+        ("gcp-ops", "curl -v https://example.test"),
+        ("local-ops", "security -h"),
+        (
+            "gcp-ops",
+            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
         ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
