@@ -25,6 +25,8 @@
 //! Test: Each submodule has its own tests (pure + `#[ignore]`-tagged live tests).
 //! The orchestrator's fallback decision logic is tested in `tests` below.
 
+// Tools released outside this workspace (tga, trusty-audit) — ruling 2026-09-28.
+pub(crate) mod external;
 pub mod fetch;
 pub mod glibc;
 // #5491: pinned-version, fail-closed install path for consumers that pin exact

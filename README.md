@@ -3,7 +3,7 @@
 **Website: [trustytools.dev](https://trustytools.dev/)**
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-It combines code search, memory, analysis, orchestration, review, audit, and
+It combines code search, memory, analysis, orchestration, review, and
 operator interfaces in one Cargo workspace. The live package inventory comes
 from `cargo metadata`; the human-readable map is
 [docs/reference/crate-map.md](docs/reference/crate-map.md).
@@ -207,7 +207,6 @@ package to its manifest, source, and documentation, use the
 | Crate | Description |
 |---|---|
 | `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |
-| `trusty-audit` | Auditor handoff client and CLI |
 | `trusty-kb` | Deterministic personal knowledge-base store + MCP server |
 | `trusty-publish-guard` | Internal release parity checker |
 | `trusty-sld-lint` | Spec-linked documentation linter |
@@ -217,17 +216,24 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description |
 |---|---|
-| `tga` (`trusty-git-analytics` directory) | Developer productivity analytics from git history |
 | `trusty-agents` | Agent orchestration platform |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
 | `trusty-agents-ui` | Nested Tauri desktop client for trusty-agents |
-| `trusty-audit-ui` | Nested Tauri desktop client for trusty-audit |
+
+### Moved to their own repo
+
+`tga` (git analytics, formerly the crates/trusty-git-analytics directory) and
+`trusty-audit` (auditor handoff client, bins `trusty-audit` and `taudit`, plus
+`trusty-audit-ui`) build, release and publish from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
+`tctl install tga` still installs `tga`; `tctl install` does not take
+`trusty-audit` by name.
 
 ## Architecture
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ User surfaces: tm · tcode · tagent · taudit · tga · GUIs    │
+│ User surfaces: tm · tcode · tagent · tctl · GUIs            │
 └──────────────────────────────┬────────────────────────────────┘
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
@@ -297,6 +303,9 @@ PATH — is the recommended route for its managed application set:
 together, knows which run as daemons, and can update its own control-plane
 binary. The live set is defined in
 [`stable_set.rs`](crates/trusty-installer/src/commands/stable_set.rs).
+`tga` comes from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics)
+releases, with `cargo install` from crates.io as the fallback.
 
 ```bash
 tctl install                       # the full managed set
@@ -329,6 +338,10 @@ brew install trusty-mpm
 brew install trusty-review
 brew install trusty-search
 ```
+
+`trusty-audit` and `trusty-git-analytics` are built in
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics),
+not in this repo.
 
 Or combine into a single command:
 
