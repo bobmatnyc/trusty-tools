@@ -48,6 +48,8 @@ use std::path::{Path, PathBuf};
 use trusty_common::github_path::GithubPath;
 
 mod handover;
+// #8819: the on-disk lease a restarted daemon reads for a slot it lost.
+pub mod lease;
 
 /// The marker file that records a slot directory has been seeded.
 ///

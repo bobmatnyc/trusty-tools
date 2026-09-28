@@ -280,6 +280,19 @@ fn ceiling_notice(ceiling: u32) -> String {
     )
 }
 
+/// Longest-running first, then by agent name.
+///
+/// Why: stable output so a deny message and a doctor row read the same way
+/// twice in a row; a `DashMap` scan has no inherent order. #8819: shared with
+/// the restored-lease holders, which are merged into the same list.
+pub(super) fn sort_holders(rows: &mut [BuilderHolder]) {
+    rows.sort_by(|a, b| {
+        b.elapsed_secs
+            .cmp(&a.elapsed_secs)
+            .then_with(|| a.agent.cmp(&b.agent))
+    });
+}
+
 impl DaemonState {
     /// Every builder currently holding one of this machine's slots.
     ///
@@ -314,8 +327,20 @@ impl DaemonState {
     /// Test: `census_separates_holders_from_expired_leases`.
     #[must_use]
     pub fn builder_slot_census(&self, cap: u32) -> BuilderSlotCensus {
+        self.builder_slot_census_with_pool_root(cap, None)
+    }
+
+    /// [`Self::builder_slot_census`], counting the restored leases under
+    /// `pool_root` among the holders (#8819).
+    /// Test: `the_census_counts_restored_leases_once_and_skips_stale_ones_8819`.
+    #[must_use]
+    pub fn builder_slot_census_with_pool_root(
+        &self,
+        cap: u32,
+        pool_root: Option<&Path>,
+    ) -> BuilderSlotCensus {
         BuilderSlotCensus {
-            holders: self.builder_slot_holders(None),
+            holders: self.builder_slot_holders_with_pool_root(None, pool_root),
             expired: self.builder_leases(None, |lease| lease == BuilderLease::ReleasedByTtl),
             cap,
         }
@@ -347,8 +372,22 @@ impl DaemonState {
         ceiling: u32,
         exclude_tool_use_id: Option<&str>,
     ) -> crate::core::builder_capacity::Capacity {
-        let held =
-            u32::try_from(self.builder_slot_holders(exclude_tool_use_id).len()).unwrap_or(u32::MAX);
+        self.builder_capacity_with_pool_root(config, ceiling, exclude_tool_use_id, None)
+    }
+
+    /// [`Self::builder_capacity`], counting the restored leases under
+    /// `pool_root` as held (#8819).
+    /// Test: `the_census_counts_restored_leases_once_and_skips_stale_ones_8819`.
+    #[must_use]
+    pub fn builder_capacity_with_pool_root(
+        &self,
+        config: &crate::core::builders::BuildersConfig,
+        ceiling: u32,
+        exclude_tool_use_id: Option<&str>,
+        pool_root: Option<&Path>,
+    ) -> crate::core::builder_capacity::Capacity {
+        let holders = self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool_root);
+        let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
         let readings = crate::core::builder_capacity::sample_capacity_readings();
         let mut quiet = self.builder_quiet_window.lock();
         crate::core::builder_capacity::resolve_capacity(
@@ -482,8 +521,39 @@ impl DaemonState {
         record: C,
         release: R,
     ) -> BuilderSlotGrant {
+        let pool_root = pool.map(SlotPool::root);
+        self.claim_builder_slot_with_pool_root(
+            cap,
+            exclude_tool_use_id,
+            eligible,
+            pool,
+            pool_root,
+            record,
+            release,
+        )
+    }
+
+    /// [`Self::claim_builder_slot_with_pool`], counting the restored leases
+    /// under `pool_root` whether or not this dispatch has a pool (#8819).
+    ///
+    /// Why (#8819 critic): a dispatch from a checkout with no GitHub origin has
+    /// no pool, yet the machine-wide cap must still count every restored lease,
+    /// or a restarted daemon admits it past the cap.
+    /// Test: `a_claim_with_no_pool_counts_restored_leases_8819`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_builder_slot_with_pool_root<C: FnOnce(&Self), R: FnOnce(&Self)>(
+        &self,
+        cap: u32,
+        exclude_tool_use_id: Option<&str>,
+        eligible: bool,
+        pool: Option<&SlotPool>,
+        pool_root: Option<&Path>,
+        record: C,
+        release: R,
+    ) -> BuilderSlotGrant {
         let _claim = self.builder_claim_guard();
-        let holders = self.builder_slot_holders(exclude_tool_use_id);
+        // #8819: a restarted daemon also counts the leases it restored from disk.
+        let holders = self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool_root);
         let admitted = eligible && u32::try_from(holders.len()).unwrap_or(u32::MAX) < cap;
         let mut grant = BuilderSlotGrant {
             holders,
@@ -539,7 +609,11 @@ impl DaemonState {
     /// `create_dir_all`, and the handover's one `rename` per invalidated package
     /// directory. The trash trees of every slot tried go to
     /// [`BuilderSlotGrant::purge`] for the caller to delete after answering.
+    /// #8819: a slot whose on-disk lease a previous daemon granted is skipped
+    /// while that lease is live or unverifiable, and every handover records a
+    /// lease before the slot is handed out.
     /// Test: `two_admissions_racing_for_an_unseeded_slot_get_no_slot_and_one_seed`,
+    /// `a_held_slot_survives_a_daemon_restart_8819`,
     /// `an_admitted_builder_records_the_slot_directory_it_was_given`,
     /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`,
     /// `a_second_claim_on_a_slot_invalidates_the_first_holders_build`,
@@ -562,24 +636,39 @@ impl DaemonState {
                 continue;
             }
             seeded.insert(index);
+            // #8819: a lease granted before a restart is not in `taken`; its
+            // file is the evidence, and one that cannot be verified keeps it.
+            let lost = self.lost_lease_verdict(pool, index);
+            if lost.blocks() {
+                tracing::info!("seeded builder slot {index} is still leased: {lost:?}");
+                continue;
+            }
             let handed = pool.hand_over(index, holder);
             // #8794: listed here, under the mutex every handover runs under, so
             // no listed tree is still being filled; deleted after the answer.
             grant.purge.extend(pool.invalidated_trees(index));
-            match handed {
-                Ok(path) if self.stamp_builder_slot(holder, index) => {
-                    let rendered = format!("{:?}", SeedKind::AlreadySeeded);
-                    self.record_builder_slot_dir(tool_use_id, &path, &rendered);
-                    grant.slot_dir = Some(path);
-                    grant.slot_seed = Some(rendered);
-                    return;
+            let path = match handed {
+                Ok(path) => path,
+                Err(err) => {
+                    tracing::warn!("seeded builder slot {index} not handed out: {err}");
+                    continue;
                 }
-                Ok(_) => {
-                    grant.slot_notice = Some(NO_INDEX_NOTICE.to_string());
-                    return;
-                }
-                Err(err) => tracing::warn!("seeded builder slot {index} not handed out: {err}"),
+            };
+            // #8819: a lease that is not on disk is lost at the next restart.
+            if let Err(err) = pool.record_lease(index, &self.slot_lease_for(holder)) {
+                tracing::warn!("builder slot {index} not handed out, lease unrecorded: {err}");
+                continue;
             }
+            if !self.stamp_builder_slot(holder, index) {
+                pool.clear_lease(index);
+                grant.slot_notice = Some(NO_INDEX_NOTICE.to_string());
+                return;
+            }
+            let rendered = format!("{:?}", SeedKind::AlreadySeeded);
+            self.record_builder_slot_dir(tool_use_id, &path, &rendered);
+            grant.slot_dir = Some(path);
+            grant.slot_seed = Some(rendered);
+            return;
         }
         // #8794: bounded by the ceiling, so hand-overs that keep failing cannot
         // clone a new slot on every admission.
@@ -813,13 +902,7 @@ impl DaemonState {
                 })
             })
             .collect();
-        // Stable output so a deny message and a doctor row read the same way
-        // twice in a row; a `DashMap` scan has no inherent order.
-        rows.sort_by(|a, b| {
-            b.elapsed_secs
-                .cmp(&a.elapsed_secs)
-                .then_with(|| a.agent.cmp(&b.agent))
-        });
+        sort_holders(&mut rows);
         rows
     }
 
@@ -1361,6 +1444,17 @@ mod tests {
     fn slot_zero_served_to_a(pool: &SlotPool) -> String {
         pool.seed(0, None).expect("a seeded slot 0");
         let slot = pool.hand_over(0, "toolu_A").expect("A is handed slot 0");
+        // #8819: a lease-less handover inside the TTL is unverifiable and keeps
+        // its slot, so backdate it past the TTL to leave the slot free.
+        std::fs::File::options()
+            .write(true)
+            .open(slot.join(crate::core::builder_slot_pool::SEED_MARKER))
+            .and_then(|marker| {
+                marker.set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),
+                )
+            })
+            .expect("backdate the marker");
         served_line(&slot)
     }
 

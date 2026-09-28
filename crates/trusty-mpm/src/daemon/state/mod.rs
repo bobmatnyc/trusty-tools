@@ -21,6 +21,12 @@ mod builder_slot_release_tests;
 // #8548: a stopped builder's slot index is not reissued while it may resume.
 #[cfg(test)]
 mod builder_slot_quarantine_tests;
+// #8819: a held slot's lease survives a daemon restart.
+mod builder_slot_lease;
+#[cfg(test)]
+mod builder_slot_lease_census_tests;
+#[cfg(test)]
+mod builder_slot_lease_tests;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;
@@ -33,6 +39,8 @@ mod tree_membership;
 #[cfg(test)]
 mod tests;
 
+// #8819: the agent name the census counts a restored lease under.
+pub use builder_slot_lease::RESTORED_LEASE_AGENT;
 pub use builder_slots::{
     BUILDER_LEASE_TTL_SECS, BuilderHolder, BuilderLease, BuilderSlotCensus, BuilderSlotGrant,
     builder_lease,
