@@ -16,6 +16,7 @@ use super::*;
 use crate::core::embed::Embedder;
 use crate::core::indexer::ingest::deferred::DeferredEmbedPlan;
 use crate::core::indexer::ingest::embed::EmbedRun;
+use crate::core::indexer::ingest::EmbedCatchUp;
 use crate::core::store::VectorHit;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
@@ -327,7 +328,13 @@ async fn commit_refuses_when_the_chunk_map_cannot_be_rehydrated() {
     let run = plan.embed(None, None).await.expect("embed");
 
     let _unreadable = make_corpus_unreadable(&idx).await;
-    let committed = idx.commit_deferred_embed(plan, run).await;
+    // #8761: a regression that records no fault would otherwise wait 300 s.
+    let committed = tokio::time::timeout(
+        Duration::from_secs(20),
+        idx.commit_deferred_embed(plan, run),
+    )
+    .await
+    .expect("the unreadable map fails the commit before the ceiling");
 
     let err = committed.expect_err("an unreadable chunk map must not read as an empty corpus");
     // The pre-upsert check refuses; skipping it would drop every chunk as
@@ -348,12 +355,18 @@ async fn post_upsert_check_refuses_when_the_chunk_map_cannot_be_rehydrated() {
     let run = plan.embed(None, None).await.expect("embed");
 
     let (reached, release) = gated.before_upsert.arm();
-    let (committed, _unreadable) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
+    // #8761: a regression that records no fault would otherwise wait 300 s.
+    let commit = tokio::time::timeout(
+        Duration::from_secs(20),
+        idx.commit_deferred_embed(plan, run),
+    );
+    let (committed, _unreadable) = tokio::join!(commit, async {
         reached.await.expect("upsert reached");
         let unreadable = make_corpus_unreadable(&idx).await;
         release.send(()).expect("release upsert");
         unreadable
     });
+    let committed = committed.expect("the unreadable map fails the commit before the ceiling");
 
     let err = committed.expect_err("an unreadable chunk map must not evict committed vectors");
     assert!(format!("{err:#}").contains("find chunks removed during the vector upsert"));
@@ -485,4 +498,124 @@ async fn the_commit_wait_gives_up_at_its_ceiling() {
         format!("{err:#}").contains("did not rehydrate within"),
         "{err:#}"
     );
+}
+
+/// Holds `rehydrate_generation`'s lock on a plain thread until released. A
+/// reclaim clears the chunk map, then needs this lock to mark it evicted, so
+/// while it is held the reclaim parks between the two.
+struct GenerationHeld {
+    release: std::sync::mpsc::Sender<()>,
+    holder: std::thread::JoinHandle<()>,
+}
+
+impl GenerationHeld {
+    async fn lock(idx: &CodeIndexer) -> Self {
+        let generation = Arc::clone(&idx.rehydrate_generation);
+        let (locked_tx, locked_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _held = generation.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv();
+        });
+        locked_rx.await.expect("generation lock taken");
+        Self { release, holder }
+    }
+
+    /// Give the commit time to read the map, then let the reclaim finish.
+    async fn release_after_the_commit_reads(self) {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = self.release.send(());
+        self.holder.join().expect("generation holder");
+    }
+}
+
+/// Start a memory-pressure reclaim; return once it has cleared the chunk map
+/// and parked on the held generation lock.
+async fn park_a_reclaim(idx: &Arc<CodeIndexer>) -> tokio::task::JoinHandle<usize> {
+    let reclaiming = Arc::clone(idx);
+    let reclaim = tokio::spawn(async move { reclaiming.reclaim_memory_now().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            // A held write lock, or a released empty map, means it cleared.
+            let cleared = match idx.chunks.try_read() {
+                Err(_) => true,
+                Ok(map) => map.is_empty(),
+            };
+            if cleared {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the reclaim cleared the chunk map");
+    reclaim
+}
+
+/// The commit waits the reclaim out and keeps both vectors.
+async fn assert_both_vectors_kept(idx: &CodeIndexer, committed: anyhow::Result<EmbedCatchUp>) {
+    let outcome = committed.expect("a reclaimed chunk map is waited out");
+    assert_eq!(
+        outcome.embedded, 2,
+        "the commit read a reclaimed chunk map as an empty corpus"
+    );
+    assert!(!outcome.paused);
+    assert!(
+        has_vector(idx, "a").await && has_vector(idx, "c").await,
+        "a vector of a live chunk is missing"
+    );
+}
+
+/// A reclaim between the pre-upsert wait and its read. Before the fix the
+/// commit read the cleared map as an empty corpus, dropped every chunk as
+/// removed, and returned `Ok` with nothing committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_reclaim_between_the_wait_and_the_pre_upsert_read_is_waited_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, plan, run) = embedded_pass(dir.path()).await;
+    let idx = Arc::new(idx);
+    let held = GenerationHeld::lock(&idx).await;
+    let reclaim = park_a_reclaim(&idx).await;
+
+    let commit = tokio::time::timeout(
+        Duration::from_secs(20),
+        idx.commit_deferred_embed(plan, run),
+    );
+    let (committed, ()) = tokio::join!(commit, held.release_after_the_commit_reads());
+
+    assert_both_vectors_kept(&idx, committed.expect("the commit finishes")).await;
+    assert!(reclaim.await.expect("reclaim") > 0);
+}
+
+/// A reclaim between the post-upsert wait and its read. Before the fix the
+/// commit read every chunk it had just upserted as removed and evicted its
+/// vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_reclaim_between_the_wait_and_the_post_upsert_read_is_waited_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, gated) = gated_indexer(Some(&dir.path().join("index.redb")));
+    let idx = Arc::new(idx);
+    stage(&idx, &[A, C]).await;
+    let plan = idx.plan_deferred_embed().await;
+    let run = plan.embed(None, None).await.expect("embed");
+
+    let (reached, release) = gated.before_upsert.arm();
+    let commit = tokio::time::timeout(
+        Duration::from_secs(20),
+        idx.commit_deferred_embed(plan, run),
+    );
+    let (committed, reclaimed) = tokio::join!(commit, async {
+        reached.await.expect("upsert reached");
+        let held = GenerationHeld::lock(&idx).await;
+        let reclaim = park_a_reclaim(&idx).await;
+        release.send(()).expect("release upsert");
+        held.release_after_the_commit_reads().await;
+        reclaim.await.expect("reclaim")
+    });
+
+    assert_both_vectors_kept(&idx, committed.expect("the commit finishes")).await;
+    assert!(reclaimed > 0);
 }

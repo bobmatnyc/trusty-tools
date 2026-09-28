@@ -914,13 +914,17 @@ impl CodeIndexer {
     /// see that field's doc comment) — marks `chunks_evicted` and bumps the
     /// generation counter TOGETHER as one critical section, so a concurrent
     /// rehydrate commit can never read the pre-bump generation and then clear
-    /// this flag back to `false` after the fact. Returns the reclaimed chunk
-    /// count. Callers own any logging.
+    /// this flag back to `false` after the fact. #8761: all of it happens
+    /// under the map's write guard, so a reader that sees an empty map also
+    /// sees the flag. Returns the reclaimed chunk count. Callers own any
+    /// logging.
     /// Test: exercised by `idle_eviction_drops_and_lazily_rehydrates_chunks`
     /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure
     /// path); `rehydrate_commit_skips_flag_clear_when_evict_races_it` and
     /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
-    /// in `indexer::rehydrate_tests` pin the race itself.
+    /// in `indexer::rehydrate_tests` pin the race itself;
+    /// `a_reclaim_between_the_wait_and_the_pre_upsert_read_is_waited_out`
+    /// pins the flag-before-release order.
     async fn clear_in_memory_chunks(&self) -> usize {
         if self.corpus.is_none() {
             return 0;
@@ -932,12 +936,14 @@ impl CodeIndexer {
         let evicted = chunks.len();
         chunks.clear();
         chunks.shrink_to_fit();
-        drop(chunks);
         // Issue #3683 round-3 review (remaining HIGH): the flag-set and the
         // generation bump MUST happen under the same lock acquisition as a
         // single critical section — see `rehydrate_generation`'s doc comment.
         // A short, never-awaited-while-held std Mutex critical section (no
         // I/O, no `.await` inside it).
+        // #8761: both land before the write guard drops, so no reader sees the
+        // emptied map with the flag still clear. Lock order is chunks, then
+        // generation; nothing takes `chunks` while holding the generation lock.
         {
             let mut generation = self
                 .rehydrate_generation
@@ -946,6 +952,7 @@ impl CodeIndexer {
             self.chunks_evicted.store(true, Ordering::Relaxed);
             *generation += 1;
         }
+        drop(chunks);
         evicted
     }
 
