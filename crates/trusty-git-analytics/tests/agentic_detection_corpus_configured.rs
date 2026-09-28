@@ -55,6 +55,7 @@ fn history() -> Option<Vec<Commit>> {
 }
 
 #[test]
+#[ignore = "walks the surrounding trusty-tools checkout; run with --include-ignored"]
 fn a_configured_marker_raises_the_catch_rate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ai-markers.yaml");

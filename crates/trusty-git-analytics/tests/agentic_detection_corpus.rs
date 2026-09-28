@@ -105,6 +105,7 @@ fn history() -> Option<Vec<Commit>> {
 /// #5249 acceptance: detected agentic share must rise from ~48% toward the
 /// ~91% the two known markers account for.
 #[test]
+#[ignore = "walks the surrounding trusty-tools checkout; run with --include-ignored"]
 fn catch_rate_on_trusty_tools_history() {
     let Some(commits) = history() else {
         panic!("expected a git checkout at the workspace root");
