@@ -44,7 +44,9 @@
 #                                   these validate prose but cannot affect a
 #                                   Cargo result
 #
-#   Inert ONLY when ADDED or MODIFIED (owner ruling 2026-09-27, ADR-0064):
+#   Inert ONLY when ADDED or MODIFIED (owner ruling 2026-09-27, ADR-0064).
+#   The list is is_inert_instruction_asset in scripts/lib/source_class.sh,
+#   which check_changelog_fragment.sh applies too:
 #     crates/trusty-mpm/src/assets/**/*.md
 #     crates/trusty-agents-common/src/assets/**/*.md
 #                                 instruction content compiled in via
@@ -178,18 +180,11 @@ is_inert_path() {
   return 1
 }
 
-# is_inert_instruction_asset <status> <path> — true when <path> is instruction
-# content whose add or modify cannot change a Cargo result (ADR-0064). Any
-# other status — D, T, or `?` for a bare path — answers false.
-is_inert_instruction_asset() {
-  case "$1" in A | M) ;; *) return 1 ;; esac
-  case "$2" in
-    content/?*) return 0 ;;
-    crates/trusty-mpm/src/assets/?*.md) return 0 ;;
-    crates/trusty-agents-common/src/assets/?*.md) return 0 ;;
-  esac
-  return 1
-}
+# is_inert_instruction_asset <status> <path> lives in lib/source_class.sh, so
+# check_changelog_fragment.sh exempts exactly the paths this script treats as
+# inert. Sourced from this script's OWN directory, as that gate does.
+# shellcheck source=lib/source_class.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/source_class.sh"
 
 main() {
   if [ "${1:-}" = "--instruction-assets" ]; then
