@@ -517,6 +517,7 @@ commit (ADR-0061, #5649). Run `git worktree list` and look for that agent's
 tree before re-engaging. Tree present — `SendMessage` it as above. Tree gone —
 do not resume: re-dispatch fresh with `isolation: "worktree"` and restate the
 base commit and branch in the brief; never `SendMessage` into the main checkout.
+`tm hook --pm-guard` refuses that `SendMessage` and names the missing tree.
 
 **Cross-check `state` before calling anything green.** Treat `bucket` as
 advisory: under GitHub API eventual-consistency lag it can report a false DONE

@@ -134,6 +134,8 @@ pub(crate) mod pm_guard_fanout;
 // #8453: the PM delegation rules apply by session profile.
 pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;
+// #8004: a resume of an agent whose isolated worktree is gone is refused.
+pub(crate) mod pm_guard_resume_worktree;
 pub(crate) mod pm_guard_routing;
 // #7266: a line-range or partial READ of a secret-bearing file, refused for
 // every caller — the sibling `pm_guard_bash::secret_file_copy` screens only a
