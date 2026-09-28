@@ -69,6 +69,7 @@ pub(crate) async fn launch_protected_workspace(
         false,
         super::managed_workspace::LaunchDir::CallerResolved,
         home,
+        false, // #8878: twin mode is armed only by `tm launch --twin`.
     )
     .await
 }

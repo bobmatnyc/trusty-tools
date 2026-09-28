@@ -78,6 +78,8 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 // #8545: launch/connect user-home writes, under a caller-named home.
 pub(crate) mod launch_home;
+// #8878: `tm launch --twin` arming.
+pub(crate) mod launch_twin;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.

@@ -107,6 +107,9 @@ impl SessionProfile {
 pub struct SupervisorConfig {
     /// Absolute paths of the projects allowed to run the supervisor profile.
     pub projects: Vec<PathBuf>,
+    /// `[supervisor.twin]` — projects granted supervisor-twin mode.
+    // #8878: nested here so the grant needs this allowlist too (ruling D1).
+    pub twin: crate::core::twin_identity::TwinGrant,
 }
 
 /// The supervisor profile's sections, in composition order.
@@ -215,11 +218,22 @@ pub fn requested(project_dir: &Path) -> SessionProfile {
 /// Test: `an_allowlist_entry_for_another_path_does_not_match`,
 /// `a_symlinked_allowlist_entry_is_canonicalized`.
 pub fn is_allow_listed(project_dir: &Path, allowed: &SupervisorConfig) -> bool {
+    path_is_listed(project_dir, &allowed.projects)
+}
+
+/// Whether some absolute `entries` path canonicalizes to canonical `project_dir`.
+///
+/// Why: the #8453 allowlist and the #8878 `[supervisor.twin]` grant match
+/// paths by one rule.
+/// What: a relative entry, or a path that cannot be canonicalized, matches
+/// nothing.
+/// Test: `a_symlinked_allowlist_entry_is_canonicalized`,
+/// `a_supervisor_without_the_twin_grant_is_not_twin`.
+pub fn path_is_listed(project_dir: &Path, entries: &[PathBuf]) -> bool {
     let Ok(project) = std::fs::canonicalize(project_dir) else {
         return false;
     };
-    allowed
-        .projects
+    entries
         .iter()
         .filter(|entry| entry.is_absolute())
         .filter_map(|entry| std::fs::canonicalize(entry).ok())

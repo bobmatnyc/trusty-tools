@@ -827,6 +827,7 @@ fn cli_parses_launch() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -844,6 +845,7 @@ fn cli_parses_launch_with_dir() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
@@ -863,6 +865,7 @@ fn cli_parses_launch_with_style() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
@@ -892,6 +895,7 @@ fn cli_parses_launch_with_worktree() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -901,6 +905,93 @@ fn cli_parses_launch_with_worktree() {
             );
         }
         other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --twin` reaches the launch as an explicit arming request, and a
+/// bare `tm launch` never does (#8878, ruling D1).
+#[test]
+fn cli_parses_launch_with_twin() {
+    for (argv, want) in [
+        (&["trusty-mpm", "launch", "--twin"][..], true),
+        (&["trusty-mpm", "launch"][..], false),
+    ] {
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Launch { twin, worktree, .. } => {
+                assert_eq!(twin, want, "{argv:?}");
+                assert!(!worktree, "{argv:?}");
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+}
+
+/// `--twin --worktree` is refused, and only that pair (#8878 review).
+#[test]
+fn twin_preflight_refuses_only_twin_with_worktree() {
+    use crate::commands::launch_twin::preflight;
+    for (twin, worktree, refused) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let got = preflight(twin, worktree);
+        assert_eq!(got.is_err(), refused, "twin={twin} worktree={worktree}");
+    }
+}
+
+/// `tm launch --twin --worktree` is refused before `launch` resolves, inits
+/// or provisions anything — the directory is not even read (#8878 review).
+#[tokio::test]
+async fn a_twin_worktree_launch_is_refused_before_anything_is_touched() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let absent = root.path().join("never-created");
+    let err = crate::commands::launch::launch(
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        Some(absent.to_string_lossy().into_owned()),
+        None,
+        true,
+        crate::commands::managed_workspace::LaunchDir::OperatorCwd,
+        None,
+        true,
+    )
+    .await
+    .expect_err("a twin worktree launch is refused");
+    assert!(err.to_string().contains("`--worktree`"), "{err}");
+    assert!(!absent.exists());
+}
+
+/// A twin session must run in the directory the grant was checked for.
+#[test]
+fn twin_placement_must_be_the_checked_directory() {
+    use crate::commands::launch_twin::confirm_placement;
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let (checked, other) = (root.path().join("checked"), root.path().join("other"));
+    std::fs::create_dir(&checked).expect("mkdir");
+    std::fs::create_dir(&other).expect("mkdir");
+    assert!(confirm_placement(&checked, &checked.join(".")).is_ok());
+    assert!(confirm_placement(&checked, &other).is_err());
+    assert!(confirm_placement(&checked, &root.path().join("absent")).is_err());
+}
+
+/// The no-origin and reattach refusals fire for `--twin` only; a plain launch
+/// passes both (#8878 review).
+#[test]
+fn twin_refusals_apply_only_to_twin_launches() {
+    use crate::commands::launch_twin::{refuse_live_checkout, refuse_reattach};
+    for twin in [false, true] {
+        assert_eq!(
+            refuse_live_checkout(twin).is_err(),
+            twin,
+            "live, twin={twin}"
+        );
+        assert_eq!(
+            refuse_reattach(twin, "tm-x").is_err(),
+            twin,
+            "reattach, twin={twin}"
+        );
     }
 }
 
