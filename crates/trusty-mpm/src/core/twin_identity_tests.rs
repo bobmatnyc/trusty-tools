@@ -454,10 +454,9 @@ fn walk(rows: &[Row], start: u32) -> Result<Option<ClaudeProcess>, String> {
 
 #[test]
 fn the_walk_stops_at_the_nearest_claude() {
-    // hook 100 → sh 90 → nested claude 80 → sh 70 → armed claude 60.
-    let nested: [Row; 6] = [
-        (100, Some(90), Ok(false)),
-        (90, Some(80), Ok(false)),
+    // hook 100 → nested claude 80 → sh 70 → armed claude 60.
+    let nested: [Row; 5] = [
+        (100, Some(80), Ok(false)),
         (80, Some(70), Ok(true)),
         (70, Some(60), Ok(false)),
         (60, Some(50), Ok(true)),
@@ -473,6 +472,50 @@ fn the_walk_stops_at_the_nearest_claude() {
     assert_eq!(walk(&alone, 100), Ok(None));
 }
 
+/// A session started from the twin's Bash tool is not the twin, even when its
+/// process is not named `claude` (npm installs run as `node`): the armed
+/// `claude` counts only as the hook's own parent (#8878 review).
+#[test]
+fn a_session_nested_under_the_twin_is_not_twin() {
+    // hook 100 → sh 90 → node 80 → bash 70 → armed claude 60.
+    let via_shells: [Row; 5] = [
+        (100, Some(90), Ok(false)),
+        (90, Some(80), Ok(false)),
+        (80, Some(70), Ok(false)),
+        (70, Some(60), Ok(false)),
+        (60, Some(1), Ok(true)),
+    ];
+    assert_eq!(walk(&via_shells, 100), Ok(None));
+    // `exec node …` from the Bash tool: hook 100 → node 80 → armed claude 60.
+    let execd: [Row; 3] = [
+        (100, Some(80), Ok(false)),
+        (80, Some(60), Ok(false)),
+        (60, Some(1), Ok(true)),
+    ];
+    assert_eq!(walk(&execd, 100), Ok(None));
+    // The twin's own hook: hook 100 → armed claude 60.
+    let own: [Row; 2] = [(100, Some(60), Ok(false)), (60, Some(1), Ok(true))];
+    let armed = ClaudeProcess {
+        pid: 60,
+        start_time: 600,
+    };
+    assert_eq!(walk(&own, 100), Ok(Some(armed)));
+}
+
+/// A start process the table no longer holds is an error, never "no claude
+/// ancestor" (#8878 review).
+#[cfg(unix)]
+#[test]
+fn a_reaped_process_has_no_claude_ancestor_it_is_an_error() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let pid = child.id();
+    child.wait().expect("reap true");
+    let got = twin_arming::nearest_claude_ancestor(pid);
+    assert!(got.is_err(), "{got:?}");
+}
+
 #[test]
 fn an_unidentifiable_ancestor_stops_the_walk() {
     // hook 100 → 90, whose name cannot be read → armed claude 60.
@@ -482,12 +525,8 @@ fn an_unidentifiable_ancestor_stops_the_walk() {
         (60, Some(1), Ok(true)),
     ];
     assert!(walk(&unnamed, 100).is_err(), "{:?}", walk(&unnamed, 100));
-    // hook 100 → 90 → 80, absent from the table.
-    let orphaned: [Row; 3] = [
-        (100, Some(90), Ok(false)),
-        (90, Some(80), Ok(false)),
-        (60, Some(1), Ok(true)),
-    ];
+    // hook 100 → 80, absent from the table.
+    let orphaned: [Row; 2] = [(100, Some(80), Ok(false)), (60, Some(1), Ok(true))];
     assert!(walk(&orphaned, 100).is_err());
 }
 

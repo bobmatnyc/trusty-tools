@@ -11,7 +11,10 @@
 //! `a_writable_by_others_arming_record_is_refused`,
 //! `the_nearest_claude_ancestor_is_found_with_its_start_time`,
 //! `the_walk_stops_at_the_nearest_claude`,
-//! `a_malformed_user_config_is_an_error_not_a_default`).
+//! `a_session_nested_under_the_twin_is_not_twin`,
+//! `a_reaped_process_has_no_claude_ancestor_it_is_an_error`,
+//! `a_malformed_user_config_is_an_error_not_a_default`) and
+//! `is_claude_of_a_dead_pid_is_an_error` here.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -29,8 +32,17 @@ use crate::core::twin_identity::{
 /// `claude`, named `<pid>.json`.
 pub const ARMED_DIR: &str = "twin/armed";
 
-/// Ancestor hops walked before the search gives up; a hook sits 1–3 below.
-const MAX_ANCESTOR_HOPS: usize = 32;
+/// Ancestor hops walked before the search gives up: the hook's parent only.
+///
+/// Why (#8878 review): Claude Code spawns a hook as `spawn(command, [],
+/// {shell})`, i.e. `sh -c "<command>"`, and the shell execs a simple command in
+/// place; the `tm hook` processes observed live had their `claude` as the
+/// direct parent. Any hop past the parent can cross a session boundary — a
+/// nested session started from the twin's Bash tool, including one whose
+/// process is not named `claude` (npm installs run as `node`), sits between
+/// its hook and the twin. A compound hook command (a surviving `sh`) or
+/// `CLAUDE_CODE_SHELL_PREFIX` puts the `claude` further up and fails closed.
+const MAX_ANCESTOR_HOPS: usize = 1;
 
 /// The machine-backed [`TwinProbe`].
 #[derive(Debug, Clone)]
@@ -232,6 +244,7 @@ fn process_facts(pid: u32) -> Result<ProcessFacts, String> {
 /// What: `/proc/<pid>/comm` on Linux, else `ps -o comm=`. Unlike the launch
 /// side, a failed read is `Err`, never `false`, so the walk cannot skip a
 /// process it could not identify.
+/// Test: `is_claude_of_a_dead_pid_is_an_error`.
 fn is_claude(pid: u32) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
@@ -251,10 +264,11 @@ fn is_claude(pid: u32) -> Result<bool, String> {
 
 /// The nearest `claude` ancestor of `start_pid`, excluding `start_pid` itself.
 ///
-/// Why: condition (c). Claude Code runs a hook as its own descendant, so the
-/// nearest `claude` above the hook is the session the call belongs to.
+/// Why: condition (c). Claude Code runs a hook as its own child, so the
+/// `claude` directly above the hook is the session the call belongs to.
 /// What: [`nearest_claude_in`] over the live process table.
-/// Test: `the_nearest_claude_ancestor_is_found_with_its_start_time`.
+/// Test: `the_nearest_claude_ancestor_is_found_with_its_start_time`,
+/// `a_reaped_process_has_no_claude_ancestor_it_is_an_error`.
 pub fn nearest_claude_ancestor(start_pid: u32) -> Result<Option<ClaudeProcess>, String> {
     nearest_claude_in(start_pid, process_facts, is_claude)
 }
@@ -269,6 +283,7 @@ pub fn nearest_claude_ancestor(start_pid: u32) -> Result<Option<ClaudeProcess>, 
 /// `Ok(None)`. Any `facts` or `is_claude` error → `Err`: an ancestor that
 /// cannot be identified is never skipped.
 /// Test: `the_walk_stops_at_the_nearest_claude`,
+/// `a_session_nested_under_the_twin_is_not_twin`,
 /// `an_unidentifiable_ancestor_stops_the_walk`.
 pub fn nearest_claude_in(
     start_pid: u32,
@@ -296,4 +311,21 @@ pub fn nearest_claude_in(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A name read that cannot find the process is an error, never "not
+    /// claude", so the walk cannot step past an unidentified ancestor.
+    #[cfg(unix)]
+    #[test]
+    fn is_claude_of_a_dead_pid_is_an_error() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        let got = super::is_claude(pid);
+        assert!(got.is_err(), "{got:?}");
+    }
 }

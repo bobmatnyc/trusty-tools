@@ -107,7 +107,8 @@ impl Drop for LaunchSessionGuard {
 /// relocates their session.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
 /// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
-/// `cli_parses_launch_with_twin`;
+/// `cli_parses_launch_with_twin`,
+/// `a_twin_worktree_launch_is_refused_before_anything_is_touched`;
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// covers the composed fallback path.
 #[allow(clippy::too_many_arguments)] // #8878: `twin` is the eighth.
@@ -121,6 +122,7 @@ pub(crate) async fn launch(
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
     twin: bool,
 ) -> anyhow::Result<()> {
+    super::launch_twin::preflight(twin, worktree)?; // #8878: before anything is touched.
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
@@ -219,6 +221,11 @@ pub(crate) async fn launch(
     //    `tm launch` from a subdirectory deploys to the project, not the
     //    subdirectory) and owns the uncommitted-changes notice, which only
     //    applies when there IS a clone.
+    // #8878: the hook judges `CLAUDE_PROJECT_DIR`; the grant is checked for the
+    // managed checkout BEFORE provisioning, so a refusal leaves no clone behind.
+    let twin_root = twin
+        .then(|| super::launch_twin::precheck(&project_dir))
+        .transpose()?;
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
         &origin_url,
@@ -230,11 +237,9 @@ pub(crate) async fn launch(
     )
     .await?;
     let managed_path = workspace.path().to_path_buf();
-    // #8878: the hook judges `CLAUDE_PROJECT_DIR`, the session directory, so
-    // the grant is checked for it before any tmux session exists.
-    let twin_root = twin
-        .then(|| super::launch_twin::precheck(&managed_path))
-        .transpose()?;
+    if twin_root.is_some() {
+        super::launch_twin::confirm_placement(&project_dir, &managed_path)?; // #8878
+    }
 
     // 7. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can

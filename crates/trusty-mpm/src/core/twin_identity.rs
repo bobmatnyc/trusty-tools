@@ -5,7 +5,11 @@
 //! allowed to do what the user directly asks. That relaxation (later PRs) must
 //! reach only the one session the operator armed, never a session that merely
 //! claims it. So twin mode builds on the #8453 supervisor profile and adds
-//! three more conditions, all outside the session's own control.
+//! three more conditions, meant to sit outside the session's own control.
+//! Residual: today the session can still write `~/.trusty-mpm/config.toml`
+//! and `~/.trusty-mpm/twin/armed/<pid>.json` itself. The D4 trust-anchor-write
+//! floor (PR 2 of #8878) closes that; a write through an executed script file
+//! stays open under D9, tracked in #8879.
 //! What: [`resolve`] answers [`TwinStatus::Active`] only when ALL hold:
 //! (a) the user-level `~/.trusty-mpm/config.toml` grants twin mode to the
 //! project (`[supervisor.twin] projects`) and the #8453 supervisor profile
