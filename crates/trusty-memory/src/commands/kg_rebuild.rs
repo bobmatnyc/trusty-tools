@@ -20,6 +20,7 @@ use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
 use trusty_common::memory_core::store::OpenIntent;
 
 use super::kg_twin_merge::report_merge;
+use super::maintenance_gate::require_state_lease;
 use crate::kg_extract::{
     extract_triples, is_stop_token, ExtractInput, AUTO_PROVENANCE, DRAWER_SUBJECT_PREFIX,
     ROOM_SUBJECT_PREFIX, TAG_SUBJECT_PREFIX, TOPIC_SUBJECT_PREFIX,
@@ -117,12 +118,25 @@ pub async fn handle_kg_rebuild(palace: Option<String>) -> Result<()> {
 /// onto the cleaned twin (#5401); with `dry_run` it skips the rebuild entirely
 /// and only reports what the selected passes would do, so the whole invocation
 /// writes nothing.
-/// Test: not unit-tested (process-level entry point); `rebuild_palaces` and
-/// `purge_palaces` are the testable surfaces.
+/// Test: `kg_rebuild_refuses_before_the_rebuild_while_the_lease_is_held` covers
+/// [`kg_rebuild_at`], everything below the data-dir lookup.
 pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")
         .context("resolve trusty-memory data dir")?;
-    let data_root = resolve_palace_registry_dir(data_dir);
+    kg_rebuild_at(resolve_palace_registry_dir(data_dir), opts).await
+}
+
+/// [`handle_kg_rebuild_with`] against an explicit registry dir.
+///
+/// Why: the handler's only untestable step is the data-dir lookup, and the
+/// lease check (#8744) has to be proven to run before the rebuild writes.
+/// What: the dry run needs no lease. An applying run that selects the purge or
+/// the twin merge takes the data root's maintenance lease before the rebuild
+/// step and holds it until both passes return. The plain rebuild takes none:
+/// its asserts are the writes every `memory_remember` makes, and its open-time
+/// TTL purge is already gated by the writer registry's lease (#8733).
+/// Test: `kg_rebuild_refuses_before_the_rebuild_while_the_lease_is_held`.
+async fn kg_rebuild_at(data_root: std::path::PathBuf, opts: KgRebuildOptions) -> Result<()> {
     let state = AppState::new(data_root);
     let palace = opts.palace.clone();
 
@@ -160,6 +174,12 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
     // handle cache, so dropping the pre-open changes nothing it can observe —
     // each palace is opened once, lazily, through the writer-intent registry.
     let state = state.with_writer_intent();
+    // #8744: refuse before the rebuild writes anything, and hold the lease
+    // (the registry's own, so the purge and merge re-take it as `Held`)
+    // through both destructive passes.
+    let _lease = (opts.purge_stale_subjects || opts.merge_punctuated_twins)
+        .then(|| require_state_lease(&state))
+        .transpose()?;
 
     let summaries = rebuild_palaces(&state, palace.as_deref()).await?;
     let mut total_drawers = 0usize;
@@ -379,8 +399,13 @@ where
 /// [`stale_subject_candidates`] returns, and (when `apply`) calls the existing
 /// `delete_by_subject` on each. A failing palace is captured as a summary
 /// carrying `error`; a failure to list the palaces at all propagates instead.
+/// An applying pass first takes the data root's maintenance lease and holds it
+/// until every palace is done; without it the pass refuses and opens nothing
+/// (#8744).
 /// Test: `purge_selects_only_stopword_subjects`, `purge_skips_namespaced_subjects`,
-/// `purge_palaces_propagates_an_unreadable_data_root`.
+/// `purge_palaces_propagates_an_unreadable_data_root`,
+/// `purge_under_a_lease_held_elsewhere_refuses_and_deletes_nothing`,
+/// `destructive_passes_fail_closed_on_an_unavailable_lease`.
 pub async fn purge_palaces(
     state: &AppState,
     palace_filter: Option<&str>,
@@ -390,6 +415,9 @@ pub async fn purge_palaces(
     // #5511: an unreadable data root is a failed purge, never an empty one.
     let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
+    // #8744: deleting subjects is maintenance; a daemon mid-dream-pass holds
+    // the lease, so refuse before any Writer open and hold it to the end.
+    let _lease = apply.then(|| require_state_lease(state)).transpose()?;
     for palace in palaces {
         let id = palace.id.0.clone();
         if let Some(filter) = palace_filter {
@@ -683,6 +711,10 @@ async fn rebuild_one(state: &AppState, palace_id: &str) -> Result<PalaceRebuildS
 fn room_id_to_label(_room_id: uuid::Uuid) -> Option<String> {
     None
 }
+
+#[cfg(test)]
+#[path = "kg_rebuild_lease_tests.rs"]
+mod lease_tests;
 
 #[cfg(test)]
 mod tests {
