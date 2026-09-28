@@ -341,6 +341,28 @@ the guard will establish every precondition itself.
      any error in either direction refuses. Every refusal names the
      conflicted or residual files and how many base commits were searched —
      "the oldest N of M" when the cap cut the search short.
+
+     Amended by #8849 — a HEAD BEHIND its merged pull request's head grants
+     on the branch route too. A review round's last commits land on a
+     renamed `-rN` branch and are pushed onto the pull request's head, so the
+     worktree left on the earlier round finds its MERGED pull request by name
+     but sits on an ancestor of `headRefOid`. The #7958 exact match does not
+     fire, and `content_on_base` reads the later round's edits, and any later
+     `main` commit on the same files, as work the tree undid. Four clean trees
+     were refused that way on 2026-09-28 (PRs #8832, #8835, #8837, #8839).
+     The `merged-pr-ancestry` route was reachable only after a lookup that
+     found NO pull request. After the exact match, the guard now also grants
+     when four facts hold. GitHub named a hex `headRefOid` and a hex
+     `mergeCommit` for the pull request. `local-only-commits` refreshed
+     `origin` in this evaluation. `git merge-base --is-ancestor HEAD
+     <headRefOid>` answers yes. `git merge-base --is-ancestor <mergeCommit>
+     origin/<baseRefName>` answers yes. This holds for the branch's own pull
+     request and its round sibling's, because the proof is ancestry and the
+     name only located the pull request. Only that one direction counts, as
+     for route (c). It is a relaxation, so it inherits decision 6: a missing
+     or malformed id, an unrefreshed `origin`, an unresolvable HEAD, a "no"
+     from either probe, and a probe that could not run all refuse, and the
+     refusal appends which one it was.
 6. Every re-check fails CLOSED. A fact the guard cannot establish denies — the
    ADR-0045 distinction between absent and undeterminable, applied to a gate
    whose ALLOW deletes a checkout. This is the opposite bias from

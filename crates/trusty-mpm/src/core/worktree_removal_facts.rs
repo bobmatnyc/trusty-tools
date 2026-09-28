@@ -127,7 +127,14 @@
 //! only ancestry consulted is (c)'s one direction; ancestry against the squash
 //! commit is never evidence.
 //!
+//! **A HEAD behind its merged pull request's head is inside what merged
+//! (#8849).** [`WorktreeRemovalProbe::is_ancestor`] and
+//! [`MergedPrLookup::merge_commit`] are the two facts the guard's ancestry
+//! route needs: HEAD ⊑ the pull request's `headRefOid`, and the merge commit on
+//! the refreshed base.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
+//! `is_ancestor_refuses_an_option_shaped_argument`,
 //! `detached_head_is_not_a_branch`,
 //! `local_only_commits_counts_only_what_no_origin_ref_has`,
 //! `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`,
@@ -174,11 +181,13 @@ use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 /// #7958: `headRefOid` rides along too. A worktree sitting on exactly the commit
 /// the pull request merged has the strongest landing evidence there is, and the
 /// policy could not see it because nothing carried the pull request's own head.
+/// #8849: `mergeCommit` rides along, so the ancestry route can prove the squash
+/// is on the refreshed base before a HEAD behind the pull request's head grants.
 const MERGED_PR_ARGS: &[&str] = &[
     "--state",
     "merged",
     "--json",
-    "number,baseRefName,headRefOid",
+    "number,baseRefName,headRefOid,mergeCommit",
     "--limit",
     "1",
 ];
@@ -222,6 +231,10 @@ pub struct MergedPrLookup {
     /// — also when GitHub reported a pull request without one, in which case
     /// the policy never grants on this route.
     pub head_sha: String,
+    /// The squash (or merge) commit GitHub recorded for that pull request
+    /// (#8849). Empty when GitHub named none, which never grants on the
+    /// ancestry route.
+    pub merge_commit: String,
 }
 
 impl MergedPrLookup {
@@ -239,7 +252,20 @@ impl MergedPrLookup {
             repo: repo.into(),
             base_ref: base_ref.into(),
             head_sha: String::new(),
+            merge_commit: String::new(),
         }
+    }
+
+    /// The same answer, carrying the merged pull request's merge commit
+    /// (#8849).
+    ///
+    /// Test: `worktree_8849_a_head_behind_the_merged_prs_head_is_reclaimable`,
+    /// `worktree_8849_a_merge_commit_not_on_the_base_denies` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove_ancestry_tests`.
+    #[must_use]
+    pub fn with_merge_commit(mut self, merge_commit: impl Into<String>) -> Self {
+        self.merge_commit = merge_commit.into();
+        self
     }
 
     /// The same answer, carrying the merged pull request's own head commit
@@ -459,6 +485,24 @@ pub trait WorktreeRemovalProbe {
         _dir: &Path,
         _pr_head: &str,
     ) -> Result<Vec<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
+
+    /// Is `ancestor` the same commit as `descendant`, or one of its ancestors
+    /// (#8849)?
+    ///
+    /// Why: a review round's last commits land on a renamed `-rN` branch, so a
+    /// worktree still on the earlier round sits BEHIND its merged pull
+    /// request's head, and the merge-tree comparison reads the later rounds'
+    /// edits as work this tree undid. Ancestry tells "behind" from "undone".
+    /// What: `git merge-base --is-ancestor`. `Ok(false)` only when git answered
+    /// no; an argument git could read as an option, a commit git does not have,
+    /// or any other failure is `Err`. Defaulted, with the fail-closed default,
+    /// for the reason [`head_sha`](Self::head_sha) is.
+    /// Test: `worktree_8849_a_merged_head_git_does_not_have_denies`,
+    /// `is_ancestor_refuses_an_option_shaped_argument`,
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    fn is_ancestor(&self, _dir: &Path, _ancestor: &str, _descendant: &str) -> Result<bool, String> {
         Err(NOT_IMPLEMENTED.to_string())
     }
 
@@ -717,6 +761,23 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
             .collect())
     }
 
+    fn is_ancestor(&self, dir: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+        // #8849: both ids can come from GitHub and land in argv, so nothing git
+        // could read as an option is passed. The exit-code probe is the
+        // sweep's own.
+        for arg in [ancestor, descendant] {
+            if arg.is_empty() || arg.starts_with('-') || arg.contains(char::is_whitespace) {
+                return Err(format!("`{arg}` is not a commit git can be asked about"));
+            }
+        }
+        crate::session_manager::worktree_reclaim_pr_match::LandingProbe::is_ancestor(
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+            dir,
+            ancestor,
+            descendant,
+        )
+    }
+
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
         // #7057: the repository — and its host, when that is not github.com —
         // comes from THIS worktree's own remote, not from whatever `gh` would
@@ -837,11 +898,22 @@ fn merged_pull_requests_in(
         .unwrap_or_default()
         .trim()
         .to_string();
+    // #8849: `mergeCommit` is an object (`{"oid": …}`) or null; either absence
+    // leaves it empty, which never grants on the ancestry route.
+    let merge_commit = rows
+        .first()
+        .and_then(|r| r.get("mergeCommit"))
+        .and_then(|m| m.get("oid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     Ok(MergedPrLookup {
         count: rows.len(),
         repo,
         base_ref,
         head_sha,
+        merge_commit,
     })
 }
 
@@ -898,6 +970,11 @@ mod tests {
             MERGED_PR_ARGS
                 .iter()
                 .any(|a| a.contains("headRefOid") && a.contains("baseRefName")),
+            "{MERGED_PR_ARGS:?}"
+        );
+        // #8849: the merge commit, which the ancestry route proves is on the base.
+        assert!(
+            MERGED_PR_ARGS.iter().any(|a| a.contains("mergeCommit")),
             "{MERGED_PR_ARGS:?}"
         );
     }
@@ -1037,6 +1114,28 @@ mod tests {
                 .commits_after_merged_head(dir, "deadbeef")
                 .is_err()
         );
+        // #8849: and so is ancestry, which then never admits.
+        assert!(UnoverriddenProbe.is_ancestor(dir, "a", "b").is_err());
+    }
+
+    /// 🔴 #8849: an option-shaped id from GitHub never reaches git — unguarded,
+    /// `--all` would make `merge-base` answer a different question.
+    #[test]
+    fn is_ancestor_refuses_an_option_shaped_argument() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        for (a, d) in [
+            ("--all", "HEAD"),
+            ("HEAD", "-x"),
+            ("", "HEAD"),
+            ("HEAD", "a b"),
+        ] {
+            let err = GitAndGhProbe
+                .is_ancestor(&repo, a, d)
+                .expect_err("an unaskable argument must be refused");
+            assert!(err.contains("is not a commit"), "{err}");
+        }
+        assert_eq!(GitAndGhProbe.is_ancestor(&repo, "HEAD", "HEAD"), Ok(true));
     }
 
     /// 🔴 #8665: the merged head comes from GitHub and lands in argv, so a
