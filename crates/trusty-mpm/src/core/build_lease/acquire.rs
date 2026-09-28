@@ -327,6 +327,12 @@ fn take_a_slot(
     for slot in slots.preference_order(limit, params.checkout) {
         match slots.try_acquire(slot) {
             Ok(Some(guard)) => {
+                // #8261 repair r3: a SIGKILLed holder's build still running.
+                if guard.orphaned_build().is_some() {
+                    guard.release_keeping_record();
+                    any_held = true;
+                    continue;
+                }
                 if params.slot_busy.is_some_and(|busy| busy(slot)) {
                     drop(guard);
                     any_held = true;

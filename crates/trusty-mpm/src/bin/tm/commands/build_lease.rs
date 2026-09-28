@@ -19,7 +19,10 @@
 //! "allow up to the cap", #8261 round 3), with a degraded warning naming the
 //! store, the OS error and the repair; an unreadable census refuses. On
 //! timeout, exit [`EXIT_LEASE_TIMEOUT`] naming the holders and every reading. Every decision is POSTed to the daemon log with the
-//! command summarized, never its full argv.
+//! command summarized, never its full argv. `cargo run` leases only a
+//! `cargo build` with the same flags and runs the program after the slot is
+//! released; `cargo watch` runs unleased and leases each build it starts
+//! (`build_lease_split`, #8261 repair r3).
 //!
 //! `tm build-lease --census` runs no build; it probes slot locks like `tm
 //! doctor` (#8261 round 5). It prints the lease holders and every build group
@@ -48,7 +51,9 @@ use trusty_mpm::core::build_lease::target_dir::{
 };
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 
+use super::build_lease_split::{Split, split};
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
+use super::pm_guard_build_lease::tm_program_word;
 use trusty_mpm::core::config::MpmConfig;
 
 /// `tm build-lease --census`: print the holders and the attributed census.
@@ -120,9 +125,10 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
     let command_line = summarize_command(&args.command);
+    let heavy = lease.effective_heavy_build_commands();
     // #8261 round 3 (critic finding 4): the lease program never runs anything
     // the hook's classifier would not have leased.
-    if !is_heavy_build(&args.command, &lease.effective_heavy_build_commands()) {
+    if !is_heavy_build(&args.command, &heavy) {
         eprintln!(
             "tm build-lease: refusing `{command_line}` — it is not a heavy build \
              (`builders.heavy_build_commands`), and the lease runs heavy builds only. Run it \
@@ -133,6 +139,25 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
     for warning in builders.deprecation_warnings() {
         eprintln!("tm build-lease: {warning}");
     }
+    // #8261 repair r3: `cargo run` / `cargo watch` never hold a slot for the
+    // program's or the watcher's lifetime — only their builds are leased.
+    let prefix = format!("{} build-lease --", tm_program_word());
+    let (lease_argv, then_run) = match split(&args.command, &heavy, &prefix) {
+        Split::Watch(Ok(watch)) => {
+            eprintln!(
+                "tm build-lease: `cargo watch` runs unleased; every build it starts takes its \
+                 own lease (#8261)."
+            );
+            exit_with(spawn_and_wait(&watch, None, None).await)
+        }
+        Split::Watch(Err(why)) => refuse(&format!(
+            "not running `{command_line}` (#8261) — {why}; run each build as its own leased \
+             command instead"
+        )),
+        Split::BuildThenRun { build } => (build, Some(args.command)),
+        Split::Whole => (args.command, None),
+    };
+    let command_line = summarize_command(&lease_argv);
     let url = trusty_mpm::core::discovery::resolve_daemon_url(url);
     let home = dirs::home_dir();
     let home_or_root = home.clone().unwrap_or_else(|| PathBuf::from("/"));
@@ -148,7 +173,7 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
     // value cargo actually uses — it outranks `CARGO_TARGET_DIR` from the
     // environment, so `plan` must see that value, not the env var, when both
     // are present.
-    let explicit_target_dir = explicit_target_dir_arg(&args.command).map(str::to_string);
+    let explicit_target_dir = explicit_target_dir_arg(&lease_argv).map(str::to_string);
     let ambient = explicit_target_dir
         .clone()
         .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
@@ -230,20 +255,27 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
             record.target_dir.clone_from(&target);
             write_record(&mut guard, &record);
             post_decision(&url, "admitted", &command_line, &decision, &[]).await;
-            // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
-            // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
-            let run_argv = match (&explicit_target_dir, &target) {
-                (Some(_), Some(dir)) => rewrite_target_dir_arg(&args.command, dir),
-                _ => args.command.clone(),
-            };
             let status = spawn_and_wait(
-                &run_argv,
+                &with_slot_target(&lease_argv, explicit_target_dir.is_some(), &target),
                 target.as_deref(),
                 Some((&mut guard, &mut record)),
             )
             .await;
+            let slot = guard.slot();
             drop(guard);
-            exit_with(status)
+            match then_run {
+                Some(program) if status.as_ref().is_ok_and(|s| s.success()) => {
+                    eprintln!(
+                        "tm build-lease: the build finished and slot {slot} is released; \
+                         running `{}` unleased (#8261).",
+                        summarize_command(&program)
+                    );
+                    let program =
+                        with_slot_target(&program, explicit_target_dir.is_some(), &target);
+                    exit_with(spawn_and_wait(&program, target.as_deref(), None).await)
+                }
+                _ => exit_with(status),
+            }
         }
         Outcome::Unleased { fault, decision } => {
             if let TargetPlan::Slot { .. } = target_plan {
@@ -266,7 +298,8 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
                 decision.ceiling
             );
             post_decision(&url, "admitted-unleased", &command_line, &decision, &[]).await;
-            exit_with(spawn_and_wait(&args.command, None, None).await)
+            let argv = then_run.unwrap_or(lease_argv);
+            exit_with(spawn_and_wait(&argv, None, None).await)
         }
         Outcome::TimedOut { decision, holders } => {
             post_decision(&url, "timed-out", &command_line, &decision, &holders).await;
@@ -308,6 +341,17 @@ fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
              CARGO_TARGET_DIR EXCEPT with this granted slot: the lease sets it for this build, \
              so the command needs no override of its own."
         );
+    }
+}
+
+/// `argv` with its explicit `--target-dir` pointed at the slot's directory.
+///
+/// Why: #8261 round 6 (critic LOW) — an explicit `--target-dir` in argv
+/// outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
+fn with_slot_target(argv: &[String], explicit: bool, target: &Option<String>) -> Vec<String> {
+    match (explicit, target) {
+        (true, Some(dir)) => rewrite_target_dir_arg(argv, dir),
+        _ => argv.to_vec(),
     }
 }
 

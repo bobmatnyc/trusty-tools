@@ -34,6 +34,7 @@
 //! - [`census_detail`] — the census attributed per group (pgid, leader,
 //!   driver, parent chain) for `tm build-lease --census`.
 //! - [`acquire`] — the bounded wait.
+//! - [`orphan`] — a build still running after its holder was SIGKILLed.
 //! - [`target_dir`] — the slot's private `CARGO_TARGET_DIR`.
 //! - [`stale_guard`] — clears a slot's workspace fingerprints when its next
 //!   holder builds a different worktree, and detects a slot directory an
@@ -55,6 +56,7 @@
 //! | lease impossible AND census unreadable | FAILS CLOSED: nothing bounds the build, so it waits and exits 75 naming both faults | `no_lease_and_no_census_admits_nothing` |
 //! | an unleased run whose inherited `CARGO_TARGET_DIR` is shared | REFUSED, exit 75: only a leased slot can replace the shared directory | `a_shared_dir_without_a_pool_is_refused` |
 //! | a free slot whose directory an orphaned build still uses (`.cargo-lock` held) | that slot is skipped; its fingerprints are untouched | `a_busy_orphan_slot_is_not_reused` |
+//! | a free slot whose dead holder's build still runs (a `cargo test` run holds no `.cargo-lock`) | counted as held, never taken, until that build exits | `a_sigkilled_holders_live_test_run_keeps_its_slot`, `an_orphaned_build_keeps_its_slot` |
 //! | shared `CARGO_TARGET_DIR` and no slot directory (no pool, seed failed, fingerprints not clearable) | REFUSED, exit 75 | `an_unusable_slot_directory_refuses_instead_of_sharing`, `a_shared_target_without_a_repo_identity_refuses` |
 //! | pressure sysctl / PSI unreadable | pressure gate skipped; ceiling, leases and load still apply; warning | `unreadable_pressure_uses_the_ceiling_and_warns` |
 //! | load average unreadable | load gate skipped; the rest applies | `an_unreadable_load_skips_only_the_load_gate` |
@@ -69,11 +71,21 @@
 //! `admission.lock` or no usable store, and WARNS while the fallback store is in
 //! use, so a degraded lease is never silent.
 //!
-//! **A SIGKILLed holder.** The kernel drops its flock, so the slot reads free
-//! at once; the build it spawned keeps running. The census counts that orphan
-//! as a foreign group, and the next lease skips the slot while cargo's
-//! `.cargo-lock` in its directory is held, so the orphan's directory is never
-//! reseeded or invalidated under it.
+//! **A SIGKILLed holder.** The kernel drops its flock, and the build it
+//! spawned keeps running. The record the holder left in
+//! the slot file keeps the slot counted as held, and never taken, while that
+//! build is alive ([`orphan`], #8261 repair r3): cargo releases `.cargo-lock`
+//! while test binaries run, so that lock alone left a live `cargo test` run's
+//! slot free. The census excludes the orphan's compilers, which its record
+//! already counts, and the next lease still skips a slot whose `.cargo-lock`
+//! is held, so the orphan's directory is never reseeded under it.
+//!
+//! **`cargo run` and `cargo watch`** (#8261 repair r3). Neither holds a slot for
+//! the program's or the watcher's lifetime. `cargo run` leases a `cargo build`
+//! with the same flags, releases the slot, then runs `cargo run` unleased,
+//! which finds the build fresh. `cargo watch` runs unleased, with every
+//! command it starts rewritten to take its own lease (`build_lease_split` in
+//! the `tm` binary).
 //! Test: each submodule's suite, and `tests/tm_build_lease.rs` with real
 //! processes.
 
@@ -82,6 +94,7 @@ pub mod admission;
 pub mod census;
 pub mod census_detail;
 pub mod config;
+pub mod orphan;
 pub mod slots;
 pub mod stale_guard;
 pub mod store;

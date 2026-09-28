@@ -18,11 +18,15 @@
 //!
 //! The lock files are opened close-on-exec (Rust's default), so a build's own
 //! children never inherit the lock: a daemon a build starts (an `sccache`
-//! server, a `cargo run` service) cannot pin the slot after the build ends.
-//! The other side of that choice: when the `tm build-lease` holder is
-//! SIGKILLed, its build keeps running while the slot reads free. The lease
-//! therefore also checks cargo's own `.cargo-lock` in the slot's target
-//! directory before it uses the directory (see `stale_guard::cargo_lock_held`).
+//! server) cannot pin the slot after the build ends. A `cargo run` program
+//! never holds a slot at all: `tm build-lease` leases only the `cargo build`
+//! with the same flags, releases the slot, and then runs the program (#8261
+//! repair r3). The other side of close-on-exec: when the `tm build-lease` holder
+//! is SIGKILLed, its build keeps running while the flock reads free. The
+//! record the dead holder left in the slot file keeps the slot taken while the
+//! build it names is alive ([`SlotState::Orphaned`], see `orphan`), and the
+//! lease also checks cargo's own `.cargo-lock` in the slot's target directory
+//! before it uses the directory (see `stale_guard::cargo_lock_held`).
 //!
 //! Slot and admission files are created mode `0600`: a record names the
 //! holder's command and checkout, and only the store's owner reads it.
@@ -173,6 +177,9 @@ pub enum SlotState {
     /// The slot file could not be opened or locked; the error, rendered.
     /// Not counted as held: a broken file must not read as a build forever.
     Broken(String),
+    /// Nobody holds the flock, but the record a SIGKILLed holder left names a
+    /// build still running (#8261 repair r3). Counted as held, never taken.
+    Orphaned(HolderRecord),
 }
 
 /// The build-slot directory.
@@ -269,7 +276,12 @@ impl SlotDir {
         if try_flock(&file)? {
             // A file an older binary created 0644 is narrowed on first use.
             let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
-            Ok(Some(SlotGuard { file, slot, path }))
+            Ok(Some(SlotGuard {
+                file,
+                slot,
+                path,
+                keep_record: false,
+            }))
         } else {
             Ok(None)
         }
@@ -331,6 +343,7 @@ impl SlotDir {
         self.probe()
             .into_iter()
             .filter_map(|(slot, state)| match state {
+                SlotState::Orphaned(record) => Some(record),
                 SlotState::Held(record) => Some(record.unwrap_or_else(|| HolderRecord {
                     slot,
                     pid: 0,
@@ -347,10 +360,16 @@ impl SlotDir {
 
     fn probe_one(&self, slot: u32) -> SlotState {
         match self.try_acquire(slot) {
-            Ok(Some(guard)) => {
-                drop(guard);
-                SlotState::Free
-            }
+            Ok(Some(guard)) => match guard.orphaned_build() {
+                Some(record) => {
+                    guard.release_keeping_record();
+                    SlotState::Orphaned(record)
+                }
+                None => {
+                    drop(guard);
+                    SlotState::Free
+                }
+            },
             Ok(None) => SlotState::Held(read_record(&self.lock_path(slot))),
             // #8261 fail-open table: a broken slot file is neither capacity nor
             // a holder; `acquire` skips it and runs unleased if all are broken.
@@ -432,6 +451,8 @@ pub struct SlotGuard {
     file: File,
     slot: u32,
     path: PathBuf,
+    /// Set by [`SlotGuard::release_keeping_record`]: `Drop` leaves the record.
+    keep_record: bool,
 }
 
 impl SlotGuard {
@@ -461,13 +482,32 @@ impl SlotGuard {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The record a SIGKILLed holder left in this slot, while its build runs.
+    ///
+    /// Why: see `orphan` — such a slot is still in use (#8261 repair r3).
+    /// Test: `an_orphaned_build_keeps_its_slot`.
+    #[must_use]
+    pub fn orphaned_build(&self) -> Option<HolderRecord> {
+        read_record(&self.path).filter(super::orphan::is_orphaned_build)
+    }
+
+    /// Release the lock but leave the record in the file.
+    ///
+    /// Why: a probe of an orphaned slot must not erase the only record that
+    /// keeps the slot taken.
+    pub fn release_keeping_record(mut self) {
+        self.keep_record = true;
+    }
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         // Cleared BEFORE the descriptor closes, so a probe never reads the old
         // holder's record on a slot that is already free.
-        let _ = self.file.set_len(0);
+        if !self.keep_record {
+            let _ = self.file.set_len(0);
+        }
     }
 }
 
@@ -554,6 +594,30 @@ mod tests {
         held.write_record(&record(0)).expect("write");
         drop(held);
         assert_eq!(slots.probe(), vec![(0, SlotState::Free)]);
+        assert!(slots.holders().is_empty());
+    }
+
+    /// #8261 repair r3: a holder that dies without clearing its record (the
+    /// SIGKILL case) leaves the slot taken while the build it names runs.
+    #[test]
+    fn an_orphaned_build_keeps_its_slot() {
+        let (_tmp, slots) = dir();
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in build");
+        let mut dead_holder = record(0);
+        dead_holder.child_pid = Some(build.id());
+        let mut held = slots.try_acquire(0).expect("io").expect("free");
+        held.write_record(&dead_holder).expect("write");
+        held.release_keeping_record();
+        let probed = slots.probe();
+        let holders = slots.holders();
+        let _ = build.kill();
+        let _ = build.wait();
+        assert_eq!(probed, vec![(0, SlotState::Orphaned(dead_holder))]);
+        assert_eq!(holders.len(), 1, "an orphaned build counts as held");
+        assert_eq!(slots.probe(), vec![(0, SlotState::Free)], "once it exits");
         assert!(slots.holders().is_empty());
     }
 
