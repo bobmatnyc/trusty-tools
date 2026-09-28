@@ -122,6 +122,9 @@ mod tests_8148;
 // #8134: vectors restored over an empty corpus never register as ready.
 #[cfg(test)]
 mod tests_8134;
+// #8105: a reindex of a write-quarantined index is refused, not queued.
+#[cfg(test)]
+mod tests_8105;
 // #8167: a delete releases the index's files while a handle clone survives.
 #[cfg(test)]
 mod tests_8167;

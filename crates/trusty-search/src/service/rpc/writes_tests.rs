@@ -35,7 +35,7 @@ use tower::ServiceExt;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INTERNAL_ERROR};
 
 use crate::allowlist::{AllowlistConfig, AllowlistEntry, AllowlistPaths};
-use crate::core::corpus::CorpusStore;
+use crate::core::corpus::{CorpusOpenFailure, CorpusStore};
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -891,6 +891,45 @@ async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport
         state.reindex_progress.get(&IndexId::new("wf")).is_none(),
         "a refused trigger must not publish a progress entry an SSE subscriber \
          would then wait on forever"
+    );
+}
+
+/// Why (#8105): the socket serves the same `reindex_report` body as HTTP, so a
+/// write-quarantined index must be refused on both, or the socket would queue
+/// the run whose completion never arrives.
+/// What: sets the quarantine exactly as `build_indexer_from_entry` does on a
+/// failed open (flag, kind, no corpus), then compares the two refusals.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wq", tmp.path()))).await;
+    {
+        let handle = state.registry.get(&IndexId::new("wq")).expect("planted");
+        let mut indexer = handle.indexer.write().await;
+        indexer.corpus_open_failed = true;
+        indexer.corpus_open_failure = Some(CorpusOpenFailure::Contention);
+    }
+
+    let over_http = http_err(&http, "POST", "/indexes/wq/reindex", serde_json::json!({})).await;
+    assert_eq!(over_http.0, StatusCode::CONFLICT, "body: {}", over_http.1);
+    assert_eq!(over_http.1["error"], "index_write_quarantined");
+    let over_socket = rpc_err(
+        &rpc,
+        writes::METHOD_INDEX_REINDEX,
+        serde_json::json!({ "index_id": "wq" }),
+    )
+    .await;
+
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        CODE_CONFLICT,
+        "reindex of a write-quarantined index",
+    );
+    assert!(
+        state.reindex_progress.get(&IndexId::new("wq")).is_none(),
+        "#8105: a refused trigger must queue nothing"
     );
 }
 

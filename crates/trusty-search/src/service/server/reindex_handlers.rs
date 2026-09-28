@@ -24,6 +24,7 @@ use crate::service::reindex::{
     root_gate, spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus,
 };
 
+use super::degraded::write_quarantine_refusal;
 use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
 
@@ -63,12 +64,14 @@ pub(super) async fn reindex_handler(
 /// get wrong: the #120 cooldown that stops an infinite memory-abort loop, and
 /// the three guards on a `root_path` override (#3993 collision, #5357 root-move
 /// gate, #767 allowlist) that each stop this index being re-pointed at a tree it
-/// must not claim. The SSE progress stream stays on HTTP until slice 5.
+/// must not claim. #8105 adds the write-quarantine refusal, which runs first.
+/// The SSE progress stream stays on HTTP until slice 5.
 /// What: [`reindex_handler`]'s whole former body, taking the already-decoded
 /// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
 /// Test: `reindex_over_the_socket_matches_the_http_body`,
-/// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport` in
-/// `crate::service::rpc::writes`.
+/// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport`,
+/// `a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport`
+/// in `crate::service::rpc::writes`; `reindex_of_a_write_quarantined_index_is_refused_with_409`.
 pub(crate) async fn reindex_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -81,6 +84,16 @@ pub(crate) async fn reindex_report(
             "error": format!("unknown index: {}", index_id.0),
         }),
     ))?;
+
+    // #8105: a write-quarantined index can persist nothing, so refuse before
+    // anything is queued. Ahead of the #120 cooldown: the quarantine outlasts it.
+    if let Some(refusal) = write_quarantine_refusal(&index_id.0, &handle).await {
+        tracing::warn!(
+            index_id = %index_id.0,
+            "reindex_handler: refusing reindex of a write-quarantined index (issue #8105)"
+        );
+        return Err(refusal);
+    }
 
     // Issue #120: cooldown guard. If the most recent reindex for this index
     // aborted at the memory limit, refuse to queue another one for
