@@ -483,8 +483,9 @@ pub(crate) fn run_with_timeout(cmd: Command, budget: Duration) -> Result<String,
             budget.as_secs()
         ))),
         Err(BoundedError::Spawn(e)) => Err(GhFailure::new(format!("`gh` could not be run: {e}"))),
-        Err(BoundedError::NoPipe(which)) => {
-            Err(GhFailure::new(format!("`gh` exposed no {which} pipe")))
+        // #8306: a pipe held open after exit is a failure too.
+        Err(e @ (BoundedError::NoPipe(_) | BoundedError::PipeHeldOpen(_))) => {
+            Err(GhFailure::new(format!("`gh` {e}")))
         }
         Err(BoundedError::Wait(e)) => {
             Err(GhFailure::new(format!("`gh` could not be waited on: {e}")))

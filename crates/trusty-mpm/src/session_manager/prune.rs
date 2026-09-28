@@ -20,6 +20,7 @@ use chrono::{Duration, Utc};
 use tracing::{debug, info, warn};
 
 use super::driver::ManagedTmuxDriver;
+use super::git_ceiling::{git_ceiling, with_git_ceiling};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_safety::{
@@ -667,6 +668,9 @@ impl SessionManager {
         use std::collections::HashSet;
 
         let repos_root = repos_root.to_path_buf();
+        // #8306: every git call below runs under ONE ceiling, re-installed on
+        // each thread the sweep hands work to.
+        let ceiling = git_ceiling();
         // Build a canonicalized set for O(1) lookup and symlink safety.
         let initial_in_use: HashSet<std::path::PathBuf> = in_use_workspace_paths
             .iter()
@@ -685,7 +689,11 @@ impl SessionManager {
             // #8782: the scope bounds discovery, so an out-of-scope tree is
             // never classified, reported, or removed.
             let scope = scope.clone();
-            move || find_orphaned_worktrees_in(&repos_root, &initial_in_use, &adopted, &scope)
+            move || {
+                with_git_ceiling(ceiling, || {
+                    find_orphaned_worktrees_in(&repos_root, &initial_in_use, &adopted, &scope)
+                })
+            }
         })
         .await
         .map_err(|e| anyhow::anyhow!("prune-worktrees: orphan scan panicked: {e}"))?;
@@ -746,7 +754,8 @@ impl SessionManager {
                         skipped_live += 1;
                         continue;
                     }
-                    if !git_worktree_list_agrees(&candidate) {
+                    // #8306: a timed-out probe disagrees, so the tree is kept.
+                    if !with_git_ceiling(ceiling, || git_worktree_list_agrees(&candidate)) {
                         warn!(
                             path = %candidate.display(),
                             "prune-worktrees: git worktree list disagrees this path is a \
@@ -756,7 +765,11 @@ impl SessionManager {
                     }
                     // #4091: last gate — never destroy unsaved work. #8782:
                     // bounded by the operator's discard allowlist.
-                    match allowed_dirt_verdict(&candidate, policy, "scan", scope) {
+                    // #8306: a timed-out dirt check is DIRTY, so it blocks.
+                    let verdict = with_git_ceiling(ceiling, || {
+                        allowed_dirt_verdict(&candidate, policy, "scan", scope)
+                    });
+                    match verdict {
                         DirtVerdict::Blocks(dirt) => {
                             skipped_dirty.push(dirt);
                             continue;
@@ -808,7 +821,7 @@ impl SessionManager {
         // #8782: a real run reports what the pre-removal re-check discarded.
         discarded_dirty.clear();
         for candidate in reclaimable {
-            match remove_candidate(&candidate, &fresh_in_use, policy, scope).await {
+            match remove_candidate(&candidate, &fresh_in_use, policy, scope, ceiling).await {
                 CandidateRemoval::Removed(discard) => {
                     removed.push(candidate);
                     discarded_dirty.extend(discard);
