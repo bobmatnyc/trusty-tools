@@ -1,2 +1,0 @@
-Fixed
-- `POST /indexes/{id}/reindex` on an index whose durable corpus failed to open no longer answers `queued: true` and embeds a run that can persist nothing, leaving `chunk_count` null and a completion poll that never ends. It now answers `409 index_write_quarantined` with `queued: false`, `retryable: false`, the corpus-open `failure_kind`, and a message that names the quarantine and the daemon restart that clears it. The socket transport and the MCP `reindex` tool report the same refusal (#8105).

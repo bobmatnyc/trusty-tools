@@ -1,3 +1,0 @@
-Fixed
-- An index restored with a missing or discarded HNSW snapshot (for example a torn binary/sidecar pair) no longer stays at `semantic: pending` with 0 vectors until a manual reindex. The restore now queues the embed backfill, and the stage reaches `ready` with a vector for every chunk. When the backfill cannot be scheduled, because no embedder is wired or the vector store's size cannot be read, the stage becomes `failed` and names the reason (#8863).
-- A restored index whose semantic stage reads `ready` but whose vector store's size cannot be read is no longer reported as `ready`. The stage becomes `failed` with the same reason the `pending` case gives (#8863).

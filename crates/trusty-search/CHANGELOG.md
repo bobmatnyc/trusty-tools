@@ -6,6 +6,85 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.5] — 2026-09-28
+
+### Fixed
+
+- `build.rs` no longer watches the `ui/` files #6155 deleted. Cargo treats a missing watched path as changed, so every `cargo build` re-ran the build script and recompiled trusty-search and its dependents. The script now watches `ui-dist/`, so a remirrored bundle still reaches the binary.
+- Tests that write process env knobs (redb cache, idle timers, concurrency limits, `FASTEMBED_CACHE_*`, embedderd restarts, memory-policy limits, `TRUSTY_INDEX_DEVICE`, reaper intervals, `TRUSTY_EMBED_WORKERS`) and the denylist tests that read `HOME` now run in the one unnamed `#[serial]` group, replacing three private mutexes and a named key, so a parallel sibling can no longer change the value mid-test (#5937). Test-only.
+- A source-scan ratchet fails the build when a `src/**` test writes the environment outside the unnamed `#[serial]` group (#5937). Test-only.
+- `POST /indexes/{id}/reindex` on an index whose durable corpus failed to open no longer answers `queued: true` and embeds a run that can persist nothing, leaving `chunk_count` null and a completion poll that never ends. It now answers `409 index_write_quarantined` with `queued: false`, `retryable: false`, the corpus-open `failure_kind`, and a message that names the quarantine and the daemon restart that clears it. The socket transport and the MCP `reindex` tool report the same refusal (#8105).
+- A search whose query embed fails, for example because the embedder sidecar cannot spawn, now answers `200` with lexical results instead of `500 internal search error`. The response sets `meta.vector_unavailable: true` and carries the embedder's error in `meta.embedder_error`. A query that pinned `"stage": "semantic"` gets `503 vector_unavailable` with `reason: "embedder_unavailable"` and `retryable: true` (#8348).
+- `/health` now reports `embedder: "stalled"` after a failed query embed, including for a lazily spawned sidecar that was never flagged ready, and the `search_health` MCP tool reports `embedder_unavailable` with `healthy: false` instead of `ok` (#8348).
+- Registering or indexing a repo no longer edits the repo's `.gitignore`. A
+  new index now keeps its store in the data dir, outside the work tree, so
+  `git reset --hard` followed by `git clean -fdx` no longer deletes a live
+  index. A repo that already holds a `.trusty-search/` index keeps it. That
+  directory now hides itself from `git status` and `git clean -fd` with its
+  own `.gitignore` (`*`). Registration refuses with `409` when the store would
+  land inside the repository. An earlier uncommitted `.gitignore` edit is left
+  alone; revert it with `git checkout -- .gitignore`. To move an existing
+  in-repo index out of the work tree, delete it with `delete_data=true` and
+  register it again ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- Registration also refuses with `409` when the data dir itself sits inside
+  the index root, for example `TRUSTY_DATA_DIR` set to a path in the repo, or
+  a dotfiles repo at `$HOME` over the default data dir. Before, the whole
+  store was written into the work tree in that case. `PATCH /indexes/:id`
+  applies the same rule to the new root
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `POST /indexes` no longer waits on every other registration in the daemon.
+  Only registrations under the same id, or over the same or a nested root,
+  wait for each other ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- The `409` also covers a data dir anywhere in the git work tree that holds
+  the index root, not only under the root itself: an index at `<repo>/sub`
+  with its data dir at `<repo>/data` is refused, because `git clean -fdx` at
+  the repository top deletes it. A linked worktree or a submodule counts as
+  its own work tree. An index already in `indexes.toml` keeps registering
+  only while its store still exists there
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- No path creates a new data-dir store inside the work tree that holds the
+  index root: re-registering an `indexes.toml` row whose store is missing, a
+  warm boot, and a lazy restore now refuse (`409` on `POST /indexes`) instead
+  of creating an empty store that `git clean -fdx` then deletes. An existing
+  store keeps working. An unreadable `indexes.toml` exempts nothing
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- The `500` that `POST /indexes` answers when a new index's corpus cannot be
+  opened now carries `failure_kind`, as the `503` does (`null` when the
+  failure was not classified)
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- Re-registering an index whose store an earlier registration still holds
+  open (a background embed pass, or a delete that has not closed the files
+  yet) answers a retryable `503 index_corpus_unavailable` naming the index,
+  instead of `500`. Retry once the earlier holder finishes
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `PATCH /indexes/:id` (relocate) now waits for, and is refused by, a
+  concurrent registration over the same or a nested root, and refuses a new
+  root that overlaps another index's root, as `POST /indexes` does. Before,
+  two relocates into one root could both succeed
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `PATCH /indexes/:id` (relocate) answers `409` while a reindex,
+  deferred-embed pass or component catch-up runs on that index, instead of
+  moving the root under the running walk. Retry once it finishes
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- A shutdown that lands during a deferred-embed pass now ends the pass. The daemon drains every index's embedding gate when the stop signal arrives, the in-flight embed wave is abandoned, only fully completed waves are committed, and the pass is not re-queued. The semantic stage is never reported `ready` for an abandoned pass, and the pending-embed marker re-arms it on the next boot (#8600).
+- An embed wave that makes no progress for `TRUSTY_EMBED_NO_PROGRESS_SECS` (default 600) now aborts the pass and marks the semantic stage `failed`, instead of holding the background permit indefinitely on an embedder that never answers (#8600).
+- When a deferred-embed pass aborts on `TRUSTY_EMBED_NO_PROGRESS_SECS`, the waves it had already completed are now committed and snapshotted before the semantic stage is marked `failed`. The pending-embed marker is kept, so the next boot embeds only the remainder. Before, the abort discarded every vector the pass had computed (#8600).
+- Warm boot now retries a corpus that is still locked (`DatabaseAlreadyOpen`) with backoff for up to 10 seconds instead of once after 50 ms, so a lock the previous process still holds briefly no longer forces a full cold start (#8600).
+- `GET /indexes/{id}/status` and the `index_status` MCP tool now answer while a deferred-embed pass runs, even with a writer such as a component-toggle `PATCH` queued on the index. The pass holds the indexer lock only to snapshot the owed chunks and to commit them, never across embedding. Before, a queued writer blocked every later status read for the rest of the pass (#8600).
+- A deferred-embed pass whose sub-batch returns an error, such as the sidecar's `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` per-call timeout, now commits and snapshots the waves it had already completed, marks the semantic stage `failed` with that error, and keeps the pending-embed marker. Before, the error discarded every vector the pass had computed (#8600).
+- Two `trusty-search` daemons started together on one data dir can no longer both hold the daemon lock. A starter that found the lock held, with the file still naming a dead predecessor (the winner's window between its flock and its pid write), unlinked the live lock file and locked a new one. A held lock now always means `AlreadyRunning`; the pid in the file is diagnostics only and is written before `acquire_lock` returns, and a pid-write failure stops startup. A lock taken on an inode the path no longer names is retried (#8760).
+- `trusty-search start`'s orphan reaper and `trusty-search doctor --fix` remove `daemon.lock` (and the reaper, `daemon.port`) only while holding the lock themselves, so neither can delete a live daemon's lock or port file (#8760).
+- A file removed while a deferred-embed pass runs no longer gets its vectors back when the pass commits. The commit now keeps only the chunks the corpus still holds, and evicts the vector of any chunk removed while the upsert ran. Before, the removed file's vectors stayed in the HNSW store with no chunk behind them, and nothing removed them. This covers removals through `remove_file` and through the file watcher (#8761).
+- A chunk edited while a deferred-embed pass runs no longer has its current vector replaced by the embedding of its pre-edit content. The pass skips it, and the next pass embeds the new content (#8761).
+- A deferred-embed commit whose chunk map was evicted now waits up to 300 s for the map to reload, instead of the ~27 s a search waits. Before, a reload slower than 27 s, as measured on large NFS corpora, discarded the whole embed pass. The commit fails at once when the corpus read fails, and at the 300 s ceiling. The pending-embed marker is kept, so the next pass retries. An embed pass now also counts as index activity, so idle eviction no longer empties the chunk map while the pass runs (#8761).
+- A deferred-embed commit no longer reads a chunk map that a memory-pressure reclaim or idle eviction emptied just after the commit's wait finished. Before, the commit read the emptied map as an empty corpus: it dropped every embedded chunk as removed, or evicted the vectors it had just written, and still reported success, so the pending-embed marker was cleared with the vectors missing. Eviction now marks the map evicted before other readers can see it empty, and the commit re-checks that mark after it takes the read lock and waits again when it is set (#8761).
+- When several removed chunks need their vectors evicted after the upsert, one failed eviction no longer leaves the rest in place. Every eviction is attempted and the failures are reported together (#8761).
+- The deferred-embed pass reports the number of vectors it kept, not the number of chunks it embedded (#8761).
+- A deferred-embed catch-up job whose task was dropped before it claimed its turn — its runtime shut down, or it was aborted — stayed at the head of the size-ordered queue, and every later index's embed pass waited behind it forever. A dropped job now leaves the queue at any point, and the next job runs (#8770).
+- `trusty-search start` (background) now starts the daemon in its own session, so a group kill or Ctrl-C aimed at the caller no longer takes the daemon down with it. The daemon auto-started by `tga audit` gets the same fix through `trusty-common` (#8783).
+- An index restored with a missing or discarded HNSW snapshot (for example a torn binary/sidecar pair) no longer stays at `semantic: pending` with 0 vectors until a manual reindex. The restore now queues the embed backfill, and the stage reaches `ready` with a vector for every chunk. When the backfill cannot be scheduled, because no embedder is wired or the vector store's size cannot be read, the stage becomes `failed` and names the reason (#8863).
+- A restored index whose semantic stage reads `ready` but whose vector store's size cannot be read is no longer reported as `ready`. The stage becomes `failed` with the same reason the `pending` case gives (#8863).
+
 ## [0.54.4] — 2026-09-27
 
 ### Fixed
