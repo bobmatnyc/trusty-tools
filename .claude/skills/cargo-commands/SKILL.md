@@ -40,6 +40,7 @@ Name what you changed — `--features memory-core,embedder-test-support` — or
 `--features unconditional-only` for the always-compiled surface.
 `--all-features` is unavailable: the `embedder-*` ORT variants are mutually
 exclusive. `cargo build` and `cargo check -p trusty-common` are unaffected.
+The whole crate, every test once: `./scripts/test_trusty_common_lanes.sh`.
 
 ## Workspace-wide
 

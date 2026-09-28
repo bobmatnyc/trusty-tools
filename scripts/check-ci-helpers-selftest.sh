@@ -711,9 +711,12 @@ assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Ava
 #
 # 6 -> 7: the `affected-test` legs (#7777) run `cargo test` for up to the
 # whole workspace, the same build `test-shard` does.
+#
+# 7 -> 8: the `trusty-common-lanes` job builds trusty-common four times,
+# one per coverage lane, including the bundled ONNX Runtime (ruling 2026-09-27).
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
   "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
-assert_eq "all seven disk-reclaim jobs call the helper" "7" \
+assert_eq "all eight disk-reclaim jobs call the helper" "8" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
 # ---------------------------------------------------------------------------
@@ -972,7 +975,8 @@ assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
 # 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
 # 13 -> 12: the `audit-ui` job left with trusty-audit-ui (owner ruling 2026-09-28).
-assert_eq "every apt step routes through the wrapper" "12" \
+# 12 -> 13: the `trusty-common-lanes` job (owner ruling 2026-09-27).
+assert_eq "every apt step routes through the wrapper" "13" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

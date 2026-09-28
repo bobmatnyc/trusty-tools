@@ -565,10 +565,14 @@ jobs:
   # once and never rebuilds it, so a link that ships broken stays broken for
   # that version.
   #
-  # NOT a required context. Adding one wedges every open PR that predates it
-  # (they cannot produce a check run that did not exist when they were cut —
-  # see CLAUDE.md, "What CI actually gates"), so promoting this row is the
-  # repo owner's call, made once the open-PR backlog is drained.
+  # Covered by `CI gate` (#7288): `rustdoc-links` is now in `ci-gate`'s
+  # `needs:` and the CONTEXTS table in scripts/ci-gate-verdict.sh, so a red,
+  # cancelled or skipped-without-cause result fails the gate like any other
+  # covered context. #8835 merged with this check red because nothing gated
+  # on it. This job already ran unconditionally on every PR (#5973); this
+  # change only wires its existing result into the gate. An open PR keeps
+  # its current gate result until it gets a new commit, which then picks up
+  # this row.
   #
   # docs_only short-circuit and `!cancelled()` for the same reasons the fmt and
   # clippy jobs carry them: a Cargo-inert PR pays runner startup and nothing
@@ -1280,34 +1284,10 @@ jobs:
       # parallel. `test` still gates on it, so nothing is verified less.
 
       # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
-      # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
-      # returns None whenever CI is non-empty, and this test expects the
-      # live cache-freshness path instead). It is filtered out of the nextest
-      # run above and re-run here with the override. Previously CI="" was
-      # applied to the WHOLE `cargo test --workspace` invocation, which flipped
-      # cargo's fingerprint for every crate in the workspace and forced an
-      # unrelated recompile of trusty-agents + trusty-agents-local (#4402).
-      # Scoping the override to a single `-p trusty-common` invocation
-      # contains that recompile to trusty-common alone (measured locally:
-      # ~3s) instead of cascading workspace-wide. `--features update-check`
-      # is required: that module is `#[cfg(feature = "update-check")]`-gated
-      # and only gets pulled in under `--workspace` via other crates'
-      # feature unification, not under a bare `-p trusty-common` build.
-      - name: cargo test -p trusty-common (cache-freshness, CI unset)
-        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
-        env:
-          CI: ""
-        run: |
-          cargo test -p trusty-common --lib --features update-check \
-            update::tests::cache_fresh_returns_some_when_newer -- --exact
-
-      # `codex-config` is enabled by no crate in the workspace, so neither
-      # `cargo test --workspace` nor `cargo clippy --workspace` ever compiles
-      # `codex_config` or runs its tests — the module could rot undetected
-      # (#5264). This is the only step that exercises it.
-      - name: cargo test -p trusty-common --features codex-config
-        if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test -p trusty-common --lib --features codex-config codex_config
+      # (check_throttled in crates/trusty-common/src/update/mod.rs returns None
+      # whenever CI is non-empty), so the filter above keeps it out of this
+      # run. The `trusty-common-lanes` job runs it with CI unset, together with
+      # the `codex-config` tests no workspace crate enables (#5264).
 
   # --------------------------------------------------------------------------
   # test-doc: the workspace doctests, on their own runner.
@@ -1481,6 +1461,8 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
       matrix: ${{ steps.plan.outputs.matrix }}
       reason: ${{ steps.plan.outputs.reason }}
+      # Read by `trusty-common-lanes`; the legs never carry trusty-common.
+      trusty_common: ${{ steps.plan.outputs.trusty_common }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1516,9 +1498,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" != "pull_request" ]; then
-            reason="no affected crates: ${EVENT_NAME} run — the pre-publish shards test the whole workspace"
-            printf 'count=0\nmatrix={"include":[]}\nreason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
-            echo "$reason"
+            # scripts/ci-affected-test-plan.sh's own --event-name arm decides
+            # trusty_common: false on a docs-only push (#8236), true
+            # otherwise, including a missing/failed docs-only signal (fail
+            # closed — run the lanes).
+            bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" --event-name "${EVENT_NAME}" --
             exit 0
           fi
           # An unresolvable merge-base passes an empty range, which the
@@ -1601,8 +1585,10 @@ jobs:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
 
-      # `--skip` mirrors `test-shard`'s nextest filter: that one test needs CI
-      # unset and is re-run below with the override.
+      # trusty-common never appears here: the plan hands it to the
+      # `trusty-common-lanes` job. Were it ever to, its empty default feature
+      # set makes `-p trusty-common` a compile_error (#4901), so the leg fails
+      # rather than passing over the gated modules.
       - name: cargo test (this leg's crates)
         env:
           LEG_CRATES: ${{ matrix.crates }}
@@ -1611,27 +1597,9 @@ jobs:
           args=()
           for c in $LEG_CRATES; do
             args+=(-p "$c")
-            # #4901: trusty-common has an empty default feature set; same
-            # override as `select-test-crates.sh --cargo-args`.
-            if [ "$c" = "trusty-common" ]; then
-              args+=(--features trusty-common/unconditional-only)
-            fi
           done
           echo "cargo test ${args[*]} --no-fail-fast"
-          cargo test "${args[@]}" --no-fail-fast \
-            -- --skip update::tests::cache_fresh_returns_some_when_newer
-
-      - name: cargo test -p trusty-common (cache-freshness, CI unset)
-        if: contains(format(' {0} ', matrix.crates), ' trusty-common ')
-        env:
-          CI: ""
-        run: |
-          cargo test -p trusty-common --lib --features update-check \
-            update::tests::cache_fresh_returns_some_when_newer -- --exact
-
-      - name: cargo test -p trusty-common --features codex-config
-        if: contains(format(' {0} ', matrix.crates), ' trusty-common ')
-        run: cargo test -p trusty-common --lib --features codex-config codex_config
+          cargo test "${args[@]}" --no-fail-fast
 
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.
@@ -1664,6 +1632,118 @@ jobs:
             exit 1
           fi
           echo "every affected-crate leg succeeded"
+
+  # --------------------------------------------------------------------------
+  # trusty-common coverage lanes (owner ruling 2026-09-27). trusty-common has
+  # `default = []` and gates most of its modules behind features, so no single
+  # `cargo test -p trusty-common` covers it: the bare form is a compile_error
+  # (#4901), and any one `--features` set compiles only what it names. The
+  # lanes in `[package.metadata.trusty-test-coverage]` of its Cargo.toml are a
+  # set whose union compiles and runs every test in the crate;
+  # `tests/feature_coverage.rs` proves they cover every declared feature.
+  # scripts/test_trusty_common_lanes.sh runs them one after another and keeps
+  # going past a failing lane. It is the same command a local run uses.
+  #
+  # One job, sequential lanes: the lanes share every dependency their feature
+  # sets agree on, and a matrix would rebuild that shared graph per leg.
+  #
+  # It always runs and always reports, like the required jobs above; only
+  # its steps consult the plan. The plan is `affected-plan`, i.e. the same
+  # selector the legs use, which already knows the out-of-crate inputs
+  # trusty-common's tests read. The legs never carry trusty-common. A push or
+  # dispatch run answers `trusty_common=true`, and a failed plan answers
+  # nothing, which runs the lanes too (fail closed).
+  #
+  # `CI: ""` on the lane step: update::tests::cache_fresh_returns_some_when_newer
+  # needs CI unset (see `test-shard`), and nothing else in trusty-common
+  # reads CI, so the whole run matches a local one. `libdbus-1-dev`: the
+  # `inference` lane enables `keyring-store` (see `rustdoc-links`).
+  # --------------------------------------------------------------------------
+  trusty-common-lanes:
+    name: trusty-common coverage lanes
+    needs: [affected-plan]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Decide whether trusty-common is affected
+        id: decide
+        env:
+          PLAN_RESULT: ${{ needs.affected-plan.result }}
+          SELECTED: ${{ needs.affected-plan.outputs.trusty_common }}
+        run: |
+          if [ "${SELECTED}" = "false" ]; then
+            echo "the affected-crate plan did not select trusty-common — nothing to run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "running the lanes (plan=${PLAN_RESULT}, trusty_common='${SELECTED}')"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.decide.outputs.run == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        if: steps.decide.outputs.run == 'true'
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Create local main branch for git tests
+        if: steps.decide.outputs.run == 'true'
+        run: bash scripts/ci-create-local-main.sh
+
+      - name: Install stable toolchain
+        if: steps.decide.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          bash scripts/ci-apt-install.sh \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libdbus-1-dev
+
+      # Its own key: four trusty-common feature sets, none of them the
+      # workspace union the `test` cache holds.
+      - name: Cache cargo artifacts
+        if: steps.decide.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: trusty-common-lanes
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Resolve fastembed model cache key
+        if: steps.decide.outputs.run == 'true'
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      # Restore only: `test-shard` on main is the sole writer of this key.
+      - name: Restore fastembed model cache
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      - name: Run every trusty-common coverage lane
+        if: steps.decide.outputs.run == 'true'
+        env:
+          CI: ""
+        run: ./scripts/test_trusty_common_lanes.sh
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
@@ -2617,10 +2697,12 @@ jobs:
         clippy,
         msrv,
         affected,
+        trusty-common-lanes,
         agents-ui,
         mpm-gui,
         code-gui,
         search-daemon-smoke,
+        rustdoc-links,
         teardown-guard,
         tmux-exact-targets,
         parity-selftest,

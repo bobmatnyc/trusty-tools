@@ -2140,7 +2140,8 @@ fn pm_guard_warns_when_no_daemon_answers_the_claim() {
 /// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
 /// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
 /// immediately instead of waiting on a barrier no one else will reach. Returns
-/// the base URL and the temp dir backing the hermetic state.
+/// the base URL and the temp dir backing the hermetic state. An `expected` of 1
+/// releases every request on arrival: the same router with no race held open.
 fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
     use std::future::IntoFuture;
     use std::sync::Arc;
@@ -2206,7 +2207,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // reach the daemon before either is recorded. Pre-fix the daemon only
     // ANSWERED, so both saw an empty set and both were ALLOWED, which is the
     // collision the guard exists to prevent. The claim is now taken inside the
-    // same critical section that produced the answer, so exactly one is
+    // same critical section that produced the answer, so at most one is
     // admitted.
     //
     // The interleaving is forced, not timed: the barrier holds both claims until
@@ -2226,18 +2227,14 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // through `claim_shared_tree_dispatch` directly with no scheduler in the
     // way. Treat the two as a pair: this one proves the wiring, that one proves
     // the mutual exclusion.
-    // #5914: the barrier holds the FIRST child's HTTP request open until the
-    // SECOND child's arrives, and `post_shared_tree` gives up after 2 s and
-    // fails OPEN. So the whole of the second child's process startup sits
-    // inside a 2 s budget. A COLD first exec of `tm` measured 1.5 s on this
-    // machine against 40 ms warm, and under a parallel `cargo build` it crossed
-    // the budget: the held request timed out, its guard read the timeout as
-    // "nobody else is here", and BOTH dispatches were admitted — the reported
-    // `got: ["", ""]`. Two changes take startup out of the window, neither of
-    // them a tuned delay: `prewarm_pm_guard_binary` pays the cold-exec cost
-    // before the barrier is armed, and both children are forked back to back
-    // from this one thread, so what remains between their arrivals is two warm
-    // execs, not a thread hand-off plus a page-in.
+    // #5914: the barrier holds the FIRST child's request open until the SECOND
+    // child's arrives, and `post_shared_tree` gives up after 2 s. Since #5923 a
+    // timed-out claim DENIES, so under load both children can be refused — the
+    // correct fail-closed result, not a regression. The invariant is therefore
+    // "never both admitted", and a lone claim against a second daemon proves the
+    // guard still admits at all, so a guard that denies everything cannot pass.
+    // `prewarm_pm_guard_binary` and forking both children back to back keep the
+    // race itself exercised on an idle machine, where exactly one is admitted.
     let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
     let cwd = tempfile::tempdir().expect("tempdir");
     prewarm_pm_guard_binary();
@@ -2284,26 +2281,53 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
         .filter(|(_, d)| d.as_deref() == Some("deny"))
         .map(|(v, _)| v)
         .collect();
-    assert_eq!(
-        allowed, 1,
-        "exactly one of two simultaneous dispatches may be admitted (a `deny` \
-         permissionDecision marks the other, not merely non-empty stdout), got \
-         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
-         {elapsed:?}; at or past the guard's 2 s client budget in \
-         `post_shared_tree` the held request timed out and failed open — that is the \
-         machine, not this rule regressing, see #5914)"
-    );
-    assert_eq!(denied.len(), 1, "and exactly one must be denied");
-    assert_denied(denied[0]);
-    let reason: serde_json::Value =
-        serde_json::from_str(denied[0]).expect("deny stdout must be valid JSON");
-    let reason = reason["hookSpecificOutput"]["permissionDecisionReason"]
-        .as_str()
-        .expect("reason is a string");
+    // The safety invariant: two simultaneous dispatches are never both admitted.
     assert!(
-        reason.contains("#4480") && reason.contains("rust-engineer"),
-        "the deny must name the rule and the sibling already in the tree, got: {reason}"
+        allowed <= 1,
+        "two simultaneous dispatches must never both be admitted (a `deny` \
+         permissionDecision marks a refusal, not merely non-empty stdout), got \
+         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
+         {elapsed:?})"
     );
+
+    // #5914: a lone claim against a second daemon and router, sharing no barrier
+    // or state with the race, is admitted — so its verdict cannot depend on how
+    // many race children reached the barrier. `documentation` takes the same
+    // shared-tree claim path but no builder slot, so the load-throttled builder
+    // cap (#8261) cannot refuse it either.
+    let (lone_url, _lone_dir) = serve_delegation_router_behind_a_barrier(1);
+    let lone_cwd = tempfile::tempdir().expect("tempdir");
+    let lone = finish_pm_guard(spawn_pm_guard(
+        UNISOLATED_DOCUMENTATION_DISPATCH,
+        &lone_url,
+        Some(lone_cwd.path()),
+        &[],
+        &[],
+    ));
+    assert_ne!(
+        decision(lone.trim()).as_deref(),
+        Some("deny"),
+        "a lone claim must be admitted, or the guard denies everything and the \
+         invariant above proves nothing, got: {lone}"
+    );
+
+    // Every refusal is a well-formed deny naming a rule that may refuse here:
+    // the shared-tree collision (#4480), an unanswered claim (#5923), or the
+    // builder cap (#6892).
+    for deny in denied {
+        assert_denied(deny);
+        let parsed: serde_json::Value =
+            serde_json::from_str(deny).expect("deny stdout must be valid JSON");
+        let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason is a string");
+        assert!(
+            ["#4480", "#5923", "#6892"]
+                .iter()
+                .any(|r| reason.contains(r)),
+            "a deny must name the collision, timeout or builder-cap rule, got: {reason}"
+        );
+    }
 }
 
 // ── Main-checkout destructive-git guard (ADR-0037) ──────────────────────────

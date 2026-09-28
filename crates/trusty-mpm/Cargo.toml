@@ -277,11 +277,12 @@ name = "tm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
+# Compatibility alias, not a second CLI build: a std-only shim that execs the
+# `tm` beside it, kept because installed plists and hooks name `trusty-mpm`.
 [[bin]]
 name = "trusty-mpm"
-path = "src/bin/tm/main.rs"
+path = "src/bin/trusty-mpm.rs"
 required-features = ["cli"]
-# #8345: same source as `tm`, whose target already runs these unit tests.
 test = false
 
 # Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.

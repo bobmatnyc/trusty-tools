@@ -15,8 +15,9 @@
 #                      classifier, missing need, unusable input;
 #   ci.yml wiring:     the ci-gate job's `needs:` equals the verdict table,
 #                      each job carries the context name the table claims,
-#                      the job-level filters fail closed, and the moved
-#                      workflows are gone (no second check run per name);
+#                      the job-level filters fail closed, the moved
+#                      workflows are gone (no second check run per name),
+#                      and trusty-common is tested only by its lanes job;
 #   vmtest-harness:    its pull_request trigger carries a `paths:` filter.
 # Usage: bash scripts/ci-gate-selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing each mismatch.
@@ -106,6 +107,8 @@ verdict() { env -u GITHUB_STEP_SUMMARY NEEDS_JSON="$(needs_json "$@")" bash scri
 assert_eq "every context succeeded"                     "0" "$(verdict)"
 assert_eq "clippy failed (probe 7)"                     "1" "$(verdict clippy=failure)"
 assert_eq "affected legs cancelled"                     "1" "$(verdict affected=cancelled)"
+assert_eq "trusty-common lanes failed"                  "1" "$(verdict trusty-common-lanes=failure)"
+assert_eq "trusty-common lanes skipped (never allowed)" "1" "$(verdict trusty-common-lanes=skipped)"
 assert_eq "classifier failed (probe 8, fail closed)"    "1" "$(verdict changes=failure)"
 assert_eq "teardown skipped, classifier said false"     "0" "$(verdict teardown-guard=skipped out:teardown_guard_relevant=false)"
 assert_eq "teardown skipped, classifier said true"      "1" "$(verdict teardown-guard=skipped out:teardown_guard_relevant=true)"
@@ -156,6 +159,15 @@ assert_eq "tmux-exact-targets skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}" "$ci")"
 assert_eq "changes exports both relevance outputs" "2" \
   "$(grep -cE '^      (teardown_guard|tmux_targets)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
+# Owner ruling 2026-09-27: trusty-common is tested by its coverage lanes and
+# nowhere else, so no single `-p trusty-common` run can pass for the crate.
+lanes_job="$(sed -n '/^  trusty-common-lanes:$/,/^  # ----/p' "$ci")"
+assert_eq "trusty-common-lanes runs the lanes script" "1" \
+  "$(printf '%s\n' "$lanes_job" | grep -c '^        run: \./scripts/test_trusty_common_lanes\.sh$')"
+assert_eq "trusty-common-lanes steps read the plan's trusty_common" "1" \
+  "$(printf '%s\n' "$lanes_job" | grep -c 'SELECTED: \${{ needs\.affected-plan\.outputs\.trusty_common }}')"
+assert_eq "no single cargo test -p trusty-common step remains" "0" \
+  "$(grep -vE '^[[:space:]]*#' "$ci" | grep -c 'cargo test -p trusty-common')"
 for moved in teardown-guard tmux-exact-targets tag-publish-parity; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"
