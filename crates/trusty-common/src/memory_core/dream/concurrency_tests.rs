@@ -10,7 +10,8 @@
 
 use super::concurrency::{
     DEFAULT_DREAM_MAX_CONCURRENT, DreamCycleGauge, acquire_dream_permit, dream_cycles_in_flight,
-    dream_cycles_peak_in_flight, dream_max_concurrent, parse_max_concurrent, stagger_offset,
+    dream_cycles_peak_in_flight, dream_max_concurrent, parse_max_concurrent,
+    reset_dream_cycles_peak_in_flight_for_test, stagger_offset,
 };
 use super::config::DreamConfig;
 use super::cycle::{DREAM_EMBED_CHUNK, dedup_pass_with_embedder};
@@ -149,9 +150,13 @@ impl Embedder for RecordingEmbedder {
 /// Why: the cap's whole job is to keep N cycles' working sets from coexisting.
 /// What: spawns 20 tasks that each hold a permit while a shared counter tracks
 /// the live holders and their high-water mark; asserts the mark never exceeds
-/// the configured cap.
+/// the configured cap. `#[serial(dream_permits)]` (#8835): the 20 tasks hold
+/// real permits from the process-wide semaphore, so a concurrent sibling that
+/// wants every permit for itself (`a_dream_cycle_waits_when_every_permit_is_held`,
+/// `an_interactive_dream_errors_when_the_dreamer_is_busy`) must not overlap it.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(dream_permits)]
 async fn dream_permits_cap_concurrent_holders() {
     let cap = dream_max_concurrent();
     let live = Arc::new(AtomicUsize::new(0));
@@ -193,11 +198,22 @@ async fn dream_permits_cap_concurrent_holders() {
 /// configured cap. The gauge is incremented inside `dream_cycle` independently
 /// of the permit, so removing the permit leaves the gauge reporting the real
 /// (uncapped) overlap and this test fails.
+/// `#[serial(dream_permits)]` (#8835): the peak this test reads is a
+/// process-wide, never-reset high-water mark, and
+/// `the_in_flight_gauge_counts_a_held_cycle` bumps it by entering the gauge
+/// directly, without a permit — unserialized, that bypass can coincide with
+/// this test's own (correctly capped) cycles and report a peak one higher
+/// than the cap ever actually allowed. `reset_dream_cycles_peak_in_flight_for_test`
+/// rebases the mark to the current in-flight count first, under the same
+/// lock, so a stale spike left by an earlier, non-overlapping test cannot be
+/// mistaken for this test's own overlap either.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(dream_permits)]
 async fn ten_palaces_never_exceed_the_concurrency_cap() {
     const PALACES: usize = 10;
     let cap = dream_max_concurrent();
+    reset_dream_cycles_peak_in_flight_for_test();
 
     let mut handles = Vec::new();
     for i in 0..PALACES {
@@ -404,7 +420,13 @@ fn the_default_cap_is_two() {
 /// this binary run cycles concurrently, so only monotone facts are asserted;
 /// the release itself is proven by `dream_permits_cap_concurrent_holders`,
 /// which would deadlock its twenty tasks if a slot were never returned.
+/// `#[serial(dream_permits)]` (#8835): this is the one place that enters the
+/// gauge directly, bypassing `acquire_dream_permit` — the semaphore's cap
+/// cannot bound it. Overlapping `ten_palaces_never_exceed_the_concurrency_cap`
+/// let this test's bypass add one to a peak the cap was already meeting,
+/// reporting one more concurrent cycle than the cap ever actually allowed.
 #[test]
+#[serial(dream_permits)]
 fn the_in_flight_gauge_counts_a_held_cycle() {
     let held = DreamCycleGauge::enter();
     let during = dream_cycles_in_flight();

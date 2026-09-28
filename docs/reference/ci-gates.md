@@ -244,17 +244,20 @@ above.
   skipped matrix, so a failed plan turns it red.
 - **Each leg matches `test-shard`**: the stable toolchain, the same apt
   packages, the .NET SDK, `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, and a
-  read of the shared `test` rust-cache and the fastembed model cache. The one
-  test `test-shard` filters out,
-  `update::tests::cache_fresh_returns_some_when_newer`, is skipped in the main
-  run and re-run with `CI` unset. The leg that holds `trusty-common` also runs
-  the `codex-config` step. Nothing else is filtered: no `--lib`, no
-  `continue-on-error`, and no flake list.
+  read of the shared `test` rust-cache and the fastembed model cache. Nothing
+  is filtered: no `--lib`, no `--skip`, no `continue-on-error`, and no flake
+  list.
 - 🟡 **Feature coverage is a subset of the shards'.** Each leg is its own
   `cargo test -p …` invocation, so it resolves features only across that leg's
-  crates. `trusty-common` gets `--features trusty-common/unconditional-only`
-  (#4901), plus whatever its leg-mates unify in. Its tests that sit behind a
-  gated module run in full only on `main`.
+  crates.
+- 🔴 **`trusty-common` never lands in a leg.** No single `--features` set
+  covers it (#4901), so the plan reports it as `trusty_common=true` and the
+  `trusty-common coverage lanes` job runs
+  `./scripts/test_trusty_common_lanes.sh`: every lane in its Cargo.toml's
+  `[package.metadata.trusty-test-coverage]`, one after another, with `CI`
+  unset so `update::tests::cache_fresh_returns_some_when_newer` runs too. The
+  job always reports; when the plan did not select trusty-common its steps
+  no-op. A push or dispatch run always runs the lanes. `CI gate` covers it.
 
 ## A red `main` files an issue
 

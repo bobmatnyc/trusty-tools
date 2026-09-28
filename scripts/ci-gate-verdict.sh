@@ -42,6 +42,7 @@ fmt|Format check|-
 clippy|Clippy|-
 msrv|MSRV check|-
 affected|Rust tests (affected crates)|-
+trusty-common-lanes|trusty-common coverage lanes|-
 agents-ui|trusty-agents-ui clippy|-
 mpm-gui|trusty-mpm-gui clippy|-
 code-gui|trusty-code-gui clippy|-
