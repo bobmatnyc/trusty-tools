@@ -132,6 +132,12 @@ fn a_store_that_never_returns_times_out_within_the_bound() {
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Gate::new();
     let release = Gate::new();
+    // #8236: every assertion below runs before the happy path's own
+    // `release.open()` — a panicking assertion would otherwise strand the
+    // parked reader in `Gate::wait` for its full 60 s. This guard opens
+    // `release` on any exit, panic included; `Gate::open` is idempotent, so
+    // the happy path's later explicit `release.open()` is harmless.
+    let _release_guard = ReleaseOnDrop(Arc::clone(&release));
     let store: Arc<dyn KeyStore> = Arc::new(ParkedUntilReleased {
         calls: Arc::clone(&calls),
         entered: Arc::clone(&entered),
@@ -554,6 +560,21 @@ impl Gate {
                 panic!("gate never opened within {bound:?}: {what}");
             }
         }
+    }
+}
+
+/// Opens a [`Gate`] on drop, so a panicking assertion still frees a parked
+/// reader instead of leaving it to run out its own wait bound.
+///
+/// Why: a test that parks a reader on a `Gate` and only opens it after every
+/// assertion passes strands that reader for its full wait bound if an
+/// assertion panics first (#8236). `Gate::open` is idempotent, so holding
+/// this guard alongside an explicit happy-path `release.open()` is harmless.
+struct ReleaseOnDrop(Arc<Gate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.open();
     }
 }
 
