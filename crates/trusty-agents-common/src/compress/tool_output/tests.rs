@@ -703,12 +703,29 @@ async fn real_rtk_pipe_round_trips_a_marker_payload() {
 #[tokio::test]
 async fn rtk_binary_returns_none_and_warns_on_non_zero_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // #8635: `compress_via_rtk_binary` maps BOTH "spawn failed" and "the
+    // shim ran and exited non-zero" to `None` (see the `spawn().ok()?` vs.
+    // the explicit post-exit `return None` in rtk.rs). Asserting only
+    // `out.is_none()` cannot tell those apart, so it passed even in a Linux
+    // ETXTBSY repro where the shim never spawned. The marker file, `touch`ed
+    // by the shim before it exits, is the only observable proof the shim's
+    // own exit path — not a spawn failure — produced the `None`.
+    let marker = dir.path().join("shim-ran.marker");
     let shim = write_rtk_shim(
         dir.path(),
-        "#!/bin/sh\ncat >/dev/null\necho 'rtk: No such file or directory (os error 2)' >&2\nexit 127\n",
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch '{}'\necho 'rtk: No such file or directory (os error 2)' >&2\nexit 127\n",
+            marker.display()
+        ),
     );
     let out = compress_via_rtk_binary(&shim, "git status", "payload\n").await;
     assert!(out.is_none(), "a non-zero rtk exit must fall back");
+    assert!(
+        marker.exists(),
+        "the shim must actually have run (and exited non-zero) to produce \
+         this None; a missing marker means None came from a spawn failure \
+         instead, which this test must not accept as proof of the non-zero-exit path"
+    );
 }
 
 // ── The resolver seam (#7325) ───────────────────────────────────────────
