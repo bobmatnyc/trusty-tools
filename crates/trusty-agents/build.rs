@@ -36,17 +36,30 @@ fn main() {
     // Re-run whenever HEAD moves so a new commit triggers a rebuild.
     println!("cargo:rerun-if-changed=.git/HEAD");
 
-    // Re-run whenever the built UI bundle changes so rust-embed re-inlines fresh
-    // assets. We watch `ui/dist/index.html` (the output) rather than `ui/src/`
-    // because cargo's `rerun-if-changed` only tracks the directory inode, not
-    // recursive file mutations — edits to `.svelte`/`.ts` files inside `ui/src/`
-    // wouldn't trigger a rebuild and stale assets would stay embedded. Watching
-    // the build output is reliable: every `pnpm build` regenerates `index.html`,
-    // and the `pnpm build` invocation below runs on every cargo build anyway,
-    // so cargo will pick up the resulting change on the subsequent build cycle.
-    println!("cargo:rerun-if-changed=ui/dist/index.html");
-    println!("cargo:rerun-if-changed=ui/index.html");
-    println!("cargo:rerun-if-changed=ui/package.json");
+    // Re-run when the UI source that `pnpm build` reads changes; cargo scans a
+    // watched directory such as `ui/src` recursively. `ui/dist/` is NOT watched:
+    // it is this script's own output, and cargo's staleness reference is
+    // `invoked.timestamp`, stamped BEFORE the script runs, so every `pnpm build`
+    // made the next build re-run this script and rebuild the crate. rust-embed
+    // reads `ui/dist/` itself. Only paths that exist are declared: a missing one
+    // counts as changed, and the published tarball ships no `ui/public`.
+    for rel in [
+        "ui/src",
+        "ui/public",
+        "ui/index.html",
+        "ui/package.json",
+        "ui/pnpm-lock.yaml",
+        "ui/pnpm-workspace.yaml",
+        "ui/vite.config.ts",
+        "ui/svelte.config.js",
+        "ui/tailwind.config.js",
+        "ui/postcss.config.js",
+        "ui/tsconfig.json",
+    ] {
+        if Path::new(rel).exists() {
+            println!("cargo:rerun-if-changed={rel}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
 
     // #8094: this script emits `rerun-if-changed`, which switches cargo off its
