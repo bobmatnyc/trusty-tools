@@ -836,7 +836,8 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// never lets `cargo install`'s own output touch the terminal directly, the
 /// same class of fix as `service_bootstrap::run_captured`). In BOTH cases,
 /// health-gates the CONCRETE just-installed path (#3554) via
-/// `trusty_common::update::verify_installed_binary_at_path` — never a
+/// `trusty_common::update::verify_installed_binary_at_path` (the prebuilt
+/// branch via `download::fresh_exec::probe_fresh_binary`, #6231) — never a
 /// name-based lookup a stale earlier-PATH/earlier-priority-directory binary
 /// could shadow; the path itself is resolved by the pure
 /// [`select_prebuilt_bin_path`] / [`cargo_fallback_bin_path`] helpers above.
@@ -878,7 +879,8 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             // path `download::try_install_prebuilt` reports having written —
             // never a name re-resolved afterward.
             let bin_path = select_prebuilt_bin_path(&paths, &m.binary, &install_dir);
-            let reported = trusty_common::update::verify_installed_binary_at_path(&bin_path)
+            // #6231: this process just wrote the file — retry an ETXTBSY exec.
+            let reported = crate::download::fresh_exec::probe_fresh_binary(&bin_path)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(

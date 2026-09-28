@@ -28,6 +28,8 @@
 // Tools released outside this workspace (tga, trusty-audit) — ruling 2026-09-28.
 pub(crate) mod external;
 pub mod fetch;
+// #6231: the `--version` probe of a just-written binary, retried on ETXTBSY.
+pub(crate) mod fresh_exec;
 pub mod glibc;
 // #5491: pinned-version, fail-closed install path for consumers that pin exact
 // versions — additive; `try_install_prebuilt` below keeps its latest+fallback
