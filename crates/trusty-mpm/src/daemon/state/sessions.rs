@@ -1134,16 +1134,26 @@ impl DaemonState {
     /// race a concurrent update from another hook event.
     /// What: takes the entry's write guard and runs `f`. Returns `false` when no
     /// such delegation exists. `f` must not touch the delegation store — it runs
-    /// under a shard lock.
-    /// Test: `daemon::services::delegation_tracker` suite.
+    /// under a shard lock. #8819: a builder whose record leaves the live states
+    /// here has its slot lease removed, after the shard lock is released.
+    /// Test: `daemon::services::delegation_tracker` suite,
+    /// `a_completed_builder_frees_its_slot_across_a_restart_8819`.
     pub fn mutate_delegation(&self, id: DelegationId, f: impl FnOnce(&mut Delegation)) -> bool {
-        match self.delegations.get_mut(&id.0) {
+        let ended = match self.delegations.get_mut(&id.0) {
             Some(mut entry) => {
+                let was_live = entry.value().status.is_live();
                 f(entry.value_mut());
-                true
+                let d = entry.value();
+                (was_live && !d.status.is_live())
+                    .then(|| (d.builder_slot_dir.clone(), d.tool_use_id.clone()))
             }
-            None => false,
+            None => return false,
+        };
+        // #8819: completion, a deny, a TaskStop — every terminal write lands here.
+        if let Some((Some(slot_dir), Some(holder))) = ended {
+            crate::core::builder_slot_pool::lease::clear_lease_of(&slot_dir, &holder);
         }
+        true
     }
 
     /// Move one delegation to a terminal status, stamping `ended_at` (#2864).

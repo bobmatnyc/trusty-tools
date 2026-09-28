@@ -521,10 +521,39 @@ impl DaemonState {
         record: C,
         release: R,
     ) -> BuilderSlotGrant {
+        let pool_root = pool.map(SlotPool::root);
+        self.claim_builder_slot_with_pool_root(
+            cap,
+            exclude_tool_use_id,
+            eligible,
+            pool,
+            pool_root,
+            record,
+            release,
+        )
+    }
+
+    /// [`Self::claim_builder_slot_with_pool`], counting the restored leases
+    /// under `pool_root` whether or not this dispatch has a pool (#8819).
+    ///
+    /// Why (#8819 critic): a dispatch from a checkout with no GitHub origin has
+    /// no pool, yet the machine-wide cap must still count every restored lease,
+    /// or a restarted daemon admits it past the cap.
+    /// Test: `a_claim_with_no_pool_counts_restored_leases_8819`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_builder_slot_with_pool_root<C: FnOnce(&Self), R: FnOnce(&Self)>(
+        &self,
+        cap: u32,
+        exclude_tool_use_id: Option<&str>,
+        eligible: bool,
+        pool: Option<&SlotPool>,
+        pool_root: Option<&Path>,
+        record: C,
+        release: R,
+    ) -> BuilderSlotGrant {
         let _claim = self.builder_claim_guard();
         // #8819: a restarted daemon also counts the leases it restored from disk.
-        let holders =
-            self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool.map(SlotPool::root));
+        let holders = self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool_root);
         let admitted = eligible && u32::try_from(holders.len()).unwrap_or(u32::MAX) < cap;
         let mut grant = BuilderSlotGrant {
             holders,

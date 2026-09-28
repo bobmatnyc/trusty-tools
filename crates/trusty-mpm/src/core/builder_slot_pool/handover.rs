@@ -32,6 +32,12 @@ use super::{
 // #8819: `lease` reads it to recover a pre-#8819 holder after a restart.
 pub(super) const SERVED_PREFIX: &str = "served: ";
 
+/// The marker line a post-#8819 handover writes beside its `served:` line.
+///
+/// Why (#8819 critic): its lease file is the authority on that holder, so a
+/// cleared lease reads as free rather than as a pre-#8819 handover.
+pub(super) const LEASED_LINE: &str = "lease: recorded beside the slot (#8819)";
+
 /// The slot subdirectory invalidated fingerprints are moved into (#8794).
 ///
 /// Why: one level of nesting (`<slot>/.trusty-invalidated/<run>/<entry>`) keeps
@@ -320,10 +326,13 @@ fn unit_package(name: &str) -> Option<&str> {
 fn rewrite_served(slot: &Path, body: &str, served: &str) -> Result<(), String> {
     let mut next: String = body
         .lines()
-        .filter(|line| !line.starts_with(SERVED_PREFIX))
+        .filter(|line| !line.starts_with(SERVED_PREFIX) && *line != LEASED_LINE)
         .map(|line| format!("{line}\n"))
         .collect();
     next.push_str(served);
+    next.push('\n');
+    // #8819 critic: this holder's lease file, not the marker, says if it holds.
+    next.push_str(LEASED_LINE);
     next.push('\n');
     let marker = slot.join(SEED_MARKER);
     let draft = slot.join(format!(

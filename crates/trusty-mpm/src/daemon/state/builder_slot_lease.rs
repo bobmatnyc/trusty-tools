@@ -119,13 +119,20 @@ impl DaemonState {
                     }
                 };
                 let record = pool.read_lease(index);
-                if !self.judge_record(&record).blocks() {
+                let verdict = self.judge_record(&record);
+                if !verdict.blocks() {
                     return None;
                 }
+                // #8819 critic: name the file, so an operator can find it.
+                tracing::info!(
+                    lease = %pool.lease_path(index).display(),
+                    "builder slot counted as a restored lease: {verdict:?}"
+                );
                 Some(match record {
                     LeaseRecord::Leased(lease) => holder(lease.session, lease.granted_at),
                     LeaseRecord::Served { served_at, .. } => holder(None, served_at),
-                    LeaseRecord::Absent | LeaseRecord::Unreadable(_) => holder(None, now),
+                    LeaseRecord::Unreadable { since, .. } => holder(None, since.unwrap_or(now)),
+                    LeaseRecord::Absent => holder(None, now),
                 })
             })
             .collect()

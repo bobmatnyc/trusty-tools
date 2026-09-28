@@ -134,7 +134,10 @@ fn unverifiable_lease_evidence_keeps_its_slot_after_a_restart_8819() {
             .expect("malformed lease");
     }
     fn legacy(pool: &SlotPool) {
-        pool.hand_over(0, "toolu_A")
+        // The marker a pre-#8819 handover left: a `served:` line and no lease.
+        let marker = pool.slot_path(0).join(SEED_MARKER);
+        let body = std::fs::read_to_string(&marker).expect("marker");
+        std::fs::write(&marker, format!("{body}served: toolu_A from /co\n"))
             .expect("a pre-#8819 handover to A");
     }
     type Plant = fn(&SlotPool);
@@ -210,4 +213,86 @@ fn a_restored_lease_counts_toward_the_cap_after_a_restart_8819() {
     );
     let agents: Vec<&str> = b.holders.iter().map(|h| h.agent.as_str()).collect();
     assert_eq!(agents, ["restored-lease"]);
+}
+
+/// The delegation record carrying `tool_use_id`.
+fn record_of(state: &DaemonState, tool_use_id: &str) -> crate::core::agent::Delegation {
+    state
+        .delegations
+        .iter()
+        .find(|e| e.value().tool_use_id.as_deref() == Some(tool_use_id))
+        .map(|e| e.value().clone())
+        .expect("a record for the dispatch")
+}
+
+/// #8819 critic item 2: A completes, then the daemon restarts; B is offered
+/// A's slot. Before, A's lease outlived its build and, with A's dispatching
+/// session still running, held the slot for the whole TTL after the restart.
+#[test]
+fn a_completed_builder_frees_its_slot_across_a_restart_8819() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let pool = seeded_pool(root.path());
+    let before = Arc::new(DaemonState::new());
+    assert_eq!(suggested_slot(&before, &pool, "toolu_A"), slot(&pool, 0));
+    let a = record_of(&before, "toolu_A");
+    assert!(before.terminate_delegation(a.id, crate::core::agent::DelegationStatus::Completed));
+    drop(before);
+
+    let after = Arc::new(DaemonState::new());
+    assert_eq!(
+        suggested_slot(&after, &pool, "toolu_B"),
+        slot(&pool, 0),
+        "a finished builder's slot is free after the restart"
+    );
+}
+
+/// #8819 critic item 3: an unreadable lease is bounded by its own mtime. Past
+/// the TTL it frees its slot; inside the TTL it keeps it.
+#[test]
+fn an_unreadable_lease_is_bounded_by_the_ttl_8819() {
+    for (age_secs, expected, why) in [
+        (2 * 60 * 60, 0, "older than the TTL frees its slot"),
+        (0, 1, "inside the TTL keeps its slot"),
+    ] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pool = seeded_pool(root.path());
+        let lease = lease_path(&pool, 0);
+        std::fs::write(&lease, "holder: toolu_A\ngranted_at: soon\n").expect("malformed");
+        let mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&lease)
+            .and_then(|file| file.set_modified(mtime))
+            .expect("set the lease's mtime");
+        let state = Arc::new(DaemonState::new());
+        assert_eq!(
+            suggested_slot(&state, &pool, "toolu_B"),
+            slot(&pool, expected),
+            "an unreadable lease {why}"
+        );
+    }
+}
+
+/// #8819 critic item 5: a lease that cannot be written hands out no slot and
+/// stamps no index. The pool's repo directory is read-only, so the lease
+/// draft cannot be created while the lease path itself is free.
+#[test]
+fn a_lease_that_cannot_be_written_grants_no_slot_8819() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("tempdir");
+    let pool = seeded_pool(root.path());
+    let parent = pool.slot_path(0).parent().expect("repo dir").to_path_buf();
+    let perms = |mode| std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode));
+    perms(0o555).expect("read-only repo dir");
+
+    let state = Arc::new(DaemonState::new());
+    let b = claim_via_route(&state, &pool, "toolu_B", 4);
+    perms(0o755).expect("restore the repo dir");
+
+    assert!(b.claimed, "the admission stands: {b:?}");
+    assert_eq!(b.slot_path, None, "no slot without a recorded lease");
+    let record = record_of(&state, "toolu_B");
+    assert_eq!(record.builder_slot, None, "no index was stamped");
+    assert_eq!(record.builder_slot_dir, None);
+    assert!(!lease_path(&pool, 0).exists() && !lease_path(&pool, 1).exists());
 }

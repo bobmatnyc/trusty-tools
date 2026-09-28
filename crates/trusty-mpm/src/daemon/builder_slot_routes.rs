@@ -290,13 +290,16 @@ pub async fn builder_slot_route(
         project_dir.as_deref(),
         capacity.ceiling,
     );
-    let outcome = builder_slot_op_with_pool(
+    // #8819 critic: the configured root, so a claim with no pool still counts
+    // every restored lease.
+    let outcome = builder_slot_op_with_pool_root(
         &state,
         &id,
         req,
         &capacity,
         resolved.pool.as_ref(),
         resolved.notice.as_deref(),
+        pool_root.as_deref(),
     )?;
     // #8261 critic round: the seed is the unbounded half of the pool and runs
     // AFTER the answer, never under the claim mutex the hook is waiting on.
@@ -610,6 +613,27 @@ pub fn builder_slot_op_with_pool(
     pool: Option<&SlotPool>,
     no_pool_notice: Option<&str>,
 ) -> Result<SlotClaimOutcome, DaemonError> {
+    let pool_root = pool.map(SlotPool::root);
+    builder_slot_op_with_pool_root(state, id, req, capacity, pool, no_pool_notice, pool_root)
+}
+
+/// [`builder_slot_op_with_pool`], counting the restored leases under the
+/// configured `pool_root` whether or not this dispatch has a pool (#8819).
+///
+/// # Errors
+///
+/// As [`builder_slot_op`].
+///
+/// Test: `a_claim_with_no_pool_counts_restored_leases_8819`.
+pub fn builder_slot_op_with_pool_root(
+    state: &Arc<DaemonState>,
+    id: &str,
+    req: BuilderSlotRequest,
+    capacity: &Capacity,
+    pool: Option<&SlotPool>,
+    no_pool_notice: Option<&str>,
+    pool_root: Option<&std::path::Path>,
+) -> Result<SlotClaimOutcome, DaemonError> {
     let session = uuid::Uuid::parse_str(id)
         .map(SessionId)
         .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
@@ -618,11 +642,12 @@ pub fn builder_slot_op_with_pool(
     let exclude = str_field(payload, "tool_use_id");
     let eligible = claims_a_builder_slot(payload);
 
-    let grant = state.claim_builder_slot_with_pool(
+    let grant = state.claim_builder_slot_with_pool_root(
         capacity.n_effective,
         exclude,
         eligible,
         pool,
+        pool_root,
         |s| {
             crate::daemon::services::delegation_tracker::observe(
                 s,
