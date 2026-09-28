@@ -20,11 +20,18 @@
 //! A variable bound from a credential carries it into every stage of the
 //! command (#8676, `credential_print_taint`). While one does, any inline code
 //! handed to an evaluator refuses, as it can read the environment with no `$`.
+//! #8677 (`credential_print_clis`): `security -i` refuses outright, a verbose
+//! `curl` given a credential routes its echo, four sibling CLIs print like
+//! `gcloud auth print-access-token`, and a redirect target chosen at run time
+//! refuses once a value reaches it. Review round 2: a relative target in an
+//! unknown directory, a `tee`/`dd` output operand chosen at run time, and a
+//! credential CLI subcommand chosen at run time refuse too.
 //!
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
 //! [`MAX_DEPTH`], an unlexable wrapper string, a descriptor chosen at run
-//! time, a panic — denies. A command naming none of [`TRIGGERS`] is never
+//! time, a panic — denies. A command naming none of [`TRIGGERS`], no
+//! interactive `security` and no sibling credential call (#8677) is never
 //! parsed at all.
 //!
 //! Documented residual classes (#8676 exit criterion): each can print a value
@@ -46,10 +53,19 @@
 //!    read in a later one (`exec N< <(…)`). The `coproc` form refuses outright
 //!    while any name is tainted (#8676 rounds 4-5); the general form stays
 //!    residual.
+//! 6. #8677: a credential named in no command text — an exported
+//!    `$GITHUB_TOKEN` under `curl -v`, a sibling CLI run by a `$`-named
+//!    program — and echo flags beyond `curl`'s (`wget -d`, `http -v`), or
+//!    set in a config file (`~/.curlrc`). A symlink planted on a plain-file
+//!    target (`ln -sf /dev/stdout /tmp/f; gcloud … > /tmp/f`), or one left
+//!    there by an earlier command: the guard reads a literal path as a file.
 //!
 //! Why a denylist and not an allowlist: see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
 
+// #8677: `security -i`, verbose `curl`, and the sibling secret-printing CLIs.
+#[path = "credential_print_clis.rs"]
+mod credential_print_clis;
 #[path = "credential_print_heredoc.rs"]
 mod credential_print_heredoc;
 #[path = "credential_print_programs.rs"]
@@ -68,6 +84,7 @@ mod credential_print_taint_sinks;
 use super::bash_tokens::tokenize;
 use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
+use credential_print_clis::{interactive_security, judge_cli_echoes, names_cli_trigger};
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
     basename, code_operands, consumes_stdin, credential_fds, enables_xtrace, evaluator_name,
@@ -75,7 +92,9 @@ use credential_print_programs::{
 };
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
-use credential_print_redirect::{apply_redirections, terminal_name_sink};
+use credential_print_redirect::{
+    apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
+};
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
@@ -123,6 +142,9 @@ enum Sink {
     Discarded,
     /// The next pipeline stage's stdin.
     Pipe,
+    /// #8677: a target the shell picks at run time (`> "$OUT"`); a value
+    /// routed here refuses as unreadable.
+    Unknown,
 }
 
 /// Why a command was refused.
@@ -169,6 +191,9 @@ struct Lifted {
     names: BTreeSet<String>,
     /// #8676: work units spent so far, shared by every clone in one scan.
     spent: Rc<Cell<usize>>,
+    /// #8677 round 2: the command changes directory, so no relative target's
+    /// directory is known.
+    changes_dir: bool,
 }
 
 /// Refuse a Bash command that prints a credential value: `Some(reason)` denies.
@@ -192,7 +217,13 @@ struct Lifted {
 /// `credential_print_tests::allows_the_round_five_neighbours`,
 /// `credential_print_tests::scan_work_is_bounded`,
 /// `credential_print_tests::deny_reason_never_echoes_the_command`,
-/// `credential_print_tests::no_prefix_of_a_command_panics`.
+/// `credential_print_tests::no_prefix_of_a_command_panics`,
+/// `credential_print_tests::denies_security_reading_commands_on_stdin_8677`,
+/// `credential_print_tests::refuses_an_unclassifiable_interactive_security_8677`,
+/// `credential_print_tests::denies_a_verbose_curl_carrying_a_credential_8677`,
+/// `credential_print_tests::denies_a_credential_redirected_to_an_unread_target_8677`,
+/// `credential_print_tests::denies_the_sibling_credential_clis_8677`,
+/// `credential_print_tests::allows_the_8677_neighbours`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
         return None;
@@ -227,16 +258,20 @@ const HOW_TO: &str = "Check existence by exit status alone \
      (`security find-generic-password -s <service> >/dev/null 2>&1`, no `-w`/`-g`), and \
      consume a value inside the command that needs it \
      (`curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" …`, or a pipe \
-     to `--password-stdin`), never echoing it and never behind `set -x`.";
+     to `--password-stdin`), never echoing it and never behind `set -x`. To keep \
+     a value in a file, write it to a literal `~/…` path under `umask 077` \
+     (`(umask 077; gcloud auth print-access-token > ~/.gcloud-token)`); a variable \
+     target such as `$HOME/…` refuses.";
 
-/// Whether `text`, quotes removed and lowercased, names a [`TRIGGERS`] entry.
+/// Whether `text`, quotes removed and lowercased, names a [`TRIGGERS`] entry,
+/// an interactive `security`, or a sibling credential call (#8677).
 fn has_trigger(text: &str) -> bool {
     let flat: String = text
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect::<String>()
         .to_ascii_lowercase();
-    TRIGGERS.iter().any(|t| flat.contains(t))
+    TRIGGERS.iter().any(|t| flat.contains(t)) || names_cli_trigger(&flat)
 }
 
 /// Whether `text` handed to an evaluator could run a credential call: it names
@@ -290,6 +325,7 @@ fn scan_pass(
     lifted: &mut Lifted,
 ) -> Result<(bool, Vec<String>), Refusal> {
     let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
+    lifted.changes_dir |= changes_directory(&text);
     let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);
     let cost = 1 + text.len() / BYTES_PER_UNIT;
@@ -378,7 +414,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     let routed = apply_redirections(&tokens, ctx.out, ctx.err, lifted)?;
     // #8676 round 5: `wc -c < "$T"` — a missing file's "No such file" error
     // names the carrying target on stderr.
-    if routed.read_target_carries {
+    if routed.target_carries {
         route(routed.err, &mut emitted)?;
     }
     let argv = &routed.argv;
@@ -452,6 +488,12 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if program_word.starts_with('$') || program_word.starts_with(MARK) || dynamic_before_trigger {
         return Err(Refusal::Unreadable("a program name chosen at run time"));
     }
+    // #8677: `security -i` runs whatever commands its stdin carries.
+    if interactive_security(argv, start) {
+        return Err(Refusal::Unreadable(
+            "the commands `security -i` reads from its input",
+        ));
+    }
     // #8756: `wrapped_command` now unwraps `eval`; this rule keeps reading it
     // as an evaluator, whose operands are program text.
     let wrapped = if program == "eval" {
@@ -496,10 +538,13 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     match wrapped {
         WrappedCommand::Unlexable => return Err(Refusal::Unreadable("its wrapped command")),
         WrappedCommand::Inner(inner) => {
-            let inner_err = if err == Sink::Terminal {
-                Sink::Terminal
-            } else {
-                Sink::Discarded
+            // #8677: stderr piped or captured (`sh -c '… -g' 2>&1 | cat`) is
+            // followed as a capture, then routed with stdout below.
+            let err_carries = matches!(err, Sink::Pipe | Sink::Captured);
+            let inner_err = match err {
+                Sink::Terminal | Sink::Unknown => err,
+                Sink::Pipe | Sink::Captured => Sink::Captured,
+                Sink::Discarded => Sink::Discarded,
             };
             let prints = if program == "xargs" && stdin_carries {
                 // #8596 finding 10: xargs hands stdin to its program as
@@ -519,6 +564,9 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
             };
             if prints {
                 route(out, &mut emitted)?;
+                if err_carries {
+                    route(err, &mut emitted)?;
+                }
             }
             return Ok(emitted);
         }
@@ -536,9 +584,21 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         fd1 = true;
         // #8596 round 3: a file operand naming a descriptor or the terminal
         // (`tee /dev/stderr`, `dd of=/dev/tty`, `tee >(cat)`).
-        for a in args {
+        for (n, a) in args.iter().enumerate() {
             let path = a.strip_prefix("of=").unwrap_or(a);
-            if let Some(sink) = terminal_name_sink(path, &routed.fds, lifted, ctx.out) {
+            // #8677 round 2: `tee`'s and `dd`'s own output files are read as
+            // redirect targets, so `tee "$OUT"` refuses.
+            let writes = match program.as_str() {
+                "tee" => !a.starts_with('-') || args[..n].iter().any(|b| b == "--"),
+                "dd" => a.starts_with("of="),
+                _ => false,
+            };
+            let sink = if writes {
+                Some(redirect_target_sink(path, &routed.fds, lifted, ctx.out))
+            } else {
+                terminal_name_sink(path, &routed.fds, lifted, ctx.out)
+            };
+            if let Some(sink) = sink {
                 route(sink, &mut emitted)?;
             }
         }
@@ -549,6 +609,8 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if fd2 {
         route(err, &mut emitted)?;
     }
+    // #8677: sibling credential CLIs and a verbose `curl`.
+    judge_cli_echoes(argv, &routed, lifted, ctx.out, &mut emitted)?;
     Ok(emitted)
 }
 
@@ -592,6 +654,8 @@ fn route(sink: Sink, emitted: &mut Emitted) -> Result<(), Refusal> {
         Sink::Captured => emitted.captured = true,
         Sink::Pipe => emitted.piped = true,
         Sink::Discarded => {}
+        // #8677: the target may be the terminal.
+        Sink::Unknown => return Err(Refusal::Unreadable("an output target chosen at run time")),
     }
     Ok(())
 }

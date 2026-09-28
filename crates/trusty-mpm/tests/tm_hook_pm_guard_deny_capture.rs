@@ -126,6 +126,47 @@ fn a_process_manager_env_dump_is_denied_and_recorded() {
     }
 }
 
+/// 🔴 REGRESSION (#8677): each credential-print shape #8677 closes is denied
+/// by the real hook and recorded through the scrubbed store (#8722).
+#[test]
+fn a_credential_print_bypass_from_8677_is_denied_and_recorded() {
+    for (command, fragment) in [
+        (
+            "echo 'find-generic-password -s s -w' | security -i",
+            "security -i",
+        ),
+        (
+            "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -v",
+            "curl -H",
+        ),
+        // The scrubber replaces the path, so the record keeps the call.
+        (
+            "security find-generic-password -s fake-svc -w > /dev/./tty",
+            "security find-generic-password -s fake-svc -w",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir(&data).expect("mkdir data");
+
+        let (stdout, _) = run_guard(&data, tmp.path(), command);
+        assert!(
+            stdout.contains(r#""permissionDecision":"deny""#) && stdout.contains("#8596"),
+            "`{command}` must deny: {stdout}"
+        );
+
+        let errors = aggregate_errors_from_paths(&store_paths_under(&data), 100);
+        let deny = errors
+            .iter()
+            .find(|e| e.record.crate_target == "trusty_mpm::pm_guard")
+            .unwrap_or_else(|| panic!("no pm-guard record for `{command}` among {errors:#?}"));
+        let fields = &deny.record.fields;
+        for part in ["check=secret-file-read", fragment, "session=s-8722"] {
+            assert!(fields.contains(part), "{part} missing from {fields}");
+        }
+    }
+}
+
 /// 🔴 REGRESSION (#8261 x #8722): a heavy build hidden in an unterminated
 /// `$(…)` — the one shape the build-lease rule refuses — is denied and
 /// recorded. #8730's unplaceable-write guard runs first and catches it today;
