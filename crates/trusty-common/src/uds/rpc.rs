@@ -212,11 +212,10 @@ pub enum UdsRpcError {
     /// Why it is not [`UdsRpcError::Write`]: `write_all` + `flush` failing
     /// leaves the peer without a newline-terminated frame, so it never
     /// dispatches and a redial repeats nothing. A `shutdown` failure is the
-    /// opposite — the frame is already on the wire. On macOS `soshutdown`
-    /// answers ENOTCONN once the peer has closed, which is exactly what a
-    /// server that framed on `read_until(b'\n')`, replied and dropped looks
-    /// like. Retrying that would deliver a second copy of a request the daemon
-    /// had already executed, so this variant is never transient.
+    /// opposite — the frame is already on the wire, and retrying would deliver
+    /// a second copy of a request the daemon may have executed, so this
+    /// variant is never transient. `ENOTCONN` never lands here (#8464): it
+    /// means the peer already closed, and the read that follows decides.
     ///
     /// The request's fate is unknown: it may have been dispatched, and the
     /// caller must not read this as "nothing was sent".
@@ -556,10 +555,9 @@ where
     // #8267: the send and the half-close are two error variants, not one.
     // `write_all` + `flush` failing leaves the peer without a newline-terminated
     // frame, so it never dispatches and a redial is safe. `shutdown` failing is
-    // the opposite: the frame is already on the wire, and on macOS ENOTCONN here
-    // means the peer closed AFTER reading it — the server frames on
-    // `read_until(b'\n')` and replies without waiting for our half-close. Folding
-    // both into `Write` made a retry re-send a request the daemon had executed.
+    // the opposite: the frame is already on the wire. Folding both into `Write`
+    // made a retry re-send a request the daemon had executed. See `half_close`
+    // for the ENOTCONN case (#8464).
     let send = async {
         stream.write_all(&frame).await?;
         stream.flush().await
@@ -569,17 +567,30 @@ where
         source,
     })?;
 
-    // Half-close: the peer's `read_to_end`/`read_until` sees EOF and knows the
-    // request is complete. The read half stays open for the response.
-    stream
-        .shutdown()
-        .await
-        .map_err(|source| UdsRpcError::HalfClose {
+    half_close(&mut stream, path).await?;
+    Ok(stream)
+}
+
+/// Shut down the write half of a stream whose request frame is already written.
+///
+/// Why: the peer's `read_to_end`/`read_until` sees EOF and knows the request is
+/// complete. The read half stays open for the response.
+/// What: `shutdown()`. `ENOTCONN` is success: the peer has already closed, so
+/// there is no write side left to shut, and the read that follows decides the
+/// outcome — the buffered reply, or [`UdsRpcError::NoResponse`]. Any other
+/// failure is [`UdsRpcError::HalfClose`].
+/// Test: `a_half_close_after_the_peer_replied_and_closed_still_reads_the_reply`.
+async fn half_close(stream: &mut UnixStream, path: &Path) -> Result<(), UdsRpcError> {
+    match stream.shutdown().await {
+        Ok(()) => Ok(()),
+        // #8464: macOS answers ENOTCONN once a peer that frames on
+        // `read_until(b'\n')` has replied and closed before this call runs.
+        Err(source) if source.kind() == std::io::ErrorKind::NotConnected => Ok(()),
+        Err(source) => Err(UdsRpcError::HalfClose {
             path: path.to_path_buf(),
             source,
-        })?;
-
-    Ok(stream)
+        }),
+    }
 }
 
 /// The un-timed body of [`send_framed_request_capped`], split out so the
@@ -810,6 +821,47 @@ mod tests {
             matches!(err, UdsRpcError::NoResponse { .. }),
             "expected NoResponse, got {err:?}"
         );
+    }
+
+    /// #8464: the interleaving behind the `memory_verbs_socket` flake, forced.
+    /// A server that frames on `read_until(b'\n')` replies and closes before
+    /// the client reaches its half-close; the reply is already buffered, so
+    /// the exchange must still succeed. On macOS `shutdown` answers ENOTCONN
+    /// here, which the client used to report as a failed exchange.
+    #[tokio::test]
+    async fn a_half_close_after_the_peer_replied_and_closed_still_reads_the_reply() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("fast.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind stub socket");
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.expect("accept");
+            let mut reader = BufReader::new(conn);
+            let mut frame = Vec::new();
+            reader
+                .read_until(b'\n', &mut frame)
+                .await
+                .expect("read the request frame");
+            let mut conn = reader.into_inner();
+            conn.write_all(b"{\"echoed\":8}\n").await.expect("reply");
+            // `conn` drops here: closed without waiting for the half-close.
+        });
+
+        let mut stream = connect_hardened(&sock).await.expect("dial");
+        let frame = encode_frame(&Ping {
+            method: "ping",
+            n: 8,
+        })
+        .expect("encode");
+        stream.write_all(&frame).await.expect("write the request");
+        server.await.expect("the server replied and closed");
+
+        half_close(&mut stream, &sock)
+            .await
+            .expect("a peer that already answered and closed is not a failed half-close");
+        let got: Pong = read_one_frame(stream, &sock, MAX_FRAME_BYTES)
+            .await
+            .expect("the buffered reply is still readable");
+        assert_eq!(got, Pong { echoed: 8 });
     }
 
     #[tokio::test]
