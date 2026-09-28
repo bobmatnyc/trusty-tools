@@ -233,10 +233,29 @@ impl VectorStore for UnreadableStore {
 /// Test: this test.
 #[tokio::test]
 async fn an_unreadable_store_fails_a_pending_stage_closed() {
+    let (handle, total) = handle_over_unreadable_store("vector-gap-8863-unreadable").await;
+    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    assert_fails_closed_on_unreadable_store(&handle).await;
+}
+
+/// Why (#8863 review): a `ready` stage over a store whose size read errors
+/// cannot be confirmed ready. It used to hit `semantic_vector_gap`'s
+/// `vector_count?` early return and stay `ready` with the fault hidden; it must
+/// fail closed with the same reason the `pending` case gives.
+/// Test: this test.
+#[tokio::test]
+async fn an_unreadable_store_fails_a_ready_stage_closed() {
+    let (handle, _) = handle_over_unreadable_store("vector-gap-8863-unreadable-ready").await;
+    handle.stages.write().await.semantic.status = StageStatus::Ready;
+    assert_fails_closed_on_unreadable_store(&handle).await;
+}
+
+/// A handle whose corpus holds every chunk of [`SOURCE`] over an
+/// [`UnreadableStore`], with an embedder wired.
+async fn handle_over_unreadable_store(id: &str) -> (Arc<IndexHandle>, usize) {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
     let store: Arc<dyn VectorStore> = Arc::new(UnreadableStore);
-    let indexer = CodeIndexer::new("vector-gap-8863-unreadable", "/tmp/vector-gap-8863")
-        .with_components(embedder, store);
+    let indexer = CodeIndexer::new(id, "/tmp/vector-gap-8863").with_components(embedder, store);
     let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
     let total = chunks.len();
     indexer
@@ -254,21 +273,25 @@ async fn an_unreadable_store_fails_a_pending_stage_closed() {
         .await
         .expect("commit");
     let handle = Arc::new(IndexHandle::bare(
-        IndexId::new("vector-gap-8863-unreadable"),
+        IndexId::new(id),
         Arc::new(tokio::sync::RwLock::new(indexer)),
         std::path::PathBuf::from("/tmp/vector-gap-8863"),
     ));
-    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    (handle, total)
+}
 
+/// The reconcile queues nothing over an unreadable store and leaves the stage
+/// `Failed`, naming the unreadable size as the reason.
+async fn assert_fails_closed_on_unreadable_store(handle: &Arc<IndexHandle>) {
     assert!(
-        !reconcile_semantic_vector_gap(&handle).await,
+        !reconcile_semantic_vector_gap(handle).await,
         "nothing can be queued over a store that cannot be read"
     );
     let semantic = handle.stages.read().await.semantic.clone();
     assert_eq!(
         semantic.status,
         StageStatus::Failed,
-        "an unschedulable stage must be terminal, not pending: {semantic:?}"
+        "a stage over an unreadable store must fail closed: {semantic:?}"
     );
     assert!(
         semantic

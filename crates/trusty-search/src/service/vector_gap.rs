@@ -65,12 +65,13 @@ pub fn semantic_vector_gap(
 /// overlaps a reindex or a migration. That pass embeds only the chunks the store
 /// lacks and settles the stage `Ready` or `Failed`. A gap that nothing can close
 /// is a terminal `Failed` naming the reason, never a `Pending` nothing will
-/// start (#8863): no embedder wired, or a `Pending` stage over a store whose
-/// size cannot be read. Returns `true` only when a pass was queued.
+/// start (#8863): no embedder wired, or a `Pending` or `Ready` stage over a
+/// store whose size cannot be read. Returns `true` only when a pass was queued.
 /// Test: `a_gap_demotes_the_stage_and_queues_a_backfill`,
 /// `no_gap_leaves_a_ready_stage_alone`,
 /// `a_pending_stage_left_by_a_discarded_snapshot_is_backfilled`,
 /// `an_unreadable_store_fails_a_pending_stage_closed`,
+/// `an_unreadable_store_fails_a_ready_stage_closed`,
 /// `a_gap_with_no_embedder_fails_the_stage_with_a_reason`,
 /// `m005_vector_gap_is_not_ready_and_is_backfilled`,
 /// `m005_vector_gap_backfill_failure_is_not_reported_ready`.
@@ -96,8 +97,10 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
         let mut stages = handle.stages.write().await;
         let status = stages.semantic.status;
         // #8863: a wired store whose size cannot be read cannot be reconciled.
-        // Fail closed rather than leave owed work at a `Pending` nothing starts.
-        if has_store && vectors.is_none() && status == StageStatus::Pending && chunk_count > 0 {
+        // Fail closed rather than leave owed work at a `Pending` nothing starts,
+        // or report `Ready` over a store whose coverage is unknown.
+        let owed = matches!(status, StageStatus::Ready | StageStatus::Pending);
+        if has_store && vectors.is_none() && owed && chunk_count > 0 {
             let reason = format!(
                 "semantic embed was not scheduled: the vector store's size could not be read, \
                  so the {chunk_count} corpus chunks cannot be reconciled against it (#8863)"
