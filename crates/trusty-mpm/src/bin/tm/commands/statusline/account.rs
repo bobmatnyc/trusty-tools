@@ -24,9 +24,12 @@
 //! `account_segment_absent_when_file_missing`,
 //! `account_segment_absent_when_json_is_malformed`,
 //! `account_segment_absent_when_email_is_blank`,
+//! `bounded_probe_omits_segment_when_read_outruns_budget`,
 //! `render_claude_account_segment_*`.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Marker prefixed to the account email in the rendered segment.
 ///
@@ -138,28 +141,48 @@ fn render_claude_account_segment(email: Option<&str>) -> Option<String> {
     Some(format!("{CLAUDE_MARKER}{email}"))
 }
 
-/// Probe the Claude Code account at `path`, fail-soft, ≤100 ms.
+/// How long the live statusline waits for the account read (#6304).
+pub(crate) const ACCOUNT_PROBE_BUDGET: Duration = Duration::from_millis(100);
+
+/// Probe the Claude Code account at `path`, fail-soft, within `budget`.
 ///
 /// Why (#6304): the render path Claude Code calls on every cycle must never
 /// block, and `.claude.json` can be a megabyte on a cold page cache. The
 /// bounded-thread pattern here matches the sibling `gh` and git/tmux probes:
 /// a read that outruns its budget costs the segment, never the statusline.
-/// What: spawns a detached thread that reads `path` via
-/// [`account_segment_from_path`], waits ≤100 ms, and returns `None` on timeout,
-/// on any read failure, or when `path` is `None` (no resolvable config).
-/// Test: `render_statusline_shows_claude_account_when_config_is_present` drives
-/// it through the renderer with an injected path; the read and render it wraps
-/// are unit-tested directly.
-pub(crate) fn claude_account_segment_probe(path: Option<&Path>) -> Option<String> {
-    use std::sync::mpsc;
-    use std::time::Duration;
-
+/// What: runs [`account_segment_from_path`] under [`bounded_probe`]; `None`
+/// when `path` is `None` (no resolvable config). The live renderer passes
+/// [`ACCOUNT_PROBE_BUDGET`].
+/// Test: `render_statusline_shows_claude_account_when_config_is_present`
+/// (read reaches the line), `bounded_probe_omits_segment_when_read_outruns_budget`
+/// (timeout fallback).
+pub(crate) fn claude_account_segment_probe(
+    path: Option<&Path>,
+    budget: Duration,
+) -> Option<String> {
     let path = path?.to_path_buf();
+    // #8867: budget and reader are injectable so tests never race the clock.
+    bounded_probe(budget, move || account_segment_from_path(&path))
+}
+
+/// Run `read` on a detached thread and wait at most `budget` for its result.
+///
+/// Why (#8867): taking the reader and the budget as parameters lets a test
+/// drive the timeout fallback with a reader it holds open, instead of racing
+/// a real file read against a 100 ms wall clock under suite load.
+/// What: returns the reader's result if it arrives within `budget`, else
+/// `None`; the thread is left to finish on its own. A `budget` too large to
+/// add to `Instant::now()` waits for the reader (std `recv_timeout` behaviour).
+/// Test: `bounded_probe_omits_segment_when_read_outruns_budget`.
+fn bounded_probe<F>(budget: Duration, read: F) -> Option<String>
+where
+    F: FnOnce() -> Option<String> + Send + 'static,
+{
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(account_segment_from_path(&path));
+        let _ = tx.send(read());
     });
-    rx.recv_timeout(Duration::from_millis(100)).ok().flatten()
+    rx.recv_timeout(budget).ok().flatten()
 }
 
 #[cfg(test)]
@@ -236,6 +259,30 @@ mod tests {
 
         let f = temp_json(r#"{"oauthAccount": {"organizationName": "Acme"}}"#);
         assert_eq!(account_segment_from_path(f.path()), None);
+    }
+
+    /// Why (#8867): a read that outruns its budget must cost the segment, never
+    /// block the statusline. The reader is held open by the test until after
+    /// the probe returns, so the timeout always wins — no wall-clock race in
+    /// the assertion. The probe runs on its own thread so a probe that ignores
+    /// its budget fails this test at the hang guard instead of hanging it.
+    /// Test: itself.
+    #[test]
+    fn bounded_probe_omits_segment_when_read_outruns_budget() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let got = bounded_probe(Duration::from_millis(1), move || {
+                let _ = release_rx.recv();
+                Some("\u{273b}late@example.com".to_string())
+            });
+            let _ = done_tx.send(got);
+        });
+        let got = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("probe must return when its budget lapses, not wait for the reader");
+        assert_eq!(got, None, "a timed-out read must omit the segment");
+        drop(release_tx);
     }
 
     /// Why: the marker distinguishes this segment from the neighbouring
