@@ -215,7 +215,8 @@ pub enum UdsRpcError {
     /// opposite — the frame is already on the wire, and retrying would deliver
     /// a second copy of a request the daemon may have executed, so this
     /// variant is never transient. `ENOTCONN` never lands here (#8464): it
-    /// means the peer already closed, and the read that follows decides.
+    /// means the peer already closed, and the read that follows (if the caller
+    /// reads at all) decides.
     ///
     /// The request's fate is unknown: it may have been dispatched, and the
     /// caller must not read this as "nothing was sent".
@@ -421,8 +422,8 @@ fn tokio_sleep(delay: Duration) -> tokio::time::Sleep {
 ///
 /// # Errors
 ///
-/// [`UdsRpcError::Dial`], [`UdsRpcError::Encode`], [`UdsRpcError::Write`], or
-/// [`UdsRpcError::Timeout`]. `Ok(())` means the bytes reached the kernel, not
+/// [`UdsRpcError::Dial`], [`UdsRpcError::Encode`], [`UdsRpcError::Write`],
+/// [`UdsRpcError::HalfClose`], or [`UdsRpcError::Timeout`]. `Ok(())` means the bytes reached the kernel, not
 /// that the peer acted on them — that is what one-way means, and a caller that
 /// needs an acknowledgement wants [`send_framed_request`] instead.
 ///
@@ -578,8 +579,11 @@ where
 /// What: `shutdown()`. `ENOTCONN` is success: the peer has already closed, so
 /// there is no write side left to shut, and the read that follows decides the
 /// outcome — the buffered reply, or [`UdsRpcError::NoResponse`]. Any other
-/// failure is [`UdsRpcError::HalfClose`].
-/// Test: `a_half_close_after_the_peer_replied_and_closed_still_reads_the_reply`.
+/// failure is [`UdsRpcError::HalfClose`]. [`send_framed_notification`] never
+/// reads, so there a peer that closed after the write yields `Ok(())`, which
+/// matches its "bytes reached the kernel" contract.
+/// Test: `a_half_close_after_the_peer_replied_and_closed_still_reads_the_reply`,
+/// `a_peer_that_closed_without_reading_the_request_reports_no_response`.
 async fn half_close(stream: &mut UnixStream, path: &Path) -> Result<(), UdsRpcError> {
     match stream.shutdown().await {
         Ok(()) => Ok(()),
@@ -862,6 +866,46 @@ mod tests {
             .await
             .expect("the buffered reply is still readable");
         assert_eq!(got, Pong { echoed: 8 });
+    }
+
+    /// #8464: the fail-open check on the swallowed ENOTCONN arm. A peer that
+    /// closes without reading the request (or replying) must still surface as
+    /// `NoResponse`: macOS reads EOF, Linux reads ECONNRESET, and both reach
+    /// the same variant. `half_close` returning Ok here must never become an
+    /// acknowledgement.
+    #[tokio::test]
+    async fn a_peer_that_closed_without_reading_the_request_reports_no_response() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("rude.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind stub socket");
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.expect("accept");
+            written_rx.await.expect("the client wrote the request");
+            // `conn` drops here with the request frame still unread.
+            drop(conn);
+        });
+
+        let mut stream = connect_hardened(&sock).await.expect("dial");
+        let frame = encode_frame(&Ping {
+            method: "ping",
+            n: 9,
+        })
+        .expect("encode");
+        stream.write_all(&frame).await.expect("write the request");
+        written_tx.send(()).expect("the server is waiting");
+        server.await.expect("the server closed without reading");
+
+        half_close(&mut stream, &sock)
+            .await
+            .expect("a peer that already closed is not a failed half-close");
+        let err = read_one_frame::<_, Pong>(stream, &sock, MAX_FRAME_BYTES)
+            .await
+            .expect_err("a peer that never replied has not acknowledged anything");
+        assert!(
+            matches!(err, UdsRpcError::NoResponse { .. }),
+            "expected NoResponse, got {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -397,6 +397,7 @@ mod tests {
     #[test]
     fn a_failed_half_close_is_never_retried() {
         for kind in [
+            // #8464: `half_close` no longer produces this; the case covers the classifier only.
             ErrorKind::NotConnected,
             ErrorKind::BrokenPipe,
             ErrorKind::ConnectionReset,
