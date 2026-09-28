@@ -20,17 +20,24 @@ use crate::service::reindex::deferred_embed_queue_depth;
 const DIM: usize = 8;
 const SOURCE: &str = "pub fn alpha() -> u32 {\n    1\n}\n\npub fn beta() -> u32 {\n    2\n}\n";
 
-/// Why (#8726): only a `Ready` stage over a wired, short store is a gap.
+/// Why (#8726, #8863): a `Ready` or `Pending` stage over a wired, short store
+/// is a gap; a stage with a pass in flight or a terminal verdict is not.
 /// Test: this test.
 #[test]
-fn gap_is_reported_only_for_a_ready_stage_short_of_vectors() {
+fn gap_is_reported_for_a_ready_or_pending_stage_short_of_vectors() {
     use StageStatus::*;
-    assert_eq!(semantic_vector_gap(Ready, 12814, Some(11979)), Some(835));
-    assert_eq!(semantic_vector_gap(Ready, 10, Some(10)), None);
-    assert_eq!(semantic_vector_gap(Ready, 10, Some(12)), None, "orphans");
-    assert_eq!(semantic_vector_gap(Ready, 10, None), None, "no store");
-    for owed in [Pending, InProgress, Failed, Skipped] {
-        assert_eq!(semantic_vector_gap(owed, 10, Some(3)), None, "{owed:?}");
+    for owed in [Ready, Pending] {
+        assert_eq!(semantic_vector_gap(owed, 12814, Some(11979)), Some(835));
+        assert_eq!(semantic_vector_gap(owed, 10, Some(10)), None);
+        assert_eq!(semantic_vector_gap(owed, 10, Some(12)), None, "orphans");
+        assert_eq!(semantic_vector_gap(owed, 10, None), None, "no store");
+    }
+    for settled in [InProgress, Failed, Skipped] {
+        assert_eq!(
+            semantic_vector_gap(settled, 10, Some(3)),
+            None,
+            "{settled:?}"
+        );
     }
 }
 
@@ -129,5 +136,220 @@ async fn no_gap_leaves_a_ready_stage_alone() {
     assert_eq!(
         handle.stages.read().await.semantic.status,
         StageStatus::Ready
+    );
+}
+
+/// The stages lazy restore derives when it discards a torn HNSW snapshot over
+/// a full corpus: lexical `Ready`, semantic `Pending` (#8863).
+fn stages_after_a_discarded_snapshot(chunk_count: usize) -> crate::core::registry::IndexStages {
+    crate::service::warm_boot::derive_warm_boot_stages(crate::service::warm_boot::WarmBootInputs {
+        chunk_count,
+        hnsw_snapshot_ready: false,
+        graph_node_count: 0,
+        lexical_only: false,
+        skip_kg: false,
+        skip_vector: false,
+        corpus_open_failure: None,
+    })
+}
+
+/// Why (#8863): lazy restore discarded a torn snapshot, derived `pending` over
+/// 8223 chunks and an empty store, and nothing queued the embed — the stage sat
+/// at `pending` with 0 vectors through the watcher's rescan walk until a manual
+/// reindex. The restore's reconcile must schedule the backfill and drive it to
+/// `Ready` with vectors == chunks.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_pending_stage_left_by_a_discarded_snapshot_is_backfilled() {
+    let (handle, total) = handle_with_vectors("vector-gap-8863-pending", 0).await;
+    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    assert_eq!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Pending,
+        "sanity: restore derives pending when the snapshot was discarded"
+    );
+    assert_eq!(handle.indexer.read().await.vector_count().await, Some(0));
+
+    assert!(
+        reconcile_semantic_vector_gap(&handle).await,
+        "a pending stage over {total} chunks and 0 vectors must get a backfill queued"
+    );
+    assert_ne!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Pending,
+        "a queued pass must not read pending"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while handle.stages.read().await.semantic.status != StageStatus::Ready {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the backfill never settled the stage: {:?}",
+            handle.stages.read().await.semantic
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        handle.indexer.read().await.vector_count().await,
+        Some(total),
+        "ready must mean every chunk has a vector"
+    );
+    while deferred_embed_queue_depth() > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queue never drained"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A store whose size read always fails, as a closed store's does.
+struct UnreadableStore;
+
+#[async_trait::async_trait]
+impl VectorStore for UnreadableStore {
+    async fn upsert(&self, _id: &str, _embedding: Vec<f32>) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn search(
+        &self,
+        _query: &[f32],
+        _top_k: usize,
+    ) -> anyhow::Result<Vec<crate::core::store::VectorHit>> {
+        Ok(Vec::new())
+    }
+    async fn remove(&self, _id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn len(&self) -> anyhow::Result<usize> {
+        anyhow::bail!("store is closed")
+    }
+}
+
+/// Why (#8863): when the reconcile cannot decide — the store's size read
+/// errors — a `pending` stage must fail closed with the reason on the stage,
+/// not stay `pending` with nothing scheduled.
+/// Test: this test.
+#[tokio::test]
+async fn an_unreadable_store_fails_a_pending_stage_closed() {
+    let (handle, total) = handle_over_unreadable_store("vector-gap-8863-unreadable").await;
+    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    assert_fails_closed_on_unreadable_store(&handle).await;
+}
+
+/// Why (#8863 review): a `ready` stage over a store whose size read errors
+/// cannot be confirmed ready. It used to hit `semantic_vector_gap`'s
+/// `vector_count?` early return and stay `ready` with the fault hidden; it must
+/// fail closed with the same reason the `pending` case gives.
+/// Test: this test.
+#[tokio::test]
+async fn an_unreadable_store_fails_a_ready_stage_closed() {
+    let (handle, _) = handle_over_unreadable_store("vector-gap-8863-unreadable-ready").await;
+    handle.stages.write().await.semantic.status = StageStatus::Ready;
+    assert_fails_closed_on_unreadable_store(&handle).await;
+}
+
+/// A handle whose corpus holds every chunk of [`SOURCE`] over an
+/// [`UnreadableStore`], with an embedder wired.
+async fn handle_over_unreadable_store(id: &str) -> (Arc<IndexHandle>, usize) {
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UnreadableStore);
+    let indexer = CodeIndexer::new(id, "/tmp/vector-gap-8863").with_components(embedder, store);
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    let total = chunks.len();
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        std::path::PathBuf::from("/tmp/vector-gap-8863"),
+    ));
+    (handle, total)
+}
+
+/// The reconcile queues nothing over an unreadable store and leaves the stage
+/// `Failed`, naming the unreadable size as the reason.
+async fn assert_fails_closed_on_unreadable_store(handle: &Arc<IndexHandle>) {
+    assert!(
+        !reconcile_semantic_vector_gap(handle).await,
+        "nothing can be queued over a store that cannot be read"
+    );
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a stage over an unreadable store must fail closed: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("could not be read")),
+        "the failure must name why the embed was not scheduled: {semantic:?}"
+    );
+}
+
+/// Why (#8863): a gap with no embedder wired has no pass that can close it. It
+/// used to log a warning and leave the stage `pending`, which is exactly the
+/// never-started state #8863 reports; it must be a named, terminal `failed`.
+/// Test: this test.
+#[tokio::test]
+async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let mut indexer = CodeIndexer::new("vector-gap-8863-no-embedder", "/tmp/vector-gap-8863");
+    indexer.set_store(store);
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    let total = chunks.len();
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("vector-gap-8863-no-embedder"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        std::path::PathBuf::from("/tmp/vector-gap-8863"),
+    ));
+    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    assert!(!handle.indexer.read().await.has_embedder(), "sanity");
+
+    assert!(
+        !reconcile_semantic_vector_gap(&handle).await,
+        "nothing can be queued without an embedder"
+    );
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a gap no pass can close must be terminal, not pending: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("no embedder wired")),
+        "the failure must name the missing embedder: {semantic:?}"
     );
 }
