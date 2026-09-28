@@ -222,10 +222,14 @@ rc=0
 "$PACKER" --version 0.0.0 --out-dir "$TMP_ROOT/out-live" > "$TMP_ROOT/live.log" 2>&1 || rc=$?
 live="$(tar -xzOf "$TMP_ROOT/out-live/content-v0.0.0.tar.gz" bundle-manifest.toml 2>/dev/null || true)"
 missing_classes=""
+# Here-strings, NOT `printf '%s\n' "$live" | grep -q`: `$live` is this
+# checkout's real manifest (hundreds of file entries), and under
+# `set -euo pipefail` `grep -q` exiting at its first match can SIGPIPE the
+# printf still writing the rest (#8716).
 for c in $CLASSES; do
-  printf '%s\n' "$live" | grep -qxF "name = \"$c\"" || missing_classes="$missing_classes $c"
+  grep -qxF "name = \"$c\"" <<<"$live" || missing_classes="$missing_classes $c"
 done
-if [ "$rc" = 0 ] && [ -z "$missing_classes" ] && ! printf '%s\n' "$live" | grep -qx 'files = 0'; then
+if [ "$rc" = 0 ] && [ -z "$missing_classes" ] && ! grep -qx 'files = 0' <<<"$live"; then
   pass "default path table packages every class of this checkout"
 else
   fail "live run: exit $rc, missing classes:${missing_classes:- none}; $(cat "$TMP_ROOT/live.log")"
