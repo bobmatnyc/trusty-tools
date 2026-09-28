@@ -7,7 +7,7 @@ name = "trusty-embedderd"
 # `struct_pub_field_missing` for `Args.http_addr`, `constructible_struct_adds_field`
 # for `Args.http`, and `feature_not_enabled_by_default` for `http-server`
 # leaving the default set. Consumers' floors move to `0.4` in the same cut.
-version = "0.4.0"
+version = "0.4.1"
 publish = true
 edition = "2021"
 license.workspace = true
