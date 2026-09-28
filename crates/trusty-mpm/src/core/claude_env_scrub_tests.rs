@@ -319,3 +319,38 @@ fn the_env_prefix_really_drops_an_inherited_profile_stamp() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "absent");
 }
+
+/// #8583: `RUSTUP_TOOLCHAIN`, by LITERAL name, is cleared by both helpers, so
+/// no launch path hands a session the toolchain `tm`'s own directory resolved.
+#[test]
+fn both_helpers_clear_the_toolchain_override() {
+    let var = "RUSTUP_TOOLCHAIN";
+    assert!(
+        parse_env_unset_vars(&format!("env{} x", env_unset_flags())).contains(&var),
+        "env_unset_flags must unset {var}"
+    );
+    let mut cmd = std::process::Command::new("true");
+    scrub_command(&mut cmd);
+    assert!(
+        cmd.get_envs().any(|(k, v)| k == var && v.is_none()),
+        "scrub_command must remove {var}"
+    );
+}
+
+/// #8583: the prefix really drops an inherited `RUSTUP_TOOLCHAIN` through the
+/// system `env`, so rustup falls through to the project's `rust-toolchain.toml`.
+/// The parent is given the issue's observed `1.94.1` on its own `Command`.
+#[test]
+fn the_env_prefix_really_drops_an_inherited_toolchain_override() {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "env{} sh -c 'printf %s \"${{RUSTUP_TOOLCHAIN-absent}}\"'",
+            env_unset_flags()
+        ))
+        .env("RUSTUP_TOOLCHAIN", "1.94.1")
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "absent");
+}
