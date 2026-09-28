@@ -74,6 +74,16 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# #8616: the pre-init ONNX Runtime probe (`src/ort_probe.rs`) reads
+# `ort::MINOR_VERSION` and `ort::sys::OrtApiBase`, so the version floor it
+# enforces is the one the linked `ort` enforces. Already in every build of this
+# crate through `trusty-common`'s `embedder` feature; the pin must match
+# `trusty-common/Cargo.toml`'s.
+ort = { version = "=2.0.0-rc.12", default-features = false }
+# #8616: dlopen()s the runtime for the probe. Only a load-dynamic build
+# (`load-dynamic`, `cuda`) runs the probe, so only those enable it.
+libloading = { workspace = true, optional = true }
+
 # Why (issue #2222): `gnu_get_libc_version()` for the pre-init glibc probe
 # (see `src/glibc_probe.rs`). Target-gated to Linux/glibc only — musl and
 # non-Linux targets have no such symbol and no glibc-floor problem to probe
@@ -89,6 +99,8 @@ anyhow = { workspace = true }
 tempfile = { workspace = true }
 # Wire types + MockEmbedder for integration tests.
 trusty-common = { workspace = true, features = ["embedder", "embedder-bundled-ort", "embedder-client", "embedder-test-support"] }
+# #8616: the probe's unit tests run in the default (bundled-ort) test build.
+libloading = { workspace = true }
 
 [features]
 # Why (issue #250, renamed #6289): `daemon` gates the crate's startup surface
@@ -121,6 +133,6 @@ http-server = ["daemon"]
 # (same rule as `trusty-common`'s `embedder-bundled-ort`) — always pair a
 # non-default selection with `--no-default-features`.
 bundled-ort = ["trusty-common/embedder-bundled-ort"]
-cuda = ["trusty-common/embedder-cuda"]
-load-dynamic = ["trusty-common/embedder-load-dynamic"]
+cuda = ["trusty-common/embedder-cuda", "dep:libloading"]
+load-dynamic = ["trusty-common/embedder-load-dynamic", "dep:libloading"]
 coreml = ["trusty-common/embedder-coreml"]

@@ -11391,6 +11391,8 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "libloading 0.9.0",
+ "ort",
  "serde",
  "serde_json",
  "tempfile",
