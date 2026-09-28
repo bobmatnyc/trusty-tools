@@ -307,11 +307,11 @@ mod tests {
         assert_eq!(classify_now(&other), Leftover::Clear);
         let truncated = ProcessFacts {
             start_secs: Some(now),
-            name: Some("cargo-llvm-cove".into()),
+            name: Some("cargo-nextest-w".into()),
             exe_name: None,
         };
         let rec = record(
-            "/x/cargo-llvm-cov test",
+            "/x/cargo-nextest-wrapper run",
             Some(42),
             chrono::Utc::now().to_rfc3339(),
         );
