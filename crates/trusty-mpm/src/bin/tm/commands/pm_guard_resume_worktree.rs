@@ -107,7 +107,9 @@ pub(crate) fn evaluate_resume_worktree(
                 "its harness record `{}` could not be read ({e})",
                 record.display()
             );
-            return ResumeVerdict::Deny(deny_reason(&agent, None, None, &unconfirmed(&why)));
+            // #8004: the record itself is unreadable, so no tree was ever
+            // confirmed gone — false, not the re-dispatch advice.
+            return ResumeVerdict::Deny(deny_reason(&agent, None, None, &unconfirmed(&why), false));
         }
     };
     match classify_record(&bytes) {
@@ -117,22 +119,32 @@ pub(crate) fn evaluate_resume_worktree(
             let branch = tree.as_deref().and_then(harness_branch_name);
             let state =
                 "was removed by the harness when the agent stopped, because it held no changes";
+            // #8004: the harness confirmed removal — the re-dispatch advice
+            // is correct here.
             ResumeVerdict::Deny(deny_reason(
                 &agent,
                 tree.as_deref(),
                 branch.as_deref(),
                 state,
+                true,
             ))
         }
         Record::Tree { path, branch } => match probe_tree(&path) {
             Ok(()) => ResumeVerdict::Allow,
-            Err(state) => {
-                ResumeVerdict::Deny(deny_reason(&agent, Some(&path), branch.as_deref(), &state))
-            }
+            Err(state) => ResumeVerdict::Deny(deny_reason(
+                &agent,
+                Some(&path),
+                branch.as_deref(),
+                &state,
+                true,
+            )),
         },
         Record::Undeterminable(why) => {
+            // #8004: the record parsed but its worktree fields are unreadable
+            // — no tree was confirmed gone, so false, not the re-dispatch
+            // advice.
             let why = format!("its harness record `{}` {why}", record.display());
-            ResumeVerdict::Deny(deny_reason(&agent, None, None, &unconfirmed(&why)))
+            ResumeVerdict::Deny(deny_reason(&agent, None, None, &unconfirmed(&why), false))
         }
     }
 }
@@ -270,16 +282,34 @@ fn harness_branch_name(tree: &Path) -> Option<String> {
 }
 
 /// The deny text: the agent, the missing tree and branch, and the remedy.
-fn deny_reason(agent: &str, tree: Option<&Path>, branch: Option<&str>, state: &str) -> String {
+///
+/// `confirmed` is true only when the harness record itself showed the tree
+/// removed or missing; the re-dispatch advice belongs there. #8004: critic
+/// MEDIUM — a record that could not be read or parsed never confirmed
+/// anything, so the tree may still be live, and re-dispatching it fresh
+/// risks a second live agent on the same tree.
+fn deny_reason(
+    agent: &str,
+    tree: Option<&Path>,
+    branch: Option<&str>,
+    state: &str,
+    confirmed: bool,
+) -> String {
     let tree = tree.map_or_else(String::new, |p| format!(" `{}`", p.display()));
     let branch = branch.map_or_else(String::new, |b| {
         format!(" Its branch was `{b}`; name it in the brief if it holds commits to keep.")
     });
+    let advice = if confirmed {
+        "Do not resume it: re-dispatch fresh with `isolation: \"worktree\"` and restate the \
+         base commit and the task in the brief."
+    } else {
+        "Its worktree could not be verified, so it may still be live: retry, or check `git \
+         worktree list` before resuming or re-dispatching."
+    };
     format!(
         "Resume refused (#8004): agent `{agent}` was dispatched with `isolation: \"worktree\"`, \
          and its worktree{tree} {state}. A SendMessage now would resume it in the main \
-         checkout, where it cannot commit (ADR-0061). Do not resume it: re-dispatch fresh with \
-         `isolation: \"worktree\"` and restate the base commit and the task in the brief.{branch}"
+         checkout, where it cannot commit (ADR-0061). {advice}{branch}"
     )
 }
 
@@ -471,5 +501,58 @@ mod tests {
         }
         let id = recipient_agent_id(Some(&json!({"agent_id": format!("agent-{AGENT}")})));
         assert_eq!(id.as_deref(), Some(AGENT));
+    }
+
+    /// #8004: pins the three real `agent-*.meta.json` shapes `classify_record`
+    /// reads, so a harness rename of `worktreeCleanlyRemoved` or
+    /// `worktreePath` fails this test loudly instead of silently changing the
+    /// resume verdict. Shapes taken verbatim (paths and ids sanitised) from
+    /// `~/.claude/projects/*/*/subagents/agent-*.meta.json` on this machine,
+    /// 2026-09-28.
+    #[test]
+    fn classify_record_pins_the_harness_agent_record_schema() {
+        // (a) cleanly-removed — the harness rewrites the record to this shape
+        // once it deletes the tree.
+        let removed = br#"{"agentType":"general-purpose","description":"Root-cause tm relaunch --continue bug","toolUseId":"toolu_EXAMPLE00000000000000001","spawnDepth":1,"worktreeCleanlyRemoved":true}"#;
+        assert_eq!(
+            classify_record(removed),
+            Record::Removed,
+            "harness subagents/*.meta.json schema changed: `worktreeCleanlyRemoved` no longer \
+             recognised — update classify_record (#8004)"
+        );
+
+        // (b) a live isolated agent — `worktreePath` plus `spawnedWithWorktree`.
+        let live = br#"{"agentType":"general-purpose","worktreePath":"/Users/example/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a0000000000000000","spawnedWithWorktree":true,"worktreeBranch":"worktree-agent-a0000000000000000","description":"Fix bare --continue on managed relaunch","toolUseId":"toolu_EXAMPLE00000000000000002","spawnDepth":1}"#;
+        match classify_record(live) {
+            Record::Tree { path, branch } => {
+                assert_eq!(
+                    path,
+                    PathBuf::from(
+                        "/Users/example/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a0000000000000000"
+                    ),
+                    "harness subagents/*.meta.json schema changed: `worktreePath` no longer \
+                     recognised — update classify_record (#8004)"
+                );
+                assert_eq!(
+                    branch.as_deref(),
+                    Some("worktree-agent-a0000000000000000"),
+                    "harness subagents/*.meta.json schema changed: `worktreeBranch` no longer \
+                     recognised — update classify_record (#8004)"
+                );
+            }
+            other => panic!(
+                "harness subagents/*.meta.json schema changed: `worktreePath` no longer \
+                 recognised — update classify_record (#8004); got {other:?}"
+            ),
+        }
+
+        // (c) a non-isolated agent — no worktree keys at all.
+        let non_isolated = br#"{"agentType":"Explore","description":"Diagnose tm tmux reattach","toolUseId":"toolu_EXAMPLE00000000000000003","spawnDepth":1}"#;
+        assert_eq!(
+            classify_record(non_isolated),
+            Record::NotIsolated,
+            "harness subagents/*.meta.json schema changed: a non-isolated record no longer \
+             classifies as NotIsolated — update classify_record (#8004)"
+        );
     }
 }
