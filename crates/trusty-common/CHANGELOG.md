@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.52.7] — 2026-09-28
+
+### Breaking
+
+- trusty-common 0.52.7 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-common-0.52.7.txt` (Refs #8699).
+
+### Added
+
+- `daemon_guard::start_in_new_session(&mut Command)` makes a spawned process lead a new session (`setsid` in a `pre_exec` hook, Unix; a no-op elsewhere), for a daemon start that needs its own stdio or cwd and so cannot use `spawn_detached`. Combined with `Command::process_group` the spawn fails with `EPERM`, because a group leader cannot call `setsid` (#8783).
+
+### Fixed
+
+- Tests that write `HOME`, `OLLAMA_HOST` or the memory-core timeout knobs now share one serialization domain with every other writer and reader of the same variable: every `HOME` reader and writer in the lib tests (`update`, `workspace_layout`, `bin_resolve`, `launchd`, `catchup`, `search_index`, `embedder`) holds `data_dir::ENV_LOCK`, `update/tests.rs`'s private lock is gone, `memory_core::timeouts` takes the same lock, and the `OLLAMA_HOST` writers share `dotenv_credential_env` (#5937). Test-only.
+- The env-lock ratchet now accepts only the exact path `crate::data_dir::ENV_LOCK` (or a `use` of it) and fails on any new private env mutex in the lib target (#5937). Test-only.
+- `FileKeyStore::try_get` now returns an `Io` or `Toml` error when the credential file exists but cannot be read or parsed, instead of reporting the credential as absent. A missing file still reads as an empty store, and `get` keeps its `None`-on-failure contract (#8569).
+- `FileKeyStore::set` and `unset` now hold an exclusive advisory lock on a `0600` `credentials.toml.lock` beside the store across the read, modify and atomic write, so concurrent writers in separate processes no longer lose each other's keys. A writer waits at most 10 seconds for a live holder, then fails with a `TimedOut` I/O error; the kernel releases the lock when a holder process dies (#8569).
+- The stdio embedder client now restarts a sidecar that answers only requests that have already timed out. Only a reply to a still-pending request resets the wedge counter or re-arms the call deadline; a late or orphan reply does neither. Before this, a sidecar working through abandoned requests at high CPU reset the counter on every late reply and never tripped the three-timeout wedge restart (#8600).
+- With several embed requests in flight, a sidecar that never answers the oldest one while it keeps answering newer ones now times the oldest out and trips the wedge restart. The call deadline belongs to the oldest pending request and re-arms only when that request resolves or times out, and only a reply that resolves the oldest pending request resets the wedge counter. Before, every reply to a newer request re-armed the shared deadline, so the stuck request never timed out (#8600).
+- `PersistedDreamStats::save` now publishes `dream_stats.json` through `atomic_file::write_atomic` (sibling temp file, `fsync`, rename) instead of a truncating `fs::write`. A concurrent `load` no longer reads an empty or partial file (`EOF while parsing a value`), and a failed save leaves the previous snapshot intact (#8733).
+- `atomic_file::write_atomic` now stages each call in its own `<name>.<pid>.<n>.tm-tmp` file, opened with `create_new`, instead of one shared `<path>.tm-tmp`. Two concurrent writers to one path each publish a complete file, and neither fails with `ENOENT`. Before, one writer could truncate the other's staging file, so a partial file was published. This covers every caller: the dream stats snapshot, `codex_config`, and the `tm doctor` LaunchAgent repair (#8733).
+- `atomic_file::write_atomic` creates its staging file with mode `0600` on Unix, so a copy stranded by a crash between the write and the rename is owner-only. The published file keeps the target's existing mode, and a new target still gets the plain-create default (`0666 & !umask`) (#8733).
+- Two daemons binding the same socket through `uds::bind_singleton_hardened` at the same time can no longer both succeed. The whole probe, takeover and bind now runs under an exclusive lock on `<socket>.lock`; a second binder that finds the lock held refuses with the new `UdsSecurityError::BindInProgress`, and one that cannot take the lock refuses with `UdsSecurityError::BindLock` instead of binding unlocked (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- The singleton bind lock at `<socket>.lock` is never followed through a symlink, and a lock path holding anything but a regular file (a symlink, directory or FIFO) refuses the bind with `UdsSecurityError::BindLock` naming that path, so a planted link can no longer make the bind create or lock a file elsewhere (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- A daemon started through `daemon_guard::spawn_detached` or `spawn_current_exe` (and their `_forwarding_parent_link` forms) now starts in its own session (`setsid`, Unix), so a SIGKILL or Ctrl-C aimed at the spawning CLI's process group no longer kills it (#8783).
+- A detached `uds::UdsServiceSupervisor` child (`SupervisorConfig::with_detached`, used for the on-demand trusty-analyze daemon) now starts in its own session too, so it outlives a group kill or Ctrl-C aimed at its caller. A supervised child stays in the caller's group (#8783).
+
+### Changed
+
+- Tests: nine previously `#[ignore]`d tests (filesystem, redb, fail-open, `cargo` probe) now run by default; the two recall-ranking tests use the real ONNX embedder in the pre-publish gate instead of silently seeding the mock; every remaining ignored test states its reason (refs #8787 audit).
+
 ## [0.52.6] — 2026-09-27
 
 0.52.5 was tagged but never published.

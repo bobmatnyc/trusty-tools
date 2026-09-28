@@ -1,0 +1,11 @@
+crate   trusty-memory
+version 0.28.2
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  function_missing function trusty_memory::commands::daemon_lock::acquire_lock
+accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path
+accept  function_missing function trusty_memory::commands::daemon_lock::lock_file_path_for_dir
+accept  function_missing function trusty_memory::commands::daemon_lock::pid_alive
+accept  function_missing function trusty_memory::commands::daemon_lock::read_lock_pid
+accept  module_missing mod trusty_memory::commands::daemon_lock
+accept  pub_module_level_const_missing LOCK_FILENAME
+accept  struct_missing struct trusty_memory::commands::daemon_lock::DaemonLock
