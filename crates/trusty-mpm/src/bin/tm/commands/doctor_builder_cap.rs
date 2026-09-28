@@ -261,7 +261,8 @@ mod tests {
     fn doctor_fails_on_a_corrupt_slot_record() {
         let cfg = (BuildersConfig::default(), BuildLeaseConfig::default());
         let (_tmp, dir) = slots();
-        drop(dir.try_acquire(0).expect("io").expect("free"));
+        // #8736: written without taking its lock, so no child another test
+        // spawns can inherit a locked copy and make the probe read `Held`.
         std::fs::write(dir.path().join("slot-0.lock"), "not a record").expect("corrupt");
         let check = slot_dir_check(&dir, (&cfg.0, &cfg.1), 4, &mut quiet());
         assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);

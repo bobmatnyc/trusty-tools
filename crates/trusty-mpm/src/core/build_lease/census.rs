@@ -375,6 +375,7 @@ mod tests {
     /// counted foreign, and stops being counted when a holder record names
     /// this test process as its `tm build-lease`.
     #[test]
+    #[serial_test::serial(build_slot_fds)] // #8736: spawns; see `slots::tests`.
     fn a_real_foreign_compiler_is_counted() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let fake = tmp.path().join("rustc");

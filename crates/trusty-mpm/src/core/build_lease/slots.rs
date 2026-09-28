@@ -563,7 +563,13 @@ pub(super) fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Every test here runs under the `build_slot_fds` key, shared by each
+/// `build_lease` test that spawns a process (#8736). A child spawned on
+/// another test thread gets a copy of every open descriptor until its `exec`
+/// closes the close-on-exec ones, so a slot lock this test just dropped or
+/// probed stays held for that window and the next probe reads `Held`.
 #[cfg(test)]
+#[serial_test::serial(build_slot_fds)]
 mod tests {
     use super::*;
 

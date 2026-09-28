@@ -382,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(build_slot_fds)] // #8736: probes after a release; see `slots::tests`.
     fn a_held_cargo_lock_marks_the_directory_busy() {
         use std::os::fd::AsRawFd;
         let slot = slot();
@@ -398,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(build_slot_fds)] // #8736: spawns `cargo`; see `slots::tests`.
     fn workspace_packages_lists_this_workspace() {
         let names = workspace_packages(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("metadata");
         assert!(names.iter().any(|n| n == "trusty-mpm"), "{names:?}");

@@ -329,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(build_slot_fds)] // #8736: spawns `git`; see `slots::tests`.
     fn a_checkout_without_an_origin_has_no_pool() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let err = resolve_pool(&BuildersConfig::default(), tmp.path(), tmp.path())

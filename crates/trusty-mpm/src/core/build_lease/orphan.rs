@@ -160,7 +160,9 @@ fn starts_in_window(start: i64, recorded: i64) -> bool {
     (recorded - 1..=recorded + START_WINDOW_SECS).contains(&start)
 }
 
+// #8736: these tests spawn processes; see `slots::tests` for the key.
 #[cfg(test)]
+#[serial_test::serial(build_slot_fds)]
 mod tests {
     use super::*;
 

@@ -1,5 +1,7 @@
 //! Tests for `core::build_lease::acquire` (#8261): real lock files, real
-//! `flock`s, scripted readings.
+//! `flock`s, scripted readings. Every test runs under the `build_slot_fds`
+//! key: a dropped slot lock must not be pinned by another test's child
+//! (#8736, see `slots::tests`).
 
 use super::*;
 use crate::core::build_lease::admission::Readings;
@@ -73,6 +75,7 @@ fn leased(outcome: Outcome) -> SlotGuard {
 }
 
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn a_free_machine_leases_immediately() {
     let (_tmp, slots) = slot_dir();
     let c = configs();
@@ -86,6 +89,7 @@ fn a_free_machine_leases_immediately() {
 }
 
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn the_n_plus_first_waits_then_times_out() {
     let (_tmp, slots) = slot_dir();
     let c = configs();
@@ -112,6 +116,7 @@ fn the_n_plus_first_waits_then_times_out() {
 }
 
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn a_slot_freed_mid_wait_is_taken() {
     let (_tmp, slots) = slot_dir();
     let c = configs();
@@ -128,6 +133,7 @@ fn a_slot_freed_mid_wait_is_taken() {
 /// The brief's case (c): warn pressure refuses a new build for the whole wait
 /// while the existing holder keeps its slot.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn warn_pressure_times_out_while_the_holder_keeps_its_slot() {
     let (_tmp, slots) = slot_dir();
     let c = configs();
@@ -163,6 +169,7 @@ fn warn_pressure_times_out_while_the_holder_keeps_its_slot() {
 /// Critic round 1 (HIGH 1a): a broken slot-0 file is skipped — the next index
 /// is leased and the ceiling still binds; it never disables the cap.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn a_broken_lowest_slot_is_skipped() {
     let (_tmp, slots) = slot_dir();
     std::fs::create_dir(slots.path().join("slot-0.lock")).expect("mkdir");
@@ -182,6 +189,7 @@ fn a_broken_lowest_slot_is_skipped() {
 /// #8736 fail-open check: a free slot holding a corrupt record is skipped
 /// like a broken file, never taken, and its record is left for the operator.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn a_corrupt_record_slot_is_skipped_not_taken() {
     let (_tmp, slots) = slot_dir();
     drop(slots.try_acquire(0).expect("io").expect("free"));
@@ -205,6 +213,7 @@ fn a_corrupt_record_slot_is_skipped_not_taken() {
 /// `admission.lock` runs the build unleased only while the census has room,
 /// and the outcome names the store, the error and the repair.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn an_unopenable_admission_lock_is_bounded_by_the_census() {
     let (_tmp, slots) = slot_dir();
     std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
@@ -230,6 +239,7 @@ fn an_unopenable_admission_lock_is_bounded_by_the_census() {
 /// "Allow up to the cap": admitted while fewer than `ceiling` builds run
 /// without a lease.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn unleased_is_admitted_while_the_count_is_below_the_ceiling() {
     let (_tmp, slots) = slot_dir();
     std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
@@ -247,6 +257,7 @@ fn unleased_is_admitted_while_the_count_is_below_the_ceiling() {
 
 /// "Allow up to the cap": refused once `ceiling` builds run without a lease.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn unleased_is_refused_when_the_count_reaches_the_ceiling() {
     let (_tmp, slots) = slot_dir();
     std::fs::create_dir(slots.path().join("admission.lock")).expect("mkdir");
@@ -273,6 +284,7 @@ fn unleased_is_refused_when_the_count_reaches_the_ceiling() {
 
 /// Every slot file broken: the census bound applies, not a free pass.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn unlockable_slot_files_fall_back_to_the_census_bound() {
     use std::os::unix::fs::PermissionsExt;
     let (_tmp, slots) = slot_dir();
@@ -311,6 +323,7 @@ fn unlockable_slot_files_fall_back_to_the_census_bound() {
 /// #8261 round 3: a free slot whose directory an orphaned build still uses is
 /// skipped; a slot freed that way is never handed to a new lease.
 #[test]
+#[serial_test::serial(build_slot_fds)]
 fn a_slot_whose_directory_is_busy_is_skipped() {
     let (_tmp, slots) = slot_dir();
     let c = configs();
