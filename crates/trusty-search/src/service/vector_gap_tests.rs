@@ -278,3 +278,55 @@ async fn an_unreadable_store_fails_a_pending_stage_closed() {
         "the failure must name why the embed was not scheduled: {semantic:?}"
     );
 }
+
+/// Why (#8863): a gap with no embedder wired has no pass that can close it. It
+/// used to log a warning and leave the stage `pending`, which is exactly the
+/// never-started state #8863 reports; it must be a named, terminal `failed`.
+/// Test: this test.
+#[tokio::test]
+async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let mut indexer = CodeIndexer::new("vector-gap-8863-no-embedder", "/tmp/vector-gap-8863");
+    indexer.set_store(store);
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    let total = chunks.len();
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("vector-gap-8863-no-embedder"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        std::path::PathBuf::from("/tmp/vector-gap-8863"),
+    ));
+    *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
+    assert!(!handle.indexer.read().await.has_embedder(), "sanity");
+
+    assert!(
+        !reconcile_semantic_vector_gap(&handle).await,
+        "nothing can be queued without an embedder"
+    );
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a gap no pass can close must be terminal, not pending: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("no embedder wired")),
+        "the failure must name the missing embedder: {semantic:?}"
+    );
+}

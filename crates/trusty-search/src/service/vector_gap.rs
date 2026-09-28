@@ -71,6 +71,7 @@ pub fn semantic_vector_gap(
 /// `no_gap_leaves_a_ready_stage_alone`,
 /// `a_pending_stage_left_by_a_discarded_snapshot_is_backfilled`,
 /// `an_unreadable_store_fails_a_pending_stage_closed`,
+/// `a_gap_with_no_embedder_fails_the_stage_with_a_reason`,
 /// `m005_vector_gap_is_not_ready_and_is_backfilled`,
 /// `m005_vector_gap_backfill_failure_is_not_reported_ready`.
 pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
