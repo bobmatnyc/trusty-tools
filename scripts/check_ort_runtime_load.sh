@@ -11,22 +11,24 @@
 # What: pipes one JSON-RPC `embed` request into `<binary> --stdio`, then
 #   closes stdin. The daemon loads ORT and the model before it reads the
 #   request, answers it, and exits on EOF. Every run is bounded by
-#   `timeout CHECK_TIMEOUT_SECS`: with `ort` rc.12 a runtime that fails to
-#   load (missing, or older than 1.24) deadlocks the loader instead of
-#   exiting — its error path re-enters the `OnceLock` it is initialising —
-#   so a hang (exit 124) is the expected failure shape, not a flake.
+#   `timeout CHECK_TIMEOUT_SECS`. `ort` rc.12 deadlocks instead of exiting
+#   when a runtime fails to load (missing, or older than 1.24); since #8616
+#   the daemon checks the runtime before `ort` sees it and exits non-zero
+#   with an error, so a hang (exit 124) is now a regression of #8616.
 #   - Default mode passes when the process exits 0 and the response carries
 #     one embedding of EXPECTED_DIM floats (default 384, all-MiniLM-L6-v2).
 #   - `--expect-load-failure` is the negative control: it passes only when the
-#     process exits non-zero (error or timeout) and produced no embedding.
-#     CI runs it against a missing ORT_DYLIB_PATH so the default mode is
-#     shown unable to pass without a loadable runtime.
+#     process exits non-zero BY ITSELF (not a timeout) and produced no
+#     embedding. CI runs it against a missing ORT_DYLIB_PATH, so the default
+#     mode is shown unable to pass without a loadable runtime and the #8616
+#     pre-init check is shown to fail fast instead of hanging.
 #   The runtime comes from the caller's environment (ORT_DYLIB_PATH for a
 #   load-dynamic build); this script never sets it.
 #
 # Usage: scripts/check_ort_runtime_load.sh <trusty-embedderd-binary> [--expect-load-failure]
 # Env:   EXPECTED_DIM (default 384), CHECK_TIMEOUT_SECS (default 600).
-# Needs: `timeout` (GNU coreutils) — without it a failed load would hang forever.
+# Needs: `timeout` (GNU coreutils) — every gate run is bounded, so a
+#   regression of #8616 fails the check instead of hanging the job.
 #
 # Test: run by the `al2023-load-dynamic-search` job in
 #   .github/workflows/al2023-build.yml, in both modes.
@@ -78,10 +80,14 @@ embedding_dim() {
   fi
 }
 
+timed_out() {
+  [[ ${status} -eq 124 || ${status} -eq 137 ]]
+}
+
 describe_failure() {
-  if [[ ${status} -eq 124 || ${status} -eq 137 ]]; then
-    echo "the daemon hung for ${limit}s before producing an embedding — the shape of" \
-      "an ONNX Runtime load failure under ort 2.0.0-rc.12 (missing dylib, or older than 1.24)"
+  if timed_out; then
+    echo "the daemon hung for ${limit}s before producing an embedding — a load failure" \
+      "that reached ort 2.0.0-rc.12's deadlock instead of the #8616 pre-init check"
   else
     echo "the daemon exited ${status} before producing an embedding"
   fi
@@ -92,6 +98,12 @@ dim="$(embedding_dim)"
 if [[ "${mode}" == "--expect-load-failure" ]]; then
   if [[ ${status} -eq 0 || "${dim}" -ne 0 ]]; then
     echo "FAIL: expected no embedding without a loadable runtime, got exit ${status} and a ${dim}-float vector" >&2
+    show_stderr
+    exit 1
+  fi
+  # #8616: a missing runtime must end the daemon with an error, not a hang.
+  if timed_out; then
+    echo "FAIL: $(describe_failure)" >&2
     show_stderr
     exit 1
   fi

@@ -283,6 +283,9 @@ toml = "0.8"
 # not reflow the operator's comments and unrelated tables.
 toml_edit = "0.22"
 libc = "0.2"
+# `trusty-embedderd`'s pre-init ONNX Runtime probe (#8616). Same major as the
+# `libloading` that `ort`'s `load-dynamic` feature already pulls in.
+libloading = "0.9"
 unicode-width = "0.2"
 # `.env.local` loader for the trusty-common `credentials` resolver
 # (issue #2401). Already used ad hoc by trusty-agents and trusty-search; the
