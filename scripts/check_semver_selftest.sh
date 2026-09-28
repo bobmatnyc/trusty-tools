@@ -1404,6 +1404,24 @@ else
   ci_enforce "(m) item only in an entry's second clause" "$ONE" trusty-mpm - 0 \
     "SemVer: ACCEPTED BREAK" "NOT DECLARED" "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
     "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
+
+  # (n) An entry's first clause uses the `previously in file /<path>:<line>`
+  #     shape cargo-semver-checks prints for a baseline item's location (an
+  #     absolute /Users/... or registry path), while its second clause keeps
+  #     the plain ` in /<path>:<line>` shape. Both must be stripped, so the
+  #     item still matches its existing, unmodified accept row and the
+  #     "Computed break list" record carries the clean item text, comma
+  #     directly after "parameters" — not the raw location. (The raw gate log
+  #     is echoed verbatim elsewhere in CI output regardless of this fix, so
+  #     the assertion is on the normalised record, not on total output.)
+  main_decl "$DECL_OK"
+  IN_FILE="${ACC}/in-file.out"
+  sed 's# in /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes# in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes#' \
+    "$ONE" > "$IN_FILE"
+  ci_enforce "(n) previously-in-file location dropped from the record" "$IN_FILE" trusty-mpm - 0 \
+    "SemVer: ACCEPTED BREAK" - \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
 fi
 rm -rf "$ACC"
 
