@@ -1601,6 +1601,13 @@ jobs:
           echo "cargo test ${args[*]} --no-fail-fast"
           cargo test "${args[@]}" --no-fail-fast
 
+      # Owner ruling 2026-09-27: a default `cargo test -p trusty-mpm` compiles
+      # neither memory-core nor ONNX, so the memory-palace tests gated behind
+      # `sm-memory` / `manager-memory` run in this step, one build for both.
+      - name: cargo test -p trusty-mpm --features sm-memory,manager-memory
+        if: contains(format(' {0} ', matrix.crates), ' trusty-mpm ')
+        run: cargo test -p trusty-mpm --features sm-memory,manager-memory --no-fail-fast
+
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.
   affected:

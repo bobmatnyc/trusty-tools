@@ -240,9 +240,9 @@ jobs:
 
       # #8700: ONE cargo build serves both checks below. The resident-budget
       # tests are unit tests in trusty-mpm's lib, and a lib test build resolves
-      # trusty-mpm's dev-dependency features (trusty-common gains memory-core,
-      # embedder-test-support, axum-server), which re-features ~185 units and
-      # adds ~100 crates. A separate `cargo install` (release, production
+      # trusty-mpm's dev-dependency features (trusty-common gains axum-server;
+      # memory-core and embedder-test-support only under `sm-memory` since
+      # 2026-09-27), which re-features units. A separate `cargo install` (release, production
       # features) therefore shared nothing with the test build. Asking cargo
       # for one integration-test target makes it also build the normal `tm`
       # executable inside that same resolve, so `tm` and the lib test harness
