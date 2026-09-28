@@ -1,7 +1,8 @@
 //! Tests for `core::build_lease::acquire` (#8261): real lock files, real
-//! `flock`s, scripted readings. Every test runs under the `build_slot_fds`
-//! key: a dropped slot lock must not be pinned by another test's child
-//! (#8736, see `slots::tests`).
+//! `flock`s, scripted readings. A released slot unlocks with `LOCK_UN`, so
+//! another test's child cannot pin it; every test also runs under the
+//! `build_slot_fds` key, a second guard that keeps the group's own spawners
+//! apart (#8736, see `slots::tests`).
 
 use super::*;
 use crate::core::build_lease::admission::Readings;

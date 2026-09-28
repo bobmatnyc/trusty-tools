@@ -599,9 +599,10 @@ pub(super) fn current_uid() -> u32 {
 
 /// Every test here runs under the `build_slot_fds` key, shared by each
 /// `build_lease` test that spawns a process (#8736). A child spawned on
-/// another test thread gets a copy of every open descriptor until its `exec`
-/// closes the close-on-exec ones, so a slot lock this test just dropped or
-/// probed stays held for that window and the next probe reads `Held`.
+/// another test thread holds a copy of every open descriptor until its
+/// `exec`. `unlock` (`LOCK_UN`) is what frees a released slot at once
+/// regardless; the key is a second guard that keeps the group's own spawners
+/// apart from these tests.
 #[cfg(test)]
 #[serial_test::serial(build_slot_fds)]
 mod tests {
@@ -677,13 +678,25 @@ mod tests {
         let mut cycles = 0;
         while cycles < 5_000 && started.elapsed() < Duration::from_secs(3) {
             cycles += 1;
-            let Some(mut held) = slots.try_acquire(0).expect("io") else {
-                failure = Some(format!(
-                    "cycle {cycles}: the previous probe's lock was still held"
-                ));
-                break;
+            // Errors end the loop as failures, never panics, so `stop` is
+            // always set and the spawner always exits.
+            let mut held = match slots.try_acquire(0) {
+                Ok(Some(held)) => held,
+                Ok(None) => {
+                    failure = Some(format!(
+                        "cycle {cycles}: the previous probe's lock was still held"
+                    ));
+                    break;
+                }
+                Err(err) => {
+                    failure = Some(format!("cycle {cycles}: acquire failed: {err}"));
+                    break;
+                }
             };
-            held.write_record(&record(0)).expect("write");
+            if let Err(err) = held.write_record(&record(0)) {
+                failure = Some(format!("cycle {cycles}: write failed: {err}"));
+                break;
+            }
             drop(held);
             let probed = slots.probe();
             if probed != vec![(0, SlotState::Free)] {
