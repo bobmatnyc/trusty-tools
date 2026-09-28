@@ -215,6 +215,15 @@ pub fn tm_command() -> Command {
     tm_command_in(tm_spawn_home())
 }
 
+/// A `trusty-mpm` alias command confined to [`tm_spawn_home`].
+///
+/// The alias execs the `tm` beside it, so the child needs the same isolation.
+pub fn alias_command() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-mpm"));
+    isolate_spawned_tm(&mut cmd, tm_spawn_home());
+    cmd
+}
+
 /// Write `disk.max_usage_pct: <pct>` into `home`'s trusty-mpm config (#7497).
 ///
 /// Why: a spawned `tm hook --pm-guard` gates every `git worktree add` on the

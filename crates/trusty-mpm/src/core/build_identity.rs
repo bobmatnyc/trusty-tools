@@ -8,7 +8,7 @@
 //! Semver is a RELEASE label, not a build label.
 //!
 //! #7822 filled that gap with a per-FILE fingerprint (`"<mtime>:<size>"` of
-//! `std::env::current_exe()`), which #7873 replaced: this package ships TWO
+//! `std::env::current_exe()`), which #7873 replaced: this package shipped TWO
 //! `[[bin]]` targets from one source — `tm`, which runs the check, and
 //! `trusty-mpm`, which runs the daemon — and one `cargo install` writes them
 //! seconds apart. Their file fingerprints therefore always differ (observed:
