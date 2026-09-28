@@ -1,3 +1,0 @@
-Fixed
-- A `load-dynamic` or `cuda` build now checks the ONNX Runtime at `ORT_DYLIB_PATH` (loadable, is ONNX Runtime, version 1.24.x or newer 1.x) before `ort` initialises, and exits non-zero with an error naming the path and version. A missing, corrupt or too-old runtime used to hang the daemon forever inside `ort` rc.12 ([#8616](https://github.com/bobmatnyc/trusty-tools/issues/8616)).
-- A model-load timeout (`TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`) now ends the process with status 1. The stuck init thread used to keep the process alive, because tokio's runtime shutdown waits for blocking threads ([#8616](https://github.com/bobmatnyc/trusty-tools/issues/8616)).
