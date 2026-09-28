@@ -181,19 +181,33 @@ impl SlotPool {
 /// What: the lease is first renamed to a unique tomb path, which captures one
 /// file atomically, and only then read. `holder`'s tomb is removed; any other
 /// tomb is hard-linked back, which never replaces a lease a claim wrote in the
-/// meantime. Another holder's lease is off its path only until that link; a
-/// holder this daemon granted is covered by its record meanwhile. A missing
-/// lease is a no-op; one that is not a plain file, or that cannot be moved, is
-/// logged and left, which costs at most one TTL.
+/// meantime. A tomb is read in its lease's place ([`SlotPool::read_lease`]), so
+/// another holder's lease is never lost while it is off its path. A restore
+/// that fails leaves the tomb, which holds the slot until the daemon sweeps it
+/// past the lease TTL ([`SlotPool::sweep_expired_tombs`]). A missing lease is a
+/// no-op; one that is not a plain file, or that cannot be moved, is logged and
+/// left, which costs at most one TTL.
 /// Test: `a_completed_builder_frees_its_slot_across_a_restart_8819`,
-/// `clear_lease_of_never_removes_another_holders_lease_8819`.
+/// `clear_lease_of_never_removes_another_holders_lease_8819`,
+/// `a_failed_restore_keeps_the_slot_held_until_the_lease_ttl_8819`.
 pub fn clear_lease_of(slot_dir: &Path, holder: &str) {
-    clear_captured_lease(slot_dir, holder, |_| {});
+    clear_captured_lease(
+        slot_dir,
+        holder,
+        |_| {},
+        |from, to| std::fs::hard_link(from, to),
+    );
 }
 
 /// [`clear_lease_of`], running `between` once the lease is captured and before
-/// it is judged: the window a concurrent claim can write a new lease in.
-fn clear_captured_lease(slot_dir: &Path, holder: &str, between: impl FnOnce(&Path)) {
+/// it is judged: the window a concurrent claim can write a new lease in. It
+/// restores another holder's lease with `link`, which a test can fail.
+fn clear_captured_lease(
+    slot_dir: &Path,
+    holder: &str,
+    between: impl FnOnce(&Path),
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) {
     let Some(path) = lease_path_of(slot_dir) else {
         return;
     };
@@ -203,12 +217,22 @@ fn clear_captured_lease(slot_dir: &Path, holder: &str, between: impl FnOnce(&Pat
     // #8819 critic round 2: never capture unreadable evidence, e.g. a directory.
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => {}
-        Ok(_) => return,
+        Ok(meta) => {
+            tracing::warn!(
+                lease = %path.display(), file_type = ?meta.file_type(),
+                "left a finished builder's lease that is not a plain file"
+            );
+            return;
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
         Err(err) => return warn("could not inspect", err),
     }
     let mut tomb = path.clone().into_os_string();
-    tomb.push(format!(".tomb.{}.{}", std::process::id(), unique_nanos()));
+    tomb.push(format!(
+        "{TOMB_INFIX}{}.{}",
+        std::process::id(),
+        unique_nanos()
+    ));
     let tomb = PathBuf::from(tomb);
     // #8819 critic round 2: a read then a remove could delete a lease a claim
     // wrote between the two; the rename takes exactly one file.
@@ -223,14 +247,17 @@ fn clear_captured_lease(slot_dir: &Path, holder: &str, between: impl FnOnce(&Pat
         .and_then(|body| parse_lease(&body))
         .is_some_and(|lease| lease.holder == holder);
     if !ours {
-        match std::fs::hard_link(&tomb, &path) {
+        match link(&tomb, &path) {
             Ok(()) => {}
             // A claim wrote a newer lease meanwhile; it supersedes this one.
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // #8819 r4: the tomb stays and is read as the lease, so the slot
+            // stays held until the sweep past the lease TTL.
             Err(err) => {
-                tracing::warn!(
+                tracing::error!(
                     lease = %path.display(), tomb = %tomb.display(),
-                    "could not restore another holder's lease, left at the tomb: {err}"
+                    "could not restore another holder's lease; its tomb holds the slot \
+                     until the lease TTL: {err}"
                 );
                 return;
             }
@@ -247,38 +274,135 @@ fn lease_path_of(slot_dir: &Path) -> Option<PathBuf> {
     Some(slot_dir.with_file_name(format!("{STAGING_PREFIX_DOT}{name}.lease")))
 }
 
+/// What a captured lease's tomb adds to the lease's name: `<lease>.tomb.`.
+const TOMB_INFIX: &str = ".tomb.";
+
+/// The tombs [`clear_lease_of`] left beside `lease`, and no other slot's.
+fn tombs_of(lease: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let (Some(dir), Some(name)) = (lease.parent(), lease.file_name().and_then(|n| n.to_str()))
+    else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!("{name}{TOMB_INFIX}");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut tombs = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(&prefix))
+        {
+            tombs.push(entry.path());
+        }
+    }
+    Ok(tombs)
+}
+
+/// The lease a tomb beside `lease` records, or `None` when there is no tomb.
+///
+/// Why: #8819 r4 — a restore that failed leaves another holder's lease only at
+/// its tomb, and reading that as no lease would free a slot a build still holds.
+/// What: an unreadable tomb, or a directory that cannot be listed, is
+/// [`LeaseRecord::Unreadable`]; else the lease granted last, since a later
+/// grant supersedes an earlier one.
+fn read_tomb(lease: &Path) -> Option<LeaseRecord> {
+    let tombs = match tombs_of(lease) {
+        Ok(tombs) => tombs,
+        Err(err) => return Some(unreadable(lease.parent()?, &err.to_string())),
+    };
+    let mut newest: Option<SlotLease> = None;
+    for tomb in tombs {
+        let body = match std::fs::read_to_string(&tomb) {
+            Ok(body) => body,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Some(unreadable(&tomb, &err.to_string())),
+        };
+        let Some(found) = parse_lease(&body) else {
+            return Some(unreadable(&tomb, "is malformed"));
+        };
+        if newest
+            .as_ref()
+            .is_none_or(|n| found.granted_at > n.granted_at)
+        {
+            newest = Some(found);
+        }
+    }
+    newest.map(LeaseRecord::Leased)
+}
+
 impl SlotPool {
     /// Read slot `index`'s lease, or the holder a pre-#8819 marker names.
     ///
     /// What: any read failure other than a missing file is
-    /// [`LeaseRecord::Unreadable`], never [`LeaseRecord::Absent`].
+    /// [`LeaseRecord::Unreadable`], never [`LeaseRecord::Absent`]. With no
+    /// lease file, a tomb [`clear_lease_of`] left is read in its place.
     /// Test: `a_lease_round_trips_through_its_file`,
     /// `an_unreadable_lease_is_unreadable_not_absent`,
-    /// `a_pre_8819_served_marker_is_read_as_served`.
+    /// `a_pre_8819_served_marker_is_read_as_served`,
+    /// `a_failed_restore_keeps_the_slot_held_until_the_lease_ttl_8819`.
     #[must_use]
     pub fn read_lease(&self, index: u32) -> LeaseRecord {
         let path = self.lease_path(index);
         match std::fs::read_to_string(&path) {
             Ok(body) => parse_lease(&body)
                 .map_or_else(|| unreadable(&path, "is malformed"), LeaseRecord::Leased),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                read_served(&self.slot_path(index).join(SEED_MARKER))
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => read_tomb(&path)
+                .unwrap_or_else(|| read_served(&self.slot_path(index).join(SEED_MARKER))),
             Err(err) => unreadable(&path, &err.to_string()),
         }
     }
+
+    /// Remove slot `index`'s tombs once the lease each captured is `ttl_secs`
+    /// old (#8819 r4).
+    ///
+    /// Why: nothing else removes a tomb a failed restore left, and past the TTL
+    /// [`judge_lease`] reads it as free, so it holds nothing.
+    /// What: a tomb's age runs from the grant it records, or from its mtime
+    /// when it cannot be parsed, as [`judge_lease`] bounds each; one with
+    /// neither stays, unverifiable. Best effort: a failed removal is logged.
+    /// Test: `a_failed_restore_keeps_the_slot_held_until_the_lease_ttl_8819`.
+    pub fn sweep_expired_tombs(&self, index: u32, now: i64, ttl_secs: i64) {
+        let Ok(tombs) = tombs_of(&self.lease_path(index)) else {
+            return;
+        };
+        for tomb in tombs {
+            let since = std::fs::read_to_string(&tomb)
+                .ok()
+                .and_then(|body| parse_lease(&body))
+                .map_or_else(|| mtime(&tomb), |lease| Some(lease.granted_at));
+            if since.is_none_or(|t| now - t < ttl_secs) {
+                continue;
+            }
+            match std::fs::remove_file(&tomb) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(tomb = %tomb.display(), "could not sweep an expired lease tomb: {err}");
+                }
+            }
+        }
+    }
+}
+
+/// `path`'s modification time, in Unix seconds.
+fn mtime(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).timestamp())
 }
 
 /// [`LeaseRecord::Unreadable`] for `path`, stamped with its mtime when that
 /// can be read (#8819 critic: the TTL bounds it).
 fn unreadable(path: &Path, why: &str) -> LeaseRecord {
-    let since = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).timestamp());
     LeaseRecord::Unreadable {
         why: format!("{}: {why}", path.display()),
-        since,
+        since: mtime(path),
     }
 }
 
@@ -584,10 +708,15 @@ mod tests {
             pool.seed(0, None).expect("a seeded slot 0");
             pool.record_lease(0, &named(captured)).expect("lease");
             let b = named("toolu_B");
-            clear_captured_lease(&pool.slot_path(0), "toolu_A", |_| {
-                pool.record_lease(0, &b)
-                    .expect("B's claim writes its lease");
-            });
+            clear_captured_lease(
+                &pool.slot_path(0),
+                "toolu_A",
+                |_| {
+                    pool.record_lease(0, &b)
+                        .expect("B's claim writes its lease");
+                },
+                |from, to| std::fs::hard_link(from, to),
+            );
             assert_eq!(
                 pool.read_lease(0),
                 LeaseRecord::Leased(b),
@@ -601,6 +730,49 @@ mod tests {
                 .collect();
             assert!(tombs.is_empty(), "captured {captured}: {tombs:?}");
         }
+    }
+
+    /// #8819 r4: a restore that fails with anything but `AlreadyExists` leaves
+    /// C's lease at its tomb. The slot still reads as held, the tomb is read
+    /// for no other slot and counts as no slot, and it is swept once C's lease
+    /// TTL has passed.
+    #[test]
+    fn a_failed_restore_keeps_the_slot_held_until_the_lease_ttl_8819() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pool = pool(root.path());
+        pool.seed(1, None).expect("a seeded slot 1");
+        let captured = SlotLease {
+            holder: "toolu_C".to_string(),
+            ..lease(Some(7), Some(501), 1_000)
+        };
+        pool.record_lease(1, &captured).expect("C's lease");
+        let slots = || slots_under(&root.path().join("pool")).len();
+        let before = slots();
+        clear_captured_lease(
+            &pool.slot_path(1),
+            "toolu_A",
+            |_| {},
+            |_, _| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        );
+        let record = pool.read_lease(1);
+        assert_eq!(record, LeaseRecord::Leased(captured.clone()), "tomb read");
+        assert!(
+            judge(&record, unknown, started_500).blocks(),
+            "held, not free"
+        );
+        assert_eq!(pool.read_lease(10), LeaseRecord::Absent, "slot 10 is not 1");
+        assert_eq!(slots(), before, "a tomb is not a slot");
+        pool.sweep_expired_tombs(1, 1_099, 100);
+        assert_eq!(pool.read_lease(1), LeaseRecord::Leased(captured), "in TTL");
+        pool.sweep_expired_tombs(1, 1_100, 100);
+        assert_eq!(pool.read_lease(1), LeaseRecord::Absent, "swept past TTL");
+        let parent = pool.slot_path(1).parent().expect("repo dir").to_path_buf();
+        let left: Vec<_> = std::fs::read_dir(parent)
+            .expect("list")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|name| name.contains(TOMB_INFIX))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     fn unknown(_: &str) -> bool {

@@ -34,6 +34,13 @@ const _: () = assert!(DELEGATION_RETENTION_SECS >= BUILDER_LEASE_TTL_SECS);
 /// session is the lease's own when recorded, else the nil id.
 pub const RESTORED_LEASE_AGENT: &str = "restored-lease";
 
+/// Slot `index`'s lease, after sweeping its tombs past the lease TTL (#8819 r4).
+fn read_slot_lease(pool: &SlotPool, index: u32) -> LeaseRecord {
+    let now = chrono::Utc::now().timestamp();
+    pool.sweep_expired_tombs(index, now, BUILDER_LEASE_TTL_SECS);
+    pool.read_lease(index)
+}
+
 impl DaemonState {
     /// The lease to record when `holder`'s dispatch is handed a slot.
     ///
@@ -69,7 +76,7 @@ impl DaemonState {
     /// `unverifiable_lease_evidence_keeps_its_slot_after_a_restart_8819`,
     /// `a_stale_lease_frees_its_slot_after_a_restart_8819`.
     pub(super) fn lost_lease_verdict(&self, pool: &SlotPool, index: u32) -> LeaseVerdict {
-        self.judge_record(&pool.read_lease(index))
+        self.judge_record(&read_slot_lease(pool, index))
     }
 
     /// Every builder holding a slot: this daemon's live records plus every
@@ -118,7 +125,7 @@ impl DaemonState {
                         return Some(holder(None, now));
                     }
                 };
-                let record = pool.read_lease(index);
+                let record = read_slot_lease(&pool, index);
                 let verdict = self.judge_record(&record);
                 if !verdict.blocks() {
                     return None;
