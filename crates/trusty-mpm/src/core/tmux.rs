@@ -95,10 +95,44 @@ pub use trusty_common::tmux::{
 /// well-known-dirs-aware lookup for others — means resolution behavior is
 /// identical everywhere, and there is exactly one place to fix if it ever
 /// needs to change.
-/// What: delegates to `trusty_common::bin_resolve::resolve_binary("tmux")`.
-/// Test: `resolve_tmux_binary_does_not_panic`.
+/// What: returns the [`with_tmux_binary`] override when the current task has
+/// one, else delegates to `trusty_common::bin_resolve::resolve_binary("tmux")`.
+/// Test: `resolve_tmux_binary_does_not_panic`,
+/// `with_tmux_binary_scopes_the_override_to_its_future`.
 pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
+    if let Ok(bin) = TMUX_BINARY_OVERRIDE.try_with(Clone::clone) {
+        return Some(bin);
+    }
+    // #6542: a no-op outside a test binary; in one, the first resolution
+    // starts that process's config-free private default server.
+    crate::core::tmux_test_isolation::ensure_default_server();
     trusty_common::bin_resolve::resolve_binary("tmux")
+}
+
+tokio::task_local! {
+    /// The tmux binary [`resolve_tmux_binary`] returns inside a
+    /// [`with_tmux_binary`] scope.
+    static TMUX_BINARY_OVERRIDE: std::path::PathBuf;
+}
+
+/// Run `fut` with every tmux resolution inside it returning `bin` (#6542).
+///
+/// Why: the guided-fallback tests drive a real `launch()`, which creates a
+/// tmux session through a dozen call sites that each resolve the binary
+/// themselves. A test that only reaps afterwards leaked sessions onto the
+/// operator's live server whenever the reap missed. Pointing `bin` at a
+/// `tmux -L <private>` shim sends every one of those calls to a server the
+/// test owns outright. The scope is task-local, not process-global, so tests
+/// running in parallel keep resolving the real binary.
+/// What: installs `bin` for [`resolve_tmux_binary`] and
+/// [`resolve_tmux_binary_or_bare`] while `fut` is polled. Work moved to
+/// another task or thread does not see it.
+/// Test: `with_tmux_binary_scopes_the_override_to_its_future`.
+pub async fn with_tmux_binary<F: std::future::Future>(
+    bin: std::path::PathBuf,
+    fut: F,
+) -> F::Output {
+    TMUX_BINARY_OVERRIDE.scope(bin, fut).await
 }
 
 /// [`resolve_tmux_binary`], falling back to the literal `"tmux"` (a plain

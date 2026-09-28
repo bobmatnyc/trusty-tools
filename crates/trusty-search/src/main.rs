@@ -27,11 +27,13 @@ mod detect;
 pub(crate) use trusty_search::{allowlist, config, core, mcp, service};
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use commands::convert::ConvertTarget;
+use commands::explicit_target::index_id_source;
 use commands::index_action::IndexAction;
+use commands::index_remove::handle_index_remove;
 use commands::service::ServiceAction;
 use std::io;
 
@@ -1140,27 +1142,41 @@ async fn run() -> Result<()> {
     let argv: Vec<String> = std::env::args().collect();
     trusty_search::service::bootstrap_process_env(&argv);
 
-    // Why: parse via `try_parse` so we can attach the workspace-shared
-    // "did you mean?" suggestion to clap's standard error rendering before
-    // exiting (issue #216). On success the parse is indistinguishable from
-    // the original `Cli::parse()` call.
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(e) => {
-            // Let clap render its own helpful error first so the user sees
-            // the unrecognised-token message in the format they already know.
-            e.print().ok();
-            // Then layer on the workspace-shared "did you mean?" suggestion
-            // when the input looks like an unknown subcommand or argument.
-            if matches!(
-                e.kind(),
-                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
-            ) {
-                trusty_common::help::print_suggestion_hint(&argv, &HELP);
-            }
-            std::process::exit(e.exit_code());
+    // Why: parse via `try_get_matches` (rather than `Cli::try_parse`) so we can
+    // both attach the workspace-shared "did you mean?" suggestion to clap's
+    // standard error rendering (issue #216) AND read the resulting
+    // `ArgMatches` before it is consumed into `Cli`. On success the parsed
+    // `Cli` is indistinguishable from the original `Cli::parse()` call.
+    let mut arg_matches = Cli::command().try_get_matches().unwrap_or_else(|e| {
+        // Let clap render its own helpful error first so the user sees the
+        // unrecognised-token message in the format they already know, then
+        // layer on the "did you mean?" suggestion for an unknown
+        // subcommand/argument, matching the pre-#8175 `Cli::try_parse` path.
+        e.print().ok();
+        if matches!(
+            e.kind(),
+            clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+        ) {
+            trusty_common::help::print_suggestion_hint(&argv, &HELP);
         }
-    };
+        std::process::exit(e.exit_code());
+    });
+    // #8175: clap folds an explicit `-i`/`--index` flag and the `TRUSTY_INDEX`
+    // env fallback into the same `Cli::index` field, so a value alone cannot
+    // say which one supplied it — and a destructive command (`index remove`)
+    // must never treat an env-only value as though the operator typed it.
+    // `ArgMatches::value_source` is read here, before `Cli::from_arg_matches`
+    // consumes the matches, because it is the only place that distinction is
+    // still visible.
+    let index_from_cli_flag =
+        arg_matches.value_source("index") == Some(clap::parser::ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches_mut(&mut arg_matches).unwrap_or_else(|e| {
+        e.print().ok();
+        std::process::exit(e.exit_code());
+    });
+    // #8175/#8737: the destructive verbs (`index remove`, `reindex`,
+    // `quantize`, `index relocate`) take this to refuse an env-only target.
+    let index_source = index_id_source(cli.index.is_some(), index_from_cli_flag);
 
     // Tracing init + NO_COLOR handling via shared trusty-common helpers.
     //
@@ -1215,7 +1231,12 @@ async fn run() -> Result<()> {
         }
 
         Commands::Status { index_id, watch } => {
-            match index_id {
+            // #8175: an explicit positional INDEX wins, but `-i`/`--index`
+            // (or the `TRUSTY_INDEX` it folds in) must not be silently
+            // dropped just because this command's own target is positional
+            // rather than the global flag — same precedence `index-status`
+            // uses below.
+            match commands::index_status::resolve_status_target(index_id, cli.index.clone()) {
                 // Per-index status: delegate to the `index-status` handler so
                 // behaviour (single-index fetch + `--watch` poll loop against
                 // GET /indexes/:id/status) matches `index-status` exactly.
@@ -1239,8 +1260,13 @@ async fn run() -> Result<()> {
         }
 
         Commands::IndexStatus { index_id, watch } => {
-            commands::index_status::handle_index_status(index_id.as_deref(), watch, cli.json)
-                .await?;
+            // #8175: `index-status -i <id>` used to ignore `-i`/`TRUSTY_INDEX`
+            // outright — this handler only ever saw the positional INDEX,
+            // which is `None` when the operator passed `-i` instead, and fell
+            // through to the cwd-derived default. The positional argument
+            // still wins when both are given.
+            let target = commands::index_status::resolve_status_target(index_id, cli.index.clone());
+            commands::index_status::handle_index_status(target.as_deref(), watch, cli.json).await?;
         }
 
         Commands::Init {
@@ -1267,8 +1293,7 @@ async fn run() -> Result<()> {
                 keep_data,
                 yes,
             }) => {
-                commands::index_remove::handle_index_remove(rm_path, cli.index, keep_data, yes)
-                    .await?;
+                handle_index_remove(rm_path, cli.index, index_source, keep_data, yes).await?;
             }
             Some(IndexAction::Add {
                 path: add_path,
@@ -1286,7 +1311,8 @@ async fn run() -> Result<()> {
                 commands::index_allowlist::handle_allowlist_list(json).await?;
             }
             Some(IndexAction::Relocate { to }) => {
-                commands::index_relocate::handle_index_relocate(&cli.index, to).await?;
+                commands::index_relocate::handle_index_relocate(&cli.index, index_source, to)
+                    .await?;
             }
             None => {
                 commands::index::handle_index(
@@ -1311,11 +1337,11 @@ async fn run() -> Result<()> {
         }
 
         Commands::Quantize(args) => {
-            commands::quantize::handle_quantize(&cli.index, &args, cli.json).await?;
+            commands::quantize::handle_quantize(&cli.index, index_source, &args, cli.json).await?;
         }
 
         Commands::Reindex { path, timeout } => {
-            commands::reindex::handle_reindex(&cli.index, path, timeout).await?;
+            commands::reindex::handle_reindex(&cli.index, index_source, path, timeout).await?;
         }
 
         Commands::List => commands::list::handle_list(cli.json).await?,

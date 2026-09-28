@@ -25,7 +25,6 @@
 - [trusty-memory](./trusty-memory/README.md)
 - [trusty-analyze](./trusty-analyze/README.md)
 - [trusty-console](./trusty-console/README.md)
-- [trusty-git-analytics](./trusty-git-analytics/README.md)
 - [trusty-common](./trusty-common/README.md)
 
 # Roadmap

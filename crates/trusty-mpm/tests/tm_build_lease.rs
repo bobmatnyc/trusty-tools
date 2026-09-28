@@ -11,7 +11,7 @@
 //! and the debug-only fallback-store override keeps every case off the
 //! machine's real `/tmp` store.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};

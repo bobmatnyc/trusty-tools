@@ -24,7 +24,7 @@
 #      scripts/** or .github/** path selects only the crates whose Rust source
 #      names it literally, often none (#7777); and its FAIL OPEN applies on any
 #      detection error.
-#   3. Drop the four Tauri UI crates. The headless runner has no WebKit2GTK, and
+#   3. Drop the three Tauri UI crates. The headless runner has no WebKit2GTK, and
 #      each has its own dedicated job in ci.yml (see that file's header).
 #   4. Split the rest into at most `--max-legs` legs (default 8, the shard
 #      count), greedy longest-first on a weight of the crate's `#[test]` /
@@ -46,7 +46,7 @@ set -uo pipefail
 
 MAX_LEGS=8
 DOCS_ONLY=""
-UI_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+UI_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
 
 usage() {
   echo "Usage: ci-affected-test-plan.sh [--docs-only true|false] [--max-legs N] -- <select-test-crates.sh args>" >&2

@@ -61,7 +61,7 @@ fn every_marker_is_pinned_by_literal_name() {
 fn marker_list_is_free_of_deliberate_spawn_env() {
     for deliberate in DELIBERATE_SPAWN_ENV {
         assert!(
-            !INHERITED_SESSION_MARKERS.contains(deliberate),
+            !scrubbed_on_spawn().any(|name| name == *deliberate),
             "{deliberate} is set deliberately by a managed spawn and must never \
              be scrubbed — scrubbing CLAUDE_CONFIG_DIR re-breaks #4451"
         );
@@ -109,10 +109,11 @@ fn env_unset_flags_covers_every_marker() {
             "env_unset_flags() must unset {name}; got {flags:?}"
         );
     }
+    // #8453: the markers, then tm's own stamps.
     assert_eq!(
         parse_env_unset_vars(&flags),
-        INHERITED_SESSION_MARKERS.to_vec(),
-        "the flags must round-trip back to exactly the marker list"
+        scrubbed_on_spawn().collect::<Vec<_>>(),
+        "the flags must round-trip back to exactly the scrub list"
     );
 }
 
@@ -280,4 +281,41 @@ fn markers_present_in_reports_every_marker_when_all_are_set() {
         markers_present_in(|_| true),
         INHERITED_SESSION_MARKERS.to_vec()
     );
+}
+
+/// #8453: the profile stamp, by LITERAL name, is cleared by both helpers —
+/// the string prefix every shell launch line carries and the `Command` scrub.
+/// This is the choke point: a launch path that routes through either helper
+/// cannot pass a supervisor's stamp on to its child.
+#[test]
+fn both_helpers_clear_the_profile_stamp() {
+    let stamp = "TRUSTY_MPM_SESSION_PROFILE";
+    assert!(
+        parse_env_unset_vars(&format!("env{} x", env_unset_flags())).contains(&stamp),
+        "env_unset_flags must unset {stamp}"
+    );
+    let mut cmd = std::process::Command::new("true");
+    scrub_command(&mut cmd);
+    assert!(
+        cmd.get_envs().any(|(k, v)| k == stamp && v.is_none()),
+        "scrub_command must remove {stamp}"
+    );
+}
+
+/// #8453: the prefix really drops an inherited stamp through the system
+/// `env`. The parent is given `TRUSTY_MPM_SESSION_PROFILE=supervisor` on its
+/// own `Command` (no process-global write) and the child prints the variable.
+#[test]
+fn the_env_prefix_really_drops_an_inherited_profile_stamp() {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "env{} sh -c 'printf %s \"${{TRUSTY_MPM_SESSION_PROFILE-absent}}\"'",
+            env_unset_flags()
+        ))
+        .env("TRUSTY_MPM_SESSION_PROFILE", "supervisor")
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "absent");
 }

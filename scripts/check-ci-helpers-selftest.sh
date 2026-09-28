@@ -303,12 +303,39 @@ assert_eq "UI source"             "false" "$(docs_only_of 'crates/trusty-agents/
 # The trap this denylist exists to avoid: markdown UNDER a crate's src/ is a
 # bundled agent/skill/instruction asset compiled in via include_dir!.
 assert_eq "embedded .md asset"    "false" "$(docs_only_of 'crates/trusty-code/src/assets/agents/ops.md')"
+# #8378 / ADR-0064: instruction content under the two shared roots and
+# content/** is inert when ADDED or MODIFIED, and code when deleted, renamed
+# (a D half under --no-renames), type-changed, or given without a status.
+tab="$(printf '\t')"
+assert_eq "instruction asset modified"   "true"  "$(docs_only_of "M${tab}crates/trusty-agents-common/src/assets/agents/BASE-AGENT.md")"
+assert_eq "instruction asset added"      "true"  "$(docs_only_of "A${tab}crates/trusty-mpm/src/assets/skills/tm/SKILL.md")"
+assert_eq "content/ added"               "true"  "$(docs_only_of "A${tab}content/agents/qa.md")"
+assert_eq "instruction asset deleted"    "false" "$(docs_only_of "D${tab}crates/trusty-mpm/src/assets/skills/tm/SKILL.md")"
+assert_eq "instruction asset renamed"    "false" "$(docs_only_of "D${tab}crates/trusty-mpm/src/assets/a.md
+A${tab}crates/trusty-mpm/src/assets/b.md")"
+assert_eq "instruction asset type change" "false" "$(docs_only_of "T${tab}crates/trusty-mpm/src/assets/a.md")"
+assert_eq "content/ deleted"             "false" "$(docs_only_of "D${tab}content/agents/qa.md")"
+assert_eq "asset without a status"       "false" "$(docs_only_of 'crates/trusty-mpm/src/assets/a.md')"
+assert_eq "non-.md asset (manifest)"     "false" "$(docs_only_of "M${tab}crates/trusty-mpm/src/assets/framework-manifest.toml")"
+assert_eq "asset mod.rs"                 "false" "$(docs_only_of "M${tab}crates/trusty-mpm/src/assets/mod.rs")"
+assert_eq "forked tcode agent, modified" "false" "$(docs_only_of "M${tab}crates/trusty-code/src/assets/agents/qa.md")"
+assert_eq "status form keeps docs inert" "true"  "$(docs_only_of "D${tab}docs/old.md")"
+assert_eq "asset + .rs is code"          "false" "$(docs_only_of "M${tab}crates/trusty-mpm/src/assets/a.md
+M${tab}crates/trusty-mpm/src/lib.rs")"
 assert_eq "nested fragment"       "false" "$(docs_only_of 'crates/x/changelog.d/sub/1.md')"
 assert_eq "mixed docs + code"     "false" "$(docs_only_of 'docs/a.md
 crates/trusty-mpm/src/lib.rs')"
 assert_eq "mixed website + code"  "false" "$(docs_only_of 'website/src/routes/+page.svelte
 crates/trusty-mpm/src/lib.rs')"
 assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
+# #8378: the asset-content definition check_asset_test_filter.py and the
+# capabilities-drift relevance step both read.
+assert_eq "--instruction-assets keeps only inert instruction content" \
+  "crates/trusty-mpm/src/assets/skills/a.md crates/trusty-agents-common/src/assets/agents/qa.md content/agents/qa.json " \
+  "$(printf '%s\n' crates/trusty-mpm/src/assets/skills/a.md crates/trusty-mpm/src/assets/hooks/pre-push \
+    crates/trusty-agents-common/src/assets/agents/qa.md crates/trusty-code/src/assets/agents/qa.md \
+    content/agents/qa.json docs/a.md crates/trusty-mpm/src/lib.rs |
+    bash scripts/detect-docs-only.sh --instruction-assets | tr '\n' ' ')"
 
 # ---------------------------------------------------------------------------
 # detect-embedder-cuda-relevant.sh
@@ -944,7 +971,8 @@ unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
 # 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
-assert_eq "every apt step routes through the wrapper" "13" \
+# 13 -> 12: the `audit-ui` job left with trusty-audit-ui (owner ruling 2026-09-28).
+assert_eq "every apt step routes through the wrapper" "12" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------
@@ -1398,22 +1426,33 @@ assert_eq "website-tests.yml: push trigger has no paths filter" "0" \
   "$(grep -cE '^    paths(-ignore)?:' <<<"$(sed -n '/^  push:/,/^  pull_request:/p' "${web_wf}")" || true)"
 assert_eq "website-tests.yml: no job-level if: can skip a reporting job" "0" \
   "$(grep -cE '^    if:' "${web_wf}" || true)"
-assert_eq "website-tests.yml classifies relevance in each job" "3" \
+assert_eq "website-tests.yml classifies relevance in each job" "2" \
   "$(grep -c '^        id: relevance$' "${web_wf}" || true)"
-assert_eq "website-tests.yml classifies from the diff, not the event" "3" \
+assert_eq "website-tests.yml classifies from the diff, not the event" "2" \
   "$(grep -c 'bash scripts/ci-website-relevance.sh ' "${web_wf}" || true)"
-# 16 = 6 in Vitest (unit + smoke) + 5 in Website content corpus + 5 in Prettier +
-# ESLint. Every pnpm/Node/Playwright install and every suite invocation is
-# gated; the two cheap steps (checkout-adjacent base refresh, reading the pnpm
-# pin) are not. Raise this ONLY together with a costly step that IS gated.
-assert_eq "website-tests gates its costly steps on relevance, not the job" "16" \
+# 11 = 6 in Vitest (unit + smoke) + 5 in Prettier + ESLint. Every
+# pnpm/Node/Playwright install and every suite invocation is gated; the two
+# cheap steps (checkout-adjacent base refresh, reading the pnpm pin) are not.
+# Raise this ONLY together with a costly step that IS gated.
+assert_eq "website-tests gates its costly steps on relevance, not the job" "11" \
   "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'\$" "${web_wf}" || true)"
 assert_eq "no gate in website-tests branches on the activity type" "0" \
   "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' "${web_wf}")" || true)"
-# The three check names branch protection can list. Renaming one silently
-# drops its required context, so they are pinned here.
-assert_eq "website-tests keeps its three check names" "3" \
-  "$(grep -cE '^    name: (Vitest \(unit \+ smoke\)|Website content corpus|Prettier \+ ESLint)$' "${web_wf}" || true)"
+# The check names branch protection can list. Renaming one silently drops its
+# required context, so they are pinned here. `Website content corpus` moved to
+# ci.yml's `website-corpus` job (#8378) so `CI gate` can wait on it; it keeps
+# its name and its five relevance-gated steps there.
+assert_eq "website-tests keeps its two check names" "2" \
+  "$(grep -cE '^    name: (Vitest \(unit \+ smoke\)|Prettier \+ ESLint)$' "${web_wf}" || true)"
+corpus_job="$(sed -n '/^  website-corpus:$/,/^  # ----/p' .github/workflows/ci.yml)"
+assert_eq "ci.yml website-corpus keeps the corpus check name" "1" \
+  "$(grep -c '^    name: Website content corpus$' <<<"${corpus_job}" || true)"
+assert_eq "ci.yml website-corpus classifies from the diff" "1" \
+  "$(grep -c 'bash scripts/ci-website-relevance.sh corpus$' <<<"${corpus_job}" || true)"
+assert_eq "ci.yml website-corpus gates its costly steps on relevance" "5" \
+  "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'\$" <<<"${corpus_job}" || true)"
+assert_eq "corpus relevance counts ci.yml, its host workflow (#8378)" "true" \
+  "$(printf '.github/workflows/ci.yml' | bash scripts/ci-website-relevance.sh corpus 2>/dev/null)"
 # The unit run must not re-acquire the corpus: `pnpm test` names its projects.
 assert_eq "the default website test script excludes the corpus project" "1" \
   "$(grep -c '"test": "vitest run --project=unit --project=smoke"' website/package.json || true)"

@@ -342,6 +342,17 @@ mod tests {
         );
     }
 
+    /// #8453: a daemon started from a supervisor session carries its
+    /// `TRUSTY_MPM_SESSION_PROFILE`; the headless child must not inherit it.
+    #[test]
+    fn build_command_never_passes_on_the_profile_stamp() {
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        assert!(
+            env_mutations(&cmd).contains(&("TRUSTY_MPM_SESSION_PROFILE".to_owned(), None)),
+            "the profile stamp must be REMOVED from the headless child"
+        );
+    }
+
     #[test]
     fn build_command_program_is_claude() {
         // The seam invokes `claude` directly, not the `env` shell wrapper, so

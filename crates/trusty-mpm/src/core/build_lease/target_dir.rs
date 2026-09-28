@@ -244,8 +244,11 @@ pub fn resolve_pool(
     )
     .ok()
     .map(|env| env.cargo_target_dir);
+    // #8794: the pool's seeding ceiling is the lease's own slot count, since
+    // a lease only ever holds slot indexes below it.
+    let ceiling = config.effective_max_concurrent(crate::core::builders::host_memory_tier());
     Ok((
-        SlotPool::new(config.effective_slot_pool_root(home), identity),
+        SlotPool::new(config.effective_slot_pool_root(home), identity, ceiling),
         shared,
     ))
 }
@@ -265,7 +268,7 @@ mod tests {
             owner: "o".into(),
             repo: "r".into(),
         };
-        Ok((SlotPool::new(PathBuf::from("/pool"), id), None))
+        Ok((SlotPool::new(PathBuf::from("/pool"), id, 4), None))
     }
 
     #[test]

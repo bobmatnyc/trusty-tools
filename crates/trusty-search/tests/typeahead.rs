@@ -312,7 +312,7 @@ fn classify_source_covers_all_known_match_reasons() {
 /// valid tags.
 /// Test: `cargo test -p trusty-search --test typeahead -- --include-ignored`.
 #[tokio::test]
-#[ignore]
+#[ignore = "loads the ONNX embedder; run by the pre-publish ignored-tests gate"]
 async fn typeahead_blended_mode_returns_results_tagged_by_source() {
     use axum::extract::{Path, Query, State};
     use trusty_search::core::indexer::typeahead::TypeaheadMode;

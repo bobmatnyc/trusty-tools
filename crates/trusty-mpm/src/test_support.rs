@@ -98,6 +98,23 @@ fn arm_home_write_fence() {
     crate::core::home_write_fence::arm_for_this_process();
 }
 
+/// Give the lib test binary its own default tmux server, before `main` (#6542).
+///
+/// Aborts the binary when the private directory cannot be created, rather than
+/// let a test reach the operator's server. See `core::tmux_test_isolation`.
+/// Test: `core::tmux_test_isolation::tests::this_test_binary_runs_on_a_relocated_tmux_server`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    crate::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    crate::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the

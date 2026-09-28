@@ -25,6 +25,11 @@ mod semantic;
 #[cfg(test)]
 mod concurrency_tests;
 #[cfg(test)]
+mod maintenance_election_tests;
+// #8733: atomic `dream_stats.json` publication.
+#[cfg(test)]
+mod persisted_stats_tests;
+#[cfg(test)]
 mod tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────

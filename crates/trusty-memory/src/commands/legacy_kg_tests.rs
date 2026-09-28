@@ -101,6 +101,38 @@ fn bytes(p: &Path) -> Vec<u8> {
     std::fs::read(p).expect("read")
 }
 
+/// The data root a fixture palace sits in, where `maintenance.lock` lives.
+fn data_root(palace: &Palace) -> &Path {
+    palace.data_dir.parent().expect("palace root")
+}
+
+/// #8733: the import is user data, so it still runs while another process
+/// holds the data root's maintenance lease, but its Writer open deletes no
+/// expired row. Pre-fix that open purged the row.
+#[tokio::test]
+async fn import_under_a_lease_held_elsewhere_deletes_no_expired_row() {
+    let (_root, palace) = fixture();
+    let kg_path = palace.data_dir.join("kg.redb");
+    let mut expired = Drawer::new(Uuid::parse_str(ROOM).expect("room"), "an expired drawer");
+    expired.expires_at = Some(Utc::now() - chrono::Duration::days(1));
+    KgStoreRedb::open(&kg_path)
+        .expect("open kg.redb")
+        .upsert_drawer(&expired)
+        .expect("seed expired drawer");
+    let holder = MaintenanceLease::new(data_root(&palace));
+    assert!(holder.try_hold().is_held());
+
+    let r = apply_report(&palace, data_root(&palace), false, false, false)
+        .await
+        .expect("the import needs no lease");
+    assert_eq!(r.imported, 2, "the import still ran");
+    let ids = KgStoreRedb::open(&kg_path)
+        .expect("reopen kg.redb")
+        .load_drawer_ids()
+        .expect("ids");
+    assert!(ids.contains(&expired.id), "the expired row was deleted");
+}
+
 /// Why: the dry run is the default and the owner's look-before-you-leap; it is
 /// only worth anything if its counts are right and it writes nothing.
 /// Test: itself.
@@ -239,7 +271,7 @@ async fn assert_rejected_in_both_modes(
     };
 
     check(&scan_report(&palace, allow_short).expect("scan"));
-    let r = apply_report(&palace, false, false, allow_short)
+    let r = apply_report(&palace, data_root(&palace), false, false, allow_short)
         .await
         .expect("apply");
     check(&r);
@@ -323,9 +355,15 @@ async fn apply_error_after_backup_names_the_kept_backup() {
         Ok(n)
     };
 
-    let err = apply_report_with(&palace, (false, false, false), dir, then_break_identity)
-        .await
-        .expect_err("an unreadable L1 snapshot refuses the Writer open");
+    let err = apply_report_with(
+        &palace,
+        data_root(&palace),
+        (false, false, false),
+        dir,
+        then_break_identity,
+    )
+    .await
+    .expect_err("an unreadable L1 snapshot refuses the Writer open");
 
     let kept = backup_dirs(dir);
     assert_eq!(kept.len(), 1, "the verified backup stays");
@@ -352,9 +390,15 @@ async fn failed_backup_cleanup_names_the_partial_backup() {
         Err(std::io::Error::other("disk full"))
     };
 
-    let err = apply_report_with(&palace, (false, false, false), &palace.data_dir, locked)
-        .await
-        .expect_err("a failed copy aborts");
+    let err = apply_report_with(
+        &palace,
+        data_root(&palace),
+        (false, false, false),
+        &palace.data_dir,
+        locked,
+    )
+    .await
+    .expect_err("a failed copy aborts");
 
     let partial = backup_dirs(&palace.data_dir);
     assert_eq!(partial.len(), 1, "the unremovable partial dir remains");
@@ -392,7 +436,7 @@ async fn short_row_is_rejected_by_default_and_imported_with_allow_short() {
         preview.render()
     );
 
-    let r = apply_report(&palace, false, false, true)
+    let r = apply_report(&palace, data_root(&palace), false, false, true)
         .await
         .expect("apply --allow-short");
     assert!(r.rejected.is_empty(), "{:?}", r.rejected);
@@ -444,9 +488,15 @@ async fn apply_with_a_failing_backup_writes_nothing() {
         };
         let before = dir_state(dir);
 
-        let err = apply_report_with(&palace, (false, false, false), &parent, copy)
-            .await
-            .expect_err(label);
+        let err = apply_report_with(
+            &palace,
+            data_root(&palace),
+            (false, false, false),
+            &parent,
+            copy,
+        )
+        .await
+        .expect_err(label);
 
         assert!(
             format!("{err:#}").contains("nothing was written"),
@@ -473,7 +523,7 @@ async fn apply_leaves_a_verified_backup_of_the_pre_apply_bytes() {
     let names = ["kg.redb", "index.usearch.redb", "kg.db"];
     let before: Vec<Vec<u8>> = names.iter().map(|n| bytes(&dir.join(n))).collect();
 
-    let r = apply_report(&palace, true, false, false)
+    let r = apply_report(&palace, data_root(&palace), true, false, false)
         .await
         .expect("apply");
 
@@ -515,7 +565,7 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
     let (_root, palace) = fixture();
     let legacy_before = bytes(&palace.data_dir.join("kg.db"));
 
-    let r = apply_report(&palace, true, false, false)
+    let r = apply_report(&palace, data_root(&palace), true, false, false)
         .await
         .expect("apply");
     assert!(!r.dry_run);
@@ -542,7 +592,7 @@ async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
         assert!(hits.iter().any(|h| h.drawer.id == a), "A recalled");
     }
 
-    let again = apply_report(&palace, true, false, false)
+    let again = apply_report(&palace, data_root(&palace), true, false, false)
         .await
         .expect("re-run");
     assert_eq!(
@@ -587,7 +637,7 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     let scan = scan_report(&palace, false).expect("scan");
     assert_eq!((scan.already_live, scan.missing), (1, 2), "L1 is not live");
 
-    let r = apply_report(&palace, false, false, false)
+    let r = apply_report(&palace, data_root(&palace), false, false, false)
         .await
         .expect("apply");
     assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
@@ -615,7 +665,9 @@ async fn apply_refuses_a_store_the_writer_open_would_rename_aside() {
         let quarantined = list_incompatible_files(dir).expect("list").len();
 
         assert!(
-            apply_report(&palace, false, false, false).await.is_err(),
+            apply_report(&palace, data_root(&palace), false, false, false)
+                .await
+                .is_err(),
             "{file}: apply must refuse"
         );
 
@@ -724,7 +776,7 @@ async fn wal_only_legacy_rows_are_counted_and_imported() {
 
     let scan = scan_report(&palace, false).expect("scan");
     assert_eq!((scan.legacy_rows, scan.missing), (2, 2));
-    let r = apply_report(&palace, false, false, false)
+    let r = apply_report(&palace, data_root(&palace), false, false, false)
         .await
         .expect("apply");
     assert_eq!(r.imported, 2);
@@ -762,7 +814,7 @@ async fn apply_skips_content_duplicates_unless_included() {
             .expect("ids")
     };
 
-    let r = apply_report(&palace, false, false, false)
+    let r = apply_report(&palace, data_root(&palace), false, false, false)
         .await
         .expect("apply");
     assert_eq!(
@@ -779,12 +831,12 @@ async fn apply_skips_content_duplicates_unless_included() {
     assert!(ids.contains(&a), "the distinct drawer is imported");
     assert!(!ids.contains(&b), "the content duplicate is skipped");
 
-    let again = apply_report(&palace, false, false, false)
+    let again = apply_report(&palace, data_root(&palace), false, false, false)
         .await
         .expect("re-run");
     assert_eq!((again.content_duplicates, again.imported), (Some(1), 0));
 
-    let r = apply_report(&palace, false, true, false)
+    let r = apply_report(&palace, data_root(&palace), false, true, false)
         .await
         .expect("include");
     assert_eq!((r.content_duplicates, r.imported), (Some(1), 1));

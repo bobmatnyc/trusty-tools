@@ -12,6 +12,7 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod drops;
+pub(crate) mod embed_degrade;
 pub(crate) mod exact;
 pub(crate) mod kg;
 pub(crate) mod lanes;
@@ -59,6 +60,9 @@ pub struct SearchOutcome {
     pub dropped: SearchDrops,
     /// Whether an exact-match floor applied, and to which literal (#7675).
     pub exact_match: ExactMatchReport,
+    /// #8348: the query embed failed and the vector lane was skipped; the
+    /// embedder's error text. `None` when the lane ran or was never asked for.
+    pub vector_lane_error: Option<String>,
 }
 
 /// Score assigned to grep-fallback hits (issue #75). Intentionally tiny so
@@ -261,10 +265,12 @@ impl CodeIndexer {
         let skip_kg = lexical_only || semantic_lane;
 
         // 1) Embed (cache-first).
-        let embedding = if lexical_only {
-            None
+        // #8348: an embed failure degrades an unpinned query to lexical.
+        let (embedding, mut vector_lane_error) = if lexical_only {
+            (None, None)
         } else {
-            self.embed_query(&query.text).await?
+            self.embed_query_or_degrade(&query.text, semantic_lane)
+                .await?
         };
 
         // 2) Run lanes (HNSW + BM25), then inject entity-exact-match.
@@ -352,7 +358,12 @@ impl CodeIndexer {
             None
         } else {
             match &query.refine_query {
-                Some(rq) if !rq.is_empty() => self.embed_query(rq).await?,
+                // #8348: a refine embed failure drops the rerank, not the query.
+                Some(rq) if !rq.is_empty() => {
+                    let (v, err) = self.embed_query_or_degrade(rq, false).await?;
+                    vector_lane_error = vector_lane_error.or(err);
+                    v
+                }
                 _ => None,
             }
         };
@@ -461,6 +472,7 @@ impl CodeIndexer {
             results: result,
             dropped,
             exact_match,
+            vector_lane_error,
         })
     }
 

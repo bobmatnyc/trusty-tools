@@ -294,7 +294,9 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
 /// plan replaced the directory; a kept or unset one prints nothing. Names the
 /// directory as exclusive only while THIS lease holds it (critic MEDIUM,
 /// round 6): another checkout can win the same slot once this build's flock
-/// releases and rebuild `debug/<bin>` there.
+/// releases and rebuild `debug/<bin>` there. #8831: it restates the
+/// `CLAUDE.md` rule's one exception, so the notice and the rule never read as
+/// two contradictory instructions.
 /// Test: `a_subagents_leased_build_runs_in_its_slot_directory`.
 fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
     if let (TargetPlan::Slot { .. }, Some(dir)) = (plan, target) {
@@ -302,7 +304,9 @@ fn announce_slot(plan: &TargetPlan, slot: u32, target: Option<&str>) {
             "tm build-lease: slot {slot} — CARGO_TARGET_DIR={dir} for this build; its \
              binaries are under that directory, not the inherited one, and are exclusively \
              this build's only while the lease is held — once it releases, another checkout \
-             can win the same slot and rebuild debug/<bin> there (#8261)."
+             can win the same slot and rebuild debug/<bin> there (#8261). Never override \
+             CARGO_TARGET_DIR EXCEPT with this granted slot: the lease sets it for this build, \
+             so the command needs no override of its own."
         );
     }
 }

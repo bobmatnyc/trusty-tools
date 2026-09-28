@@ -40,7 +40,14 @@ name = "trusty-memory"
 # 0.27.1 (#8589): patch — picks up trusty-common 0.52.3, whose secret filter
 # stops refusing identifier paths, Google doc URLs and common identifier
 # shapes as secrets during kuzu-import. No public item was removed or changed.
-version = "0.28.0"
+# 0.28.1 (#8732, issue #4421): patch — 0.28.0 is already live on crates.io
+# and this PR changes `src/**`, so the "PR version bump vs crates.io" gate
+# requires a bump. No public item added, removed, or changed shape.
+# 0.28.1 -> 0.28.2 (issue #4421): patch — 0.28.1 is already live on crates.io
+# and open PRs #8791, #8790, #8779 all change `src/**`, so this branch opens
+# the next patch version ahead of those PRs' rebase. No public item added,
+# removed, or changed shape on main as of this bump.
+version = "0.28.2"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -122,7 +129,7 @@ trusty-mcp = { workspace = true, features = ["daemon-bridge-json-rpc"] }
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-trusty-common = { path = "../trusty-common", version = "0.52", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds", "machine-tier"] }
+trusty-common = { path = "../trusty-common", version = "0.52.5", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds", "machine-tier"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -178,9 +185,8 @@ redb = { workspace = true }
 # trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
 # lockfile churn.
 sha2 = { workspace = true }
-# `commands::daemon_lock` probes a recorded pid with `libc::kill(pid, 0)` and
 # `fd_metrics` reads `RLIMIT_NOFILE` via `libc::getrlimit`. (#5329 removed the
-# other caller, the BM25 spawn supervisor's SIGTERM path.)
+# BM25 spawn supervisor's SIGTERM caller; #8759 removed `commands::daemon_lock`.)
 libc = { workspace = true }
 # Issue #220: rolling dedup window uses Jaro-Winkler similarity to detect
 # near-duplicate memory writes within a short time window. `strsim` is
@@ -216,7 +222,7 @@ serial_test = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.52", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.52.5", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 # #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
 # the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real

@@ -960,8 +960,8 @@ impl AppState {
                 .map_err(|e| anyhow::anyhow!("join list_palaces: {e}"))??;
         let total = palaces.len();
         // #4911: hydrate under the registry's own intent, not the zero-arg
-        // `PalaceHandle::open` default (`ReadOnlyClient`).
-        let intent = registry.open_intent();
+        // `PalaceHandle::open` default (`ReadOnlyClient`). #8733: through
+        // `open_handle`, which gates the open-time purge on the lease.
         // #7106: hydration opens one palace at a time and holds a gate permit
         // while it does, so the whole startup fan-out — hydration plus both
         // BM25 sweeps — can never have more than `gate.limit()` palaces open
@@ -985,7 +985,7 @@ impl AppState {
                 // Held for the whole open so the bound covers the hydration,
                 // not just the call that starts it.
                 let _permit = permit;
-                match trusty_common::memory_core::PalaceHandle::open_with_intent(&palace, intent) {
+                match registry.open_handle(&palace) {
                     Ok(handle) => {
                         tracing::debug!(
                             palace = %palace.id,
@@ -1077,7 +1077,7 @@ impl AppState {
     /// reads-only. CLI, stdio-proxy, and test code paths never call this, so
     /// they keep the snapshot read-fallback (issue #59).
     /// What: Replaces `self.registry` with a fresh `PalaceRegistry` carrying
-    /// `OpenIntent::Writer`.
+    /// `OpenIntent::Writer` and this data root's `MaintenanceLease` (#8733).
     ///
     /// Invariant: MUST be called on a fresh, unhydrated, unshared registry —
     /// during startup, before `spawn_startup_tasks`/`load_palaces_from_disk`
@@ -1101,7 +1101,14 @@ impl AppState {
         debug_assert!(self.registry.is_empty() && Arc::strong_count(&self.registry) == 1);
         // Idle-to-disk: preserve the configurable open-handle cap
         // (TRUSTY_MEMORY_MAX_OPEN_PALACES) while marking the registry a writer.
-        self.registry = Arc::new(PalaceRegistry::from_env().with_writer_intent());
+        // #8733: a writer may run maintenance only while it holds this data
+        // root's lease; hydration's first open takes it or logs the holder.
+        let lease = trusty_common::memory_core::MaintenanceLease::new(&self.data_root);
+        self.registry = Arc::new(
+            PalaceRegistry::from_env()
+                .with_writer_intent()
+                .with_maintenance_lease(Arc::new(lease)),
+        );
         self
     }
 
@@ -1533,3 +1540,7 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
 
 #[cfg(test)]
 mod lib_tests;
+
+/// #5937: every env-writing lib test holds `commands::env_test_lock()`.
+#[cfg(test)]
+mod env_lock_ratchet_tests;

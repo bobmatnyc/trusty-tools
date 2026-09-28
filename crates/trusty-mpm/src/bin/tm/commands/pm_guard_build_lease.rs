@@ -49,7 +49,10 @@ use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
 use super::hook_rewrite::rewrite_bash_command_unless_isolated;
 use super::pm_guard_bash::build_lease_rewrite::{LeaseRewrite, rewrite_for_lease};
 use super::pm_guard_bash::{split_shell_segments, unclassifiable_command};
-use super::pm_guard_response::{RewriteDecision, build_rewrite_response};
+use super::pm_guard_deny_log::{DenyContext, audit_denied_tool};
+use super::pm_guard_response::{
+    RewriteDecision, build_pm_guard_deny_response, build_rewrite_response,
+};
 
 /// What the lease rule decided for one tool call.
 ///
@@ -202,6 +205,21 @@ pub(crate) fn emit_allow(payload: &Value, cost_notice: Option<String>, rewrite: 
         "{}",
         super::pm_guard_worktree_grant::with_additional_context(&rewrite, context.as_deref())
     );
+}
+
+/// The check slug a build-lease refusal is recorded under (#8722).
+pub(crate) const DENY_CHECK: &str = "build-lease";
+
+/// Record a build-lease refusal, then render its deny response for stdout.
+///
+/// Why (#8722): every pm-guard deny is captured to the scrubbed denial store
+/// the bug pipeline reads. The lease's refusal is one more deny, so it goes
+/// through the same [`audit_denied_tool`] before the caller prints it.
+/// What: [`audit_denied_tool`] under [`DENY_CHECK`], then the deny JSON.
+/// Test: `a_lease_refusal_is_recorded_before_it_is_printed`.
+pub(crate) async fn deny_response(refused: &DenyContext<'_>, reason: &str) -> String {
+    audit_denied_tool(refused, DENY_CHECK, reason).await;
+    build_pm_guard_deny_response(reason).to_string()
 }
 
 /// The Bash permission patterns, by kind.
@@ -403,6 +421,29 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8261 x #8722: the lease refusal lands in the denial store under its own
+    /// check slug before the deny is rendered. Removing the audit call from
+    /// [`deny_response`] fails this.
+    #[tokio::test]
+    async fn a_lease_refusal_is_recorded_before_it_is_printed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("pm-guard-denials.jsonl");
+        let payload = serde_json::json!({
+            "session_id": "s-lease",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo $(cargo build"},
+            "cwd": "/tmp/repo",
+        });
+        let mut refused = DenyContext::from_payload("http://127.0.0.1:1", &payload);
+        refused.store = Some(store.clone());
+        let deny = deny_response(&refused, "wrap it in tm build-lease").await;
+        assert!(deny.contains(r#""permissionDecision":"deny""#), "{deny}");
+        let body = std::fs::read_to_string(&store).expect("the refusal was recorded");
+        for part in ["check=build-lease", "cargo build", "session=s-lease"] {
+            assert!(body.contains(part), "{part} missing from {body}");
+        }
+    }
 
     fn cwd() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")

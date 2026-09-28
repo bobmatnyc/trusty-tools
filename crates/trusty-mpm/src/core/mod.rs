@@ -309,6 +309,8 @@ pub mod session_mcp_scope;
 // #6972: which model the parent session runs, remembered by the statusline hook
 // so the divert producer prices its rows at the parent's real rate.
 pub mod session_model;
+// #8453: the PM or supervisor instruction profile a session runs.
+pub mod session_profile;
 // #7282: a pause snapshot reaches `origin/main` through its own branch and PR,
 // never as a commit on whatever branch the main checkout happens to be on.
 pub mod session_pause_pr;
@@ -360,6 +362,9 @@ pub mod stop_spool;
 pub mod statusline_settings;
 pub mod stray_mcp;
 pub mod tmux;
+// #6542: each test binary's private default tmux server; test support only.
+#[doc(hidden)]
+pub mod tmux_test_isolation;
 pub mod transcript_usage;
 pub mod trusty_tools_config;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.

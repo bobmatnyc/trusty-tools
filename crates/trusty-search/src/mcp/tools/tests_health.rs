@@ -446,3 +446,27 @@ async fn search_health_reports_which_source_named_the_index() {
     assert_eq!(report["index"]["index_id"], "explicit-one");
     assert_eq!(report["index"]["resolved_from"], "argument");
 }
+
+/// A healthy index on a daemon whose embedder is failing is not `ok` (#8348).
+///
+/// Why: searches still answer lexically, so every index-level check passed and
+/// `search_health` said `ok` while no semantic result could be served.
+/// What: `/health` reports `embedder: "stalled"`; the verdict must be
+/// `embedder_unavailable` with `healthy: false`.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_reports_a_failing_embedder_as_unhealthy() {
+    let mut health = healthy_body(1, 5);
+    health["embedder"] = json!("stalled");
+    let base = spawn_health_daemon((200, health), (200, json!({ "chunk_count": 5 }))).await;
+    let server = McpServer::new(base).with_pinned_index("mine");
+
+    let report = health_report(&server, json!({})).await;
+
+    assert_eq!(
+        report["status"],
+        crate::mcp::tools::health::HEALTH_EMBEDDER_UNAVAILABLE,
+        "{report}"
+    );
+    assert_eq!(report["healthy"], Value::Bool(false));
+}

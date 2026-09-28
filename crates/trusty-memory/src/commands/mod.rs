@@ -17,7 +17,9 @@ pub mod audit_secrets;
 // #4891: ADR-0028 Migration step 3 — the read-only backfill triage report.
 pub mod backfill_report;
 pub mod daemon_guard;
-pub mod daemon_lock;
+// #8759: `daemon_lock` is gone — unused since #6286 and racy; the socket's
+// singleton bind lock (`trusty_common::uds::bind_singleton_hardened`) is the
+// daemon lock.
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;
@@ -29,12 +31,15 @@ pub mod kuzu_import;
 pub mod kuzu_migrate;
 pub mod legacy_kg;
 pub mod link;
+pub(crate) mod maintenance_gate;
 pub mod migrate;
 pub mod migrations;
 pub mod monitor;
 pub mod note;
 // #6652: `palace stats` / `palace compact` — kg.redb measurement and rewrite.
 pub mod palace;
+// #8732: `palace deletions` — read the maintenance deletion journal.
+pub mod palace_deletions;
 pub mod port;
 pub mod prompt_context;
 pub mod rooms;

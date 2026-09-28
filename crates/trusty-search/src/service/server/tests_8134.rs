@@ -84,8 +84,12 @@ async fn create_index_vectors_over_an_empty_corpus_is_not_ready() {
     assert!(state.registry.unregister(&id), "unregister");
 
     // The artifact shape the reporter registered: vectors, no corpus rows.
-    let redb = crate::service::colocated_storage::colocated_redb_path(&root).expect("redb path");
-    std::fs::remove_file(&redb).expect("remove index.redb");
+    // #8499: the first create kept its corpus in the data dir, so the
+    // colocated dir already holds only the snapshot; the re-POST adopts it.
+    let redb = root
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
+        .join("index.redb");
+    assert!(!redb.exists(), "precondition: no colocated corpus rows");
 
     let second = super::indexes::create_index_handler(
         State(Arc::clone(&state)),

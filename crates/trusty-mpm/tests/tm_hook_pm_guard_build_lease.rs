@@ -5,7 +5,7 @@
 //! identical rewrite, and a dispatch — builder or not — is never refused by the
 //! retired dispatch-time cap, even with the daemon down.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::Path;
@@ -469,5 +469,11 @@ fn a_subagents_leased_build_runs_in_its_slot_directory() {
     assert!(
         err.contains(&format!("slot 0 — CARGO_TARGET_DIR={}", slot.display())),
         "the agent is told the slot path: {err}"
+    );
+    // #8831: the notice restates the CLAUDE.md rule's one exception, or an
+    // agent reading both sees two contradictory instructions.
+    assert!(
+        err.contains("Never override CARGO_TARGET_DIR EXCEPT with this granted slot"),
+        "the notice must carry the rule's slot exception: {err}"
     );
 }

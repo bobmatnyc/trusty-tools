@@ -183,7 +183,13 @@ failure**, the same tier as a failing `cargo test` / `cargo clippy` gate — and
 is also a CI failure (`.github/workflows/changelog-fragment.yml` →
 `scripts/check_changelog_fragment.sh`). No "trivial change" exception.
 
-Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment.
+Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment. So
+may a PR that only adds or modifies Cargo-inert instruction assets — the
+`.md` content under `crates/trusty-mpm/src/assets/` and
+`crates/trusty-agents-common/src/assets/`, and `content/**` (owner ruling
+2026-09-27). The list is `is_inert_instruction_asset` in
+`scripts/lib/source_class.sh`, which `scripts/detect-docs-only.sh` reads too.
+Deleting such an asset still owes a fragment.
 
 ### The test-only exemption is decided by FILE PATH (#7033)
 

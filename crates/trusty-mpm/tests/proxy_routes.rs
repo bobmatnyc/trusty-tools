@@ -15,9 +15,6 @@
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm --test
 //! proxy_routes`.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use std::future::IntoFuture;
 use std::sync::Arc;
 

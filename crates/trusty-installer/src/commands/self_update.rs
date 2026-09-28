@@ -169,8 +169,9 @@ pub fn run(json: bool) -> i32 {
         Next::Verify { paths, version } => {
             let bin_path =
                 super::install::select_prebuilt_bin_path(&paths, INSTALLER_BINARY, &install_dir);
+            // #6231: this process just wrote the file — retry an ETXTBSY exec.
             let probed = crate::commands::runtime::block_on(
-                trusty_common::update::verify_installed_binary_at_path(&bin_path),
+                crate::download::fresh_exec::probe_fresh_binary(&bin_path),
             )
             .map_err(|e| e.to_string());
             match health_gate_verdict(&bin_path, &version, probed) {

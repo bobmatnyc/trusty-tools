@@ -606,6 +606,10 @@ mod tests {
     /// Test: itself.
     #[test]
     fn with_daemon_path_seeds_full_path() {
+        // #5937: compares against HOME, which other tests in this binary set.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = dirs::home_dir().expect("home dir resolvable in test env");
         let xml = sample(KeepAlive::Always)
             .with_daemon_path()

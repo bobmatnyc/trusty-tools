@@ -7,10 +7,14 @@
 //! fabricated; nothing reaches the network.
 //! What: the post-merge cleanup that must keep working, a commit made after
 //! the merge (refused, named), such a commit whose content a later squash
-//! landed (admitted), and a merged head git does not have (refused).
+//! landed (admitted), and a merged head git does not have (refused). #8721:
+//! a detached HEAD whose content is on `origin/main` (admitted), and the
+//! residual, unrefreshable and unanswered-search arms (refused).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use trusty_mpm::core::worktree_landed_content::{LandingAdmission, landed_content_verdict};
 use trusty_mpm::core::worktree_landed_history::ContentOnBase;
 use trusty_mpm::core::worktree_removal_facts::{
     GitAndGhProbe, MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
@@ -140,6 +144,18 @@ impl WorktreeRemovalProbe for RealGitFakeGh {
     fn merged_pull_requests(&self, _dir: &Path, _branch: &str) -> Result<MergedPrLookup, String> {
         self.pr.clone()
     }
+    // #8721: the detached route asks by commit; the same fabricated answer.
+    fn merged_pull_request_for_commit(
+        &self,
+        _dir: &Path,
+        _sha: &str,
+    ) -> Result<MergedPrLookup, String> {
+        self.pr.clone()
+    }
+    // #8721: route (b) on real git; route (c) would reach `gh`.
+    fn landing_admission(&self, dir: &Path) -> LandingAdmission {
+        landed_content_verdict(dir, Duration::from_secs(10)).into()
+    }
     fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
         GitAndGhProbe.content_on_base(dir, base_ref)
     }
@@ -211,4 +227,96 @@ fn worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit() {
     assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
     assert!(reason.contains("could not be established"), "{reason}");
     assert!(reason.contains(ABSENT), "{reason}");
+}
+
+/// The #8721 shape: a clone with HEAD detached on a commit no `origin` ref
+/// has, whose content `origin/main` gained through a different commit.
+fn detached_landed() -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("fixture: tempdir");
+    let bare = [
+        "init",
+        "-q",
+        "--bare",
+        "--initial-branch=main",
+        "origin.git",
+    ];
+    git(tmp.path(), &bare);
+    let url = tmp.path().join("origin.git");
+    let url = url.to_str().expect("utf8 path");
+    let main = tmp.path().join("main");
+    git(tmp.path(), &["clone", "-q", url, "main"]);
+    configure(&main);
+    git(&main, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    commit_file(&main, "README.md", "seed\n", "seed");
+    git(&main, &["push", "-q", "-u", "origin", "main"]);
+    let wt = tmp.path().join("wt");
+    git(tmp.path(), &["clone", "-q", url, "wt"]);
+    configure(&wt);
+    git(&wt, &["checkout", "-q", "--detach"]);
+    commit_file(&wt, "a.txt", "a\n", "detached work");
+    commit_file(&main, "a.txt", "a\n", "the same work, landed (#1)");
+    git(&main, &["push", "-q", "origin", "main"]);
+    (tmp, wt)
+}
+
+/// No MERGED pull request, by branch or by commit.
+fn no_pr() -> Result<MergedPrLookup, String> {
+    Ok(MergedPrLookup::new(0, "o/r", ""))
+}
+
+/// Evaluate the re-checks for a detached `wt` with GitHub answering `pr`.
+fn detached_verdict(wt: &Path, pr: Result<MergedPrLookup, String>) -> Option<String> {
+    evaluate_removal_rechecks(wt, Ok(&[]), &RealGitFakeGh { pr })
+}
+
+/// 🔴 REGRESSION (#8721): a clean detached tree whose content is on
+/// `origin/main` is admitted. Fails at 62b6f29e1, which denies with
+/// `merged-pull-request`: the detached route never asked the admission.
+#[test]
+fn worktree_8721_a_detached_head_whose_tree_is_on_origin_main_is_reclaimable() {
+    let (_tmp, wt) = detached_landed();
+    assert!(GitAndGhProbe.branch(&wt).is_err(), "fixture: detached");
+    assert_eq!(GitAndGhProbe.local_only_commits(&wt), Ok(1), "fixture");
+    assert_eq!(detached_verdict(&wt, no_pr()), None);
+}
+
+/// 🔴 #8721: work `origin/main` lacks still denies, and the refusal names
+/// the admission's residual path. Fails at 62b6f29e1: no admission ran.
+#[test]
+fn worktree_8721_a_detached_head_holding_residue_still_denies() {
+    let (_tmp, wt) = detached_landed();
+    commit_file(&wt, "b.txt", "unlanded\n", "work nobody has");
+    let reason = detached_verdict(&wt, no_pr()).expect("residue must deny");
+    assert!(reason.contains(CHECK_MERGED_PULL_REQUEST), "{reason}");
+    assert!(
+        reason.contains("`landed-content` admission does not apply"),
+        "{reason}"
+    );
+    assert!(reason.contains("`b.txt`"), "{reason}");
+}
+
+/// 🔴 FAIL-OPEN CHECK (#8721): an admission that cannot refresh `origin`
+/// establishes nothing, so it denies and says so. Fails at 62b6f29e1,
+/// whose deny carries no admission sentence.
+#[test]
+fn worktree_8721_an_unrefreshable_origin_never_admits_a_detached_head() {
+    let (tmp, wt) = detached_landed();
+    let moved = tmp.path().join("moved.git");
+    std::fs::rename(tmp.path().join("origin.git"), moved).expect("fixture: move remote");
+    let reason = detached_verdict(&wt, no_pr()).expect("an unrefreshed origin must deny");
+    assert!(
+        reason.contains("`landed-content` admission could not be established"),
+        "{reason}"
+    );
+}
+
+/// 🔴 #8721: a commit search that did not answer never reaches the
+/// admission (ADR-0045), even for a tree whose content is landed.
+#[test]
+fn worktree_8721_an_unanswerable_commit_search_never_reaches_the_admission() {
+    let (_tmp, wt) = detached_landed();
+    let reason = detached_verdict(&wt, Err("`gh pr list` timed out".into()))
+        .expect("an unanswered search must deny");
+    assert!(reason.contains("timed out"), "{reason}");
+    assert!(!reason.contains("landed-content"), "{reason}");
 }

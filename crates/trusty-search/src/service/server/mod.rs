@@ -14,6 +14,7 @@
 mod admin;
 mod components;
 mod contrib_graph;
+mod create_layout;
 // #8167/#8232: a delete closes the index's redb and HNSW files first.
 mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
@@ -106,6 +107,15 @@ mod tests_6380;
 // #8438: `delete_data` removes the directory the registry names, per source.
 #[cfg(test)]
 mod tests_8438;
+// #8499: indexing never modifies a tracked file; the index survives git clean.
+#[cfg(test)]
+mod tests_8499;
+// #8499 round 2: store placement, registration claims, relocate vs reindex.
+#[cfg(test)]
+mod registration_8499_tests;
+// #8499 round 3: enclosing work tree, busy store, relocate under the claim.
+#[cfg(test)]
+mod work_tree_8499_tests;
 // #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
 #[cfg(test)]
 mod tests_8148;
@@ -115,6 +125,12 @@ mod tests_8134;
 // #8167: a delete releases the index's files while a handle clone survives.
 #[cfg(test)]
 mod tests_8167;
+// #8664: a delete closes the files a queued deferred-embed job holds.
+#[cfg(test)]
+mod tests_8664;
+// #8727: parked registrations are listed; an overlap 409 names its blocker.
+#[cfg(test)]
+mod tests_8727;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
@@ -181,6 +197,9 @@ mod tests_grep_cold_8266;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
+// #8348: a failed query embed degrades to lexical instead of a 500.
+#[cfg(test)]
+mod tests_8348;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]

@@ -823,12 +823,11 @@ fn expand_query_noop_for_unmatched() {
 /// What: Remember 20 drawers, drop the handle, reopen the palace from the
 /// same data_dir, and recall a keyword from a drawer that is NOT in the
 /// top-15 by importance. The drawer must still come back.
-/// Test: Requires real ONNX embedder for semantic similarity; mark `--include-ignored`
-/// to run locally. Skipped in CI to avoid HuggingFace download / 429 flake (issue #850).
-#[ignore = "requires real ONNX embedder (issue #850)"]
+/// Test: itself. Needs the real ONNX embedder for semantic similarity, run
+/// in a fresh process: it must not seed the mock, and the shared embedder is process-global.
+#[ignore = "needs the real ONNX embedder in its own process; run by the pre-publish ignored-tests gate"]
 #[tokio::test]
 async fn cold_restart_recalls_beyond_l1_snapshot() {
-    init_embedder();
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("cold-restart"),
@@ -1405,12 +1404,11 @@ fn read_time_expiry_filters_without_deleting() {
 /// What: Insert two drawers — one high-importance but semantically unrelated
 /// to the query, one low-importance but closely matching the query — run
 /// `recall`, and assert the on-topic drawer appears first in the results.
-/// Test: Requires real ONNX embedder for semantic similarity; mark `--include-ignored`
-/// to run locally. Skipped in CI to avoid HuggingFace download / 429 flake (issue #850).
-#[ignore = "requires real ONNX embedder (issue #850)"]
+/// Test: itself. Needs the real ONNX embedder for semantic similarity, run
+/// in a fresh process: it must not seed the mock, and the shared embedder is process-global.
+#[ignore = "needs the real ONNX embedder in its own process; run by the pre-publish ignored-tests gate"]
 #[tokio::test]
 async fn recall_ranks_by_similarity_over_importance() {
-    init_embedder();
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("similarity-ranking-test"),

@@ -29,7 +29,7 @@ echo "exit=$?"                              # 0 means everything passed
 ```
 
 `run local` clones the base image, boots it, provisions a Rust toolchain, streams
-your **working tree** into the guest, installs all nine in-scope crates from it,
+your **working tree** into the guest, installs all eight in-scope crates from it,
 runs the assertion oracle, and deletes the VM. Expect **9–16 minutes**.
 
 Try `vmtest-harness/vmtest run local --dry-run` first: it runs preflight and prints
@@ -395,7 +395,7 @@ The six steps:
 ## What a green run proves — and what it does not
 
 A `vmtest run <pattern>` exiting 0 proves: the stack **built from that source**,
-**all fourteen in-scope binaries landed**, no multi-binary package installed a
+**all twelve in-scope binaries landed**, no multi-binary package installed a
 partial set, the installed tool versions are internally consistent, and the six
 in-scope daemons **answered `/health`**. On a machine with none of your state on it.
 

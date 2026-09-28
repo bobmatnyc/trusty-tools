@@ -321,6 +321,24 @@ pub(crate) fn room_label(room: &RoomType) -> Option<String> {
     Some(trusty_common::memory_core::room_identity::room_label(room))
 }
 
+/// Refuse a maintenance tool call unless this process holds the data root's
+/// maintenance lease (#8733).
+///
+/// Why: the MCP dream and compact tools evict, delete and rewrite rows, which
+/// only the elected maintainer may do; `dream_run` already refuses this way.
+/// What: `Ok` when `may_run_maintenance` allows it; otherwise an error carrying
+/// the same text as `dream_run`'s `Conflict`. An unavailable lease refuses.
+/// Test: `palace_dream_is_refused_without_the_maintenance_lease`,
+/// `dream_consolidate_room_is_refused_without_the_maintenance_lease`,
+/// `palace_compact_is_refused_without_the_maintenance_lease`.
+pub(crate) fn require_maintenance_lease(state: &AppState) -> Result<()> {
+    if state.registry.may_run_maintenance() {
+        Ok(())
+    } else {
+        Err(anyhow!(crate::service::core_kg::MAINTENANCE_LEASE_NOT_HELD))
+    }
+}
+
 /// Resolve (or lazily open) the palace handle for a tool call.
 ///
 /// Why the liveness guard (issue #4001): this is the single choke point every

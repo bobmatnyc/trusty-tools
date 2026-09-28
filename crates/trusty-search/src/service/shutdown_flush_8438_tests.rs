@@ -112,7 +112,10 @@ async fn colocated_shutdown_flush_writes_chunks_json_to_the_data_dir() {
     assert!(
         repo_entries
             .iter()
-            .all(|n| n == HNSW_FILE || n == "hnsw.keys.json"),
+            // #8499: the directory's own `.gitignore` hides it from git.
+            .all(|n| n == HNSW_FILE
+                || n == "hnsw.keys.json"
+                || n == crate::service::colocated_storage::SELF_IGNORE_FILE),
         "#8438: <root>/.trusty-search/ must hold only the HNSW snapshot, found {repo_entries:?}"
     );
 }

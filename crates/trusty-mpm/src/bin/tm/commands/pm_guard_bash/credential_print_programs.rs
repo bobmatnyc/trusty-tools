@@ -9,6 +9,7 @@
 //! Test: `credential_print_tests` (sibling module).
 
 use super::super::shell_lex::DASH_C_SHELLS;
+use super::credential_print_taint::is_identifier;
 
 /// `security find-*-password` options that take a value (BSD getopt).
 const SECURITY_OPTS_WITH_ARG: &[char] = &[
@@ -54,6 +55,12 @@ const EVALUATORS: &[&str] = &[
     "deno",
     "php",
     "fish",
+    // #8676 round 3.
+    "bun",
+    "lua",
+    "luajit",
+    "pwsh",
+    "powershell",
 ];
 
 /// The basename of a program word, lowercased: APFS is case-insensitive, so
@@ -280,21 +287,25 @@ fn options_enable_xtrace(args: &[String]) -> bool {
 
 /// The operands an evaluator runs as code (#8596 round 3, finding 6).
 ///
-/// What: every operand of `eval`, `source`, `.` and `ssh`; the `deno eval`
-/// operands; otherwise the value of each inline-code flag — `-c` for
-/// `python`/shells/`fish`, `-e`/`-E` for `perl`, `-e` for `ruby` and
-/// `osascript`, `-e`/`-p` and `--eval`/`--print` for `node`, `-r` for `php` —
+/// What: every operand of `eval`, `source`, `.`, `ssh` and `pwsh`; the `deno
+/// eval` operands; otherwise the value of each inline-code flag — `-c` for
+/// `python`/shells/`fish`, `-e`/`-E` for `perl`, `-e` for `ruby`, `lua` and
+/// `osascript`, `-e`/`-p` and `--eval`/`--print` for `node` and `bun`, `-r` for
+/// `php` —
 /// attached (`-cCODE`) or the next word, found anywhere in `args`. A script
 /// path and its arguments are not code: they are judged like any program's.
 pub(super) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a str> {
     let all = || args.iter().map(String::as_str).collect();
     let (short, long): (&[char], &[&str]) = match program {
-        "eval" | "source" | "." | "ssh" => return all(),
+        // #8676 round 3: PowerShell reads `-c`, `-Command`, `-EncodedCommand`
+        // and any unambiguous prefix, so every operand counts.
+        "eval" | "source" | "." | "ssh" | "pwsh" | "powershell" => return all(),
         "deno" if args.first().is_some_and(|a| a == "eval") => return all(),
         "deno" => return Vec::new(),
         "perl" => (&['e', 'E'], &[]),
         "ruby" | "osascript" => (&['e'], &[]),
-        "node" => (&['e', 'p'], &["--eval", "--print"]),
+        "node" | "bun" => (&['e', 'p'], &["--eval", "--print"]),
+        "lua" | "luajit" => (&['e'], &[]),
         "php" => (&['r'], &[]),
         _ => (&['c'], &["--command"]),
     };
@@ -327,11 +338,53 @@ pub(super) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a st
 
 /// Whether `program` runs text it is handed as code: an [`EVALUATORS`] entry,
 /// or a shell reading its program from stdin or an argument.
-pub(super) fn is_evaluator(program: &str) -> bool {
-    EVALUATORS.contains(&program) || DASH_C_SHELLS.contains(&program)
+// #8756: crate-visible so `substitutions` can ask which heredoc bodies run.
+pub(crate) fn is_evaluator(program: &str) -> bool {
+    evaluator_name(program).is_some()
+}
+
+/// The [`EVALUATORS`] or shell entry `program` runs as, with a version suffix
+/// dropped (#8676 round 3): `python3.12` and `lua5.4` run as `python`, `lua`.
+pub(super) fn evaluator_name(program: &str) -> Option<&str> {
+    let known = |p: &str| EVALUATORS.contains(&p) || DASH_C_SHELLS.contains(&p);
+    if known(program) {
+        return Some(program);
+    }
+    let bare = program.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | '-'));
+    (bare.len() < program.len() && !bare.is_empty() && known(bare)).then_some(bare)
 }
 
 /// Shell keywords that can precede the program word.
-pub(super) const KEYWORDS: &[&str] = &[
-    "!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time",
+const KEYWORDS: &[&str] = &[
+    "!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time", "coproc",
 ];
+
+/// The compound-command openers a `coproc NAME` can precede.
+const COMPOUND_OPENERS: &[&str] = &["{", "while", "until", "if", "for", "select", "case", "[["];
+
+/// How many words of `argv` from `from` are leading keywords, and whether one
+/// is `coproc` (#8676 round 4).
+///
+/// What: counts [`KEYWORDS`] entries; after `coproc`, an identifier followed
+/// by a [`COMPOUND_OPENERS`] word is its NAME and is counted too, so the
+/// coproc's own command is the one judged. `coproc NAME ( … )` loses its
+/// parens to `ungroup` and keeps NAME as the program; the caller's carrying
+/// refusal covers that shape.
+pub(super) fn keyword_words(argv: &[String], from: usize) -> (usize, bool) {
+    let mut at = from;
+    let mut coproc = false;
+    while let Some(word) = argv.get(at).map(String::as_str)
+        && KEYWORDS.contains(&word)
+    {
+        at += 1;
+        if word == "coproc" {
+            coproc = true;
+            let named = argv.get(at).is_some_and(|n| is_identifier(n))
+                && argv
+                    .get(at + 1)
+                    .is_some_and(|o| COMPOUND_OPENERS.contains(&o.as_str()));
+            at += usize::from(named);
+        }
+    }
+    (at - from, coproc)
+}

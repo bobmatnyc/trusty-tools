@@ -14,12 +14,16 @@
 # What was wrong is that the two definitions lived in two places and could drift
 # without anyone deciding they should.
 #
-# What: three predicates, and the ruling on which gate applies which.
+# What: four predicates, and the ruling on which gate applies which.
 #
 #   is_test_path <path>       test / benchmark / testdata file
 #   is_crate_src_path <path>  crates/<crate>/src/**, exactly one level under
 #                             crates/
 #   crate_of_src_path <path>  the <crate> of such a path, on stdout
+#   is_inert_instruction_asset <status> <path>
+#                             Cargo-inert instruction content (ADR-0064): the
+#                             ONE list scripts/detect-docs-only.sh and
+#                             check_changelog_fragment.sh both read
 #
 # THE RULING (#5765). The two gates ask different questions, so they apply
 # different predicates — deliberately, and stated here rather than implied by
@@ -36,6 +40,12 @@
 #
 # So a test file under src/ IS crate source and is NOT a user-visible change.
 # Both gates now say that in the same words.
+#
+#   is_inert_instruction_asset is applied by check_changelog_fragment.sh and
+#   scripts/detect-docs-only.sh, NOT by check-pr-version-bump.sh: an edited
+#   instruction asset ships in the crates.io tarball, so it is still drift
+#   against a published version. Owner ruling 2026-09-27: such assets count
+#   as docs, which owe no changelog fragment.
 #
 # SCOPE, honestly. This file holds the definitions, not every path each gate
 # reaches. `check_changelog_fragment.sh` additionally attributes NESTED crate
@@ -106,4 +116,21 @@ crate_of_src_path() {
   is_crate_src_path "$path" || return 1
   rest="${path#crates/}"
   printf '%s\n' "${rest%%/*}"
+}
+
+# is_inert_instruction_asset <status> <path> — 0 when <path> is instruction
+# content whose ADD or MODIFY cannot change a Cargo result (ADR-0064).
+#
+# <status> is a git --name-status letter. Any status other than A or M — D, T,
+# or `?` for a bare path — answers no: a delete removes a path an include_str!
+# names, so it is code. `*` in a `case` glob spans `/`, which is intended here:
+# every depth under each root qualifies.
+is_inert_instruction_asset() {
+  case "$1" in A | M) ;; *) return 1 ;; esac
+  case "$2" in
+    content/?*) return 0 ;;
+    crates/trusty-mpm/src/assets/?*.md) return 0 ;;
+    crates/trusty-agents-common/src/assets/?*.md) return 0 ;;
+  esac
+  return 1
 }

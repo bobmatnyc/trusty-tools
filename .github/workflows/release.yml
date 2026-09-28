@@ -19,7 +19,9 @@
 #      which are set — this job bumps a formula on every real tag push.
 #
 # TRIGGERS:
-#   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`)
+#   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`), except
+#     `content-v*` (Refs #8389) — that tag belongs to content-release.yml's
+#     independent bundle-versioning channel, not a crate release.
 #   - workflow_dispatch for manual dry-runs (skips the release upload by default)
 #
 # LINUX BINARY PORTABILITY (issue #2037):
@@ -136,6 +138,7 @@ on:
   push:
     tags:
       - "*-v*"
+      - "!content-v*"
   workflow_dispatch:
     inputs:
       crate:
@@ -180,10 +183,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate:    ${{ steps.parse.outputs.crate }}
-      # Why (#1128): the ORIGINAL tag prefix before alias canonicalization (e.g.
-      # `tga` stays `tga`, while `crate` becomes `trusty-git-analytics`). Used by
-      # the release job's changelog --tag-pattern, which must match the literal
-      # pushed tag. For non-aliased crates tag_prefix == crate.
+      # Why (#1128): the ORIGINAL tag prefix before alias canonicalization. Used
+      # by the release job's changelog --tag-pattern, which must match the
+      # literal pushed tag. For non-aliased crates tag_prefix == crate, and no
+      # crate in this workspace carries an alias today.
       tag_prefix: ${{ steps.parse.outputs.tag_prefix }}
       # Why (See #5455): the SINGLE resolved release tag, computed once here
       # instead of read from `github.ref_name` at each call site. On a real tag
@@ -209,12 +212,12 @@ jobs:
       # is NOT bundled — it has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
       # Space-separated `[[bin]]` target names for this crate, as set in the
-      # `config` step's per-crate branches (e.g. "trusty-audit taudit"). This
+      # `config` step's per-crate branches (e.g. "trusty-installer tctl"). This
       # is the SAME `BINARIES` value the build-matrix step above already
       # consumes — exposing it here lets `homebrew-bump` install every binary
       # the crate actually ships instead of hand-maintaining a second
-      # crate→binaries table that can drift from this one (#5972: it did, for
-      # trusty-audit). Empty for a bundled (library-only) crate, but
+      # crate→binaries table that can drift from this one (#5972: it did).
+      # Empty for a bundled (library-only) crate, but
       # `homebrew-bump` only runs when `bundled != 'true'`, so it never reads
       # an empty value.
       binaries: ${{ steps.config.outputs.binaries }}
@@ -249,8 +252,7 @@ jobs:
           # one from the raw (pre-alias) crate input, using the SAME
           # `<prefix>-v<version>` convention documented in CLAUDE.md ("Git Tag /
           # Release Convention") and enforced by the regex above, so a manual
-          # republish targets the tag that was actually pushed (e.g. `tga-v2.18.0`,
-          # not `trusty-git-analytics-v2.18.0`). Reading `github.ref_name`
+          # republish targets the tag that was actually pushed. Reading `github.ref_name`
           # directly at each downstream call site is what broke this: under
           # workflow_dispatch it resolves to the dispatched-against REF (e.g. the
           # literal string `main`), never the crate/version inputs.
@@ -270,19 +272,15 @@ jobs:
           # changelog --include-path, and the GitHub Release name — keys off the
           # single canonical crate/directory name.
           #
-          # tga (the crates.io package name for trusty-git-analytics) → its
-          # directory/canonical name trusty-git-analytics. Pushing tga-v<ver>
-          # previously fell through to the library-only green-skip branch and
-          # silently produced no binaries; it now resolves to the same config as
-          # trusty-git-analytics-v<ver>.
+          # No crate carries an alias today. `tga` (→ trusty-git-analytics) was
+          # the only one, and it moved to bobmatnyc/trusty-git-analytics (owner
+          # ruling 2026-09-28). A future alias adds a
+          # `case "$CRATE" in <alias>) CRATE="<dir>" ;; esac` below TAG_PREFIX.
           #
           # TAG_PREFIX retains the ORIGINAL tag prefix (before aliasing) because
           # the changelog step keys --tag-pattern off the literal pushed tag, not
           # the canonical crate name. For non-aliased crates TAG_PREFIX == CRATE.
           TAG_PREFIX="$CRATE"
-          case "$CRATE" in
-            tga) CRATE="trusty-git-analytics" ;;
-          esac
 
           {
             echo "crate=$CRATE"
@@ -453,24 +451,6 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
-          elif [[ "$CRATE" == "trusty-git-analytics" ]]; then
-            # Cargo package name is `tga` (short name in Cargo.toml — confirmed).
-            # Also serves `tga-v*` tags: the parse step canonicalizes the `tga`
-            # tag-prefix alias to `trusty-git-analytics` (issue #1128), so both
-            # tga-v<ver> and trusty-git-analytics-v<ver> resolve to this branch.
-            # Single [[bin]] `tga` at src/main.rs confirmed in Cargo.toml.
-            # Default features = [] (empty); no required-features on the bin target.
-            # No SKIP_UI_BUILD, no AL2023 variant.
-            CARGO_PKG="tga"
-            BINARIES="tga"
-            SKIP_UI_BUILD="false"
-            CARGO_FEATURES=""
-            NO_DEFAULT_FEATURES="false"
-            NATIVE_LINUX_LINK="false"
-            AL2023_VARIANT="false"
-            AL2023_NO_DEFAULT="false"
-            AL2023_FEATURES=""
-
           elif [[ "$CRATE" == "trusty-code" ]]; then
             # Single [[bin]] `tcode` at src/main.rs confirmed in Cargo.toml.
             # No required-features on the bin target; publish=false but included for
@@ -492,35 +472,6 @@ jobs:
             # No UI embedding, no ORT: no SKIP_UI_BUILD, no AL2023 variant.
             CARGO_PKG="trusty-installer"
             BINARIES="trusty-installer tctl"
-            SKIP_UI_BUILD="false"
-            CARGO_FEATURES=""
-            NO_DEFAULT_FEATURES="false"
-            NATIVE_LINUX_LINK="false"
-            AL2023_VARIANT="false"
-            AL2023_NO_DEFAULT="false"
-            AL2023_FEATURES=""
-
-          elif [[ "$CRATE" == "trusty-audit" ]]; then
-            # Binaries: trusty-audit + taudit (#5502) — two [[bin]] targets over
-            # ONE src/main.rs, the trusty-installer / tctl precedent. `taudit` is
-            # what crates/trusty-audit/install.sh (#5870) downloads and launches.
-            #
-            # #5870: before this branch existed, a `trusty-audit-v*` tag fell
-            # through to the library-only green-skip below and published nothing,
-            # which is exactly the "missing binary release is silent" caveat the
-            # green-skip comment warns about. The self-downloading installer has
-            # no asset to fetch without it.
-            #
-            # `publish = false` in Cargo.toml governs crates.io only and does not
-            # affect this workflow, which builds from the tag — trusty-code is the
-            # existing precedent for a publish=false crate in this allowlist.
-            #
-            # No required-features on either bin target. No UI embedding (the
-            # crate's ui/ is not a rust-embed bundle), so no SKIP_UI_BUILD. No ORT
-            # anywhere in the graph, so ordinary zigbuild on Linux and no AL2023
-            # variant.
-            CARGO_PKG="trusty-audit"
-            BINARIES="trusty-audit taudit"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -584,9 +535,8 @@ jobs:
           else
             echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
             echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
-            echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
-            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias),"
-            echo "  trusty-audit (+ taudit alias)."
+            echo "  trusty-analyze, trusty-review, trusty-mpm,"
+            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services,"
@@ -1887,14 +1837,14 @@ jobs:
       #
       # Scoping (issue #1128): two distinct keys are used here on purpose.
       #   --include-path crates/<crate>/**  keys off needs.setup.outputs.crate,
-      #     the CANONICAL crate/directory name (e.g. trusty-git-analytics). This
+      #     the CANONICAL crate/directory name. This
       #     must be the directory under crates/ so git-cliff scopes commits to
       #     the right path.
       #   --tag-pattern <tag_prefix>-v*  keys off needs.setup.outputs.tag_prefix,
-      #     the ORIGINAL tag prefix actually pushed (e.g. `tga`). This must match
+      #     the ORIGINAL tag prefix actually pushed. This must match
       #     the literal tag so --latest selects this release's section.
       # For non-aliased crates the two are identical (tag_prefix == crate); only
-      # aliased tags like tga-v* (canonical trusty-git-analytics) differ.
+      # an aliased tag would differ, and none exists today.
       #
       # --latest emits only this tag's section; --strip all drops the
       # Keep-a-Changelog header/footer so the body is just the grouped commits.

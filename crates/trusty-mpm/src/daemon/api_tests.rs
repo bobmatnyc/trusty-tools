@@ -1354,6 +1354,8 @@ async fn doctor_endpoint_returns_report() {
         "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
+        // #8453: the resolved session profile, or why it fell back to PM.
+        "session_profile",
         // #7616: the instruction fold's measured saving, or INACTIVE.
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.

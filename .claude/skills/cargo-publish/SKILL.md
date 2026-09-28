@@ -232,11 +232,8 @@ assuming you're mid-publish — this is the Step 2b pre-tag gate above, MANDATOR
 before `git tag`, not just a status preview. `--help` documents the rare,
 logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated release
 worktrees only — misuse of it is exactly how the incident happened). No
-override exists for the identity check. Publishing `trusty-audit` has one extra
-obligation: run `scripts/refresh-engagement-pins.sh` and commit the result before
-the bump, because CHECK 10 fails the release when a `[tools]` pin in
-`crates/trusty-audit/templates/engagement.template.toml` lags a sibling whose
-workspace version this same train is about to publish (#6772).
+override exists for the identity check. `tga` and `trusty-audit` publish from
+bobmatnyc/trusty-git-analytics, not from this workspace.
 
 ## Step 6: Version-Parity Guard (MANDATORY, issue #3366)
 
@@ -534,7 +531,7 @@ grep "^name = " crates/<dir>/Cargo.toml
 Most match (`crates/trusty-search/` → `-p trusty-search`).
 
 **Exceptions** (always verify `Cargo.toml`):
-- `crates/trusty-git-analytics/` → `name = "tga"` → `-p tga`
+- `crates/trusty-agents/ui/src-tauri/` → `name = "trusty-agents-ui"` → `-p trusty-agents-ui`
 
 If `cargo -p <name>` returns "package not found":
 ```bash

@@ -24,7 +24,8 @@ use super::build_lease_program::{
 };
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
-use super::{paren_substitution_live_at, split_shell_segments, split_shell_segments_raw};
+use super::substitutions::paren_substitution_live_at;
+use super::{split_shell_segments, split_shell_segments_raw};
 use crate::commands::hook_rewrite::is_env_assignment;
 
 /// What the hook does with one Bash command.

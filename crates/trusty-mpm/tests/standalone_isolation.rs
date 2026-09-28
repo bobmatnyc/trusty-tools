@@ -22,10 +22,7 @@
 //! advertises.
 //!
 //! Test: this file IS the test module; run with
-//! `cargo test -p trusty-mpm --test standalone_isolation`.
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//! `cargo test -p trusty-mpm --test env_serial standalone_isolation::`.
 
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -143,7 +140,7 @@ fn assert_no_real_claude_writes(fake_home: &Path) {
 /// What: redirects HOME to `fake_home`, runs the full config-assembly pipeline
 /// against `<managed_root>/claude-config/`, then asserts `fake_home` contains
 /// no `.claude` directory or `.claude.json` file.
-/// Test: this function IS the test; run with `cargo test -p trusty-mpm --test standalone_isolation`.
+/// Test: this function IS the test; run with `cargo test -p trusty-mpm --test env_serial standalone_isolation::`.
 #[serial_test::serial]
 #[test]
 fn full_assembly_writes_nothing_to_real_home() {
@@ -663,7 +660,7 @@ fn teardown_leaves_no_stray_artifacts_outside_temp_roots() {
 ///   (b) content matches the bundled constant,
 ///   (c) `$HOME/.claude` and `$HOME/.claude.json` do NOT exist.
 /// Test: this function IS the test; run with
-/// `cargo test -p trusty-mpm --test standalone_isolation`.
+/// `cargo test -p trusty-mpm --test env_serial standalone_isolation::`.
 #[serial_test::serial]
 #[test]
 fn output_styles_deploy_to_config_dir_not_home() {
@@ -818,7 +815,7 @@ fn assert_no_managed_driver_writes_to_home(fake_home: &Path) {
 /// `~/.claude.json`, or `~/.config/claude*` — naming the exact violating path
 /// if the assertion fires.
 /// Test: this function IS the test; run with
-/// `cargo test -p trusty-mpm --test standalone_isolation`.
+/// `cargo test -p trusty-mpm --test env_serial standalone_isolation::`.
 #[serial_test::serial]
 #[test]
 fn regression_guard_version_capture_and_isolation_invariant() {

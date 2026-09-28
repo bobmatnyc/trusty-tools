@@ -51,6 +51,18 @@
 #                                 and must NOT be reported as unattributable —
 #                                 its manifest is gone at HEAD, so attribution
 #                                 falls back to the merge base to find it.
+#     instruction-asset-only-exempt  modifying and adding .md instruction
+#                                 content under crates/trusty-mpm/src/assets/
+#                                 needs no fragment: the same Cargo-inert list
+#                                 scripts/detect-docs-only.sh reads (owner
+#                                 ruling 2026-09-27). FAILS against the gate
+#                                 before that list was shared.
+#     instruction-asset-plus-src-fails  the same asset edit beside a real
+#                                 crates/trusty-mpm/src/lib.rs change still
+#                                 FAILS: the exemption covers the asset only.
+#     instruction-asset-deleted-fails  deleting an asset removes a path an
+#                                 include_str! names, so it is source and
+#                                 FAILS, as detect-docs-only.sh calls it code.
 #
 # Usage:
 #   bash scripts/check_changelog_attribution_selftest.sh
@@ -141,6 +153,10 @@ g config user.name "changelog attribution self-test"
 
 new_crate demo
 new_crate doomed
+# The instruction-asset root the shared Cargo-inert list names.
+new_crate trusty-mpm
+mkdir -p "$REPO/crates/trusty-mpm/src/assets/agents"
+printf '# QA agent\n' >"$REPO/crates/trusty-mpm/src/assets/agents/qa.md"
 
 # The nested workspace member, modelled on crates/trusty-audit/ui/src-tauri:
 # its own Cargo.toml, its own src/, and NO changelog.d/ of its own.
@@ -301,6 +317,42 @@ g commit -qm "dissolve the doomed crate"
 assert_case dissolved-crate-exempt 0 \
   'no crate source changed \(docs-only / CI-only / test-only\) — OK' \
   'UNATTRIBUTED SOURCE|FAIL'
+
+# ---------------------------------------------------------------------------
+# 8. INSTRUCTION ASSETS COUNT AS DOCS (owner ruling 2026-09-27). An add and a
+#    modify under the Cargo-inert asset root need no fragment — the same paths
+#    scripts/detect-docs-only.sh treats as docs-only.
+# ---------------------------------------------------------------------------
+start_case asset-only
+printf '# QA agent\n\nchanged\n' >"$REPO/crates/trusty-mpm/src/assets/agents/qa.md"
+printf '# Ops agent\n' >"$REPO/crates/trusty-mpm/src/assets/agents/ops.md"
+g add -A
+g commit -qm "edit and add instruction assets, no fragment"
+assert_case instruction-asset-only-exempt 0 \
+  'no crate source changed \(docs-only / CI-only / test-only\) — OK' \
+  'FAIL'
+
+# ---------------------------------------------------------------------------
+# 9. STILL A GATE. The asset exemption must not cover a src/** change beside it.
+# ---------------------------------------------------------------------------
+start_case asset-plus-src
+printf '# QA agent\n\nchanged\n' >"$REPO/crates/trusty-mpm/src/assets/agents/qa.md"
+printf 'pub fn v() -> u32 { 2 }\n' >"$REPO/crates/trusty-mpm/src/lib.rs"
+g add -A
+g commit -qm "edit an instruction asset and real source, no fragment"
+assert_case instruction-asset-plus-src-fails 1 \
+  'FAIL trusty-mpm: crates/trusty-mpm/src/\*\* changed with no changelog record' \
+  ''
+
+# ---------------------------------------------------------------------------
+# 10. A DELETE is not inert: it removes a path an include_str! names.
+# ---------------------------------------------------------------------------
+start_case asset-deleted
+g rm -q crates/trusty-mpm/src/assets/agents/qa.md
+g commit -qm "delete an instruction asset, no fragment"
+assert_case instruction-asset-deleted-fails 1 \
+  'FAIL trusty-mpm: crates/trusty-mpm/src/\*\* changed with no changelog record' \
+  ''
 
 echo
 if [ "$fail" -ne 0 ]; then

@@ -941,7 +941,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn write_json_atomic_creates_and_backs_up() {
         let dir = scratch_dir("atomic");
         let path = dir.join("settings.json");
@@ -960,7 +959,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn patch_mcp_server_is_idempotent() {
         let dir = scratch_dir("patch");
         let path = dir.join("settings.json");
@@ -980,7 +978,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn patch_mcp_server_preserves_other_keys() {
         let dir = scratch_dir("patch-preserve");
         let path = dir.join("settings.json");
@@ -1002,7 +999,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the real filesystem"]
     fn discover_claude_settings_skips_blacklisted_dirs() {
         let home = scratch_dir("discover");
 

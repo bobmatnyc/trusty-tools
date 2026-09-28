@@ -362,9 +362,9 @@ assert_eq "trusty-mpm-gui  <- crates/trusty-embedderd/src/lib.rs" \
   "false" "$(live_verdict trusty-mpm-gui crates/trusty-embedderd/src/lib.rs)"
 assert_eq "trusty-code-gui <- crates/trusty-embedderd/src/lib.rs" \
   "false" "$(live_verdict trusty-code-gui crates/trusty-embedderd/src/lib.rs)"
-assert_eq "trusty-audit-ui <- crates/trusty-common/src/lib.rs" \
-  "true" "$(live_verdict trusty-audit-ui crates/trusty-common/src/lib.rs)"
-for crate in trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui; do
+assert_eq "trusty-code-gui  <- crates/trusty-common/src/lib.rs" \
+  "true" "$(live_verdict trusty-code-gui crates/trusty-common/src/lib.rs)"
+for crate in trusty-agents-ui trusty-mpm-gui trusty-code-gui; do
   assert_eq "${crate} <- Cargo.lock" "true" "$(live_verdict "${crate}" Cargo.lock)"
 done
 

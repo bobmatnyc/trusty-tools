@@ -44,14 +44,13 @@ path = "src/lib.rs"
 trusty-mpm = { workspace = true }
 trusty-review = { workspace = true }
 # #8341 (B): `tests/analyze_uds_consumers.rs` stands the trusty-analyze daemon
-# up on its derived socket and asks each of its four consumers what it sees.
-# The four used to be dev-dependencies of trusty-analyze, adding ~135 crates to
-# every `cargo test -p trusty-analyze`.
+# up on its derived socket and asks each in-tree consumer what it sees. They
+# used to be dev-dependencies of trusty-analyze, adding ~135 crates to every
+# `cargo test -p trusty-analyze`. `tga` and `trusty-audit`, the other two
+# consumers, moved to bobmatnyc/trusty-git-analytics (owner ruling 2026-09-28).
 trusty-analyze = { path = "../trusty-analyze" }
 trusty-console = { workspace = true }
 trusty-installer = { workspace = true }
-tga = { workspace = true }
-trusty-audit = { workspace = true }
 # #8341 (C): `tests/memory_uds_consumer.rs` asks tctl's probe about a live
 # trusty-memory daemon. `trusty-installer` above was a trusty-memory
 # dev-dependency for this one test, adding 13 crates to its test build.

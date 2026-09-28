@@ -17,6 +17,9 @@
 //! `echo`/`printf`/`cat` argument, or the command-name position; when xtrace is
 //! on; and when credential-command text is handed to an evaluator (`eval`,
 //! `sh` on stdin, `ssh`, `python3 -c`, …) or run through a `$`-named program.
+//! A variable bound from a credential carries it into every stage of the
+//! command (#8676, `credential_print_taint`). While one does, any inline code
+//! handed to an evaluator refuses, as it can read the environment with no `$`.
 //!
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
@@ -24,10 +27,27 @@
 //! time, a panic — denies. A command naming none of [`TRIGGERS`] is never
 //! parsed at all.
 //!
-//! Known residual (unscored default): a program the rule has no fact for is
-//! treated as non-printing when a credential is its argument. `awk -v t=… '…'`,
-//! `jq --arg t …`, and a shell function or alias can each print the value and
-//! are allowed; only [`ARG_PRINTERS`] are known to print their arguments.
+//! Documented residual classes (#8676 exit criterion): each can print a value
+//! and is allowed.
+//! 1. Environment reads by arbitrary programs: a child reads an exported
+//!    tainted variable without naming it on the command line. No argv-level
+//!    guard can see this.
+//! 2. Unlisted external programs given a tainted argument: the program echoes
+//!    or logs its operand (`ls "$T"`, `timeout 5 sleep "$T"`, `[ x "$T" y ]`,
+//!    a shell function or alias), or takes the value through its own flags
+//!    (`awk -v t=…`, `jq --arg t …`). Only [`ARG_PRINTERS`] and the echoing
+//!    builtins (`credential_print_taint_sinks`) are known to print their
+//!    arguments. The #8697 follow-up replaces this class with a consumer
+//!    allowlist.
+//! 3. Script files run by name (`bash deploy.sh`): the guard does not read
+//!    the script.
+//! 4. Shell history: `history -s …; history`, and `fc`, where history is on.
+//! 5. Descriptors read across stages: a descriptor opened in one stage and
+//!    read in a later one (`exec N< <(…)`). The `coproc` form refuses outright
+//!    while any name is tainted (#8676 rounds 4-5); the general form stays
+//!    residual.
+//!
+//! Why a denylist and not an allowlist: see #8676 round 3.
 //! Test: `credential_print_tests` (sibling module).
 
 #[path = "credential_print_heredoc.rs"]
@@ -36,17 +56,35 @@ mod credential_print_heredoc;
 mod credential_print_programs;
 #[path = "credential_print_redirect.rs"]
 mod credential_print_redirect;
+#[path = "credential_print_split.rs"]
+mod credential_print_split;
+#[path = "credential_print_taint.rs"]
+mod credential_print_taint;
+#[path = "credential_print_taint_forms.rs"]
+mod credential_print_taint_forms;
+#[path = "credential_print_taint_sinks.rs"]
+mod credential_print_taint_sinks;
 
 use super::bash_tokens::tokenize;
-use super::heredoc::HeredocBodies;
-use super::shell_lex::{QuoteScan, WrappedCommand, wrapped_command};
+use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
-    KEYWORDS, basename, code_operands, consumes_stdin, credential_fds, enables_xtrace,
-    first_credential_program, is_evaluator,
+    basename, code_operands, consumes_stdin, credential_fds, enables_xtrace, evaluator_name,
+    first_credential_program, keyword_words,
 };
+// #8756: re-exported for `substitutions`, which asks which bodies run as code.
+pub(super) use credential_print_programs::is_evaluator;
 use credential_print_redirect::{apply_redirections, terminal_name_sink};
+use credential_print_split::{lift_substitutions, split_stages, ungroup};
+use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
+use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
+use credential_print_taint_sinks::{
+    judge_builtin_sinks, reads_script_by_path, reports_unset_error,
+};
+use std::cell::Cell;
+use std::collections::BTreeSet;
+use std::rc::Rc;
 
 /// Subcommand names whose presence makes the command worth parsing.
 const TRIGGERS: &[&str] = &[
@@ -63,6 +101,13 @@ const ARG_PRINTERS: &[&str] = &["echo", "printf", "print", "cat"];
 
 /// Substitution and wrapper nesting the scanner follows before refusing.
 const MAX_DEPTH: usize = 8;
+
+/// Work units one whole scan may spend before refusing (#8676): a pass costs
+/// one unit plus one per [`BYTES_PER_UNIT`] of its text.
+const WORK_BUDGET: usize = 4_000;
+
+/// Text bytes one work unit covers.
+const BYTES_PER_UNIT: usize = 1_024;
 
 /// Placeholder a lifted substitution leaves in the outer text.
 const MARK: &str = "__TMCRED";
@@ -120,6 +165,10 @@ struct Heredoc {
 struct Lifted {
     subs: Vec<Sub>,
     heredocs: Vec<Heredoc>,
+    /// #8676: shell variables that hold a credential.
+    names: BTreeSet<String>,
+    /// #8676: work units spent so far, shared by every clone in one scan.
+    spent: Rc<Cell<usize>>,
 }
 
 /// Refuse a Bash command that prints a credential value: `Some(reason)` denies.
@@ -129,11 +178,20 @@ struct Lifted {
 /// What: a cheap case-insensitive trigger test over the quote-stripped text,
 /// then [`scan`] at the top level, where stdout and stderr are both tool
 /// output. A panic inside the scan is caught and refuses, so it can never exit
-/// the hook 101 and fail open.
+/// the hook 101 and fail open; recursion is depth-bounded and the whole scan
+/// shares one work budget, so neither a stack overflow nor a slow scan can.
 /// Test: `credential_print_tests::denies_the_reported_leaks`,
 /// `credential_print_tests::allows_the_capturing_forms`,
 /// `credential_print_tests::denies_what_it_cannot_read`,
 /// `credential_print_tests::denies_the_round_two_bypasses`,
+/// `credential_print_tests::denies_a_credential_carried_by_a_variable`,
+/// `credential_print_tests::denies_inline_code_reading_a_tainted_name`,
+/// `credential_print_tests::denies_a_coproc_that_carries`,
+/// `credential_print_tests::allows_the_round_four_neighbours`,
+/// `credential_print_tests::denies_the_round_five_bypasses`,
+/// `credential_print_tests::allows_the_round_five_neighbours`,
+/// `credential_print_tests::scan_work_is_bounded`,
+/// `credential_print_tests::deny_reason_never_echoes_the_command`,
 /// `credential_print_tests::no_prefix_of_a_command_panics`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
@@ -195,6 +253,10 @@ fn input_is_program_text(text: &str) -> bool {
 /// ([`split_stages`]) and judges each ([`judge_stage`]), carrying "stdin holds
 /// a credential" and "stdin holds program text" from a stage piped into the
 /// next; program text passes through any stage that is not a stdin consumer.
+/// #8676: a name a stage binds is seen by every later stage of the same pass;
+/// a pass that binds a new name is re-run with it, so every earlier stage and
+/// substitution body sees it too; the set only grows. The passes of the whole
+/// scan share [`WORK_BUDGET`], and exhausting it refuses as unreadable.
 fn scan(
     text: &str,
     stdout: Sink,
@@ -205,11 +267,37 @@ fn scan(
     if depth > MAX_DEPTH {
         return Err(Refusal::Unreadable("nesting this deep"));
     }
-    let mut lifted = outer.clone();
+    let mut names = outer.names.clone();
+    loop {
+        let mut lifted = outer.clone();
+        lifted.names.clone_from(&names);
+        let (yields, bound) = scan_pass(text, stdout, stderr, depth, &mut lifted)?;
+        let known = names.len();
+        names.extend(bound);
+        if names.len() == known {
+            return Ok(yields);
+        }
+    }
+}
+
+/// One [`scan`] pass with a fixed name set: whether a value is captured, and
+/// every name a stage bound.
+fn scan_pass(
+    text: &str,
+    stdout: Sink,
+    stderr: Sink,
+    depth: usize,
+    lifted: &mut Lifted,
+) -> Result<(bool, Vec<String>), Refusal> {
     let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
-    let flat = lift_substitutions(&text, stdout, stderr, depth, &mut lifted)?;
+    let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);
-    let mut yields = false;
+    let cost = 1 + text.len() / BYTES_PER_UNIT;
+    lifted.spent.set(lifted.spent.get() + cost);
+    if lifted.spent.get() > WORK_BUDGET {
+        return Err(Refusal::Unreadable("a command this costly to follow"));
+    }
+    let (mut yields, mut bound) = (false, Vec::new());
     let (mut stdin_carries, mut stdin_text) = (false, false);
     for (idx, (stage, piped, pipe_stderr)) in stages.iter().enumerate() {
         let next_exists = stages.get(idx + 1).is_some();
@@ -228,14 +316,20 @@ fn scan(
             err,
             stdin_carries,
             stdin_text,
+            stdin_piped: idx > 0 && stages[idx - 1].1,
             depth,
         };
-        let emitted = judge_stage(stage.trim(), &lifted, ctx)?;
+        let emitted = judge_stage(stage.trim(), lifted, ctx)?;
         yields |= emitted.captured;
         stdin_carries = emitted.piped;
         stdin_text = *piped && emitted.text;
+        for name in emitted.bound {
+            if lifted.names.insert(name.clone()) {
+                bound.push(name);
+            }
+        }
     }
-    Ok(yields)
+    Ok((yields, bound))
 }
 
 /// The sinks a stage starts with, before its own redirections.
@@ -246,6 +340,8 @@ struct StageCtx {
     stdin_carries: bool,
     /// The previous stage piped program text in (`echo '…' | sh`).
     stdin_text: bool,
+    /// #8676: the previous stage piped anything in.
+    stdin_piped: bool,
     depth: usize,
 }
 
@@ -255,6 +351,8 @@ struct Emitted {
     captured: bool,
     piped: bool,
     text: bool,
+    /// #8676: names this stage bound from a credential.
+    bound: Vec<String>,
 }
 
 /// Judge one pipeline stage.
@@ -271,19 +369,26 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if stage.is_empty() {
         return Ok(emitted);
     }
+    // #8676: forms `ungroup` erases, read from the text as written.
+    let arrays = array_bindings(stage, lifted)?;
+    let header = function_header_words(stage);
+    let raw = stage;
     let stage = ungroup(stage);
     let tokens = tokenize(&stage).map_err(|_| Refusal::Unreadable("its quoting"))?;
     let routed = apply_redirections(&tokens, ctx.out, ctx.err, lifted)?;
+    // #8676 round 5: `wc -c < "$T"` — a missing file's "No such file" error
+    // names the carrying target on stderr.
+    if routed.read_target_carries {
+        route(routed.err, &mut emitted)?;
+    }
     let argv = &routed.argv;
     let reads_input = argv
         .iter()
         .any(|w| carries_kind(w, lifted, Some(SubKind::Input)));
     let stdin_carries = ctx.stdin_carries || routed.here_carries || reads_input;
     emitted.text = argv.iter().any(|w| input_is_program_text(w)) || routed.here_program_text;
-    let kw = argv
-        .iter()
-        .take_while(|w| KEYWORDS.contains(&w.as_str()))
-        .count();
+    let (keywords, coproc) = keyword_words(argv, header);
+    let kw = header + keywords;
     let resolved = argv.get(kw..).and_then(strip_wrapper_prefix);
     let start = kw + resolved.unwrap_or(0);
     let program_word = argv.get(start).map(String::as_str).unwrap_or_default();
@@ -294,6 +399,37 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     emitted.text |= ctx.stdin_text && !consumer;
     if enables_xtrace(&program, argv, args) {
         return Err(Refusal::Prints);
+    }
+    // #8676: bind before any early return; `printenv T`/`env`/`set` print them.
+    emitted.bound = bound_names(argv, kw, &program, args, lifted);
+    emitted.bound.extend(arrays);
+    if reads_in_arithmetic(raw, argv, &program, &lifted.names) {
+        return Err(Refusal::Prints);
+    }
+    // #8676 round 4/5: a coproc's output is a descriptor a later stage reads,
+    // and `coproc NAME ( … )` hides its program, so `ungroup` can leave a bare
+    // NAME standing in for a declarer, `set`, or an evaluator this scan never
+    // re-parses (`coproc X ( declare -p T >&2 )`). While any name is tainted,
+    // refuse every coproc stage outright, not only one with a word that
+    // itself carries the value.
+    if coproc && (!lifted.names.is_empty() || argv.iter().any(|w| carries(w, lifted))) {
+        return Err(Refusal::Prints);
+    }
+    if dumps_variables(argv, &program, args, &lifted.names) {
+        route(routed.out, &mut emitted)?;
+    }
+    // #8676 round 3: `cd "$T"`, `export "$T"`, `trap 'echo $T' EXIT`.
+    let sinks = (routed.out, routed.err);
+    judge_builtin_sinks(&program, args, sinks, lifted, ctx.depth, &mut emitted)?;
+    // #8676 round 5: `select NAME in WORD...` lists every WORD on stderr.
+    if program == "select" && select_items_carry(argv, lifted) {
+        route(routed.err, &mut emitted)?;
+    }
+    // #8676 round 5: `${NAME?word}`/`${NAME:?word}` aborts and writes a
+    // carrying `word` to stderr at expansion time, before any program runs —
+    // this must precede the empty check below, which is why it runs here.
+    if reports_unset_error(argv, &lifted.names) {
+        route(routed.err, &mut emitted)?;
     }
     if program_word.is_empty() {
         // Assignments only (`T=$(…)`): nothing is printed.
@@ -316,7 +452,13 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     if program_word.starts_with('$') || program_word.starts_with(MARK) || dynamic_before_trigger {
         return Err(Refusal::Unreadable("a program name chosen at run time"));
     }
-    let wrapped = wrapped_command(&stage);
+    // #8756: `wrapped_command` now unwraps `eval`; this rule keeps reading it
+    // as an evaluator, whose operands are program text.
+    let wrapped = if program == "eval" {
+        WrappedCommand::None
+    } else {
+        wrapped_command(&stage)
+    };
     // A wrapper with flags (`sudo -u x bash -c …`) hides its program, so the
     // first evaluator word after it stands in.
     let evaluator_at = if resolved.is_some() {
@@ -328,12 +470,22 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
             .map(|p| p + start)
     };
     if let Some(at) = evaluator_at.filter(|&at| at != start || wrapped == WrappedCommand::None) {
-        let evaluator = basename(&argv[at]);
+        let word = basename(&argv[at]);
+        // #8676 round 3: `python3.12` runs as `python`.
+        let evaluator = evaluator_name(&word).unwrap_or(&word);
+        let operands = argv.get(at + 1..).unwrap_or_default();
+        let code = code_operands(evaluator, operands);
+        // #8676: with a credential in a variable, any inline code can read it
+        // with no `$` (`os.environ`, `ENV`, `process.env`), so all refuse.
+        let tainted = !lifted.names.is_empty();
+        let reads_stdin = operands.iter().all(|a| a.starts_with('-'));
         // #8596 round 3: only code operands; `python3 up.py --token "$T"` is data.
-        let fed = matches!(evaluator.as_str(), "eval" | "source" | ".")
-            || code_operands(&evaluator, argv.get(at + 1..).unwrap_or_default())
-                .into_iter()
-                .any(input_is_program_text)
+        let fed = matches!(evaluator, "eval" | "source" | ".")
+            || code.iter().any(|c| input_is_program_text(c))
+            || (tainted && (!code.is_empty() || routed.here_any))
+            || (tainted && reads_stdin && ctx.stdin_piped)
+            // #8676 round 3: `bash /dev/stdin`, `bash <(…)`, `bash < <(…)`.
+            || (tainted && reads_script_by_path(operands, lifted))
             || routed.here_program_text
             || ctx.stdin_text;
         if fed {
@@ -433,24 +585,6 @@ fn inject_xargs_value(inner: &str, xargs_args: &[String], mark: &str) -> String 
     }
 }
 
-/// Blank unquoted grouping parens: `(gcloud …)` runs `gcloud` in a subshell.
-fn ungroup(stage: &str) -> String {
-    let quotes = QuoteScan::new(stage);
-    if !quotes.balanced {
-        return stage.to_string();
-    }
-    stage
-        .char_indices()
-        .map(|(i, c)| {
-            if matches!(c, '(' | ')') && quotes.is_unquoted(i) {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 /// Record where one credential-carrying descriptor lands, refusing the terminal.
 fn route(sink: Sink, emitted: &mut Emitted) -> Result<(), Refusal> {
     match sink {
@@ -462,9 +596,10 @@ fn route(sink: Sink, emitted: &mut Emitted) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether `word` holds a lifted substitution whose value is a credential.
+/// Whether `word` holds a lifted substitution whose value is a credential, or
+/// expands a variable that holds one (#8676).
 fn carries(word: &str, lifted: &Lifted) -> bool {
-    carries_kind(word, lifted, None)
+    carries_kind(word, lifted, None) || expands_tainted(word, &lifted.names)
 }
 
 /// [`carries`], limited to one substitution kind when `kind` is set.
@@ -477,6 +612,18 @@ fn carries_kind(word: &str, lifted: &Lifted, kind: Option<SubKind>) -> bool {
     })
 }
 
+/// Whether a `select NAME in ITEM...` stage lists a carrying item (#8676
+/// round 5): bash writes the numbered menu, one line per item, to stderr, and
+/// no reader argument names it, so nothing else in [`judge_stage`] sees it.
+fn select_items_carry(argv: &[String], lifted: &Lifted) -> bool {
+    argv.iter().position(|w| w == "in").is_some_and(|at| {
+        argv.get(at + 1..)
+            .unwrap_or_default()
+            .iter()
+            .any(|w| carries(w, lifted))
+    })
+}
+
 /// The indices of every [`MARK`] placeholder in `word`.
 fn marks_in(word: &str) -> impl Iterator<Item = usize> + '_ {
     word.match_indices(MARK).filter_map(|(at, _)| {
@@ -486,119 +633,6 @@ fn marks_in(word: &str) -> impl Iterator<Item = usize> + '_ {
             .collect();
         digits.parse().ok()
     })
-}
-
-/// Replace every live substitution in `text` with a [`MARK`] placeholder,
-/// scanning each body first and appending it to `lifted.subs`.
-///
-/// What: the same opener/closer scan as `super::classify_command_substitutions`
-/// — `$(…)`/`<(…)`/`>(…)` with paren counting, backtick pairs — on a
-/// [`QuoteScan`] of `text`. `$(…)`, backtick and `<(…)` bodies run with a
-/// captured stdout; a `>(…)` body writes to the outer stdout. An unclosed
-/// opener is refused. Every slice starts and ends at an ASCII byte.
-fn lift_substitutions(
-    text: &str,
-    stdout: Sink,
-    stderr: Sink,
-    depth: usize,
-    lifted: &mut Lifted,
-) -> Result<String, Refusal> {
-    let scan_quotes = QuoteScan::new(text);
-    let live = |i: usize| !scan_quotes.balanced || scan_quotes.allows_substitution(i);
-    let unquoted = |i: usize| !scan_quotes.balanced || scan_quotes.is_unquoted(i);
-    let bytes = text.as_bytes();
-    let mut flat = String::with_capacity(text.len());
-    let (mut i, mut copied) = (0, 0);
-    while i < bytes.len() {
-        let paren = bytes.get(i + 1) == Some(&b'(')
-            && match bytes[i] {
-                b'$' => live(i),
-                b'<' | b'>' => unquoted(i),
-                _ => false,
-            };
-        let (body, end) = if paren {
-            let mut level = 1usize;
-            let mut j = i + 2;
-            while j < bytes.len() && level > 0 {
-                match bytes[j] {
-                    b'(' => level += 1,
-                    b')' => level -= 1,
-                    _ => {}
-                }
-                j += 1;
-            }
-            if level != 0 {
-                return Err(Refusal::Unreadable("an unclosed substitution"));
-            }
-            (&text[i + 2..j - 1], j)
-        } else if bytes[i] == b'`' && live(i) {
-            let close = text[i + 1..]
-                .find('`')
-                .ok_or(Refusal::Unreadable("an unclosed backtick"))?;
-            (&text[i + 1..i + 1 + close], i + close + 2)
-        } else {
-            i += 1;
-            continue;
-        };
-        let kind = match (paren, bytes[i]) {
-            (true, b'<') => SubKind::Input,
-            (true, b'>') => SubKind::Output,
-            _ => SubKind::Command,
-        };
-        let body_out = if kind == SubKind::Output {
-            stdout
-        } else {
-            Sink::Captured
-        };
-        let yields = scan(body, body_out, stderr, depth + 1, lifted)?;
-        flat.push_str(&text[copied..i]);
-        flat.push_str(&format!("{MARK}{}__", lifted.subs.len()));
-        lifted.subs.push(Sub { kind, yields });
-        i = end;
-        copied = end;
-    }
-    flat.push_str(&text[copied..]);
-    Ok(flat)
-}
-
-/// Split `text` into stages: `(stage, stdout piped on, stderr piped on)`.
-///
-/// What: cuts at unquoted `|`, `|&`, `||`, `&&`, `;`, newline and a bare `&`
-/// (never at a `>&`/`<&`/`&>` redirection), leaving unquoted here-document bodies
-/// whole the way `super::split_shell_segments_raw` does.
-fn split_stages(text: &str) -> Vec<(String, bool, bool)> {
-    let quotes = QuoteScan::new(text);
-    let bodies = HeredocBodies::scan(text);
-    let bytes = text.as_bytes();
-    let mut stages = Vec::new();
-    let mut start = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if (quotes.balanced && !quotes.is_unquoted(i)) || bodies.suppresses_separator(i) {
-            i += 1;
-            continue;
-        }
-        let next = bytes.get(i + 1).copied();
-        let (width, piped, pipe_stderr) = match (bytes[i], next) {
-            (b'|', Some(b'|')) | (b'&', Some(b'&')) => (2, false, false),
-            (b'|', Some(b'&')) => (2, true, true),
-            (b'|', _) => (1, true, false),
-            (b';' | b'\n', _) => (1, false, false),
-            (b'&', _) if i > 0 && matches!(bytes[i - 1], b'>' | b'<') => (0, false, false),
-            (b'&', Some(b'>')) => (0, false, false),
-            (b'&', _) => (1, false, false),
-            _ => (0, false, false),
-        };
-        if width == 0 {
-            i += 1;
-            continue;
-        }
-        stages.push((text[start..i].to_string(), piped, pipe_stderr));
-        i += width;
-        start = i;
-    }
-    stages.push((text[start..].to_string(), false, false));
-    stages
 }
 
 #[cfg(test)]

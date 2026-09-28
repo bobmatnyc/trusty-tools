@@ -173,7 +173,7 @@ fn guard_read_budget_leaves_the_audit_post_inside_the_hook_timeout() {
     // real constants, not copies, so lowering any one of them trips this.
     let worst_case = trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT
         + PM_GUARD_STDIN_TIMEOUT
-        + crate::commands::pm_guard::AUDIT_POST_TIMEOUT;
+        + crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
     assert!(
         worst_case < REGISTERED_HOOK_TIMEOUT,
         "{worst_case:?} must fit inside {REGISTERED_HOOK_TIMEOUT:?}"

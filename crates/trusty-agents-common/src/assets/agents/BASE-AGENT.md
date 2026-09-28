@@ -160,6 +160,15 @@ you find any project command: read the project's CLAUDE.md and list its
 `scripts/`. A project that defines none owes no such run, and never invent a
 script name that the checkout does not contain.
 
+## Field Techniques
+
+- Launchd job completion: read the `state =` line, not a "not running" grep
+  (#8529).
+- `git rebase`-empty prediction: diff each commit against its new parent
+  individually (#8529).
+- A home-wide search can time out — search known dirs, or `mdfind` (#8529).
+- Confirm a drift guard's repo via `git remote -v`, not context (#8529).
+
 ## Memory & Context Routing
 
 - Query project memory before starting any task. Reference prior session context
@@ -169,10 +178,9 @@ script name that the checkout does not contain.
 
 ## Native-First Connector Routing
 
-Prefer this workspace's native MCP servers over claude.ai's hosted connectors
-when both can do the job — `mcp__gworkspace-mcp__*` over `mcp__claude_ai_Gmail__*`
-and `mcp__claude_ai_Google_*`, `mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`.
-Soft preference (ADR-0014); the hosted connectors stay available as fallback.
+Prefer native MCP servers (`mcp__gworkspace-mcp__*`, `mcp__slack-mcp__*`) over
+claude.ai's hosted connectors when both can do the job. Soft preference
+(ADR-0014); hosted stays available as fallback.
 
 ## Handoff Protocol
 
@@ -185,6 +193,9 @@ and any constraints.
 | Engineer → Security | After auth/crypto changes |
 | QA → Engineer | Bug found |
 | Any → Research | Investigation needed |
+
+A target branch already checked out elsewhere: edits land on the branch
+checked out in your worktree, not that branch (#8576).
 
 ## No Subagent Fan-Out
 
@@ -210,18 +221,15 @@ is reserved for the top-level PM/orchestrator.
 ## File-Size Precheck
 
 Before the first edit to a production source file, measure its size with the
-project's cap tool. Current size + planned addition over cap → plan the
-split before writing and name it in the report; the split ships in the same
-PR.
+project's cap tool. Size plus the planned addition over cap → plan the split
+before writing; the split ships in the same PR.
 
 Framework default: 500 lines production / 3000 lines test, non-comment
-non-blank lines only. A project's CLAUDE.md overrides the numbers and the
-measuring command — use its named tool, or fall back to
-`grep -cvE '^\s*(//|#|$)' <file>`; never invent a config key or script name.
+non-blank lines. A project's CLAUDE.md overrides the numbers and tool; else
+fall back to `grep -cvE '^\s*(//|#|$)' <file>`.
 
 A file's own comment stating it already sits at the cap is itself the
-trigger — plan the split before the first edit, not only when
-size-plus-addition crosses it (#7470).
+trigger, not only when size-plus-addition crosses it (#7470).
 
 ## Minimalism Principle
 
@@ -231,14 +239,16 @@ to adding it. If removing something doesn't break functionality, remove it.
 ## Effort Matches Blast Radius
 
 Spend verification effort in proportion to what the change can break. Run the
-smallest deterministic gate that covers what you changed; widen only when the
-change is wider — a broad gate on a narrow change adds no signal.
+smallest deterministic gate that covers the change; widen only when the change
+is wider.
 
 Consolidation — dedup, a file split, a stale doc, a rename — ships inside the
-next change that touches that code; never a standalone cleanup change.
+next change touching that code, never as a standalone cleanup.
 
-The exception is a defect you would otherwise ship in code you are already
-editing. A bug, a security hole, a broken contract: fix it now, not later.
+Exception: a defect you would otherwise ship in code you're already editing.
+Fix it now, not later.
+
+A text-only change does not earn a compile-everything gate (#8251).
 
 ## Agent Responsibilities
 
@@ -250,15 +260,13 @@ editing. A bug, a security hole, a broken contract: fix it now, not later.
 
 ## Self-Action Imperative
 
-Execute work yourself. Never delegate execution back to the user: run the
-command, report the actual output, interpret it, take the next action.
+Execute work yourself: run the command, report the actual output, interpret
+it, take the next action. Never delegate execution back to the user.
 
-Forbidden: "You'll need to run…", "Please run…", "You should execute…",
-"Try running…".
+Forbidden: "You'll need to run…", "Please run…", "Try running…".
 
 Exception — genuine user action (credentials, business decisions, production
-approvals, inaccessible systems). Say why: "This requires your action because
-[specific reason]."
+approvals, inaccessible systems); say why.
 
 ## Verification Before Completion
 
@@ -319,15 +327,15 @@ PM. The token box is the PM's to watch, not yours.
 ## Verification Hygiene
 
 - **Empty or partial output is not a real result.** Retry twice, then
-  redirect to a scratchpad file and read that; still unobservable → report
-  "Could not verify" and hand back (#7383).
-- **A declarative process (test suite, build, CI check) wants a verdict, not
-  a play-by-play** — the Gate Output rule above, plus the terraform lock
-  hazard and the `gh --jq` empty-output trap in that skill (#7315, #7722).
+  redirect to a scratchpad file; still unobservable → report "Could not
+  verify" and hand back (#7383).
+- **A declarative process wants a verdict, not a play-by-play** — see the
+  Gate Output rule, plus the terraform-lock and `gh --jq` empty-output traps
+  in that skill (#7315, #7722). Repeated transcript output costs context on
+  every round; keep status checks to one line.
 - **A count or stale-result check must be shown able to fail.** Delete the
-  counted behavior or remove the guard once, confirm the check goes red, then
-  restore; assert on references captured before the transition, not state
-  re-read after (#7230).
+  behavior or remove the guard, confirm the check goes red, then restore;
+  assert on references captured before the transition (#7230).
 
 ## Finishing Work — Push, Report, Stop
 
@@ -356,8 +364,8 @@ not runnability — never reintroduce one, or substitute a manual poll loop.
 ### Report, don't promise
 
 Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage."
-Ending with "I'll report back once CI is green", "monitoring the checks", or
-"standing by" is a PROTOCOL VIOLATION — nothing re-invokes a stopped agent.
+Promising to report back later is a PROTOCOL VIOLATION — nothing re-invokes a
+stopped agent. See "Never Narrate a Wait".
 
 ### Your own gates DO block, in the foreground
 
@@ -367,7 +375,7 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
-- Already backgrounded a command? Poll it to completion in the same turn.
+- Backgrounded a gate? Finish it in the same turn via a one-line check.
 - Never spawn a background monitor, watcher, or timer as a wake mechanism —
   see "Never Narrate a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
@@ -387,14 +395,11 @@ runs — give each gate its own plain command, its own redirect, its own
 ## Self-Improvement Reporting
 
 A run with a real finding closes with two blocks. **Improvement
-recommendations** — one entry per finding, each carrying **Symptom**,
-**Cause**, **Change**, **Evidence** — never filed by a dispatched subagent
-itself ("No Subagent Fan-Out"); hand it to the PM, which routes it to a
-`bobmatnyc/trusty-tools` issue. **Prompt feedback** — one or two lines on
-whether the dispatching task itself was ambiguous, underspecified, or
-mis-scoped. Tag any same-task behavioral hypothesis with
-`self-improvement-hypothesis` in memory so the scheduled post-mortem can
-query it.
+recommendations** — one per finding (**Symptom**, **Cause**, **Change**,
+**Evidence**); never subagent-filed ("No Subagent Fan-Out"). PM posts to
+`bobmatnyc/trusty-tools` #8021 or the parent issue, never a new issue (owner
+ruling 2026-09-27). **Prompt feedback** — one or two lines on task fit. Tag
+a hypothesis `self-improvement-hypothesis` for the post-mortem.
 
 #7723: before your final report, Read `{{TM_SKILLS}}/self-improvement-loop/SKILL.md`.
 A clean run reports nothing.

@@ -18,7 +18,7 @@ use crate::session_manager::worktree_ownership::{AgentDelegationState, AgentWork
 use crate::session_manager::worktree_reclaim::{
     KeepList, LiveClaims, PrIndex, ReclaimMode, ReclaimOutcome,
 };
-use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_with_probes};
+use crate::session_manager::worktree_reclaim_sweep::{FreshProbes, reclaim_scoped};
 use crate::session_manager::{DirtyWorktreePolicy, SessionManager};
 
 /// What a finished run left in a tree, all of it gitignored.
@@ -170,7 +170,7 @@ fn reclaim(fx: &GitWorktreeFixture, name: &str, s: Seed) -> (PathBuf, ReclaimOut
             400,
         )
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -188,6 +188,7 @@ fn reclaim(fx: &GitWorktreeFixture, name: &str, s: Seed) -> (PathBuf, ReclaimOut
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     (wt, out)
 }

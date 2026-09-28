@@ -1,0 +1,2 @@
+Fixed
+- The `--version` check of a binary the installer has just written (pinned-set staging, prebuilt install, prebuilt upgrade, `self-update`) no longer fails a correct install with `Text file busy` (os error 26) on Linux. A thread that forks while the installer writes the file hands its child a copy of the write fd, and the kernel refuses the exec until that child execs. The check now retries only that error, 8 times over 635 ms at most, and reports the original error unchanged if it persists ([#6231](https://github.com/bobmatnyc/trusty-tools/issues/6231))

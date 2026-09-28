@@ -284,7 +284,7 @@ CANARY_CRATES="trusty-common trusty-mpm"
 CODESIGN_CRATE="trusty-common"
 # The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
 # list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
-RELEVANCE_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+RELEVANCE_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # fallback_all_crates — last-resort crate-name scan needing neither cargo nor
@@ -361,7 +361,7 @@ fail_open() {
       done < <(printf '%s' "$meta" | jq -r '.packages[].name' 2>/dev/null)
     fi
     if [ ${#crates[@]} -eq 0 ]; then
-      echo "select-test-crates: WARNING: cargo metadata unavailable — falling back to a shallow crates/*/Cargo.toml scan, which MISSES any nested workspace member (e.g. trusty-agents-ui, trusty-audit-ui) — this list may be incomplete" >&2
+      echo "select-test-crates: WARNING: cargo metadata unavailable — falling back to a shallow crates/*/Cargo.toml scan, which MISSES any nested workspace member (e.g. trusty-agents-ui) — this list may be incomplete" >&2
       while IFS= read -r line; do
         [ -n "$line" ] && crates+=("$line")
       done < <(fallback_all_crates)

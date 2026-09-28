@@ -275,10 +275,9 @@ async fn mcp_handle_respawn_failure_applies_backoff() {
 /// that answers initialize and tools/list (without console_metrics).
 /// What: Spawns a sh script that completes the MCP handshake and returns an
 /// empty tools/list, then verifies poll_metrics returns McpHandleError::Degraded.
-/// Test: This test. Marked #[ignore] to keep CI fast (requires Unix + sh).
+/// Test: This test (requires Unix, `sh` and `python3`).
 #[tokio::test]
 #[cfg(unix)]
-#[ignore]
 async fn mcp_handle_probe_detects_missing_console_metrics_tool() {
     // Minimal MCP stub: answers initialize, then tools/list with no tools.
     let script = r#"

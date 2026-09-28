@@ -13,9 +13,9 @@
 #
 # What: builds synthetic `crates/<dir>/` fixtures under a scratch directory and
 #   runs the gate against each with `--repo`, asserting both the exit status
-#   and the finding code on stdout/stderr. Case 5 runs the gate against the
-#   REAL, currently-checked-out trusty-audit crate — the one #6400 repaired —
-#   to prove the live repo passes with no fixture standing in for it.
+#   and the finding code on stdout/stderr. (A fifth, live-repo case ran the gate
+#   against trusty-audit, the crate #6400 repaired; it went with that crate to
+#   bobmatnyc/trusty-git-analytics, owner ruling 2026-09-28.)
 #
 # Test: this IS the test. Run directly:
 #   bash scripts/check-changelog-assembled-selftest.sh
@@ -25,7 +25,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 GATE="${SCRIPT_DIR}/check-changelog-assembled.sh"
 
 PASSED=0
@@ -175,17 +174,6 @@ cat > "${repo}/crates/nodir-crate/CHANGELOG.md" <<'EOF'
 - entry with no changelog.d/ directory left behind
 EOF
 run_case "no changelog.d/ directory, section present" 0 "-" "$repo" nodir-crate
-
-# ===========================================================================
-# 5. THE LIVE REPO. trusty-audit was the crate #5919/#6400 repaired — this
-#    proves the check passes against the real, current checkout rather than
-#    only a fixture built to make it pass.
-# ===========================================================================
-if [ -f "${REPO_ROOT}/crates/trusty-audit/Cargo.toml" ]; then
-  run_case "live repo: trusty-audit (post-#6400 repair)" 0 "-" "$REPO_ROOT" trusty-audit
-else
-  echo "  skip live-repo case: crates/trusty-audit not found at ${REPO_ROOT}"
-fi
 
 echo
 echo "check-changelog-assembled-selftest: ${PASSED} passed, ${FAILED} failed."

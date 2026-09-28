@@ -3,12 +3,72 @@
 **Website: [trustytools.dev](https://trustytools.dev/)**
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-It combines code search, memory, analysis, orchestration, review, audit, and
+It combines code search, memory, analysis, orchestration, review, and
 operator interfaces in one Cargo workspace. The live package inventory comes
 from `cargo metadata`; the human-readable map is
 [docs/reference/crate-map.md](docs/reference/crate-map.md).
 
-## Three Flagship MCP Servers
+| Crate | What it is | Install / run |
+|---|---|---|
+| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked && tm start` |
+| [trusty-memory](#trusty-memory--memory-palace-storage-engine) | Long-term memory storage with semantic search and an embedded UI | `cargo run -p trusty-memory -- serve` |
+| [trusty-search](#trusty-search--hybrid-code-search) | Machine-wide hybrid code search — BM25 + vector + KG fusion, MCP server | `cargo install trusty-search && trusty-search start` |
+| [trusty-review](#trusty-review--llm-backed-pr-review) | LLM-backed review of GitHub PRs and diffs via AWS Bedrock or OpenRouter | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked && trusty-review run owner repo 123` |
+| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start` |
+
+## Flagship Crates
+
+### trusty-mpm — Meta-Harness Multi-Agent Orchestration
+
+PM-style multi-agent orchestration over coding work: manages multi-project
+sessions, relays hooks, and exposes an MCP server to Claude Code sessions,
+delegating coding tasks to `trusty-code`.
+
+**What you get:**
+- PM-style orchestration of Claude Code sessions, delegating coding tasks to
+  specialist agents such as `trusty-code` (`tcode`)
+- Multi-project session management with hook relaying
+- An MCP server exposed to Claude Code sessions
+- A TUI dashboard (`tm tui`) and a Telegram bot (`tm telegram pair`)
+
+**Quick start:**
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
+tm start
+tm launch
+```
+
+See [crates/trusty-mpm/README.md](crates/trusty-mpm/README.md) for full documentation.
+
+---
+
+### trusty-memory — Memory Palace Storage Engine
+
+Long-term memory storage with semantic search, persistent embedding index, and embedded Svelte UI. Store development context, notes, snippets, and retrieve them via natural language.
+
+**What you get:**
+- Pure-Rust HNSW vector index (`hnsw_rs`) persisted in `redb` + fastembed embeddings
+- Semantic search over all stored memories
+- Collection organization (notes, snippets, code patterns, decisions)
+- Svelte UI for browsing and editing
+- MCP server for Claude Code integration
+
+**Quick start:**
+```bash
+cargo run -p trusty-memory -- serve
+# Or via MCP stdio:
+# Add to ~/.claude/claude_desktop_config.json:
+# "trusty-memory": {
+#   "command": "cargo",
+#   "args": ["run", "-p", "trusty-memory", "--", "serve"]
+# }
+```
+
+**MCP tools:** `memory_remember`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_note`, `memory_list`, `memory_forget`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`
+
+See [crates/trusty-memory/README.md](crates/trusty-memory/README.md) for full documentation.
+
+---
 
 ### trusty-search — Hybrid Code Search
 
@@ -37,32 +97,29 @@ See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full do
 
 ---
 
-### trusty-memory — Memory Palace Storage Engine
+### trusty-review — LLM-backed PR Review
 
-Long-term memory storage with semantic search, persistent embedding index, and embedded Svelte UI. Store development context, notes, snippets, and retrieve them via natural language.
+Fast local PR-review service: LLM-backed code review with search and analysis
+context, reviewing GitHub PRs and unified diffs via AWS Bedrock or OpenRouter.
 
 **What you get:**
-- Pure-Rust HNSW vector index (`hnsw_rs`) persisted in `redb` + fastembed embeddings
-- Semantic search over all stored memories
-- Collection organization (notes, snippets, code patterns, decisions)
-- Svelte UI for browsing and editing
-- MCP server for Claude Code integration
-- MIT license (memory preservation is for everyone)
+- Fetches GitHub PR diffs, retrieves code context from trusty-search and
+  complexity data from trusty-analyze, then calls an LLM to produce a
+  structured review verdict
+- Ships as a one-shot CLI (`run` / `compare`), a JSON-RPC 2.0 / MCP stdio
+  service (`mcp`), and a per-delivery webhook drain spawned by trusty-console
+- Dry-run by default — posting a PR comment requires an explicit `--live` flag
+- Per-project config and named review templates
 
 **Quick start:**
 ```bash
-cargo run -p trusty-memory -- serve
-# Or via MCP stdio:
-# Add to ~/.claude/claude_desktop_config.json:
-# "trusty-memory": {
-#   "command": "cargo",
-#   "args": ["run", "-p", "trusty-memory", "--", "serve"]
-# }
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked
+trusty-review run owner repo 123
 ```
 
-**MCP tools:** `memory_remember`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_note`, `memory_list`, `memory_forget`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`
+**MCP tools:** `review_pr`, `review_diff`, `review_health`
 
-See [crates/trusty-memory/README.md](crates/trusty-memory/README.md) for full documentation.
+See [crates/trusty-review/README.md](crates/trusty-review/README.md) for full documentation.
 
 ---
 
@@ -108,21 +165,19 @@ documentation.
 
 ---
 
-## Workspace Package Index
+## Other Crates
 
-This is an orientation map, not a second package registry. For package names,
-versions, publishability, and targets, use `cargo metadata --no-deps
---format-version 1`; for direct links from every package to its manifest,
-source, and documentation, use the [crate map](docs/reference/crate-map.md).
+The five flagship crates above have their own README links and quick starts.
+This is an orientation map for the rest of the workspace, not a second package
+registry. For package names, versions, publishability, and targets, use
+`cargo metadata --no-deps --format-version 1`; for direct links from every
+package to its manifest, source, and documentation, use the
+[crate map](docs/reference/crate-map.md).
 
-### Core Daemons / MCP Servers
+### Other Daemons / MCP Servers
 
 | Crate | Description | License |
 |---|---|---|
-| `trusty-search` | Hybrid code search (BM25 + vector + KG) + MCP server | MIT |
-| `trusty-memory` | Memory palace UI + MCP frontend (storage engine lives in `trusty-common`'s `memory-core` feature) | MIT |
-| `trusty-analyze` | Code-analysis sidecar daemon (complexity, smells, facts) + MCP server | MIT |
-| `trusty-review` | LLM-backed review pipeline with search and static-analysis context | MIT |
 | `trusty-console` | Web console for the local trusty service fleet | MIT |
 | `trusty-channels` | Native Slack and Telegram MCP servers | MIT |
 
@@ -143,8 +198,7 @@ source, and documentation, use the [crate map](docs/reference/crate-map.md).
 
 | Crate | Description |
 |---|---|
-| `trusty-mpm` | Core platform with embedded CLI, daemon, and MCP server |
-| `trusty-mpm-gui` | Desktop GUI (Tauri) |
+| `trusty-mpm-gui` | Desktop GUI (Tauri) for `trusty-mpm` |
 | `trusty-code` | Coding harness (`tcode`) |
 | `trusty-code-gui` | Desktop shell for `tcode` |
 
@@ -153,7 +207,6 @@ source, and documentation, use the [crate map](docs/reference/crate-map.md).
 | Crate | Description |
 |---|---|
 | `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |
-| `trusty-audit` | Auditor handoff client and CLI |
 | `trusty-kb` | Deterministic personal knowledge-base store + MCP server |
 | `trusty-publish-guard` | Internal release parity checker |
 | `trusty-sld-lint` | Spec-linked documentation linter |
@@ -163,17 +216,24 @@ source, and documentation, use the [crate map](docs/reference/crate-map.md).
 
 | Crate | Description |
 |---|---|
-| `tga` (`trusty-git-analytics` directory) | Developer productivity analytics from git history |
 | `trusty-agents` | Agent orchestration platform |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
 | `trusty-agents-ui` | Nested Tauri desktop client for trusty-agents |
-| `trusty-audit-ui` | Nested Tauri desktop client for trusty-audit |
+
+### Moved to their own repo
+
+`tga` (git analytics, formerly the crates/trusty-git-analytics directory) and
+`trusty-audit` (auditor handoff client, bins `trusty-audit` and `taudit`, plus
+`trusty-audit-ui`) build, release and publish from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
+`tctl install tga` still installs `tga`; `tctl install` does not take
+`trusty-audit` by name.
 
 ## Architecture
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ User surfaces: tm · tcode · tagent · taudit · tga · GUIs    │
+│ User surfaces: tm · tcode · tagent · tctl · GUIs            │
 └──────────────────────────────┬────────────────────────────────┘
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
@@ -243,6 +303,9 @@ PATH — is the recommended route for its managed application set:
 together, knows which run as daemons, and can update its own control-plane
 binary. The live set is defined in
 [`stable_set.rs`](crates/trusty-installer/src/commands/stable_set.rs).
+`tga` comes from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics)
+releases, with `cargo install` from crates.io as the fallback.
 
 ```bash
 tctl install                       # the full managed set
@@ -275,6 +338,10 @@ brew install trusty-mpm
 brew install trusty-review
 brew install trusty-search
 ```
+
+`trusty-audit` and `trusty-git-analytics` are built in
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics),
+not in this repo.
 
 Or combine into a single command:
 

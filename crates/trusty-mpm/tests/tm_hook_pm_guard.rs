@@ -14,7 +14,7 @@
 //! ALLOW). The daemon URL is pointed at an unreachable address so the
 //! best-effort audit POST on the deny path fails fast without a real daemon —
 //! proving the deny still emits regardless.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 //!
 //! Note: the deny JSON shape asserted below
 //! (`hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason}`)
@@ -34,7 +34,7 @@
 //! share (and race on) the same counter file, and would also pollute the
 //! real developer `$HOME`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -3482,6 +3482,37 @@ fn pm_guard_allows_a_git_ref_name_and_a_text_payload() {
             &repo,
         );
         assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_allows_issue_prose_a_printf_writes_to_a_file() {
+    // #8723, through the real binary: a subagent writing issue prose that
+    // quotes this guard's deny text into a scratch file DENIED on 62b6f29e1
+    // as "naming `.env` in a `printf` command".
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("mpm8723-body.md");
+    let out = out.display();
+    let subagent = r#""agent_id":"agt_8723","#;
+    let run = |command: &str| {
+        run_pm_guard_at(
+            &bash_payload_at(command, dir.path(), subagent),
+            UNREACHABLE_DAEMON,
+            dir.path(),
+        )
+    };
+    let prose = format!(
+        "printf '%s' '> naming `.env` in a `printf` command is refused (issue #7266)' > {out}"
+    );
+    let stdout = run(&prose);
+    assert!(stdout.trim().is_empty(), "prose must allow: {stdout}");
+    // The negative bound in the same binary: a pipe to a reader, and a real
+    // read of the secret-bearing file, keep the pre-fix answer.
+    for command in [
+        "echo .env | xargs cat".to_string(),
+        format!("cat .env > {out}"),
+    ] {
+        assert_denied(&run(&command));
     }
 }
 

@@ -99,9 +99,10 @@ A **task-completion report** carries four things:
 4. each claim mapped to its evidence source.
 
 In-flight responses answer the question instead; only a completion claim owes
-all four. Route each agent's **Improvement recommendations** block to
-`bobmatnyc/trusty-tools` issues through the `ticketing` agent, whatever project
-the agent ran in (#6935).
+all four. Route each agent's **Improvement recommendations** block to the
+`bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the parent
+issue — never a new issue — whatever project the agent ran in (#6935, owner
+ruling 2026-09-27).
 
 ## Example Good Report
 

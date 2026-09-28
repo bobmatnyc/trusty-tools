@@ -973,7 +973,7 @@ Work:
 
 Run locally with:
 ```bash
-cargo test -p trusty-mpm --test services_integration -- --include-ignored --nocapture
+cargo test -p trusty-mpm --test integration services_integration:: -- --include-ignored --nocapture
 ```
 
 ### Manual test plan (engineer runs before merging)

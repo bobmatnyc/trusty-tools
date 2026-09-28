@@ -9,8 +9,8 @@
 //! `python3 -c` regex literal `.*?` read the same way (#7738); an `awk`
 //! `/regex/{action}` rule's body likewise (#7744); and the file descriptor of
 //! `2>&1` read as a file named `&1` (#7743) — which the sibling BYTE scanner
-//! [`super::scan_file_write_redirect`] had already answered correctly for
-//! years, while the argv-side parser in [`super::secret_file_copy`] had not.
+//! [`super::scan_file_write_redirects`], which returns every redirect target
+//! in a command, had already answered correctly for years, while the argv-side parser in [`super::secret_file_copy`] had not.
 //! One classifier is what stops a sixth shape getting a sixth answer.
 //!
 //! What: [`tokenize`] is the lexer call for the guards #7839 migrated, and it
@@ -96,12 +96,15 @@ pub(crate) enum RedirectRole<'a> {
 /// Why: `ls .env.local 2>&1` was refused as laundering the dotenv file into a
 /// file named `&1`. `2>&1` points stderr at stdout's descriptor; it opens no
 /// file, so there is nothing to launder. The byte scanner
-/// [`super::scan_file_write_redirect`] has skipped `>&` since #5356 — this is
-/// that same rule, stated once, for the callers that work on argv.
+/// [`super::scan_file_write_redirects`] leaves a `>&` descriptor duplication
+/// out of the redirect targets it returns (#5356, #8730) — this is that same
+/// rule, stated once, for the callers that work on argv.
 /// What: the token must split at `>` with a descriptor prefix that is empty,
-/// `&`, or all digits. `>>` and `>|` are stripped, then a `&` prefix on the
-/// remainder decides: `&<digits>` and `&-` are descriptor operations, and any
-/// other `&word` is bash's `&>word` spelling, which really does name a file.
+/// `&`, or all digits. A second `>` and one clobber mark ([`strip_clobber`])
+/// are stripped, then a `&` prefix on the remainder decides: a
+/// [`is_descriptor_word`] after it is a descriptor operation, and any other
+/// `&word` is bash's `>&word` spelling, which really does name a file. A
+/// clobber mark after the `&` (zsh `>&|`/`>&!`) always names a file.
 /// Test: `bash_tokens_reads_every_redirect_spelling`,
 /// `guard_7743_ls_with_a_stderr_redirect`.
 pub(crate) fn redirect_role(token: &str) -> RedirectRole<'_> {
@@ -114,25 +117,57 @@ pub(crate) fn redirect_role(token: &str) -> RedirectRole<'_> {
     {
         return RedirectRole::None;
     }
-    let rest = rest.strip_prefix('>').unwrap_or(rest);
-    let rest = rest.strip_prefix('|').unwrap_or(rest);
-    if let Some(after) = rest.strip_prefix('&') {
+    let rest = strip_clobber(rest.strip_prefix('>').unwrap_or(rest));
+    let target = match rest.strip_prefix('&') {
+        // #8730: zsh's `>&|word`/`>&!word` opens `word` even when it is `2`.
+        Some(after) if strip_clobber(after) != after => strip_clobber(after),
         // #7743: `[n]>&<digits>` duplicates a descriptor and `[n]>&-` closes
         // one. Neither opens a file.
-        if after == "-" || (!after.is_empty() && after.chars().all(|c| c.is_ascii_digit())) {
-            return RedirectRole::FileDescriptor;
-        }
-        return if after.is_empty() {
-            RedirectRole::TargetFollows
-        } else {
-            RedirectRole::Target(after)
-        };
-    }
-    if rest.is_empty() {
+        Some(after) if is_descriptor_word(after) => return RedirectRole::FileDescriptor,
+        Some(after) => after,
+        None => rest,
+    };
+    if target.is_empty() {
         RedirectRole::TargetFollows
     } else {
-        RedirectRole::Target(rest)
+        RedirectRole::Target(target)
     }
+}
+
+/// `rest` without the one clobber mark that may open it (#8730).
+///
+/// Why: bash's `>|` and zsh's `>!` (and `>>|`, `>>!`, `>&|`, `>&!`) override
+/// `noclobber`; the mark belongs to the operator. Left on the word, it made
+/// `>!/dev/tty` a file named `!/dev/tty`, which the credential-print rule
+/// read as a discarded write.
+fn strip_clobber(rest: &str) -> &str {
+    rest.strip_prefix(['|', '!']).unwrap_or(rest)
+}
+
+/// Whether the byte at `i` is the `|` of a clobber redirect (`>|`, `>>|`,
+/// `&>|`, zsh `>&|`) rather than a pipe (#8730).
+///
+/// Why: every cutter that splits a command at `|` must agree on this, or one
+/// of them reads `>|/dev/tty` as `>` piped into a command named `/dev/tty`.
+/// Test: `bash_tokens_reads_every_redirect_spelling`,
+/// `allows_a_clobber_redirect_to_a_file_8730`.
+pub(crate) fn is_clobber_bar(bytes: &[u8], i: usize) -> bool {
+    let before = |back: usize| i.checked_sub(back).and_then(|at| bytes.get(at));
+    bytes.get(i) == Some(&b'|')
+        && (before(1) == Some(&b'>') || (before(1) == Some(&b'&') && before(2) == Some(&b'>')))
+}
+
+/// Whether the word after `>&` (or `<&`) names a descriptor rather than a file.
+///
+/// What: `-` (close), or digits with an optional trailing `-` (move). Any
+/// other word — `>&out.txt`, `>&$f` — is a file bash opens for both stdout
+/// and stderr. Shared with the byte scanner [`super::scan_file_write_redirects`]
+/// so the two readers cannot disagree (#8730).
+/// Test: `bash_tokens_reads_every_redirect_spelling`,
+/// `write_targets_read_a_descriptor_redirect_that_names_a_file`.
+pub(crate) fn is_descriptor_word(word: &str) -> bool {
+    let digits = word.strip_suffix('-').unwrap_or(word);
+    word == "-" || (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Programs that take an inline PROGRAM behind [`INLINE_PROGRAM_FLAGS`].
@@ -305,6 +340,92 @@ pub(crate) fn without_glob_metacharacters(word: &str) -> String {
         .collect()
 }
 
+/// Programs whose every argument is text they PRINT, never a file they open.
+///
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
+const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
+
+/// Which tokens of a `printf`/`echo` call are prose it writes into a file
+/// (#8723).
+///
+/// Why: `printf '%s\n' '<issue prose>' > body.md` was refused because the
+/// prose quoted this guard's own deny text, which names a dotenv file. Neither
+/// program opens an argument as a file, so a name in one is text.
+/// What: the argument indices after the program, only when all of these hold:
+/// the program's basename is a [`TEXT_PRINTERS`] entry; a stdout redirect
+/// (`>`, `>>`, `1>`, `&>`) names a file; `printf` carries no `-v`, which
+/// stores the text in a variable a later command can read; and `segment`
+/// runs nothing nested — no `$` or backtick outside single quotes, and no
+/// unquoted `(`. A redirect token and its target are never prose, so
+/// `echo x > .env` and `echo x < .env` stay screened; a token carrying
+/// whitespace was quoted, so it is prose even when it starts with `>`. The
+/// CALLER owns one
+/// more gate: `segment` must be the whole command, because a pipe hands the
+/// printed name to a reader (`echo .env | xargs cat`).
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`,
+/// `allows_issue_prose_a_lone_printer_writes_to_a_file_8723`,
+/// `denies_a_secret_read_beside_a_prose_write_8723`.
+pub(crate) fn prose_write_indices(segment: &str, argv: &[String]) -> Vec<usize> {
+    let Some(start) = crate::commands::hook_rewrite::strip_wrapper_prefix(argv) else {
+        return Vec::new();
+    };
+    let program = argv
+        .get(start)
+        .map_or("", |t| t.rsplit('/').next().unwrap_or(t));
+    if !TEXT_PRINTERS.contains(&program) || runs_a_nested_command(segment) {
+        return Vec::new();
+    }
+    let (mut prose, mut writes_a_file, mut target_next) = (Vec::new(), false, false);
+    for (index, token) in argv.iter().enumerate().skip(start + 1) {
+        if std::mem::take(&mut target_next) {
+            continue;
+        }
+        // A token carrying whitespace was quoted, so it is a word: a blockquote
+        // line `'> naming …'` is prose, never a redirect.
+        let is_word = token.chars().any(char::is_whitespace);
+        let role = if is_word {
+            RedirectRole::None
+        } else {
+            redirect_role(token)
+        };
+        if role != RedirectRole::None {
+            let descriptor = token.split_once('>').map_or("", |(d, _)| d);
+            let names_a_file =
+                matches!(role, RedirectRole::Target(_) | RedirectRole::TargetFollows);
+            writes_a_file |= names_a_file && matches!(descriptor, "" | "1" | "&");
+            target_next = role == RedirectRole::TargetFollows;
+            continue;
+        }
+        // An input redirect (`<`, `0<`, `<<<`): screened, target included.
+        if !is_word
+            && let Some((descriptor, rest)) = token.split_once('<')
+            && descriptor.chars().all(|c| c.is_ascii_digit())
+        {
+            target_next = rest.trim_start_matches(['<', '&']).is_empty();
+            continue;
+        }
+        if program == "printf" && token.starts_with("-v") {
+            return Vec::new();
+        }
+        prose.push(index);
+    }
+    if writes_a_file { prose } else { Vec::new() }
+}
+
+/// Whether `segment` can run or expand anything beyond its literal words.
+///
+/// What: unbalanced quoting, a `$` or backtick outside single quotes, or an
+/// unquoted `(` (a subshell or a process substitution).
+/// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
+fn runs_a_nested_command(segment: &str) -> bool {
+    let scan = super::shell_lex::QuoteScan::new(segment);
+    !scan.balanced
+        || segment.bytes().enumerate().any(|(i, b)| {
+            (matches!(b, b'$' | b'`') && scan.allows_substitution(i))
+                || (b == b'(' && scan.is_unquoted(i))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,9 +462,29 @@ mod tests {
         assert_eq!(redirect_role("2>"), RedirectRole::TargetFollows);
         assert_eq!(redirect_role(">out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role(">>out.txt"), RedirectRole::Target("out.txt"));
-        assert_eq!(redirect_role(">|out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role("&>out.txt"), RedirectRole::Target("out.txt"));
         assert_eq!(redirect_role(">&out.txt"), RedirectRole::Target("out.txt"));
+        // #8730: every clobber spelling (bash `>|`; zsh `>!`, `>>|`, `>>!`,
+        // `>&|`, `>&!`) reads exactly like its plain operator.
+        for op in [
+            ">|", ">!", ">>|", ">>!", "2>|", "2>!", "&>|", "&>!", ">&|", ">&!",
+        ] {
+            assert_eq!(
+                redirect_role(&format!("{op}/dev/tty")),
+                RedirectRole::Target("/dev/tty"),
+                "{op}"
+            );
+            assert_eq!(redirect_role(op), RedirectRole::TargetFollows, "{op}");
+        }
+        // A clobber `>&` names a file even when the word is all digits.
+        assert_eq!(redirect_role(">&!2"), RedirectRole::Target("2"));
+        assert_eq!(redirect_role("2>&1-"), RedirectRole::FileDescriptor);
+        for (text, at) in [("a >|b", 3), ("a >>|b", 4), ("a >&|b", 4), ("a &>|b", 4)] {
+            assert!(is_clobber_bar(text.as_bytes(), at), "{text}");
+        }
+        for (text, at) in [("a | b", 2), ("a 2>&1|b", 6), ("|b", 0), ("a &|b", 3)] {
+            assert!(!is_clobber_bar(text.as_bytes(), at), "{text}");
+        }
         assert_eq!(redirect_role("-rf"), RedirectRole::None);
         assert_eq!(redirect_role("->"), RedirectRole::None);
     }
@@ -397,5 +538,28 @@ mod tests {
         assert_eq!(without_glob_metacharacters(".env.*"), ".env.");
         assert_eq!(without_glob_metacharacters(".*?pen"), ".pen");
         assert_eq!(without_glob_metacharacters("/.*[Oo]pen/"), "/.Oopen/");
+    }
+
+    /// #8723: a printer's arguments are prose only while stdout is a file and
+    /// nothing nested runs; a redirect token and its target never are.
+    #[test]
+    fn bash_tokens_reads_prose_a_printer_writes_to_a_file() {
+        let prose = |c: &str| prose_write_indices(c, &words(c));
+        assert_eq!(prose("printf '%s\\n' 'a `.env` b' > out.md"), vec![1, 2]);
+        assert_eq!(prose("echo -n a .env >> out.md"), vec![1, 2, 3]);
+        assert_eq!(prose("FOO=1 echo a 2>&1 >out.md < in.txt"), vec![2]);
+        assert_eq!(prose("echo a &> out.md"), vec![1]);
+        assert_eq!(prose("printf '%s' '> a .env' > out.md"), vec![1, 2]);
+        for command in [
+            "echo a .env",
+            "echo a .env 2> err.md",
+            "cat .env > out.md",
+            "printf -v F .env > out.md",
+            "echo \"$(cat .env)\" > out.md",
+            "echo \"`cat .env`\" > out.md",
+            "echo .env > >(cat)",
+        ] {
+            assert!(prose(command).is_empty(), "no prose in `{command}`");
+        }
     }
 }

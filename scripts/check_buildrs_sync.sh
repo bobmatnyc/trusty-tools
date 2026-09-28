@@ -12,26 +12,25 @@
 #               build.rs builds all four of its bundles through this block.
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
-#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui,
-#               trusty-audit-ui (issues #4699, #5477). Embeds the whole desktop
+#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui
+#               (issue #4699). Embeds the whole desktop
 #               window; ABORTS the crate build on any UI-build failure, because
-#               a placeholder there would ship a blank app. trusty-agents-ui and
-#               trusty-audit-ui are edition 2021, so this block must stay free
-#               of let-chains.
-#               Those last two are crate NAMES, not directory names: the first
+#               a placeholder there would ship a blank app. trusty-agents-ui is
+#               edition 2021, so this block must stay free of let-chains.
+#               That last one is a crate NAME, not a directory name: the first
 #               two live at crates/<name>/build.rs, but trusty-agents-ui is
-#               crates/trusty-agents/ui/src-tauri/build.rs and trusty-audit-ui
-#               is crates/trusty-audit/ui/src-tauri/build.rs. TAURI_UI_FILES
+#               crates/trusty-agents/ui/src-tauri/build.rs. TAURI_UI_FILES
 #               below is the authoritative list.
 #
 # The two families are deliberately not merged: their failure semantics differ.
 #
 # What: Extracts the text between each family's BEGIN/END markers from every
 # member's build.rs and asserts the members of a family are byte-for-byte
-# identical. Exits 0 on success, 1 on any mismatch with a diff.
+# identical, then runs scripts/check_buildrs_watched_paths.sh over every build
+# script. Exits 0 on success, 1 on any mismatch with a diff.
 #
 # Test: Run `bash scripts/check_buildrs_sync.sh` from the workspace root.
-# Expected output: one "in sync" line per family.
+# Expected output: one "in sync" line per family, then one "watched paths" line.
 
 set -euo pipefail
 
@@ -46,7 +45,6 @@ TAURI_UI_FILES=(
     "crates/trusty-code-gui/build.rs"
     "crates/trusty-mpm-gui/build.rs"
     "crates/trusty-agents/ui/src-tauri/build.rs"
-    "crates/trusty-audit/ui/src-tauri/build.rs"
 )
 
 TMP_DIR=$(mktemp -d)
@@ -99,5 +97,9 @@ check_family() {
 
 check_family "daemon" "" "${DAEMON_FILES[@]}"
 check_family "tauri-ui" "TAURI UI " "${TAURI_UI_FILES[@]}"
+
+# Every build script, not just the two families: a watched path that does not
+# exist re-runs its script on every build (QUICK BUILDS, 2026-09-27).
+"$WORKSPACE_ROOT/scripts/check_buildrs_watched_paths.sh" "$WORKSPACE_ROOT" || FAILED=1
 
 exit "$FAILED"

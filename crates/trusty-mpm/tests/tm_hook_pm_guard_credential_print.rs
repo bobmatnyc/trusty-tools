@@ -8,9 +8,9 @@
 //! What: spawns the built `tm` against an unreachable daemon URL and asserts
 //! DENY (one JSON line carrying `permissionDecision: "deny"`) or ALLOW (empty
 //! stdout). Every command uses a fake service name and is never executed.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_credential_print`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_credential_print::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::Path;
@@ -76,6 +76,19 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "gcp-ops",
             "gcloud auth application-default print-access-token",
         ),
+        // #8676: a value captured into a variable and printed a stage later.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); echo \"${T:0:10}\"",
+        ),
+        (
+            "local-ops",
+            "export K=$(security find-generic-password -s fake-svc -w) && printenv K",
+        ),
+        (
+            "gcp-ops",
+            "for t in $(gcloud auth print-access-token); do echo $t; done",
+        ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();
@@ -89,6 +102,25 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
     }
 }
 
+/// #8676 round 2, row 4: a word nested ~100k `${` deep once overflowed the
+/// hook's stack, which aborts past `catch_unwind` and fails open.
+#[test]
+fn pm_guard_denies_a_deeply_nested_expansion_without_crashing() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let depth = 100_000;
+    let command = format!(
+        "T=$(gcloud auth print-access-token); echo {}T{}",
+        "${a".repeat(depth),
+        "}".repeat(depth)
+    );
+    let stdout = run_pm_guard("gcp-ops", &command, cwd.path());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("deny is JSON");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{stdout}"
+    );
+}
+
 #[test]
 fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
     let cwd = tempfile::tempdir().expect("cwd");
@@ -100,6 +132,12 @@ fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
         (
             "gcp-ops",
             "curl -sS -H \"Authorization: Bearer $(gcloud auth print-access-token)\" https://example.test/v1",
+        ),
+        // #8676: a carried variable that is only measured or passed on.
+        ("gcp-ops", "T=$(gcloud auth print-access-token); echo ${#T}"),
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
         ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());

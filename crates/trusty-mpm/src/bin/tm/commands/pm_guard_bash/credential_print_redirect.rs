@@ -3,18 +3,35 @@
 //! Why: `security … -w 3>&1 1>&3` moved the value through fd 3, and a copy of
 //! an fd the rule did not track was read as discarded, which failed open.
 //! Round 3 found the input-side spellings: `1<&2` copies like `1>&2`, and
-//! `1<>/dev/tty` opens the terminal read-write.
+//! `1<>/dev/tty` opens the terminal read-write. Round 5 found a plain input
+//! redirect (`wc -c < "$T"`): the shell's own "No such file" error names a
+//! carrying target on stderr when it fails to open, and nothing had ever
+//! parsed a bare `<`. Round 6 found the same missing-file leak through a
+//! command substitution or backtick target (`wc -c < "$(echo "$T")"`) —
+//! round 5's gate matched only a bare `$NAME` expansion, not the placeholder
+//! a lifted `$(…)`/backtick leaves behind.
 //! What: [`apply_redirections`] keeps a sink per descriptor 0-9. A copy of an
 //! untracked descriptor (fd 0, an fd never assigned, fd 10+) is
 //! [`Sink::Terminal`]; a copy from a descriptor chosen at run time
 //! (`>&$fd`) is refused as unreadable. [`terminal_name_sink`] maps a path that
-//! names a descriptor or the terminal to its sink.
+//! names a descriptor or the terminal to its sink. A plain input redirect
+//! whose target carries the value — a bare `$NAME` expansion, or a
+//! [`SubKind::Command`] substitution that yields — sets
+//! [`Routed::read_target_carries`]; the caller routes it to the stage's
+//! stderr. A [`SubKind::Input`] (`<(…)`) target stays excluded: bash always
+//! opens that descriptor, so it never produces a missing-file error.
 //! Test: `credential_print_tests::denies_the_round_two_bypasses`,
-//! `credential_print_tests::denies_the_round_three_bypasses`.
+//! `credential_print_tests::denies_the_round_three_bypasses`,
+//! `credential_print_tests::denies_the_round_five_bypasses`,
+//! `credential_print_tests::denies_the_round_six_bypasses`,
+//! `credential_print_tests::allows_the_round_six_neighbours`.
 
 use super::super::bash_tokens::{RedirectRole, redirect_role};
 use super::credential_print_heredoc::HEREDOC_MARK;
-use super::{Lifted, MARK, Refusal, Sink, SubKind, carries, input_is_program_text, marks_in};
+use super::credential_print_taint::expands_tainted;
+use super::{
+    Lifted, MARK, Refusal, Sink, SubKind, carries, carries_kind, input_is_program_text, marks_in,
+};
 
 /// A stage's argv and routing after its redirections.
 pub(super) struct Routed {
@@ -24,10 +41,17 @@ pub(super) struct Routed {
     /// Every descriptor 0-9 after the redirections; an unassigned one is the
     /// terminal.
     pub(super) fds: [Sink; 10],
-    /// A here-string carries a credential value.
+    /// A here-string or unquoted here-document carries a credential value.
     pub(super) here_carries: bool,
     /// A here-string or here-document holds text an evaluator would run.
     pub(super) here_program_text: bool,
+    /// #8676: stdin is any here-string or here-document.
+    pub(super) here_any: bool,
+    /// #8676 round 5/6: a plain input redirect (`<`, `N<`) names a target
+    /// that carries — via a bare `$NAME` expansion or a yielding `$(…)`/
+    /// backtick substitution — and a missing file's error would echo it on
+    /// stderr.
+    pub(super) read_target_carries: bool,
 }
 
 /// Split a stage's words into argv and its output routing.
@@ -57,6 +81,8 @@ pub(super) fn apply_redirections(
         fds,
         here_carries: false,
         here_program_text: false,
+        here_any: false,
+        read_target_carries: false,
     };
     let mut i = 0;
     while let Some(tok) = tokens.get(i) {
@@ -64,6 +90,7 @@ pub(super) fn apply_redirections(
         if let Some(index) = heredoc_index(tok) {
             let text = lifted.heredocs.get(index).is_none_or(|h| h.program_text);
             routed.here_program_text |= text;
+            routed.here_any = true;
             continue;
         }
         if let Some(word) = tok.strip_prefix("<<<") {
@@ -75,6 +102,7 @@ pub(super) fn apply_redirections(
             };
             routed.here_carries |= carries(word, lifted);
             routed.here_program_text |= input_is_program_text(word);
+            routed.here_any = true;
             continue;
         }
         if tok.starts_with("<<") {
@@ -82,6 +110,9 @@ pub(super) fn apply_redirections(
             // words follow the operator.
             let rest = tokens.get(i..).unwrap_or_default();
             routed.here_program_text |= rest.iter().any(|w| input_is_program_text(w));
+            routed.here_any = true;
+            // #8676: a body word expanding a credential feeds it on stdin.
+            routed.here_carries |= rest.iter().any(|w| carries(w, lifted));
         }
         if let Some((fd, src)) = dup_operands(tok, tokens.get(i).map(String::as_str))? {
             if src.consumed_next {
@@ -111,6 +142,34 @@ pub(super) fn apply_redirections(
             };
             let sink = terminal_name_sink(target, &fds, lifted, out).unwrap_or(Sink::Discarded);
             assign(&mut fds, &mut assigned, &[fd], sink);
+            continue;
+        }
+        if let Some((_fd, rest)) = input_redirect_operand(tok) {
+            let target = match rest {
+                "" => {
+                    i += 1;
+                    tokens
+                        .get(i - 1)
+                        .ok_or(Refusal::Unreadable("a redirection with no target"))?
+                        .as_str()
+                }
+                t => t,
+            };
+            // #8676 round 5/6: a missing file's "No such file" error names
+            // `target` on stderr — a bare `$T` (round 5) and a command
+            // substitution's own filename (`$(…)`/backtick, round 6: the
+            // substitution's result IS the missing path bash reports, not a
+            // real descriptor). A `<(…)` target stays excluded — it is a real
+            // descriptor bash always opens, never a missing-file error.
+            routed.read_target_carries |= expands_tainted(target, &lifted.names)
+                || carries_kind(target, lifted, Some(SubKind::Command));
+            // A `<(…)`/`$(…)` target's file content becomes stdin, exactly
+            // like a here-string (round 2's `sort < <(cred)`, `bash <
+            // <(echo …)`) — this branch used to leave the target in `argv`,
+            // which is what those rows actually relied on.
+            routed.here_carries |= carries(target, lifted);
+            routed.here_program_text |= input_is_program_text(target);
+            routed.here_any = true;
             continue;
         }
         let target = match redirect_role(tok) {
@@ -259,6 +318,25 @@ fn dup_operands<'a>(
 /// follows.
 fn read_write_operands(tok: &str) -> Option<(usize, &str)> {
     let (left, right) = tok.split_once("<>")?;
+    let fd = if left.is_empty() {
+        0
+    } else if left.chars().all(|c| c.is_ascii_digit()) {
+        left.parse().unwrap_or(usize::MAX)
+    } else {
+        return None;
+    };
+    Some((fd, right))
+}
+
+/// Parse a plain input redirect: `<`, `N<`, `<path`, or `N<path` (#8676
+/// round 5) — never `<<`, `<<<`, `<>`, or `<&`, each already consumed by an
+/// earlier check before this one runs. Returns the descriptor (default 0) and
+/// the attached path, empty if it follows as the next token.
+fn input_redirect_operand(tok: &str) -> Option<(usize, &str)> {
+    let (left, right) = tok.split_once('<')?;
+    if right.starts_with(['<', '>', '&']) {
+        return None;
+    }
     let fd = if left.is_empty() {
         0
     } else if left.chars().all(|c| c.is_ascii_digit()) {

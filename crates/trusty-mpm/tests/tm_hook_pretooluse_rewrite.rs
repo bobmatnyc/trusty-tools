@@ -14,7 +14,7 @@
 //! the expected rewrite (or that nothing is printed for excluded commands).
 //! The daemon URL is pointed at an unreachable address so the best-effort
 //! POST fails fast without a real daemon running.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pretooluse_rewrite`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pretooluse_rewrite::`.
 //!
 //! Note: the `hookSpecificOutput`/`updatedInput` JSON shape asserted against
 //! below, and the stdin field names consumed (`hook_event_name`,
@@ -27,7 +27,7 @@
 //! consistent with the documented protocol, not a substitute for testing
 //! against a real running Claude Code session.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 

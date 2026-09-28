@@ -24,6 +24,7 @@ use super::decommission_force::{
     DecommissionReport, ProvisioningDirt, remove_in_project_worktree, unowned_kept_reason,
 };
 use super::decommission_owned::{remove_owned_workspace, unclaimed_directory_blocks_removal};
+use super::git_ceiling::bounded_git_output;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
@@ -31,6 +32,7 @@ use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_ignored_output::ignored_output_blocks_removal;
 use super::worktree_protection;
 use super::worktree_registry;
+use super::worktree_removal_integrity::{content_count, partial_removal};
 use super::worktree_safety::{DirtyWorktreePolicy, worktree_remove_command};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
@@ -231,6 +233,9 @@ pub(crate) enum WorktreeRemoval {
     Removed,
     /// The directory is still on disk. The string says why, for the operator.
     Kept(String),
+    /// Git failed after deleting some or all of the directory (#8782). The
+    /// string carries git's error and what was deleted; never read it as kept.
+    PartiallyRemoved(String),
 }
 
 impl WorktreeRemoval {
@@ -239,11 +244,11 @@ impl WorktreeRemoval {
         matches!(self, Self::Removed)
     }
 
-    /// The operator-facing reason the directory was kept, if it was.
+    /// The operator-facing reason the removal did not complete, if it did not.
     pub(super) fn reason(&self) -> Option<&str> {
         match self {
             Self::Removed => None,
-            Self::Kept(reason) => Some(reason),
+            Self::Kept(reason) | Self::PartiallyRemoved(reason) => Some(reason),
         }
     }
 }
@@ -315,6 +320,8 @@ impl WorktreeRemoval {
 /// the fact. It is a required argument rather than a defaulted one because a
 /// route that cannot say why it is deleting is the case that went unrecorded.
 /// #8534: `ignored` — see [`remove_session_worktree_guarded`].
+// #8782: every production route now passes a guard; tests keep this form.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn remove_session_worktree(
     path: &Path,
     reason: &str,
@@ -387,11 +394,16 @@ pub(super) fn remove_session_worktree_guarded(
     // #7885 critic round: an attempt line before and an outcome line after, so
     // a refused removal never reads as a deletion.
     super::worktree_removal_audit::audited_removal(path, reason, || {
+        // #8782: counted before the guard, so the guard stays next to git.
+        let before = content_count(path);
         // #7652 critic round: the caller's last refusal, after the attempt line.
         if let Some(refusal) = guard() {
             return WorktreeRemoval::Kept(format!("refused immediately before removal: {refusal}"));
         }
-        remove_registered_worktree(path, ignored)
+        // #8306: bounded; a killed removal is classified by the `Err` arm.
+        remove_registered_worktree(path, ignored, before, &|root| {
+            bounded_git_output(worktree_remove_command(root, path))
+        })
     })
 }
 
@@ -402,11 +414,20 @@ pub(super) fn remove_session_worktree_guarded(
 /// call rather than being repeated on each of this function's five return arms
 /// (#7885).
 /// What: registry resolution, the #8534 gitignored-output gate, `git worktree
-/// remove --force`, and the two [`worktree_protection`]-gated fallbacks.
+/// remove --force` (run by `run_git` against the registry root), and the two
+/// [`worktree_protection`]-gated fallbacks. A failed git run that deleted
+/// content, judged against `before`, is [`WorktreeRemoval::PartiallyRemoved`]
+/// (#8782).
 /// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
 /// `worktree_7885_a_refused_removal_is_never_audited_as_a_deletion`,
-/// `decommission_keeps_gitignored_run_output`.
-fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> WorktreeRemoval {
+/// `decommission_keeps_gitignored_run_output`,
+/// `a_git_failure_after_a_partial_delete_is_reported_as_partially_removed`.
+fn remove_registered_worktree(
+    path: &Path,
+    ignored: DirtyWorktreePolicy,
+    before: Option<u64>,
+    run_git: &dyn Fn(&Path) -> std::io::Result<std::process::Output>,
+) -> WorktreeRemoval {
     // #4207: ask git which checkout owns this worktree's registry instead of
     // guessing that it is the grandparent directory. The grandparent rule held
     // only for the two shapes it was written against; a worktree registered to
@@ -451,7 +472,7 @@ fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> Work
     // #6391: through the hardened builder, which keeps the #1840 OsStr-safe
     // Path args and additionally strips the env vars that would point
     // `git worktree` at a different repository than `-C` names.
-    let out = worktree_remove_command(repo_root, path).output();
+    let out = run_git(repo_root);
     match out {
         Ok(o) if o.status.success() => {
             info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
@@ -463,6 +484,16 @@ fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> Work
             // lock` uses that exit to REFUSE. Classify the reason instead of
             // reading every non-zero exit as permission to delete by hand.
             let stderr = String::from_utf8_lossy(&o.stderr);
+            // #8782: git may fail after deleting part of the tree; never "kept".
+            let failure = format!(
+                "`git worktree remove --force` exited {}: {}",
+                o.status,
+                stderr.trim()
+            );
+            if let Some(partial) = partial_removal(path, before, &failure) {
+                warn!(path = %path.display(), "decommission: {partial}");
+                return WorktreeRemoval::PartiallyRemoved(partial);
+            }
             let verdict =
                 worktree_protection::protection_after_failed_removal(path, repo_root, &stderr);
             if let Some(reason) = verdict.refusal() {
@@ -488,6 +519,11 @@ fn remove_registered_worktree(path: &Path, ignored: DirtyWorktreePolicy) -> Work
             // what it may be protecting. An unanswerable probe is never a
             // licence to delete.
             let reason = format!("git could not be run to remove the worktree: {e}");
+            // #8306: a git killed at its ceiling may have deleted part of it.
+            if let Some(partial) = partial_removal(path, before, &reason) {
+                warn!(path = %path.display(), "decommission: {partial}");
+                return WorktreeRemoval::PartiallyRemoved(partial);
+            }
             warn!(
                 path = %path.display(),
                 "decommission: refusing worktree removal — {reason} (#4732)"
@@ -543,9 +579,10 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // #7171: through the shared entry point — this runs on every session
         // teardown across the fleet, one of the storm-trigger commands named
         // by the incident.
-        let prune_out = trusty_common::git::command_in(repo_root)
-            .args(["worktree", "prune"])
-            .output();
+        let mut prune = trusty_common::git::command_in(repo_root);
+        prune.args(["worktree", "prune"]);
+        // #8306: bounded like every other sweep git call.
+        let prune_out = bounded_git_output(prune);
         if let Err(e) = prune_out {
             warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
         }
@@ -567,12 +604,9 @@ fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
         // this module keeps compiling with the `daemon` feature disabled.
         if let Some(session_name) = path.file_name().and_then(|n| n.to_str()) {
             let branch = crate::core::worktree_naming::worktree_branch_for(session_name);
-            let branch_out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo_root)
-                .args(["branch", "-D"])
-                .arg(&branch)
-                .output();
+            let mut delete = trusty_common::git::command_in(repo_root);
+            delete.args(["branch", "-D"]).arg(&branch);
+            let branch_out = bounded_git_output(delete);
             match branch_out {
                 Ok(o) if o.status.success() => {
                     info!(
@@ -1236,3 +1270,7 @@ impl SessionManager {
 #[cfg(test)]
 #[path = "decommission_force_wire_tests.rs"]
 mod decommission_force_wire_tests;
+
+#[cfg(test)]
+#[path = "decommission_partial_tests.rs"]
+mod decommission_partial_tests;

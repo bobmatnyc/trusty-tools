@@ -88,6 +88,8 @@ async fn run_status(json: bool) -> Result<()> {
                 "url": base,
                 "version": health_body.get("version").cloned().unwrap_or(serde_json::json!(null)),
                 "indexes": arr,
+                // #8727: the registrations `indexes` omits but create still checks.
+                "parked": list_body.get("parked").cloned().unwrap_or(serde_json::json!([])),
             })
         );
     } else {
@@ -125,6 +127,7 @@ async fn run_status(json: bool) -> Result<()> {
                 }
             }
         }
+        super::list::print_parked(&list_body);
     }
     Ok(())
 }

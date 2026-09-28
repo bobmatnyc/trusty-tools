@@ -564,6 +564,8 @@ mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
 mod last_used_tests;
+// #8733: the maintenance tools refuse without the maintenance lease.
+mod lease_refusal_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.
 mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
@@ -1067,14 +1069,12 @@ async fn dispatch_discover_aliases_inserts_new_and_dedupes() {
         .await
         .expect("palace_create");
 
-    // Use the live workspace root so the discovery actually finds
-    // something. CARGO_MANIFEST_DIR points at the crate dir; walk up
-    // twice to the workspace root.
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .to_path_buf();
+    // A self-contained workspace fixture carrying the `tga` package alias
+    // (tga left this workspace, PR #8824). Separate from `_tmp`, which holds
+    // the palace data.
+    let fixture = tempfile::tempdir().expect("fixture tempdir");
+    crate::discovery::write_tga_workspace_fixture(fixture.path());
+    let workspace_root = fixture.path().to_path_buf();
 
     let first = dispatch_tool(
         &state,

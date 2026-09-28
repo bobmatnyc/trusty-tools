@@ -1526,3 +1526,54 @@ fn a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time() {
         }
     }
 }
+
+/// #8733: the open-time TTL purge is maintenance, so a registry whose data
+/// root's maintenance lease is held by another process deletes no row. Once
+/// the holder is gone the same open reclaims the row. Pre-fix the first open
+/// already deleted it.
+#[test]
+fn a_non_maintainer_open_deletes_no_expired_row() {
+    use crate::memory_core::palace::Drawer;
+    let root = tempdir().unwrap();
+    let data_dir = root.path().join("ttl-palace");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let mut expired = Drawer::new(uuid::Uuid::new_v4(), "an expired drawer");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+    let expired_id = expired.id;
+    {
+        let kg = KnowledgeGraph::open(&data_dir.join("kg.db")).unwrap();
+        kg.upsert_drawer_sync(&expired).unwrap();
+    }
+    let palace = Palace {
+        id: PalaceId::new("ttl-palace"),
+        name: "TTL".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir,
+    };
+
+    let holder = Arc::new(MaintenanceLease::new(root.path()));
+    assert!(holder.try_hold().is_held());
+    let non_maintainer =
+        PalaceRegistry::new().with_maintenance_lease(Arc::new(MaintenanceLease::new(root.path())));
+    {
+        let handle = non_maintainer.open_handle(&palace).expect("open");
+        assert!(
+            !handle.drawers.read().iter().any(|d| d.id == expired_id),
+            "the expired drawer is still hidden from the handle"
+        );
+        let rows = handle.kg.load_drawers().unwrap();
+        assert!(
+            rows.iter().any(|d| d.id == expired_id),
+            "a non-maintainer must not delete the expired row"
+        );
+    }
+
+    drop(holder);
+    let handle = non_maintainer.open_handle(&palace).expect("reopen");
+    let rows = handle.kg.load_drawers().unwrap();
+    assert!(
+        !rows.iter().any(|d| d.id == expired_id),
+        "the new maintainer reclaims the expired row"
+    );
+}

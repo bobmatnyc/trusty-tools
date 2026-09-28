@@ -64,7 +64,7 @@ if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" matrix)" = '{"include":[
 else fail "empty selection: $out"; fi
 
 # 3. Only Tauri UI crates selected -> nothing for the headless runner.
-stub 0 trusty-code-gui trusty-audit-ui
+stub 0 trusty-code-gui trusty-agents-ui
 out="$(plan -- --files x)"
 if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'Tauri'; then
   pass "Tauri-only selection -> count=0"
@@ -125,7 +125,7 @@ else fail "live unreferenced script: $out"; fi
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in
-  *" trusty-code-gui "* | *" trusty-audit-ui "* | *" trusty-mpm-gui "* | *" trusty-agents-ui "*)
+  *" trusty-code-gui "* | *" trusty-mpm-gui "* | *" trusty-agents-ui "*)
     fail "live: trusty-common selection kept a Tauri crate: $out" ;;
   *" trusty-common "*" trusty-mpm "*) pass "live: trusty-common path -> trusty-common + dependents, no Tauri crate" ;;
   *) fail "live: trusty-common selection: $out" ;;

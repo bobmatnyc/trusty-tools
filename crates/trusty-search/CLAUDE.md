@@ -214,8 +214,17 @@ List every registered index.
 - **Request body**: none.
 - **Response 200**:
   ```json
-  { "indexes": ["my-project", "trusty-search", "trusty-agents"] }
+  { "indexes": ["my-project", "trusty-search", "trusty-agents"],
+    "parked": [{ "id": "old-wt", "root_path": "/repo/.claude/worktrees/old-wt",
+                 "root_state": "orphaned" }] }
   ```
+  - `indexes`: the resident ids.
+  - `parked` (#8727): every registered-but-not-resident id — the rest of the
+    set `POST /indexes`'s overlap check consults. `root_state` is the
+    `/registry/orphans` classification (`present` / `orphaned` /
+    `indeterminate`). Also on `?details=true`; a `?repo_identity=` filter
+    narrows it to that repo's rows. Omitted when nothing is
+    parked, so a consumer must treat it as optional.
 
 ##### `POST /indexes`
 
@@ -234,6 +243,33 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 409** (#8499): the index store would land inside the git work
+  tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
+  repository (not only under `<root_path>`), or the default data dir under a
+  root such as `$HOME`. Outside any repository the root itself is the bound.
+  A linked worktree or submodule is its own work tree. An id already in
+  `indexes.toml` at the same root is exempt only while its store already
+  exists there; a missing store is never created. Nothing is registered and no
+  store is written. `PATCH /indexes/:id` refuses a new root the same way, and
+  also answers `409` while a reindex holds that index.
+- **Response 503** `index_corpus_unavailable` (#8499): the store is still
+  open under an earlier registration of the same index (a deferred embed job
+  or an unfinished delete close). Carries `index_id`, `failure_kind`, and
+  `retryable: true`; nothing is registered. Retry.
+
+Concurrent registrations and relocates wait for each other only when they
+share an id or their roots are equal or nested; unrelated roots register in
+parallel.
+
+**Storage placement (#8499).** A new index keeps its store in the data dir
+(`<data_dir>/indexes/<id>/`), outside the work tree, so `git reset --hard` plus
+`git clean -fdx` cannot delete it. Registration never reads or writes the
+repository's `.gitignore`. A root whose `.trusty-search/` already holds an
+index file (a pre-#8499 index, or an off-box artifact below) is adopted in
+place; that directory then carries its own `.gitignore` (`*`), which hides it
+from `git status` and `git clean -fd` but not from `git clean -fdx`. To move
+such an index out of the work tree, `DELETE /indexes/:id?delete_data=true`
+and register it again.
 
 ###### Off-box per-index delivery (issue #8135)
 

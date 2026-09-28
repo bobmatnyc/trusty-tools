@@ -58,8 +58,9 @@ guessed priority is noise someone else re-triages.
 label, never a milestone.
 
 **Other labels in use**, applied when they describe the issue: `blocked`,
-`breaking-change`, `do-not-merge`, `duplicate`, `regression`, `release`,
-`release-cleanup`, `security`, `self-improvement`, `tech-debt`, `wont-do`.
+`breaking-change`, `closed:sweep`, `do-not-merge`, `duplicate`, `regression`,
+`release`, `release-cleanup`, `security`, `self-improvement`, `tech-debt`,
+`wont-do`.
 
 **Not part of this standard, and never applied by the agent:** the
 `unicorn:*` family, `blast:*`, `approval:*`, and `T2`–`T4`. These belong to the
@@ -323,6 +324,10 @@ posts ONE triage comment naming its recommended disposition with evidence:
 At **60 days** it closes with a note, unless the issue is pinned to a milestone
 or carries `keep`, `paused`, or `blocked`.
 
+🔴 **A sweep closure carries `closed:sweep`** (owner ruling 2026-09-27) — age,
+staleness, duplicate, or obsolete dispositions all count. A fix closure comes
+from a merged PR and never carries `closed:sweep`.
+
 🔴 **A human decision is requested as a digest, never per issue.** Group the
 recommendations per epic and post them as one comment on that epic's tracker.
 The sweep is `tm-issues-prune`'s Prune phase; this section is the policy it
@@ -385,6 +390,41 @@ may still be filed — search first.
   (impact, affected versions, disclosure state), and a research or audit issue
   (its evidence inventory).
 - Every reference renders as a clickable markdown link, never a bare number.
+
+## Symptom Titles and Area Labels (owner decision, 2026-09-27)
+
+1. **Title states the observed symptom**, never the cause or the fix. Good:
+   "index remove deletes the wrong index when TRUSTY_INDEX is set". Bad:
+   "value_source ignores -i".
+2. **Body carries three sections:** Symptom, Evidence, and Suspected cause.
+   Suspected cause is optional and labeled a hypothesis, never a diagnosis.
+3. **Every issue carries exactly one `area:` label**, from this fixed set:
+
+   | Label | Area |
+   |---|---|
+   | `area:pm-guard` | Command/write authorization guard allow-deny logic (not secret heuristics) |
+   | `area:secrets` | Credential/secret detection, storage and redaction, wherever it runs |
+   | `area:worktree` | Worktree creation, reclaim, disk usage, provisioning, orphan sweeps |
+   | `area:build-lease` | Build slots, the builder cap, target-dir capacity, build disk budget, test-run concurrency |
+   | `area:session-lifecycle` | Session/tmux launch, resume, pause, pane, statusline, project registry |
+   | `area:daemon-launchd` | Daemon start/stop/restart, launchd plists, orphaned processes, daemon-client deadlines |
+   | `area:release` | Version bumps, publish, changelog gates, version parity, PR merge/auto-merge/gate mechanics |
+   | `area:ci` | GitHub Actions pipeline configuration and health, Dependabot |
+   | `area:test-hermeticity` | Flaky, hanging, non-deterministic or state-polluting tests |
+   | `area:memory-daemon` | trusty-memory internals: dream/consolidation, KG, palace locks, drawer loss |
+   | `area:memory-import` | kuzu-memory import/export review workflow |
+   | `area:search-index` | trusty-search indexing, embedding, reindex, vector integrity, and its own daemon |
+   | `area:agent-platform` | trusty-code / trusty-agents harness and roster |
+   | `area:agent-prompts` | Agent briefs, base-agent rules, skill, doc and PM-instruction wording, prompt-feedback rollups |
+   | `area:channels` | Slack/Telegram front door and channel routing |
+   | `area:other` | Fallback when no area above fits |
+
+4. **Tie-break: label the area where the symptom shows**, never where the fix
+   will land. A guard refusal triggered by a secret heuristic is
+   `area:secrets`, not `area:pm-guard`.
+5. **If `area:other` exceeds 5% of open issues, propose a new area** instead
+   of growing the fallback.
+6. **Status reports give issues opened and closed per area per day.**
 
 ## Attribution
 

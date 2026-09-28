@@ -40,8 +40,10 @@
 #   not exist, which is how a correct gate gets disabled after one false alarm.
 #
 #   Case 11 runs against THIS repo rather than a fixture: the real
-#   `tga-v2.17.0` tag against the real current HEAD, which is the real
-#   2026-08-11 shape with real objects. It is corroboration, not the load-
+#   `trusty-review-v0.15.0` tag — cut at 246e4ca2 the same 2026-08-11 night
+#   as `tga-v2.17.0` — against the real current HEAD, which is the real
+#   drifted-tag shape with real objects. (It named `tga-v2.17.0` until tga
+#   left this workspace, owner ruling 2026-09-28.) It is corroboration, not the load-
 #   bearing coverage — it self-skips when the tag is not present locally (a
 #   clone without tags) or when HEAD happens to be the tagged commit.
 #
@@ -197,20 +199,20 @@ run_case "missing tag" 1 "TAG-MISSING" "$repo" trusty-example
 # 5. Alias split — both accepted tag series exist (#1128) at DIFFERENT commits.
 #    Whichever one a reader checks out, one of them misrepresents the release.
 # ===========================================================================
-repo="$(mkrepo alias-split trusty-git-analytics tga 2.17.0)"
-git -C "$repo" tag tga-v2.17.0
+repo="$(mkrepo alias-split trusty-aliased taliased 2.17.0)"
+git -C "$repo" tag taliased-v2.17.0
 commit_more "$repo" 1
-git -C "$repo" tag trusty-git-analytics-v2.17.0
-run_case "alias split" 1 "TAG-SPLIT" "$repo" tga
+git -C "$repo" tag trusty-aliased-v2.17.0
+run_case "alias split" 1 "TAG-SPLIT" "$repo" taliased
 
 # ===========================================================================
-# 6. The tga alias alone, at HEAD — the form 2026-08-11 actually pushed. It
-#    must RESOLVE and pass, or case 5 would be satisfied by a gate that simply
-#    cannot see alias tags.
+# 6. The package-name alias alone, at HEAD — the form 2026-08-11 actually
+#    pushed. It must RESOLVE and pass, or case 5 would be satisfied by a gate
+#    that simply cannot see alias tags.
 # ===========================================================================
-repo="$(mkrepo alias-only trusty-git-analytics tga 2.17.0)"
-git -C "$repo" tag tga-v2.17.0
-run_case "package-name alias tag resolves" 0 "-" "$repo" tga
+repo="$(mkrepo alias-only trusty-aliased taliased 2.17.0)"
+git -C "$repo" tag taliased-v2.17.0
+run_case "package-name alias tag resolves" 0 "-" "$repo" taliased
 
 # ===========================================================================
 # 7. vcs-info agrees with the tag. Exit 0.
@@ -284,11 +286,11 @@ git -C "$repo" tag -a trusty-example-v1.2.3 -m "release 1.2.3"
 run_case "annotated tag at HEAD" 0 "-" "$repo" trusty-example
 
 # ===========================================================================
-# 11. Corroboration against this repo's real history: tga-v2.17.0 versus the
-#     current HEAD. Self-skips rather than failing when the tag is absent (a
+# 11. Corroboration against this repo's real history: trusty-review-v0.15.0
+#     (246e4ca2, the 2026-08-11 commit) versus the current HEAD. Self-skips rather than failing when the tag is absent (a
 #     clone without tags) or when HEAD is the tagged commit itself.
 # ===========================================================================
-REAL_TAG="tga-v2.17.0"
+REAL_TAG="trusty-review-v0.15.0"
 REAL_TAG_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/tags/${REAL_TAG}^{commit}" || true)"
 REAL_HEAD="$(git -C "$REPO_ROOT" rev-parse "HEAD^{commit}")"
 if [ -z "$REAL_TAG_SHA" ]; then
@@ -297,7 +299,7 @@ elif [ "$REAL_TAG_SHA" = "$REAL_HEAD" ]; then
   echo "  --  real-history case skipped: HEAD is ${REAL_TAG}'s own commit"
 else
   rc=0
-  out="$(bash "$GATE" --repo "$REPO_ROOT" --no-fetch tga 2.17.0 2>&1)" || rc=$?
+  out="$(bash "$GATE" --repo "$REPO_ROOT" --no-fetch trusty-review 0.15.0 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     fail_case "real-history: the gate passed ${REAL_TAG} (${REAL_TAG_SHA}) against HEAD (${REAL_HEAD})" "$out"
   # Here-strings, NOT `printf … | grep -qF`. `grep -q` exits on the FIRST match
@@ -305,7 +307,7 @@ else
   # closed pipe; past the pipe buffer it dies on SIGPIPE, `set -o pipefail`
   # promotes that 141 to the pipeline's status, and the test reads "the needle
   # was absent" from output that plainly contains it. The gate's output grows
-  # with every commit between tga-v2.17.0 and HEAD — it reached ~43 KB and the
+  # with every commit between the real tag and HEAD — it reached ~43 KB and the
   # job started failing with `printf: write error: Broken pipe` beside a
   # verbatim "FAIL: TAG-DRIFT" line.
   elif ! grep -qF "TAG-DRIFT" <<< "$out"; then

@@ -36,7 +36,8 @@ use super::worktree_remove_rechecks::{
     CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
     CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks, recheck_deny,
 };
-use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
+use crate::commands::pm_guard::build_pm_guard_deny_response;
+use crate::commands::pm_guard_deny_log::{DenyContext, post_deny_audit, record_deny};
 use crate::commands::pm_guard_dispatch;
 use std::io::Write;
 
@@ -102,27 +103,26 @@ pub(crate) async fn removal_recheck_deny(
 ///
 /// Why: a deny still sitting in a buffer when the hook is killed decides
 /// nothing, and the audit is best-effort, so the decision goes out first.
-/// What: prints the `PreToolUse` deny, flushes stdout, then runs the audit
-/// under whatever is left before [`DECISION_DEADLINE`], skipping it when
-/// nothing is.
+/// What: prints the `PreToolUse` deny, flushes stdout, records it (a local
+/// append, never skipped — #8722), then runs the audit POST under whatever is
+/// left before [`DECISION_DEADLINE`], skipping it when nothing is.
 /// Test: `a_late_start_still_denies_inside_the_remaining_budget` (the budget
 /// arithmetic); the print path in `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn print_deny_then_audit(
-    url: &str,
-    session_id: &str,
-    tool_name: &str,
+    refused: &DenyContext<'_>,
+    check: &str,
     reason: &str,
     started: Instant,
 ) {
     println!("{}", build_pm_guard_deny_response(reason));
     // Nothing useful can be done with a flush error; the deny is written.
     let _ = std::io::stdout().flush();
+    record_deny(refused, check, reason);
     let left = remaining(DECISION_DEADLINE, started);
     if left.is_zero() {
         return;
     }
-    let audit = audit_denied_tool(url, session_id, tool_name, reason);
-    let _ = tokio::time::timeout(left, audit).await;
+    let _ = tokio::time::timeout(left, post_deny_audit(refused, reason)).await;
 }
 
 /// [`evaluate_removal_rechecks`] under a deadline; expiry denies (#7889).

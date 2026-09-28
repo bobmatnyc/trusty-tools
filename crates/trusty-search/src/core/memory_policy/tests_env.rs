@@ -1,6 +1,6 @@
 //! Tests for memory_policy — env-var overrides, coreml, tripwire, RAM detect.
 //!
-//! Why: env-mutating tests need a shared mutex (ENV_LOCK) to prevent races
+//! Why: env-mutating tests need the crate's `#[serial]` group to prevent races
 //! between parallel test threads. They are isolated here so their
 //! process-global side effects don't mix with the pure compute tests in
 //! `tests_basic`.
@@ -14,27 +14,23 @@ use super::coreml::{
     DEFAULT_COREML_BATCH_SIZE, DEFAULT_COREML_TRIPWIRE_MB,
 };
 use super::policy::MemoryPolicy;
-use std::sync::Mutex;
 // #6820: re-exported from trusty-common through `super`, so these tests exercise
 // the same path every production call site takes.
 use super::{detect_total_ram_mb, MemoryTier};
 
-/// Serialize env-mutating tests within this module. Cargo runs tests on
-/// multiple threads by default and `std::env::set_var` is process-global,
-/// so without this guard a concurrent test can stomp on the env vars a
-/// sibling test relies on (e.g. `TRUSTY_MAX_BATCH_SIZE_EXPLICIT`).
-pub(super) static ENV_LOCK: Mutex<()> = Mutex::new(());
+// #5937: env-mutating tests here run in the crate's unnamed `#[serial]`
+// group; a module-private mutex excluded no other env test in the binary.
 
 #[test]
+#[serial_test::serial]
 fn test_index_memory_limit_resolution_floors_at_global() {
     // When TRUSTY_INDEX_MEMORY_LIMIT_MB is set below TRUSTY_MEMORY_LIMIT_MB,
     // MemoryPolicy must clamp it back up to at least the global limit.
     // Otherwise the indexing pipeline would run with a tighter ceiling
     // than the steady-state daemon — almost certainly a misconfiguration.
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior_idx = std::env::var("TRUSTY_INDEX_MEMORY_LIMIT_MB").ok();
     let prior_mem = std::env::var("TRUSTY_MEMORY_LIMIT_MB").ok();
-    // SAFETY: serialized via ENV_LOCK within this module.
+    // SAFETY: serialized via #[serial].
     unsafe {
         std::env::set_var("TRUSTY_MEMORY_LIMIT_MB", "8192");
         std::env::set_var("TRUSTY_INDEX_MEMORY_LIMIT_MB", "2048"); // < global
@@ -59,11 +55,11 @@ fn test_index_memory_limit_resolution_floors_at_global() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_memory_limit_scales_proportionally_across_xlarge_hosts() {
     // Regression test for issue #120: two XLarge hosts of different sizes
     // must produce different memory limits (the old code returned 16 GB
     // for both 64 GB and 128 GB boxes).
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_MEMORY_LIMIT_MB").ok();
     // SAFETY: tests run single-threaded within this module's env block.
     unsafe {
@@ -105,8 +101,8 @@ fn test_memory_limit_scales_proportionally_across_xlarge_hosts() {
 /// process env. We restore the prior values at the end of the test to
 /// avoid bleeding into other tests in the same binary.
 #[test]
+#[serial_test::serial]
 fn test_env_override() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Save & override.
     let prior = std::env::var("TRUSTY_MAX_CHUNKS").ok();
     // SAFETY: tests run single-threaded within this module's env block.
@@ -130,6 +126,7 @@ fn test_env_override() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_tier_batch_size_hard_cap() {
     // Issue #89: tier-specific batch-size hard caps protect against
     // runaway TRUSTY_MAX_BATCH_SIZE overrides on memory-constrained hosts.
@@ -141,8 +138,8 @@ fn test_tier_batch_size_hard_cap() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_batch_size_env_override_clamped_by_hard_cap() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Save & override.
     let prior = std::env::var("TRUSTY_MAX_BATCH_SIZE").ok();
     let prior_explicit = std::env::var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT").ok();
@@ -177,8 +174,8 @@ fn test_batch_size_env_override_clamped_by_hard_cap() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_batch_size_explicit_flag_bypasses_clamp() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Save & override.
     let prior = std::env::var("TRUSTY_MAX_BATCH_SIZE").ok();
     let prior_explicit = std::env::var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT").ok();
@@ -220,13 +217,13 @@ fn test_batch_size_explicit_flag_bypasses_clamp() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_batch_size_default() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_BATCH_SIZE").ok();
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::remove_var("TRUSTY_COREML_BATCH_SIZE") };
     assert_eq!(resolve_coreml_batch_size(), DEFAULT_COREML_BATCH_SIZE);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_BATCH_SIZE", v),
@@ -236,13 +233,13 @@ fn test_coreml_batch_size_default() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_batch_size_env_override() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_BATCH_SIZE").ok();
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_BATCH_SIZE", "64") };
     assert_eq!(resolve_coreml_batch_size(), 64);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_BATCH_SIZE", v),
@@ -252,22 +249,22 @@ fn test_coreml_batch_size_env_override() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_batch_size_env_clamp() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_BATCH_SIZE").ok();
     // Out-of-range upper: clamp to MAX.
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_BATCH_SIZE", "10000") };
     assert_eq!(resolve_coreml_batch_size(), COREML_BATCH_SIZE_MAX);
     // Zero: fall back to default (with warn).
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_BATCH_SIZE", "0") };
     assert_eq!(resolve_coreml_batch_size(), DEFAULT_COREML_BATCH_SIZE);
     // Garbage: fall back to default (with warn).
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_BATCH_SIZE", "not-a-number") };
     assert_eq!(resolve_coreml_batch_size(), DEFAULT_COREML_BATCH_SIZE);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_BATCH_SIZE", v),
@@ -277,13 +274,13 @@ fn test_coreml_batch_size_env_clamp() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_tripwire_default() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_TRIPWIRE_MB").ok();
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::remove_var("TRUSTY_COREML_TRIPWIRE_MB") };
     assert_eq!(resolve_coreml_tripwire_mb(), DEFAULT_COREML_TRIPWIRE_MB);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", v),
@@ -293,13 +290,13 @@ fn test_coreml_tripwire_default() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_tripwire_env_override() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_TRIPWIRE_MB").ok();
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", "8192") };
     assert_eq!(resolve_coreml_tripwire_mb(), 8192);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", v),
@@ -309,18 +306,18 @@ fn test_coreml_tripwire_env_override() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_coreml_tripwire_env_invalid() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let prior = std::env::var("TRUSTY_COREML_TRIPWIRE_MB").ok();
     // Zero: fall back to default (with warn).
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", "0") };
     assert_eq!(resolve_coreml_tripwire_mb(), DEFAULT_COREML_TRIPWIRE_MB);
     // Garbage: fall back to default (with warn).
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe { std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", "not-a-number") };
     assert_eq!(resolve_coreml_tripwire_mb(), DEFAULT_COREML_TRIPWIRE_MB);
-    // SAFETY: serialized via ENV_LOCK.
+    // SAFETY: serialized via #[serial].
     unsafe {
         match prior {
             Some(v) => std::env::set_var("TRUSTY_COREML_TRIPWIRE_MB", v),
@@ -330,6 +327,7 @@ fn test_coreml_tripwire_env_invalid() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_ram_detection_returns_nonzero() {
     // Best-effort: on macOS/Linux CI hosts this must return a real value.
     // On other platforms (none in our CI matrix today) the function

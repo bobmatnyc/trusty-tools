@@ -138,7 +138,15 @@ name = "trusty-mpm"
 # 1.7.8 release cut: 1.7.8 was never published (crates.io max 1.7.7), so the
 # release ships as 1.7.8 per the owner's plan and milestone "trusty-mpm 1.7.8
 # · bugfix"; the 1.7.9 number above is unused.
-version = "1.7.9"
+# 1.7.9 (issue #4421): patch — 1.7.8 is published on crates.io and this PR
+# edits `src/**`, so the "PR version bump vs crates.io" check requires the
+# bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
+# consumer surface, no library dependents); no signature break.
+# 1.7.10 (Refs #8261, #8736): patch — release-opening bump carrying over the
+# build-lease accepted break declared in
+# scripts/semver-accepted-breaks/trusty-mpm-1.7.10.txt. No source change in
+# this commit.
+version = "1.7.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -149,6 +157,11 @@ homepage = "https://trustytools.dev"
 keywords = ["orchestration", "multi-agent", "cli", "daemon", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.claude/", "/.trusty-mpm/", "/CLAUDE.md"]
+# #8345: every `tests/*.rs` file is a module of one of the two `[[test]]`
+# targets declared below, not a binary of its own — linking ~60 test binaries
+# dominated this crate's CI shard. `every_integration_target_arms_the_home_write_fence`
+# fails if a file under `tests/` is mounted by neither target.
+autotests = false
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 #
@@ -268,6 +281,8 @@ required-features = ["cli"]
 name = "trusty-mpm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
+# #8345: same source as `tm`, whose target already runs these unit tests.
+test = false
 
 # Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
 # Single-owner-per-binary — the standalone `trusty-console` crate is now the
@@ -276,21 +291,18 @@ required-features = ["cli"]
 # console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 # ── Integration tests ─────────────────────────────────────────────────────────
+# #8345: two targets, not one per file. `integration` holds every module that
+# leaves process-global state alone and runs them in parallel; `env_serial`
+# holds the modules that rewrite `$HOME`, `$PATH`, other env vars or the cwd,
+# and runs one test at a time. Select one file's tests with a module filter:
+# `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 [[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
-required-features = ["daemon"]
+name = "integration"
+path = "tests/integration.rs"
 
-# Services discovery integration test (gated #[ignore]; run with --include-ignored).
 [[test]]
-name = "services_integration"
-path = "tests/services_integration.rs"
-
-# WI-7: isolation-invariant integration tests for the standalone managed driver.
-# No special features required — uses only the always-on `core::standalone` module.
-[[test]]
-name = "standalone_isolation"
-path = "tests/standalone_isolation.rs"
+name = "env_serial"
+path = "tests/env_serial.rs"
 
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
