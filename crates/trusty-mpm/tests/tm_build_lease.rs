@@ -134,7 +134,7 @@ fn wait_for_holders_in(dir: &Path, n: usize) -> Vec<serde_json::Value> {
 /// build-lease` forwards to its build, then reap it.
 ///
 /// Why: a SIGKILLed holder leaves its build running, and that orphaned build
-/// keeps its slot until it exits (#8261 repair r3), so a later lease in the
+/// keeps its slot until it exits (#8261), so a later lease in the
 /// same home would wait on it.
 fn stop(mut child: Child) {
     let pid = i32::try_from(child.id()).expect("pid");
@@ -206,7 +206,7 @@ fn the_n_plus_first_waits_then_times_out_with_the_named_code() {
 /// A build killed with SIGKILL frees its slot at once — the holder exits with
 /// the build's signal status and the kernel drops the flock. Killing the
 /// `tm build-lease` process itself drops the flock too, but the build it
-/// orphaned keeps the slot until that build exits (#8261 repair r3).
+/// orphaned keeps the slot until that build exits (#8261).
 #[test]
 fn a_sigkilled_build_or_holder_releases_the_slot() {
     let home = home_with_ceiling(1, "");
@@ -230,7 +230,7 @@ fn a_sigkilled_build_or_holder_releases_the_slot() {
 
     // Now the lease holder itself dies. The kernel releases its flock, but
     // its orphaned build still runs, so the slot stays taken until that build
-    // exits (#8261 repair r3).
+    // exits (#8261).
     let mut holder = spawn_holder(home.path(), "30");
     let records = wait_for_holders(home.path(), 1);
     let orphan = u32::try_from(records[0]["child_pid"].as_u64().expect("pid")).expect("pid");
@@ -762,27 +762,18 @@ fn an_ambient_pool_slot_held_by_another_lease_is_not_used() {
 /// the driven test needs the run path's own classifier to admit `cargo`, not
 /// the `sleep`/`true`/`sh`/`touch` stand-ins the other cases use).
 fn home_with_ceiling_and_cargo(ceiling: u32) -> tempfile::TempDir {
-    home_with_cargo_verbs(ceiling, &["cargo test"])
-}
-
-/// [`home_with_ceiling`] whose heavy-build table also names `verbs`, with a
-/// 10-second lease wait so a lease nested in another command cannot hang a
-/// case (#8261 repair r3).
-fn home_with_cargo_verbs(ceiling: u32, verbs: &[&str]) -> tempfile::TempDir {
     let home = tempfile::Builder::new()
         .prefix("tm-test-build-lease-")
         .tempdir_in("/tmp")
         .expect("scratch home");
     let dir = home.path().join(".trusty-mpm");
     std::fs::create_dir_all(&dir).expect("config dir");
-    let verbs: String = verbs.iter().map(|v| format!(", \"{v}\"")).collect();
     std::fs::write(
         dir.join("config.toml"),
         format!(
             "[builders]\nmax_concurrent = {ceiling}\ncount_foreign_builds = false\n\
              memory_pressure_max = \"critical\"\nmin_available_pct = 0\nload_factor = 64\n\
-             lease_wait_secs = 10\n\
-             heavy_build_commands = [\"sleep\", \"true\", \"sh\", \"touch\"{verbs}]\n"
+             heavy_build_commands = [\"sleep\", \"true\", \"sh\", \"touch\", \"cargo test\"]\n"
         ),
     )
     .expect("config");
@@ -989,61 +980,6 @@ fn a_held_slot_survives_a_daemon_restart_8819() {
     );
 }
 
-/// A fake `cargo` on `PATH` for the `cargo run` / `cargo watch` split
-/// (#8261 repair r3).
-///
-/// What: every call appends `<CARGO_TARGET_DIR>|<args>` to `$FAKE_CARGO_LOG`.
-/// `build` exits 0. `run` touches `$FAKE_CARGO_RUNNING` and stays up like a
-/// server. `test` copies the lease's slot file to `$FAKE_CARGO_INNER`, so a
-/// case can see that the build ran under a lease. `watch` runs each `-s`
-/// command once, as cargo-watch would on its first pass, then touches
-/// `$FAKE_CARGO_RUNNING` and stays up.
-fn fake_long_lived_cargo(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir).expect("fake bin dir");
-    let script = dir.join("cargo");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\n\
-         printf '%s|%s\\n' \"$CARGO_TARGET_DIR\" \"$*\" >> \"$FAKE_CARGO_LOG\"\n\
-         case \"$1\" in\n\
-         build) exit 0 ;;\n\
-         run) : > \"$FAKE_CARGO_RUNNING\"; exec sleep 30 ;;\n\
-         test) cat \"$HOME/.trusty-mpm/build-slots/slot-0.lock\" > \"$FAKE_CARGO_INNER\"; exit 0 ;;\n\
-         watch) shift\n\
-           while [ $# -gt 0 ]; do\n\
-             if [ \"$1\" = -s ]; then sh -c \"$2\"; shift; fi\n\
-             shift\n\
-           done\n\
-           : > \"$FAKE_CARGO_RUNNING\"; exec sleep 30 ;;\n\
-         esac\n\
-         exit 2\n",
-    )
-    .expect("write fake cargo");
-    let mut perms = std::fs::metadata(&script).expect("meta").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&script, perms).expect("chmod");
-}
-
-/// A `tm build-lease` command wired to [`fake_long_lived_cargo`] in `home`.
-fn fake_cargo_lease(home: &Path) -> Command {
-    let fakebin = home.join("fakebin");
-    fake_long_lived_cargo(&fakebin);
-    let mut cmd = build_lease(home);
-    cmd.env(
-        "PATH",
-        format!(
-            "{}:{}",
-            fakebin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
-    )
-    .env("FAKE_CARGO_LOG", home.join("cargo.log"))
-    .env("FAKE_CARGO_RUNNING", home.join("running"))
-    .env("FAKE_CARGO_INNER", home.join("inner-slot"));
-    cmd
-}
-
 /// Wait (bounded) for `path` to exist; `false` at the bound.
 fn wait_for_file(path: &Path, secs: u64) -> bool {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -1054,78 +990,6 @@ fn wait_for_file(path: &Path, secs: u64) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     true
-}
-
-/// #8261 repair r3 (BLOCK, slot pileup): a `cargo run` whose program stays up
-/// holds no slot after its build. The lease runs `cargo build` with the same
-/// flags, releases the slot, then runs `cargo run` unleased; a second build
-/// on a ceiling of one is admitted while the program runs.
-#[test]
-fn a_long_lived_cargo_run_releases_its_slot_after_the_build() {
-    let home = home_with_cargo_verbs(1, &["cargo run"]);
-    let program = fake_cargo_lease(home.path())
-        .args(["--", "cargo", "run", "--release", "--", "--port", "1"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cargo run");
-    let running = wait_for_file(&home.path().join("running"), 20);
-    let next = build_lease(home.path())
-        .args(["--wait-secs", "3", "--", "true"])
-        .output()
-        .expect("a second build");
-    stop(program);
-    let log = std::fs::read_to_string(home.path().join("cargo.log")).unwrap_or_default();
-    assert!(running, "the program never started: {log}");
-    assert_eq!(
-        next.status.code(),
-        Some(0),
-        "the running program must not hold the slot: {}",
-        stderr(&next)
-    );
-    assert_eq!(
-        log.lines().collect::<Vec<_>>(),
-        vec!["|build --release", "|run --release -- --port 1"],
-        "the build takes the run's flags; the run keeps its program arguments"
-    );
-}
-
-/// #8261 repair r3 (BLOCK, slot pileup): `cargo watch` holds no slot; each
-/// build it starts takes its own lease, and a second build is admitted while
-/// the watcher stays up.
-#[test]
-fn cargo_watch_leases_each_build_not_the_watcher() {
-    let home = home_with_cargo_verbs(1, &["cargo test", "cargo watch"]);
-    let watcher = fake_cargo_lease(home.path())
-        .args(["--", "cargo", "watch", "-x", "test"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cargo watch");
-    let running = wait_for_file(&home.path().join("running"), 30);
-    let next = build_lease(home.path())
-        .args(["--wait-secs", "3", "--", "true"])
-        .output()
-        .expect("a second build");
-    stop(watcher);
-    let log = std::fs::read_to_string(home.path().join("cargo.log")).unwrap_or_default();
-    let inner = std::fs::read_to_string(home.path().join("inner-slot")).unwrap_or_default();
-    assert!(running, "the watcher's first pass never finished: {log}");
-    assert!(
-        log.lines()
-            .any(|l| l.starts_with("|watch -s ") && l.ends_with(" build-lease -- cargo test")),
-        "the watcher is handed a leased command: {log}"
-    );
-    assert!(
-        inner.contains("\"command\":\"cargo test\""),
-        "the inner build held slot 0 while it ran: {inner:?}"
-    );
-    assert_eq!(
-        next.status.code(),
-        Some(0),
-        "the watcher must not hold the slot: {}",
-        stderr(&next)
-    );
 }
 
 /// A one-test crate at `dir` whose test writes `$PROBE_DIR/running` and then
@@ -1152,7 +1016,7 @@ fn real_cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
-/// #8261 repair r3, question (b): cargo releases its build-directory lock
+/// #8261: cargo releases its build-directory lock
 /// (`.cargo-lock`) before it runs the test binaries. So `.cargo-lock` alone
 /// cannot tell a slot's live `cargo test` run from an idle directory — the
 /// reason a dead holder's record keeps its slot (see `core::build_lease::orphan`).
@@ -1189,7 +1053,7 @@ fn cargo_releases_its_build_lock_while_test_binaries_run() {
     );
 }
 
-/// #8261 repair r3, question (b): a holder SIGKILLed while its `cargo test`
+/// #8261: a holder SIGKILLed while its `cargo test`
 /// runs the test binary leaves that run alive with no flock and no
 /// `.cargo-lock`. Its slot must stay taken until the run exits — before the
 /// fix a second build took it at once.

@@ -57,6 +57,8 @@
 //! | an unleased run whose inherited `CARGO_TARGET_DIR` is shared | REFUSED, exit 75: only a leased slot can replace the shared directory | `a_shared_dir_without_a_pool_is_refused` |
 //! | a free slot whose directory an orphaned build still uses (`.cargo-lock` held) | that slot is skipped; its fingerprints are untouched | `a_busy_orphan_slot_is_not_reused` |
 //! | a free slot whose dead holder's build still runs (a `cargo test` run holds no `.cargo-lock`) | counted as held, never taken, until that build exits | `a_sigkilled_holders_live_test_run_keeps_its_slot`, `an_orphaned_build_keeps_its_slot` |
+//! | a free slot whose leftover record is corrupt, or whose build's pid, start time or process name cannot be read | BROKEN: skipped, never taken, record kept; `tm doctor` FAILS | `a_corrupt_record_in_a_free_slot_is_broken`, `a_corrupt_record_slot_is_skipped_not_taken`, `doctor_fails_on_a_corrupt_slot_record`, `an_unparseable_started_at_is_broken`, `an_uncheckable_pid_is_broken`, `an_unreadable_start_time_is_unknown`, `an_unreadable_process_name_is_unknown` |
+//! | a free slot whose leftover record names a live pid running another program | free: a reused pid is not the build | `a_recycled_pid_running_another_program_frees_the_slot` |
 //! | shared `CARGO_TARGET_DIR` and no slot directory (no pool, seed failed, fingerprints not clearable) | REFUSED, exit 75 | `an_unusable_slot_directory_refuses_instead_of_sharing`, `a_shared_target_without_a_repo_identity_refuses` |
 //! | pressure sysctl / PSI unreadable | pressure gate skipped; ceiling, leases and load still apply; warning | `unreadable_pressure_uses_the_ceiling_and_warns` |
 //! | load average unreadable | load gate skipped; the rest applies | `an_unreadable_load_skips_only_the_load_gate` |
@@ -74,18 +76,13 @@
 //! **A SIGKILLed holder.** The kernel drops its flock, and the build it
 //! spawned keeps running. The record the holder left in
 //! the slot file keeps the slot counted as held, and never taken, while that
-//! build is alive ([`orphan`], #8261 repair r3): cargo releases `.cargo-lock`
-//! while test binaries run, so that lock alone left a live `cargo test` run's
-//! slot free. The census excludes the orphan's compilers, which its record
-//! already counts, and the next lease still skips a slot whose `.cargo-lock`
-//! is held, so the orphan's directory is never reseeded under it.
-//!
-//! **`cargo run` and `cargo watch`** (#8261 repair r3). Neither holds a slot for
-//! the program's or the watcher's lifetime. `cargo run` leases a `cargo build`
-//! with the same flags, releases the slot, then runs `cargo run` unleased,
-//! which finds the build fresh. `cargo watch` runs unleased, with every
-//! command it starts rewritten to take its own lease (`build_lease_split` in
-//! the `tm` binary).
+//! build is alive ([`orphan`], #8261): cargo releases `.cargo-lock` while test
+//! binaries run, so that lock alone left a live `cargo test` run's slot free.
+//! The live process must be the recorded program, so a reused pid frees the
+//! slot, and a record that cannot be read or checked makes the slot broken,
+//! never free (#8736). The census excludes the orphan's compilers, which its
+//! record already counts, and the next lease still skips a slot whose
+//! `.cargo-lock` is held, so the orphan's directory is never reseeded under it.
 //! Test: each submodule's suite, and `tests/tm_build_lease.rs` with real
 //! processes.
 

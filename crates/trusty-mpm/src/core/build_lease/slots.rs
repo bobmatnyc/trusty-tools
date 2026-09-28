@@ -18,15 +18,17 @@
 //!
 //! The lock files are opened close-on-exec (Rust's default), so a build's own
 //! children never inherit the lock: a daemon a build starts (an `sccache`
-//! server) cannot pin the slot after the build ends. A `cargo run` program
-//! never holds a slot at all: `tm build-lease` leases only the `cargo build`
-//! with the same flags, releases the slot, and then runs the program (#8261
-//! repair r3). The other side of close-on-exec: when the `tm build-lease` holder
-//! is SIGKILLed, its build keeps running while the flock reads free. The
-//! record the dead holder left in the slot file keeps the slot taken while the
-//! build it names is alive ([`SlotState::Orphaned`], see `orphan`), and the
-//! lease also checks cargo's own `.cargo-lock` in the slot's target directory
-//! before it uses the directory (see `stale_guard::cargo_lock_held`).
+//! server) cannot pin the slot after the build ends. A `cargo run` program is
+//! not such a child: cargo replaces itself with the program, so the program is
+//! the build the holder waits on and keeps the slot until it exits, as does a
+//! `cargo watch` watcher (unchanged; tracked in #8692). The other side of
+//! close-on-exec: when the `tm build-lease` holder is SIGKILLed, its build
+//! keeps running while the flock reads free. The record the dead holder left
+//! in the slot file keeps the slot taken while the build it names is alive
+//! ([`SlotState::Orphaned`], see `orphan`); a record that cannot be read or
+//! checked makes the slot [`SlotState::Broken`] (#8736). The lease also checks
+//! cargo's own `.cargo-lock` in the slot's target directory before it uses the
+//! directory (see `stale_guard::cargo_lock_held`).
 //!
 //! Slot and admission files are created mode `0600`: a record names the
 //! holder's command and checkout, and only the store's owner reads it.
@@ -40,6 +42,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+use super::orphan::{Leftover, read_leftover};
 
 /// The directory name under `~/.trusty-mpm`.
 pub const SLOT_DIR_NAME: &str = "build-slots";
@@ -174,11 +178,13 @@ pub enum SlotState {
     Free,
     /// Somebody holds it; their record, when it parsed.
     Held(Option<HolderRecord>),
-    /// The slot file could not be opened or locked; the error, rendered.
+    /// The slot file could not be opened or locked, or a free slot's leftover
+    /// record could not be read or checked (#8736); the error, rendered.
     /// Not counted as held: a broken file must not read as a build forever.
+    /// Never taken either, and `tm doctor` FAILs on it.
     Broken(String),
     /// Nobody holds the flock, but the record a SIGKILLed holder left names a
-    /// build still running (#8261 repair r3). Counted as held, never taken.
+    /// build still running (#8261). Counted as held, never taken.
     Orphaned(HolderRecord),
 }
 
@@ -360,14 +366,19 @@ impl SlotDir {
 
     fn probe_one(&self, slot: u32) -> SlotState {
         match self.try_acquire(slot) {
-            Ok(Some(guard)) => match guard.orphaned_build() {
-                Some(record) => {
+            Ok(Some(guard)) => match guard.leftover() {
+                Leftover::Clear => {
+                    drop(guard);
+                    SlotState::Free
+                }
+                Leftover::Running(record) => {
                     guard.release_keeping_record();
                     SlotState::Orphaned(record)
                 }
-                None => {
-                    drop(guard);
-                    SlotState::Free
+                // #8736: an unreadable leftover never reads as Free.
+                Leftover::Unknown(err) => {
+                    guard.release_keeping_record();
+                    SlotState::Broken(err)
                 }
             },
             Ok(None) => SlotState::Held(read_record(&self.lock_path(slot))),
@@ -483,19 +494,21 @@ impl SlotGuard {
         &self.path
     }
 
-    /// The record a SIGKILLed holder left in this slot, while its build runs.
+    /// What the record a dead holder left in this slot means.
     ///
-    /// Why: see `orphan` — such a slot is still in use (#8261 repair r3).
-    /// Test: `an_orphaned_build_keeps_its_slot`.
+    /// Why: see `orphan` — a SIGKILLed holder's build may still run (#8261),
+    /// and a record that cannot be checked must not free the slot (#8736).
+    /// Test: `an_orphaned_build_keeps_its_slot`,
+    /// `a_corrupt_record_in_a_free_slot_is_broken`.
     #[must_use]
-    pub fn orphaned_build(&self) -> Option<HolderRecord> {
-        read_record(&self.path).filter(super::orphan::is_orphaned_build)
+    pub fn leftover(&self) -> Leftover {
+        read_leftover(&self.path)
     }
 
     /// Release the lock but leave the record in the file.
     ///
-    /// Why: a probe of an orphaned slot must not erase the only record that
-    /// keeps the slot taken.
+    /// Why: a probe of an orphaned or broken slot must not erase the record
+    /// that keeps it from being taken.
     pub fn release_keeping_record(mut self) {
         self.keep_record = true;
     }
@@ -597,8 +610,8 @@ mod tests {
         assert!(slots.holders().is_empty());
     }
 
-    /// #8261 repair r3: a holder that dies without clearing its record (the
-    /// SIGKILL case) leaves the slot taken while the build it names runs.
+    /// #8261: a holder that dies without clearing its record (the SIGKILL
+    /// case) leaves the slot taken while the build it names runs.
     #[test]
     fn an_orphaned_build_keeps_its_slot() {
         let (_tmp, slots) = dir();
@@ -607,10 +620,9 @@ mod tests {
             .spawn()
             .expect("spawn a stand-in build");
         let mut dead_holder = record(0);
+        dead_holder.command = "sleep 30".into();
         dead_holder.child_pid = Some(build.id());
-        let mut held = slots.try_acquire(0).expect("io").expect("free");
-        held.write_record(&dead_holder).expect("write");
-        held.release_keeping_record();
+        leave_record(&slots, &dead_holder);
         let probed = slots.probe();
         let holders = slots.holders();
         let _ = build.kill();
@@ -619,6 +631,90 @@ mod tests {
         assert_eq!(holders.len(), 1, "an orphaned build counts as held");
         assert_eq!(slots.probe(), vec![(0, SlotState::Free)], "once it exits");
         assert!(slots.holders().is_empty());
+    }
+
+    /// Leave `record` in slot 0 the way a SIGKILLed holder does.
+    fn leave_record(slots: &SlotDir, record: &HolderRecord) {
+        let mut held = slots.try_acquire(0).expect("io").expect("free");
+        held.write_record(record).expect("write");
+        held.release_keeping_record();
+    }
+
+    /// Probe slot 0 holding a record whose build is a live `sleep`, after
+    /// `edit` adjusts the record.
+    fn probe_live_sleep(slots: &SlotDir, edit: impl FnOnce(&mut HolderRecord)) -> SlotState {
+        let mut build = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in build");
+        let mut dead_holder = record(0);
+        dead_holder.command = "sleep 30".into();
+        dead_holder.child_pid = Some(build.id());
+        edit(&mut dead_holder);
+        leave_record(slots, &dead_holder);
+        let probed = slots.probe();
+        let _ = build.kill();
+        let _ = build.wait();
+        probed.into_iter().next().expect("slot 0").1
+    }
+
+    /// #8736 fail-open check: a corrupt non-empty record in a free slot is
+    /// Broken — never Free — and stays in the file for the operator.
+    #[test]
+    fn a_corrupt_record_in_a_free_slot_is_broken() {
+        let (_tmp, slots) = dir();
+        drop(slots.try_acquire(0).expect("io").expect("free"));
+        let path = slots.path().join("slot-0.lock");
+        let corrupt = r#"{"slot":0,"pid":12"#;
+        std::fs::write(&path, corrupt).expect("corrupt");
+        let probed = slots.probe();
+        assert!(
+            matches!(&probed[..], [(0, SlotState::Broken(e))] if e.contains("corrupt")),
+            "{probed:?}"
+        );
+        assert_eq!(slots.broken().len(), 1, "tm doctor and acquire see it");
+        assert!(slots.holders().is_empty(), "not counted as a holder");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            corrupt,
+            "a probe never erases it"
+        );
+    }
+
+    /// #8736 fail-open check: a live build whose record's `started_at` does
+    /// not parse cannot be checked, so its slot is Broken.
+    #[test]
+    fn an_unparseable_started_at_is_broken() {
+        let (_tmp, slots) = dir();
+        let state = probe_live_sleep(&slots, |r| r.started_at = "yesterday".into());
+        assert!(
+            matches!(&state, SlotState::Broken(e) if e.contains("started_at")),
+            "{state:?}"
+        );
+    }
+
+    /// #8736 fail-open check: a pid the check cannot even ask about is Broken.
+    #[test]
+    fn an_uncheckable_pid_is_broken() {
+        let (_tmp, slots) = dir();
+        let mut dead_holder = record(0);
+        dead_holder.child_pid = Some(u32::MAX);
+        leave_record(&slots, &dead_holder);
+        let probed = slots.probe();
+        assert!(
+            matches!(&probed[..], [(0, SlotState::Broken(e))] if e.contains("could not check")),
+            "{probed:?}"
+        );
+    }
+
+    /// #8736: a record naming a live pid that runs a different program — a
+    /// pid the kernel reused — frees the slot.
+    #[test]
+    fn a_recycled_pid_running_another_program_frees_the_slot() {
+        let (_tmp, slots) = dir();
+        let state = probe_live_sleep(&slots, |r| r.command = "cargo test -p x".into());
+        assert_eq!(state, SlotState::Free);
+        assert_eq!(slots.probe(), vec![(0, SlotState::Free)]);
     }
 
     #[test]

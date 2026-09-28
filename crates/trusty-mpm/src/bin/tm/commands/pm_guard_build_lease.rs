@@ -73,7 +73,7 @@ const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 ///
 /// Why: the hook binary is the one version guaranteed to know `build-lease`;
 /// a `tm` found on the agent's `PATH` may be older, or absent.
-pub(crate) fn tm_program_word() -> String {
+fn tm_program_word() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string))

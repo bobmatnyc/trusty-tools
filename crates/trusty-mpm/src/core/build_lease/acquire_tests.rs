@@ -179,6 +179,28 @@ fn a_broken_lowest_slot_is_skipped() {
     drop(first);
 }
 
+/// #8736 fail-open check: a free slot holding a corrupt record is skipped
+/// like a broken file, never taken, and its record is left for the operator.
+#[test]
+fn a_corrupt_record_slot_is_skipped_not_taken() {
+    let (_tmp, slots) = slot_dir();
+    drop(slots.try_acquire(0).expect("io").expect("free"));
+    std::fs::write(slots.path().join("slot-0.lock"), "not a record").expect("corrupt");
+    let c = configs();
+    let first = leased(acquire(
+        &slots,
+        &params(&c, 1, 200),
+        &mut scripted(PressureLevel::Normal),
+        &mut |_, _| {},
+    ));
+    assert_eq!(first.slot(), 1, "the corrupt slot is skipped");
+    assert_eq!(
+        std::fs::read_to_string(slots.path().join("slot-0.lock")).expect("read"),
+        "not a record"
+    );
+    drop(first);
+}
+
 /// Owner ruling "allow up to the cap" (#8261 round 3): an unopenable
 /// `admission.lock` runs the build unleased only while the census has room,
 /// and the outcome names the store, the error and the repair.

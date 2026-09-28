@@ -36,7 +36,6 @@ pub(crate) mod divert_worker;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
-pub(crate) mod build_lease_split;
 pub(crate) mod doctor_builder_cap;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.

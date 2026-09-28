@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use super::admission::{Decision, decide, decide_unleased};
 use super::census::Sampler;
 use super::config::BuildLeaseConfig;
+use super::orphan::Leftover;
 use super::slots::{HolderRecord, SlotDir, SlotGuard};
 use crate::core::builders::BuildersConfig;
 
@@ -308,6 +309,8 @@ pub fn acquire_unleased(
 /// What: candidates are `0..ceiling + held + broken`, so neither a holder left
 /// above a lowered ceiling nor a broken slot file hides a usable index — a
 /// broken file is skipped, never a reason to disable the cap. A free slot whose
+/// leftover record names a live build counts as held; one whose record cannot
+/// be read or checked counts as broken (`orphan`, #8736). A free slot whose
 /// directory `params.slot_busy` reports in use is released again and skipped.
 /// `Ok(None)` when every candidate is held or busy; `Err` only when no
 /// candidate could be locked and none was held.
@@ -327,11 +330,20 @@ fn take_a_slot(
     for slot in slots.preference_order(limit, params.checkout) {
         match slots.try_acquire(slot) {
             Ok(Some(guard)) => {
-                // #8261 repair r3: a SIGKILLed holder's build still running.
-                if guard.orphaned_build().is_some() {
-                    guard.release_keeping_record();
-                    any_held = true;
-                    continue;
+                match guard.leftover() {
+                    Leftover::Clear => {}
+                    // #8261: a SIGKILLed holder's build still running.
+                    Leftover::Running(_) => {
+                        guard.release_keeping_record();
+                        any_held = true;
+                        continue;
+                    }
+                    // #8736: a leftover that cannot be checked is broken, never free.
+                    Leftover::Unknown(err) => {
+                        guard.release_keeping_record();
+                        errors.push(format!("slot-{slot}.lock: {err}"));
+                        continue;
+                    }
                 }
                 if params.slot_busy.is_some_and(|busy| busy(slot)) {
                     drop(guard);

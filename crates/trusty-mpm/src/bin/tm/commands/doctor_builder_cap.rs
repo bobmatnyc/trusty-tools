@@ -32,7 +32,7 @@ const CHECK: &str = "builder_cap";
 /// directory and scripted readings.
 /// What: FAIL naming each broken slot file or an unopenable `admission.lock`;
 /// otherwise [`render_check`], which WARNS while `slots` is the fallback store.
-/// Test: `doctor_fails_on_a_broken_slot_file`,
+/// Test: `doctor_fails_on_a_broken_slot_file`, `doctor_fails_on_a_corrupt_slot_record`,
 /// `an_idle_machine_reports_ok_with_its_readings`,
 /// `doctor_warns_while_the_fallback_store_is_in_use`.
 pub(crate) fn slot_dir_check(
@@ -251,6 +251,22 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
         assert!(
             check.message.contains("admission.lock"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// #8736 fail-open check: a corrupt record in a free slot FAILS the row.
+    #[test]
+    fn doctor_fails_on_a_corrupt_slot_record() {
+        let cfg = (BuildersConfig::default(), BuildLeaseConfig::default());
+        let (_tmp, dir) = slots();
+        drop(dir.try_acquire(0).expect("io").expect("free"));
+        std::fs::write(dir.path().join("slot-0.lock"), "not a record").expect("corrupt");
+        let check = slot_dir_check(&dir, (&cfg.0, &cfg.1), 4, &mut quiet());
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+        assert!(
+            check.message.contains("slot-0.lock (corrupt slot record"),
             "{}",
             check.message
         );
