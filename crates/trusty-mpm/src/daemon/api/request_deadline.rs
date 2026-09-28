@@ -5,11 +5,11 @@
 //! task open until the CALLER gave up. Behind trusty-console that surfaced as
 //! the proxy's opaque 30 s `502` instead of a daemon-side error, and a caller
 //! with no client timeout of its own waited forever.
-//! What: [`enforce`] is an axum `from_fn` middleware layered router-wide in
-//! [`super::router`]. It races the handler future against the deadline
-//! [`deadline_for`] picks from the matched route template. On expiry it drops
+//! What: `enforce` is an axum `from_fn` middleware layered router-wide in
+//! `super::router`. It races the handler future against the deadline
+//! `deadline_for` picks from the matched route template. On expiry it drops
 //! the handler future and answers `504 Gateway Timeout` with a JSON `error`
-//! body. Every route gets [`STANDARD_DEADLINE`] unless [`LONG_ROUTES`] names
+//! body. Every route gets `STANDARD_DEADLINE` unless `LONG_ROUTES` names
 //! it with a longer class, each class sized just under the client bound its
 //! callers already use so the caller reads the daemon's error, not its own
 //! transport timeout.
