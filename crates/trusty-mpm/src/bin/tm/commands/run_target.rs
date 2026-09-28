@@ -468,6 +468,7 @@ async fn run_managed(
         false,
         super::managed_workspace::LaunchDir::CallerResolved,
         dirs::home_dir().as_deref(),
+        false, // #8878: twin mode is armed only by `tm launch --twin`.
     )
     .await
 }

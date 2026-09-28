@@ -106,9 +106,11 @@ impl Drop for LaunchSessionGuard {
 /// this function with placement already decided, and resolving it again
 /// relocates their session.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
-/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`;
+/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
+/// `cli_parses_launch_with_twin`;
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// covers the composed fallback path.
+#[allow(clippy::too_many_arguments)] // #8878: `twin` is the eighth.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
@@ -117,6 +119,7 @@ pub(crate) async fn launch(
     worktree: bool,
     launch_dir: super::managed_workspace::LaunchDir,
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
+    twin: bool,
 ) -> anyhow::Result<()> {
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
@@ -149,6 +152,7 @@ pub(crate) async fn launch(
         .map_err(|e| anyhow::anyhow!(e))?;
     let origin_url = match super::origin_plan::plan_for_origin(raw_origin.as_deref()) {
         super::origin_plan::OriginPlan::LiveCheckout => {
+            super::launch_twin::refuse_live_checkout(twin)?; // #8878
             eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
             return connect(client, url, Some(live_workdir), home).await;
         }
@@ -188,6 +192,7 @@ pub(crate) async fn launch(
         find_existing_session(client, url, &live_workdir, Some(&project_dir_str)).await
         && !existing.is_empty()
     {
+        super::launch_twin::refuse_reattach(twin, &existing)?; // #8878
         print_launch_banner_reconnecting(&live_workdir, &existing);
         crate::commands::tmux_attach::tmux_attach(&existing)?;
         return Ok(());
@@ -225,6 +230,11 @@ pub(crate) async fn launch(
     )
     .await?;
     let managed_path = workspace.path().to_path_buf();
+    // #8878: the hook judges `CLAUDE_PROJECT_DIR`, the session directory, so
+    // the grant is checked for it before any tmux session exists.
+    let twin_root = twin
+        .then(|| super::launch_twin::precheck(&managed_path))
+        .transpose()?;
 
     // 7. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can
@@ -428,12 +438,20 @@ pub(crate) async fn launch(
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
     //      the daemon so it can monitor process liveness.
+    // #8878: twin arming needs the PID even when registration failed.
+    let claude_pid = (session_id.is_some() || twin_root.is_some())
+        .then(|| {
+            trusty_mpm::core::process::find_claude_pid_in_tmux(
+                &tmux_name,
+                10,
+                std::time::Duration::from_millis(500),
+            )
+        })
+        .flatten();
+    if let Some(root) = &twin_root {
+        super::launch_twin::arm(root, claude_pid, &managed_path);
+    }
     if let Some(session_id) = session_id {
-        let claude_pid = trusty_mpm::core::process::find_claude_pid_in_tmux(
-            &tmux_name,
-            10,
-            std::time::Duration::from_millis(500),
-        );
         if let Some(pid) = claude_pid {
             let _ = client
                 .patch(format!("{url}/sessions/{}/pid", session_id.0))

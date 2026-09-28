@@ -827,6 +827,7 @@ fn cli_parses_launch() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -844,6 +845,7 @@ fn cli_parses_launch_with_dir() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
@@ -863,6 +865,7 @@ fn cli_parses_launch_with_style() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
@@ -892,6 +895,7 @@ fn cli_parses_launch_with_worktree() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -901,6 +905,24 @@ fn cli_parses_launch_with_worktree() {
             );
         }
         other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --twin` reaches the launch as an explicit arming request, and a
+/// bare `tm launch` never does (#8878, ruling D1).
+#[test]
+fn cli_parses_launch_with_twin() {
+    for (argv, want) in [
+        (&["trusty-mpm", "launch", "--twin"][..], true),
+        (&["trusty-mpm", "launch"][..], false),
+    ] {
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Launch { twin, worktree, .. } => {
+                assert_eq!(twin, want, "{argv:?}");
+                assert!(!worktree, "{argv:?}");
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
     }
 }
 

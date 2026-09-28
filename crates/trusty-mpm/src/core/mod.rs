@@ -367,6 +367,9 @@ pub mod tmux;
 pub mod tmux_test_isolation;
 pub mod transcript_usage;
 pub mod trusty_tools_config;
+// #8878: the supervisor-twin identity (D1) and its arming record.
+pub mod twin_arming;
+pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;
 pub mod update_check;

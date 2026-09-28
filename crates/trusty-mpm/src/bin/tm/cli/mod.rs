@@ -777,6 +777,14 @@ pub(crate) enum Command {
         /// untouched.
         #[arg(long)]
         worktree: bool,
+        /// Arm the started `claude` for supervisor-twin mode (#8878).
+        ///
+        /// Needs the project in both `[supervisor] projects` and
+        /// `[supervisor.twin] projects` of `~/.trusty-mpm/config.toml`, and
+        /// `profile = "supervisor"` in its `.trusty-mpm.toml`. Refused on a
+        /// reattach and for a checkout with no origin remote.
+        #[arg(long)]
+        twin: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///

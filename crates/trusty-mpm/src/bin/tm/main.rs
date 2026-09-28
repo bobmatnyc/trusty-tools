@@ -545,6 +545,7 @@ async fn main() -> anyhow::Result<()> {
             dir,
             style,
             worktree,
+            twin,
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => {
@@ -557,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
                 worktree,
                 LaunchDir::OperatorCwd,
                 home.as_deref(),
+                twin, // #8878: only an operator's `tm launch --twin` arms.
             )
             .await
         }
