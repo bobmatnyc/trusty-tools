@@ -199,18 +199,72 @@ fn owner_refusal_keeps_a_tree_a_live_pid_locks() {
     assert!(owner_refusal(&path, &g).is_some_and(|r| r.contains("pid 1 runs")));
 }
 
+/// A live delegation keeps the tree while its dispatching session may still be
+/// running it — the caller's own included. #7771 narrowed this from every
+/// session: an `Ended` dispatcher makes the record stale, see
+/// `worktree_7771_a_dead_sessions_open_delegation_is_stale`.
 #[test]
 fn owner_refusal_keeps_a_live_delegations_tree() {
     let fx = GitWorktreeFixture::new();
     let path = agent_tree(&fx, "agent-7771busy");
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-7771busy");
+    let live = |_: &AgentWorktreeOwner| AgentDelegationState::Live;
+    for end in [
+        SessionEnd::Caller,
+        SessionEnd::Live,
+        SessionEnd::Undeterminable("unproven".into()),
+    ] {
+        let session = move |_: &str| end.clone();
+        let g = OwnerGate {
+            agent_state: &live,
+            ..gate(&session)
+        };
+        assert!(owner_refusal(&path, &g).is_some_and(|r| r.contains("agent-7771busy")));
+    }
+}
+
+/// 🔴 #7771: a delegation record still `Running` after its dispatching session
+/// provably ended is stale — the agent died with that session.
+///
+/// Fails before #7771's delegation arm: an open record refused the tree
+/// whatever its session's state.
+#[test]
+fn worktree_7771_a_dead_sessions_open_delegation_is_stale() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_tree(&fx, "agent-7771orphan");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-7771orphan");
     let ended = |_: &str| SessionEnd::Ended;
     let live = |_: &AgentWorktreeOwner| AgentDelegationState::Live;
     let g = OwnerGate {
         agent_state: &live,
         ..gate(&ended)
     };
-    assert!(owner_refusal(&path, &g).is_some_and(|r| r.contains("agent-7771busy")));
+    assert_eq!(owner_refusal(&path, &g), None);
+}
+
+/// #7771: a stale delegation releases (b) only — a live lock holder and a
+/// process standing in the tree still keep it.
+#[test]
+fn worktree_7771_a_stale_delegation_still_yields_to_a_held_lock() {
+    let fx = GitWorktreeFixture::new();
+    let path = agent_tree(&fx, "agent-7771stilllocked");
+    GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-7771stilllocked");
+    let ended = |_: &str| SessionEnd::Ended;
+    let live = |_: &AgentWorktreeOwner| AgentDelegationState::Live;
+    let held = |_: &Path| LockLiveness::Held("pid 1 runs".into());
+    let g = OwnerGate {
+        agent_state: &live,
+        lock: &held,
+        ..gate(&ended)
+    };
+    assert!(owner_refusal(&path, &g).is_some_and(|r| r.contains("pid 1 runs")));
+    let inside = |_: &Path| Some("pid 2 stands in the tree".into());
+    let g = OwnerGate {
+        agent_state: &live,
+        cwd_holder: &inside,
+        ..gate(&ended)
+    };
+    assert!(owner_refusal(&path, &g).is_some_and(|r| r.contains("pid 2")));
 }
 
 #[test]
@@ -411,6 +465,52 @@ fn session_end_ranks_a_live_alias_above_the_caller_alias() {
     .with_caller(Some("managed-caller".to_string()));
     assert_eq!(owners.session_end("managed-caller"), SessionEnd::Caller);
     assert_eq!(owners.session_end("claude-shared"), SessionEnd::Live);
+}
+
+/// 🔴 #7771: a Claude id no record carries now is judged by the records the
+/// link history ties it to — ended only when every one is a stored record, and
+/// undeterminable on every probe that cannot answer.
+#[test]
+fn session_end_judges_a_superseded_claude_id_by_its_history() {
+    use crate::session_manager::worktree_reclaim_ownership::LinkHistory;
+    let history = LinkHistory::Read(
+        [
+            ("claude-old", vec!["managed-pm"]),
+            ("claude-both", vec!["managed-pm", "managed-compacted"]),
+            ("claude-now", vec!["managed-pm"]),
+        ]
+        .into_iter()
+        .map(|(c, m)| (c.to_string(), m.into_iter().map(String::from).collect()))
+        .collect(),
+    );
+    let store = || SessionOwners::observed([("managed-pm".to_string(), ClaimLiveness::Live)]);
+    let owners = store()
+        .with_aliases([("claude-now".to_string(), "managed-pm".to_string())])
+        .with_history(history.clone());
+    let undeterminable = |end: SessionEnd| matches!(end, SessionEnd::Undeterminable(_));
+    // Superseded on a stored record: that Claude session has ended.
+    assert_eq!(owners.session_end("claude-old"), SessionEnd::Ended);
+    // The current id is judged by its live record, not by the history.
+    assert_eq!(owners.session_end("claude-now"), SessionEnd::Live);
+    // Linked to a record the store does not hold: unproven.
+    assert!(undeterminable(owners.session_end("claude-both")));
+    // Named by nothing at all: unproven, as before #7771.
+    assert!(undeterminable(owners.session_end("claude-unknown")));
+    // An unreadable history, or none, proves nothing.
+    for h in [
+        LinkHistory::Unreadable("EACCES".into()),
+        LinkHistory::Absent,
+    ] {
+        assert!(undeterminable(
+            store().with_history(h).session_end("claude-old")
+        ));
+    }
+    // An unread store proves nothing, whatever the history says.
+    assert!(undeterminable(
+        SessionOwners::default()
+            .with_history(history)
+            .session_end("claude-old")
+    ));
 }
 
 #[test]

@@ -7,9 +7,10 @@
 //! is any live party still entitled to this tree?
 //! What: [`owner_refusal`] applies conditions (a)–(d) of the #7771 rule. (a) no
 //! harness lock names a running pid whose start time matches the lock; (b) no
-//! non-terminal delegation names the owner file's agent; (c) no process stands
-//! in the tree; (d) the owner file's session is the caller or provably ended.
-//! An owner file that names nobody makes (b) and (d) vacuous.
+//! non-terminal delegation names the owner file's agent, unless the session
+//! that dispatched it provably ended; (c) no process stands in the tree; (d)
+//! the owner file's session is the caller or provably ended. An owner file
+//! that names nobody makes (b) and (d) vacuous.
 //!
 //! # Fail direction
 //!
@@ -300,10 +301,14 @@ impl OwnerGate<'_> {
 /// What: (a) the lock, then the owner file (one naming nobody skips (b) and
 /// (d); one that cannot be read keeps the tree — [`read_owner`]), then (b) and
 /// (d) against an agent or session owner, then (c) last,
-/// because it is the one probe that costs a process-table walk.
+/// because it is the one probe that costs a process-table walk. A `Live`
+/// delegation whose dispatching session is [`SessionEnd::Ended`] is stale and
+/// does not refuse (#7771); a held lock or a process in the tree still does.
 /// Test: `owner_refusal_reclaims_a_tree_with_no_owner_file`,
 /// `owner_refusal_keeps_a_tree_a_live_pid_locks`,
 /// `owner_refusal_keeps_a_live_delegations_tree`,
+/// `worktree_7771_a_dead_sessions_open_delegation_is_stale`,
+/// `worktree_7771_a_stale_delegation_still_yields_to_a_held_lock`,
 /// `owner_refusal_keeps_another_live_sessions_tree`,
 /// `owner_refusal_permits_the_callers_own_agent_tree`,
 /// `owner_refusal_permits_an_ended_sessions_agent_tree`,
@@ -317,19 +322,30 @@ pub(crate) fn owner_refusal(path: &Path, gate: &OwnerGate<'_>) -> Option<String>
         Err(why) => return Some(why),
         Ok(None | Some(SentinelOwner::Unknown)) => None,
         Ok(Some(SentinelOwner::Agent(owner, _))) => {
-            if (gate.agent_state)(&owner) == AgentDelegationState::Live {
+            let session = owner.parent_session_id.0.to_string();
+            let end = (gate.session_end)(&session);
+            // #7771: a delegation record still `Running` after its dispatching
+            // session provably ended is stale — the agent ran inside that
+            // session and died with it. Only `Ended` releases it; the caller's
+            // own live agent, and every unproven session, still keep the tree.
+            if end != SessionEnd::Ended && (gate.agent_state)(&owner) == AgentDelegationState::Live
+            {
                 return Some(format!(
                     "owned by dispatched agent {} — a delegation naming it has not ended \
                      (#5661, #7771)",
                     owner.agent_id
                 ));
             }
-            Some(owner.parent_session_id.0.to_string())
+            Some((session, end))
         }
-        Ok(Some(SentinelOwner::Known(owner, _))) => Some(owner.to_string()),
+        Ok(Some(SentinelOwner::Known(owner, _))) => {
+            let session = owner.to_string();
+            let end = (gate.session_end)(&session);
+            Some((session, end))
+        }
     };
-    if let Some(session) = session {
-        match (gate.session_end)(&session) {
+    if let Some((session, end)) = session {
+        match end {
             SessionEnd::Caller | SessionEnd::Ended => {}
             SessionEnd::Live => {
                 return Some(format!(
