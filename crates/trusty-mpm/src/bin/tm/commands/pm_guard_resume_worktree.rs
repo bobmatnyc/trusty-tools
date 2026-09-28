@@ -129,16 +129,22 @@ pub(crate) fn evaluate_resume_worktree(
                 true,
             ))
         }
-        Record::Tree { path, branch } => match probe_tree(&path) {
-            Ok(()) => ResumeVerdict::Allow,
-            Err(state) => ResumeVerdict::Deny(deny_reason(
+        Record::Tree { path, branch } => {
+            // #8004: only an observed absence earns the re-dispatch advice; a
+            // probe error leaves the tree possibly live.
+            let (state, confirmed) = match probe_tree(&path) {
+                Ok(()) => return ResumeVerdict::Allow,
+                Err(TreeFault::Gone(state)) => (state, true),
+                Err(TreeFault::Unconfirmed(state)) => (state, false),
+            };
+            ResumeVerdict::Deny(deny_reason(
                 &agent,
                 Some(&path),
                 branch.as_deref(),
                 &state,
-                true,
-            )),
-        },
+                confirmed,
+            ))
+        }
         Record::Undeterminable(why) => {
             // #8004: the record parsed but its worktree fields are unreadable
             // — no tree was confirmed gone, so false, not the re-dispatch
@@ -214,27 +220,39 @@ fn classify_record(bytes: &[u8]) -> Record {
     }
 }
 
+/// Why [`probe_tree`] refused a recorded tree.
+#[derive(Debug)]
+enum TreeFault {
+    /// The probe observed the tree is not a live linked worktree.
+    Gone(String),
+    /// An I/O error or malformed pointer stopped the probe; the tree may be live.
+    Unconfirmed(String),
+}
+
 /// `Ok` only when `tree` is a directory holding a linked-worktree `.git`
 /// pointer whose git directory exists; otherwise the state, as a phrase.
 ///
-/// Why: every failure to confirm the tree reads as missing (#8004 fail-closed).
-fn probe_tree(tree: &Path) -> Result<(), String> {
+/// Why: every failure to confirm the tree denies (#8004 fail-closed), but
+/// only an observed absence is [`TreeFault::Gone`].
+fn probe_tree(tree: &Path) -> Result<(), TreeFault> {
+    let gone = |s: &str| TreeFault::Gone(s.into());
+    let unsure = |s: &str| TreeFault::Unconfirmed(unconfirmed(s));
     match std::fs::metadata(tree) {
         Ok(m) if m.is_dir() => {}
-        Ok(_) => return Err("is no longer a directory".into()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("is gone".into()),
-        Err(e) => return Err(unconfirmed(&format!("probing it failed ({e})"))),
+        Ok(_) => return Err(gone("is no longer a directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(gone("is gone")),
+        Err(e) => return Err(unsure(&format!("probing it failed ({e})"))),
     }
     let dotgit = tree.join(".git");
     let pointer = match std::fs::symlink_metadata(&dotgit) {
-        Ok(m) if m.is_dir() => return Err("is a main checkout, not a linked worktree".into()),
+        Ok(m) if m.is_dir() => return Err(gone("is a main checkout, not a linked worktree")),
         Ok(m) if m.is_file() => read_capped(&dotgit)
-            .map_err(|e| unconfirmed(&format!("its `.git` pointer could not be read ({e})")))?,
-        Ok(_) => return Err(unconfirmed("its `.git` is neither a file nor a directory")),
+            .map_err(|e| unsure(&format!("its `.git` pointer could not be read ({e})")))?,
+        Ok(_) => return Err(unsure("its `.git` is neither a file nor a directory")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("is no longer a git worktree (no `.git`)".into());
+            return Err(gone("is no longer a git worktree (no `.git`)"));
         }
-        Err(e) => return Err(unconfirmed(&format!("probing its `.git` failed ({e})"))),
+        Err(e) => return Err(unsure(&format!("probing its `.git` failed ({e})"))),
     };
     let text = String::from_utf8_lossy(&pointer);
     let Some(gitdir) = text
@@ -243,21 +261,23 @@ fn probe_tree(tree: &Path) -> Result<(), String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     else {
-        return Err(unconfirmed("its `.git` pointer names no gitdir"));
+        return Err(unsure("its `.git` pointer names no gitdir"));
     };
     match std::fs::metadata(tree.join(gitdir)) {
         Ok(m) if m.is_dir() => Ok(()),
-        Ok(_) => Err(unconfirmed("its gitdir is not a directory")),
+        Ok(_) => Err(unsure("its gitdir is not a directory")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err("is no longer registered with git".into())
+            Err(gone("is no longer registered with git"))
         }
-        Err(e) => Err(unconfirmed(&format!("probing its gitdir failed ({e})"))),
+        Err(e) => Err(unsure(&format!("probing its gitdir failed ({e})"))),
     }
 }
 
 /// The state phrase for a tree that could not be confirmed to exist.
+///
+/// #8004: never says "gone" — the advice that follows calls it possibly live.
 fn unconfirmed(why: &str) -> String {
-    format!("cannot be confirmed to exist, so it is treated as gone: {why}")
+    format!("cannot be confirmed to exist: {why}")
 }
 
 /// The removed tree's path, from the first line of the agent's transcript.
@@ -283,11 +303,11 @@ fn harness_branch_name(tree: &Path) -> Option<String> {
 
 /// The deny text: the agent, the missing tree and branch, and the remedy.
 ///
-/// `confirmed` is true only when the harness record itself showed the tree
-/// removed or missing; the re-dispatch advice belongs there. #8004: critic
-/// MEDIUM — a record that could not be read or parsed never confirmed
-/// anything, so the tree may still be live, and re-dispatching it fresh
-/// risks a second live agent on the same tree.
+/// `confirmed` is true only when the harness record showed the tree removed,
+/// or the probe observed it missing; the re-dispatch advice belongs there.
+/// #8004: critic MEDIUM — an unreadable record or a probe I/O error never
+/// confirmed anything, so the tree may still be live, and re-dispatching it
+/// fresh risks a second live agent on the same tree.
 fn deny_reason(
     agent: &str,
     tree: Option<&Path>,
@@ -407,9 +427,11 @@ mod tests {
             reason.contains("is gone") && reason.contains("worktree-x"),
             "{reason}"
         );
+        assert!(reason.contains("re-dispatch fresh"), "{reason}");
     }
 
-    /// #8004 fail-closed: a probe error is not "present".
+    /// #8004 fail-closed: a probe error is not "present", and not "gone"
+    /// either — the advice must not recommend a fresh re-dispatch.
     #[test]
     fn denies_when_the_tree_probe_errors() {
         let s = Session::new();
@@ -418,6 +440,9 @@ mod tests {
         s.record(&json!({"worktreePath": file.join("child")}).to_string());
         let reason = denial(s.verdict());
         assert!(reason.contains("cannot be confirmed"), "{reason}");
+        assert!(reason.contains("may still be live"), "{reason}");
+        assert!(!reason.contains("re-dispatch fresh"), "{reason}");
+        assert!(!reason.contains("gone"), "{reason}");
     }
 
     #[test]
