@@ -232,7 +232,7 @@ use crate::commands::pm_guard_deny_log::DenyContext;
 pub(crate) use crate::commands::pm_guard_deny_log::audit_denied_tool;
 use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_enter_worktree;
-use crate::commands::{pm_guard_fanout, pm_guard_profile};
+use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktree};
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
 pub(crate) use crate::commands::pm_guard_response::{
@@ -700,6 +700,25 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                     return Ok(());
                 }
             }
+        }
+    }
+
+    // #8004: the PM's SendMessage to an agent whose isolated worktree is gone
+    // would resume it in the main checkout; refused, fail-closed on the tree.
+    match pm_guard_resume_worktree::evaluate_resume_worktree(
+        tool_name,
+        &payload,
+        caller_is_subagent,
+    ) {
+        pm_guard_resume_worktree::ResumeVerdict::Allow => {}
+        pm_guard_resume_worktree::ResumeVerdict::Unchecked { agent, why } => eprintln!(
+            "tm pm-guard: could not check whether agent `{agent}` still has its worktree \
+             ({why}); allowing this SendMessage (#8004)"
+        ),
+        pm_guard_resume_worktree::ResumeVerdict::Deny(reason) => {
+            audit_denied_tool(&refused, "resume-worktree", &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
+            return Ok(());
         }
     }
 

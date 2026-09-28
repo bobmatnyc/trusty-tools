@@ -5263,3 +5263,80 @@ fn pm_guard_denies_a_reset_keep_into_a_live_agents_worktree() {
     assert_denied(&stdout);
     assert!(stdout.contains("tm restart"), "{stdout}");
 }
+
+/// A PM `SendMessage` resuming agent `a8004feed` from a session whose harness
+/// record for that agent is `meta` (#8004). Returns the session root and the
+/// payload.
+fn resume_fixture(meta: &str) -> (tempfile::TempDir, serde_json::Value) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let subagents = dir.path().join("sess-8004/subagents");
+    std::fs::create_dir_all(&subagents).expect("mkdir subagents");
+    std::fs::write(subagents.join("agent-a8004feed.meta.json"), meta).expect("write record");
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-8004",
+        "transcript_path": dir.path().join("sess-8004.jsonl"),
+        "tool_name": "SendMessage",
+        "tool_input": {"to": "a8004feed", "message": "owner ruled: continue"},
+    });
+    (dir, payload)
+}
+
+#[test]
+fn pm_guard_refuses_resuming_an_agent_whose_worktree_was_reclaimed_8004() {
+    // #8004: the reported scenario. The agent stopped with no changes, the
+    // harness removed its worktree and rewrote its record, and the PM's
+    // SendMessage would resume it in the main checkout.
+    let (dir, payload) =
+        resume_fixture(r#"{"agentType":"rust-engineer","worktreeCleanlyRemoved":true}"#);
+    let tree = dir.path().join(".claude/worktrees/agent-a8004feed");
+    let first = serde_json::json!({"agentId": "a8004feed", "cwd": tree});
+    let transcript = dir.path().join("sess-8004/subagents/agent-a8004feed.jsonl");
+    std::fs::write(transcript, format!("{first}\n")).expect("write transcript");
+    let reason = deny_reason_of(&run_pm_guard_outside_a_checkout(&payload.to_string()));
+    assert!(
+        reason.contains(&tree.display().to_string()),
+        "names the tree: {reason}"
+    );
+    assert!(
+        reason.contains("worktree-agent-a8004feed"),
+        "names the branch: {reason}"
+    );
+    assert!(reason.contains("re-dispatch fresh"), "{reason}");
+}
+
+#[test]
+fn pm_guard_refuses_a_resume_when_the_worktree_probe_errors_8004() {
+    // #8004 fail-closed: a recorded tree whose probe errors (ENOTDIR here) is
+    // not confirmed present, so the resume is refused, never allowed.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let file = scratch.path().join("plain-file");
+    std::fs::write(&file, "x").expect("write file");
+    let meta = serde_json::json!({"worktreePath": file.join("tree"), "spawnedWithWorktree": true});
+    let (_dir, payload) = resume_fixture(&meta.to_string());
+    let reason = deny_reason_of(&run_pm_guard_outside_a_checkout(&payload.to_string()));
+    assert!(reason.contains("cannot be confirmed"), "{reason}");
+}
+
+#[test]
+fn pm_guard_allows_resuming_an_agent_whose_worktree_is_live_8004() {
+    // Control: a live linked worktree resumes normally, and a subagent's own
+    // SendMessage (its report-back channel) is never evaluated.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let tree = scratch.path().join(".claude/worktrees/agent-a8004feed");
+    let gitdir = scratch.path().join(".git/worktrees/agent-a8004feed");
+    std::fs::create_dir_all(&tree).expect("mkdir tree");
+    std::fs::create_dir_all(&gitdir).expect("mkdir gitdir");
+    std::fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).expect(".git");
+    let (_dir, payload) = resume_fixture(&serde_json::json!({"worktreePath": tree}).to_string());
+    assert_eq!(
+        run_pm_guard_outside_a_checkout(&payload.to_string()).trim(),
+        ""
+    );
+    let (_gone, mut removed) = resume_fixture(r#"{"worktreeCleanlyRemoved":true}"#);
+    removed["agent_id"] = serde_json::json!("agent-sub1");
+    assert_eq!(
+        run_pm_guard_outside_a_checkout(&removed.to_string()).trim(),
+        ""
+    );
+}
