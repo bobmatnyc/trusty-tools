@@ -391,11 +391,14 @@ impl PersistedDreamStats {
     /// Write the snapshot to `<data_dir>/dream_stats.json`, atomically.
     ///
     /// Why: `load` runs concurrently from the dashboard and other processes; a
-    /// truncate-then-write lets it read an empty or partial file (#8733).
-    /// What: delegates to [`crate::atomic_file::write_atomic`] — sibling temp
-    /// file, `fsync`, rename. On `Err` the prior snapshot is unchanged.
+    /// truncate-then-write lets it read an empty or partial file (#8733). The
+    /// idle loop and a `memory.dream_run` RPC can also save at the same time.
+    /// What: delegates to [`crate::atomic_file::write_atomic`] — a per-call
+    /// sibling temp file, `fsync`, rename. On `Err` the prior snapshot is
+    /// unchanged; concurrent saves each publish a complete file.
     /// Test: `failed_dream_stats_save_keeps_the_prior_snapshot`,
-    /// `concurrent_dream_stats_reader_never_sees_a_partial_file`.
+    /// `concurrent_dream_stats_reader_never_sees_a_partial_file`,
+    /// `two_concurrent_dream_stats_writers_never_publish_a_partial_file`.
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         let path = data_dir.join(Self::FILE_NAME);
         let raw = serde_json::to_string_pretty(self).context("serialize dream stats")?;

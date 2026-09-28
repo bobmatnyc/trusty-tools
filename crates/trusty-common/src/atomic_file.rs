@@ -11,7 +11,8 @@
 //! `codex_config::write_atomic` already used, hoisted here so the plist repair
 //! shares it rather than inventing a second one, plus four properties that
 //! repair needs and the Codex writer did not: the temp file is a SIBLING (a
-//! cross-device rename is not atomic and not even possible); the target's
+//! cross-device rename is not atomic and not even possible) with a name unique
+//! to the call, so two concurrent writers never share one (#8733); the target's
 //! existing permission bits are carried over (a `0600` plist must not silently
 //! widen to the process umask); both the temp file and the parent directory are
 //! `fsync`ed, in that order, so the atomicity survives a power loss and not
@@ -25,15 +26,18 @@
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Replace `path`'s contents with `bytes`, atomically and durably.
 ///
 /// Why: see the module docs — an interrupted direct write corrupts the target.
-/// What: refuses a symlinked target, creates the parent directory, writes
-/// `<path>.tm-tmp` beside the target, `fsync`s it, copies the target's
+/// What: refuses a symlinked target, creates the parent directory, creates a
+/// fresh `<name>.<pid>.<n>.tm-tmp` beside the target with `create_new` (never
+/// truncating an existing file), writes and `fsync`s it, copies the target's
 /// permission bits onto it when the target exists, renames it over `path`, then
-/// `fsync`s the parent directory. A failure at any step removes the temp file
-/// and leaves `path` byte-identical.
+/// `fsync`s the parent directory. A failure after the temp file exists removes
+/// it and leaves `path` byte-identical. Concurrent callers on one `path` each
+/// stage their own file, so the last rename wins with a complete document.
 ///
 /// The two syncs are what make the atomicity survive a power loss rather than
 /// only a process crash: the content has to be on disk before the rename that
@@ -44,8 +48,11 @@ use std::path::{Path, PathBuf};
 /// `write_atomic_preserves_the_targets_mode`,
 /// `write_atomic_publishes_content_mode_and_no_temp_together`,
 /// `write_atomic_refuses_a_symlinked_target`,
-/// `write_atomic_leaves_the_original_intact_when_the_rename_fails`,
-/// `write_atomic_leaves_no_temp_file_behind`.
+/// `write_atomic_leaves_the_original_intact_when_staging_fails`,
+/// `write_atomic_removes_its_temp_file_when_the_rename_fails`,
+/// `write_atomic_leaves_no_temp_file_behind`,
+/// `temp_sibling_is_unique_per_call_and_beside_the_target`,
+/// `two_concurrent_dream_stats_writers_never_publish_a_partial_file`.
 ///
 /// # Errors
 ///
@@ -69,9 +76,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = temp_sibling(path);
+    // #8733: `create_new` — never truncate a file this call did not create. A
+    // failure here leaves nothing of ours on disk, so there is nothing to clean.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
 
     let result = (|| -> io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
         // Durability of the CONTENT has to precede the rename that publishes it.
         file.sync_all()?;
@@ -121,11 +133,20 @@ fn refuse_symlink(path: &Path) -> io::Result<()> {
     }
 }
 
-/// `<path>.tm-tmp`, in the same directory so the rename stays intra-filesystem.
-// #8733: crate-visible so a caller's error-arm test can block the staging path.
-pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
+/// Staging path for one [`write_atomic`] call: `<name>.<pid>.<n>.tm-tmp`.
+///
+/// Why: a fixed staging name is shared by concurrent writers — one truncates
+/// the file another is filling, the first rename publishes it partial, and the
+/// second rename fails with `ENOENT` (#8733; `json_rmw::temp_path` is the
+/// precedent). What: the target's own directory, so the rename stays on one
+/// filesystem; the pid separates processes and a process-wide counter
+/// separates calls within one.
+/// Test: `temp_sibling_is_unique_per_call_and_beside_the_target`.
+fn temp_sibling(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut name = path.as_os_str().to_owned();
-    name.push(".tm-tmp");
+    name.push(format!(".{}.{n}.tm-tmp", std::process::id()));
     PathBuf::from(name)
 }
 
@@ -173,19 +194,67 @@ mod tests {
         assert_eq!(mode, 0o600, "mode widened to {mode:o}");
     }
 
+    /// Sorted file names in `dir` — proves no staging file survived, whatever
+    /// its unique name was.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Why: the whole point of the helper — a failed write must not corrupt the
-    /// target. A directory standing where the temp file would go makes the
-    /// write fail without touching the original.
+    /// target. A read-only parent refuses the staging file, which no unique
+    /// name can dodge (#8733).
+    #[cfg(unix)]
     #[test]
-    fn write_atomic_leaves_the_original_intact_when_the_rename_fails() {
+    fn write_atomic_leaves_the_original_intact_when_staging_fails() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("unit.plist");
         std::fs::write(&path, b"original").expect("seed");
-        std::fs::create_dir(temp_sibling(&path)).expect("block the temp path");
+        let Some(_ro) = test_support::ReadOnlyDir::new(dir.path()) else {
+            return;
+        };
 
         let err = write_atomic(&path, b"replacement").expect_err("must fail");
-        assert!(!matches!(err.kind(), io::ErrorKind::NotFound), "{err}");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
         assert_eq!(std::fs::read(&path).expect("read"), b"original");
+        assert_eq!(entries(dir.path()), ["unit.plist"]);
+    }
+
+    /// Why: a failure AFTER the staging file exists must remove it. A
+    /// non-empty directory at the target makes the rename itself fail.
+    #[test]
+    fn write_atomic_removes_its_temp_file_when_the_rename_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("unit.plist");
+        std::fs::create_dir(&path).expect("directory at the target");
+        std::fs::write(path.join("keep"), b"kept").expect("seed");
+
+        write_atomic(&path, b"replacement").expect_err("rename over a directory must fail");
+        assert_eq!(entries(dir.path()), ["unit.plist"]);
+        assert_eq!(std::fs::read(path.join("keep")).expect("read"), b"kept");
+    }
+
+    /// Why (#8733): a shared staging name let concurrent writers truncate
+    /// each other's file. Every call must get its own name, in the target's
+    /// directory, carrying this process's pid.
+    #[test]
+    fn temp_sibling_is_unique_per_call_and_beside_the_target() {
+        let path = Path::new("/state/dream_stats.json");
+        let (a, b) = (temp_sibling(path), temp_sibling(path));
+        assert_ne!(a, b);
+        for tmp in [&a, &b] {
+            assert_eq!(tmp.parent(), path.parent());
+            let name = tmp.file_name().expect("name").to_string_lossy();
+            let prefix = format!("dream_stats.json.{}.", std::process::id());
+            assert!(
+                name.starts_with(&prefix) && name.ends_with(".tm-tmp"),
+                "{name}"
+            );
+        }
     }
 
     /// Why: the three postconditions the plist repair depends on hold TOGETHER
@@ -212,7 +281,8 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path).expect("read"), b"<plist>new</plist>");
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
-        assert!(!temp_sibling(&path).exists(), "a temp file survived");
+        let name = path.file_name().expect("name").to_string_lossy();
+        assert_eq!(entries(dir.path()), [name], "a temp file survived");
     }
 
     /// Why (#8236): `rename(2)` over a symlink replaces the LINK, so a repair
@@ -240,16 +310,55 @@ mod tests {
             "the link was replaced by a plain file"
         );
         assert_eq!(std::fs::read(&real).expect("read"), b"original");
-        assert!(!temp_sibling(&link).exists());
+        assert_eq!(entries(dir.path()).len(), 2, "only the link and its target");
     }
 
-    /// Why: a leftover `<path>.tm-tmp` beside a LaunchAgent is a second
+    /// Why: a leftover `*.tm-tmp` beside a LaunchAgent is a second
     /// readable copy of whatever the plist held.
     #[test]
     fn write_atomic_leaves_no_temp_file_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("unit.plist");
         write_atomic(&path, b"fresh").expect("write");
-        assert!(!temp_sibling(&path).exists());
+        assert_eq!(entries(dir.path()), ["unit.plist"]);
+    }
+}
+
+/// Test-only fixtures shared with callers' error-arm tests.
+#[cfg(all(test, unix))]
+pub(crate) mod test_support {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// Makes a directory read-only for its lifetime, restoring `0755` on drop.
+    ///
+    /// Why (#8733): with a unique staging name per call, pre-blocking the
+    /// temp path no longer forces a failure; a read-only parent does, for any
+    /// name. What: `None` (with a skip message) when this process can still
+    /// create a file there — root ignores the mode bits.
+    pub(crate) struct ReadOnlyDir(PathBuf);
+
+    impl ReadOnlyDir {
+        pub(crate) fn new(dir: &Path) -> Option<Self> {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))
+                .expect("chmod 0555");
+            let guard = Self(dir.to_path_buf());
+            let probe = dir.join(".read-only-probe");
+            if std::fs::File::create(&probe).is_ok() {
+                let _ = std::fs::remove_file(&probe);
+                eprintln!(
+                    "skipping: {} stays writable at mode 0555 (running as root?)",
+                    dir.display()
+                );
+                return None;
+            }
+            Some(guard)
+        }
+    }
+
+    impl Drop for ReadOnlyDir {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
     }
 }
