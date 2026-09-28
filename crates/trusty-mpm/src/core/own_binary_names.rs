@@ -1,12 +1,13 @@
 //! Canonical binary names this crate ships — the single source of truth for
 //! the three consumers that don't need a different search order.
 //!
-//! Why (#4058): `Cargo.toml`'s `[[bin]]` targets `tm` and `trusty-mpm` build
-//! from the identical `src/bin/tm/main.rs` entry point, so any code that
-//! recognises "a trusty-mpm process" or "the trusty-mpm binary" must
-//! recognise BOTH names — they are the same artifact under two names, not two
-//! artifacts. Before this module existed, four call sites each hand-maintained
-//! their own copy of this two-name list (`daemon::discovery::CLAUDE_COMMANDS`,
+//! Why (#4058): `Cargo.toml` installs `tm` and `trusty-mpm`, and both run the
+//! same CLI — `trusty-mpm` is now a shim that execs `tm` (owner ruling
+//! 2026-09-27), and a daemon started before that change still runs under the
+//! old name. So any code that recognises "a trusty-mpm process" or "the
+//! trusty-mpm binary" must recognise BOTH names. Before this module existed,
+//! four call sites each hand-maintained their own copy of this two-name list
+//! (`daemon::discovery::CLAUDE_COMMANDS`,
 //! `core::standalone::hooks::MPM_BIN_NAMES`,
 //! `core::session_launch::settings::STATUSLINE_BIN_NAMES`, and an inline
 //! `name == "trusty-mpm" || name == "tm"` check in the `tm stop` daemon-PID

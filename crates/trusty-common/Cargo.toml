@@ -193,6 +193,11 @@ lanes = [
         "bug-capture",
         "session-naming",
         "rpc",
+        # `uds::sse` compiles only with `uds` AND `axum-server`. `uds` lives in
+        # this lane and `axum-server` in `inference`, so until this line no lane
+        # compiled `sse_data_is_one_line_per_event` — a feature-level coverage
+        # check cannot see a gap in a combination.
+        "axum-server",
     ] },
     { name = "inference", features = [
         "bedrock-client",

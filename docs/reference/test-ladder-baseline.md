@@ -138,6 +138,7 @@ these wherever a rung says `cargo test -p trusty-common`:
 | `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
 | any other gated module | `cargo test -p trusty-common --features <feature>` |
 | only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
+| the whole crate (every test, once) | `./scripts/test_trusty_common_lanes.sh` — runs each coverage lane in `[package.metadata.trusty-test-coverage]` with `--no-fail-fast`; CI's `trusty-common coverage lanes` job runs the same command. Name lanes to run a subset: `./scripts/test_trusty_common_lanes.sh core` |
 
 The same shape exists wherever a non-default feature gates real code —
 `trusty-common`'s `codex-config` is enabled by no crate in the workspace, so even

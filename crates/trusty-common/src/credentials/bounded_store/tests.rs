@@ -81,29 +81,115 @@ impl KeyStore for CountingAbsent {
     }
 }
 
+/// A store whose `get` parks on a [`Gate`] the test holds, counting its reads.
+///
+/// Why: a stand-in for a Keychain dialog that does not answer until the test
+/// says so, which lets a test observe the caller while the read is provably
+/// still outstanding — and then release the reader instead of leaking it.
+struct ParkedUntilReleased {
+    calls: Arc<AtomicUsize>,
+    /// Opened by the reader once it is inside `get`.
+    entered: Arc<Gate>,
+    /// The reader returns only after the test opens this.
+    release: Arc<Gate>,
+}
+
+impl KeyStore for ParkedUntilReleased {
+    fn get(&self, _provider: &str) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.open();
+        self.release.wait(
+            Duration::from_secs(60),
+            "the test never released the parked store read",
+        );
+        None
+    }
+    fn set(&self, _provider: &str, _value: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn unset(&self, _provider: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// Why (#8236 item 6): a store read that never returns must not hold the
 /// caller. The daemon's async path waits on this, and a launchd Keychain
 /// dialog makes "never returns" the routine case after every reinstall.
+/// What: the read stays parked until AFTER the caller returns, so the caller
+/// can only have left through the deadline arm. No upper wall-clock bound —
+/// a loaded runner woke the waiter 1.089 s into a 200 ms bound (#8236).
 /// Test: itself.
 #[test]
 fn a_store_that_never_returns_times_out_within_the_bound() {
+    // Only a caller that ignores its bound gets near this; it is a hang guard,
+    // not a latency assertion.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+    let provider = "test-never-returns-a";
+    clear_error(provider);
     let calls = Arc::new(AtomicUsize::new(0));
-    let store: Arc<dyn KeyStore> = Arc::new(NeverReturns {
+    let entered = Gate::new();
+    let release = Gate::new();
+    // #8236: every assertion below runs before the happy path's own
+    // `release.open()` — a panicking assertion would otherwise strand the
+    // parked reader in `Gate::wait` for its full 60 s. This guard opens
+    // `release` on any exit, panic included; `Gate::open` is idempotent, so
+    // the happy path's later explicit `release.open()` is harmless.
+    let _release_guard = ReleaseOnDrop(Arc::clone(&release));
+    let store: Arc<dyn KeyStore> = Arc::new(ParkedUntilReleased {
         calls: Arc::clone(&calls),
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
     });
     let bound = Duration::from_millis(200);
 
-    let started = Instant::now();
-    let err = store_get_bounded(store, "test-never-returns-a", bound).expect_err("must time out");
-    let elapsed = started.elapsed();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let caller = std::thread::spawn(move || {
+        let started = Instant::now();
+        let got = store_get_bounded(store, provider, bound);
+        let _ = tx.send((got, started.elapsed()));
+    });
+    let (got, elapsed) = rx.recv_timeout(HANG_GUARD).unwrap_or_else(|e| {
+        panic!("the caller did not return within {HANG_GUARD:?} of a {bound:?} bound: {e:?}")
+    });
 
-    assert_eq!(err.kind, StoreErrorKind::Timeout);
-    assert!(!err.cached, "a fresh read must not report itself cached");
+    // The reader has not published: `release` is still shut, so the flight is
+    // outstanding with no outcome. The loop's only exit with no outcome is the
+    // deadline arm — not a wake, not a store error.
+    let flight = map(&INFLIGHT)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(provider)
+        .cloned()
+        .expect("the caller returned after the reader published");
     assert!(
-        elapsed < bound * 5,
-        "the caller waited {elapsed:?}, well past the {bound:?} bound"
+        flight
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none(),
+        "the reader published while its store read was still parked"
     );
+    assert_eq!(got, Err(StoreFailure::fresh(StoreErrorKind::Timeout)));
+    assert_eq!(
+        cached_error(provider),
+        Some(StoreErrorKind::Timeout),
+        "the deadline arm did not record its Timeout"
+    );
+    assert!(
+        elapsed >= bound,
+        "the caller returned after {elapsed:?}, before its {bound:?} bound elapsed"
+    );
+
+    entered.wait(HANG_GUARD, "the detached reader never entered the store");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // Let the reader land so no thread outlives the test.
+    release.open();
+    await_reader_done(provider, HANG_GUARD);
+    caller.join().expect("caller thread");
 }
 
 /// Why (#8236 item 6b): the readers resolve per call — the overseer classifies
@@ -474,6 +560,21 @@ impl Gate {
                 panic!("gate never opened within {bound:?}: {what}");
             }
         }
+    }
+}
+
+/// Opens a [`Gate`] on drop, so a panicking assertion still frees a parked
+/// reader instead of leaving it to run out its own wait bound.
+///
+/// Why: a test that parks a reader on a `Gate` and only opens it after every
+/// assertion passes strands that reader for its full wait bound if an
+/// assertion panics first (#8236). `Gate::open` is idempotent, so holding
+/// this guard alongside an explicit happy-path `release.open()` is harmless.
+struct ReleaseOnDrop(Arc<Gate>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.open();
     }
 }
 
