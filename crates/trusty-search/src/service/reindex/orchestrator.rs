@@ -19,6 +19,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::claim::{try_claim_reindex, ReindexClaim, ReindexClaimError};
 use super::progress::ReindexProgress;
 use super::quarantine::ReindexQuarantine;
 use super::semaphore::BACKGROUND_QUEUE_DEPTH;
@@ -28,11 +29,18 @@ use super::semaphore::BACKGROUND_QUEUE_DEPTH;
 ///
 /// Why: thin wrapper for callers that don't need GC, aborted-map tracking, or
 /// the embedderd RSS poller. Always treated as interactive (priority=true).
-/// What: delegates to `spawn_reindex_with_cleanup` with all optional maps as
-/// `None` and `priority=true`.
-/// Test: covered indirectly by the integration tests via `reindex_handler`.
-pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, force: bool) {
-    spawn_reindex_with_cleanup(handle, progress, force, None, None, None, true, None);
+/// What: claims the index (#8889) and spawns with all optional maps as `None`
+/// and `priority=true`. `Err` when another reindex of the index is running, or
+/// the claim cannot be checked; nothing is spawned then.
+/// Test: `claim_tests::spawn_reindex_refuses_while_the_index_is_claimed`.
+pub fn spawn_reindex(
+    handle: Arc<IndexHandle>,
+    progress: Arc<ReindexProgress>,
+    force: bool,
+) -> Result<(), ReindexClaimError> {
+    let claim = try_claim_reindex(&handle.id, "api", force)?;
+    spawn_claimed_reindex(claim, handle, progress, force, None, None, None, true, None);
+    Ok(())
 }
 
 /// Test-only variant of [`spawn_reindex`] that hands back the task's
@@ -48,7 +56,8 @@ pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, f
 /// Awaiting the real `JoinHandle` is a rendezvous with no timing assumption.
 /// What: spawns exactly the same task as [`spawn_reindex`] (interactive
 /// priority, no cleanup / aborted maps / embedderd pid slot / quarantine) but
-/// returns the `tokio::task::JoinHandle`. `run_reindex` always sets a terminal
+/// returns the `tokio::task::JoinHandle`. Panics when the index is already
+/// claimed (#8889): a test that overlaps two runs has a bug. `run_reindex` always sets a terminal
 /// status (`Complete`/`Failed`/`AbortedMemory`) and flushes every side effect
 /// (prune, corpus swap, terminal SSE event, stage marks) before returning, so
 /// once the handle resolves the status and all observable state are final.
@@ -59,8 +68,10 @@ pub(crate) fn spawn_reindex_awaitable(
     progress: Arc<ReindexProgress>,
     force: bool,
 ) -> tokio::task::JoinHandle<()> {
+    let claim = try_claim_reindex(&handle.id, "test", force)
+        .expect("#8889: a test reindex overlapped another run of the same index");
     tokio::spawn(super::runner::run_reindex(
-        handle, progress, force, None, None, None, true, None,
+        handle, progress, force, None, None, None, true, None, claim,
     ))
 }
 
@@ -91,14 +102,48 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
 /// `embedderd_pid_slot` — when `Some`, the orchestrator spawns a concurrent
 /// RSS poller for the embedderd sidecar (issue #282).
 ///
-/// What: spawns a `tokio::task` that acquires the appropriate semaphore permit,
-/// runs the three reindex phases, emits the terminal SSE event, and GC's the
-/// progress entry.
+/// What: claims the index (#8889), then spawns a `tokio::task` that acquires
+/// the appropriate semaphore permit, runs the three reindex phases, emits the
+/// terminal SSE event, and GC's the progress entry. `Err` — and nothing
+/// spawned — when the index is already claimed or the claim cannot be checked.
 /// Test: `interactive_reindex_not_starved_by_background` verifies that a
 /// background task holding the background semaphore does not block a concurrent
-/// interactive request.
+/// interactive request; `claim_tests::spawn_reindex_refuses_while_the_index_is_claimed`.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_reindex_with_cleanup(
+    handle: Arc<IndexHandle>,
+    progress: Arc<ReindexProgress>,
+    force: bool,
+    cleanup_map: Option<Arc<DashMap<IndexId, Arc<ReindexProgress>>>>,
+    aborted_map: Option<Arc<DashMap<IndexId, Instant>>>,
+    embedderd_pid_slot: Option<Arc<AtomicU32>>,
+    priority: bool,
+    quarantine: Option<ReindexQuarantine>,
+) -> Result<(), ReindexClaimError> {
+    let claim = try_claim_reindex(&handle.id, "internal", force)?;
+    spawn_claimed_reindex(
+        claim,
+        handle,
+        progress,
+        force,
+        cleanup_map,
+        aborted_map,
+        embedderd_pid_slot,
+        priority,
+        quarantine,
+    );
+    Ok(())
+}
+
+/// Spawn a reindex under a claim the caller already holds (#8889).
+///
+/// Why: `reindex_report` must claim BEFORE it re-points the index root or
+/// replaces the progress entry, so a refused request changes nothing.
+/// What: moves `claim` into the task, which releases it when the task ends.
+/// Test: `server::tests_8889::a_second_reindex_request_is_refused_while_the_first_runs`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_claimed_reindex(
+    claim: ReindexClaim,
     handle: Arc<IndexHandle>,
     progress: Arc<ReindexProgress>,
     force: bool,
@@ -122,5 +167,6 @@ pub fn spawn_reindex_with_cleanup(
         embedderd_pid_slot,
         priority,
         quarantine,
+        claim,
     ));
 }

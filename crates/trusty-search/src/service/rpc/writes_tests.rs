@@ -828,7 +828,8 @@ async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
 /// Why: the reindex TRIGGER is this slice's; the SSE progress stream is slice
 /// 5's. What the trigger owes a caller is the `stream_url` it will subscribe to,
 /// and a socket that built a different one would hand back a URL that answers
-/// nothing.
+/// nothing. #8889: the HTTP run holds the index until it ends, so the socket
+/// request retries (bounded) while it is refused as `reindex_already_running`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn reindex_over_the_socket_matches_the_http_body() {
@@ -837,12 +838,21 @@ async fn reindex_over_the_socket_matches_the_http_body() {
         routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
 
     let over_http = http_ok(&http, "POST", "/indexes/wf/reindex", serde_json::json!({})).await;
-    let over_socket = rpc_ok(
-        &rpc,
-        writes::METHOD_INDEX_REINDEX,
-        serde_json::json!({ "index_id": "wf" }),
-    )
-    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let over_socket = loop {
+        let params = serde_json::json!({ "index_id": "wf" });
+        let response = dispatch(&rpc, writes::METHOD_INDEX_REINDEX, params).await;
+        match response.error {
+            Some(e)
+                if e.message.starts_with("reindex_already_running")
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Some(e) => panic!("search.index.reindex must answer a result: {e:?}"),
+            None => break response.result.expect("a non-error frame carries a result"),
+        }
+    };
 
     assert_eq!(over_socket["queued"], serde_json::json!(true));
     assert_eq!(

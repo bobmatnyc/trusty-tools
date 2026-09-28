@@ -777,6 +777,14 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
   queued. The body carries `index_id`, `failure_kind`, `queued: false`,
   `retryable: false`, and a `message` naming the quarantine. Restart the
   daemon to clear it: a successful corpus open lifts the quarantine.
+- **Response 409** `reindex_already_running` (#8889): a reindex of this index
+  is already running. Nothing is queued and the running job's progress entry
+  is untouched. The body carries `index_id`, `running` (`run_id`, `origin`,
+  `started_unix_ms`, `force`), that job's `stream_url`, `queued: false`, and
+  `retryable: true`. Follow the stream, or retry after it ends.
+- **Response 503** `reindex_guard_unavailable` (#8889): the one-reindex guard
+  could not be checked, so the reindex is refused rather than started
+  unguarded. `retryable: false`; restart the daemon.
 
 ##### `GET /indexes/:id/reindex/stream`
 

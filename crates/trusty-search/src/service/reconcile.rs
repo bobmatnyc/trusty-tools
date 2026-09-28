@@ -655,7 +655,9 @@ fn read_last_indexed_unix_for_index(index_id: &str) -> Option<u64> {
 /// `reconcile_one_index`.
 fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex_with_cleanup(
+    // #8889: a reindex already running covers what this one would do, so a
+    // refusal is logged and dropped rather than queued behind it.
+    if let Err(refused) = spawn_reindex_with_cleanup(
         Arc::clone(handle),
         progress,
         false, // not force — incremental skip-hash still applies
@@ -664,7 +666,12 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
         None,
         false, // background priority
         None,
-    );
+    ) {
+        tracing::warn!(
+            "reconcile[{}]: full reindex not started — {refused}",
+            handle.id.0
+        );
+    }
 }
 
 /// Apply per-file reconciliation for a small delta.

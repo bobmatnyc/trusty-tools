@@ -24,6 +24,7 @@ use super::batch::{
     commit_parsed_and_finalize, prepare_and_parse_batch, BatchCtx, REINDEX_BATCH_SIZE,
 };
 use super::checkpoint;
+use super::claim::ReindexClaim;
 use super::corpus_swap::begin_staged_corpus_swap;
 use super::finish::{BatchTotals, FileHashes, FinishCtx};
 use super::guard::ReindexTerminationGuard;
@@ -63,8 +64,12 @@ pub(super) async fn run_reindex(
     embedderd_pid_slot: Option<Arc<AtomicU32>>,
     priority: bool,
     quarantine: Option<ReindexQuarantine>,
+    // #8889: this run's claim on the index. A parameter, so it drops after every
+    // local — on return, panic, or cancellation — and no path runs unclaimed.
+    claim: ReindexClaim,
 ) {
     use std::sync::atomic::Ordering;
+    let staging_name = claim.staging_file_name();
 
     let cleanup_id = handle.id.clone();
 
@@ -302,7 +307,9 @@ pub(super) async fn run_reindex(
     let checkpoint_for_run = (!force && staging::should_stage(has_durable_corpus))
         .then(|| checkpoint::ReindexCheckpoint::for_run(&handle, &index_id, &canonical_root));
     let resume = match checkpoint_for_run.as_ref() {
-        Some(cp) => checkpoint::probe_resume(&handle, &index_id, &canonical_root, cp).await,
+        Some(cp) => {
+            checkpoint::probe_resume(&handle, &index_id, &canonical_root, cp, &staging_name).await
+        }
         None => None,
     };
     // #4721: `resume` now OWNS the probe's open staging-corpus handle and is
@@ -435,6 +442,7 @@ pub(super) async fn run_reindex(
                 // probe's open staging handle.
                 resume,
                 checkpoint_for_run.as_ref(),
+                &staging_name,
             )
             .await
             {

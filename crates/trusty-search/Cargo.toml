@@ -53,7 +53,7 @@ name = "trusty-search"
 # scripts/semver-accepted-breaks/trusty-search-0.54.5.txt, per owner ruling
 # 2026-09-26 (a public-API break never forces a major/minor bump here). No
 # source change in this commit.
-version = "0.54.5"
+version = "0.54.6"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

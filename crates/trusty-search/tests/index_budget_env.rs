@@ -102,7 +102,7 @@ async fn run_budget_reindex_with_handle(id: &str, root: &std::path::Path) -> Bud
     ));
     let progress = Arc::new(ReindexProgress::new());
     let mut rx = progress.sender.subscribe();
-    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), false);
+    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), false).expect("index is unclaimed");
 
     for _ in 0..600 {
         if progress.status.load() != ReindexStatus::Running {

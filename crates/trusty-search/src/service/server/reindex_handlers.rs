@@ -21,7 +21,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{
-    root_gate, spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus,
+    root_gate, spawn_claimed_reindex, try_claim_reindex, ReindexClaimError, ReindexProgress,
+    ReindexStatus,
 };
 
 use super::degraded::write_quarantine_refusal;
@@ -65,6 +66,7 @@ pub(super) async fn reindex_handler(
 /// the three guards on a `root_path` override (#3993 collision, #5357 root-move
 /// gate, #767 allowlist) that each stop this index being re-pointed at a tree it
 /// must not claim. #8105 adds the write-quarantine refusal, which runs first.
+/// #8889 adds the one-reindex-per-index claim, taken before the root override.
 /// The SSE progress stream stays on HTTP until slice 5.
 /// What: [`reindex_handler`]'s whole former body, taking the already-decoded
 /// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
@@ -137,16 +139,21 @@ pub(crate) async fn reindex_report(
         state.last_reindex_aborted_at.remove(&index_id);
     }
 
+    // #8889: claim the index before anything below changes it — the root
+    // override re-registers the handle and the progress entry is replaced — so
+    // a refused second request leaves the running job and its stream intact.
+    let force = body.as_ref().and_then(|req| req.force).unwrap_or(false);
+    let claim = try_claim_reindex(&index_id, "http", force)
+        .map_err(|refused| claim_refusal(&index_id, refused))?;
+
     // If caller supplied a root_path and the stored handle doesn't have one
     // (or differs), re-register with the new path. We can't mutate the
     // existing Arc in place, but registering replaces the entry.
-    let mut force = false;
     // Issue #458: `background=true` routes to the low-priority semaphore so
     // startup auto-discover reindexes never starve interactive requests.
     // Default false (interactive/priority path) when the field is absent.
     let mut is_interactive = true;
     if let Some(req) = body {
-        force = req.force.unwrap_or(false);
         is_interactive = !req.background.unwrap_or(false);
         if let Some(new_root) = req.root_path {
             // Issue #63: a caller-supplied override must pass the same
@@ -379,7 +386,8 @@ pub(crate) async fn reindex_report(
         .reindex_progress
         .insert(index_id.clone(), Arc::clone(&progress));
 
-    spawn_reindex_with_cleanup(
+    spawn_claimed_reindex(
+        claim,
         handle,
         progress,
         force,
@@ -402,6 +410,47 @@ pub(crate) async fn reindex_report(
         "queued": true,
         "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
     }))
+}
+
+/// The HTTP answer to a refused reindex claim (#8889).
+///
+/// Why: a second request must learn which job holds the index and where to
+/// follow it, and a broken guard must read as the daemon's fault, not the
+/// caller's.
+/// What: `AlreadyRunning` → `409` naming the running job and its stream URL;
+/// `GuardUnavailable` → `503`. Both carry `queued: false`.
+/// Test: `a_second_reindex_request_is_refused_while_the_first_runs`,
+/// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`.
+fn claim_refusal(
+    index_id: &IndexId,
+    refused: ReindexClaimError,
+) -> (StatusCode, serde_json::Value) {
+    let message = refused.to_string();
+    tracing::warn!("reindex_handler: {message} (#8889)");
+    match refused {
+        ReindexClaimError::AlreadyRunning { running, .. } => (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "reindex_already_running",
+                "index_id": index_id.0,
+                "message": message,
+                "running": running,
+                "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
+                "queued": false,
+                "retryable": true,
+            }),
+        ),
+        ReindexClaimError::GuardUnavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "error": "reindex_guard_unavailable",
+                "index_id": index_id.0,
+                "message": message,
+                "queued": false,
+                "retryable": false,
+            }),
+        ),
+    }
 }
 
 /// Heartbeat interval for the reindex SSE stream.
