@@ -33,7 +33,11 @@ fn gap_is_reported_for_a_ready_or_pending_stage_short_of_vectors() {
         assert_eq!(semantic_vector_gap(owed, 10, None), None, "no store");
     }
     for settled in [InProgress, Failed, Skipped] {
-        assert_eq!(semantic_vector_gap(settled, 10, Some(3)), None, "{settled:?}");
+        assert_eq!(
+            semantic_vector_gap(settled, 10, Some(3)),
+            None,
+            "{settled:?}"
+        );
     }
 }
 
