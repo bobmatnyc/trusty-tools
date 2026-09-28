@@ -1,5 +1,7 @@
 # trusty-git-analytics — AI Assistant Instructions
 
+Published from [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics); this copy is not published from trusty-tools.
+
 ## Project Purpose
 
 This is a **Rust port** of `gitflow-analytics` — a developer productivity analytics tool.

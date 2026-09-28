@@ -435,6 +435,31 @@ pub fn apply_output_style_to_prompt_with_native(
     // manifest tier included.
     let root = crate::core::paths::FrameworkPaths::default().root;
     let selected = select_style_under(&root, project_dir, explicit);
+    apply_selected_style(project_dir, &selected, prompt, native_supported)
+}
+
+/// [`apply_output_style_to_prompt_with_native`] for an already-resolved
+/// profile (#8453): the launch passes the one value it resolved.
+pub fn apply_output_style_to_prompt_for(
+    project_dir: &Path,
+    explicit: Option<&str>,
+    prompt: String,
+    native_supported: bool,
+    profile: crate::core::session_profile::SessionProfile,
+) -> String {
+    let root = crate::core::paths::FrameworkPaths::default().root;
+    let selected = project::select_style_under_for(&root, project_dir, explicit, profile);
+    apply_selected_style(project_dir, &selected, prompt, native_supported)
+}
+
+/// The injection decision for a selected style; see
+/// [`apply_output_style_to_prompt_with_native`].
+fn apply_selected_style(
+    project_dir: &Path,
+    selected: &SelectedStyle,
+    prompt: String,
+    native_supported: bool,
+) -> String {
     if native_supported {
         // #8533: Claude Code reads the style file `outputStyle` names. When that
         // is the current composite, the floor is already in it; otherwise the
@@ -466,6 +491,7 @@ pub use project::{
     ActiveStyle, PROJECT_STYLES_DIR, ProjectStyleError, SelectedStyle, describe_effective_style,
     effective_style_id, manifest_style_id, project_selected_style, project_style_ids,
     resolve_or_default, resolve_style_in_project, select_style, select_style_under,
+    select_style_under_for,
 };
 
 #[cfg(test)]

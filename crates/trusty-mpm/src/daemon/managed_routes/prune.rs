@@ -19,7 +19,10 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
+use crate::session_manager::prune::OrphanSweepOutcome;
 use crate::session_manager::worktree_reclaim::ReclaimMode;
+use crate::session_manager::worktree_reclaim_preview::preview_rows;
+use crate::session_manager::worktree_scope::PruneScope;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
@@ -169,6 +172,27 @@ pub struct PruneWorktreesRequest {
     /// worktrees as blocked by a stranger.
     #[serde(default)]
     pub invoking_session: Option<String>,
+    /// The checkout the caller is working in; when set, both passes touch only
+    /// worktrees that checkout's registry lists (#8782).
+    ///
+    /// Absent means every registered project — the automatic sweep's and the
+    /// MCP tool's scope. A value that does not resolve is REJECTED, never read
+    /// as "absent", so a typo cannot widen a prune to every project.
+    #[serde(default)]
+    pub project_root: Option<String>,
+    /// The orphan paths a `--force` run's own preview listed (#8782). When
+    /// set, the orphan sweep surveys and removes nothing outside it.
+    #[serde(default)]
+    pub only_orphan_paths: Option<Vec<String>>,
+    /// The merged-PR paths that preview listed (#8782); the same bound for the
+    /// merged-PR pass.
+    #[serde(default)]
+    pub only_merged_paths: Option<Vec<String>>,
+    /// The orphan paths that preview said `--discard-dirty` would discard
+    /// unsaved work from (#8782). When set, a dirty tree it does not list is
+    /// kept, even under `discard_dirty`.
+    #[serde(default)]
+    pub only_discard_paths: Option<Vec<String>>,
 }
 
 fn default_dry_run() -> bool {
@@ -224,6 +248,20 @@ pub(crate) async fn prune_worktrees_core(
         warn!("prune-worktrees route: {msg}");
         return RouteOutcome::text(400, msg);
     }
+    // #8782: resolved before any work, and a project root that does not
+    // resolve is a 400 rather than a daemon-global sweep.
+    let scope = match PruneScope::from_request(
+        req.project_root.as_deref(),
+        req.only_orphan_paths.as_deref(),
+        req.only_merged_paths.as_deref(),
+        req.only_discard_paths.as_deref(),
+    ) {
+        Ok(scope) => scope,
+        Err(msg) => {
+            warn!("prune-worktrees route: {msg}");
+            return RouteOutcome::text(400, msg);
+        }
+    };
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
@@ -274,13 +312,16 @@ pub(crate) async fn prune_worktrees_core(
     // under the daemon's own framework root — the root `project_register`
     // wrote them to. Every scan below takes them as a parameter.
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
+    // #8782: a checkout the scan never reaches finds nothing; say so.
+    let project_known = scope.orphan.project_known(&repos_root, &adopted);
     match mgr
-        .prune_orphaned_worktrees(
+        .prune_orphaned_worktrees_in(
             &repos_root,
             &in_use_workspace_paths,
             req.dry_run,
             policy,
             &adopted,
+            &scope.orphan,
         )
         .await
     {
@@ -328,39 +369,50 @@ pub(crate) async fn prune_worktrees_core(
                     &repos_root,
                     mode,
                     req.invoking_session.clone(),
+                    scope.merged.clone(),
                 )
                 .await
                 {
-                    Ok(o) => serde_json::json!({
-                        "removed": o.removed,
-                        "removed_bytes": o.removed_bytes,
-                        "refused_at_recheck": o.refused_at_recheck,
-                        "removal_failed": o.removal_failed,
-                        // #5829: the agent-ownership gate has spared these
-                        // since #5661, but reported nothing — so a run that
-                        // protected a live agent's tree was indistinguishable
-                        // from one that found nothing to reclaim.
-                        "spared_agent_owned": o.survey.agent_owned,
-                        // #6507: one line per non-reclaimable candidate naming
-                        // the GATE that refused it. Without it a plain
-                        // `Blocked` — every gate but 4 — appears in no field of
-                        // this reply and in no log line, which is how a merged,
-                        // clean worktree sat unreclaimed with nothing saying
-                        // why.
-                        "blocked_reasons": o.survey.blocked_reasons,
-                        "reclaimable": o.survey.reclaimable,
-                        "reclaimable_measured": o.survey.reclaimable_measured,
-                        "reclaimable_bytes": o.survey.reclaimable_bytes,
-                        "total_bytes": o.survey.total_bytes,
-                        "pr_state_unknown": o.survey.pr_state_unknown,
-                        // #6561: without these three, `0 reclaimable` and
-                        // "the `gh` call failed for every worktree" are the
-                        // same reply. The renderer prints them beside the
-                        // reclaimable count.
-                        "not_inspected": o.survey.not_inspected,
-                        "lookup_failed": o.survey.lookup_failed,
-                        "lookup_failure": o.survey.lookup_failure,
-                    }),
+                    Ok(o) => {
+                        // #8782: every path the pass would remove, and every path
+                        // it keeps because its PR state is unknown, each with its
+                        // project and reason.
+                        let preview = preview_rows(&o.survey);
+                        serde_json::json!({
+                            "reclaimable_paths": preview.reclaim,
+                            "unknown_paths": preview.unknown,
+                            "removed": o.removed,
+                            "removed_bytes": o.removed_bytes,
+                            "refused_at_recheck": o.refused_at_recheck,
+                            "removal_failed": o.removal_failed,
+                            // #8782: git failed after deleting content.
+                            "partially_removed": o.partially_removed,
+                            // #5829: the agent-ownership gate has spared these
+                            // since #5661, but reported nothing — so a run that
+                            // protected a live agent's tree was indistinguishable
+                            // from one that found nothing to reclaim.
+                            "spared_agent_owned": o.survey.agent_owned,
+                            // #6507: one line per non-reclaimable candidate naming
+                            // the GATE that refused it. Without it a plain
+                            // `Blocked` — every gate but 4 — appears in no field of
+                            // this reply and in no log line, which is how a merged,
+                            // clean worktree sat unreclaimed with nothing saying
+                            // why.
+                            "blocked_reasons": o.survey.blocked_reasons,
+                            "reclaimable": o.survey.reclaimable,
+                            "reclaimable_measured": o.survey.reclaimable_measured,
+                            "reclaimable_bytes": o.survey.reclaimable_bytes,
+                            "total_bytes": o.survey.total_bytes,
+                            "pr_state_unknown": o.survey.pr_state_unknown,
+                            // #6561: without these three, `0 reclaimable` and
+                            // "the `gh` call failed for every worktree" are the
+                            // same reply. The renderer prints them beside the
+                            // reclaimable count.
+                            "not_inspected": o.survey.not_inspected,
+                            "lookup_failed": o.survey.lookup_failed,
+                            "lookup_failure": o.survey.lookup_failure,
+                        })
+                    }
                     Err(e) => {
                         // A panicked pass reclaimed nothing; say so rather than
                         // omitting the key, which would read as "not requested".
@@ -373,10 +425,16 @@ pub(crate) async fn prune_worktrees_core(
             };
             RouteOutcome::ok(&serde_json::json!({
                 "dry_run": req.dry_run,
+                // #8782: echoed so a client can refuse a daemon that predates
+                // the scope and would have run daemon-global.
+                "scope": scope.echo(project_known),
+                "orphan_rows": orphan_rows(&outcome),
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
                 "agent_owned_paths": agent_owned_paths,
                 "skipped_dirty": outcome.skipped_dirty,
+                // #8782: git failed after deleting content.
+                "partially_removed": outcome.partially_removed,
                 "merged_prs": merged,
             }))
         }
@@ -385,6 +443,44 @@ pub(crate) async fn prune_worktrees_core(
             RouteOutcome::text(500, format!("orphan worktree scan failed: {e}"))
         }
     }
+}
+
+/// The orphan pass's paths as preview rows: path, owning checkout, reason (#8782).
+///
+/// What: one row per `removed` path. The project is the registry root the
+/// scan carried, so this runs no `git`. A path whose unsaved work
+/// `--discard-dirty` destroys says so, with what the dirty check found, and
+/// carries `discards_unsaved_work: true` — the CLI's discard allowlist.
+/// Test: `orphan_rows_name_the_owning_checkout`,
+/// `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+pub(crate) fn orphan_rows(outcome: &OrphanSweepOutcome) -> Vec<serde_json::Value> {
+    outcome
+        .removed
+        .iter()
+        .map(|path| {
+            let project = outcome.registry_roots.get(path).map_or_else(
+                || "(owning checkout unresolved)".to_string(),
+                |r| r.to_string_lossy().into_owned(),
+            );
+            let dirt = outcome.discarded_dirty.iter().find(|d| d.path == *path);
+            let reason = match dirt {
+                Some(dirt) => format!(
+                    "orphaned — its owning session has ended; it holds unsaved work ({}) — \
+                     discarded (--discard-dirty)",
+                    dirt.reason
+                ),
+                None => {
+                    "orphaned — its owning session has ended and it holds no unsaved work".into()
+                }
+            };
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "project": project,
+                "reason": reason,
+                "discards_unsaved_work": dirt.is_some(),
+            })
+        })
+        .collect()
 }
 
 /// POST /api/v1/sessions/managed/prune — by-state prune + compaction (#1508).
@@ -524,6 +620,10 @@ mod tests {
                 discard_dirty: false,
                 merged_prs: false,
                 invoking_session: Some("not-a-uuid".into()),
+                project_root: None,
+                only_orphan_paths: None,
+                only_merged_paths: None,
+                only_discard_paths: None,
             }),
         )
         .await
@@ -542,6 +642,10 @@ mod tests {
                 discard_dirty: false,
                 merged_prs: false,
                 invoking_session: None,
+                project_root: None,
+                only_orphan_paths: None,
+                only_merged_paths: None,
+                only_discard_paths: None,
             }),
         )
         .await
@@ -551,6 +655,35 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "an absent caller id is legitimate and must be accepted"
         );
+    }
+
+    /// 🔴 #8782: a `project_root` that does not resolve is a 400, never a
+    /// daemon-global sweep.
+    ///
+    /// Fails when the route reads the unresolvable root as "no scope"
+    /// (`WorktreeScope::all()` in the `Err` arm): it then answers 200 over
+    /// every project. A dry run, so even that arm deletes nothing.
+    #[tokio::test]
+    async fn prune_worktrees_route_rejects_an_unresolvable_project_root() {
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let resp = prune_worktrees_route(
+            State(state),
+            Json(PruneWorktreesRequest {
+                dry_run: true,
+                discard_dirty: false,
+                merged_prs: false,
+                invoking_session: None,
+                project_root: Some("/nonexistent/8782/project".into()),
+                only_orphan_paths: None,
+                only_merged_paths: None,
+                only_discard_paths: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Test: this function IS the test.
@@ -757,6 +890,10 @@ mod tests {
                     discard_dirty: false,
                     merged_prs: false,
                     invoking_session: None,
+                    project_root: None,
+                    only_orphan_paths: None,
+                    only_merged_paths: None,
+                    only_discard_paths: None,
                 }),
             )
             .await

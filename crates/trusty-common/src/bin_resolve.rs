@@ -785,6 +785,10 @@ mod tests {
 
     #[test]
     fn daemon_path_dirs_expands_home() {
+        // #5937: compares against HOME, which other tests in this binary set.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = dirs::home_dir().expect("home dir resolvable in test env");
         let dirs = daemon_path_dirs();
         assert!(
@@ -817,6 +821,10 @@ mod tests {
 
     #[test]
     fn daemon_path_env_contains_expected_dirs() {
+        // #5937: compares against HOME, which other tests in this binary set.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let env = daemon_path_env();
         let home = dirs::home_dir().expect("home dir resolvable in test env");
         assert!(env.contains("/opt/homebrew/bin"), "PATH missing Homebrew");

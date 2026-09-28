@@ -195,11 +195,14 @@ pub(crate) async fn ensure_daemon_started(
             .context("open daemon log file")?;
         let log_copy = log_file.try_clone().context("clone log file handle")?;
         let exe = std::env::current_exe().context("resolve current executable path")?;
-        let child = std::process::Command::new(&exe)
-            .arg("daemon")
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log_file))
-            .stderr(std::process::Stdio::from(log_copy))
+            .stderr(std::process::Stdio::from(log_copy));
+        // #8783: own session, so Ctrl-C to `tm`'s foreground group or a group
+        // kill aimed at `tm` spares the daemon it auto-started.
+        let child = trusty_common::daemon_guard::start_in_new_session(&mut cmd)
             .spawn()
             .context("spawn daemon process")?;
         // Record the child's PID so a raced/orphaned autostart daemon stays

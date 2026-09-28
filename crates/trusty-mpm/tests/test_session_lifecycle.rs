@@ -5,12 +5,9 @@
 //! operator-facing path — start, command, pause, resume, stop — over the live
 //! HTTP API in one continuous flow, the way the CLI / TUI / Telegram bot drive
 //! the daemon.
-//! What: a standalone integration-test binary that binds the daemon's axum
+//! What: an `env_serial` integration-test module that binds the daemon's axum
 //! router to a random loopback port and exercises the lifecycle with `reqwest`.
-//! Test: `cargo test -p trusty-mpm-daemon --test test_session_lifecycle`.
-
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
+//! Test: `cargo test -p trusty-mpm --test env_serial test_session_lifecycle::`.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,10 +22,10 @@ use trusty_mpm::daemon::tmux::TmuxDriver;
 ///
 /// Why: `$HOME` is process-global, and an assertion failure between the set and
 /// a manual restore would leak the scratch value into the harness's own
-/// teardown. Same shape as `scratch_home_tmux_gate.rs`'s guard — this binary
-/// holds exactly ONE test (`full_user_cycle`), which is what makes a plain
+/// teardown. Same shape as `scratch_home_tmux_gate.rs`'s guard — the `env_serial`
+/// target runs ONE test at a time (#8345), which is what makes a plain
 /// process-global override safe here without `#[serial_test::file_serial]`:
-/// under both `cargo test` and `cargo nextest` no other test shares the process.
+/// under both `cargo test` and `cargo nextest` no other test runs beside it.
 struct EnvOverride {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
@@ -37,7 +34,7 @@ struct EnvOverride {
 impl EnvOverride {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
-        // SAFETY: single-test binary — no other thread reads or writes the
+        // SAFETY: `env_serial` runs one test at a time — no other thread reads or writes the
         // environment while this runs.
         unsafe { std::env::set_var(key, value) };
         Self { key, prev }
@@ -54,7 +51,7 @@ impl EnvOverride {
     /// an empty `TMUX` as a malformed server address, not as absent.
     fn remove(key: &'static str) -> Self {
         let prev = std::env::var_os(key);
-        // SAFETY: as in `set` — single-test binary.
+        // SAFETY: as in `set` — one test at a time.
         unsafe { std::env::remove_var(key) };
         Self { key, prev }
     }
@@ -62,7 +59,7 @@ impl EnvOverride {
 
 impl Drop for EnvOverride {
     fn drop(&mut self) {
-        // SAFETY: as in `set` — single-test binary.
+        // SAFETY: as in `set` — one test at a time.
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(self.key, v) },
             None => unsafe { std::env::remove_var(self.key) },
@@ -314,7 +311,7 @@ async fn full_user_cycle() {
     // project-tier writer starts from the CHECKOUT, and `cargo test` runs this
     // binary inside it. Redirecting cwd sends any such resolution into the
     // scratch directory. Safe as a process-global here for the same reason
-    // `EnvOverride` is: this binary holds exactly one test.
+    // `EnvOverride` is: `env_serial` runs one test at a time.
     let _cwd = CwdOverride::set(scratch_home.path());
     // #6523: a scratch `$HOME` is precisely what `host_state_gate` refuses tmux
     // under (#5784), and step 11's #1454 assertion needs a REAL tmux host to

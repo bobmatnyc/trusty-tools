@@ -869,6 +869,8 @@ fn recall_query_is_the_whole_prompt() {
 /// Test: itself.
 #[test]
 fn resolve_palace_for_log_prefers_stdin_cwd() {
+    // #5937: palace resolution reads TRUSTY_MEMORY_PALACE, which sibling tests mutate.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = tmp.path().join("stdin-driven-project");
     std::fs::create_dir_all(&project).expect("create project dir");
@@ -902,6 +904,8 @@ fn resolve_palace_for_log_prefers_stdin_cwd() {
 /// Test: itself.
 #[test]
 fn resolve_palace_for_log_falls_back_to_process_cwd() {
+    // #5937: palace resolution reads TRUSTY_MEMORY_PALACE, which sibling tests mutate.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let from_empty = resolve_palace_for_log("");
     let from_garbage = resolve_palace_for_log("not json at all");
     assert_eq!(from_empty, from_garbage);

@@ -18,9 +18,6 @@
 //! and never double-assign a number.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 

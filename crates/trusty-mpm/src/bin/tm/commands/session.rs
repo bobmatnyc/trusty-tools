@@ -450,7 +450,10 @@ pub(crate) async fn session(
             force,
             discard_dirty,
             merged_prs,
+            all_projects,
         } => {
+            // #8782: scoped to this checkout unless `--all-projects`; outside a
+            // repository there is no project to scope to, so it refuses.
             // `--force` means "actually delete"; absence means dry-run (#1840).
             // `--discard-dirty` is a SEPARATE opt-in that additionally permits
             // destroying uncommitted/unpushed work (#4091).
@@ -459,12 +462,14 @@ pub(crate) async fn session(
             // #6806: the daemon occupies no pane and cannot discover the
             // caller, so the caller names itself; absent outside a managed
             // session, which leaves every claim foreign.
-            crate::commands::managed_merged_prs::session_prune_worktrees(
+            crate::commands::managed_merged_prs::prune_worktrees_from(
                 client,
                 url,
-                !force,
+                &std::env::current_dir()?,
+                force,
                 discard_dirty,
                 merged_prs,
+                all_projects,
                 std::env::var("TM_MANAGED_SESSION_ID").ok(),
             )
             .await?

@@ -17,7 +17,9 @@ pub mod audit_secrets;
 // #4891: ADR-0028 Migration step 3 — the read-only backfill triage report.
 pub mod backfill_report;
 pub mod daemon_guard;
-pub mod daemon_lock;
+// #8759: `daemon_lock` is gone — unused since #6286 and racy; the socket's
+// singleton bind lock (`trusty_common::uds::bind_singleton_hardened`) is the
+// daemon lock.
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;

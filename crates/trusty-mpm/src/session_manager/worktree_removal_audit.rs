@@ -127,6 +127,11 @@ impl RemovalAudit {
     /// `worktree_7885_a_completed_removal_is_audited_as_removed`.
     pub(super) fn outcome_line(&self, outcome: &WorktreeRemoval, still_on_disk: bool) -> String {
         let (verb, detail) = match (outcome.reason(), still_on_disk) {
+            // #8782: git failed after deleting content — never "kept".
+            (Some(why), _) if matches!(outcome, WorktreeRemoval::PartiallyRemoved(_)) => (
+                "partially removed",
+                format!("{why} (asked for: {})", self.reason),
+            ),
             (None, false) => ("removed", self.reason.clone()),
             (None, true) => (
                 "kept",

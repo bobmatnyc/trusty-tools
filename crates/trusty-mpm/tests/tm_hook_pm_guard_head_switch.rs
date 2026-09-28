@@ -10,9 +10,9 @@
 //! What: builds a real repository per test, spawns the built `tm` against an
 //! unreachable daemon URL, and asserts ALLOW (empty stdout) or DENY (one JSON
 //! line carrying `permissionDecision: "deny"`).
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_head_switch`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_head_switch::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

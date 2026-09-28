@@ -334,6 +334,8 @@ mod tests {
     /// Test: pure, no network.
     #[test]
     fn fastembed_cache_check_reports_missing_dir() {
+        // #5937: mutates FASTEMBED_CACHE_*; serialise on the crate-wide env lock.
+        let _env = crate::commands::env_test_lock().blocking_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let missing = tmp.path().join("does_not_exist");
         // SAFETY: serial test — no other thread is reading the env var.

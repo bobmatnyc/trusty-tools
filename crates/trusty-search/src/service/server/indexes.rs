@@ -379,6 +379,11 @@ pub(crate) async fn create_index_report(
     // readiness check further down so even a `503` answer is not issued about an
     // id whose fate is still being decided.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
+    // #8499: held to the registry insert — per-id stores no longer collide in
+    // redb, so this claim, not a failed corpus open, closes the #2336 race.
+    // Taken before the id check below so a same-id racer sees the winner's
+    // handle; it serializes only against the same id or an equal/nested root.
+    let _create_claim = super::create_layout::claim_registration(&req.id, &req.root_path).await;
     // The id is already taken. Registration was ASYMMETRIC here: a request for a
     // registered TREE under a new id was refused (#2336, #3993), but a request
     // for a registered ID over a different tree was accepted with
@@ -514,10 +519,9 @@ pub(crate) async fn create_index_report(
     // Issue #85: if a previously-saved HNSW snapshot + chunks file exist for
     // this id, restore them so the daemon warm-boots without re-indexing.
     //
-    // Fix #483/#485: use `build_indexer_from_entry` with `colocated: true`
-    // instead of `build_indexer_with_persisted_state` (which hard-codes
-    // `colocated: false`).  The entry-aware builder routes the corpus store
-    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`.
+    // Fix #483/#485: use the entry-aware `build_indexer_from_entry` instead of
+    // `build_indexer_with_persisted_state` (which hard-codes `colocated:
+    // false`), so the corpus store follows the entry's layout (#8499 below).
     // #8438: every write path takes its layout from
     // `StorageLayout::for_entry(init_entry)`, carried on the indexer, so HNSW
     // and corpus writes follow the registry flag — never a probe of whether
@@ -546,10 +550,18 @@ pub(crate) async fn create_index_report(
     // Issue #2984 Phase 1: mirrors `skip_kg` — no equivalent env-var default
     // (no `TRUSTY_NO_VECTOR`), so `None` on the wire simply maps to `false`.
     let skip_vector: bool = req.skip_vector.unwrap_or(false);
+    // #8499: a new index lives in the data dir, outside the work tree —
+    // `git clean -fdx` deletes ignored files too, so no `.gitignore` entry
+    // protects an in-tree store, and editing the tracked `.gitignore` left an
+    // uncommitted change that `reset --hard` reverted. An existing colocated
+    // artifact is adopted and hides itself with its own `.gitignore`. A store
+    // that would land in the repository is refused, never redirected.
+    let layout = super::create_layout::registration_layout(&req.id, &req.root_path)?;
+    let colocated = layout == crate::service::storage_layout::StorageLayout::Colocated;
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
-        colocated: true,
+        colocated,
         skip_kg,
         skip_vector,
         ..Default::default()
@@ -594,21 +606,11 @@ pub(crate) async fn create_index_report(
     // failure was swallowed: `indexer.corpus_open_failed` was set but never
     // checked here.
     if indexer.corpus_open_failed {
-        tracing::error!(
-            "create_index: corpus open failed for '{}' at {} — refusing to register a \
-             broken index handle (issue #2336)",
-            req.id,
-            req.root_path.display()
-        );
-        return Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "corpus open failed for root_path {:?}; refusing to register a broken \
-                     index handle",
-                    req.root_path.display()
-                )
-            }),
+        // #8499: a store an earlier generation still holds is a retryable 503.
+        return Err(super::create_layout::corpus_open_refusal(
+            &req.id,
+            &req.root_path,
+            indexer.corpus_open_failure,
         ));
     }
 
@@ -687,18 +689,11 @@ pub(crate) async fn create_index_report(
     let data_file_max_bytes_opt: Option<u64> = req.data_file_max_bytes;
     let data_file_max_bytes: u64 =
         crate::service::persistence::resolve_data_file_max_bytes(data_file_max_bytes_opt);
-    // Issue #403: new indexes use colocated storage (`<root>/.trusty-search/`).
     // Register the root in `roots.toml` so the startup scanner can find it on
-    // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
-    let colocated = true;
+    // the next daemon boot. #8499: the repository's `.gitignore` is never
+    // edited; `colocated` was decided above.
     if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
         tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
-    }
-    if let Err(e) = crate::service::colocated_storage::ensure_gitignored(&req.root_path) {
-        tracing::warn!(
-            "could not add .trusty-search/ to .gitignore for {}: {e}",
-            req.id
-        );
     }
     // DOC-37 (issue #2611): derive the canonical repo identity from the
     // (already-canonical) root and store it alongside `id` so this index can

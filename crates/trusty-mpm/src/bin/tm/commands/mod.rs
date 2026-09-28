@@ -89,6 +89,8 @@ pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod memory;
+// #8782: the per-project prune-worktrees preview and its scope checks.
+pub(crate) mod prune_preview;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
@@ -128,6 +130,8 @@ pub(crate) mod repair_delegation_list;
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
+// #8453: the PM delegation rules apply by session profile.
+pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;
 pub(crate) mod pm_guard_routing;
 // #7266: a line-range or partial READ of a secret-bearing file, refused for
@@ -142,6 +146,8 @@ pub(crate) mod pm_guard_secret_words;
 pub(crate) mod pm_guard_secret_positions;
 // #8523: a pm2 dump and a credential-carrying launchd plist hold a process env.
 pub(crate) mod pm_guard_secret_env_files;
+// #8756: the secret rules read every command substitution's body.
+pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.

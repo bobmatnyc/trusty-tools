@@ -49,12 +49,13 @@ async fn pool_creates_n_workers() {
     assert_eq!(pool.workers(), 3);
 }
 
-// Serialise the two autotune tests via `#[serial_test::serial(env_workers)]`
+// Serialise the two autotune tests via `#[serial_test::serial]` (#5937: the
+// unnamed group, not a named key that excludes nothing of it)
 // because both touch the `TRUSTY_EMBED_WORKERS` env var and cargo runs
 // tests in parallel by default — without serialisation the override test
 // can race the autotune test and corrupt its observation.
 #[tokio::test]
-#[serial_test::serial(env_workers)]
+#[serial_test::serial]
 async fn autotune_worker_count_matches_table() {
     std::env::remove_var("TRUSTY_EMBED_WORKERS");
     let n = autotune_workers();
@@ -65,7 +66,7 @@ async fn autotune_worker_count_matches_table() {
 }
 
 #[tokio::test]
-#[serial_test::serial(env_workers)]
+#[serial_test::serial]
 async fn pool_autotune_respects_env_override() {
     std::env::set_var("TRUSTY_EMBED_WORKERS", "7");
     let n = autotune_workers();

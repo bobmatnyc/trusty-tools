@@ -14,6 +14,7 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod commit;
+pub(crate) mod deferred;
 pub(crate) mod embed;
 
 use anyhow::{Context, Result};
@@ -711,51 +712,11 @@ impl CodeIndexer {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> anyhow::Result<EmbedCatchUp> {
-        let chunks: Vec<RawChunk> = {
-            self.ensure_chunks_loaded().await;
-            let map = self.chunks.read().await;
-            map.values().cloned().collect()
-        };
-        let total = chunks.len();
-        if total == 0 || self.embedder.is_none() || self.store.is_none() {
-            return Ok(EmbedCatchUp::finished(0, total));
-        }
-        // Issue #2984 Phase 1 HIGH finding 3: incremental catch-up — skip
-        // chunks that already have a stored vector rather than blindly
-        // re-embedding the whole corpus.
-        let store = self.store.as_ref().expect("store presence checked above");
-        let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
-        let already_embedded = store.contains_many(&ids).await;
-        let to_embed: Vec<RawChunk> = chunks
-            .into_iter()
-            .zip(already_embedded)
-            .filter_map(|(chunk, embedded)| (!embedded).then_some(chunk))
-            .collect();
-        if to_embed.is_empty() {
-            return Ok(EmbedCatchUp::finished(0, total));
-        }
-        let mut embeddings = self
-            .embed_chunks_in_batches(&to_embed, progress_tx, pause)
-            .await?;
-        // #6524: a pause stops the wave loop early, leaving the tail `None`.
-        // Commit only the embedded prefix — a `None` slot means "no vector was
-        // computed for this chunk in this pass", which `commit_vectors_batch`
-        // reads as a stale-embedding eviction, and evicting the un-embedded
-        // remainder would be work undone rather than work deferred. Without a
-        // pause the loop fills every slot, so `done == to_embed.len()` and both
-        // commits see exactly the slices they always did.
-        let done = embeddings.iter().take_while(|e| e.is_some()).count();
-        let paused = done < to_embed.len();
-        embeddings.truncate(done);
-        self.commit_vectors_batch(&to_embed[..done], &embeddings)
-            .await?;
-        self.commit_embeddings_cache(&to_embed[..done], embeddings)
-            .await;
-        Ok(EmbedCatchUp {
-            embedded: done,
-            total,
-            paused,
-        })
+        // #8600: the three phases `run_embed_catch_up` runs with the indexer
+        // guard dropped between them, here under one borrow.
+        let plan = self.plan_deferred_embed().await;
+        let run = plan.embed(progress_tx, pause).await?;
+        self.commit_deferred_embed(plan, run).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

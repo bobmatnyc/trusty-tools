@@ -68,7 +68,10 @@ name = "tga"
 # Only trusty-analyze takes a Cargo edge on tga, and it pins by path with no
 # version requirement, so nothing in-workspace has to move with it.
 version = "8.0.0"
-publish = true
+# Owner ruling 2026-09-27: crates.io publishes tga from bobmatnyc/trusty-git-analytics.
+# This copy stays a workspace member (trusty-crate-contracts depends on it) but
+# is never published from here.
+publish = false
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
 # `std::sync::LazyLock` (CLI help wiring, issue #216). The effective workspace

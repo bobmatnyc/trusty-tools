@@ -261,6 +261,28 @@ pub enum UdsSecurityError {
         path: PathBuf,
     },
 
+    /// Another process holds the singleton bind lock for this socket: it is
+    /// probing, taking over or binding the path right now. See #8759.
+    #[error(
+        "another process is binding {path} right now; refusing to start a second owner \
+         (the lock at {path}.lock releases when that bind finishes or its process exits)"
+    )]
+    BindInProgress {
+        /// Socket another process is binding.
+        path: PathBuf,
+    },
+
+    /// The singleton bind lock could not be created or locked. The bind is
+    /// refused rather than attempted unlocked (#8759).
+    #[error("singleton bind lock {path}: {source}")]
+    BindLock {
+        /// The lock file that could not be used.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The socket path exists but holds something that is not a socket, so a
     /// singleton bind refused it instead of unlinking it.
     ///

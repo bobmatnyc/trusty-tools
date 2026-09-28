@@ -11,6 +11,7 @@
 //! Test: this module.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -20,15 +21,23 @@ use trusty_common::embedder::MockEmbedder;
 
 use super::build_router;
 use super::tests_components::IsolatedDataDir;
-use crate::core::indexer::CodeIndexer;
+use crate::core::indexer::{CodeIndexer, IndexDeleted};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::Embedder;
 use crate::service::persistence::{corpus_redb_path_for_entry, PersistedIndex};
 use crate::service::persistence_loader::build_indexer_from_entry;
-use crate::service::reindex::{push_job, wait_for_turn, ReindexProgress};
+use crate::service::reindex::{push_job, wait_for_turn, LiveJob, ReindexProgress};
 use crate::service::server::SearchAppState;
 
 const INDEX_ID: &str = "delete-queued-job-8664";
+
+/// Drive a queued job to its end under a deadline, so a wedged queue fails
+/// the test instead of hanging CI (#8770).
+async fn settle(job: LiveJob) -> Result<(), IndexDeleted> {
+    tokio::time::timeout(Duration::from_secs(60), wait_for_turn(job))
+        .await
+        .expect("the queued job never settled — the deferred-embed queue is wedged")
+}
 
 /// #8664: DELETE of a cold-parked index releases `index.redb` although a
 /// queued embed job holds the only handle, and that job then ends with
@@ -59,7 +68,7 @@ async fn delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index() {
     let state = SearchAppState::new(IndexRegistry::new());
     state.cold_store.register_cold_entries(vec![entry]);
     let router = build_router(state);
-    let seq = push_job(handle, Arc::new(ReindexProgress::new()), 1);
+    let job = push_job(handle, Arc::new(ReindexProgress::new()), 1);
     assert!(
         redb::Database::open(&redb).is_err(),
         "precondition: the queued job's handle holds index.redb open"
@@ -80,7 +89,7 @@ async fn delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index() {
     let reopened = redb::Database::open(&redb);
     let closed = reopened.is_ok();
     drop(reopened);
-    let outcome = wait_for_turn(seq).await;
+    let outcome = settle(job).await;
     assert!(
         closed,
         "a queued embed job must not keep a deleted index's redb file open"
@@ -112,7 +121,7 @@ async fn a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index
     let hot = registry.register(bare());
     // A detached handle with its own indexer, as a job queued before a park holds.
     let job = Arc::new(bare());
-    let seq = push_job(Arc::clone(&job), Arc::new(ReindexProgress::new()), 1);
+    let queued = push_job(Arc::clone(&job), Arc::new(ReindexProgress::new()), 1);
     let router = build_router(SearchAppState::new(registry.clone()));
 
     // Holding the job indexer's write lock makes its close time out.
@@ -135,7 +144,7 @@ async fn a_job_handle_that_cannot_close_abandons_the_delete_before_the_hot_index
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let hot_deleted = hot.indexer.read().await.is_deleted();
     let _ = job.indexer.write().await.detach_for_delete();
-    let outcome = wait_for_turn(seq).await;
+    let outcome = settle(queued).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["removed"], false, "{body}");

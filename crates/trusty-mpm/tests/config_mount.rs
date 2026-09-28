@@ -10,7 +10,7 @@
 //! invocations exit success with the expected surface text.
 //! Test: this file IS the test.
 
-mod common;
+use crate::common;
 
 #[test]
 fn config_help_advertises_keys_feature() {

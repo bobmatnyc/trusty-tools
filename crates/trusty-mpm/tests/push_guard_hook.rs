@@ -31,9 +31,6 @@
 //! cross-branch case here genuinely diverges — see `fixture`.
 //! Test: this file IS the test module.
 
-// #8545: `common` arms the home-write fence before `main`.
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

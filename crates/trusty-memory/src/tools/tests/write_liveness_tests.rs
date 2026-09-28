@@ -9,16 +9,18 @@
 //! reads the verdict back through the real `memory.health` handler.
 //! Test: this IS the test module.
 //!
-//! No assertion here depends on a sleep. Each test waits for a condition with a
-//! bounded poll ([`wait_for`]), so a slow host lengthens the run but cannot
-//! flip the verdict.
+//! No assertion here reads a clock. Each test polls for the observable outcome
+//! ([`wait_for`], [`wait_for_health`]) under a [`SETTLE`] hang guard, so a slow
+//! host lengthens the run but cannot flip the verdict.
 
 use super::*;
 use crate::transport::methods::health::{health, HealthQuery};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Upper bound on any single condition wait in this module.
-const SETTLE: Duration = Duration::from_secs(10);
+/// Hang guard on any single condition wait in this module. It only stops a
+/// test that would otherwise never finish; no verdict depends on its value, so
+/// it sits far above the sub-second waits these tests expect.
+const SETTLE: Duration = Duration::from_secs(60);
 
 /// Build a Ready `AppState` with an injected write budget.
 fn liveness_state(budget: Duration) -> (AppState, tempfile::TempDir) {
@@ -30,16 +32,18 @@ fn liveness_state(budget: Duration) -> (AppState, tempfile::TempDir) {
     (state, tmp)
 }
 
-/// Poll `cond` until it holds, failing the test after [`SETTLE`].
+/// Poll `cond` until it holds, failing the test if [`SETTLE`] expires first.
 async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !cond() {
-        assert!(
-            started.elapsed() < SETTLE,
-            "timed out after {SETTLE:?} waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    let polled = tokio::time::timeout(SETTLE, async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        polled.is_ok(),
+        "{what} never happened (hang guard {SETTLE:?})"
+    );
 }
 
 /// Read `memory.health` on the cheap path, as both doctors do.
@@ -128,24 +132,28 @@ async fn a_write_stalled_holding_the_palace_lock_reads_as_wedged() {
     assert_eq!(v["worker"]["in_flight"], 0, "got {v}");
 }
 
-/// Poll `memory.health` until `pred` holds, failing after [`SETTLE`].
+/// Poll `memory.health` until `pred` holds, failing the test if [`SETTLE`]
+/// expires first. The failure quotes the last body seen.
 async fn wait_for_health(
     state: &AppState,
     what: &str,
     pred: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
-    let started = Instant::now();
-    loop {
-        let v = health_body(state).await;
-        if pred(&v) {
-            return v;
+    let mut last = serde_json::Value::Null;
+    let polled = tokio::time::timeout(SETTLE, async {
+        loop {
+            let v = health_body(state).await;
+            if pred(&v) {
+                return v;
+            }
+            last = v;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(
-            started.elapsed() < SETTLE,
-            "timed out after {SETTLE:?} waiting for {what}; last health: {v}"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    })
+    .await;
+    polled.unwrap_or_else(|_| {
+        panic!("{what} never happened (hang guard {SETTLE:?}); last health: {last}")
+    })
 }
 
 /// Spawn `n` `memory_remember` writers on `palace`, each abandoned by its

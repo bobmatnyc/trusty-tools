@@ -94,12 +94,14 @@ fn build_claude_command(claude_cmd: &str, prompt_file: Option<&std::path::Path>)
 /// Why: this pane is a tmux pane like any other managed one, so without the
 /// assignment the tmux server's inherited `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN`
 /// decided the renderer here too.
-/// What: `env <configured_shell_assignments> <build_claude_command>`, with the
-/// renderer [`crate::core::alt_screen::configured_alternate_screen_in`] reads
-/// from `config_root`. The operand values are `0`/`1` or the pinned
+/// What: `env <env_unset_flags> <configured_shell_assignments>
+/// <build_claude_command>`, with the renderer
+/// [`crate::core::alt_screen::configured_alternate_screen_in`] reads from
+/// `config_root`. The operand values are `0`/`1` or the pinned
 /// `${NAME-default}` form, so nothing caller-supplied enters the prefix.
-/// Test: `pane_claude_line_follows_the_configured_renderer`.
-fn pane_claude_line(
+/// Test: `pane_claude_line_follows_the_configured_renderer`,
+/// `pane_claude_line_never_passes_on_the_profile_stamp`.
+pub(crate) fn pane_claude_line(
     config_root: Option<&std::path::Path>,
     claude_cmd: &str,
     prompt_file: Option<&std::path::Path>,
@@ -107,8 +109,12 @@ fn pane_claude_line(
     let assignments = crate::core::alt_screen::configured_shell_assignments(
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     );
+    // #8453: the shared scrub, so a supervisor's profile stamp in the tmux
+    // server's environment never reaches this child; the `-u` flags must
+    // precede every assignment (POSIX `env`).
     Ok(format!(
-        "env {assignments} {}",
+        "env{} {assignments} {}",
+        crate::core::claude_env_scrub::env_unset_flags(),
         build_claude_command(claude_cmd, prompt_file)?
     ))
 }
@@ -337,15 +343,55 @@ mod tests {
         assert_eq!(tmux_session_name(&id), "tm:some-long-project:7");
     }
 
-    /// Test that TmuxBackend::new returns an error when tmux is unavailable,
-    /// rather than panicking. Requires tmux to NOT be on PATH to exercise the
-    /// error path; skip if tmux is available (the normal case).
+    /// `TmuxBackend::new` returns an error, never a panic, when tmux cannot
+    /// run; with a working tmux it spawns its session and `Drop` kills it.
+    ///
+    /// #6542: this used to call `new` against whatever tmux the host resolved,
+    /// so under `--include-ignored` on a host WITH tmux it spawned `tm_proj_0`
+    /// running the real `claude` on the operator's server. Every tmux call now
+    /// resolves through a `with_tmux_binary` scope: a missing binary for the
+    /// error path, a `PrivateTmuxServer` shim for the spawn path, which is
+    /// skipped when tmux is absent. The server dies with the guard, panic
+    /// included.
     #[test]
-    #[ignore = "only runs when tmux is absent from PATH"]
+    #[ignore = "spawns a session on a private tmux server when tmux is on PATH"]
+    #[serial_test::serial]
     fn tmux_backend_constructs_without_spawning() {
-        let id = ControlSessionId::new("proj", 0);
-        let result = TmuxBackend::new(id, "/tmp", None, "claude".into(), 100);
-        assert!(result.is_err());
+        use crate::core::tmux::with_tmux_binary;
+        use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let new_backend = || {
+            TmuxBackend::new(
+                ControlSessionId::new("proj", 0),
+                "/tmp",
+                None,
+                "true".into(),
+                100,
+            )
+        };
+
+        let missing = std::path::PathBuf::from("/nonexistent/tmux-6542");
+        let result = rt.block_on(with_tmux_binary(missing, async { new_backend() }));
+        assert!(result.is_err(), "an unusable tmux must be an Err");
+
+        let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+        if !ScratchTmuxSession::tmux_available(&tmux_bin) {
+            eprintln!("tmux not available; skipping the spawn half");
+            return;
+        }
+        let server = PrivateTmuxServer::new(&tmux_bin, "backend");
+        let shim = std::path::PathBuf::from(server.shim_bin());
+        // tmux stores `tm:proj:0` as `tm_proj_0`: `:` is not legal in a name.
+        let live = || server.query(&["has-session", "-t", "=tm_proj_0"]).is_some();
+        rt.block_on(with_tmux_binary(shim, async {
+            let backend = new_backend().expect("new spawns on the private server");
+            assert!(live(), "the session must exist on the private server");
+            drop(backend);
+            assert!(!live(), "Drop must kill the session it spawned (#1452)");
+        }));
     }
 
     /// A `prompt_file` with shell metacharacters is rendered inert (quoted) at
@@ -399,8 +445,8 @@ mod tests {
     #[test]
     fn pane_claude_line_follows_the_configured_renderer() {
         for (alternate_screen, want) in [
-            (true, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
-            (false, "env CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
+            (true, " CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
+            (false, " CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
         ] {
             let root = tempfile::tempdir().expect("tempdir");
             std::fs::write(
@@ -410,8 +456,24 @@ mod tests {
             .expect("write config");
             let line =
                 pane_claude_line(Some(root.path()), "claude; rm -rf /", None).expect("quotable");
-            assert!(line.starts_with(want), "want {want:?} leading: {line}");
+            assert!(line.starts_with("env "), "an `env` prefix: {line}");
+            assert!(line.contains(want), "want {want:?}: {line}");
             assert!(line.ends_with("'claude; rm -rf /'"), "still quoted: {line}");
         }
+    }
+
+    /// #8453: the pane inherits the tmux server's environment, which carries a
+    /// supervisor's `TRUSTY_MPM_SESSION_PROFILE` when that session started the
+    /// server. The line must unset it so the child has no launch stamp of its
+    /// own and the guard treats it as a PM. The name is hard-coded so an
+    /// emptied scrub list cannot make this pass.
+    #[test]
+    fn pane_claude_line_never_passes_on_the_profile_stamp() {
+        let line = pane_claude_line(None, "claude", None).expect("quotable");
+        let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+        assert!(
+            unset.contains(&"TRUSTY_MPM_SESSION_PROFILE"),
+            "the control-plane pane line must unset the profile stamp: {line}"
+        );
     }
 }

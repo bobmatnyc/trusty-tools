@@ -10,9 +10,9 @@
 //! What: runs the built `tm` as `tm --url <dead> doctor` under a scratch HOME
 //! and cwd, then asserts the local checks printed, that daemon reachability is
 //! ONE row saying "not running", and that no output names a port.
-//! Test: `cargo test -p trusty-mpm --test tm_doctor_standalone`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_doctor_standalone::`.
 
-mod common;
+use crate::common;
 
 /// Run `tm doctor` against an address nothing listens on.
 ///

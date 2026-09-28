@@ -277,7 +277,9 @@ fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> boo
         task_id,
         "delegation: a TaskStop cancelled this agent — releasing the tree it claimed (#7487)"
     );
-    state.terminate_delegation(id, DelegationStatus::Cancelled)
+    // #8548: Cancelled as before; a builder's record is also tagged so a resume
+    // re-arms it and its slot index is not reissued meanwhile.
+    state.cancel_task_stopped(id)
 }
 
 /// The guard denied this dispatch: it never ran, so it holds nothing (#7487).
@@ -308,6 +310,34 @@ fn on_task_stop(state: &DaemonState, session: SessionId, payload: &Value) -> boo
 /// `a_denied_dispatch_cancels_a_record_the_tracker_already_wrote`,
 /// `a_dispatch_the_grant_path_denies_records_no_claim_7487`.
 pub fn release_denied_dispatch(state: &DaemonState, session: SessionId, payload: &Value) -> bool {
+    release_dispatch_unless(state, session, payload, |_| false)
+}
+
+/// [`release_denied_dispatch`], sparing a record whose agent has launched (#8794).
+///
+/// Why: the builder-slot release route acts on the hook's word that it DENIED a
+/// dispatch whose claim it never saw answered. A record that has learned an
+/// `agent_id` is an agent that ran, and releasing its lease would admit a
+/// second builder into its slot.
+/// What: as [`release_denied_dispatch`], except a record carrying an `agent_id`
+/// is left untouched and `false` is returned. Checked under the same lock as
+/// the write.
+/// Test: `a_release_never_frees_a_builder_whose_agent_launched_8794`.
+pub fn release_unlaunched_dispatch(
+    state: &DaemonState,
+    session: SessionId,
+    payload: &Value,
+) -> bool {
+    release_dispatch_unless(state, session, payload, |d| d.agent_id.is_some())
+}
+
+/// The body both releases share; `spare` vetoes an existing record.
+fn release_dispatch_unless(
+    state: &DaemonState,
+    session: SessionId,
+    payload: &Value,
+    spare: impl Fn(&Delegation) -> bool,
+) -> bool {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return false;
     };
@@ -315,6 +345,12 @@ pub fn release_denied_dispatch(state: &DaemonState, session: SessionId, payload:
     if let Some(id) =
         state.find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
     {
+        if state
+            .find_delegation(session, |d| d.id == id && spare(d))
+            .is_some()
+        {
+            return false;
+        }
         return state.mutate_delegation(id, |d| {
             if !d.status.is_terminal() {
                 d.status = DelegationStatus::Cancelled;
@@ -583,6 +619,8 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     else {
         return;
     };
+    // #8548: a stopped builder that makes a tool call was resumed.
+    state.rearm_on_agent_activity(id);
     // #6556 critic round: track where this agent is NOW, in the same pass that
     // decides whether to claim. `worktree_path` is a latch and must stay one —
     // the reap needs it — so the current directory is its own field. Written

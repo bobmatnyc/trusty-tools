@@ -103,6 +103,9 @@ pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
     if let Ok(bin) = TMUX_BINARY_OVERRIDE.try_with(Clone::clone) {
         return Some(bin);
     }
+    // #6542: a no-op outside a test binary; in one, the first resolution
+    // starts that process's config-free private default server.
+    crate::core::tmux_test_isolation::ensure_default_server();
     trusty_common::bin_resolve::resolve_binary("tmux")
 }
 

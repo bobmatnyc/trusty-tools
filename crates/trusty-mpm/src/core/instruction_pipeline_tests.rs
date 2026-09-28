@@ -1341,7 +1341,9 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
         "the appended prompt must carry at least one override phrase"
     );
 
-    for style in crate::core::bundle::OUTPUT_STYLES {
+    // #8453: PM styles only — a supervisor session receives neither this
+    // prompt nor a PRIMARY DIRECTIVE.
+    for style in crate::core::bundle::pm_output_styles() {
         let combined =
             assembled.matches(SENTINEL).count() + style.content.matches(SENTINEL).count();
         assert_eq!(

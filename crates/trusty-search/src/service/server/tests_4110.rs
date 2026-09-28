@@ -110,8 +110,11 @@ async fn stages_after_restore(
             .await
             .expect("index batch");
         if persist_hnsw {
-            let hnsw_path = crate::service::colocated_storage::colocated_hnsw_path(&root)
-                .expect("colocated hnsw path");
+            // #8499: the snapshot goes where the registry-named layout puts it.
+            let hnsw_path = indexer
+                .storage_layout()
+                .file(&id.0, &root, crate::service::storage_layout::HNSW_FILE)
+                .expect("hnsw path");
             assert!(
                 indexer
                     .save_vector_store(&hnsw_path)

@@ -24,10 +24,12 @@ use crate::session_manager::worktree_reconcile::ReconcileReport;
 /// assert the string still resolves, so a renamed or removed flag fails a test
 /// instead of silently leaving the hint pointing at nothing.
 /// What: the dry-run form of the real reclaim verb. It previews and removes
-/// nothing; `--force` is the operator's separate decision.
+/// nothing; `--force` is the operator's separate decision. `--all-projects`
+/// (#8782) because the count doctor reports spans every registered project,
+/// while the verb alone previews only the checkout it runs in.
 /// Test: `doctor_worktree_remediation_command_parses` (in the `tm` binary's
 /// suite, against the real `Cli`), `worktrees_with_orphan_is_warn`.
-pub const WORKTREE_REMEDIATION_COMMAND: &str = "tm session prune-worktrees";
+pub const WORKTREE_REMEDIATION_COMMAND: &str = "tm session prune-worktrees --all-projects";
 
 /// The reconciled worktree inventory, reduced to the four numbers doctor
 /// reports (#5947).

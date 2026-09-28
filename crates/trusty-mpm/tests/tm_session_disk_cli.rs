@@ -14,9 +14,9 @@
 //! RECORDS the arguments it was called with, so the `group_by` contract is
 //! asserted rather than assumed.
 //! Test: this file; run with
-//! `cargo test -p trusty-mpm --test tm_session_disk_cli`.
+//! `cargo test -p trusty-mpm --test integration tm_session_disk_cli::`.
 
-mod common;
+use crate::common;
 
 use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};

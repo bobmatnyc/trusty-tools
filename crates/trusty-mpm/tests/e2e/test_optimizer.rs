@@ -1,6 +1,6 @@
 //! E2E: token-use optimizer configuration, file-backed.
 
-use crate::harness::{TestDaemon, write_optimizer_toml};
+use super::harness::{TestDaemon, write_optimizer_toml};
 use serde_json::Value;
 
 /// With no `optimizer.toml` planted, the daemon serves the bundled default

@@ -10,9 +10,9 @@
 //! `aggregate_errors_from_paths(store_paths_under(..))` — the body of
 //! `list_recent_errors` for a pinned base. The error arm blocks the store and
 //! checks the deny still goes out and the failure is reported.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_deny_capture`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_deny_capture::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write as _;
 use std::path::Path;
@@ -97,6 +97,33 @@ fn pm_guard_records_every_deny_where_list_recent_errors_reads() {
         assert!(fields.contains(part), "{part} missing from {fields}");
     }
     assert!(!fields.contains(TOKEN), "the secret was recorded: {fields}");
+}
+
+/// 🔴 REGRESSION (#8756): a launchd or pm2 environment dump is denied by the
+/// real hook and recorded like every other deny.
+#[test]
+fn a_process_manager_env_dump_is_denied_and_recorded() {
+    for command in ["launchctl print gui/501/com.example.api", "pm2 jlist"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data = tmp.path().join("data");
+        std::fs::create_dir(&data).expect("mkdir data");
+
+        let (stdout, _) = run_guard(&data, tmp.path(), command);
+        assert!(
+            stdout.contains(r#""permissionDecision":"deny""#) && stdout.contains("#8756"),
+            "`{command}` must deny: {stdout}"
+        );
+
+        let errors = aggregate_errors_from_paths(&store_paths_under(&data), 100);
+        let deny = errors
+            .iter()
+            .find(|e| e.record.crate_target == "trusty_mpm::pm_guard")
+            .unwrap_or_else(|| panic!("no pm-guard record for `{command}` among {errors:#?}"));
+        let fields = &deny.record.fields;
+        for part in ["check=secret-file-read", command, "session=s-8722"] {
+            assert!(fields.contains(part), "{part} missing from {fields}");
+        }
+    }
 }
 
 /// Fail-Open Check (#8722): a store that cannot be written loses the record,

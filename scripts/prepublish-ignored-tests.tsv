@@ -49,11 +49,11 @@ trusty-search	migration_e2e_already_current_is_noop	loads the default ONNX embed
 trusty-search	migration_e2e_empty_corpus_advances_to_current	loads the default ONNX embedder in-process; temp redb corpus, no daemon
 trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 
-# THE UNSELECTED REMAINDER. 153 ignored tests are enumerable in this workspace
-# on the Linux runner; the 25 rows above run, and 128 do not. A macOS checkout
+# THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
+# on the Linux runner; the 25 rows above run, and 126 do not. A macOS checkout
 # enumerates one more (trusty-mpm's macOS-only
 # `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
-# local `--list-only` run there reads 129 against this Linux baseline. The gate
+# local `--list-only` run there reads 127 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
@@ -84,7 +84,7 @@ trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the 
 # (tga 8.0.0 is published and its release line lives in the trusty-git-analytics
 # repo) and trusty-review's `stage_c_live_bedrock`, whose reason string and the
 # paused-clock timeout test's un-ignore ride with the trusty-review 0.36.2 bump.
-# Once that lands the gate counts 125; lower the baseline to match then.
+# That bump has landed; see the merge note below.
 #
 # Two of the 13 tests this sweep un-ignored — tga's
 # `catch_rate_on_trusty_tools_history` and
@@ -92,5 +92,10 @@ trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the 
 # same PR (Bob ruling: no tga edits in trusty-tools PRs; tga lives in its own
 # repo). That puts the baseline back up by two: 126 -> 128.
 #
+# Merging main into that PR brought in the trusty-review 0.36.2 bump, which
+# un-ignores the paused-clock timeout test (-1). A macOS `--list-only` run of
+# the merge reads 127, which is 126 on Linux; the 128 above was the macOS
+# reading, one high for Linux. 128 -> 126.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 128
+# UNSELECTED-BASELINE: 126

@@ -248,6 +248,8 @@ next change touching that code, never as a standalone cleanup.
 Exception: a defect you would otherwise ship in code you're already editing.
 Fix it now, not later.
 
+A text-only change does not earn a compile-everything gate (#8251).
+
 ## Agent Responsibilities
 
 | DO | DO NOT |
@@ -329,7 +331,8 @@ PM. The token box is the PM's to watch, not yours.
   verify" and hand back (#7383).
 - **A declarative process wants a verdict, not a play-by-play** — see the
   Gate Output rule, plus the terraform-lock and `gh --jq` empty-output traps
-  in that skill (#7315, #7722).
+  in that skill (#7315, #7722). Repeated transcript output costs context on
+  every round; keep status checks to one line.
 - **A count or stale-result check must be shown able to fail.** Delete the
   behavior or remove the guard, confirm the check goes red, then restore;
   assert on references captured before the transition (#7230).
@@ -361,8 +364,8 @@ not runnability — never reintroduce one, or substitute a manual poll loop.
 ### Report, don't promise
 
 Hand back an observation: "pushed `<sha>`; 3 checks pending — PM to re-engage."
-Ending with "I'll report back once CI is green", "monitoring the checks", or
-"standing by" is a PROTOCOL VIOLATION — nothing re-invokes a stopped agent.
+Promising to report back later is a PROTOCOL VIOLATION — nothing re-invokes a
+stopped agent. See "Never Narrate a Wait".
 
 ### Your own gates DO block, in the foreground
 
@@ -372,7 +375,7 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
-- Already backgrounded a command? Poll it to completion in the same turn.
+- Backgrounded a gate? Finish it in the same turn via a one-line check.
 - Never spawn a background monitor, watcher, or timer as a wake mechanism —
   see "Never Narrate a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?

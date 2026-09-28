@@ -354,6 +354,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn production_socket_is_the_resolved_path() {
+        // #5937: reads TRUSTY_DATA_DIR_OVERRIDE; join the crate-wide env lock.
+        let _env = crate::commands::env_test_lock().blocking_lock();
         let Ok(resolved) = crate::socket_path() else {
             return; // no home directory in this environment; nothing to assert
         };
@@ -372,6 +374,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn production_socket_is_false_under_a_data_dir_override() {
+        // #5937: the other override writers hold env_test_lock, not #[serial].
+        let _env = crate::commands::env_test_lock().blocking_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let previous = std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV);
         // SAFETY: serialised by `#[serial]`; no concurrent env access here.

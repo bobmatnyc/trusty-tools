@@ -29,6 +29,20 @@ struct Delimiter {
     word: String,
     /// `<<-` lets the terminator line be indented with tabs.
     strip_tabs: bool,
+    /// #8756: a quoted delimiter (`<<'EOF'`) leaves the body unexpanded.
+    quoted: bool,
+}
+
+/// One here-document body its operator line hands to something other than a
+/// shell (#8756).
+///
+/// What: `span` is the body's half-open byte range, `operator_line` the range
+/// of the line that opened it, and `expands` is `true` when the delimiter was
+/// unquoted, so the shell runs every `$( … )` and backtick in the body.
+pub(crate) struct DataBody {
+    pub(crate) span: (usize, usize),
+    pub(crate) operator_line: (usize, usize),
+    pub(crate) expands: bool,
 }
 
 /// Byte ranges of a command's here-document bodies.
@@ -38,7 +52,7 @@ struct Delimiter {
 /// What: `spans` holds half-open `[start, end)` ranges covering the text
 /// between a here-document's operator line and its terminator line, terminator
 /// excluded. `frames` holds the wider separator-suppression ranges #6946 needs
-/// — see [`HeredocBodies::suppresses_separator`]. `data_spans` holds the subset
+/// — see [`HeredocBodies::suppresses_separator`]. `data` holds the subset
 /// of `spans` whose operator line hands the body to something other than a
 /// shell, which is the subset [`split_heredoc_bodies`] may lift out of the
 /// command text (#7266). All three are empty whenever [`HeredocBodies::scan`]
@@ -47,7 +61,7 @@ struct Delimiter {
 pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
-    data_spans: Vec<(usize, usize)>,
+    data: Vec<DataBody>,
 }
 
 impl HeredocBodies {
@@ -96,7 +110,7 @@ impl HeredocBodies {
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
-        let mut data_spans = Vec::new();
+        let mut data = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
@@ -121,7 +135,11 @@ impl HeredocBodies {
                         // #7266: a body its operator line does not hand to a
                         // shell is data, so no word in it is a path the
                         // command opens.
-                        data_spans.push(body.span);
+                        data.push(DataBody {
+                            span: body.span,
+                            operator_line: (start, end),
+                            expands: !delimiter.quoted,
+                        });
                     }
                 }
                 if framing {
@@ -135,7 +153,7 @@ impl HeredocBodies {
         Some(Self {
             spans,
             frames,
-            data_spans,
+            data,
         })
     }
 
@@ -144,7 +162,7 @@ impl HeredocBodies {
         Self {
             spans: Vec::new(),
             frames: Vec::new(),
-            data_spans: Vec::new(),
+            data: Vec::new(),
         }
     }
 
@@ -155,7 +173,7 @@ impl HeredocBodies {
     pub(super) fn shell_body_starting_at(&self, idx: usize) -> Option<usize> {
         self.spans
             .iter()
-            .find(|span| span.0 == idx && !self.data_spans.contains(span))
+            .find(|span| span.0 == idx && !self.data.iter().any(|d| d.span == **span))
             .map(|span| span.1)
     }
 
@@ -214,29 +232,20 @@ impl HeredocBodies {
 /// `leaves_a_shell_heredoc_body_in_the_argv_text`,
 /// `splits_nothing_without_a_heredoc`.
 pub(crate) fn split_heredoc_bodies(command: &str) -> (String, Vec<String>) {
-    let bodies = HeredocBodies::scan(command);
-    if bodies.data_spans.is_empty() {
-        return (command.to_string(), Vec::new());
-    }
-    let mut argv_text = String::with_capacity(command.len());
-    let mut texts = Vec::with_capacity(bodies.data_spans.len());
-    let mut cursor = 0;
-    for &(start, end) in &bodies.data_spans {
-        argv_text.push_str(&command[cursor..start]);
-        let body = &command[start..end];
-        for c in body.chars() {
-            if c == '\n' {
-                argv_text.push('\n');
-            } else {
-                // Space per BYTE keeps offsets identical to `command`.
-                argv_text.extend(std::iter::repeat_n(' ', c.len_utf8()));
-            }
-        }
-        texts.push(body.to_string());
-        cursor = end;
-    }
-    argv_text.push_str(&command[cursor..]);
-    (argv_text, texts)
+    let spans: Vec<(usize, usize)> = data_bodies(command).iter().map(|b| b.span).collect();
+    let texts = spans
+        .iter()
+        .map(|&(s, e)| command[s..e].to_string())
+        .collect();
+    (blank_spans(command, &spans), texts)
+}
+
+/// Every here-document body in `command` that is stdin data rather than shell
+/// source, in order (#8756).
+///
+/// Test: `data_bodies_record_whether_the_delimiter_was_quoted`.
+pub(crate) fn data_bodies(command: &str) -> Vec<DataBody> {
+    HeredocBodies::scan(command).data
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -258,8 +267,9 @@ fn line_runs_a_shell(line: &str) -> bool {
     })
 }
 
-/// `command` with every byte inside `spans` replaced by a space, newlines kept.
-fn blank_spans(command: &str, spans: &[(usize, usize)]) -> String {
+/// `command` with every byte inside `spans` replaced by a space, newlines kept,
+/// so every byte offset survives (#7266, #8756).
+pub(crate) fn blank_spans(command: &str, spans: &[(usize, usize)]) -> String {
     let mut bytes = command.as_bytes().to_vec();
     for &(start, end) in spans {
         for byte in &mut bytes[start..end] {
@@ -322,12 +332,19 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter
         while j < bytes.len() && !is_word_break(bytes[j]) {
             j += 1;
         }
-        let word: String = line[word_start..j]
+        let raw = &line[word_start..j];
+        let word: String = raw
             .chars()
             .filter(|c| !matches!(c, '\'' | '"' | '\\'))
             .collect();
         if !word.is_empty() {
-            found.push(Delimiter { word, strip_tabs });
+            // #8756: any quoting on the word keeps the body unexpanded.
+            let quoted = word.len() != raw.len();
+            found.push(Delimiter {
+                word,
+                strip_tabs,
+                quoted,
+            });
         }
         i = j.max(i + 2);
     }
@@ -509,6 +526,25 @@ mod tests {
             let (argv_text, bodies) = split_heredoc_bodies(command);
             assert_eq!(argv_text, command);
             assert!(bodies.is_empty(), "{command:?}");
+        }
+    }
+
+    /// #8756: only an unquoted delimiter expands its body, and each data body
+    /// knows the line that opened it.
+    #[test]
+    fn data_bodies_record_whether_the_delimiter_was_quoted() {
+        for (command, expands) in [
+            ("cat <<EOF\n$(date)\nEOF", true),
+            ("cat <<'EOF'\n$(date)\nEOF", false),
+            ("cat <<\"EOF\"\n$(date)\nEOF", false),
+            ("cat <<\\EOF\n$(date)\nEOF", false),
+            ("cat <<-E'O'F\n$(date)\n\tEOF", false),
+        ] {
+            let bodies = data_bodies(command);
+            assert_eq!(bodies.len(), 1, "{command:?}");
+            assert_eq!(bodies[0].expands, expands, "{command:?}");
+            let (start, end) = bodies[0].operator_line;
+            assert!(command[start..end].starts_with("cat <<"), "{command:?}");
         }
     }
 
