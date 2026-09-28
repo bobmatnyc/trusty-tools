@@ -158,7 +158,7 @@ fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
         ("local-ops", "security -h"),
         (
             "gcp-ops",
-            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
+            "gcloud auth print-access-token > /tmp/fake-token",
         ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());

@@ -137,12 +137,7 @@ pub(super) fn judge_cli_echoes(
             "op" => 1,
             _ => 0,
         };
-        let dynamic = args
-            .iter()
-            .filter(|a| !a.starts_with('-'))
-            .take(slots)
-            .any(|a| a.contains(['$', '`']) || a.contains(MARK));
-        if dynamic {
+        if subcommand_is_dynamic(args, slots) {
             return Err(Refusal::Unreadable(
                 "a credential CLI subcommand chosen at run time",
             ));
@@ -161,6 +156,33 @@ pub(super) fn judge_cli_echoes(
         }
     }
     Ok(())
+}
+
+/// Whether a word the CLI may read as one of its first `slots` subcommand
+/// words is chosen at run time (#8677 review rounds 2-3).
+///
+/// What: walks `args`, spending one slot per non-dash word and checking each
+/// such word for a `$`, a backtick or a lifted substitution. A dash word with
+/// no `=` may take the next word as its value (`gh -R owner/repo auth …`), so
+/// it adds one slot rather than naming each CLI's value-taking flags.
+/// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`,
+/// `credential_print_tests::allows_the_8677_round_two_neighbours`.
+fn subcommand_is_dynamic(args: &[String], slots: usize) -> bool {
+    let mut left = slots;
+    for a in args {
+        if left == 0 {
+            return false;
+        }
+        if a.starts_with('-') {
+            left += usize::from(!a.contains('='));
+            continue;
+        }
+        if a.contains(['$', '`']) || a.contains(MARK) {
+            return true;
+        }
+        left -= 1;
+    }
+    false
 }
 
 /// The values a sibling credential CLI prints.

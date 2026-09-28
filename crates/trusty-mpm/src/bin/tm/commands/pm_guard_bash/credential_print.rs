@@ -93,8 +93,7 @@ use credential_print_programs::{
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
 use credential_print_redirect::{
-    apply_redirections, changes_directory, note_temp_files, redirect_target_sink,
-    terminal_name_sink,
+    apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
 };
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
@@ -173,8 +172,6 @@ enum SubKind {
 struct Sub {
     kind: SubKind,
     yields: bool,
-    /// #8677: the body is a lone `mktemp` call, whose value names a file.
-    mktemp: bool,
 }
 
 /// A stripped quoted-delimiter here-document.
@@ -194,9 +191,6 @@ struct Lifted {
     names: BTreeSet<String>,
     /// #8676: work units spent so far, shared by every clone in one scan.
     spent: Rc<Cell<usize>>,
-    /// #8677: names an earlier stage bound to `$(mktemp)`, so `> "$tmp"`
-    /// names a file.
-    temp_files: BTreeSet<String>,
     /// #8677 round 2: the command changes directory, so no relative target's
     /// directory is known.
     changes_dir: bool,
@@ -339,8 +333,6 @@ fn scan_pass(
     let (mut yields, mut bound) = (false, Vec::new());
     let (mut stdin_carries, mut stdin_text) = (false, false);
     for (idx, (stage, piped, pipe_stderr)) in stages.iter().enumerate() {
-        // #8677: `tmp=$(mktemp)` names a file for every later stage.
-        note_temp_files(stage, &flat, lifted);
         let next_exists = stages.get(idx + 1).is_some();
         let out = if *piped && next_exists {
             Sink::Pipe
@@ -559,7 +551,6 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
                 with_value.subs.push(Sub {
                     kind: SubKind::Command,
                     yields: true,
-                    mktemp: false,
                 });
                 let text = inject_xargs_value(&inner, args, &mark);
                 scan(&text, Sink::Captured, inner_err, ctx.depth + 1, &with_value)?

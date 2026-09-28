@@ -12,7 +12,6 @@
 use super::super::bash_tokens::is_clobber_bar;
 use super::super::heredoc::HeredocBodies;
 use super::super::shell_lex::QuoteScan;
-use super::credential_print_redirect::is_mktemp_call;
 use super::{Lifted, MARK, Refusal, Sink, Sub, SubKind, scan};
 
 /// Blank unquoted grouping parens: `(gcloud …)` runs `gcloud` in a subshell.
@@ -110,13 +109,7 @@ pub(super) fn lift_substitutions(
         let yields = scan(body, body_out, stderr, depth + 1, lifted)?;
         flat.push_str(&text[copied..i]);
         flat.push_str(&format!("{MARK}{}__", lifted.subs.len()));
-        // #8677: a lone `mktemp` body names a file a redirect may target.
-        let mktemp = kind == SubKind::Command && is_mktemp_call(body);
-        lifted.subs.push(Sub {
-            kind,
-            yields,
-            mktemp,
-        });
+        lifted.subs.push(Sub { kind, yields });
         i = end;
         copied = end;
     }

@@ -30,10 +30,10 @@
 //! `credential_print_tests::denies_the_round_six_bypasses`,
 //! `credential_print_tests::allows_the_round_six_neighbours`.
 
-use super::super::bash_tokens::{RedirectRole, redirect_role, tokenize};
+use super::super::bash_tokens::{RedirectRole, redirect_role};
 use super::credential_print_heredoc::HEREDOC_MARK;
 use super::credential_print_programs::basename;
-use super::credential_print_taint::{expands_tainted, is_identifier};
+use super::credential_print_taint::expands_tainted;
 use super::{
     Lifted, MARK, Refusal, Sink, SubKind, carries, carries_kind, input_is_program_text, marks_in,
 };
@@ -282,13 +282,6 @@ pub(super) fn redirect_target_sink(
     if device_name(target).as_deref() == Some("stdin") {
         return fds[0];
     }
-    let name = target
-        .strip_prefix("${")
-        .and_then(|t| t.strip_suffix('}'))
-        .or_else(|| target.strip_prefix('$'));
-    if name.is_some_and(|n| lifted.temp_files.contains(n)) {
-        return Sink::Discarded;
-    }
     if target.contains(['$', '`', '*', '?', '[']) || target.contains(MARK) {
         return Sink::Unknown;
     }
@@ -332,122 +325,11 @@ fn relative_target_is_unread(target: &str, changes_dir: bool) -> bool {
         || (matches!(parent, "fd" | "pts") && last.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Whether a `$(…)` body is a lone `mktemp` call, whose value is a new file's
-/// path (#8677): no other command, redirection or expansion rides along.
-pub(super) fn is_mktemp_call(body: &str) -> bool {
-    let body = body.trim();
-    !body.contains([';', '|', '&', '<', '>', '$', '`', '\n', '(', ')'])
-        && body
-            .split_whitespace()
-            .next()
-            .is_some_and(|w| basename(w) == "mktemp")
-}
-
-/// Record the names an assignment-only stage binds to a lone `$(mktemp)`, and
-/// forget any it binds to anything else (#8677).
-///
-/// Why: `tmp=$(mktemp); gcloud … > "$tmp"` is the safe way to keep a value in
-/// a file, and the run-time target rule would otherwise refuse it.
-/// What: fails closed. Any stage naming a recorded NAME outside a
-/// `$NAME`/`${NAME}` reference, quotes removed (`tmp+=…`, `read t''mp`),
-/// removes it. Only a stage made wholly of `NAME=VALUE` words binds in the
-/// current shell; a VALUE that is exactly one [`MARK`] placeholder of a mktemp
-/// substitution adds NAME when [`temp_name_is_plain`] holds over `whole`, the
-/// pass's full lifted text.
-pub(super) fn note_temp_files(stage: &str, whole: &str, lifted: &mut Lifted) {
-    // A binding needs a lifted `$(mktemp)`; with none recorded, nothing to do.
-    if lifted.temp_files.is_empty() && !stage.contains(MARK) {
-        return;
-    }
-    // #8677 round 2: every non-reference mention may rebind, so all forget it.
-    let flat = unquoted(stage);
-    lifted.temp_files.retain(|name| !names_bare(&flat, name));
-    let words = tokenize(stage.trim()).unwrap_or_default();
-    let binds: Vec<(&str, &str)> = words.iter().filter_map(|w| w.split_once('=')).collect();
-    if words.is_empty() || binds.len() != words.len() {
-        return;
-    }
-    for (name, value) in binds {
-        let temp = is_identifier(name)
-            && is_mktemp_mark(value, lifted)
-            && temp_name_is_plain(name, whole, lifted);
-        if temp {
-            lifted.temp_files.insert(name.to_string());
-        } else {
-            lifted.temp_files.remove(name);
-        }
-    }
-}
-
-/// `text` with every quote and backslash removed, as the name check reads it.
+/// `text` with every quote and backslash removed.
 fn unquoted(text: &str) -> String {
     text.chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect()
-}
-
-/// Whether `word` is exactly one [`MARK`] placeholder of a mktemp substitution.
-fn is_mktemp_mark(word: &str, lifted: &Lifted) -> bool {
-    marks_in(word).next().is_some_and(|n| {
-        word == format!("{MARK}{n}__") && lifted.subs.get(n).is_some_and(|s| s.mktemp)
-    })
-}
-
-/// Programs that can put a link, a fifo or another file at a path. A `trap`
-/// or function body is read with the rest of the text, so it needs no entry:
-/// the character rule refuses a body's `(`, `{` and computed names.
-const RETARGETS: &[&str] = &[
-    "ln", "link", "mv", "cp", "install", "rsync", "ditto", "tar", "unzip", "cpio", "mkfifo",
-    "mknod",
-];
-
-/// Whether `whole`, a pass's lifted text, leaves `name` bound to its
-/// `$(mktemp)` file for the whole command (#8677 review round 2).
-///
-/// Why: a name can be rebound out of sight — `declare t\mp=…`, a function body,
-/// `printf -v "${n}mp"`, brace or glob expansion — or its file replaced by a
-/// link (`ln -sf /dev/stdout "$tmp"`). A carve-out that denies too much is
-/// acceptable; one that allows a rebinding is not.
-/// What: quotes removed, the text holds only plain word characters, every
-/// `$` is a `$name`/`${name}` reference to `name` or a recorded temp name,
-/// every placeholder is a mktemp one, no word is a [`RETARGETS`] program, and
-/// `name` appears bare only as its own `name=<mktemp>` binding.
-/// Test: `credential_print_tests::denies_a_temp_name_rebound_out_of_sight_8677`,
-/// `credential_print_tests::allows_the_8677_round_two_neighbours`.
-fn temp_name_is_plain(name: &str, whole: &str, lifted: &Lifted) -> bool {
-    let mut flat = unquoted(whole);
-    for known in lifted.temp_files.iter().map(String::as_str).chain([name]) {
-        flat = flat
-            .replace(&format!("${{{known}}}"), " ")
-            .replace(&format!("${known}"), " ");
-    }
-    let plain = |c: char| c.is_ascii_alphanumeric() || "_./:=@%+,-;&|<> \t\n".contains(c);
-    if !flat.chars().all(plain) {
-        return false;
-    }
-    flat.split(|c: char| c.is_whitespace() || ";&|<>".contains(c))
-        .filter(|w| !w.is_empty())
-        .all(|w| {
-            let binding = w
-                .strip_prefix(name)
-                .and_then(|v| v.strip_prefix('='))
-                .is_some_and(|v| is_mktemp_mark(v, lifted));
-            let marks_ok = marks_in(w).all(|n| lifted.subs.get(n).is_some_and(|s| s.mktemp));
-            binding
-                || (marks_ok && !RETARGETS.contains(&basename(w).as_str()) && !names_bare(w, name))
-        })
-}
-
-/// Whether `stage` names `name` as a bare word, once every `$name` and
-/// `${name}` reference is taken out.
-fn names_bare(stage: &str, name: &str) -> bool {
-    let text = stage
-        .replace(&format!("${{{name}}}"), "")
-        .replace(&format!("${name}"), "");
-    let ident = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-    text.match_indices(name).any(|(at, _)| {
-        !ident(text[..at].chars().next_back()) && !ident(text[at + name.len()..].chars().next())
-    })
 }
 
 /// The device a path names under `/dev`, as `tty` or `fd/1` (#8677).

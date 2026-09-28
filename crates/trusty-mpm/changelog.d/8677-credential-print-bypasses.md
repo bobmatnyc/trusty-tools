@@ -6,7 +6,7 @@ Fixed
   `echo 'find-generic-password -w' | security -i`. It refuses `curl -v`,
   `--trace`, `--trace-ascii` and `--libcurl` when an argument carries a
   credential. It refuses a credential written to a redirect target chosen at
-  run time (`> "$OUT"`), unless the command bound that name to `$(mktemp)`. It
+  run time (`> "$OUT"`), including a name bound to `$(mktemp)`. It
   refuses a device path with extra `/`, `.` or `..` segments
   (`> /dev/./tty`), and it refuses any terminal device. It also refuses
   `gcloud secrets versions access`, `gh auth token`, `op read`,
@@ -20,6 +20,6 @@ Fixed
   relative target that may name a device, a relative target after `cd`,
   `pushd` or `popd`, and a `~+` or `~-` target. It reads a `tee` or `dd of=`
   output file like a redirect target, so `tee "$OUT"` refuses. It refuses a
-  `gh`, `op`, `aws` or `gcloud` subcommand chosen at run time. A name bound to
-  `$(mktemp)` names a file only when nothing else in the command can rebind
-  it or replace its file.
+  `gh`, `op`, `aws` or `gcloud` subcommand chosen at run time, also after a
+  global flag and its value (`gh -R owner/repo auth …`). Write a credential to
+  a literal file path instead of `> "$tmp"`.

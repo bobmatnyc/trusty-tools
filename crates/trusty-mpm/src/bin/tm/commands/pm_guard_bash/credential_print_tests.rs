@@ -757,7 +757,6 @@ fn allows_the_round_three_neighbours() {
             "T=$(gcloud auth print-access-token); declare -i N=5",
             "T=$(gcloud auth print-access-token); declare -n R=HOME; echo $R",
             "T=$(gcloud auth print-access-token); for f in a b; do echo $f; done",
-            "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; gcloud auth print-access-token > \"$tmp\"",
             "T=$(gcloud auth print-access-token); cd /tmp && sleep 1; echo ${#T}",
             "T=$(gcloud auth print-access-token); cd /tmp && curl -H \"Authorization: Bearer $T\" https://example.test",
         ],
@@ -1156,8 +1155,6 @@ fn allows_the_8677_neighbours() {
             "gcloud auth print-access-token > /tmp//fake-token-file",
             "gcloud auth print-access-token > ./dev-token.txt",
             "gcloud auth print-access-token > /dev//null 2>&1",
-            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
-            "tmp=$(mktemp -t fake) && gcloud auth print-access-token > \"${tmp}\" && wc -c \"$tmp\"",
             // #8730 / #8763: clobber redirects to an ordinary file.
             "security find-generic-password -s x -w >|/tmp/fake-out",
             "security find-generic-password -s x -w >>!/tmp/fake-out",
@@ -1206,6 +1203,17 @@ fn denies_a_temp_name_rebound_out_of_sight_8677() {
             "tmp=$(mktemp); mv -f fake-link \"$tmp\"; gcloud auth print-access-token > \"$tmp\"",
             "n=t; tmp=$(mktemp); printf -v \"${n}mp\" %s /dev/stdout; gcloud auth print-access-token > \"$tmp\"",
             "tmp=$(mktemp); read t{m,}p <<< /dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            // Review round 3: an unlisted linker, inline code, a quoted
+            // heredoc body, and a nameref to a name built with `+=`.
+            "tmp=$(mktemp); gln -sf /dev/stdout \"$tmp\"; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); perl -e 'symlink q:/dev/stdout:, shift' \"$tmp\"; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp /tmp/fake.XXXXXX); sh <<'EOF'\nln -sf /dev/stdout /tmp/fake.*\nEOF\ngcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); declare -n r=t; declare +n r; r+=mp; declare -n r; r=/dev/stdout; gcloud auth print-access-token > \"$tmp\"",
+            // Review round 3: no `$(mktemp)` carve-out; a variable target refuses.
+            "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
+            "tmp=$(mktemp -t fake) && gcloud auth print-access-token > \"${tmp}\" && wc -c \"$tmp\"",
+            "tmp=$(mktemp); gcloud auth print-access-token | tee \"$tmp\" >/dev/null",
         ],
     );
 }
@@ -1284,6 +1292,8 @@ fn denies_a_cli_subcommand_chosen_at_run_time_8677() {
             "gh auth `echo token`",
             "op $(echo read) op://fake-vault/fake-item/password",
             "aws configure $(echo get) aws_secret_access_key",
+            // Review round 3: a global flag's value is not a subcommand slot.
+            "gh -R fake-owner/fake-repo auth $(echo token)",
         ],
     );
 }
@@ -1294,8 +1304,6 @@ fn allows_the_8677_round_two_neighbours() {
     check(
         false,
         &[
-            "tmp=$(mktemp); gcloud auth print-access-token > \"$tmp\"",
-            "tmp=$(mktemp); gcloud auth print-access-token | tee \"$tmp\" >/dev/null",
             "gcloud auth print-access-token | tee /tmp/fake-out >/dev/null",
             "gcloud auth print-access-token | tee -a fake-out >/dev/null",
             "gcloud auth print-access-token > ./fake-token.txt",
