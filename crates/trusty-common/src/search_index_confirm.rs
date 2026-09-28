@@ -82,10 +82,42 @@ pub(super) fn confirm_after_no_answer(
     index_id: &str,
     root: &Path,
 ) -> Option<String> {
-    confirm_within(socket, index_id, root, CONFIRM_DEADLINE, CONFIRM_POLL_GAP)
+    confirm_within(
+        socket,
+        index_id,
+        root,
+        CONFIRM_DEADLINE,
+        CONFIRM_POLL_GAP,
+        &WallClock(Instant::now()),
+    )
 }
 
-/// [`confirm_after_no_answer`] with the two budgets supplied.
+/// The time source [`confirm_within`] measures its deadline against.
+///
+/// Why: #8284 — on the wall clock, one slow registry read under CI load spent
+/// the whole test deadline, so the poll loop's own schedule could not be
+/// asserted. A test supplies a clock that moves only when the loop sleeps.
+/// What: `elapsed` is time since the confirm started; `sleep` waits `gap`.
+/// Test: `confirm_within_stops_at_the_deadline_and_withholds`.
+trait PollClock {
+    fn elapsed(&self) -> Duration;
+    fn sleep(&self, gap: Duration);
+}
+
+/// The production [`PollClock`]: [`Instant`] plus [`std::thread::sleep`].
+struct WallClock(Instant);
+
+impl PollClock for WallClock {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+
+    fn sleep(&self, gap: Duration) {
+        std::thread::sleep(gap);
+    }
+}
+
+/// [`confirm_after_no_answer`] with the two budgets and the clock supplied.
 ///
 /// Why: the real deadline is seconds long, so a test that drove it would spend
 /// them. Taking both as parameters lets the give-up and wrong-root arms be
@@ -95,7 +127,7 @@ pub(super) fn confirm_after_no_answer(
 /// of `deadline` so no wait is started that outlives it, and the loop always
 /// performs at least one read even when `deadline` is zero. `deadline` is tested
 /// between reads, not during one, so the final read can still overrun it by its
-/// own budget; see [`CONFIRM_DEADLINE`].
+/// own budget; see [`CONFIRM_DEADLINE`]. Time is read from `clock`.
 /// Test: `confirm_within_stops_at_the_deadline_and_withholds`,
 /// `confirm_within_never_confirms_an_index_at_another_root`,
 /// `an_exhausted_confirm_deadline_is_still_a_warning`.
@@ -105,8 +137,8 @@ fn confirm_within(
     root: &Path,
     deadline: Duration,
     gap: Duration,
+    clock: &impl PollClock,
 ) -> Option<String> {
-    let started = Instant::now();
     let mut reads: u32 = 0;
     loop {
         reads += 1;
@@ -119,15 +151,15 @@ fn confirm_within(
                 "trusty-search registered {} as index '{registered}' after the create call \
                  went unanswered ({reads} registry read(s), {:?}); pinning it (#7237)",
                 root.display(),
-                started.elapsed()
+                clock.elapsed()
             );
             return Some(registered);
         }
-        let elapsed = started.elapsed();
+        let elapsed = clock.elapsed();
         if elapsed >= deadline {
             break;
         }
-        std::thread::sleep(gap.min(deadline - elapsed));
+        clock.sleep(gap.min(deadline - elapsed));
     }
     tracing::warn!(
         "trusty-search has not registered {} after {reads} registry read(s) over {deadline:?}; \
@@ -142,6 +174,7 @@ fn confirm_within(
 mod tests {
     use super::*;
     use crate::uds_mock::{self, MockFuture, RpcError};
+    use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -166,6 +199,45 @@ mod tests {
         })
     }
 
+    /// The wall clock, for tests that assert no timing.
+    fn wall() -> WallClock {
+        WallClock(Instant::now())
+    }
+
+    /// A [`PollClock`] that advances only when the loop sleeps (#8284).
+    ///
+    /// Why: a registry read's wall time is the host's, not the loop's. Frozen
+    /// across reads, the clock makes the poll schedule a function of `deadline`
+    /// and `gap` alone.
+    /// What: records each sleep; panics on a sleep that starts at or ends past
+    /// `deadline`, so a loop that ignores its deadline fails instead of hanging.
+    struct SteppedClock {
+        deadline: Duration,
+        now: Cell<Duration>,
+        sleeps: RefCell<Vec<Duration>>,
+    }
+
+    impl PollClock for SteppedClock {
+        fn elapsed(&self) -> Duration {
+            self.now.get()
+        }
+
+        fn sleep(&self, gap: Duration) {
+            let now = self.now.get();
+            assert!(
+                now < self.deadline,
+                "slept at {now:?}, at or past the deadline"
+            );
+            assert!(
+                now + gap <= self.deadline,
+                "a {gap:?} sleep at {now:?} outlives the {:?} deadline",
+                self.deadline
+            );
+            self.now.set(now + gap);
+            self.sleeps.borrow_mut().push(gap);
+        }
+    }
+
     /// A daemon that never registers this tree leaves the pin unadvanced
     /// (#7237).
     ///
@@ -173,15 +245,23 @@ mod tests {
     /// survive it. A create that went unanswered because the daemon is wedged,
     /// or because the id is genuinely never going to exist, must still end in
     /// `None`, and the poll must stop rather than run forever.
-    /// What: a daemon whose registry stays empty; asserts `None` and that the
-    /// loop performed more than one read and returned inside a bound well under
-    /// the production deadline.
+    /// What: a daemon whose registry stays empty, on a [`SteppedClock`] with a
+    /// 100 ms deadline and a 30 ms gap; asserts `None`, the exact sleep schedule
+    /// (three full gaps, then one clamped to the 10 ms left), and one daemon read
+    /// per loop pass.
     /// Test: this test.
     #[test]
     fn confirm_within_stops_at_the_deadline_and_withholds() {
         let reads = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&reads);
-        let started = Instant::now();
+        let deadline = Duration::from_millis(100);
+        // #8284: a stepped clock, not the wall clock — one slow read under CI
+        // load used to spend the whole deadline and leave a single read.
+        let clock = SteppedClock {
+            deadline,
+            now: Cell::new(Duration::ZERO),
+            sleeps: RefCell::new(Vec::new()),
+        };
 
         let confirmed = with_daemon(
             move |_method, _params| {
@@ -193,8 +273,9 @@ mod tests {
                     socket,
                     "never-registered",
                     Path::new("/nonexistent/never/registered"),
-                    Duration::from_millis(120),
-                    Duration::from_millis(20),
+                    deadline,
+                    Duration::from_millis(30),
+                    &clock,
                 )
             },
         );
@@ -203,15 +284,16 @@ mod tests {
             confirmed, None,
             "an index the daemon never registers must stay unpinned (#5091)"
         );
-        assert!(
-            reads.load(Ordering::SeqCst) > 1,
-            "the confirm must poll rather than read once, saw {} read(s)",
-            reads.load(Ordering::SeqCst)
+        let ms = Duration::from_millis;
+        assert_eq!(
+            *clock.sleeps.borrow(),
+            [ms(30), ms(30), ms(30), ms(10)],
+            "the poll must sleep full gaps, clamp the last one, and stop at its deadline"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the poll must stop at its deadline, took {:?}",
-            started.elapsed()
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            5,
+            "the confirm must read the registry once per pass, before and after every sleep"
         );
     }
 
@@ -242,6 +324,7 @@ mod tests {
                         root,
                         Duration::from_millis(60),
                         Duration::from_millis(20),
+                        &wall(),
                     )
                 })
             },
@@ -279,6 +362,7 @@ mod tests {
                     Path::new("/nonexistent/my/tree"),
                     Duration::from_millis(60),
                     Duration::from_millis(20),
+                    &wall(),
                 )
             },
         );
@@ -309,6 +393,7 @@ mod tests {
                     Path::new("/nonexistent/my/tree"),
                     Duration::from_millis(60),
                     Duration::from_millis(20),
+                    &wall(),
                 )
             },
         );
