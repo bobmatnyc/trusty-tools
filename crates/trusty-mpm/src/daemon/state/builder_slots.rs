@@ -539,7 +539,11 @@ impl DaemonState {
     /// `create_dir_all`, and the handover's one `rename` per invalidated package
     /// directory. The trash trees of every slot tried go to
     /// [`BuilderSlotGrant::purge`] for the caller to delete after answering.
+    /// #8819: a slot whose on-disk lease a previous daemon granted is skipped
+    /// while that lease is live or unverifiable, and every handover records a
+    /// lease before the slot is handed out.
     /// Test: `two_admissions_racing_for_an_unseeded_slot_get_no_slot_and_one_seed`,
+    /// `a_held_slot_survives_a_daemon_restart_8819`,
     /// `an_admitted_builder_records_the_slot_directory_it_was_given`,
     /// `an_unseeded_slot_admits_with_no_directory_and_seeds_nothing_inline`,
     /// `a_second_claim_on_a_slot_invalidates_the_first_holders_build`,
@@ -562,24 +566,39 @@ impl DaemonState {
                 continue;
             }
             seeded.insert(index);
+            // #8819: a lease granted before a restart is not in `taken`; its
+            // file is the evidence, and one that cannot be verified keeps it.
+            let lost = self.lost_lease_verdict(pool, index);
+            if lost.blocks() {
+                tracing::info!("seeded builder slot {index} is still leased: {lost:?}");
+                continue;
+            }
             let handed = pool.hand_over(index, holder);
             // #8794: listed here, under the mutex every handover runs under, so
             // no listed tree is still being filled; deleted after the answer.
             grant.purge.extend(pool.invalidated_trees(index));
-            match handed {
-                Ok(path) if self.stamp_builder_slot(holder, index) => {
-                    let rendered = format!("{:?}", SeedKind::AlreadySeeded);
-                    self.record_builder_slot_dir(tool_use_id, &path, &rendered);
-                    grant.slot_dir = Some(path);
-                    grant.slot_seed = Some(rendered);
-                    return;
+            let path = match handed {
+                Ok(path) => path,
+                Err(err) => {
+                    tracing::warn!("seeded builder slot {index} not handed out: {err}");
+                    continue;
                 }
-                Ok(_) => {
-                    grant.slot_notice = Some(NO_INDEX_NOTICE.to_string());
-                    return;
-                }
-                Err(err) => tracing::warn!("seeded builder slot {index} not handed out: {err}"),
+            };
+            // #8819: a lease that is not on disk is lost at the next restart.
+            if let Err(err) = pool.record_lease(index, &self.slot_lease_for(holder)) {
+                tracing::warn!("builder slot {index} not handed out, lease unrecorded: {err}");
+                continue;
             }
+            if !self.stamp_builder_slot(holder, index) {
+                pool.clear_lease(index);
+                grant.slot_notice = Some(NO_INDEX_NOTICE.to_string());
+                return;
+            }
+            let rendered = format!("{:?}", SeedKind::AlreadySeeded);
+            self.record_builder_slot_dir(tool_use_id, &path, &rendered);
+            grant.slot_dir = Some(path);
+            grant.slot_seed = Some(rendered);
+            return;
         }
         // #8794: bounded by the ceiling, so hand-overs that keep failing cannot
         // clone a new slot on every admission.
@@ -1361,6 +1380,17 @@ mod tests {
     fn slot_zero_served_to_a(pool: &SlotPool) -> String {
         pool.seed(0, None).expect("a seeded slot 0");
         let slot = pool.hand_over(0, "toolu_A").expect("A is handed slot 0");
+        // #8819: a lease-less handover inside the TTL is unverifiable and keeps
+        // its slot, so backdate it past the TTL to leave the slot free.
+        std::fs::File::options()
+            .write(true)
+            .open(slot.join(crate::core::builder_slot_pool::SEED_MARKER))
+            .and_then(|marker| {
+                marker.set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60),
+                )
+            })
+            .expect("backdate the marker");
         served_line(&slot)
     }
 

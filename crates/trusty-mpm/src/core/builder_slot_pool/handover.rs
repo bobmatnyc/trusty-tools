@@ -29,7 +29,8 @@ use super::{
 };
 
 /// The marker line naming the holder the slot was last handed to.
-const SERVED_PREFIX: &str = "served: ";
+// #8819: `lease` reads it to recover a pre-#8819 holder after a restart.
+pub(super) const SERVED_PREFIX: &str = "served: ";
 
 /// The slot subdirectory invalidated fingerprints are moved into (#8794).
 ///
