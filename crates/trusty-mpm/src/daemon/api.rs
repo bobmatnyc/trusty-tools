@@ -134,6 +134,15 @@ pub use origin_guard::origin_allowed;
 pub mod rpc;
 pub use rpc::rpc_handler;
 
+/// The router-wide server-side request deadline (#8476).
+///
+/// Why: no route had a server-side bound, so a stalled handler held its
+/// connection until the caller gave up.
+/// What: the `from_fn` middleware [`router`] layers over every route, and the
+/// per-route deadline table.
+/// Test: `request_deadline::tests`.
+pub mod request_deadline;
+
 /// The Deliverable/Milestone CRUD routes (`/api/v1/projects/{name}/deliverables`
 /// and `.../milestones`, DOC-35 §10.2/§10.5; #2378 + #2380).
 ///
@@ -423,7 +432,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
 
     // DOC-60 §5.3: the peer bus owns its own route table (`bus_router`) and is
     // merged in whole, like `manager_router` above.
-    router.merge(bus_router()).with_state(state)
+    // #8476: layered LAST so it wraps every route above, merged ones included.
+    router
+        .merge(bus_router())
+        .layer(axum::middleware::from_fn(request_deadline::enforce))
+        .with_state(state)
 }
 
 /// Liveness probe plus the HR-3 catalog-staleness signal.

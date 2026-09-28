@@ -2640,3 +2640,114 @@ fn session_end_pane_still_live_false_when_all_of_multiple_panes_idle() {
         "a session whose every pane is idle must not be classified as still-live"
     );
 }
+
+/// #8476: a route whose handler stalls answers `504` at the daemon's own
+/// deadline instead of holding the connection until the caller gives up.
+///
+/// What: registers a control-plane session and holds its metadata write lock,
+/// so `GET /api/v1/control/sessions` blocks on the read inside the handler.
+/// Time is paused, so the deadline elapses at once. Before #8476 the request
+/// never completed and the outer one-hour guard fired instead.
+#[tokio::test(start_paused = true)]
+async fn stalled_route_answers_504_at_the_server_deadline() {
+    use crate::control::actor::SessionActorHandle;
+    use crate::control::event::BackendKind;
+    use crate::control::id::ControlSessionId;
+    use crate::control::state::SessionMetadata;
+    use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let (state, _dir) = hermetic_shared();
+    let id = ControlSessionId::new("deadline-proj", 0);
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let metadata = Arc::new(tokio::sync::RwLock::new(SessionMetadata::new(
+        id.clone(),
+        "deadline-proj".into(),
+        BackendKind::StreamJson,
+    )));
+    let handle = SessionActorHandle {
+        command_tx,
+        event_tx,
+        write_lock_held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        metadata: Arc::clone(&metadata),
+    };
+    state.session_registry.register(id, handle).await;
+    let _stall = metadata.write().await;
+
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let app = router(Arc::clone(&state)).layer(MockConnectInfo(loopback));
+    let started = tokio::time::Instant::now();
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        app.oneshot(
+            Request::builder()
+                .uri("/api/v1/control/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the daemon must answer a stalled request itself, not leave it open for an hour")
+    .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the deadline must fire before trusty-console's 30 s proxy bound; took {:?}",
+        started.elapsed()
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["route"], "/api/v1/control/sessions");
+}
+
+/// #8476: the deadline bounds the handler, never a streamed body — an SSE
+/// stream still delivers an event long after the deadline has passed.
+#[tokio::test(start_paused = true)]
+async fn sse_stream_outlives_the_request_deadline() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let (state, id) = state_with_session();
+    let request = Request::builder().uri("/events").body(Body::empty());
+    let response = router(Arc::clone(&state))
+        .oneshot(request.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Well past every standard-class deadline.
+    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+    state
+        .clone()
+        .push_hook_event(crate::core::hook::HookEventRecord::now(
+            id,
+            HookEvent::PostToolUse,
+            serde_json::json!({"tool": "Edit"}),
+        ));
+
+    let mut body = response.into_body();
+    let text = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = body.frame().await.expect("stream still open")?;
+            if let Ok(data) = frame.into_data() {
+                let text = String::from_utf8_lossy(&data).into_owned();
+                // Keep-alive comments arrive too; wait for the event itself.
+                if text.contains("data:") {
+                    return Ok::<_, axum::Error>(text);
+                }
+            }
+        }
+    })
+    .await
+    .expect("the SSE event arrived after the deadline")
+    .expect("frame read ok");
+    assert!(text.contains("PostToolUse"), "unexpected frame: {text:?}");
+}
