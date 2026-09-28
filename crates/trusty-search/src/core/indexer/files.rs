@@ -860,11 +860,13 @@ impl CodeIndexer {
     }
 
     /// Remove a chunk from the corpus and its vector from the HNSW store.
+    /// Test: `a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
     pub async fn remove_chunk(&self, chunk_id: &str) -> Result<()> {
+        // #8761: map before vector, as in `drop_chunk_ids_from_memory`.
+        self.chunks.write().await.remove(chunk_id);
         if let Some(store) = &self.store {
             store.remove(chunk_id).await.ok();
         }
-        self.chunks.write().await.remove(chunk_id);
         self.chunk_embeddings.write().await.pop(chunk_id);
         self.bm25.write().await.remove_document(chunk_id);
         // Issue #28: mirror the deletion into the durable redb corpus.

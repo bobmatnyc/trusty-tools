@@ -5,16 +5,20 @@
 //! holds no lock (#8600), so `remove_file` can run between snapshot and commit.
 //! The commit upserted every snapshot vector, re-inserting orphans for deleted
 //! files that no removal path reclaims.
-//! What: drives the three phases by hand and interleaves `remove_file` or an
-//! edit at each gap — the embed phase, the upsert, and `remove_file`'s own gap
-//! between its map drop and its vector drop — plus the error arms.
+//! What: drives the three phases by hand and interleaves `remove_file`,
+//! `remove_chunk` or an edit at each gap — the embed phase, the upsert, and
+//! each removal's own gap between its map drop and its vector drop — plus the
+//! error arms and the background rehydrate wait.
 //! Test: the functions below.
 
 use super::corpus_fault::break_corpus_reads;
 use super::*;
 use crate::core::embed::Embedder;
+use crate::core::indexer::ingest::deferred::DeferredEmbedPlan;
+use crate::core::indexer::ingest::embed::EmbedRun;
 use crate::core::store::VectorHit;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 /// A one-shot pause point: signals `reached`, then waits for `release`.
@@ -40,12 +44,12 @@ impl Gate {
 }
 
 /// A `UsearchStore` that can pause before an upsert or after a removal, and
-/// fail removals on demand.
+/// fail its next `fail_removes` removals.
 struct GatedStore {
     inner: UsearchStore,
     before_upsert: Gate,
     after_remove: Gate,
-    fail_remove: AtomicBool,
+    fail_removes: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -57,7 +61,11 @@ impl VectorStore for GatedStore {
         self.inner.search(query, top_k).await
     }
     async fn remove(&self, id: &str) -> anyhow::Result<()> {
-        if self.fail_remove.load(Ordering::SeqCst) {
+        let fail = self
+            .fail_removes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if fail {
             anyhow::bail!("injected remove failure");
         }
         self.inner.remove(id).await?;
@@ -87,7 +95,7 @@ fn gated_indexer(redb: Option<&std::path::Path>) -> (CodeIndexer, Arc<GatedStore
         inner: UsearchStore::new(DIM).expect("usearch new"),
         before_upsert: Gate::default(),
         after_remove: Gate::default(),
-        fail_remove: AtomicBool::new(false),
+        fail_removes: AtomicUsize::new(0),
     });
     let store: Arc<dyn VectorStore> = gated.clone();
     let mut idx = CodeIndexer::new("test", TEST_ROOT)
@@ -131,7 +139,8 @@ async fn a_file_removed_or_edited_during_the_embed_phase_gets_no_vector() {
 
     idx.remove_file("src/a.rs").await.expect("remove a");
     stage(&idx, &[("b", "src/b.rs", "fn edited_again() {}")]).await;
-    idx.commit_deferred_embed(plan, run).await.expect("commit");
+    let outcome = idx.commit_deferred_embed(plan, run).await.expect("commit");
+    assert_eq!(outcome.embedded, 1, "only the untouched chunk is reported");
 
     assert!(
         !has_vector(&idx, "a").await,
@@ -175,7 +184,8 @@ async fn a_file_removed_during_the_upsert_has_its_vector_evicted() {
         idx.remove_file("src/a.rs").await.expect("remove a");
         release.send(()).expect("release upsert");
     });
-    committed.expect("commit");
+    let outcome = committed.expect("commit");
+    assert_eq!(outcome.embedded, 1, "an evicted vector is not reported");
 
     assert!(
         !has_vector(&idx, "a").await,
@@ -211,6 +221,31 @@ async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     assert!(has_vector(&idx, "c").await);
 }
 
+/// The file watcher's `remove_chunk` has the same gap as `remove_file`.
+#[tokio::test]
+async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
+    let (idx, gated) = gated_indexer(None);
+    stage(&idx, &[A, C]).await;
+    let plan = idx.plan_deferred_embed().await;
+    let run = plan.embed(None, None).await.expect("embed");
+
+    let (reached, release) = gated.after_remove.arm();
+    let (removed, committed) = tokio::join!(idx.remove_chunk("a"), async {
+        reached.await.expect("remove reached");
+        let committed = idx.commit_deferred_embed(plan, run).await;
+        release.send(()).expect("release remove");
+        committed
+    });
+    removed.expect("remove chunk a");
+    committed.expect("commit");
+
+    assert!(
+        !has_vector(&idx, "a").await,
+        "an orphan vector survived the chunk removal"
+    );
+    assert!(has_vector(&idx, "c").await);
+}
+
 /// A vector the post-upsert check cannot evict is an error, not a warning.
 #[tokio::test]
 async fn a_failed_eviction_after_the_upsert_is_an_error() {
@@ -223,12 +258,39 @@ async fn a_failed_eviction_after_the_upsert_is_an_error() {
     let (committed, ()) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
         reached.await.expect("upsert reached");
         idx.remove_file("src/a.rs").await.expect("remove a");
-        gated.fail_remove.store(true, Ordering::SeqCst);
+        gated.fail_removes.store(1, Ordering::SeqCst);
         release.send(()).expect("release upsert");
     });
 
     let err = committed.expect_err("an orphan the commit could not evict is an error");
     assert!(format!("{err:#}").contains("evict the vector of removed chunk a"));
+}
+
+/// The first failed eviction must not leave the other orphans in place.
+#[tokio::test]
+async fn one_failed_eviction_does_not_stop_the_others() {
+    let (idx, gated) = gated_indexer(None);
+    stage(&idx, &[A, ("b", "src/b.rs", "fn also_removed() {}"), C]).await;
+    let plan = idx.plan_deferred_embed().await;
+    let run = plan.embed(None, None).await.expect("embed");
+
+    let (reached, release) = gated.before_upsert.arm();
+    let (committed, ()) = tokio::join!(idx.commit_deferred_embed(plan, run), async {
+        reached.await.expect("upsert reached");
+        idx.remove_file("src/a.rs").await.expect("remove a");
+        idx.remove_file("src/b.rs").await.expect("remove b");
+        gated.fail_removes.store(1, Ordering::SeqCst);
+        release.send(()).expect("release upsert");
+    });
+
+    let err = committed.expect_err("a failed eviction is still an error");
+    assert!(
+        format!("{err:#}").contains("1 of 2 removed chunks kept their vectors"),
+        "{err:#}"
+    );
+    let orphans = has_vector(&idx, "a").await as usize + has_vector(&idx, "b").await as usize;
+    assert_eq!(orphans, 1, "the eviction after the failed one still ran");
+    assert!(has_vector(&idx, "c").await);
 }
 
 /// Restores the rehydrate wait budget when dropped.
@@ -296,4 +358,131 @@ async fn post_upsert_check_refuses_when_the_chunk_map_cannot_be_rehydrated() {
     let err = committed.expect_err("an unreadable chunk map must not evict committed vectors");
     assert!(format!("{err:#}").contains("find chunks removed during the vector upsert"));
     assert!(has_vector(&idx, "a").await && has_vector(&idx, "c").await);
+}
+
+/// Shrinks the interactive rehydrate budget to 3 x 25 ms and makes every
+/// rehydrate scan take `scan_ms`; restores both when dropped.
+struct SlowRehydrate;
+
+impl SlowRehydrate {
+    fn new(scan_ms: u64) -> Self {
+        // SAFETY: serialized by `#[serial_test::serial]` on every caller.
+        unsafe { std::env::set_var("TRUSTY_REHYDRATE_WAIT_MS", "25") };
+        crate::core::indexer::TEST_REHYDRATE_DELAY_MS.store(scan_ms, Ordering::SeqCst);
+        SlowRehydrate
+    }
+}
+
+impl Drop for SlowRehydrate {
+    fn drop(&mut self) {
+        crate::core::indexer::TEST_REHYDRATE_DELAY_MS.store(0, Ordering::SeqCst);
+        // SAFETY: serialized by `#[serial_test::serial]` on every caller.
+        unsafe { std::env::remove_var("TRUSTY_REHYDRATE_WAIT_MS") };
+    }
+}
+
+/// An indexer with a durable corpus, `A` and `C` staged, and one pass embedded.
+async fn embedded_pass(dir: &std::path::Path) -> (CodeIndexer, DeferredEmbedPlan, EmbedRun) {
+    let (idx, _gated) = gated_indexer(Some(&dir.join("index.redb")));
+    stage(&idx, &[A, C]).await;
+    let plan = idx.plan_deferred_embed().await;
+    let run = plan.embed(None, None).await.expect("embed");
+    (idx, plan, run)
+}
+
+/// The embed phase counts as activity, so the idle ticker does not evict the
+/// chunk map the commit is about to read.
+#[tokio::test]
+async fn an_embed_pass_keeps_the_chunk_map_from_idle_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, _gated) = gated_indexer(Some(&dir.path().join("index.redb")));
+    stage(&idx, &[A, C]).await;
+    let plan = idx.plan_deferred_embed().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let _run = plan.embed(None, None).await.expect("embed");
+
+    assert_eq!(
+        idx.evict_chunks_if_idle(Duration::from_millis(250)).await,
+        0,
+        "an index mid-embed read as idle and lost its chunk map"
+    );
+}
+
+/// A rehydrate slower than the ~27 s query budget (scaled here to 75 ms) is
+/// waited out, not treated as a failure that throws the pass away.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rehydrate_slower_than_the_query_budget_is_waited_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, plan, run) = embedded_pass(dir.path()).await;
+    let _slow = SlowRehydrate::new(400);
+    assert!(
+        idx.reclaim_memory_now().await > 0,
+        "the chunk map was evicted"
+    );
+
+    let outcome = idx
+        .commit_deferred_embed(plan, run)
+        .await
+        .expect("a slow rehydrate is waited out");
+
+    assert_eq!(outcome.embedded, 2);
+    assert!(has_vector(&idx, "a").await && has_vector(&idx, "c").await);
+}
+
+/// A read fault ends the wait at once and names the fault, rather than
+/// running to the ceiling or reporting a generic eviction.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_read_fault_during_the_commit_wait_fails_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, plan, run) = embedded_pass(dir.path()).await;
+    break_corpus_reads(&idx);
+    let _slow = SlowRehydrate::new(400);
+    assert!(
+        idx.reclaim_memory_now().await > 0,
+        "the chunk map was evicted"
+    );
+
+    let committed = tokio::time::timeout(
+        Duration::from_secs(20),
+        idx.commit_deferred_embed(plan, run),
+    )
+    .await
+    .expect("a recorded read fault ends the wait before the ceiling");
+
+    let err = committed.expect_err("an unreadable corpus fails the commit");
+    assert!(
+        err.downcast_ref::<crate::core::indexer::CorpusReadUnavailable>()
+            .is_some(),
+        "the error names the read fault: {err:#}"
+    );
+    assert!(!has_vector(&idx, "a").await && !has_vector(&idx, "c").await);
+}
+
+/// The wait is bounded: a rehydrate that outlasts the ceiling is an error.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_commit_wait_gives_up_at_its_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idx, _plan, _run) = embedded_pass(dir.path()).await;
+    let _slow = SlowRehydrate::new(1_000);
+    assert!(
+        idx.reclaim_memory_now().await > 0,
+        "the chunk map was evicted"
+    );
+
+    let started = Instant::now();
+    let waited = idx.wait_for_corpus_view(Duration::from_millis(150)).await;
+
+    let err = waited.expect_err("a rehydrate past the ceiling is an error");
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "the wait ran past its ceiling"
+    );
+    assert!(
+        format!("{err:#}").contains("did not rehydrate within"),
+        "{err:#}"
+    );
 }

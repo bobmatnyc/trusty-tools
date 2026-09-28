@@ -123,6 +123,15 @@ pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
 pub use types::{CodeChunk, CommitTimings, ParsedBatch, SearchMode, SearchQuery, SearchStage};
 
+/// Record "now" on an index's idle clock ([`CodeIndexer::touch_activity`]).
+///
+/// #8761: a free function so the deferred-embed loop, which holds no indexer
+/// lock, can stamp the clock through its own clones of the two fields.
+fn stamp_activity(created_at: Instant, last_activity_ms: &AtomicU64) {
+    let ms = created_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    last_activity_ms.store(ms, Ordering::Relaxed);
+}
+
 /// LRU capacity (entries) for the per-indexer query embedding cache.
 const QUERY_CACHE_CAPACITY: usize = 256;
 /// Oversample factor for the HNSW lane before RRF fusion.
@@ -763,8 +772,7 @@ impl CodeIndexer {
     /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` touches then
     /// asserts eviction is skipped within the window.
     pub(super) fn touch_activity(&self) {
-        let ms = self.created_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        self.last_activity_ms.store(ms, Ordering::Relaxed);
+        stamp_activity(self.created_at, &self.last_activity_ms);
     }
 
     /// Milliseconds since the last recorded activity (query/ingest).
