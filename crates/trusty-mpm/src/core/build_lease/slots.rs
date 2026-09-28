@@ -440,11 +440,11 @@ impl SlotDir {
     /// An open or `flock` error.
     ///
     /// Test: `the_admission_lock_serialises_two_takers`.
-    pub fn lock_admission(&self, deadline: Instant) -> std::io::Result<Option<File>> {
+    pub fn lock_admission(&self, deadline: Instant) -> std::io::Result<Option<AdmissionGuard>> {
         let file = open_private(&self.root.join("admission.lock"))?;
         loop {
             if try_flock(&file)? {
-                return Ok(Some(file));
+                return Ok(Some(AdmissionGuard { file }));
             }
             if Instant::now() >= deadline {
                 return Ok(None);
@@ -509,6 +509,8 @@ impl SlotGuard {
     ///
     /// Why: a probe of an orphaned or broken slot must not erase the record
     /// that keeps it from being taken.
+    /// What: consumes the guard, so `Drop` unlocks it explicitly, then closes.
+    /// Test: `a_released_slot_is_free_while_this_process_spawns`.
     pub fn release_keeping_record(mut self) {
         self.keep_record = true;
     }
@@ -516,11 +518,43 @@ impl SlotGuard {
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        // Cleared BEFORE the descriptor closes, so a probe never reads the old
+        // Cleared BEFORE the lock is released, so a probe never reads the old
         // holder's record on a slot that is already free.
         if !self.keep_record {
             let _ = self.file.set_len(0);
         }
+        unlock(&self.file);
+    }
+}
+
+/// The admission lock, held until dropped.
+///
+/// Test: `the_admission_lock_serialises_two_takers`.
+#[derive(Debug)]
+pub struct AdmissionGuard {
+    file: File,
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        unlock(&self.file);
+    }
+}
+
+/// `flock(LOCK_UN)` before the descriptor closes.
+///
+/// Why: an unlock releases the lock on the open file description itself, so
+/// it cannot outlive this call. A close only releases it when the last copy of
+/// the descriptor closes.
+/// What: on error, logs it and does nothing else. The close that follows still
+/// releases the lock once every copy is gone, so the slot never reads free
+/// while it is held.
+/// Test: `a_released_slot_is_free_while_this_process_spawns`.
+fn unlock(file: &File) {
+    // #8736: an in-flight child's fd copy would otherwise hold the lock until its exec.
+    // SAFETY: `file` owns a valid open descriptor for the duration of the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+        tracing::debug!("flock(LOCK_UN) failed: {}", std::io::Error::last_os_error());
     }
 }
 
@@ -614,6 +648,61 @@ mod tests {
         drop(held);
         assert_eq!(slots.probe(), vec![(0, SlotState::Free)]);
         assert!(slots.holders().is_empty());
+    }
+
+    /// #8736: while another thread spawns children, each of which holds a
+    /// copy of every descriptor until its exec, a dropped guard's slot and a
+    /// probe's own lock are still free at once.
+    #[test]
+    fn a_released_slot_is_free_while_this_process_spawns() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let (_tmp, slots) = dir();
+        let stop = Arc::new(AtomicBool::new(false));
+        let spawned = Arc::new(AtomicU32::new(0));
+        let spawner = {
+            let (stop, spawned) = (Arc::clone(&stop), Arc::clone(&spawned));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let child = std::process::Command::new("/usr/bin/true").spawn();
+                    if let Ok(mut child) = child {
+                        let _ = child.wait();
+                        spawned.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+        let started = Instant::now();
+        let mut failure = None;
+        let mut cycles = 0;
+        while cycles < 5_000 && started.elapsed() < Duration::from_secs(3) {
+            cycles += 1;
+            let Some(mut held) = slots.try_acquire(0).expect("io") else {
+                failure = Some(format!(
+                    "cycle {cycles}: the previous probe's lock was still held"
+                ));
+                break;
+            };
+            held.write_record(&record(0)).expect("write");
+            drop(held);
+            let probed = slots.probe();
+            if probed != vec![(0, SlotState::Free)] {
+                failure = Some(format!("cycle {cycles}: {probed:?} right after the drop"));
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().expect("spawner thread");
+        assert_eq!(
+            failure,
+            None,
+            "{} children spawned",
+            spawned.load(Ordering::Relaxed)
+        );
+        assert!(
+            spawned.load(Ordering::Relaxed) > 0,
+            "the spawner must overlap the cycles"
+        );
     }
 
     /// #8261: a holder that dies without clearing its record (the SIGKILL
