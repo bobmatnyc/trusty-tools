@@ -110,3 +110,121 @@ fn refuses_what_it_cannot_read() {
     assert_denies(&["pm2 jlist 'unterminated", "launchctl print \"gui/501"]);
     assert_allows(&["pm2 logs 'unterminated"]);
 }
+
+/// #8756 round 3: `ps` with the BSD `e` or the `-E` option prints each
+/// process's environment, bare and through `$( )`, `eval` and `sh -c`.
+#[test]
+fn refuses_a_ps_environment_listing() {
+    assert_denies(&[
+        "ps eww",
+        "ps auxeww",
+        "ps auxe",
+        "ps axe",
+        "ps ewwx -p 123",
+        "ps e -o pid,command",
+        "ps -Eww",
+        "ps -E -p 123",
+        "ps -ax -E",
+        "sudo ps -Ef",
+        "/bin/ps eww",
+        "ps auxeww | grep node",
+        "ps eww 'unterminated",
+        "echo \"$(ps eww)\"",
+        "eval 'ps auxe'",
+        "sh -c 'ps -Eww'",
+    ]);
+}
+
+/// #8756 round 3: a `/proc/<pid>/environ` read prints that process's env.
+#[test]
+fn refuses_a_proc_environ_read() {
+    assert_denies(&[
+        "cat /proc/1/environ",
+        "tr '\\0' '\\n' < /proc/1/environ",
+        "strings /proc/self/environ",
+        "xargs -0 -n1 < /proc/$PID/environ",
+        "cat /proc/*/environ",
+        "cat /proc/1/task/7/environ",
+        "echo \"$(cat /proc/1/environ)\"",
+        "eval 'cat /proc/1/environ'",
+        "sh -c 'strings /proc/1/environ'",
+    ]);
+}
+
+/// #8756 round 3: `pm2 get` / `pm2 conf` print pm2's module config, where
+/// a module keeps its credentials.
+#[test]
+fn refuses_a_pm2_module_config_print() {
+    assert_denies(&[
+        "pm2 get",
+        "pm2 get pm2-slack:slack_url",
+        "pm2 conf",
+        "pm2 conf pm2-logrotate",
+        "pm2 config pm2-slack",
+        "echo \"$(pm2 conf)\"",
+        "eval 'pm2 get'",
+        "sh -c 'pm2 get pm2-slack'",
+    ]);
+}
+
+/// #8756 round 3: an `ssh` remote command that prints the remote host's
+/// environment.
+#[test]
+fn refuses_a_remote_environment_dump_over_ssh() {
+    assert_denies(&[
+        "ssh host env",
+        "ssh host printenv",
+        "ssh host printenv AWS_SECRET_ACCESS_KEY",
+        "ssh host 'cat /proc/1/environ'",
+        "ssh host sudo cat /proc/1/environ",
+        "ssh -p 2222 user@host env",
+        "ssh -i ~/.ssh/deploy -o StrictHostKeyChecking=no host printenv",
+        "ssh host -t env",
+        "ssh -- host env",
+        "ssh host 'pm2 jlist'",
+        "ssh host 'ps eww'",
+        "ssh host set",
+        "ssh host export -p",
+        "ssh host 'declare -x'",
+        "ssh host 'cd /srv/app && env | sort'",
+        "ssh host sudo -u app printenv",
+        "ssh host env -i FOO=1 printenv",
+        "ssh host 'kubectl exec api -- env'",
+        "gcloud compute ssh vm -- printenv",
+        "ssh host \"printenv",
+        "echo \"$(ssh host env)\"",
+        "eval 'ssh host printenv'",
+        "sh -c 'ssh host env'",
+    ]);
+}
+
+/// #8756 round 3: routine `ps`, `pm2` and `ssh` forms print no environment.
+#[test]
+fn allows_routine_ps_pm2_and_ssh_forms() {
+    assert_allows(&[
+        "ps aux",
+        "ps -ef",
+        "ps -A",
+        "ps -o pid,command",
+        "ps -o user,pid,command -p 123",
+        "ps -axo pid,user,command",
+        "ps -eo pid,comm",
+        "ps -p 123 -o etime=",
+        "ps -U steve",
+        "ps aux | grep node",
+        "man ps",
+        "pm2 ls",
+        "pm2 logs api",
+        "ssh host",
+        "ssh -G host",
+        "ssh host uptime",
+        "ssh host 'git -C repo status'",
+        "ssh -o StrictHostKeyChecking=no host uptime",
+        "ssh host 'set -e; make'",
+        "ssh host 'python3 -m venv env'",
+        "ssh host 'cat /proc/1/status'",
+        "cat /proc/meminfo",
+        "ls /proc/1/",
+        "git commit -m 'refuse ps eww, pm2 get, /proc/1/environ and ssh host env'",
+    ]);
+}
