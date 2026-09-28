@@ -64,7 +64,7 @@ if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" matrix)" = '{"include":[
 else fail "empty selection: $out"; fi
 
 # 3. Only Tauri UI crates selected -> nothing for the headless runner.
-stub 0 trusty-code-gui trusty-audit-ui
+stub 0 trusty-code-gui trusty-agents-ui
 out="$(plan -- --files x)"
 if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'Tauri'; then
   pass "Tauri-only selection -> count=0"
@@ -79,19 +79,6 @@ if [ "$(field "$out" count)" = 3 ] && [ "$(field "$out" crates)" = "alpha beta g
   ! printf '%s' "$m" | grep -q trusty-mpm-gui; then
   pass "mixed selection -> 3 crates, 3 legs, Tauri crate dropped"
 else fail "mixed selection: $out"; fi
-
-# 4b. tga and trusty-audit test in bobmatnyc/trusty-git-analytics: dropped,
-#     alone or mixed (owner ruling 2026-09-27).
-stub 0 tga alpha trusty-audit
-out="$(plan -- --files x)"
-if [ "$(field "$out" count)" = 1 ] && [ "$(field "$out" crates)" = "alpha" ]; then
-  pass "tga + trusty-audit dropped from a mixed selection"
-else fail "tga/trusty-audit mixed selection: $out"; fi
-stub 0 tga trusty-audit
-out="$(plan -- --files x)"
-if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'trusty-git-analytics'; then
-  pass "tga + trusty-audit only -> count=0"
-else fail "tga/trusty-audit-only selection: $out"; fi
 
 # 5. More crates than legs -> capped at 8, every crate exactly once.
 names=(c01 c02 c03 c04 c05 c06 c07 c08 c09 c10 c11 c12)
@@ -138,7 +125,7 @@ else fail "live unreferenced script: $out"; fi
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in
-  *" trusty-code-gui "* | *" trusty-audit-ui "* | *" trusty-mpm-gui "* | *" trusty-agents-ui "*)
+  *" trusty-code-gui "* | *" trusty-mpm-gui "* | *" trusty-agents-ui "*)
     fail "live: trusty-common selection kept a Tauri crate: $out" ;;
   *" trusty-common "*" trusty-mpm "*) pass "live: trusty-common path -> trusty-common + dependents, no Tauri crate" ;;
   *) fail "live: trusty-common selection: $out" ;;

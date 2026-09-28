@@ -12,17 +12,17 @@
 #               build.rs builds all four of its bundles through this block.
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
-#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui,
-#               trusty-audit-ui (issues #4699, #5477). Embeds the whole desktop
+#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui
+#               (issue #4699). Embeds the whole desktop
 #               window; ABORTS the crate build on any UI-build failure, because
-#               a placeholder there would ship a blank app. trusty-agents-ui and
-#               trusty-audit-ui are edition 2021, so this block must stay free
-#               of let-chains.
-#               Those last two are crate NAMES, not directory names: the first
+#               a placeholder there would ship a blank app. trusty-agents-ui is
+#               edition 2021, so this block must stay free of let-chains.
+#               That last one is a crate NAME, not a directory name: the first
 #               two live at crates/<name>/build.rs, but trusty-agents-ui is
-#               crates/trusty-agents/ui/src-tauri/build.rs and trusty-audit-ui
-#               is crates/trusty-audit/ui/src-tauri/build.rs. TAURI_UI_FILES
-#               below is the authoritative list.
+#               crates/trusty-agents/ui/src-tauri/build.rs. TAURI_UI_FILES
+#               below is the authoritative list. (trusty-audit-ui, #5477, was a
+#               fourth member until it moved to bobmatnyc/trusty-git-analytics,
+#               owner ruling 2026-09-28.)
 #
 # The two families are deliberately not merged: their failure semantics differ.
 #
@@ -46,7 +46,6 @@ TAURI_UI_FILES=(
     "crates/trusty-code-gui/build.rs"
     "crates/trusty-mpm-gui/build.rs"
     "crates/trusty-agents/ui/src-tauri/build.rs"
-    "crates/trusty-audit/ui/src-tauri/build.rs"
 )
 
 TMP_DIR=$(mktemp -d)

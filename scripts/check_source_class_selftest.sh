@@ -83,7 +83,7 @@ src_path "crates/trusty-review/src/report/reporter_tests.rs" yes
 # excludes a nested package from its parent's tarball, so a nested edit is not
 # drift against the parent's published version. scripts/check_changelog_fragment.sh
 # reaches them by structural attribution instead (#4576).
-src_path "crates/trusty-audit/ui/src-tauri/src/main.rs" no
+src_path "crates/trusty-agents/ui/src-tauri/src/main.rs" no
 src_path "crates/trusty-agents/ui/src/App.svelte" no
 # Adjacent shapes that must not read as crate source.
 src_path "crates/trusty-mpm/Cargo.toml" no

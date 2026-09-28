@@ -118,7 +118,6 @@ everything regardless of `default-members`.
 **Crate names** match the `name` field in each crate's `Cargo.toml`, which is
 not always the directory name:
 
-- `crates/trusty-git-analytics/` → `-p tga` (short published name)
 - `crates/trusty-agents/` → `-p trusty-agents`
 
 If you get "package not found", read the `name` field in that crate's

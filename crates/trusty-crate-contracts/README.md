@@ -30,7 +30,7 @@ lands on whoever runs this crate.
 | Test | Contract |
 |---|---|
 | `tests/conformance_cross_gate.rs` | AC-18 (DOC-15 C5, #1362): trusty-mpm's FRONT gate and trusty-review's BACK gate never disagree about one shared `ResolvedIntent`. |
-| `tests/analyze_uds_consumers.rs` | #6287: one live trusty-analyze socket, and all four of its consumers agree about what they see. |
+| `tests/analyze_uds_consumers.rs` | #6287: one live trusty-analyze socket, and every in-tree consumer (trusty-console, tctl) agrees about what it sees. |
 | `tests/memory_uds_consumer.rs` | #6555: tctl's own probe reads a live trusty-memory daemon as `Serving`. |
 
 ## Adding a test here

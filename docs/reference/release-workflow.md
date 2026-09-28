@@ -87,11 +87,6 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    step of phase 1, not after the first red `--check-only` run — evidence:
    identical `prepublish-gate` FAIL across all 7 crates on branch
    `chore/release-trusty-mpm-2026-09-13` at `3951537e2` (2026-09-13).
-4c. Releasing `trusty-audit`? Run `scripts/refresh-engagement-pins.sh` first and
-   commit the result, so `crates/trusty-audit/templates/engagement.template.toml`
-   pins the sibling versions this train ships rather than the previous ones —
-   `preflight-publish.sh` CHECK 10 fails the release when a pin lags a sibling
-   whose workspace version is not yet published (#6772).
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
@@ -1088,37 +1083,9 @@ gh workflow run e2e-docker.yml
 
 ### Live acceptance (manual) — `trusty-audit`
 
-`scripts/taudit-live-acceptance.sh` walks the whole `taudit` MVP path live
-(#5852, #5858): it builds the binary, runs `taudit distribute`, extracts the
-resulting zip as a recipient would, registers a real repository against a real
-`gh` credential, runs the one-shot `audit` chain through OpenRouter, and then
-checks the returned package's DATA — real rows in the extract database, more
-than one commit and author, real filenames in the report — before grepping every
-extracted member for the API key. No stubs and no offline variant: a stubbed run
-would pass while proving nothing.
-
-Run it before shipping a `trusty-audit` release, and after any change to
-`distribute`, the audit chain, or the return-package assembly. It is NOT wired
-into CI and cannot be — it needs a real credential and real network.
-
-```bash
-OPENROUTER_API_KEY=sk-or-v1-... scripts/taudit-live-acceptance.sh
-TAUDIT_E2E_REPO=owner/name OPENROUTER_API_KEY=... scripts/taudit-live-acceptance.sh
-```
-
-It needs a real `OPENROUTER_API_KEY` exported in the environment (never passed
-as a flag — argv is visible to `ps`), `gh` authenticated with access to a public
-GitHub repository, network access to crates.io, GitHub and OpenRouter, plus
-`cargo` and `unzip`; `sqlite3` is optional and the script falls back to a
-header-and-size check without it. A run takes several minutes.
-
-Each run writes to a fresh directory under `~/.taudit-acceptance` and touches
-nothing under `~/duetto/audit`. Two things survive it: `rm -rf`
-`~/.trusty-tools/trusty-audit/work`, and remove by hand the one `trusty-search`
-allowlist row per audited clone that the script prints (it deliberately does not
-remove its own — `trusty-search index remove` ignores its path argument in
-0.45.1 and would drop an unrelated index). Full rationale, including what the
-script deliberately stopped checking after #5915/#5916, is in its own header.
+`trusty-audit`, its live acceptance script and its engagement-pin refresh moved
+to [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics)
+with the crate (owner ruling 2026-09-28).
 
 ## Bundled Crates — Intentionally Skipped by `release.yml`
 

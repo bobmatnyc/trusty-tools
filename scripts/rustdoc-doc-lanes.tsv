@@ -40,11 +40,10 @@
 #       Same bar as scripts/semver-checks-feature-exclusions.tsv, which carries
 #       the matching rows for the same features.
 #
-# The four Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
-# trusty-code-gui, trusty-agents-ui, trusty-audit-ui) need no rows: they are
-# never documented. trusty-audit-ui joined that list in #7466 — it needs
-# WebKit2GTK exactly as its three siblings do, and carrying a row for a crate
-# the run excludes is a claim about documentation that never happens.
+# The three Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
+# trusty-code-gui, trusty-agents-ui) need no rows: they are never documented,
+# and carrying a row for a crate the run excludes is a claim about
+# documentation that never happens.
 #
 # Regenerate the inventory this file must cover:
 #   cargo metadata --no-deps --format-version 1
