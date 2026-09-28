@@ -37,9 +37,9 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 - Anything else (release builds, feature-gated tests, `--include-ignored`, a
   single test by name) — `Skill(skill="cargo-commands")` rather than guessing.
 - 🔴 **`CARGO_TARGET_DIR` is exported by the repo-local `.envrc`.** Never
-  override it and never point a gate at a worktree-local `target/` — that is a
-  cold build of the whole dependency graph:
-  [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
+  override it EXCEPT with the builder slot the hook grants, and never point a
+  gate at a worktree-local `target/` — that is a cold build of the whole
+  dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:

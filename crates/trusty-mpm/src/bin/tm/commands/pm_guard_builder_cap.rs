@@ -689,7 +689,9 @@ fn slot_notice(dir: &str) -> String {
          directory. Prefix `CARGO_TARGET_DIR={dir}` INLINE on every cargo \
          command — an exported variable does not survive between tool calls, and \
          building in the shared directory contends on its lock with every other \
-         builder on this machine."
+         builder on this machine. Never override CARGO_TARGET_DIR EXCEPT with \
+         this granted slot: it takes precedence over the shared directory \
+         `.envrc` exports."
     )
 }
 
@@ -986,6 +988,13 @@ mod tests {
                 assert!(
                     notice.contains("CARGO_TARGET_DIR"),
                     "the notice must name the variable: {notice}"
+                );
+                // The notice restates the CLAUDE.md rule's one exception, or an
+                // agent reading both sees two contradictory instructions.
+                assert!(
+                    notice
+                        .contains("Never override CARGO_TARGET_DIR EXCEPT with this granted slot"),
+                    "the notice must carry the rule's slot exception: {notice}"
                 );
             }
             BuilderCapVerdict::Allow(None) => {
