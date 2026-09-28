@@ -1,16 +1,16 @@
 //! Tools whose prebuilts the installer fetches but which are built and
 //! released OUTSIDE this workspace.
 //!
-//! Why: `tga` and `trusty-audit` left the trusty-tools workspace (owner ruling
-//! 2026-09-28). They build, tag and publish from `bobmatnyc/trusty-git-analytics`,
-//! yet the installer still fetches their prebuilts. Their origin therefore has to be a row the
-//! installer owns, not the assumption that every installable crate sits under
-//! this repo's `crates/`.
+//! Why: `tga` and `trusty-audit` build, tag and publish from
+//! `bobmatnyc/trusty-git-analytics`, not from this workspace (owner ruling
+//! 2026-09-28), yet the installer still fetches their prebuilts. Their origin
+//! therefore has to be a row the installer owns, not the assumption that every
+//! installable crate sits under this repo's `crates/`.
 //!
-//! What: [`EXTERNAL_TOOLS`] holds one row per external tool: its crates.io
-//! package (the `cargo install` fallback and the `tctl updates` version source),
-//! the GitHub repo hosting its release assets, any extra release-tag spelling,
-//! and its asset filename prefix. [`external_tool`] finds a row under any
+//! What: [`EXTERNAL_TOOLS`] holds one row per external tool: its lookup key
+//! (the crates.io package name the table is matched on), the GitHub repo
+//! hosting its release assets, any extra release-tag spelling, and its asset
+//! filename prefix. [`external_tool`] finds a row under any
 //! spelling. Release routing, tag aliases and asset names in
 //! [`super::release`] read this table. A row does not make a tool installable
 //! by name; only a `commands::stable_set::stable_set` row does, and `tga` has
@@ -30,7 +30,7 @@ use super::release::{ReleaseRepo, TRUSTY_GIT_ANALYTICS_REPO};
 /// Test: `tests::external_tools_publish_from_trusty_git_analytics`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExternalTool {
-    /// crates.io package name — `cargo install <crate_name> --locked`.
+    /// Lookup key this row is matched on — the crate's crates.io package name.
     pub crate_name: &'static str,
     /// GitHub repo whose releases carry the prebuilt tarballs.
     pub repo: ReleaseRepo,

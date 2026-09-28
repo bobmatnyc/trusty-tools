@@ -60,9 +60,9 @@ not reach nested Tauri manifests.
 ## External tools
 
 `tga` (binary `tga`) and `trusty-audit` (binaries `trusty-audit`, `taudit`,
-plus the `trusty-audit-ui` desktop client) left this workspace (owner ruling
-2026-09-28). They build, release and publish from
-[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
+plus the `trusty-audit-ui` desktop client) build, release and publish from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics);
+trusty-tools does not publish them (owner ruling 2026-09-28).
 The installer's external-tool table
 (`crates/trusty-installer/src/download/external.rs`) routes their prebuilts
 to that repo's GitHub releases. `tctl install tga` still installs `tga`, with

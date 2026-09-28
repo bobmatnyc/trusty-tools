@@ -20,5 +20,5 @@ used to be here.
 
 | Crate (binaries) | Former directory | Now lives in |
 |---|---|---|
-| `tga` (`tga`) | `crates/trusty-git-analytics` | [`bobmatnyc/trusty-git-analytics`](https://github.com/bobmatnyc/trusty-git-analytics) |
-| `trusty-audit` (`trusty-audit`, `taudit`) | `crates/trusty-audit` | [`bobmatnyc/trusty-git-analytics`](https://github.com/bobmatnyc/trusty-git-analytics) |
+| `tga` (`tga`) | the former crates/trusty-git-analytics directory | [`bobmatnyc/trusty-git-analytics`](https://github.com/bobmatnyc/trusty-git-analytics) |
+| `trusty-audit` (`trusty-audit`, `taudit`) | the former crates/trusty-audit directory | [`bobmatnyc/trusty-git-analytics`](https://github.com/bobmatnyc/trusty-git-analytics) |

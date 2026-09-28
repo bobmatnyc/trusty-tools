@@ -222,7 +222,7 @@ package to its manifest, source, and documentation, use the
 
 ### Moved to their own repo
 
-`tga` (git analytics, formerly `crates/trusty-git-analytics`) and
+`tga` (git analytics, formerly the crates/trusty-git-analytics directory) and
 `trusty-audit` (auditor handoff client, bins `trusty-audit` and `taudit`, plus
 `trusty-audit-ui`) build, release and publish from
 [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).

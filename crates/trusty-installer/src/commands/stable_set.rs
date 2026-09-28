@@ -15,8 +15,8 @@
 //! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
 //! cargo dependencies of these binaries, so they are intentionally *not*
 //! listed here. `tga` is an EXTERNAL member: it builds and releases from
-//! `bobmatnyc/trusty-git-analytics`, and `crate::download::external` is where
-//! its prebuilts are fetched from.
+//! `bobmatnyc/trusty-git-analytics`, and `crate::download::external` routes
+//! its prebuilts.
 //!
 //! A member may ship more than one binary; [`StableMember::binary`] names the
 //! one probed for health, and [`StableMember::binaries`] enumerates the full
