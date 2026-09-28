@@ -388,11 +388,19 @@ impl PersistedDreamStats {
         Ok(Some(parsed))
     }
 
-    /// Write the snapshot to `<data_dir>/dream_stats.json`.
+    /// Write the snapshot to `<data_dir>/dream_stats.json`, atomically.
+    ///
+    /// Why: `load` runs concurrently from the dashboard and other processes; a
+    /// truncate-then-write lets it read an empty or partial file (#8733).
+    /// What: delegates to [`crate::atomic_file::write_atomic`] — sibling temp
+    /// file, `fsync`, rename. On `Err` the prior snapshot is unchanged.
+    /// Test: `failed_dream_stats_save_keeps_the_prior_snapshot`,
+    /// `concurrent_dream_stats_reader_never_sees_a_partial_file`.
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         let path = data_dir.join(Self::FILE_NAME);
         let raw = serde_json::to_string_pretty(self).context("serialize dream stats")?;
-        std::fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
-        Ok(())
+        // #8733: rename-publish so a concurrent reader never sees a truncated file.
+        crate::atomic_file::write_atomic(&path, raw.as_bytes())
+            .with_context(|| format!("write {}", path.display()))
     }
 }

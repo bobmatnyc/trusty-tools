@@ -122,7 +122,8 @@ fn refuse_symlink(path: &Path) -> io::Result<()> {
 }
 
 /// `<path>.tm-tmp`, in the same directory so the rename stays intra-filesystem.
-fn temp_sibling(path: &Path) -> PathBuf {
+// #8733: crate-visible so a caller's error-arm test can block the staging path.
+pub(crate) fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".tm-tmp");
     PathBuf::from(name)
