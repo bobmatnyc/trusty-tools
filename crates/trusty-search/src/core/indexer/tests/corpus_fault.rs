@@ -41,7 +41,7 @@ fn search_for(text: &str) -> SearchQuery {
 
 /// Drop the chunks table so every later read of it fails inside redb, the way
 /// a corpus that has entered its "Previous I/O error occurred" state does.
-fn break_corpus_reads(idx: &CodeIndexer) {
+pub(super) fn break_corpus_reads(idx: &CodeIndexer) {
     let corpus = idx
         .corpus
         .clone()

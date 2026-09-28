@@ -183,12 +183,15 @@ pub(crate) struct EmbedRun {
 /// `GET /indexes/{id}/status`, until the pass ended. Owned clones let the pass
 /// embed with no guard held.
 /// What: `embedder` is `None` when the index has no embedder or no vector
-/// store (BM25-only), matching the old early return.
+/// store (BM25-only), matching the old early return. `created_at` and
+/// `last_activity_ms` are the indexer's idle clock (#8761).
 /// Test: `status_answers_during_an_embed_pass_with_a_writer_queued`.
 pub(crate) struct EmbedContext {
     index_id: String,
     embedder: Option<Arc<dyn crate::core::embed::Embedder>>,
     embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+    created_at: std::time::Instant,
+    last_activity_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CodeIndexer {
@@ -210,6 +213,8 @@ impl CodeIndexer {
             index_id: self.index_id.clone(),
             embedder,
             embed_pool,
+            created_at: self.created_at,
+            last_activity_ms: Arc::clone(&self.last_activity_ms),
         }
     }
 
@@ -229,6 +234,12 @@ impl CodeIndexer {
 }
 
 impl EmbedContext {
+    /// Mark the indexer active, as [`CodeIndexer::touch_activity`] does (#8761).
+    /// Test: `an_embed_pass_keeps_the_chunk_map_from_idle_eviction`.
+    fn touch_activity(&self) {
+        super::super::stamp_activity(self.created_at, &self.last_activity_ms);
+    }
+
     /// [`Self::embed_chunks_keeping_prefix`], with an abort
     /// reported as an `Err` — for callers that cannot use a partial result.
     /// Test: `test_index_files_batch_*`.
@@ -322,6 +333,9 @@ impl EmbedContext {
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
+            // #8761: a pass is activity, so idle eviction does not empty the
+            // chunk map the commit must read.
+            self.touch_activity();
             // #6524: stop at this wave boundary while embedding is paused.
             // #8600: and once the daemon is draining for shutdown.
             if pause.is_some_and(|p| p.is_paused() || p.is_drained()) {
@@ -464,6 +478,8 @@ impl EmbedContext {
 
             batch_start = wave_pos;
         }
+        // #8761: the last wave's duration must not count as idle either.
+        self.touch_activity();
         Ok(EmbedRun {
             embeddings,
             stalled,
