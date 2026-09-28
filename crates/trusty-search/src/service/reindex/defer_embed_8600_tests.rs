@@ -233,6 +233,14 @@ async fn a_never_completing_embedder_aborts_the_pass_within_the_deadline() {
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_wave_commits_the_waves_before_it() {
+    // #8863: the pending-marker read resolves `indexes.toml` from the
+    // process-global `TRUSTY_DATA_DIR`, which sibling tests set in-process; a
+    // child process with its own data dir is the only fence (see #6369).
+    if !crate::service::test_isolation::isolate_in_child(
+        "service::reindex::defer_embed::tests_8600::a_stalled_wave_commits_the_waves_before_it",
+    ) {
+        return;
+    }
     let id = "stall-prefix-8600";
     let tmp = tempfile::tempdir().expect("tempdir");
     let redb_path = tmp.path().join("index.redb");
@@ -303,6 +311,12 @@ async fn a_stalled_wave_commits_the_waves_before_it() {
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_wave_commits_the_waves_before_it() {
+    // #8863: same process-global data-dir race as the stalled-wave test above.
+    if !crate::service::test_isolation::isolate_in_child(
+        "service::reindex::defer_embed::tests_8600::a_failed_wave_commits_the_waves_before_it",
+    ) {
+        return;
+    }
     let id = "fail-prefix-8600";
     let tmp = tempfile::tempdir().expect("tempdir");
     let redb_path = tmp.path().join("index.redb");
