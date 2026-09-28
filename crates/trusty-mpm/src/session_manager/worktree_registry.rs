@@ -52,6 +52,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::git_ceiling::bounded_git_output;
 use super::worktree_safety::git_command;
 use super::worktree_scope::WorktreeScope;
 
@@ -372,11 +373,11 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
 /// Test: `registry_root_for_linked_worktree_is_the_owning_checkout`,
 /// `registry_root_for_non_repo_is_none`.
 pub(crate) fn registry_root_for(anchor: &Path) -> Option<PathBuf> {
-    let out = git_command(
+    // #8306: bounded; a timeout is `None`, the same "never a guessed path".
+    let out = bounded_git_output(git_command(
         anchor,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .output()
+    ))
     .ok()?;
     if !out.status.success() {
         return None;
@@ -409,13 +410,27 @@ pub(crate) fn registry_root_for(anchor: &Path) -> Option<PathBuf> {
 /// Test: `list_registered_worktrees_reports_a_real_worktree`,
 /// `list_registered_worktrees_none_outside_a_repo`.
 pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredWorktree>> {
-    let out = git_command(anchor, &["worktree", "list", "--porcelain"])
-        .output()
-        .ok()?;
+    probe_registered_worktrees(anchor).ok()
+}
+
+/// [`list_registered_worktrees`], keeping WHY the probe failed (#8306).
+///
+/// Why: a caller that must fail closed on a wedged git has to tell a timeout
+/// from "not a repository"; the `Option` form erases that.
+/// What: `Err` with [`std::io::ErrorKind::TimedOut`] when git was killed at the
+/// ceiling; any other `Err` for a spawn failure or a non-zero exit.
+/// Test: `a_timed_out_worktree_list_disagrees`.
+pub(crate) fn probe_registered_worktrees(
+    anchor: &Path,
+) -> std::io::Result<Vec<RegisteredWorktree>> {
+    let out = bounded_git_output(git_command(anchor, &["worktree", "list", "--porcelain"]))?;
     if !out.status.success() {
-        return None;
+        return Err(std::io::Error::other(format!(
+            "`git worktree list` exited {}",
+            out.status
+        )));
     }
-    Some(parse_worktree_list(&String::from_utf8_lossy(&out.stdout)))
+    Ok(parse_worktree_list(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// Every git-registered worktree living under `repos_root` (#4207 slice 1).

@@ -126,10 +126,37 @@ fn binding_json(root: Option<&Path>) -> serde_json::Value {
 
 /// Write an executable `sh` stub to `dir` and return its path. The stub
 /// stands in for the `tcode` binary that would be spawned.
+///
+/// Why (#6231): exec fails with ETXTBSY on Linux while ANY process holds a
+/// write fd on the file's inode. An in-process `std::fs::write` fd leaks into
+/// whatever child a concurrent test forks during the write, and it stays open
+/// there until that child execs — so the stub's own exec can fail after this
+/// process has already closed its fd. Renaming does not help: the leaked fd
+/// names the same inode.
+/// What: a short-lived `sh` child writes and chmods `.<name>.tmp`, and is
+/// reaped before this returns; the finished file is then renamed to `name`.
+/// This process never opens the stub for writing, so no fork can inherit a
+/// write fd onto it, and the final path only ever names a closed,
+/// executable file. No ETXTBSY retry is needed.
+/// Test: every stub-spawning case here, notably
+/// `the_spawned_daemon_leads_its_own_session`.
 fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let staging = dir.join(format!(".{name}.tmp"));
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"printf '%s\n' "$2" > "$1" && chmod 755 "$1""#)
+        .arg("sh")
+        .arg(&staging)
+        .arg(format!("#!/bin/sh\n{body}"))
+        .stdin(std::process::Stdio::null())
+        .status()
+        .expect("run the stub writer");
+    assert!(
+        status.success(),
+        "stub writer failed for {staging:?}: {status}"
+    );
     let script = dir.join(name);
-    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write stub");
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    std::fs::rename(&staging, &script).expect("move the stub into place");
     script
 }
 

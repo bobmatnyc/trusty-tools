@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
 use super::super::decommission::WorktreeRemoval;
+use super::super::git_ceiling::with_git_ceiling;
 use super::super::record::SessionRecord;
 use super::super::worktree_removal_integrity::identity_refusal;
 use super::super::worktree_safety::{
@@ -270,7 +271,8 @@ pub(super) enum CandidateRemoval {
 /// longer resolves to itself (scanned candidates are canonical, so a
 /// difference means the path was replaced since the scan) immediately before
 /// git runs. A git failure that deleted content is
-/// [`CandidateRemoval::PartiallyRemoved`].
+/// [`CandidateRemoval::PartiallyRemoved`]. Every git call runs under
+/// `ceiling`, the sweep's own (#8306).
 /// Test: `a_scanned_path_replaced_by_a_symlink_is_not_removed`,
 /// `a_tree_dirtied_after_a_clean_preview_is_not_discarded`,
 /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion`.
@@ -279,6 +281,7 @@ pub(super) async fn remove_candidate(
     fresh_in_use: &HashSet<PathBuf>,
     policy: DirtyWorktreePolicy,
     scope: &WorktreeScope,
+    ceiling: std::time::Duration,
 ) -> CandidateRemoval {
     // #1845 item 8: a path that is gone is a skip, not a removal.
     if !candidate.exists() {
@@ -296,7 +299,10 @@ pub(super) async fn remove_candidate(
     }
     // #4118 TOCTOU: the scan-time verdict is now minutes old. Re-ask
     // immediately before THIS removal.
-    let discard = match allowed_dirt_verdict(candidate, policy, "pre-removal", scope) {
+    let verdict = with_git_ceiling(ceiling, || {
+        allowed_dirt_verdict(candidate, policy, "pre-removal", scope)
+    });
+    let discard = match verdict {
         DirtVerdict::Blocks(dirt) => return CandidateRemoval::Kept(Some(dirt)),
         DirtVerdict::Discards(dirt) => Some(dirt),
         DirtVerdict::Clean => None,
@@ -307,12 +313,14 @@ pub(super) async fn remove_candidate(
     // discards gitignored output too.
     let outcome = tokio::task::spawn_blocking(move || {
         // #8782: identity is asked in the guard, immediately before git.
-        super::super::decommission::remove_session_worktree_guarded(
-            &owned,
-            "prune-worktrees orphan sweep: no live session claims this worktree",
-            &|| identity_refusal(&owned),
-            policy,
-        )
+        with_git_ceiling(ceiling, || {
+            super::super::decommission::remove_session_worktree_guarded(
+                &owned,
+                "prune-worktrees orphan sweep: no live session claims this worktree",
+                &|| identity_refusal(&owned),
+                policy,
+            )
+        })
     })
     .await
     .unwrap_or_else(|e| {

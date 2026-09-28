@@ -14,7 +14,9 @@
 //! trusty-console, trusty-mpm, and trusty-installer itself (#5805). Library
 //! crates (trusty-common, trusty-embedderd, …) are pulled in automatically as
 //! cargo dependencies of these binaries, so they are intentionally *not*
-//! listed here.
+//! listed here. `tga` is an EXTERNAL member: it builds and releases from
+//! `bobmatnyc/trusty-git-analytics`, and `crate::download::external` routes
+//! its prebuilts.
 //!
 //! A member may ship more than one binary; [`StableMember::binary`] names the
 //! one probed for health, and [`StableMember::binaries`] enumerates the full
@@ -1194,5 +1196,26 @@ mod tests {
         assert_eq!(sel.members.len(), stable_set().len());
         assert!(sel.unknown.is_empty());
         assert!(sel.added.is_empty());
+    }
+
+    /// Why: trusty-audit left this workspace and install-by-name for it was
+    /// dropped (ruling 2026-09-28 00:25Z), so `tctl install trusty-audit` and
+    /// `tctl install taudit` must take the unknown-member error path, while
+    /// `tga` still resolves from its stable-set row.
+    /// What: each audit spelling lands in `unknown` with nothing selected;
+    /// `tga` resolves to exactly itself.
+    /// Test: This is the test.
+    #[test]
+    fn trusty_audit_is_unknown_by_name_while_tga_resolves() {
+        for name in ["trusty-audit", "taudit"] {
+            let sel = select_members_transitive(&[name.to_owned()]);
+            assert!(sel.members.is_empty(), "{name} must not resolve: {sel:?}");
+            assert!(sel.added.is_empty(), "{name}");
+            assert_eq!(sel.unknown, vec![name.to_owned()], "{name}");
+        }
+        let sel = select_members_transitive(&["tga".to_owned()]);
+        assert!(sel.unknown.is_empty(), "{sel:?}");
+        let names: Vec<&str> = sel.members.iter().map(|m| m.crate_name.as_str()).collect();
+        assert_eq!(names, ["tga"]);
     }
 }

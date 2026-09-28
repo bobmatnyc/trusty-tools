@@ -11,7 +11,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::{BoundedError, run_bounded};
+use super::{BoundedError, run_bounded, run_bounded_with_input};
 
 /// A command that exits non-zero is `Ok` here, with both streams captured.
 ///
@@ -132,4 +132,108 @@ fn run_bounded_reports_a_spawn_failure() {
     let err = run_bounded(cmd, Duration::from_secs(5)).expect_err("an unspawnable command fails");
     assert!(matches!(err, BoundedError::Spawn(_)), "{err}");
     assert!(err.to_string().contains("could not be run"), "{err}");
+}
+
+/// Input reaches the child's stdin and the child sees EOF after it (#8306).
+#[test]
+fn run_bounded_with_input_feeds_stdin() {
+    let out = run_bounded_with_input(
+        Command::new("cat"),
+        Some(b"patch\n".to_vec()),
+        Duration::from_secs(10),
+    )
+    .expect("cat echoes its input and exits at EOF");
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(out.stdout, "patch\n");
+}
+
+/// 🔴 #8306 REGRESSION: a child that exits while something it started still
+/// holds stdout open is an ERROR, never an empty `Ok`.
+///
+/// Why: before #8306 the drain wait's expiry became `unwrap_or_default()`, an
+/// empty stdout — which `git status --porcelain` callers read as "clean". The
+/// stand-in backgrounds a `cat` that blocks opening a FIFO while holding the
+/// inherited stdout, then exits; the test releases the FIFO afterwards.
+#[cfg(unix)]
+#[test]
+fn run_bounded_reports_a_pipe_held_open_after_exit() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fifo = tmp.path().join("gate");
+    let made = Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.is_ok_and(|s| s.success()), "mkfifo");
+    let script = format!("(exec cat \"{}\") & echo partial", fifo.display());
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &script]);
+
+    let result = run_bounded(cmd, Duration::from_secs(10));
+
+    // Release the backgrounded `cat` whatever the verdict: a write-open lets its
+    // blocked open complete and the close hands it EOF.
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo);
+    let err = result.expect_err("a held-open stdout must not read as complete output");
+    assert!(matches!(err, BoundedError::PipeHeldOpen("stdout")), "{err}");
+}
+
+/// 🔴 #8306 REGRESSION: the grandchild holding the pipe is KILLED before
+/// `PipeHeldOpen` is returned, not left running.
+///
+/// Why: the pipe holder is a grandchild in the child's process group — the git
+/// transport or credential-helper shape #6867 names. Returning the error without
+/// killing the group leaked it forever on every destructive call site. The
+/// stand-in is the same FIFO-blocked `cat`, whose pid the shell records; the
+/// test never opens the FIFO before the verdict, so only the runner's kill can
+/// end it. The closing write-open must then find no reader (`ENXIO`).
+#[cfg(unix)]
+#[test]
+fn run_bounded_kills_the_pipe_holder_it_reports_held_open() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fifo = tmp.path().join("gate");
+    let pidfile = tmp.path().join("holder.pid");
+    let made = Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.is_ok_and(|s| s.success()), "mkfifo");
+    let script = format!(
+        "(exec cat \"{}\") & echo $! > \"{}\"; echo partial",
+        fifo.display(),
+        pidfile.display()
+    );
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &script]);
+
+    let err = run_bounded(cmd, Duration::from_secs(10)).expect_err("the pipe is held open");
+    assert!(matches!(err, BoundedError::PipeHeldOpen("stdout")), "{err}");
+
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("the shell must have recorded the pipe holder's pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Reparented on its parent's exit, a killed holder is reaped promptly.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let still_there = alive(pid);
+    if still_there {
+        // SAFETY: `pid` was read from a process this test itself started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(
+        !still_there,
+        "the pipe holder (pid {pid}) outlived the PipeHeldOpen return — the process \
+         group was not killed (#8306)"
+    );
+    let probe = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo);
+    assert_eq!(
+        probe.err().and_then(|e| e.raw_os_error()),
+        Some(libc::ENXIO),
+        "the FIFO still has a reader after the runner returned"
+    );
 }
