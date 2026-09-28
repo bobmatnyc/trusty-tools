@@ -123,17 +123,34 @@ pub const INHERITED_SESSION_MARKERS: &[&str] = &[
 /// `the_env_prefix_really_drops_an_inherited_profile_stamp`.
 pub const INHERITED_TM_STAMPS: &[&str] = &[crate::core::session_profile::SESSION_PROFILE_ENV];
 
+/// Toolchain overrides a child spawn must never inherit (#8583).
+///
+/// Why: a `tm` run through a mise shim carries the `RUSTUP_TOOLCHAIN` mise
+/// resolved for the directory `tm` started in, not for the session's project.
+/// rustup ranks that variable above a `rust-toolchain.toml` pin, so every agent
+/// shell built on the wrong toolchain. The daemon, started by launchd, never
+/// had the variable, so the scrub also makes every launch path agree.
+/// What: the variable names. The session's own project then decides: its pin
+/// file, a mise shim, or the rustup default.
+/// Test: `both_helpers_clear_the_toolchain_override`,
+/// `the_env_prefix_really_drops_an_inherited_toolchain_override`.
+pub const INHERITED_TOOLCHAIN_OVERRIDES: &[&str] = &["RUSTUP_TOOLCHAIN"];
+
 /// Every variable a child spawn removes from the environment it inherits.
 ///
 /// Why (#8453): the one list [`env_unset_flags`], [`scrub_command`] and
 /// `runtime::managed_env_unset` all read, so every launch path that already
 /// scrubs Claude Code's markers clears tm's stamps too.
-/// What: [`INHERITED_SESSION_MARKERS`], then [`INHERITED_TM_STAMPS`].
-/// Test: `both_helpers_clear_the_profile_stamp`.
+/// What: [`INHERITED_SESSION_MARKERS`], then [`INHERITED_TM_STAMPS`], then
+/// [`INHERITED_TOOLCHAIN_OVERRIDES`].
+/// Test: `both_helpers_clear_the_profile_stamp`,
+/// `both_helpers_clear_the_toolchain_override`.
 pub fn scrubbed_on_spawn() -> impl Iterator<Item = &'static str> {
     INHERITED_SESSION_MARKERS
         .iter()
         .chain(INHERITED_TM_STAMPS)
+        // #8583: an inherited RUSTUP_TOOLCHAIN outranks the project's pin file.
+        .chain(INHERITED_TOOLCHAIN_OVERRIDES)
         .copied()
 }
 

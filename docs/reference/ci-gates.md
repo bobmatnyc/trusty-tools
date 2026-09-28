@@ -318,10 +318,13 @@ floating pin, not a version literal — then lints the whole workspace. A local
 pass over one crate, or on a different rustc, proves neither half. PR #5488 is
 the incident: local clippy green, CI clippy red.
 
-The local `cargo` resolves to the MSRV toolchain, not CI's. On this machine
-`RUSTUP_TOOLCHAIN=1.94.1` is exported into the shell, and both the rustup
-proxy at `~/.cargo/bin/cargo` and the mise-shimmed `cargo` land on MSRV
-regardless of `rustup default`. `rustup run <pin>` is what overrides it.
+The local `cargo` may not resolve to CI's toolchain. A mise shim in this repo
+injects `RUSTUP_TOOLCHAIN=1.94.1` (the MSRV, from `mise.toml`), and a shell
+that exports it sends the rustup proxy at `~/.cargo/bin/cargo` to MSRV too.
+Since #8583 a tm-managed session no longer inherits that variable from the
+`tm` that launched it, so its proxy follows the project's pin file or
+`rustup default`. Check with `rustup show active-toolchain`; `rustup run
+<pin>` overrides every case.
 
 ```bash
 # Confirm which clippy you are about to run. 2026-09-16: clippy 0.1.98.
