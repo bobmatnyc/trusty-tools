@@ -14,9 +14,7 @@ use super::*;
 // #7685: the sidecar probes these tests drive now live beside `doctor.rs`
 // rather than inside it. Same functions, same assertions — only the module
 // boundary moved, so the import is what changed and nothing else.
-use super::doctor_sidecars::{
-    check_memory, check_search, expected_search_index_id, index_present, probe_health,
-};
+use super::doctor_sidecars::{check_search, expected_search_index_id, index_present, probe_health};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::daemon::search_rpc;
 
@@ -40,18 +38,13 @@ fn index_present_matches_each_shape() {
 async fn memory_unreachable_is_fail() {
     // #6286: a path under a directory that cannot exist is refused by the
     // kernel immediately, so the probe must fail cleanly rather than hang.
-    // `TRUSTY_MEMORY_SOCKET` is what `resolve_memory_socket` honours first.
-    unsafe {
-        std::env::set_var(
-            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
-            "/nonexistent/trusty-memory/trusty-memory.sock",
-        );
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let check = check_memory(tmp.path()).await;
-    unsafe {
-        std::env::remove_var(trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV);
-    }
+    // #8225: the dead socket is passed to `probe_health` directly, as the
+    // sibling memory tests do. Setting `TRUSTY_MEMORY_SOCKET` process-wide
+    // leaked into a concurrent `run_doctor` and split its `memory` row across
+    // transports in `parity_doctor_agrees_across_transports`.
+    let socket = std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock");
+    let addr = socket.display().to_string();
+    let check = probe_health("memory", "trusty-memory", socket, &addr).await;
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
