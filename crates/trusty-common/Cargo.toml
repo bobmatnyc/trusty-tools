@@ -676,8 +676,12 @@ embedder-load-dynamic = ["embedder", "fastembed/ort-load-dynamic", "ort/load-dyn
 # no-op alias for backward compatibility.
 embedder-coreml = ["embedder"]
 # Exposes the `MockEmbedder` test double outside `cfg(test)` so downstream
-# integration tests can reuse it.
-embedder-test-support = ["embedder"]
+# integration tests can reuse it. It does NOT imply `embedder`: every item it
+# gates sits inside the `embedder` module, so on its own it compiles nothing
+# and pulls no ONNX. A crate can then list it in `[dev-dependencies]` and get
+# the mock only when one of its own features turns `embedder` or `memory-core`
+# on — trusty-mpm's `sm-memory` does (owner ruling 2026-09-27).
+embedder-test-support = []
 # Issue #54: opt-in Candle BERT backend (all-MiniLM-L6-v2 on Metal/CPU). Does
 # NOT replace the fastembed/ORT default — operators select it at runtime via
 # `TRUSTY_EMBEDDER=candle` on builds that compiled this feature in. The
