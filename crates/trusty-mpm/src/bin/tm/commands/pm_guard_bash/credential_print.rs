@@ -258,7 +258,10 @@ const HOW_TO: &str = "Check existence by exit status alone \
      (`security find-generic-password -s <service> >/dev/null 2>&1`, no `-w`/`-g`), and \
      consume a value inside the command that needs it \
      (`curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" …`, or a pipe \
-     to `--password-stdin`), never echoing it and never behind `set -x`.";
+     to `--password-stdin`), never echoing it and never behind `set -x`. To keep \
+     a value in a file, write it to a literal `~/…` path under `umask 077` \
+     (`(umask 077; gcloud auth print-access-token > ~/.gcloud-token)`); a variable \
+     target such as `$HOME/…` refuses.";
 
 /// Whether `text`, quotes removed and lowercased, names a [`TRIGGERS`] entry,
 /// an interactive `security`, or a sibling credential call (#8677).

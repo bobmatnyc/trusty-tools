@@ -1074,6 +1074,7 @@ fn denies_a_credential_redirected_to_an_unread_target_8677() {
             "security find-generic-password -s fake-svc -w > /dev//stdout",
             "security find-generic-password -s fake-svc -w > /dev/./tty",
             "gcloud auth print-access-token > $OUT",
+            "gcloud auth print-access-token > \"$HOME/.gcloud-token\"",
             "gcloud auth print-access-token >> \"${OUT}/token\"",
             "gcloud auth print-access-token > `echo /dev/tty`",
             "security find-generic-password -g -s fake-svc 2> \"$ERR\"",
@@ -1294,6 +1295,10 @@ fn denies_a_cli_subcommand_chosen_at_run_time_8677() {
             "aws configure $(echo get) aws_secret_access_key",
             // Review round 3: a global flag's value is not a subcommand slot.
             "gh -R fake-owner/fake-repo auth $(echo token)",
+            // Review round 4: an unquoted expansion inside a flag word splits
+            // into the subcommand.
+            "gh auth --hostname=$(printf 'github.com token')",
+            "T=' token'; gh auth -hgithub.com$T",
         ],
     );
 }
@@ -1307,11 +1312,16 @@ fn allows_the_8677_round_two_neighbours() {
             "gcloud auth print-access-token | tee /tmp/fake-out >/dev/null",
             "gcloud auth print-access-token | tee -a fake-out >/dev/null",
             "gcloud auth print-access-token > ./fake-token.txt",
+            // The file form the deny text advises.
+            "(umask 077; gcloud auth print-access-token > ~/.gcloud-token)",
             "grep security -i notes.txt",
             "rg security -i notes.txt",
             "git commit -m 'fix: never pipe to security -i or run gh auth $(echo token)'",
             "gh pr create --title fake --body 'use gh auth token, not security -i'",
             "GH_TOKEN=$(gh auth token) gh pr view \"$N\"",
+            // Review round 4: `gh auth` then `$` is parsed, not refused.
+            "gh auth status --hostname \"$H\"",
+            "gh api \"repos/$R/pulls\"",
             "X=$(op read \"op://fake-vault/$ITEM/password\")",
         ],
     );

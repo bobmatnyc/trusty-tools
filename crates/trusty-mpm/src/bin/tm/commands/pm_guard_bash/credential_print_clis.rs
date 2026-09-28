@@ -50,11 +50,23 @@ enum Echo<'a> {
     Path(&'a str),
 }
 
+/// Leading words of a [`WORD_TRIGGERS`] sequence after which a run-time word
+/// (`$`, a backtick) may supply the rest (#8677 review round 4).
+const RUN_TIME_PREFIXES: &[&[&str]] = &[
+    &["gcloud", "secrets"],
+    &["gh", "auth"],
+    &["op"],
+    &["aws", "configure"],
+];
+
 /// Whether the quote-stripped, lowercased `flat` text names an interactive
-/// `security` or a [`WORD_TRIGGERS`] sequence.
+/// `security`, a [`WORD_TRIGGERS`] sequence, or a [`RUN_TIME_PREFIXES`] entry
+/// followed by a `$` or backtick (`gh auth -hgithub.com$T`).
+/// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`.
 pub(super) fn names_cli_trigger(flat: &str) -> bool {
     let words: Vec<String> = flat
-        .split(|c: char| c.is_whitespace() || ";|&()<>{}`$".contains(c))
+        .replace(['$', '`'], " $ ")
+        .split(|c: char| c.is_whitespace() || ";|&()<>{}".contains(c))
         .filter(|w| !w.is_empty())
         .map(basename)
         .collect();
@@ -62,11 +74,13 @@ pub(super) fn names_cli_trigger(flat: &str) -> bool {
         .iter()
         .enumerate()
         .any(|(at, w)| w == "security" && security_is_interactive(&words[at + 1..]));
+    let in_order = |seq: &[&str], then_dynamic: bool| {
+        let mut rest = words.iter();
+        seq.iter().all(|want| rest.any(|w| w == want)) && (!then_dynamic || rest.any(|w| w == "$"))
+    };
     interactive
-        || WORD_TRIGGERS.iter().any(|seq| {
-            let mut rest = words.iter();
-            seq.iter().all(|want| rest.any(|w| w == want))
-        })
+        || WORD_TRIGGERS.iter().any(|seq| in_order(seq, false))
+        || RUN_TIME_PREFIXES.iter().any(|seq| in_order(seq, true))
 }
 
 /// Whether `security`'s own leading options start interactive mode, where it
@@ -159,12 +173,14 @@ pub(super) fn judge_cli_echoes(
 }
 
 /// Whether a word the CLI may read as one of its first `slots` subcommand
-/// words is chosen at run time (#8677 review rounds 2-3).
+/// words is chosen at run time (#8677 review rounds 2-4).
 ///
-/// What: walks `args`, spending one slot per non-dash word and checking each
-/// such word for a `$`, a backtick or a lifted substitution. A dash word with
-/// no `=` may take the next word as its value (`gh -R owner/repo auth …`), so
-/// it adds one slot rather than naming each CLI's value-taking flags.
+/// What: walks `args` while a slot is left, refusing any word — a dash word
+/// too, as an unquoted expansion in `--hostname=$(…)` splits into the
+/// subcommand — that holds a `$`, a backtick or a lifted substitution. A
+/// non-dash word spends one slot; a dash word with no `=` may take the next
+/// word as its value (`gh -R owner/repo auth …`), so it adds one slot rather
+/// than naming each CLI's value-taking flags.
 /// Test: `credential_print_tests::denies_a_cli_subcommand_chosen_at_run_time_8677`,
 /// `credential_print_tests::allows_the_8677_round_two_neighbours`.
 fn subcommand_is_dynamic(args: &[String], slots: usize) -> bool {
@@ -173,12 +189,12 @@ fn subcommand_is_dynamic(args: &[String], slots: usize) -> bool {
         if left == 0 {
             return false;
         }
+        if a.contains(['$', '`']) || a.contains(MARK) {
+            return true;
+        }
         if a.starts_with('-') {
             left += usize::from(!a.contains('='));
             continue;
-        }
-        if a.contains(['$', '`']) || a.contains(MARK) {
-            return true;
         }
         left -= 1;
     }

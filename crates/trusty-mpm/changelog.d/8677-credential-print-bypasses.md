@@ -21,5 +21,7 @@ Fixed
   `pushd` or `popd`, and a `~+` or `~-` target. It reads a `tee` or `dd of=`
   output file like a redirect target, so `tee "$OUT"` refuses. It refuses a
   `gh`, `op`, `aws` or `gcloud` subcommand chosen at run time, also after a
-  global flag and its value (`gh -R owner/repo auth …`). Write a credential to
-  a literal file path instead of `> "$tmp"`.
+  global flag and its value (`gh -R owner/repo auth …`) or inside a flag word
+  (`--hostname=$(…)`). To keep a credential in a file, write it to a literal
+  `~/…` path under `umask 077`; a variable target such as `$HOME/…` refuses,
+  and the deny message now says so.
