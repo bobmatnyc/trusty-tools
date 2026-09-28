@@ -472,6 +472,35 @@ fn bounded_python_check_classifies_timeout_apart_from_failure() {
     );
 }
 
+/// Why (#5328): the flake's real mechanism. Another test thread's `fork()`
+/// can inherit the writable fd `write_fake_venv_python` briefly holds; until
+/// that child execs, Linux refuses to exec the stub with ETXTBSY, which the
+/// check used to report as `Failed`. A busy file says nothing about the venv.
+/// What: holds the `ok` stub open for writing on a helper thread, released
+/// shortly after the check starts, and asserts the check still reaches
+/// `Passed`. On Linux this fails against pre-fix code; on macOS exec ignores
+/// writers, so it passes either way.
+/// Test: this test.
+#[test]
+fn bounded_python_check_waits_out_a_stub_held_open_for_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ok = tmp.path().join("ok");
+    write_fake_venv_python(&ok, "#!/bin/sh\nexit 0\n");
+    let writer = fs::OpenOptions::new().append(true).open(&ok).unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(writer);
+    });
+    let outcome =
+        super::run_bounded_python_check(&ok, &["-c", "pass"], Duration::from_secs(30), "t");
+    holder.join().unwrap();
+    assert_eq!(
+        outcome,
+        RecheckOutcome::Passed,
+        "a stub busy for writing must be retried, not reported as a failed check"
+    );
+}
+
 // #5328: the transient-vs-permanent spawn classification and the
 // spawn-retry policy that consumes it moved to their own module
 // (`spawn_retry.rs`, tested in `spawn_retry_tests.rs`) so `bootstrap.rs`

@@ -28,6 +28,31 @@ fn is_transient_spawn_error_classifies_would_block_and_out_of_memory() {
     )));
 }
 
+/// Why (#5328): on Linux, exec of a file that ANY process holds open for
+/// writing fails with ETXTBSY — including a sibling thread's forked child that
+/// inherited the writable fd before its own exec closed it. That is a
+/// momentary state of the file, not evidence the venv is broken.
+/// What: `ExecutableFileBusy` is transient, and `spawn_with_retry` retries it
+/// until the attempt succeeds.
+/// Test: this test.
+#[test]
+fn spawn_with_retry_retries_executable_file_busy() {
+    assert!(is_transient_spawn_error(&std::io::Error::from(
+        std::io::ErrorKind::ExecutableFileBusy
+    )));
+    let calls = Cell::new(0usize);
+    let result = spawn_with_retry(Instant::now(), Duration::from_secs(30), || {
+        calls.set(calls.get() + 1);
+        if calls.get() < 2 {
+            Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+        } else {
+            Ok(5)
+        }
+    });
+    assert_eq!(result.ok(), Some(5));
+    assert_eq!(calls.get(), 2, "must retry the one ETXTBSY attempt");
+}
+
 /// Why (#5328): the common case — nothing to retry — must not pay any extra
 /// cost or delay.
 /// What: `attempt()` succeeding on the first call returns `Ok` after exactly
