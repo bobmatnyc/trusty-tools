@@ -1,0 +1,4 @@
+Fixed
+- Two controllers starting on one project's ctrl socket can no longer both bind it, and neither can unlink the other's live socket (Refs [#8870](https://github.com/bobmatnyc/trusty-tools/issues/8870)). `CtrlSocket::bind_singleton` now binds through `trusty_common::uds::bind_singleton_hardened`, which holds the `<socket>.lock` flock across the probe, stale-socket removal, bind and listen. A starter that finds the lock held or unusable fails with `BindInProgress` / `BindLock` and runs as a local-only REPL.
+- Behaviour change: `bind_singleton` now takes over only a socket the kernel proves nobody serves. A regular file on the socket path is refused and left on disk, and a live controller whose socket fails verification is refused rather than replaced.
+- The argv-forward client path no longer unlinks the ctrl socket when its probe is refused; it holds no bind lock, and the controller's own `bind_singleton` removes a dead socket under the lock.
