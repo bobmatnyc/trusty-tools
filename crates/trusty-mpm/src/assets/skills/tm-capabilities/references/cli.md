@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-63 top-level commands.
+64 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -13,6 +13,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `set-token` — Store a `CLAUDE_CODE_OAUTH_TOKEN` for managed sessions to use
   - `status` — Report the current auth configuration without printing any secret
 - `banner` — Preview the launch banner in the current terminal without starting Claude
+- `build-lease` — Run a heavy build under a machine-wide build slot (#8261)
 - `catalog` — Sync and inspect the claude-mpm agent/skill catalog
   - `apply` — Rebuild/redeploy the manifest-selected content from the catalog (HR-3)
   - `ls` — List the cached agents and skills

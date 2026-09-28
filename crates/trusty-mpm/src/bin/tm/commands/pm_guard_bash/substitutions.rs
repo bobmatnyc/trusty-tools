@@ -62,7 +62,7 @@ impl Substitution {
 /// Test: `evaluate_bash_command_denies_process_substitution_edit`,
 /// `evaluate_bash_command_allows_quoted_process_substitution_prose`,
 /// `evaluate_bash_command_allows_quoted_substitution_prose`.
-fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Option<bool> {
+pub(super) fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Option<bool> {
     if bytes.get(i + 1).copied() != Some(b'(') {
         return None;
     }

@@ -78,13 +78,14 @@ slot the hook grants, and must not point a gate at a worktree-local
 `target/`.** 65 worktrees each holding an independent `target/` measured
 ~850 GB on 2026-09-17 and defeated cache reuse entirely.
 
-The builder slot is the one sanctioned override. When `tm hook --pm-guard`
-admits a builder dispatch, it grants a private slot directory and names it in
-the hook's notice
-([#8261](https://github.com/bobmatnyc/trusty-tools/issues/8261)). Prefix
-that directory inline on every cargo command. A private slot directory avoids
-lock contention on the shared target dir: a build there does not wait on the
-lock that every other builder on the machine holds in turn.
+The builder slot is the one sanctioned override. `tm hook --pm-guard`
+rewrites a heavy build to `tm build-lease -- <command>`, which takes a
+machine-wide build slot and sets that slot's private `CARGO_TARGET_DIR` in the
+build's own environment for the build's life. Its stderr notice names the
+directory ([#8261](https://github.com/bobmatnyc/trusty-tools/issues/8261)).
+The agent adds no override of its own: the lease applies it. A private slot
+directory avoids lock contention on the shared target dir: a build there does
+not wait on the lock that every other builder on the machine holds in turn.
 
 `.envrc` is the operator's local mechanism. The declarative one that tm itself
 ships is the `build:` section of `~/.trusty-tools/trusty-mpm/config.yaml`,

@@ -21,6 +21,7 @@ mod generate;
 mod gh_identity;
 mod tracing_setup;
 mod types;
+mod watch_dispatch;
 
 use std::io::IsTerminal as _;
 
@@ -248,6 +249,12 @@ async fn main() -> anyhow::Result<()> {
     // follows. Mirrors the tagent/tga early config short-circuit (#2405).
     if let Some(Command::Config(cmd)) = cli.command {
         return cmd.run().await;
+    }
+    // #8261: `tm build-lease` wraps every heavy build the hook rewrites, so it
+    // runs before any tracing, migration or gateway probe — its latency is paid
+    // by every build on the machine.
+    if let Some(Command::BuildLease(args)) = cli.command {
+        commands::build_lease::run(args, cli.url.as_deref()).await
     }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
@@ -520,6 +527,9 @@ async fn main() -> anyhow::Result<()> {
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
+        // #8261: normally dispatched before daemon resolution above; kept so
+        // the match stays exhaustive without a panic arm.
+        Some(Command::BuildLease(args)) => commands::build_lease::run(args, Some(&url)).await,
         Some(Command::Daemon {
             addr,
             tailscale,
@@ -594,7 +604,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
         // #6653: exits itself, like `tm wait` — the exit code IS the verb surface.
         Some(Command::Pr { cmd }) => commands::pr::run(cmd, &client, &url).await,
-        Some(Command::Watch { cmd }) => dispatch_watch(&client, &url, cmd).await,
+        Some(Command::Watch { cmd }) => watch_dispatch::dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
         // The handler is async because `meta run` (#1049/#1051) launches a real
         // `claude` tmux session and `--demo` polls for it to exit. A demo
@@ -768,57 +778,4 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(trusty_mpm::core::exit_codes::EXIT_UNAVAILABLE);
     }
     result
-}
-
-/// Dispatch a `tm watch poll|listen` invocation to its handler.
-///
-/// Why: keeps `main`'s match arm thin by folding the flattened `WatchArgs` into
-/// the [`commands::watch`] entry points in one place, mapping the shared CLI flags
-/// onto the module's `RawWatchArgs` and the safety-gate booleans.
-/// What: builds a `RawWatchArgs` from the parsed flags and calls
-/// [`commands::watch::poll`] or [`commands::watch::listen`](mod@crate::commands::watch::listen) accordingly, threading
-/// the `--execute`/`--dry-run` safety flags and the spawn runtime through.
-/// Test: the resolution/safety logic is unit-tested in `commands::watch::tests`;
-/// CLI parsing in `tests.rs` (`cli_parses_watch_*`).
-async fn dispatch_watch(
-    client: &reqwest::Client,
-    url: &str,
-    cmd: cli::WatchCmd,
-) -> anyhow::Result<()> {
-    use cli::{WatchArgs, WatchCmd};
-    use commands::watch::args::RawWatchArgs;
-
-    fn raw(args: &WatchArgs) -> RawWatchArgs {
-        RawWatchArgs {
-            project: args.project.clone(),
-            label: args.label.clone(),
-            interval_secs: args.interval_secs,
-            state: args.state,
-        }
-    }
-
-    match cmd {
-        WatchCmd::Poll { args } => {
-            commands::watch::poll(
-                client,
-                url,
-                raw(&args),
-                args.execute,
-                args.dry_run,
-                args.runtime,
-            )
-            .await
-        }
-        WatchCmd::Listen { args } => {
-            commands::watch::listen(
-                client,
-                url,
-                raw(&args),
-                args.execute,
-                args.dry_run,
-                args.runtime,
-            )
-            .await
-        }
-    }
 }

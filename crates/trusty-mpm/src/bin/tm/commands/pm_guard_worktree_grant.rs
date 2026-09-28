@@ -294,15 +294,16 @@ pub(crate) fn build_worktree_grant_response(updated_input: &Value) -> String {
 /// Add `additionalContext` to an already-rendered allow response (#8261).
 ///
 /// Why: a `PreToolUse` hook's stdout may carry exactly ONE object, so the
-/// builder slot's `CARGO_TARGET_DIR` notice cannot be a second `println!`
-/// beside the grant's own — it has to be merged into the same
-/// `hookSpecificOutput` that already carries `updatedInput`. It lives here
+/// agent-cost notice cannot be a second `println!` beside a build-lease
+/// rewrite — it has to be merged into the same `hookSpecificOutput` that
+/// already carries `updatedInput`. (#8261 round 5: no dispatch-time slot
+/// notice exists; a build learns its slot from `tm build-lease`.) It lives here
 /// rather than in `pm_guard.rs` because that file sits at its 500-SLOC cap.
 /// What: parses `response`, inserts `additionalContext` into its
 /// `hookSpecificOutput`, and re-renders. `None` — or a response this does not
 /// recognise — returns the input unchanged, so a parse failure degrades to
 /// today's answer instead of emitting something malformed.
-/// Test: `a_slot_notice_is_merged_into_the_one_hook_output_object`,
+/// Test: `an_agent_cost_notice_is_merged_into_the_one_hook_output_object`,
 /// `an_absent_notice_leaves_the_response_byte_identical`.
 pub(crate) fn with_additional_context(response: &str, context: Option<&str>) -> String {
     let Some(context) = context else {
@@ -727,19 +728,25 @@ mod tests {
         );
     }
 
-    /// #8261: the builder slot's notice must land INSIDE the grant's own
-    /// `hookSpecificOutput`. A `PreToolUse` hook's stdout may carry exactly one
-    /// object, so a second printed object would be dropped or misread — and the
-    /// `updatedInput` the grant already carries must survive the merge.
+    /// #8261 round 6 (critic LOW): renamed from
+    /// `a_slot_notice_is_merged_into_the_one_hook_output_object` — round 5
+    /// removed the dispatch-time slot notice entirely, so the only context
+    /// this function ever merges today is the agent-cost notice. The MERGE
+    /// mechanism this test proves is unchanged; only the example content
+    /// moved to match what actually calls it.
+    ///
+    /// A `PreToolUse` hook's stdout may carry exactly one object, so a second
+    /// printed object would be dropped or misread — and the `updatedInput`
+    /// the grant already carries must survive the merge.
     #[test]
-    fn a_slot_notice_is_merged_into_the_one_hook_output_object() {
+    fn an_agent_cost_notice_is_merged_into_the_one_hook_output_object() {
         let grant = build_worktree_grant_response(&serde_json::json!({"isolation": "worktree"}));
-        let merged = with_additional_context(&grant, Some("CARGO_TARGET_DIR=/pool/slot-0"));
+        let merged = with_additional_context(&grant, Some("this build costs an extra 3 min"));
 
         let parsed: Value = serde_json::from_str(&merged).expect("valid JSON");
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"],
-            "CARGO_TARGET_DIR=/pool/slot-0"
+            "this build costs an extra 3 min"
         );
         assert_eq!(
             parsed["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",

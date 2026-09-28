@@ -36,9 +36,9 @@
 //! **A slot holding a live build is never replaced (#8794).** Seeding checks
 //! the cargo `flock`s in the slot and refuses while one is held.
 //!
-//! Nothing here decides ADMISSION. The count comes from
-//! [`builder_capacity`](crate::core::builder_capacity); this module only turns
-//! a granted slot index into a directory.
+//! Nothing here decides ADMISSION. The count comes from the build lease
+//! ([`crate::core::build_lease::admission`], #8261); this module only turns a
+//! granted slot index into a directory.
 //!
 //! Test: the `#[cfg(test)]` suite below, which uses a temp root throughout —
 //! #8311 is the 42,000-directory leak from tests that wrote under the real home.
@@ -48,8 +48,6 @@ use std::path::{Path, PathBuf};
 use trusty_common::github_path::GithubPath;
 
 mod handover;
-// #8819: the on-disk lease a restarted daemon reads for a slot it lost.
-pub mod lease;
 
 /// The marker file that records a slot directory has been seeded.
 ///
@@ -204,8 +202,9 @@ impl SlotPool {
     /// at 207 GB. Without a bound, a pool whose seeded slots all fail their
     /// handover would clone a new `slot-N` on every admission. `ceiling` is the
     /// operator's builder ceiling, floored at one so a slot can always exist.
-    /// Test: `slot_paths_are_keyed_by_owner_and_repo`,
-    /// `a_failed_handover_is_not_reseeded_past_the_ceiling`.
+    /// #8261: the build lease passes its own slot count, and holds no index at
+    /// or above it.
+    /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
     #[must_use]
     pub fn new(root: PathBuf, identity: GithubPath, ceiling: u32) -> Self {
         Self {

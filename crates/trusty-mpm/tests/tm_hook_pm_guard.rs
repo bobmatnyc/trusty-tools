@@ -960,7 +960,6 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
         "git worktree remove /tmp/wt-x",
         "git worktree prune",
         "mktemp -d",
-        "cargo build --target-dir /tmp/build-cache",
     ] {
         let payload = format!(
             r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
@@ -971,6 +970,15 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
             "expected allow for: {command}"
         );
     }
+    // #8261: a heavy build is still allowed — rewritten to run under
+    // `tm build-lease`, never denied.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build --target-dir /tmp/build-cache"}}"#;
+    let stdout = run_pm_guard(payload, &[]);
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- cargo build --target-dir /tmp/build-cache"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1825,7 +1833,7 @@ fn spawn_capturing_writers_mock(body: &'static str) -> (String, CapturedRequest)
     spawn_routed_mock(MockAnswer::Http("200 OK", body))
 }
 
-/// How a routed mock answers a request that is NOT the builder-slot claim.
+/// How a routed mock answers a request.
 #[derive(Clone, Copy)]
 enum MockAnswer {
     /// Answer with this status line and body.
@@ -1834,44 +1842,15 @@ enum MockAnswer {
     Silent,
 }
 
-/// The builder-slot answer every mock in this file serves (#6892).
+/// One HTTP mock that serves connections in a loop.
 ///
-/// Why: `tm hook --pm-guard` claims a machine-wide builder slot BEFORE it asks
-/// any shared-tree question, and it DENIES when that claim goes unanswered. A
-/// mock serving only the shared-tree route therefore denies every engineer
-/// dispatch on the builder gate, and no test below ever reaches the rule it is
-/// about. Admitting is the neutral answer: it restores the guard to the state
-/// each of these tests was written against.
-/// What: `claimed: true` on a machine with room. The builder cap's own
-/// behaviour is covered where it lives, in `commands::pm_guard_builder_cap`.
-const BUILDER_SLOT_ADMITS: &str = r#"{"claimed":true,"cap":4,"holders":[]}"#;
-
-/// One HTTP mock that answers the builder-slot claim and one other route.
-///
-/// Why: the guard makes TWO daemon calls per engineer dispatch since #6892, so
-/// a one-shot listener can no longer stand in for the daemon — the first call
-/// consumed it and the second found a closed socket. This serves connections in
-/// a loop and routes by path, which is what a daemon does.
-/// What: binds an ephemeral port; answers any request whose path names the
-/// builder-slot route with [`BUILDER_SLOT_ADMITS`]; answers everything else per
-/// `answer`, after publishing its body on the capture channel. The accept loop
-/// runs on a detached thread and ends with the test binary.
+/// Why: a one-shot listener is consumed by the first call; this serves every
+/// connection, which is what a daemon does.
+/// What: binds an ephemeral port; answers every request per `answer`, after
+/// publishing its body on the capture channel. The accept loop runs on a
+/// detached thread and ends with the test binary.
+// #8261: round 4 — the builder-slot branch is gone; the guard never asks it.
 fn spawn_routed_mock(answer: MockAnswer) -> (String, CapturedRequest) {
-    spawn_routed_mock_with_builder(answer, BUILDER_SLOT_ADMITS)
-}
-
-/// [`spawn_routed_mock`] with the builder-slot answer supplied (#6892).
-///
-/// Why: one case below is ABOUT the builder cap end to end, and it needs the
-/// daemon to say the machine is full. Every other case wants the neutral
-/// [`BUILDER_SLOT_ADMITS`], so the parameter lives here rather than at every
-/// call site.
-/// What: as [`spawn_routed_mock`], with `builder` served for the builder-slot
-/// route.
-fn spawn_routed_mock_with_builder(
-    answer: MockAnswer,
-    builder: &'static str,
-) -> (String, CapturedRequest) {
     use std::io::Read;
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -1906,19 +1885,9 @@ fn spawn_routed_mock_with_builder(
                     break Some((head.to_string(), rest.to_string()));
                 }
             };
-            let Some((head, posted)) = request else {
+            let Some((_head, posted)) = request else {
                 continue;
             };
-            // #6892: every mock answers the builder-slot claim, so the rule each
-            // test is about is the one that decides its verdict.
-            if head
-                .lines()
-                .next()
-                .is_some_and(|l| l.contains("/builder-slot"))
-            {
-                let _ = socket.write_all(http_response("200 OK", builder).as_bytes());
-                continue;
-            }
             let _ = tx.send(posted);
             match answer {
                 MockAnswer::Http(status_line, body) => {
@@ -2023,8 +1992,7 @@ fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
 /// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
 /// it cannot drive the guard's malformed-response branch.
 /// What: as [`spawn_writers_mock`], but the caller supplies the status line
-/// (e.g. `"500 Internal Server Error"`) and the raw body bytes. The
-/// builder-slot claim is still answered normally — see [`BUILDER_SLOT_ADMITS`].
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
 fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
     spawn_routed_mock(MockAnswer::Http(status_line, body)).0
 }
@@ -2037,8 +2005,7 @@ fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> Str
 /// connection and went quiet. Only a real accepted-then-silent listener
 /// exercises the arm.
 /// What: reads the shared-tree request and holds the socket open past the
-/// guard's 2 s total budget. The builder-slot claim is answered normally, so the
-/// silence is the shared-tree route's alone (#6892).
+/// guard's 2 s total budget.
 fn spawn_silent_mock() -> String {
     spawn_routed_mock(MockAnswer::Silent).0
 }
@@ -2180,7 +2147,7 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
     use std::sync::Arc;
 
     use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::daemon::{builder_slot_routes, delegation_routes, state::DaemonState};
+    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
@@ -2200,13 +2167,6 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
                 }
             },
         ))
-        // #6892: the builder-slot claim precedes the shared-tree claim on every
-        // engineer dispatch, so the daemon under test has to serve it or the
-        // guard denies before the race this harness exists to drive. Merged
-        // AFTER the barrier layer, deliberately: `route_layer` applies only to
-        // the routes already on the router, so the builder claims pass straight
-        // through and the barrier still holds exactly the shared-tree calls.
-        .merge(builder_slot_routes::router())
         .with_state(state);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2973,7 +2933,6 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
         "grep -rn TODO --include=*.toml .",
         "echo \"no secrets here\"",
         "grep -rn credentials src/",
-        "cargo build 2>&1 | grep error",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
@@ -2985,6 +2944,17 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
             "`{command}` must be allowed (empty stdout), got: {stdout}"
         );
     }
+    // #8261: a heavy build is allowed as a `tm build-lease` rewrite, not denied.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cargo build 2>&1 | grep error", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- cargo build 2>&1 | grep error"),
+        "{stdout}"
+    );
     let readme = format!(r#"{{"file_path":"{}"}}"#, repo.join("README.md").display());
     let stdout = run_pm_guard_at(
         &tool_payload_at("Read", &readme, &repo, ""),
@@ -5122,7 +5092,6 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
     for command in [
         "sh -c 'git status --porcelain'",
         r#"bash -c "git log --oneline -5""#,
-        "sh -c 'cargo build'",
         "xargs git add",
         "echo $HOME",
     ] {
@@ -5132,20 +5101,29 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
             "expected allow for: {command}"
         );
     }
+    // #8261: a wrapped heavy build is still allowed — rewritten to run the
+    // whole wrapper under `tm build-lease`, never denied.
+    let stdout = run_pm_guard(&subagent_bash_payload("sh -c 'cargo build'"), &[]);
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- sh -c 'cargo build'"),
+        "{stdout}"
+    );
 }
 
-/// Criterion 5, through the real binary. Nothing is listening, so the machine's
-/// builder count is unknowable — and this guard DENIES on that, which is the
-/// opposite of the shared-worktree guard's policy on the identical failure.
-/// A copy-paste of #4480's allow-on-unreachable prints nothing here.
+/// #8261 increment two (option D), through the real binary: with nothing
+/// listening, a builder-typed dispatch is ALLOWED. Dispatch takes no builder
+/// slot any more — the cap is enforced at the build command — so the #6892
+/// fail-closed deny on an unverifiable count is gone with it.
 #[test]
-fn pm_guard_denies_a_builder_when_the_daemon_cannot_be_asked() {
+fn pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked() {
     let cwd = tempfile::tempdir().expect("tempdir");
     let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, UNREACHABLE_DAEMON, cwd.path());
     assert!(
-        verdict.contains("Builder cap unverifiable (#6892)"),
-        "an unverifiable cap must deny a builder, got: {verdict:?}"
+        !verdict.to_lowercase().contains("builder cap"),
+        "dispatch must not meet a builder cap, got: {verdict:?}"
     );
+    assert!(!verdict.contains("\"deny\""), "got: {verdict:?}");
 }
 
 /// Criterion 6, through the real binary. Same dead daemon, same turn: a
@@ -5166,82 +5144,6 @@ fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
             "{agent} must not be denied by the builder cap"
         );
     }
-}
-
-/// Criterion 1, through the real binary: over the cap, the deny names every
-/// holder with its elapsed time, the cap, and the config key that sets it —
-/// not a generic string. #8257 owner ruling: never the holder's session UUID,
-/// which the denied caller could replay as `CLAUDE_CODE_SESSION_ID`.
-#[test]
-fn pm_guard_denies_a_builder_when_the_machine_is_full() {
-    let (url, _captured) = spawn_routed_mock_with_builder(
-        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
-        r#"{"claimed":false,"cap":2,"holders":[
-            {"agent":"rust-engineer","session":"11111111-1111-1111-1111-111111111111","elapsed_secs":754},
-            {"agent":"local-ops","session":"22222222-2222-2222-2222-222222222222","elapsed_secs":61}]}"#,
-    );
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
-    assert!(
-        verdict.contains("Machine-wide builder cap reached"),
-        "{verdict}"
-    );
-    assert!(verdict.contains("rust-engineer"), "{verdict}");
-    for form in [
-        "11111111-1111-1111-1111-111111111111",
-        "11111111111111111111111111111111",
-        "22222222-2222-2222-2222-222222222222",
-        "22222222222222222222222222222222",
-    ] {
-        assert!(!verdict.contains(form), "{form} leaked: {verdict}");
-    }
-    assert!(verdict.contains("running 12m"), "{verdict}");
-    assert!(verdict.contains("local-ops"), "{verdict}");
-    assert!(verdict.contains("capped at 2"), "{verdict}");
-    assert!(verdict.contains("builders.max_concurrent"), "{verdict}");
-}
-
-/// #8261, through the real binary: an ADMITTED builder must be told the slot
-/// directory the daemon just granted it.
-///
-/// Why this dispatch and this cwd: a tempdir is no main checkout, so the
-/// ADR-0048 worktree grant does not fire and the call reaches the plain
-/// builder-cap exit — the one with no rewrite object for the notice to ride.
-/// That exit matched only the DENY arm and dropped `Allow(Some(notice))` on the
-/// floor, so the daemon recorded a private `CARGO_TARGET_DIR` that the engineer
-/// never heard about and built in the shared one regardless. Before the fix this
-/// FAILS at the parse: stdout was empty.
-///
-/// The absent `permissionDecision` is the second half of the contract — with
-/// one, the object would approve the dispatch and bypass the permission flow.
-#[test]
-fn pm_guard_tells_an_admitted_builder_its_slot_directory() {
-    let (url, _captured) = spawn_routed_mock_with_builder(
-        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
-        r#"{"claimed":true,"cap":4,"holders":[],"slot_path":"/tmp/trusty-build-slots/slot-3"}"#,
-    );
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let stdout = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("an admitted builder must be told its slot on stdout: {e}: {stdout:?}")
-    });
-    let context = parsed["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_else(|| panic!("the notice rides `additionalContext`, got: {stdout}"));
-    assert!(
-        context.contains("/tmp/trusty-build-slots/slot-3"),
-        "the notice must name the directory itself, got: {context}"
-    );
-    assert!(
-        context.contains("CARGO_TARGET_DIR"),
-        "the notice must name the variable to prefix, got: {context}"
-    );
-    assert!(
-        parsed["hookSpecificOutput"]
-            .get("permissionDecision")
-            .is_none(),
-        "an explicit decision here would bypass the permission flow: {stdout}"
-    );
 }
 
 // ---------------------------------------------------------------------------

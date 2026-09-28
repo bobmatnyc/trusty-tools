@@ -54,6 +54,12 @@ pub mod budget;
 // row reports and its `--fix` arm seeds.
 pub mod build_env;
 pub mod build_env_repair;
+// #8261 increment two: the build-command lease — a machine-wide flock slot per
+// heavy build, admitted against memory pressure, load and the process census.
+pub mod build_lease;
+// #8297 (absorbed into #8261): what is actually compiling on this host — the
+// process-table census that counts builds holding no lease.
+pub mod build_probe;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is
 // still stale, and semver alone cannot say so.
@@ -108,11 +114,6 @@ pub mod claude_mpm_session;
 // #6892: the machine-wide builder-slot cap — the `[builders]` config section,
 // the memory-tier default table, and the one host-root resolution site.
 pub mod builders;
-
-// #8261: the capacity formula that replaces the cap's fixed number — measured
-// 1-minute load average and free memory against the operator's ceiling, with
-// the fail-closed and never-revoke invariants.
-pub mod builder_capacity;
 
 // #8261: the pool of persistent per-slot `CARGO_TARGET_DIR` directories a
 // leased builder compiles into, so concurrent builds stop serialising on one

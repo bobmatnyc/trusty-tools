@@ -126,6 +126,40 @@ fn a_process_manager_env_dump_is_denied_and_recorded() {
     }
 }
 
+/// 🔴 REGRESSION (#8261 x #8722): a heavy build hidden in an unterminated
+/// `$(…)` — the one shape the build-lease rule refuses — is denied and
+/// recorded. #8730's unplaceable-write guard runs first and catches it today;
+/// the lease's own refusal is the fallback, recorded under `build-lease`
+/// (`a_lease_refusal_is_recorded_before_it_is_printed`). Either way the deny
+/// must leave a record.
+#[test]
+fn a_build_the_lease_refuses_is_denied_and_recorded() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    std::fs::create_dir(&data).expect("mkdir data");
+    let command = "echo $(cargo build";
+
+    let (stdout, _) = run_guard(&data, tmp.path(), command);
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#),
+        "{stdout}"
+    );
+
+    let errors = aggregate_errors_from_paths(&store_paths_under(&data), 100);
+    let deny = errors
+        .iter()
+        .find(|e| e.record.crate_target == "trusty_mpm::pm_guard")
+        .unwrap_or_else(|| panic!("no pm-guard record among {errors:#?}"));
+    let fields = &deny.record.fields;
+    assert!(
+        fields.contains("check=main-checkout-write") || fields.contains("check=build-lease"),
+        "{fields}"
+    );
+    for part in [command, "session=s-8722"] {
+        assert!(fields.contains(part), "{part} missing from {fields}");
+    }
+}
+
 /// Fail-Open Check (#8722): a store that cannot be written loses the record,
 /// never the deny, and says so on stderr.
 #[test]
