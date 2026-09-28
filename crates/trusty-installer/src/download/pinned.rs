@@ -593,7 +593,9 @@ async fn stage_one(
             found: binary_names,
         });
     }
-    let reported_line = trusty_common::update::verify_installed_binary_at_path(&staged_binary)
+    // #6231: the binary was extracted by this process moments ago; ride out an
+    // ETXTBSY from a write fd a concurrent fork inherited.
+    let reported_line = super::fresh_exec::probe_fresh_binary(&staged_binary)
         .await
         .map_err(|e| PinnedError::VersionMismatch {
             crate_name: name.to_owned(),
