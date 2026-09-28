@@ -1,3 +1,0 @@
-Fixed
-- Tests that write `HOME`, `OLLAMA_HOST` or the memory-core timeout knobs now share one serialization domain with every other writer and reader of the same variable: every `HOME` reader and writer in the lib tests (`update`, `workspace_layout`, `bin_resolve`, `launchd`, `catchup`, `search_index`, `embedder`) holds `data_dir::ENV_LOCK`, `update/tests.rs`'s private lock is gone, `memory_core::timeouts` takes the same lock, and the `OLLAMA_HOST` writers share `dotenv_credential_env` (#5937). Test-only.
-- The env-lock ratchet now accepts only the exact path `crate::data_dir::ENV_LOCK` (or a `use` of it) and fails on any new private env mutex in the lib target (#5937). Test-only.

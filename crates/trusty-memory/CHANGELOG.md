@@ -6,7 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.28.2] — 2026-09-28
+
+### Breaking
+
+- trusty-memory 0.28.2 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-memory-0.28.2.txt` (Refs #8699).
+
+### Fixed
+
+- Tests that write process env (bm25 knobs, `FASTEMBED_CACHE_*`, `TRUSTY_DATA_DIR_OVERRIDE`, `TRUSTY_MEMORY_PALACE`, `TRUSTY_DREAM_DISABLED`, the idle-evict and bm25-lane knobs) and the tests that read those paths now share one lock, so a parallel sibling can no longer point a test at the wrong data dir or palace (#5937). Test-only.
+- A source-scan ratchet fails the build when a lib test writes the environment without `commands::env_test_lock()`; known exceptions are listed with a reason (#5937). Test-only.
+- Two `trusty-memory serve --foreground` daemons started at the same moment on one data root no longer both serve. Previously both could prove the socket free, bind it and run, with one stranded on a socket nothing could reach; now exactly one binds and the other exits with an error naming the socket (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- `discovers_trusty_git_analytics_alias` and `dispatch_discover_aliases_inserts_new_and_dedupes` build their `tga` → `trusty-git-analytics` workspace in a tempdir instead of reading `crates/trusty-git-analytics`, which left this workspace (#8824). Test-only.
+
+### Removed
+
+- The unused `commands::daemon_lock` module (`acquire_lock`, `DaemonLock`, `read_lock_pid`, `pid_alive`, `lock_file_path`). Nothing has called it since the daemon moved to a Unix socket (#6286), and its empty-file window let two callers both take the lock; the socket's bind lock is the daemon lock now (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+
 ## [0.28.1] — 2026-09-27
+
+### Breaking
+
+- trusty-memory 0.28.1 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-memory-0.28.1.txt` (Refs #8699).
 
 ### Added
 
