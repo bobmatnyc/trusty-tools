@@ -170,9 +170,30 @@ pub fn scan(
 /// `a_missing_start_directory_is_an_error_not_an_empty_scan`,
 /// `the_home_directory_is_never_a_project_boundary`.
 pub fn resolve_project_root(dir: &Path, home: Option<&Path>) -> io::Result<PathBuf> {
+    resolve_project_root_below(dir, home, None)
+}
+
+/// [`resolve_project_root`], with the walk stopped at `ceiling`.
+///
+/// Why (#8838): a test fixture owns its temp dir, not the shared temp root
+/// above it. A stray `.trusty-mpm/` there resolved every boundary-less fixture
+/// to the temp root. A ceiling bounds the walk the way `GIT_CEILING_DIRECTORIES`
+/// bounds git's own discovery.
+/// What: the same walk, except `ceiling` and every directory above it are
+/// never probed. `None` walks to the filesystem root.
+/// Test: `a_boundary_at_the_ceiling_is_never_probed`.
+fn resolve_project_root_below(
+    dir: &Path,
+    home: Option<&Path>,
+    ceiling: Option<&Path>,
+) -> io::Result<PathBuf> {
     let start = std::fs::canonicalize(dir).map_err(|err| context(err, "resolve", dir))?;
     let home = home.map(|h| std::fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    let ceiling = ceiling.map(|c| std::fs::canonicalize(c).unwrap_or_else(|_| c.to_path_buf()));
     for candidate in start.ancestors() {
+        if ceiling.as_deref() == Some(candidate) {
+            break;
+        }
         if home.as_deref() == Some(candidate) {
             continue;
         }

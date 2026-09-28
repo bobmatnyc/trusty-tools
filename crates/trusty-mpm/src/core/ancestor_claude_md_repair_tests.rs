@@ -7,12 +7,15 @@ use super::*;
 use crate::core::instruction_pipeline::CLAUDE_MD_STUB;
 use tempfile::TempDir;
 
+/// `<tmp>/ancestor/project`, canonicalised.
+// #8838: `project` is a registered project, so the nearest-boundary walk stops
+// there whatever a shared temp root above the fixture holds.
 fn fixture() -> (TempDir, PathBuf, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let ancestor = root.join("ancestor");
     let project = ancestor.join("project");
-    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
     (tmp, ancestor, project)
 }
 
