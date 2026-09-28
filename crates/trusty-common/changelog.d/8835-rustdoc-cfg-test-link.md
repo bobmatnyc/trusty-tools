@@ -1,2 +1,0 @@
-Fixed
-- `dream_cycles_peak_in_flight`'s doc comment linked `reset_dream_cycles_peak_in_flight_for_test` as an intra-doc link; that helper is `#[cfg(test)]`-only, so a non-test rustdoc build (the release pre-publish gate) never sees it and the link reported broken, failing both the rustdoc intra-doc-link gate and `check_contracts.sh` (Refs #8835). The reference is now plain backticks, no behaviour change.

@@ -1,2 +1,0 @@
-Fixed
-- The dream concurrency tests no longer read a peak of 3 against the cap of 2. `the_in_flight_gauge_counts_a_held_cycle` enters the process-wide in-flight gauge without a permit, so it now shares the `dream_permits` serial key with `ten_palaces_never_exceed_the_concurrency_cap` and `dream_permits_cap_concurrent_holders`. A test-only reset also rebases the peak mark before the cap test measures (#8835). Test-only.
