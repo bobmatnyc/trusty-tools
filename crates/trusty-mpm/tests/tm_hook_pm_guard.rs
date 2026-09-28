@@ -2172,14 +2172,12 @@ fn pm_guard_warns_when_no_daemon_answers_the_claim() {
 /// What: binds an ephemeral port, serves the delegation sub-router behind a
 /// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
 /// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
-/// immediately instead of waiting on a barrier no one else will reach. Only the
-/// first `expected` arrivals meet the barrier; later ones pass straight through,
-/// so a lone claim sent after the race is served by the same daemon (#5914).
-/// Returns the base URL and the temp dir backing the hermetic state.
+/// immediately instead of waiting on a barrier no one else will reach. Returns
+/// the base URL and the temp dir backing the hermetic state. An `expected` of 1
+/// releases every request on arrival: the same router with no race held open.
 fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
     use std::future::IntoFuture;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use trusty_mpm::core::paths::FrameworkPaths;
     use trusty_mpm::daemon::{builder_slot_routes, delegation_routes, state::DaemonState};
@@ -2187,21 +2185,17 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
     let barrier = Arc::new(tokio::sync::Barrier::new(expected));
-    let arrivals = Arc::new(AtomicUsize::new(0));
 
     let app = delegation_routes::router()
         .route_layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let barrier = Arc::clone(&barrier);
-                let arrivals = Arc::clone(&arrivals);
                 async move {
                     // Barrier passed: every guard's claim has reached the
                     // daemon and none has been served. This is the exact state
                     // the race needs; only the daemon's own critical section
                     // decides what happens next.
-                    if arrivals.fetch_add(1, Ordering::SeqCst) < expected {
-                        barrier.wait().await;
-                    }
+                    barrier.wait().await;
                     next.run(req).await
                 }
             },
@@ -2277,7 +2271,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // child's arrives, and `post_shared_tree` gives up after 2 s. Since #5923 a
     // timed-out claim DENIES, so under load both children can be refused — the
     // correct fail-closed result, not a regression. The invariant is therefore
-    // "never both admitted", and a separate lone claim after the race proves the
+    // "never both admitted", and a lone claim against a second daemon proves the
     // guard still admits at all, so a guard that denies everything cannot pass.
     // `prewarm_pm_guard_binary` and forking both children back to back keep the
     // race itself exercised on an idle machine, where exactly one is admitted.
@@ -2336,14 +2330,16 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
          {elapsed:?})"
     );
 
-    // Liveness (#5914): a lone claim against the same daemon, in a tree nobody
-    // holds, is admitted. `documentation` reaches the same shared-tree claim the
-    // race contends on but holds no builder slot, so the load-throttled builder
-    // cap (#8261) cannot refuse it on the race winner's account.
+    // #5914: a lone claim against a second daemon and router, sharing no barrier
+    // or state with the race, is admitted — so its verdict cannot depend on how
+    // many race children reached the barrier. `documentation` takes the same
+    // shared-tree claim path but no builder slot, so the load-throttled builder
+    // cap (#8261) cannot refuse it either.
+    let (lone_url, _lone_dir) = serve_delegation_router_behind_a_barrier(1);
     let lone_cwd = tempfile::tempdir().expect("tempdir");
     let lone = finish_pm_guard(spawn_pm_guard(
         UNISOLATED_DOCUMENTATION_DISPATCH,
-        &url,
+        &lone_url,
         Some(lone_cwd.path()),
         &[],
         &[],
@@ -2351,8 +2347,8 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     assert_ne!(
         decision(lone.trim()).as_deref(),
         Some("deny"),
-        "a lone claim against the race's daemon must be admitted, or the guard \
-         denies everything and the invariant above proves nothing, got: {lone}"
+        "a lone claim must be admitted, or the guard denies everything and the \
+         invariant above proves nothing, got: {lone}"
     );
 
     // Every refusal is a well-formed deny naming a rule that may refuse here:
