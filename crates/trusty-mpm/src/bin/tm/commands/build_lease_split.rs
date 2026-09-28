@@ -162,10 +162,9 @@ fn watch_argv(
         commands = vec![joined];
     }
     if commands.is_empty() {
-        commands.push(format!(
-            "cargo {}",
-            with_features("check", features.as_deref())
-        ));
+        // cargo-watch appends `--features` to its default with no trailing space.
+        let features = features.map(|f| format!(" --features {f}"));
+        commands.push(format!("cargo check{}", features.unwrap_or_default()));
     }
     let mut out = argv[..=idx].to_vec();
     out.extend(kept);
