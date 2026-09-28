@@ -182,9 +182,9 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
 ///
 /// Why: a read-only `security` agent runs the #7748 base-ref check, and a bare
 /// `git ls-remote` found no credential ("Device not configured").
-/// What: `Some(rest)` when `args[0]` is a bare literal `GH_CONFIG_DIR=` with a
-/// non-empty value. A quoted word is a program name to the shell, not an
-/// assignment, so it is not stripped. `None` otherwise.
+/// What: `Some(rest)` when `args[0]` is a bare literal `GH_CONFIG_DIR=` with an
+/// absolute value (led by `/`). A quoted word is a program name to the shell,
+/// not an assignment, so it is not stripped. `None` otherwise.
 /// Test: `read_only_allow_tests::a_gh_config_dir_prefix_reaches_git_ls_remote`,
 /// `read_only_allow_tests::a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote`.
 fn gh_config_prefixed(args: &[Arg]) -> Option<&[Arg]> {
@@ -192,7 +192,7 @@ fn gh_config_prefixed(args: &[Arg]) -> Option<&[Arg]> {
         Some(Arg::Lit { text, bare: true })
             if text
                 .strip_prefix("GH_CONFIG_DIR=")
-                .is_some_and(|dir| !dir.is_empty()) =>
+                .is_some_and(|dir| dir.starts_with('/')) =>
         {
             Some(&args[1..])
         }

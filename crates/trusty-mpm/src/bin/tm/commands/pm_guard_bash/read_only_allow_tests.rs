@@ -877,8 +877,7 @@ fn shell_syntax_around_quoted_patterns_is_refused() {
 /// environment prefix reads as the program name.
 #[test]
 fn a_gh_config_dir_prefix_reaches_git_ls_remote() {
-    let incident =
-        "GH_CONFIG_DIR=/Users/masa/.config/gh-bobmatnyc git ls-remote origin refs/heads/main";
+    let incident = "GH_CONFIG_DIR=/Users/example/.config/gh git ls-remote origin refs/heads/main";
     assert_eq!(run(Some("security"), incident), None);
     check(
         true,
@@ -909,6 +908,7 @@ fn a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote() {
             "GH_CONFIG_DIR=/cfg 'git' ls-remote origin",
             "GH_CONFIG_DIR=/cfg",
             "GH_CONFIG_DIR= git ls-remote origin",
+            "GH_CONFIG_DIR=cfg git ls-remote origin",
             "GH_CONFIG_DIR=~/.config/gh git ls-remote origin",
             "\"GH_CONFIG_DIR=/cfg\" git ls-remote origin",
             "GH_CONFIG_DIR=/cfg GIT_SSH_COMMAND=sh git ls-remote origin",
