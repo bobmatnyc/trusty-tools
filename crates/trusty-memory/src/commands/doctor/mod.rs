@@ -26,6 +26,8 @@
 
 mod audit;
 mod checks;
+// #8751: doctor-side threshold for a palace lock held too long.
+mod lock_stall;
 mod mcp_registration;
 // #8751: the lock scan classifies the maintenance lease by its holder pid.
 mod palace_locks;

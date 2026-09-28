@@ -280,6 +280,28 @@ pub(super) fn interpret_health_body(
     status: u16,
     body: Option<&serde_json::Value>,
 ) -> CheckResult {
+    // #8751: doctor's own stall line, read from env like the wedge threshold.
+    let stall = super::lock_stall::lock_stall_threshold();
+    interpret_health_body_with_stall(label, url, status, body, stall)
+}
+
+/// [`interpret_health_body`] with the palace-lock stall threshold supplied.
+///
+/// Why (#8751): the lock age arrives in the body, so a test drives the
+/// threshold crossing deterministically by pairing a body with a threshold.
+/// What: the same chain, plus a `Warn` naming the palace and age once the
+/// daemon's `stalled_lock` is held past `stall` (see
+/// [`super::lock_stall::stalled_lock_verdict`]), checked after the stall
+/// detector has vouched for itself and before the warming and degraded rows.
+/// Test: `a_lock_held_past_the_threshold_warns_with_palace_and_age`,
+/// `a_lock_held_up_to_the_threshold_keeps_the_pass_line`.
+pub(super) fn interpret_health_body_with_stall(
+    label: String,
+    url: &str,
+    status: u16,
+    body: Option<&serde_json::Value>,
+    stall: Duration,
+) -> CheckResult {
     let Some(body) = body else {
         return CheckResult::unknown(
             label,
@@ -397,6 +419,15 @@ pub(super) fn interpret_health_body(
                 ),
             );
         }
+    }
+
+    // #8751: a lock held past doctor's stall line, below the daemon's wedge
+    // line, is named here instead of reading as "workers progressing".
+    let prefix = format!("{url} → {status}");
+    if let Some(verdict) =
+        super::lock_stall::stalled_lock_verdict(&label, &prefix, stalled_lock, stall)
+    {
+        return verdict;
     }
 
     let daemon_state = body.get("daemon_state").and_then(|v| v.as_str());
