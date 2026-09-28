@@ -26,6 +26,9 @@
 #      detection error.
 #   3. Drop the three Tauri UI crates. The headless runner has no WebKit2GTK, and
 #      each has its own dedicated job in ci.yml (see that file's header).
+#      Drop trusty-common too, and report it as `trusty_common=true`: its empty
+#      default feature set means no single `-p trusty-common` run covers it, so
+#      ci.yml's `trusty-common-lanes` job runs its coverage lanes instead.
 #   4. Split the rest into at most `--max-legs` legs (default 8, the shard
 #      count), greedy longest-first on a weight of the crate's `#[test]` /
 #      `#[tokio::test]` attribute count, so trusty-mpm (~8k tests) gets a leg
@@ -34,6 +37,7 @@
 # Output: `key=value` lines on stdout, also appended to $GITHUB_OUTPUT when set:
 #   count=<n>  crates=<space-separated>  reason=<one line>
 #   matrix={"include":[{"leg":1,"total":L,"crates":"a b"},...]}
+#   trusty_common=true|false   (selected; left out of `crates` and `matrix`)
 #
 # Exit: 0 on every answer, including "no crates". Non-zero only when
 #   select-test-crates.sh itself exits non-zero (a malformed invocation) or on
@@ -47,6 +51,9 @@ set -uo pipefail
 MAX_LEGS=8
 DOCS_ONLY=""
 UI_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
+# Tested by ci.yml's `trusty-common-lanes` job, never by a leg.
+LANES_CRATE="trusty-common"
+TRUSTY_COMMON=false
 
 usage() {
   echo "Usage: ci-affected-test-plan.sh [--docs-only true|false] [--max-legs N] -- <select-test-crates.sh args>" >&2
@@ -87,6 +94,7 @@ finish_empty() {
   emit crates ""
   emit matrix '{"include":[]}'
   emit reason "$1"
+  emit trusty_common "$TRUSTY_COMMON"
   exit 0
 }
 
@@ -103,6 +111,10 @@ fi
 crates=()
 dropped=()
 for c in $selected; do
+  if [ "$c" = "$LANES_CRATE" ]; then
+    TRUSTY_COMMON=true
+    continue
+  fi
   case " ${UI_CRATES} " in
     *" ${c} "*) dropped+=("$c") ;;
     *) crates+=("$c") ;;
@@ -113,6 +125,9 @@ if [ ${#dropped[@]} -gt 0 ]; then
   echo "Tauri UI crates left to their dedicated ci.yml jobs: ${dropped[*]}" >&2
 fi
 if [ ${#crates[@]} -eq 0 ]; then
+  if [ "$TRUSTY_COMMON" = "true" ]; then
+    finish_empty "no affected-crate legs: only trusty-common, tested by the trusty-common coverage lanes job"
+  fi
   if [ ${#dropped[@]} -gt 0 ]; then
     finish_empty "no affected crates: only Tauri UI crates (${dropped[*]}), tested by their own jobs"
   fi
@@ -167,3 +182,4 @@ emit count "${#crates[@]}"
 emit crates "$sorted"
 emit matrix "$matrix"
 emit reason "${#crates[@]} affected crate(s) over ${legs} leg(s)"
+emit trusty_common "$TRUSTY_COMMON"
