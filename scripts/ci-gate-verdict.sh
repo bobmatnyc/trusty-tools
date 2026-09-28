@@ -43,7 +43,6 @@ clippy|Clippy|-
 msrv|MSRV check|-
 affected|Rust tests (affected crates)|-
 agents-ui|trusty-agents-ui clippy|-
-audit-ui|trusty-audit-ui clippy|-
 mpm-gui|trusty-mpm-gui clippy|-
 code-gui|trusty-code-gui clippy|-
 search-daemon-smoke|trusty-search daemon smoke test|-

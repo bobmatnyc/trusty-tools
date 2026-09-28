@@ -83,7 +83,7 @@ on:
   workflow_dispatch:
     inputs:
       crate:
-        description: "Crate to check — package name (tga) or crates/ directory (trusty-git-analytics)"
+        description: "Crate to check — package name or crates/ directory name"
         required: true
         type: string
 
@@ -136,9 +136,8 @@ jobs:
 
       # Three triggers, three ways to name what is under test:
       #   tag push          — the tag prefix, in whichever accepted form the
-      #                       tagger used. `tga-v1.4.2` and
-      #                       `trusty-git-analytics-v1.4.2` are both valid tags
-      #                       for the same crate (#1128), and `--crate` accepts
+      #                       tagger used — a package name or a crates/
+      #                       directory name (#1128) — and `--crate` accepts
       #                       either, so no alias table is duplicated here.
       #   workflow_dispatch — the crate the operator typed.
       #   pull_request      — #5311: every crate whose declared version this

@@ -24,11 +24,8 @@
 #      scripts/** or .github/** path selects only the crates whose Rust source
 #      names it literally, often none (#7777); and its FAIL OPEN applies on any
 #      detection error.
-#   3. Drop the four Tauri UI crates. The headless runner has no WebKit2GTK, and
+#   3. Drop the three Tauri UI crates. The headless runner has no WebKit2GTK, and
 #      each has its own dedicated job in ci.yml (see that file's header).
-#      Also drop `tga` and `trusty-audit`: both publish from
-#      bobmatnyc/trusty-git-analytics, whose CI owns their tests (owner ruling
-#      2026-09-27). Their dependents are still selected and still compile them.
 #   4. Split the rest into at most `--max-legs` legs (default 8, the shard
 #      count), greedy longest-first on a weight of the crate's `#[test]` /
 #      `#[tokio::test]` attribute count, so trusty-mpm (~8k tests) gets a leg
@@ -49,8 +46,7 @@ set -uo pipefail
 
 MAX_LEGS=8
 DOCS_ONLY=""
-UI_CRATES="trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
-EXTERNAL_CRATES="tga trusty-audit"
+UI_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
 
 usage() {
   echo "Usage: ci-affected-test-plan.sh [--docs-only true|false] [--max-legs N] -- <select-test-crates.sh args>" >&2
@@ -106,13 +102,9 @@ fi
 
 crates=()
 dropped=()
-external=()
 for c in $selected; do
   case " ${UI_CRATES} " in
-    *" ${c} "*) dropped+=("$c"); continue ;;
-  esac
-  case " ${EXTERNAL_CRATES} " in
-    *" ${c} "*) external+=("$c") ;;
+    *" ${c} "*) dropped+=("$c") ;;
     *) crates+=("$c") ;;
   esac
 done
@@ -120,15 +112,9 @@ done
 if [ ${#dropped[@]} -gt 0 ]; then
   echo "Tauri UI crates left to their dedicated ci.yml jobs: ${dropped[*]}" >&2
 fi
-if [ ${#external[@]} -gt 0 ]; then
-  echo "Crates tested by bobmatnyc/trusty-git-analytics, not here: ${external[*]}" >&2
-fi
 if [ ${#crates[@]} -eq 0 ]; then
   if [ ${#dropped[@]} -gt 0 ]; then
     finish_empty "no affected crates: only Tauri UI crates (${dropped[*]}), tested by their own jobs"
-  fi
-  if [ ${#external[@]} -gt 0 ]; then
-    finish_empty "no affected crates: only ${external[*]}, tested by bobmatnyc/trusty-git-analytics"
   fi
   finish_empty "no affected crates: the change set maps to no workspace crate"
 fi

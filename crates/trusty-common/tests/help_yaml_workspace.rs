@@ -8,7 +8,7 @@
 //! works, catching the regression at `cargo test -p trusty-common` time
 //! rather than at the user's terminal.
 //!
-//! What: walks the six known help.yaml paths (relative to the workspace
+//! What: walks the five known help.yaml paths (relative to the workspace
 //! root), loads each, and asserts every command has a non-empty description.
 //! The walk uses relative paths so the test works in both the main checkout
 //! and any worktree without needing a CARGO_MANIFEST_DIR resolver beyond the
@@ -32,7 +32,6 @@ const HELP_YAMLS: &[(&str, &str)] = &[
     ("../trusty-memory/help.yaml", "trusty-memory"),
     ("../trusty-analyze/help.yaml", "trusty-analyze"),
     ("../trusty-mpm/help.yaml", "trusty-mpm"),
-    ("../trusty-git-analytics/help.yaml", "tga"),
     ("../trusty-agents/help.yaml", "tagent"),
 ];
 

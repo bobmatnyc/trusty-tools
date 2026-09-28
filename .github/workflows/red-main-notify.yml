@@ -75,7 +75,6 @@ on:
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
       - "Token drift" # token-drift.yml
-      - "trusty-audit installer" # trusty-audit-install.yml
       - "UI bundle freshness" # ui-bundle-freshness.yml
       - "vmtest harness" # vmtest-harness.yml
       - "Website tests" # website-tests.yml

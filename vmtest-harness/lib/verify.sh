@@ -562,10 +562,10 @@ _verify_package_expectation() {
 #
 #   (a) DOCTOR DOES NOT ENUMERATE `tsv_scope_packages`. `commands/stack/
 #       doctor.rs:151` resolves `stable_set()` FILTERED TO `m.daemon`. So
-#       `trusty-code`, `trusty-installer` and `tga` are STRUCTURALLY ABSENT and
+#       `trusty-code` and `trusty-installer` are STRUCTURALLY ABSENT and
 #       can never satisfy a predicate quantified over `member(p)`. THEY ARE NOT
-#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 14 in-scope
-#       binaries present (including `tcode`, `trusty-installer`, `tctl`, `tga`)
+#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 12 in-scope
+#       binaries present (including `tcode`, `trusty-installer`, `tctl`)
 #       and `verify_single_install` gates the multi-binary ones. Both are
 #       UNAFFECTED by this scoping and both are stronger evidence of a correct
 #       install than a health field a non-daemon package does not have.
@@ -713,7 +713,7 @@ _verify_package_expectation() {
 #
 # WHAT THIS DOES NOT NARROW, so nobody over-reads it: `on_path == true` and
 # `version != null` are STILL ASSERTED for every in-scope member doctor reports;
-# all 14 binaries are still asserted present; all 4 Single-Install gates still
+# all 12 binaries are still asserted present; all 4 Single-Install gates still
 # run; §1.3's RC-1 liveness-only rule is untouched. DAEMON HEALTH, and nothing
 # else, is what narrowed.
 #

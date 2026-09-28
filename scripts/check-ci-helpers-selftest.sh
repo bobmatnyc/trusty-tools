@@ -971,7 +971,8 @@ unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
 # 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
-assert_eq "every apt step routes through the wrapper" "13" \
+# 13 -> 12: the `audit-ui` job left with trusty-audit-ui (owner ruling 2026-09-28).
+assert_eq "every apt step routes through the wrapper" "12" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

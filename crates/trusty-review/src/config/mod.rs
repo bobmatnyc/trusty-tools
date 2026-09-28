@@ -18,7 +18,9 @@ pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
 // #8649: per-call owner/repo -> index resolution for `review_pr`; crate-only
-// so the published API does not grow.
+// so the published API does not grow. Gated on `mcp`, its only caller, so a
+// `default-features = false` build carries no dead code.
+#[cfg(feature = "mcp")]
 pub(crate) mod repo_index;
 pub mod role_models;
 pub mod verification;

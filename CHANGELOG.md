@@ -13,7 +13,6 @@ The source of truth for changes to any crate is its own CHANGELOG:
 | **trusty-analyze** | [crates/trusty-analyze/CHANGELOG.md](crates/trusty-analyze/CHANGELOG.md) |
 | **trusty-mpm** | [crates/trusty-mpm/CHANGELOG.md](crates/trusty-mpm/CHANGELOG.md) |
 | **trusty-agents** | [crates/trusty-agents/CHANGELOG.md](crates/trusty-agents/CHANGELOG.md) |
-| **trusty-git-analytics** | [crates/trusty-git-analytics/CHANGELOG.md](crates/trusty-git-analytics/CHANGELOG.md) |
 | **trusty-review** | [crates/trusty-review/CHANGELOG.md](crates/trusty-review/CHANGELOG.md) |
 | **trusty-common** | [crates/trusty-common/CHANGELOG.md](crates/trusty-common/CHANGELOG.md) |
 | **trusty-embedderd** | [crates/trusty-embedderd/CHANGELOG.md](crates/trusty-embedderd/CHANGELOG.md) |

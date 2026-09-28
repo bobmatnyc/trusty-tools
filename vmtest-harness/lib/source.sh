@@ -310,7 +310,7 @@ source_deliver_released() {
 # <binary>`, once per TSV row — looks like tidying up and is a change in
 # meaning: DOC-1 §7.4's Single-Install Convention gate asserts exactly one
 # thing, that ONE package-granular install yields EVERY sidecar. Install each
-# sidecar by name and `verify_binaries` reports 14/14 while
+# sidecar by name and `verify_binaries` reports 12/12 while
 # `verify_single_install` passes four times over, and NOTHING has tested the
 # convention. A crate that silently stopped shipping a sidecar would still show
 # green. Unlike a missing table row, `--check-table` cannot catch it, because
@@ -468,14 +468,15 @@ install_from_path() {
 # entire interface".) That is why the caller drives this from
 # `tsv_scope_packages` and NEVER from `tsv_scope_crate_dirs`:
 #
-#     crates/trusty-git-analytics/  publishes as  **tga**
+#     crates/trusty-git-analytics/  published as  **tga**
 #
 # `cargo install trusty-git-analytics --locked` does not exist on crates.io. This
 # discontinuity between directory name and package name is exactly what DOC-1 D3
 # warns about and the whole reason `expected-binaries.tsv` carries BOTH columns.
-# A pattern-(a) loop written over crate directories fails on one crate out of
-# nine, and it fails at a LATE moment — after five successful multi-minute
-# installs, `trusty-git-analytics` being the sixth crate directory in TSV order.
+# While `tga` was in scope, a pattern-(a) loop written over crate directories
+# failed on one crate out of nine, at a LATE moment — after five successful
+# multi-minute installs. `tga` has since moved to bobmatnyc/trusty-git-analytics,
+# so today's eight in-scope packages match their directories; the rule stands.
 #
 # `--locked` IS MANDATORY, AND IT IS NOT A STYLE CHOICE. Default `cargo install`
 # RE-RESOLVES the dependency graph and IGNORES the lockfile the package was
@@ -601,9 +602,9 @@ install_from_registry() {
 # tripwire covering all three patterns. Patterns (b)/(c) install by DIRECTORY
 # (`tsv_scope_crate_dirs`, the default); pattern (a) installs by PACKAGE NAME
 # (`tsv_scope_packages`), because that is what `cargo install` takes (§9.2). Both
-# sets have nine members today, so a COUNT-ONLY check would pass pattern (a)
+# sets have eight members today, so a COUNT-ONLY check would pass pattern (a)
 # even if the loop had been driven off the wrong accessor and installed
-# `trusty-git-analytics` instead of `tga` — which is precisely the discontinuity
+# `trusty-git-analytics` instead of `tga` (when `tga` was in scope) — the discontinuity
 # DOC-1 D3 warns about. The assertion is therefore on the SET, not the count:
 # P7-T1's acceptance requires the installed package names to be EXACTLY
 # `tsv_scope_packages` — "no more, no fewer, none repeated" — and asserted
@@ -678,15 +679,16 @@ install_assert_install_count() {
         die 60 "a ${unit} was installed twice: $(printf '%s' "$dups" | tr '\n' ' ')"
     fi
 
-    # SET equality, not just count. Under pattern (a) both accessors emit nine
-    # values, so a count-only check cannot tell `tga` from
-    # `trusty-git-analytics` — the one discontinuity DOC-1 D3 names.
+    # SET equality, not just count. Under pattern (a) both accessors emit eight
+    # values, so a count-only check cannot tell a package name from its
+    # directory name — the discontinuity DOC-1 D3 names (`tga` vs
+    # `trusty-git-analytics`, before `tga` left the workspace).
     # #16: both operands are now plain files. `sort` is not die-capable, so
     # these two process substitutions carry no classification to lose.
     missing=$(comm -23 <(sort "$scope") <(sort "$ledger") | tr '\n' ' ')
     extra=$(comm -13 <(sort "$scope") <(sort "$ledger") | tr '\n' ' ')
     if [ -n "${missing# }" ] || [ -n "${extra# }" ]; then
-        die 60 "the installed set is not \`${accessor}\`'s set. NOT INSTALLED: ${missing:-<none>} / INSTALLED BUT NOT IN SCOPE: ${extra:-<none>}. Under pattern (a) the key is the PACKAGE name \`cargo install\` takes, not the directory: crates/trusty-git-analytics publishes as \`tga\` (DOC-2 §9.2, DOC-1 D3)."
+        die 60 "the installed set is not \`${accessor}\`'s set. NOT INSTALLED: ${missing:-<none>} / INSTALLED BUT NOT IN SCOPE: ${extra:-<none>}. Under pattern (a) the key is the PACKAGE name \`cargo install\` takes, not the directory (DOC-2 §9.2, DOC-1 D3)."
     fi
 
     log "install count OK: ${actual} package-granular installs, one per ${unit} from \`${accessor}\` (${expected}), none installed twice, set matches exactly ($(sort "$ledger" | tr '\n' ' '))"

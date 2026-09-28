@@ -191,7 +191,7 @@ commands, conversation. Directory is always `crates/<crate>/`.
 
 | Abbrev | Crate |
 |---|---|
-| `tga` | trusty-git-analytics (`-p tga`) |
+| `tga` | trusty-git-analytics — moved to bobmatnyc/trusty-git-analytics |
 | `tm` | trusty-memory |
 | `ts` | trusty-search |
 | `tc` | trusty-common |
@@ -201,7 +201,7 @@ commands, conversation. Directory is always `crates/<crate>/`.
 | `t-agents-common` | trusty-agents-common |
 | `tcode` | trusty-code |
 | `tctl` | trusty-installer |
-| `taudit` | trusty-audit (bins `trusty-audit`, `taudit`) |
+| `taudit` | trusty-audit — moved to bobmatnyc/trusty-git-analytics |
 
 What each crate is for: [crate-map.md](docs/reference/crate-map.md).
 
