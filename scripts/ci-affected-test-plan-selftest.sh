@@ -10,10 +10,14 @@
 #   prints a fixed crate list (or fails), so the Cargo-inert short-circuit, the
 #   Tauri UI exclusion, the trusty-common split, the leg split and the error
 #   arms are checked without depending on this repo's live dependency graph.
-#   Four live cases at the end run the real selector against this checkout: a
-#   docs-only path and an unreferenced script each select nothing, a CI helper
-#   script selects the canary, and a trusty-common path selects trusty-common
-#   (for its lanes job) plus its dependents and no Tauri crate.
+#   Three `--event-name` cases (#8236) check the push/dispatch arm the selector
+#   never reaches: docs-only push -> trusty_common=false, code push ->
+#   trusty_common=true, and a missing/empty docs-only signal on push -> true
+#   (fail closed). Four live cases at the end run the real selector against
+#   this checkout: a docs-only path and an unreferenced script each select
+#   nothing, a CI helper script selects the canary, and a trusty-common path
+#   selects trusty-common (for its lanes job) plus its dependents and no Tauri
+#   crate.
 #
 # Test: this file is the test; ci.yml's `affected-plan` job runs it before
 #   the step that consults the plan.
@@ -90,6 +94,29 @@ if [ "$(field "$out" count)" = 1 ] && [ "$(field "$out" crates)" = "alpha" ] &&
   ! field "$out" matrix | grep -q trusty-common; then
   pass "trusty-common selected -> left out of the legs, trusty_common=true"
 else fail "trusty-common split: $out"; fi
+
+# 4b-push. #8236: a docs-only push/dispatch skips the trusty-common lanes too.
+stub 0 trusty-mpm
+out="$(plan --docs-only true --event-name push -- --files x)"
+if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" trusty_common)" = false ] &&
+  [ ! -e "${WORK}/stub-called" ]; then
+  pass "docs-only push -> trusty_common=false, selector not called"
+else fail "docs-only push: $out"; fi
+
+# 4b-code. A non-docs-only push runs the lanes (the shards never cover them).
+stub 0 trusty-mpm
+out="$(plan --docs-only false --event-name push -- --files x)"
+if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" trusty_common)" = true ] &&
+  [ ! -e "${WORK}/stub-called" ]; then
+  pass "code push -> trusty_common=true, selector not called"
+else fail "code push: $out"; fi
+
+# 4b-missing. A missing/failed docs-only signal on push fails closed to true.
+stub 0 trusty-mpm
+out="$(plan --docs-only "" --event-name push -- --files x)"
+if [ "$(field "$out" count)" = 0 ] && [ "$(field "$out" trusty_common)" = true ]; then
+  pass "push with empty docs-only signal -> trusty_common=true (fail closed)"
+else fail "push with empty docs-only signal: $out"; fi
 
 # 4c. trusty-common alone plans zero legs but still reports itself.
 stub 0 trusty-common

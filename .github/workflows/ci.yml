@@ -1494,11 +1494,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" != "pull_request" ]; then
-            reason="no affected crates: ${EVENT_NAME} run — the pre-publish shards test the whole workspace"
-            # The shards' `--workspace` feature union still leaves some
-            # trusty-common tests uncompiled, so its lanes run on every push.
-            printf 'count=0\nmatrix={"include":[]}\nreason=%s\ntrusty_common=true\n' "$reason" >> "$GITHUB_OUTPUT"
-            echo "$reason"
+            # scripts/ci-affected-test-plan.sh's own --event-name arm decides
+            # trusty_common: false on a docs-only push (#8236), true
+            # otherwise, including a missing/failed docs-only signal (fail
+            # closed — run the lanes).
+            bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" --event-name "${EVENT_NAME}" --
             exit 0
           fi
           # An unresolvable merge-base passes an empty range, which the
