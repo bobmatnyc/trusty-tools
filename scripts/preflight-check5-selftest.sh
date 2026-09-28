@@ -677,7 +677,7 @@ elif [[ ! -f "${RECORDS}/r5/trusty-mpm-1.6.4/${DECL_REL}" ]]; then
 elif [[ "$raw" == *"Safe to publish"* ]]; then
   fail_case "record/(r5) the summary said 'Safe to publish' over a recorded break" "$raw"
 elif [[ "$raw" != *"SHIPS"*"A PUBLIC-API BREAK: 25 break entry(ies)"* ]] \
-    || ! printf '%s\n' "$raw" | grep -q '^    enum_variant_added: '; then
+    || ! grep -q '^    enum_variant_added: ' <<<"$raw"; then
   fail_case "record/(r5) the summary does not list the recorded breaks" "$raw"
 else
   pass_case "record/(r5) check 5 + check 9 + check 3 permit, tree clean, declaration untouched, summary lists breaks"

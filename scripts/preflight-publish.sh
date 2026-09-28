@@ -1074,7 +1074,7 @@ semver_record_break() {
 
 semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
-  local summary checked skipped inventoried blind compared blind_why entries
+  local summary checked skipped inventoried blind compared blind_why entries err_line
 
   # --- EXIT 1. Owner ruling 2026-09-26: a computed public-API break never forces
   #     a major version and never blocks a publish — it is recorded instead.
@@ -1086,8 +1086,13 @@ semver_decide() {
     entries="$(semver_break_entries "$log" "$pkg" 2> /dev/null)"
     if ! grep -q '^VERDICT: BREAK' "$log"; then
       blind_why="its output carries no 'VERDICT: BREAK' line"
-    elif [ -z "$entries" ] || printf '%s\n' "$entries" | grep -q '^ERROR'; then
-      blind_why="its break list does not parse: $(printf '%s\n' "$entries" | grep '^ERROR' | cut -f2- | head -1)"
+    # Here-string, and a parameter expansion in place of `| head -1`: under
+    # `set -euo pipefail` a large `$entries` (up to 25 break entries) can
+    # make `grep -q`/`head` exit before the writer finishes, taking SIGPIPE
+    # and reporting a false parse failure (#8716).
+    elif [ -z "$entries" ] || grep -q '^ERROR' <<<"$entries"; then
+      err_line="$(grep '^ERROR' <<<"$entries" | cut -f2-)"
+      blind_why="its break list does not parse: ${err_line%%$'\n'*}"
     else
       SEMVER_GATE_COMPARED=1
       semver_record_break "$log" "$pkg" "$version"

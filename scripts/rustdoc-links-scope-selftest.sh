@@ -95,7 +95,11 @@ rm -f "$out"
 echo "rustdoc-links-scope: workflow wiring"
 # ci.yml: the job computes the scope here and the release arm widens the gate.
 ci_job="$(awk '/^  rustdoc-links:$/ { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$CI")"
-has() { if printf '%s\n' "$1" | grep -qF -- "$2"; then echo yes; else echo no; fi; }
+# Here-string, NOT `printf '%s\n' "$1" | grep -qF`: under `set -uo pipefail`
+# `grep -q` exits at the FIRST match, and printf's write to a closed pipe then
+# takes SIGPIPE, so the pipeline's exit status is non-zero even though the
+# needle is present — timing-dependent, worse the larger `$1` is (#8716).
+has() { if grep -qF -- "$2" <<<"$1"; then echo yes; else echo no; fi; }
 assert_eq "ci.yml rustdoc-links runs the scope script" yes \
   "$(has "$ci_job" 'bash scripts/rustdoc-links-scope.sh')"
 assert_eq "ci.yml rustdoc-links passes --require-published" yes \
