@@ -226,7 +226,8 @@ package to its manifest, source, and documentation, use the
 `trusty-audit` (auditor handoff client, bins `trusty-audit` and `taudit`, plus
 `trusty-audit-ui`) build, release and publish from
 [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
-`tctl install tga` and `tctl install trusty-audit` still install them.
+`tctl install tga` still installs `tga`; `tctl install` does not take
+`trusty-audit` by name.
 
 ## Architecture
 
@@ -302,8 +303,7 @@ PATH — is the recommended route for its managed application set:
 together, knows which run as daemons, and can update its own control-plane
 binary. The live set is defined in
 [`stable_set.rs`](crates/trusty-installer/src/commands/stable_set.rs).
-`tga` and `trusty-audit` (installed by name: `tctl install trusty-audit`)
-come from
+`tga` comes from
 [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics)
 releases, with `cargo install` from crates.io as the fallback.
 

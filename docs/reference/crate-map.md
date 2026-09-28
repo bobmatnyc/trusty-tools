@@ -63,11 +63,11 @@ not reach nested Tauri manifests.
 plus the `trusty-audit-ui` desktop client) left this workspace (owner ruling
 2026-09-28). They build, release and publish from
 [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
-`tctl install tga` and `tctl install trusty-audit` still install them: the
-installer's external-tool table
-(`crates/trusty-installer/src/download/external.rs`) fetches their prebuilts
-from that repo's GitHub releases and falls back to `cargo install` from
-crates.io.
+The installer's external-tool table
+(`crates/trusty-installer/src/download/external.rs`) routes their prebuilts
+to that repo's GitHub releases. `tctl install tga` still installs `tga`, with
+`cargo install` from crates.io as the fallback; `tctl install` does not take
+`trusty-audit` by name.
 
 ## Consolidated former packages
 

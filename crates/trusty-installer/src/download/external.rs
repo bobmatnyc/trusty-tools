@@ -1,8 +1,9 @@
-//! Tools `tctl` installs that are built and released OUTSIDE this workspace.
+//! Tools whose prebuilts the installer fetches but which are built and
+//! released OUTSIDE this workspace.
 //!
 //! Why: `tga` and `trusty-audit` left the trusty-tools workspace (owner ruling
 //! 2026-09-28). They build, tag and publish from `bobmatnyc/trusty-git-analytics`,
-//! yet `tctl` still installs them. Their origin therefore has to be a row the
+//! yet the installer still fetches their prebuilts. Their origin therefore has to be a row the
 //! installer owns, not the assumption that every installable crate sits under
 //! this repo's `crates/`.
 //!
@@ -11,8 +12,9 @@
 //! the GitHub repo hosting its release assets, any extra release-tag spelling,
 //! and its asset filename prefix. [`external_tool`] finds a row under any
 //! spelling. Release routing, tag aliases and asset names in
-//! [`super::release`], and the by-name install catalogue in
-//! `commands::stable_set::installable_members`, all read this table.
+//! [`super::release`] read this table. A row does not make a tool installable
+//! by name; only a `commands::stable_set::stable_set` row does, and `tga` has
+//! one while `trusty-audit` does not (ruling 2026-09-28 00:25Z).
 //!
 //! Test: `tests::external_tools_publish_from_trusty_git_analytics`,
 //! `tests::external_tool_resolves_under_every_spelling`,
@@ -38,11 +40,11 @@ pub(crate) struct ExternalTool {
     pub asset_prefix: &'static str,
 }
 
-/// Every external tool `tctl` installs.
+/// Every external tool whose prebuilts the installer fetches.
 ///
 /// `tga`'s tarball and one tag spelling carry its former directory name,
 /// `trusty-git-analytics` (#6771). Add a row when another crate leaves the
-/// workspace; installing it by name then needs no other edit.
+/// workspace.
 pub(crate) const EXTERNAL_TOOLS: &[ExternalTool] = &[
     ExternalTool {
         crate_name: "tga",
