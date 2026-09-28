@@ -117,6 +117,11 @@ pub(crate) mod worktree_claim_source;
 #[cfg(test)]
 #[path = "worktree_reclaim_owner_liveness_tests.rs"]
 mod worktree_reclaim_owner_liveness_tests;
+// #7771: end-to-end coverage for an agent tree whose dispatching Claude session
+// a restart or `/clear` replaced.
+#[cfg(test)]
+#[path = "worktree_reclaim_superseded_owner_tests.rs"]
+mod worktree_reclaim_superseded_owner_tests;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;
