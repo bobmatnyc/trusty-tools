@@ -72,6 +72,7 @@ trusty-mpm	lib	core::session_launch::tests::deploy_output_style_writes_all_style
 trusty-mpm	lib	core::session_launch::tests::deploy_output_style_writes_file	reads bundle::OUTPUT_STYLE
 trusty-mpm	lib	core::session_launch::tests_quarantine_4448::every_bundled_agent_roots_at_base_agent	reads agent_assets::AGENT_ASSETS_DIR
 trusty-mpm	lib	core::session_launch::tests_quarantine_4448::the_bundled_base_agent_carries_the_composition_marker	reads agent_assets::BASE_AGENT
+trusty-mpm	lib	core::session_profile::tests	3 reads: OUTPUT_STYLE, OUTPUT_STYLE_SUPERVISOR, include of '../assets/instructions/sections/agent-delegation.md'
 trusty-mpm	lib	core::skill_drift::tests::a_pristine_bundled_deploy_is_entirely_fresh	reads bundle::ALL
 trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename	reads bundle::TM_CAPABILITIES_MCP_TOOLS
 trusty-mpm	lib	core::skill_source::tests::materialize_skill_artifacts_writes_all_skills	reads bundle::ALL
