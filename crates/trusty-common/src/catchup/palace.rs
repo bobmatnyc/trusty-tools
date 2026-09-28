@@ -228,12 +228,10 @@ mod tests {
         assert_eq!(drawers[1].title, "Old note");
     }
 
-    /// Live-daemon test: mark #[ignore] so CI doesn't require the daemon running.
     /// Uses a socket path nothing binds rather than any resolved daemon path —
     /// the point of the test is only "does not panic", exercising the fail-open
-    /// `None` path.
+    /// `None` path. Needs no daemon, so it runs by default.
     #[tokio::test]
-    #[ignore]
     async fn live_drawer_fetch() {
         let drawers = fetch_recent_palace_drawers(
             std::path::Path::new("/nonexistent/trusty-memory.sock"),

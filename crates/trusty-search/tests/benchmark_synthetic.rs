@@ -663,7 +663,7 @@ fn percentile(sorted: &[u128], p: usize) -> u128 {
 /// What: the steps documented in the file-level comment.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "benchmark: needs the isolated fixture daemon and corpus (support/isolated_benchmark.rs)"]
 async fn benchmark_synthetic_corpus_all_modes() {
     let client = make_client();
     assert_daemon_healthy(&client).await;
