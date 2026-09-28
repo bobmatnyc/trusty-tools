@@ -24,12 +24,14 @@
 //! - `echo`, `pwd`.
 //!
 //! A pipe stage after the first must be `cat`, `head`, `tail`, `wc`, `grep`,
-//! `rg` or `sed`.
+//! `rg` or `sed`. One environment prefix is admitted: a bare
+//! `GH_CONFIG_DIR=<dir>` before the first stage's `git ls-remote` (#8628).
 //! Test: `read_only_allow_tests::legitimate_reads_stay_allowed`,
-//! `read_only_allow_tests::critic_round_three_probes_are_refused`.
+//! `read_only_allow_tests::critic_round_three_probes_are_refused`,
+//! `read_only_allow_tests::a_gh_config_dir_prefix_reaches_git_ls_remote`.
 
 use super::read_only_gh::check_gh;
-use super::read_only_git::check_git;
+use super::read_only_git::{check_git, check_git_ls_remote};
 
 /// One argument of a judged command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +138,15 @@ const FIND_VALUED: &[&str] = &[
 /// rest fits its shape; `Err` otherwise.
 /// Test: as the module doc.
 pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
+    // #8628: the #7748 base-ref check needs the project's gh credential.
+    if let Some(rest) = gh_config_prefixed(args) {
+        return match rest.first() {
+            Some(Arg::Lit { text, bare: true }) if text == "git" && !piped => {
+                check_git_ls_remote(&rest[1..])
+            }
+            _ => Err("a `GH_CONFIG_DIR=<dir>` prefix before anything but `git ls-remote`".into()),
+        };
+    }
     let program = match args.first() {
         Some(Arg::Lit { text, bare: true }) => text.as_str(),
         _ => return Err("a program named by anything but a bare word".into()),
@@ -164,6 +175,28 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
         _ => Err(format!(
             "`{program}`, which is not on the read-only allowlist"
         )),
+    }
+}
+
+/// The argv after a leading `GH_CONFIG_DIR=<dir>` assignment, if one leads (#8628).
+///
+/// Why: a read-only `security` agent runs the #7748 base-ref check, and a bare
+/// `git ls-remote` found no credential ("Device not configured").
+/// What: `Some(rest)` when `args[0]` is a bare literal `GH_CONFIG_DIR=` with a
+/// non-empty value. A quoted word is a program name to the shell, not an
+/// assignment, so it is not stripped. `None` otherwise.
+/// Test: `read_only_allow_tests::a_gh_config_dir_prefix_reaches_git_ls_remote`,
+/// `read_only_allow_tests::a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote`.
+fn gh_config_prefixed(args: &[Arg]) -> Option<&[Arg]> {
+    match args.first() {
+        Some(Arg::Lit { text, bare: true })
+            if text
+                .strip_prefix("GH_CONFIG_DIR=")
+                .is_some_and(|dir| !dir.is_empty()) =>
+        {
+            Some(&args[1..])
+        }
+        _ => None,
     }
 }
 

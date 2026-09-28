@@ -24,6 +24,9 @@
 //!   only after `--list`/`-l`;
 //! - `worktree list [--porcelain|-v|--verbose|-z]`.
 //!
+//! [`check_git_ls_remote`] is the narrower judge for a command that carries a
+//! `GH_CONFIG_DIR=<dir>` prefix: the same walk, and `ls-remote` only (#8628).
+//!
 //! `checkout`, `restore`, `switch`, `fetch` and every other subcommand are
 //! refused: each moves a ref or rewrites the tree, and `git checkout <name>`
 //! cannot be told from `git checkout <path>` without asking the filesystem.
@@ -31,7 +34,8 @@
 //! `core.fsmonitor`, `diff.external`, a textconv driver, `gpg.program`,
 //! `core.pager` — and `git status` refreshing `.git/index`.
 //! Test: `read_only_allow_tests::git_reads_pass_and_everything_else_is_refused`,
-//! `read_only_allow_tests::git_dash_c_is_judged_as_its_plain_form` (#8578).
+//! `read_only_allow_tests::git_dash_c_is_judged_as_its_plain_form` (#8578),
+//! `read_only_allow_tests::a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote`.
 
 use super::read_only_programs::Arg;
 
@@ -107,6 +111,35 @@ const BRANCH_VALUED: &[&str] = &[
 /// What: `Ok` for an allowlisted read; `Err` naming the refusal otherwise.
 /// Test: as the module doc.
 pub(super) fn check_git(rest: &[Arg]) -> Verdict {
+    let (sub, tail) = subcommand(rest)?;
+    match sub {
+        s if READS.contains(&s) => read(s, tail),
+        "branch" => branch(tail),
+        "worktree" => worktree(tail),
+        _ => Err(format!(
+            "`git {sub}`, which is not a read (a read-only agent never moves a ref or restores a file)"
+        )),
+    }
+}
+
+/// Judge a `git` argv that carries a `GH_CONFIG_DIR=<dir>` prefix (#8628).
+///
+/// Why: the #7748 base-ref check runs `git ls-remote`, which needs the
+/// project's gh credential; no other read talks to the remote.
+/// What: `Ok` only for an `ls-remote` that [`check_git`] would allow.
+/// Test: `read_only_allow_tests::a_gh_config_dir_prefix_reaches_git_ls_remote`,
+/// `read_only_allow_tests::a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote`.
+pub(super) fn check_git_ls_remote(rest: &[Arg]) -> Verdict {
+    match subcommand(rest)? {
+        ("ls-remote", tail) => read("ls-remote", tail),
+        (sub, _) => Err(format!(
+            "a `GH_CONFIG_DIR=<dir>` prefix before `git {sub}` (only `git ls-remote` may carry it)"
+        )),
+    }
+}
+
+/// Walk the allowlisted global options; return the subcommand and its args.
+fn subcommand(rest: &[Arg]) -> Result<(&str, &[Arg]), String> {
     let mut i = 0;
     let sub = loop {
         let Some(arg) = rest.get(i) else {
@@ -133,15 +166,7 @@ pub(super) fn check_git(rest: &[Arg]) -> Verdict {
             break t;
         }
     };
-    let tail = &rest[i + 1..];
-    match sub {
-        s if READS.contains(&s) => read(s, tail),
-        "branch" => branch(tail),
-        "worktree" => worktree(tail),
-        _ => Err(format!(
-            "`git {sub}`, which is not a read (a read-only agent never moves a ref or restores a file)"
-        )),
-    }
+    Ok((sub, &rest[i + 1..]))
 }
 
 /// A read subcommand without an option that writes or runs a program.
