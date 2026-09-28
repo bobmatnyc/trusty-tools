@@ -5,7 +5,8 @@
 //! The config turns the pressure, load and census gates off (their decisions
 //! are unit-tested with scripted readings in `core::build_lease`), so these
 //! cases measure the lease mechanics alone and do not depend on how busy the
-//! machine running them is. No daemon listens at the configured URL. The
+//! machine running them is. No daemon listens at the configured URL, except
+//! in `a_held_slot_survives_a_daemon_restart_8819`, which restarts one. The
 //! heavy-build table is `sleep`, `true`, `sh` and `touch`, so the real binary
 //! leases these stand-in builds (it refuses anything the table does not match),
 //! and the debug-only fallback-store override keeps every case off the
@@ -829,5 +830,113 @@ fn a_target_dir_after_the_double_dash_is_never_read_as_cargos_own_flag() {
     assert_eq!(
         got_argv, want_argv,
         "the argv handed to the child must be byte-identical to the input argv: {err}"
+    );
+}
+
+/// A real `tm daemon` on `port`, confined to `home` (#8819).
+///
+/// What: `--force` because no launchd supervises a test daemon; the scratch
+/// `$HOME` disables its tmux and host-process discovery, and the orphan GC and
+/// Telegram bot are switched off so it touches nothing outside `home`.
+fn spawn_daemon(home: &Path, port: u16) -> Child {
+    let child = common::tm_command_in(home)
+        .current_dir(home)
+        .env("TRUSTY_MPM_ORPHAN_GC", "0")
+        .env_remove("TELEGRAM_BOT_TOKEN")
+        .args(["daemon", "--force", "--addr"])
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a daemon");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !daemon_healthy(port) {
+        assert!(Instant::now() < deadline, "no daemon answered on {port}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child
+}
+
+/// Whether `GET /health` on `port` answers 200.
+fn daemon_healthy(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    let mut reply = String::new();
+    stream.write_all(request.as_bytes()).is_ok()
+        && stream.read_to_string(&mut reply).is_ok()
+        && reply.starts_with("HTTP/1.1 200")
+}
+
+/// Whether `pid` is a live process.
+fn pid_alive(pid: u32) -> bool {
+    let pid = i32::try_from(pid).expect("pid");
+    // SAFETY: kill(2) with signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// #8819 under the build lease: a daemon restart forgets no held slot, because
+/// the daemon holds none — the slot is the build's own kernel flock.
+///
+/// A holder leases the only slot and logs its decision in a real daemon. That
+/// daemon is SIGKILLed (the `launchctl kickstart -k` case) and a new one is
+/// started on the same port. While the holder runs, a second lease is refused
+/// naming the holder's pid, and the restarted daemon logs the refusal. Once the
+/// holding process exits, the slot is granted — so the refused lease also left
+/// nothing held behind it (#8816).
+#[test]
+fn a_held_slot_survives_a_daemon_restart_8819() {
+    let home = home_with_ceiling(1, "");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    let url = format!("http://127.0.0.1:{port}");
+    let mut daemon = spawn_daemon(home.path(), port);
+    let holder = build_lease(home.path())
+        .env("TRUSTY_MPM_URL", &url)
+        .args(["--", "sleep", "30"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a holder");
+    let holder_pid = holder.id();
+    wait_for_holders(home.path(), 1);
+
+    daemon.kill().expect("SIGKILL the daemon");
+    let _ = daemon.wait();
+    let restarted = spawn_daemon(home.path(), port);
+
+    let refused = build_lease(home.path())
+        .env("TRUSTY_MPM_URL", &url)
+        .args(["--wait-secs", "2", "--", "true"])
+        .output()
+        .expect("a second lease");
+    let err = stderr(&refused);
+    let holder_ran = pid_alive(holder_pid);
+    stop(holder);
+    let next = build_lease(home.path())
+        .env("TRUSTY_MPM_URL", &url)
+        .args(["--wait-secs", "5", "--", "true"])
+        .output()
+        .expect("a lease after the holder exits");
+    stop(restarted);
+
+    assert!(holder_ran, "the holder was alive during the refusal");
+    assert_eq!(refused.status.code(), Some(75), "{err}");
+    let holder_line = format!("slot 0: sleep 30 (pid {holder_pid},");
+    assert!(err.contains(&holder_line), "missing {holder_line:?}: {err}");
+    assert!(
+        !err.contains("did not log"),
+        "the restarted daemon logged the refusal: {err}"
+    );
+    assert_eq!(
+        next.status.code(),
+        Some(0),
+        "the slot is released when its holder exits: {}",
+        stderr(&next)
     );
 }
