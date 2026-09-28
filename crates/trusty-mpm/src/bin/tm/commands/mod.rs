@@ -151,6 +151,8 @@ pub(crate) mod pm_guard_secret_positions;
 pub(crate) mod pm_guard_secret_env_files;
 // #8756: the secret rules read every command substitution's body.
 pub(crate) mod pm_guard_secret_nested;
+// #8869: a key handed to a consumer that never prints it; a GET secret listing.
+pub(crate) mod pm_guard_secret_consumers;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.

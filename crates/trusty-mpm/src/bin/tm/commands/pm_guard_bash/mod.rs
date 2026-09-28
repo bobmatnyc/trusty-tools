@@ -115,7 +115,9 @@ pub(crate) use bash_tokens::{
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.
-use bash_tokens::redirect_role;
+// #8869: and by the secret-read key-consumer rule, with the input-side parser.
+pub(crate) use bash_tokens::{RedirectRole, redirect_role};
+pub(crate) use credential_print::input_redirect_operand;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
 // is screened against the same pattern list, the same brace expander and the

@@ -209,6 +209,12 @@
 //! reader through the written FILE (`xargs cat < body.md` in a later call) is
 //! the variable-indirection residual below, which a `Write` call reaches too.
 //!
+//! #8869 grants two shapes beside the safe verbs, both owned by
+//! `pm_guard_secret_consumers`: a key passed as a literal path to a program
+//! that prints none of it (`gh secret set NAME < key.pem`,
+//! `openssl dgst -sign key.pem`), and a GET `gh api` of a secret-listing
+//! endpoint. Each mode is a closed flag list, so an unknown flag denies.
+//!
 //! What this costs, deliberately: naming a secret-shaped file in ANY command
 //! now denies, including one that reads nothing — `git log --grep .env`,
 //! `git commit -m "add .env.example"`, `cp .env .env.bak`. Rounds 1 to 4
@@ -373,6 +379,8 @@ use crate::commands::pm_guard_secret_positions::{
 use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 // #8756 round 2: the dump rules, and every rule on each substitution body.
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
+// #8869: a key consumer and a GET secret listing are granted beside the verbs.
+use crate::commands::pm_guard_secret_consumers::{gh_api_lists_secret_names, key_only_consumed};
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -619,7 +627,13 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         };
         // #8249: `terraform apply|plan -state=<file>` consumes the state and
         // prints none of its bytes, unlike `terraform show <file>`.
-        if segment_only_handles(trimmed, &named) || terraform_only_consumes_state(trimmed, &named) {
+        // #8869: so does a key handed to a listed consumer, and a GET that
+        // lists secret names.
+        if segment_only_handles(trimmed, &named)
+            || terraform_only_consumes_state(trimmed, &named)
+            || key_only_consumed(trimmed, &named)
+            || gh_api_lists_secret_names(trimmed, &named)
+        {
             continue;
         }
         return Some(deny_reason(first, &describe_command(trimmed)));
@@ -866,7 +880,7 @@ pub(crate) fn inline_program_indices(argv: &[String]) -> Vec<usize> {
 /// `allows_a_parameter_expansion_that_names_no_secret`,
 /// `allows_program_text_that_only_looks_like_a_brace_group`,
 /// `allows_a_brace_literal_passed_as_an_argument_value`.
-fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
+pub(crate) fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for spelling in scan_spellings(text) {
         for word in spelling.split(|c: char| !is_path_byte(c)) {
@@ -1303,7 +1317,11 @@ fn deny_reason(target: &str, how: &str) -> String {
          name — `sed -n '38,46p'` printed a live ngrok authtoken, then `dd if=`, `tar cf -`, \
          `php -r`, `deno eval` and `$(cat …)` did the same. Only `ls`, `stat`, `file`, `test`, \
          `rm` and `git add`/`rm`/`mv`/`status` may name such a file, and `git add` loses that \
-         grant under `-p`/`-i`/`-e`. There is no flag that buys an exception: run the tool so \
+         grant under `-p`/`-i`/`-e`. A key may also go, as a literal path, to a program that \
+         prints none of it (issue #8869): `gh secret set NAME < key`, `openssl dgst -sign`, \
+         `openssl pkeyutl -sign -inkey`, `openssl pkey -in … -pubout` and `ssh-keygen -y|-l -f`; \
+         and a GET `gh api …/secrets` may list secret names. Anything else, including a \
+         `$(cat key)` argument, still denies. There is no flag that buys an exception: run the tool so \
          that it picks the file up itself without you writing the name (`docker compose up` \
          reads `./.env`, `terraform apply` reads `./terraform.tfvars`), or ask the operator to \
          read it for you."
