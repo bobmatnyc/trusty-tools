@@ -280,6 +280,19 @@ fn ceiling_notice(ceiling: u32) -> String {
     )
 }
 
+/// Longest-running first, then by agent name.
+///
+/// Why: stable output so a deny message and a doctor row read the same way
+/// twice in a row; a `DashMap` scan has no inherent order. #8819: shared with
+/// the restored-lease holders, which are merged into the same list.
+pub(super) fn sort_holders(rows: &mut [BuilderHolder]) {
+    rows.sort_by(|a, b| {
+        b.elapsed_secs
+            .cmp(&a.elapsed_secs)
+            .then_with(|| a.agent.cmp(&b.agent))
+    });
+}
+
 impl DaemonState {
     /// Every builder currently holding one of this machine's slots.
     ///
@@ -314,8 +327,20 @@ impl DaemonState {
     /// Test: `census_separates_holders_from_expired_leases`.
     #[must_use]
     pub fn builder_slot_census(&self, cap: u32) -> BuilderSlotCensus {
+        self.builder_slot_census_with_pool_root(cap, None)
+    }
+
+    /// [`Self::builder_slot_census`], counting the restored leases under
+    /// `pool_root` among the holders (#8819).
+    /// Test: `the_census_counts_restored_leases_once_and_skips_stale_ones_8819`.
+    #[must_use]
+    pub fn builder_slot_census_with_pool_root(
+        &self,
+        cap: u32,
+        pool_root: Option<&Path>,
+    ) -> BuilderSlotCensus {
         BuilderSlotCensus {
-            holders: self.builder_slot_holders(None),
+            holders: self.builder_slot_holders_with_pool_root(None, pool_root),
             expired: self.builder_leases(None, |lease| lease == BuilderLease::ReleasedByTtl),
             cap,
         }
@@ -347,8 +372,22 @@ impl DaemonState {
         ceiling: u32,
         exclude_tool_use_id: Option<&str>,
     ) -> crate::core::builder_capacity::Capacity {
-        let held =
-            u32::try_from(self.builder_slot_holders(exclude_tool_use_id).len()).unwrap_or(u32::MAX);
+        self.builder_capacity_with_pool_root(config, ceiling, exclude_tool_use_id, None)
+    }
+
+    /// [`Self::builder_capacity`], counting the restored leases under
+    /// `pool_root` as held (#8819).
+    /// Test: `the_census_counts_restored_leases_once_and_skips_stale_ones_8819`.
+    #[must_use]
+    pub fn builder_capacity_with_pool_root(
+        &self,
+        config: &crate::core::builders::BuildersConfig,
+        ceiling: u32,
+        exclude_tool_use_id: Option<&str>,
+        pool_root: Option<&Path>,
+    ) -> crate::core::builder_capacity::Capacity {
+        let holders = self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool_root);
+        let held = u32::try_from(holders.len()).unwrap_or(u32::MAX);
         let readings = crate::core::builder_capacity::sample_capacity_readings();
         let mut quiet = self.builder_quiet_window.lock();
         crate::core::builder_capacity::resolve_capacity(
@@ -483,7 +522,9 @@ impl DaemonState {
         release: R,
     ) -> BuilderSlotGrant {
         let _claim = self.builder_claim_guard();
-        let holders = self.builder_slot_holders(exclude_tool_use_id);
+        // #8819: a restarted daemon also counts the leases it restored from disk.
+        let holders =
+            self.builder_slot_holders_with_pool_root(exclude_tool_use_id, pool.map(SlotPool::root));
         let admitted = eligible && u32::try_from(holders.len()).unwrap_or(u32::MAX) < cap;
         let mut grant = BuilderSlotGrant {
             holders,
@@ -832,13 +873,7 @@ impl DaemonState {
                 })
             })
             .collect();
-        // Stable output so a deny message and a doctor row read the same way
-        // twice in a row; a `DashMap` scan has no inherent order.
-        rows.sort_by(|a, b| {
-            b.elapsed_secs
-                .cmp(&a.elapsed_secs)
-                .then_with(|| a.agent.cmp(&b.agent))
-        });
+        sort_holders(&mut rows);
         rows
     }
 

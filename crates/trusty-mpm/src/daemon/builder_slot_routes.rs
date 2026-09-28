@@ -271,7 +271,15 @@ pub async fn builder_slot_route(
     // #8261: it is now MEASURED per decision rather than read once from the
     // tier table, with `builders.max_concurrent` as the hard ceiling.
     let config = MpmConfig::load_default().builders;
-    let capacity = capacity_for(&state, &config, resolve_max_concurrent(), &req.payload);
+    // #8819: the leases a previous daemon granted count toward the cap too.
+    let pool_root = dirs::home_dir().map(|home| config.effective_slot_pool_root(&home));
+    let capacity = capacity_for(
+        &state,
+        &config,
+        resolve_max_concurrent(),
+        &req.payload,
+        pool_root.as_deref(),
+    );
     // #8261: the pool is resolved HERE, in the daemon, for the same reason the
     // cap is — `builders.slot_pool_root` and the repo identity are the daemon's
     // to read, and a hook deriving them itself would be a second authority.
@@ -392,7 +400,8 @@ struct ResolvedPool {
 /// `tool_use_id` the claim itself excludes, read from the same payload, so the
 /// number that admits and the number that counts cannot disagree.
 /// What: reconciles the builder stop markers (#8548), then
-/// [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
+/// [`DaemonState::builder_capacity`] with `tool_use_id` excluded. #8819: the
+/// restored leases under `pool_root` count as held.
 /// Test: `the_throttle_excludes_the_claimants_own_record`,
 /// `the_claim_route_releases_a_user_stopped_holder_8548`.
 fn capacity_for(
@@ -400,11 +409,17 @@ fn capacity_for(
     config: &crate::core::builders::BuildersConfig,
     ceiling: u32,
     payload: &Value,
+    pool_root: Option<&std::path::Path>,
 ) -> Capacity {
     // #8548: free a user-stopped holder's slot before anything counts holders,
     // so the claim that needs the slot does not wait for the 60 s sweep.
     state.reconcile_builder_stop_markers();
-    state.builder_capacity(config, ceiling, str_field(payload, "tool_use_id"))
+    state.builder_capacity_with_pool_root(
+        config,
+        ceiling,
+        str_field(payload, "tool_use_id"),
+        pool_root,
+    )
 }
 
 /// The slot pool for this dispatch's repo, and the directory to seed from.
@@ -699,7 +714,10 @@ pub fn builder_slot_op_with_capacity(
 pub async fn builder_slot_census_route(
     State(state): State<Arc<DaemonState>>,
 ) -> Json<BuilderSlotCensus> {
-    Json(state.builder_slot_census(resolve_max_concurrent()))
+    // #8819: the census counts the leases a previous daemon granted.
+    let config = MpmConfig::load_default().builders;
+    let pool_root = dirs::home_dir().map(|home| config.effective_slot_pool_root(&home));
+    Json(state.builder_slot_census_with_pool_root(resolve_max_concurrent(), pool_root.as_deref()))
 }
 
 /// Does this payload claim a builder slot: a dispatch tool naming a builder,
@@ -1199,7 +1217,7 @@ mod tests {
             ..crate::core::builders::BuildersConfig::default()
         };
         let request = dispatch("rust-engineer", Some("toolu_SELF"));
-        let measured = capacity_for(&state, &config, 4, &request.payload);
+        let measured = capacity_for(&state, &config, 4, &request.payload, None);
 
         assert_eq!(
             measured.n_effective, 2,
@@ -1242,7 +1260,7 @@ mod tests {
         };
         let request = dispatch("rust-engineer", Some("toolu_NEXT"));
 
-        let measured = capacity_for(&state, &config, 1, &request.payload);
+        let measured = capacity_for(&state, &config, 1, &request.payload, None);
         let body =
             builder_slot_op_with_capacity(&state, &session.0.to_string(), request, &measured)
                 .expect("a well-formed session id");
@@ -1724,8 +1742,15 @@ mod tests {
         let (state, _dir, session) = hermetic();
         insert_builder(&state, session, "rust-engineer");
         let Json(census) = builder_slot_census_route(State(Arc::clone(&state))).await;
-        assert_eq!(census.holders.len(), 1);
-        assert_eq!(census.holders[0].agent, "rust-engineer");
+        // #8819: the route also counts the leases in this host's real slot
+        // pool, which depend on the machine running the test.
+        let own: Vec<_> = census
+            .holders
+            .iter()
+            .filter(|h| h.agent != crate::daemon::state::RESTORED_LEASE_AGENT)
+            .collect();
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].agent, "rust-engineer");
         assert!(census.expired.is_empty());
         // The cap comes from the host config; only its presence is assertable
         // here, since the number depends on the machine running the test.

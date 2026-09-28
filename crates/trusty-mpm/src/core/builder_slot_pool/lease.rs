@@ -14,10 +14,13 @@
 //! held, never free (ADR-0045).
 //! Test: the `#[cfg(test)]` suite below, and `builder_slot_lease_tests`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use trusty_common::github_path::GithubPath;
 
 use super::handover::SERVED_PREFIX;
 use super::{SEED_MARKER, STAGING_PREFIX_DOT, SlotPool, SlotPoolError, unique_nanos};
+use crate::core::session::SessionId;
 
 /// How far a live owner's start time may sit from the one the lease recorded.
 ///
@@ -41,6 +44,8 @@ pub struct SlotLease {
     pub owner_start: Option<i64>,
     /// When the slot was handed to `holder`.
     pub granted_at: i64,
+    /// The session that dispatched `holder`, so a restored lease can name it.
+    pub session: Option<SessionId>,
 }
 
 /// What the disk says about a slot's holder, before it is judged.
@@ -96,6 +101,12 @@ pub enum OwnerProbe {
 }
 
 impl SlotPool {
+    /// The pool root every repo's pool shares, for [`slots_under`] (#8819).
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Where slot `index`'s lease lives: `<parent>/.slot-<n>.lease`.
     ///
     /// Why: beside the slot, like the seed-failure record, so it never reads
@@ -126,6 +137,9 @@ impl SlotPool {
         }
         if let Some(start) = lease.owner_start {
             body.push_str(&format!("owner_start: {start}\n"));
+        }
+        if let Some(session) = lease.session {
+            body.push_str(&format!("session: {}\n", session.0));
         }
         let draft = path.with_file_name(format!(
             "{STAGING_PREFIX_DOT}slot-{index}.lease.draft.{}.{}",
@@ -204,12 +218,71 @@ fn parse_lease(body: &str) -> Option<SlotLease> {
     let granted_at = field("granted_at")?.parse().ok()?;
     let owner_pid = field("owner_pid").map(str::parse).transpose().ok()?;
     let owner_start = field("owner_start").map(str::parse).transpose().ok()?;
+    let session = field("session")
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .ok()?
+        .map(SessionId);
     Some(SlotLease {
         holder,
         owner_pid,
         owner_start,
         granted_at,
+        session,
     })
+}
+
+/// Every slot directory in every repo's pool under `root` (#8819).
+///
+/// Why: the builder cap is machine-wide, so a restarted daemon must count the
+/// leases in every repo's pool, not only the pool of the dispatch asking.
+/// What: `<root>/<owner>/<repo>/slot-<n>` as `(pool, n)`. A directory that
+/// exists and cannot be listed is an `Err` naming it, so the caller can count
+/// it as unverifiable rather than as empty; a missing `root` is no slots.
+/// Test: `slots_under_lists_every_repos_slots`.
+#[must_use]
+pub fn slots_under(root: &Path) -> Vec<Result<(SlotPool, u32), String>> {
+    let list = |dir: &Path| -> Result<Vec<(String, PathBuf)>, String> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => Ok(entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| Some((e.file_name().to_str()?.to_string(), e.path())))
+                .filter(|(name, _)| !name.starts_with('.'))
+                .collect()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(format!("{}: {err}", dir.display())),
+        }
+    };
+    let mut out = Vec::new();
+    let owners = match list(root) {
+        Ok(owners) => owners,
+        Err(err) => return vec![Err(err)],
+    };
+    for (owner, owner_dir) in owners {
+        let repos = match list(&owner_dir) {
+            Ok(repos) => repos,
+            Err(err) => {
+                out.push(Err(err));
+                continue;
+            }
+        };
+        for (repo, repo_dir) in repos {
+            let identity = GithubPath {
+                owner: owner.clone(),
+                repo,
+            };
+            let pool = SlotPool::new(root.to_path_buf(), identity, 1);
+            match list(&repo_dir) {
+                Ok(slots) => out.extend(slots.iter().filter_map(|(name, _)| {
+                    let index = name.strip_prefix("slot-")?.parse().ok()?;
+                    Some(Ok((pool.clone(), index)))
+                })),
+                Err(err) => out.push(Err(err)),
+            }
+        }
+    }
+    out
 }
 
 /// Is the slot this record describes still held by a lease the daemon lost?
@@ -291,7 +364,34 @@ mod tests {
             owner_pid: pid,
             owner_start: start,
             granted_at,
+            session: Some(SessionId::new()),
         }
+    }
+
+    /// #8819: every repo's slots are listed, and nothing that is not a slot.
+    #[test]
+    fn slots_under_lists_every_repos_slots() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pool = pool(root.path());
+        pool.seed(0, None).expect("a seeded slot 0");
+        pool.record_lease(0, &lease(Some(1), Some(1), 1))
+            .expect("lease");
+        let other = SlotPool::new(
+            root.path().join("pool"),
+            GithubPath {
+                owner: "acme".to_string(),
+                repo: "gadgets".to_string(),
+            },
+            4,
+        );
+        other.seed(3, None).expect("a seeded slot 3");
+        let mut found: Vec<PathBuf> = slots_under(&root.path().join("pool"))
+            .into_iter()
+            .map(|slot| slot.map(|(p, i)| p.slot_path(i)).expect("listable"))
+            .collect();
+        found.sort();
+        assert_eq!(found, vec![other.slot_path(3), pool.slot_path(0)]);
+        assert!(slots_under(&root.path().join("absent")).is_empty());
     }
 
     #[test]

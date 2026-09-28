@@ -13,13 +13,15 @@ use std::sync::Arc;
 use crate::core::builder_capacity::{Capacity, CapacityReason};
 use crate::core::builder_slot_pool::{SEED_MARKER, SlotPool, test_support::write_checkout};
 use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
-use crate::daemon::builder_slot_routes::{BuilderSlotRequest, builder_slot_op_with_pool};
+use crate::daemon::builder_slot_routes::{
+    BuilderSlotRequest, BuilderSlotResponse, builder_slot_op_with_pool,
+};
 
 use super::core::DaemonState;
 
 /// A pool under `root` with two seeded slots and a checkout naming a path
 /// package, which a handover needs (#8794).
-fn seeded_pool(root: &Path) -> SlotPool {
+pub(super) fn seeded_pool(root: &Path) -> SlotPool {
     let checkout = write_checkout(&root.join("checkout"));
     let pool = SlotPool::new(
         root.join("pool"),
@@ -38,7 +40,7 @@ fn seeded_pool(root: &Path) -> SlotPool {
 
 /// Where slot `index`'s lease lives, spelled out so this file compiles on the
 /// tree before #8819.
-fn lease_path(pool: &SlotPool, index: u32) -> PathBuf {
+pub(super) fn lease_path(pool: &SlotPool, index: u32) -> PathBuf {
     pool.slot_path(index)
         .with_file_name(format!(".slot-{index}.lease"))
 }
@@ -46,7 +48,24 @@ fn lease_path(pool: &SlotPool, index: u32) -> PathBuf {
 /// Claim a slot through the route op for a builder `tool_use_id`, dispatched
 /// by a session whose pid is this (live) test process. Returns the slot path
 /// the hook would suggest.
-fn suggested_slot(state: &Arc<DaemonState>, pool: &SlotPool, tool_use_id: &str) -> Option<String> {
+pub(super) fn suggested_slot(
+    state: &Arc<DaemonState>,
+    pool: &SlotPool,
+    tool_use_id: &str,
+) -> Option<String> {
+    let response = claim_via_route(state, pool, tool_use_id, 4);
+    assert!(response.claimed, "{response:?}");
+    response.slot_path
+}
+
+/// Claim through the route op against a measured capacity of `n_effective`,
+/// from a session whose pid is this (live) test process.
+fn claim_via_route(
+    state: &Arc<DaemonState>,
+    pool: &SlotPool,
+    tool_use_id: &str,
+    n_effective: u32,
+) -> BuilderSlotResponse {
     let mut session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
     session.status = SessionStatus::Active;
     session.pid = Some(std::process::id());
@@ -59,11 +78,11 @@ fn suggested_slot(state: &Arc<DaemonState>, pool: &SlotPool, tool_use_id: &str) 
         "tool_use_id": tool_use_id,
     });
     let capacity = Capacity {
-        n_effective: 4,
+        n_effective,
         ceiling: 4,
         reason: CapacityReason::WaitingOutQuietWindow { remaining_secs: 0 },
     };
-    let outcome = builder_slot_op_with_pool(
+    builder_slot_op_with_pool(
         state,
         &id.0.to_string(),
         BuilderSlotRequest { payload },
@@ -71,12 +90,11 @@ fn suggested_slot(state: &Arc<DaemonState>, pool: &SlotPool, tool_use_id: &str) 
         Some(pool),
         None,
     )
-    .expect("a well-formed session id");
-    assert!(outcome.response.claimed, "{:?}", outcome.response);
-    outcome.response.slot_path
+    .expect("a well-formed session id")
+    .response
 }
 
-fn slot(pool: &SlotPool, index: u32) -> Option<String> {
+pub(super) fn slot(pool: &SlotPool, index: u32) -> Option<String> {
     Some(pool.slot_path(index).to_string_lossy().into_owned())
 }
 
@@ -170,4 +188,26 @@ fn a_stale_lease_frees_its_slot_after_a_restart_8819() {
             "{why}: a stale lease must free its slot"
         );
     }
+}
+
+/// #8819 cap follow-up: A holds slot 0; the daemon restarts; with room for one
+/// builder, B is refused, and the refusal names A's restored lease. Before,
+/// the restarted daemon counted 0 holders and admitted B over the host limit.
+#[test]
+fn a_restored_lease_counts_toward_the_cap_after_a_restart_8819() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let pool = seeded_pool(root.path());
+    let before = Arc::new(DaemonState::new());
+    assert_eq!(suggested_slot(&before, &pool, "toolu_A"), slot(&pool, 0));
+    drop(before);
+
+    let after = Arc::new(DaemonState::new());
+    let b = claim_via_route(&after, &pool, "toolu_B", 1);
+
+    assert!(
+        !b.claimed,
+        "A's restored lease fills the one-builder cap: {b:?}"
+    );
+    let agents: Vec<&str> = b.holders.iter().map(|h| h.agent.as_str()).collect();
+    assert_eq!(agents, ["restored-lease"]);
 }
