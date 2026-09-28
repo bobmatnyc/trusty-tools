@@ -28,10 +28,11 @@
 #
 # What: Extracts the text between each family's BEGIN/END markers from every
 # member's build.rs and asserts the members of a family are byte-for-byte
-# identical. Exits 0 on success, 1 on any mismatch with a diff.
+# identical, then runs scripts/check_buildrs_watched_paths.sh over every build
+# script. Exits 0 on success, 1 on any mismatch with a diff.
 #
 # Test: Run `bash scripts/check_buildrs_sync.sh` from the workspace root.
-# Expected output: one "in sync" line per family.
+# Expected output: one "in sync" line per family, then one "watched paths" line.
 
 set -euo pipefail
 
@@ -99,5 +100,9 @@ check_family() {
 
 check_family "daemon" "" "${DAEMON_FILES[@]}"
 check_family "tauri-ui" "TAURI UI " "${TAURI_UI_FILES[@]}"
+
+# Every build script, not just the two families: a watched path that does not
+# exist re-runs its script on every build (QUICK BUILDS, 2026-09-27).
+"$WORKSPACE_ROOT/scripts/check_buildrs_watched_paths.sh" "$WORKSPACE_ROOT" || FAILED=1
 
 exit "$FAILED"

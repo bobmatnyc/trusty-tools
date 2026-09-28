@@ -98,6 +98,7 @@ use crate::session_manager::worktree_ownership::{
     is_harness_agent_worktree, read_sentinel_owner,
 };
 use crate::session_manager::worktree_removal_audit::audited_removal;
+use crate::session_manager::worktree_removal_integrity::{content_count, partial_removal};
 use crate::session_manager::worktree_safety::{
     DirtyWorktreePolicy, dirt_blocks_removal, worktree_remove_command,
 };
@@ -116,6 +117,8 @@ pub enum ReapOutcome {
     AlreadyGone,
     /// Left in place, for the stated reason.
     Refused(String),
+    /// Git failed after deleting some or all of the tree (#8782); never kept.
+    PartiallyRemoved(String),
 }
 
 impl ReapOutcome {
@@ -145,6 +148,8 @@ pub struct SweepSummary {
     pub already_gone: usize,
     /// A gate refused, and the directory is still there.
     pub kept: usize,
+    /// Git failed after deleting some or all of the tree (#8782).
+    pub partially_removed: usize,
 }
 
 /// What the delegation registry can say about `agent_id` (#5661).
@@ -322,14 +327,24 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     let outcome = audited_removal(
         path,
         &format!("agent-worktree reap: agent {agent_id} has finished with this tree"),
-        || match worktree_remove_command(&registry_root, path).output() {
-            Ok(o) if o.status.success() => WorktreeRemoval::Removed,
-            Ok(o) => WorktreeRemoval::Kept(format!(
-                "`git worktree remove --force` exited {}: {}",
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+        || {
+            // #8782: judged against this count if git fails.
+            let before = content_count(path);
+            match worktree_remove_command(&registry_root, path).output() {
+                Ok(o) if o.status.success() => WorktreeRemoval::Removed,
+                Ok(o) => {
+                    let failure = format!(
+                        "`git worktree remove --force` exited {}: {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                    match partial_removal(path, before, &failure) {
+                        Some(report) => WorktreeRemoval::PartiallyRemoved(report),
+                        None => WorktreeRemoval::Kept(failure),
+                    }
+                }
+                Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+            }
         },
     );
     reap_outcome_of(path, outcome)
@@ -364,6 +379,7 @@ fn reap_outcome_of(path: &Path, outcome: WorktreeRemoval) -> ReapOutcome {
             path.display()
         )),
         WorktreeRemoval::Kept(reason) => ReapOutcome::Refused(reason),
+        WorktreeRemoval::PartiallyRemoved(report) => ReapOutcome::PartiallyRemoved(report),
     }
 }
 
@@ -501,6 +517,9 @@ async fn reap_and_record(
                 path = %path.display(),
                 "agent-worktree reap: keeping this worktree — {reason} (#4311)"
             );
+        }
+        ReapOutcome::PartiallyRemoved(report) => {
+            tracing::warn!(agent_id, path = %path.display(), "agent-worktree reap: {report}");
         }
     }
     outcome
@@ -643,20 +662,24 @@ pub fn spawn_on_session_end(
                 ReapOutcome::Removed => summary.removed += 1,
                 ReapOutcome::AlreadyGone => summary.already_gone += 1,
                 ReapOutcome::Refused(_) => summary.kept += 1,
+                ReapOutcome::PartiallyRemoved(_) => summary.partially_removed += 1,
             }
         }
         let SweepSummary {
             removed,
             already_gone,
             kept,
+            partially_removed,
         } = summary;
         tracing::info!(
             session = %session.0,
             removed,
             already_gone,
             kept,
+            partially_removed,
             "agent-worktree reap: this session ended — removed {removed} of its agents' \
-             worktrees, found {already_gone} already gone and kept {kept} (#4311)"
+             worktrees, found {already_gone} already gone, kept {kept} and partially \
+             removed {partially_removed} (#4311, #8782)"
         );
         summary
     }))

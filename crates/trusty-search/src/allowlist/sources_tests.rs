@@ -255,6 +255,8 @@ fn sensitive_dir_inside_approved_root_is_still_denied() {
 
 /// The hard denylist beats every member of the union. A sensitive root stays
 /// refused even when explicitly allowlisted AND registered as a project.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_wins_over_project_registration() {
     let dir = tempfile::tempdir().expect("tempdir");

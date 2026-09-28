@@ -77,9 +77,12 @@ mod sync_assets;
 // unchanged.
 mod system_prompt;
 pub use system_prompt::{
-    build_system_prompt_for, build_system_prompt_for_with_roster,
-    build_system_prompt_for_with_style, build_system_prompt_for_with_style_and_native,
+    CliLaunch, build_system_prompt_for, build_system_prompt_for_profile,
+    build_system_prompt_for_with_roster, build_system_prompt_for_with_style,
+    build_system_prompt_for_with_style_and_native, cli_launch,
 };
+// #8453: the supervisor model key, written and removed by ownership.
+mod supervisor_model;
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -141,6 +144,10 @@ mod tests_settings_lock_7762;
 #[cfg(test)]
 #[path = "tests_style_selection_8533.rs"]
 mod tests_style_selection_8533;
+// #8453: a supervisor launch writes the supervisor prompt, style and model.
+#[cfg(test)]
+#[path = "tests_supervisor_profile_8453.rs"]
+mod tests_supervisor_profile_8453;
 
 // #8311: the catch-up watermark lands under `fw.root`, never the home.
 #[cfg(test)]
@@ -377,6 +384,8 @@ pub struct PrepReport {
     /// `true` means auto memory was turned off, `false` means it was restored.
     /// Test: `prepare_session_reports_the_resolved_reachability`.
     pub memory_reachable: bool,
+    /// The session profile this preparation resolved and wrote for (#8453).
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -606,6 +615,9 @@ pub(super) fn prepare_session_inner(
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
     // before style resolution) was a redundant filesystem read for the same data.
     let config = crate::core::config::MpmConfig::load(&fw.root);
+    // #8453: resolved ONCE per launch; the composer, the style, the model and
+    // the settings below all take this value, and it is returned for the stamp.
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
@@ -823,10 +835,13 @@ pub(super) fn prepare_session_inner(
     // flag and the host config, and a project style file resolves like a
     // bundled one.
     // The report (`describe_effective_style`) calls this same selector.
-    let selected_style =
-        crate::core::output_style::select_style(project_dir, explicit_style, &config, || {
-            plan.style.clone()
-        });
+    let selected_style = crate::core::output_style::select_style(
+        project_dir,
+        explicit_style,
+        &config,
+        || plan.style.clone(),
+        profile,
+    );
     let effective_style: Option<String> = selected_style.id.clone();
 
     // Resolve the active output style for settings.json using the same
@@ -863,6 +878,11 @@ pub(super) fn prepare_session_inner(
     if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
     }
+    // #8453: every launch path reads the project settings' `model`, including
+    // those that pass no `--model`; a supervisor runs on the Opus tier alias.
+    if let Err(err) = supervisor_model::write_supervisor_model(project_dir, profile) {
+        tracing::warn!("failed to update the supervisor model: {err}");
+    }
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -878,10 +898,11 @@ pub(super) fn prepare_session_inner(
     // breaking the stash/launch invariant in a host-dependent way. Routing both
     // through the single seam keeps them identical regardless of Claude version
     // (issue #381 / the #382 concern).
-    let resolved_prompt = build_system_prompt_for_with_style_and_native(
+    let resolved_prompt = build_system_prompt_for_profile(
         project_dir,
         effective_style.as_deref(),
         native_supported,
+        profile,
     );
     // #4752: these two writes DEGRADE TO A WARNING; they must never short-circuit
     // this function. An unwritable `.trusty-mpm/` (disk full, bad perms) used to
@@ -1204,6 +1225,7 @@ pub(super) fn prepare_session_inner(
         roster_errors,
         asset_notices,
         memory_reachable,
+        profile,
     })
 }
 

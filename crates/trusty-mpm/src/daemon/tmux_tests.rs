@@ -319,29 +319,40 @@ fn sanitized_pane_row_is_dropped_not_coerced() {
     );
 }
 
-/// The live listing against this host's real tmux server (#6529).
+/// The live listing against a real tmux server (#6529).
 ///
 /// Why: the parse tests above prove the pure function; only a real listing
 /// proves the SPAWN asks tmux for — and receives — the columns, which is where
-/// #6529 actually broke. Read-only: `list-panes` creates and kills nothing.
-/// What: lists every pane on the operator's server and asserts each row carries
-/// a non-empty command and a `%`-prefixed pane id, i.e. that the delimiters
-/// survived. Skips cleanly when no tmux binary or no server is present.
-/// Test: this is the test. `#[ignore]` because it needs the operator's server.
+/// #6529 actually broke.
+/// What: spawns one session on a private server, lists every pane on it and
+/// asserts each row carries a non-empty command and a `%`-prefixed pane id,
+/// i.e. that the delimiters survived. Skips cleanly when no tmux binary runs.
+/// #6542: this listed the operator's own server, and skipped when none ran; a
+/// `PrivateTmuxServer` never reads host state and always holds a row.
+/// Test: this is the test. `#[ignore]` because it needs a live tmux binary.
 #[test]
-#[ignore = "needs the host's live tmux server"]
+#[ignore = "needs a live tmux binary"]
 fn live_listing_keeps_its_columns() {
-    let Ok(driver) = TmuxDriver::discover() else {
+    use crate::test_support::tmux_session::{
+        PrivateTmuxServer, ScratchTmuxSession, reserved_session_name,
+    };
+    let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+    if !ScratchTmuxSession::tmux_available(&tmux_bin) {
         eprintln!("no tmux binary — skipping");
         return;
-    };
+    }
+    let server = PrivateTmuxServer::new(&tmux_bin, "listing");
+    let _session = ScratchTmuxSession::spawn_on_socket(
+        &tmux_bin,
+        Some(server.name()),
+        &reserved_session_name("listing"),
+        "sleep 300",
+    );
+    let driver = TmuxDriver::with_tmux_path_for_test(server.shim_bin());
     let panes = driver
         .list_managed_panes()
         .expect("list_managed_panes must not error against a live server");
-    if panes.is_empty() {
-        eprintln!("no tmux server running — skipping");
-        return;
-    }
+    assert!(!panes.is_empty(), "the private server holds one session");
     for pane in &panes {
         assert!(
             !pane.pane_current_command.is_empty(),

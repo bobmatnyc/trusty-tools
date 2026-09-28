@@ -26,11 +26,15 @@
 //! so the FIRST claim on a cold slot is admitted without a private directory
 //! and the next one finds it seeded.
 //!
-//! **Clone failure is not slot failure.** A filesystem without copy-on-write
-//! clones (any non-APFS volume, and every Linux filesystem `cp -c` does not
-//! know) still gets a working slot — an empty, cold directory — and the lease
+//! **A platform that cannot clone still gets a slot.** Every non-macOS
+//! platform gets a working slot — an empty, cold directory — and the lease
 //! record says so through [`SeedKind::ColdDirectory`], because an operator
-//! debugging a slow first build needs to know the clone did not happen.
+//! debugging a slow first build needs to know the clone did not happen. A clone
+//! that FAILS on macOS is different (#8794): the slot is left unmarked and
+//! retried, because a failed replace leaves a tree in an unknown state.
+//!
+//! **A slot holding a live build is never replaced (#8794).** Seeding checks
+//! the cargo `flock`s in the slot and refuses while one is held.
 //!
 //! Nothing here decides ADMISSION. The count comes from
 //! [`builder_capacity`](crate::core::builder_capacity); this module only turns
@@ -43,20 +47,41 @@ use std::path::{Path, PathBuf};
 
 use trusty_common::github_path::GithubPath;
 
+mod handover;
+
 /// The marker file that records a slot directory has been seeded.
 ///
 /// Why: seeding must happen ONCE per slot, not on every daemon restart and not
 /// on every N-shrink-then-grow cycle — a re-clone over a directory holding a
 /// live build's artifacts would corrupt it. A marker file survives both, which
 /// an in-memory flag does not.
-/// What: written inside the slot directory after a successful seed, with
-/// `create_new` so exactly ONE run ever writes it; its presence is the whole
-/// test, and it is also what [`SlotPool::reserve_path`] reads to decide whether
-/// a slot can be granted now.
+/// What: written inside the slot directory after a SUCCESSFUL seed only, and
+/// published by `hard_link` so exactly ONE run ever writes it and no reader
+/// sees it half-written. Presence alone is not the test (#8794): the body must
+/// read as seeded (`marker_reads_seeded`), which is also what
+/// [`SlotPool::reserve_path`] checks to decide whether a slot can be granted now.
 /// Test: `a_second_seed_does_not_reseed`,
 /// `a_reservation_on_a_seeded_slot_is_ready`,
-/// `two_staging_trees_for_one_index_publish_exactly_one_slot`.
+/// `two_staging_trees_for_one_index_publish_exactly_one_slot`,
+/// `a_failure_text_marker_is_treated_as_unseeded`.
 pub const SEED_MARKER: &str = ".trusty-slot-seeded";
+
+/// The line a marker body carries when the seed succeeded (#8794).
+const SEEDED_STATUS_LINE: &str = "status: seeded";
+
+/// The cold-slot detail when there is no warm directory to clone from.
+const NO_SOURCE_DETAIL: &str = "no warm shared target directory to clone from";
+
+/// The cold-slot detail prefix on a platform `cp -c` cannot clone on.
+const UNSUPPORTED_PREFIX: &str = "copy-on-write clone is macOS/APFS only";
+
+/// The lock files cargo creates in a build directory (`<target>/<profile>/`).
+///
+/// Why (#8794): cargo leaves these files behind after every build, so their
+/// existence says nothing; only a HELD `flock` on one marks a live build.
+/// Probed on cargo 1.94: `debug/.cargo-lock` is held exclusively for the whole
+/// build and free afterwards. The other two names are newer build-dir locks.
+const CARGO_LOCK_NAMES: [&str; 3] = [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"];
 
 /// How a slot directory came to exist.
 ///
@@ -71,10 +96,10 @@ pub const SEED_MARKER: &str = ".trusty-slot-seeded";
 pub enum SeedKind {
     /// Copy-on-write cloned from the repo's shared target directory.
     ClonedFromShared,
-    /// Created empty: no clone source, or the filesystem does not support
-    /// `cp -c`. The first build in this slot will be cold. `detail` says which.
+    /// Created empty: no clone source, or a platform `cp -c` cannot clone on.
+    /// The first build in this slot will be cold. `detail` says which.
     ColdDirectory(String),
-    /// The directory already existed and carries [`SEED_MARKER`] — the warm
+    /// The directory already existed and its [`SEED_MARKER`] reads as seeded — the warm
     /// case a released-then-reacquired slot takes.
     AlreadySeeded,
 }
@@ -85,7 +110,7 @@ pub enum SeedKind {
 /// has not been cloned yet — a builder pointed at a half-seeded slot would
 /// compile against a partial cache. So the bounded call answers which of the two
 /// states the slot is in, and the caller decides.
-/// What: [`Self::Ready`] is a slot carrying [`SEED_MARKER`] and usable now.
+/// What: [`Self::Ready`] is a slot whose [`SEED_MARKER`] reads as seeded, usable now.
 /// [`Self::Seeding`] is a slot whose parent now exists and whose seed has still
 /// to run; its path is NOT granted to this claim.
 /// Test: `a_reservation_on_an_unseeded_slot_seeds_nothing`,
@@ -119,6 +144,34 @@ pub enum SlotPoolError {
         #[source]
         source: std::io::Error,
     },
+    /// #8794: the slot holds a live cargo build, so the seed or the handover
+    /// refused it and left it as it was.
+    // #8794: neutral text — a handover refusal is not a seed refusal.
+    #[error("builder slot {path} is in use: cargo holds {lock}, so a build is running there")]
+    ActiveBuild {
+        /// The slot directory left untouched.
+        path: PathBuf,
+        /// The cargo lock file found held.
+        lock: PathBuf,
+    },
+    /// #8794: the clone did not land and the slot is in an unknown state, so
+    /// it stays unseeded (no marker) for the next attempt.
+    #[error("could not seed builder slot {path}: {detail}")]
+    SeedFailed {
+        /// The slot directory that stays unseeded.
+        path: PathBuf,
+        /// Why the seed failed.
+        detail: String,
+    },
+    /// #8794: a seeded slot could not be handed to a new holder, so it is not
+    /// handed out.
+    #[error("could not hand builder slot {path} to a new holder: {detail}")]
+    HandOver {
+        /// The slot directory that was not handed out.
+        path: PathBuf,
+        /// Why the handover failed.
+        detail: String,
+    },
 }
 
 /// One repo's slot pool, rooted at the operator's `builders.slot_pool_root`.
@@ -136,15 +189,35 @@ pub enum SlotPoolError {
 pub struct SlotPool {
     root: PathBuf,
     identity: GithubPath,
+    /// Where the dispatch was issued from; see [`Self::with_checkout`].
+    checkout: Option<PathBuf>,
+    /// #8794: slots `0..ceiling` are the only ones a claim may start seeding.
+    ceiling: u32,
 }
 
 impl SlotPool {
-    /// A pool under `root` for one repo.
+    /// A pool under `root` for one repo, seeding at most `ceiling` slots.
     ///
-    /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
+    /// Why (#8794): the seed of a new slot clones a target directory measured
+    /// at 207 GB. Without a bound, a pool whose seeded slots all fail their
+    /// handover would clone a new `slot-N` on every admission. `ceiling` is the
+    /// operator's builder ceiling, floored at one so a slot can always exist.
+    /// Test: `slot_paths_are_keyed_by_owner_and_repo`,
+    /// `a_failed_handover_is_not_reseeded_past_the_ceiling`.
     #[must_use]
-    pub fn new(root: PathBuf, identity: GithubPath) -> Self {
-        Self { root, identity }
+    pub fn new(root: PathBuf, identity: GithubPath, ceiling: u32) -> Self {
+        Self {
+            root,
+            identity,
+            checkout: None,
+            ceiling: ceiling.max(1),
+        }
+    }
+
+    /// The number of slot indexes, from zero, a claim may start seeding.
+    #[must_use]
+    pub fn ceiling(&self) -> u32 {
+        self.ceiling
     }
 
     /// Where slot `index` lives, whether or not it exists yet.
@@ -171,7 +244,7 @@ impl SlotPool {
     /// parent here is not incidental: it is still the fail-closed gate, so a
     /// pool root that cannot be written refuses the claim at claim time rather
     /// than minutes later on a background task nobody is reading.
-    /// What: [`SlotReservation::Ready`] when [`SEED_MARKER`] is present — the
+    /// What: [`SlotReservation::Ready`] when [`SEED_MARKER`] reads as seeded — the
     /// warm case a released slot leaves for its next holder — else
     /// [`SlotReservation::Seeding`], which grants NO directory and obliges the
     /// caller to run [`Self::seed`] off its own hot path.
@@ -187,7 +260,8 @@ impl SlotPool {
     /// `an_unwritable_root_is_an_error_not_a_shared_fallback`.
     pub fn reserve_path(&self, index: u32) -> Result<SlotReservation, SlotPoolError> {
         let path = self.slot_path(index);
-        if path.join(SEED_MARKER).is_file() {
+        // #8794: a marker a failed seed wrote does not make the slot Ready.
+        if marker_reads_seeded(&path) {
             return Ok(SlotReservation::Ready(path));
         }
         let parent = path.parent().unwrap_or(path.as_path());
@@ -206,9 +280,13 @@ impl SlotPool {
     /// build's artifacts would corrupt them; [`SEED_MARKER`] is what makes it
     /// one-time across daemon restarts. This is the UNBOUNDED half of the pool
     /// and must never run on a path a hook is waiting on — see the module doc.
-    /// What: returns the slot's path and how it came to be. An existing,
-    /// marked directory is returned untouched. A clone that fails for ANY
-    /// reason still yields a usable cold directory.
+    /// What: returns the slot's path and how it came to be. A directory whose
+    /// marker reads as seeded is returned untouched. A slot where a cargo build
+    /// holds its lock is refused and left as it is (#8794). A clone the
+    /// platform cannot make yields a usable cold directory; a clone that fails
+    /// on a clone-capable platform writes NO marker, records the failure beside
+    /// the slot (`.slot-<n>.seed-failed`), and leaves the slot unseeded (#8794).
+    /// Every attempt and its outcome is logged at info/warn.
     ///
     /// `clone_from` is the repo's current shared `CARGO_TARGET_DIR`. `None`, or
     /// a path that does not exist, gives a cold slot rather than an error — a
@@ -219,74 +297,272 @@ impl SlotPool {
     /// [`SlotPoolError::Create`] when the slot directory cannot be made, or when
     /// [`SEED_MARKER`] cannot be written. The marker failure is an error and not
     /// a warning (#8261 critic round): an unmarked directory is re-seeded by the
-    /// next caller, and a re-seed over a directory a builder is using is the
-    /// corruption the marker exists to prevent.
+    /// next caller. [`SlotPoolError::ActiveBuild`] when a live build holds the
+    /// slot; [`SlotPoolError::SeedFailed`] when the clone did not land.
     ///
     /// Test: `a_fresh_slot_is_cloned_from_the_shared_directory`,
     /// `a_missing_clone_source_still_yields_a_usable_cold_slot`,
     /// `a_second_seed_does_not_reseed`,
     /// `a_released_slot_directory_is_reused_by_the_next_holder`,
     /// `an_unmarked_directory_is_reseeded_without_nesting`,
-    /// `an_unwritable_root_is_an_error_not_a_shared_fallback`.
+    /// `an_unwritable_root_is_an_error_not_a_shared_fallback`,
+    /// `a_slot_with_a_held_cargo_lock_is_not_replaced`,
+    /// `a_stale_unheld_cargo_lock_does_not_block_seeding`,
+    /// `a_failed_replace_leaves_no_seeded_marker`,
+    /// `a_failure_text_marker_is_treated_as_unseeded`.
     pub fn seed(
         &self,
         index: u32,
         clone_from: Option<&Path>,
     ) -> Result<(PathBuf, SeedKind), SlotPoolError> {
         let path = self.slot_path(index);
-        if path.join(SEED_MARKER).is_file() {
+        if marker_reads_seeded(&path) {
             return Ok((path, SeedKind::AlreadySeeded));
         }
-        sweep_abandoned_staging(&path);
-        let seed = match clone_from.filter(|src| src.is_dir()) {
-            Some(src) => match clone_directory(src, &path) {
-                Ok(()) => SeedKind::ClonedFromShared,
-                Err(detail) => {
-                    // A clone that lost the publish race to another run leaves
-                    // the marker here; treat that as the warm case rather than
-                    // stamping ColdDirectory over its tree.
-                    if path.join(SEED_MARKER).is_file() {
-                        return Ok((path, SeedKind::AlreadySeeded));
-                    }
-                    create_cold(&path)?;
-                    SeedKind::ColdDirectory(detail)
-                }
-            },
-            None => {
-                create_cold(&path)?;
-                SeedKind::ColdDirectory("no warm shared target directory to clone from".to_string())
+        // #8794: every replace attempt and its outcome goes to the daemon log,
+        // so how often seeding refuses or fails is measurable there.
+        let repo = format!("{}/{}", self.identity.owner, self.identity.repo);
+        tracing::info!(slot = %path.display(), %repo, "builder slot seed: replace attempt");
+        let result = seed_unmarked(&path, clone_from);
+        match &result {
+            Ok(kind) => {
+                tracing::info!(slot = %path.display(), %repo, outcome = "seeded", seed = ?kind, "builder slot seed: outcome");
             }
-        };
-        // The marker goes down last, so a seed interrupted partway is retried
-        // rather than inherited as a half-cloned directory. `create_new` makes
-        // the write itself the election: exactly one run ever marks a slot, so
-        // two runs that survived a daemon restart together cannot both claim to
-        // have seeded it (#8261 critic round 3).
-        let marker = path.join(SEED_MARKER);
-        match std::fs::File::create_new(&marker) {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(seed_marker_body(&seed).as_bytes())
-                    .map_err(|source| SlotPoolError::Create {
-                        path: marker,
-                        source,
-                    })?;
-                Ok((path, seed))
+            Err(err @ SlotPoolError::ActiveBuild { lock, .. }) => {
+                tracing::warn!(slot = %path.display(), %repo, outcome = "refused-active-build", lock = %lock.display(), "builder slot seed: outcome");
+                // #8794: recorded so the next admission can say why the slot is
+                // still unseeded.
+                record_seed_failure(&path, &err.to_string());
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                Ok((path, SeedKind::AlreadySeeded))
+            Err(err) => {
+                tracing::warn!(slot = %path.display(), %repo, outcome = "failed", error = %err, "builder slot seed: outcome");
             }
-            Err(source) => Err(SlotPoolError::Create {
-                path: marker,
-                source,
-            }),
         }
+        result.map(|kind| (path, kind))
     }
 }
 
-/// What the marker file records, for a human reading the pool directory.
-fn seed_marker_body(seed: &SeedKind) -> String {
-    format!("#8261 builder slot pool\nseed: {seed:?}\n")
+/// The unseeded half of [`SlotPool::seed`]: guard, clone, mark (#8794).
+fn seed_unmarked(path: &Path, clone_from: Option<&Path>) -> Result<SeedKind, SlotPoolError> {
+    // #8794: an unseeded slot can still hold a live build — a builder given
+    // this directory by hand, or one admitted while the seed was pending. It is
+    // refused before the clone as well as before the replace, so a refusal
+    // costs no clone.
+    refuse_active_build(path)?;
+    retire_unseeded_marker(path);
+    sweep_abandoned_staging(path);
+    let seed = match clone_from.filter(|src| src.is_dir()) {
+        Some(src) => match clone_directory(src, path) {
+            Ok(()) => SeedKind::ClonedFromShared,
+            // A clone that lost the publish race to another run: the warm case.
+            Err(CloneError::Published) => return Ok(SeedKind::AlreadySeeded),
+            Err(CloneError::ActiveBuild(lock)) => {
+                return Err(SlotPoolError::ActiveBuild {
+                    path: path.to_path_buf(),
+                    lock,
+                });
+            }
+            Err(CloneError::Unsupported(detail)) => {
+                create_cold(path)?;
+                SeedKind::ColdDirectory(detail)
+            }
+            // #8794: no marker, so the slot stays unseeded and is retried.
+            Err(CloneError::Failed(detail)) => {
+                record_seed_failure(path, &detail);
+                return Err(SlotPoolError::SeedFailed {
+                    path: path.to_path_buf(),
+                    detail,
+                });
+            }
+        },
+        None => {
+            create_cold(path)?;
+            SeedKind::ColdDirectory(NO_SOURCE_DETAIL.to_string())
+        }
+    };
+    publish_marker(path, seed)
+}
+
+/// Write [`SEED_MARKER`] for a successful seed, atomically and exactly once.
+///
+/// Why: the marker goes down last, so a seed interrupted partway is retried
+/// rather than inherited as a half-cloned directory, and exactly one run ever
+/// marks a slot (#8261 critic round 3). #8794: the body is written to a private
+/// file first and `hard_link`ed into place, because a reader now judges the
+/// body and must never see an empty, half-written marker.
+/// What: `AlreadyExists` on the link is the lost election — the warm case.
+/// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
+fn publish_marker(path: &Path, seed: SeedKind) -> Result<SeedKind, SlotPoolError> {
+    let marker = path.join(SEED_MARKER);
+    let draft = path.join(format!(
+        "{SEED_MARKER}.draft.{}.{}",
+        std::process::id(),
+        unique_nanos()
+    ));
+    let body = format!("#8261 builder slot pool\n{SEEDED_STATUS_LINE}\nseed: {seed:?}\n");
+    let created = std::fs::write(&draft, body).map_err(|source| SlotPoolError::Create {
+        path: draft.clone(),
+        source,
+    });
+    let linked = created.and_then(|()| {
+        std::fs::hard_link(&draft, &marker).map_err(|source| SlotPoolError::Create {
+            path: marker.clone(),
+            source,
+        })
+    });
+    drop(std::fs::remove_file(&draft));
+    match linked {
+        Ok(()) => {
+            drop(std::fs::remove_file(seed_failure_path(path)));
+            Ok(seed)
+        }
+        Err(SlotPoolError::Create { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            Ok(SeedKind::AlreadySeeded)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Does slot `path` carry a marker a SUCCESSFUL seed wrote? (#8794)
+///
+/// Why: before #8794 a failed clone stamped `ColdDirectory("<error>")` into the
+/// marker, and presence alone read as seeded — slot-6 on 2026-09-27 read as
+/// seeded over a half-deleted tree.
+/// What: a marker is seeded when its body carries [`SEEDED_STATUS_LINE`]. A
+/// pre-#8794 body (no status line) is seeded exactly when the current code
+/// would have written it: `ClonedFromShared`, or a cold slot with no clone
+/// source or no clone support. Any other legacy body — a clone or replace
+/// failure — and an empty or unreadable marker read as unseeded.
+/// Test: `legacy_markers_read_as_seeded_only_when_the_seed_succeeded`,
+/// `a_failure_text_marker_is_treated_as_unseeded`.
+fn marker_reads_seeded(path: &Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(path.join(SEED_MARKER)) else {
+        return false;
+    };
+    body_reads_seeded(&body)
+}
+
+/// The body test behind [`marker_reads_seeded`].
+fn body_reads_seeded(body: &str) -> bool {
+    if body.lines().any(|line| line == SEEDED_STATUS_LINE) {
+        return true;
+    }
+    body.lines().any(|line| {
+        line == "seed: ClonedFromShared"
+            || line == format!("seed: ColdDirectory({NO_SOURCE_DETAIL:?})")
+            || line.starts_with(&format!("seed: ColdDirectory(\"{UNSUPPORTED_PREFIX}"))
+    })
+}
+
+/// Where a failed seed of slot `path` is recorded: `<parent>/.<slot>.seed-failed`.
+///
+/// Why (#8794): beside the slot, not inside it, so it survives the slot being
+/// replaced and never reads as a marker; a successful seed removes it.
+fn seed_failure_path(path: &Path) -> PathBuf {
+    let slot = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("slot");
+    path.with_file_name(format!("{STAGING_PREFIX_DOT}{slot}.seed-failed"))
+}
+
+/// Record a failed seed beside the slot. Best effort — the log has it too.
+fn record_seed_failure(path: &Path, detail: &str) {
+    let body = format!("#8794 builder slot seed failed\nerror: {detail}\n");
+    if let Err(err) = std::fs::write(seed_failure_path(path), body) {
+        tracing::warn!(slot = %path.display(), "could not record the failed seed: {err}");
+    }
+}
+
+/// Move a marker that does not read as seeded out of the slot (#8794).
+///
+/// Why: a pre-#8794 failed seed left `ColdDirectory("<error>")` in the marker.
+/// Left in place it would win the `hard_link` election against this run's real
+/// marker. Its text moves to [`seed_failure_path`], where a failure belongs.
+fn retire_unseeded_marker(path: &Path) {
+    let marker = path.join(SEED_MARKER);
+    if !marker.is_file() || marker_reads_seeded(path) {
+        return;
+    }
+    let body = std::fs::read_to_string(&marker).unwrap_or_default();
+    tracing::info!(slot = %path.display(), marker = %body.trim(), "builder slot seed: retiring a marker that does not read as seeded");
+    if let Err(err) = std::fs::rename(&marker, seed_failure_path(path)) {
+        tracing::warn!(slot = %path.display(), "could not retire the unseeded marker: {err}");
+    }
+}
+
+/// Refuse when a cargo build holds a lock in slot `path` (#8794).
+fn refuse_active_build(path: &Path) -> Result<(), SlotPoolError> {
+    match hold_idle_build_locks(path) {
+        Ok(_released_on_drop) => Ok(()),
+        Err(lock) => Err(SlotPoolError::ActiveBuild {
+            path: path.to_path_buf(),
+            lock,
+        }),
+    }
+}
+
+/// Take every cargo lock in slot `path`, or name the one a live build holds.
+///
+/// Why (#8794): cargo leaves its lock files behind after a build, so file
+/// existence cannot tell a live build from a finished one — the `flock` can.
+/// Taking the lock (rather than peeking and releasing) lets the caller keep
+/// it across the replace, so a cargo that starts mid-replace blocks on it
+/// instead of writing into a tree being deleted.
+/// What: looks for [`CARGO_LOCK_NAMES`] in the slot, each child directory
+/// (`debug/`, `release/`) and each grandchild (`<triple>/<profile>/`), and
+/// `try_lock`s each one found. `Ok` holds every lock until dropped. `Err` names
+/// a lock that is held — or one whose state cannot be read, since destroying
+/// a live build is the outcome this guard exists to rule out (ADR-0045).
+/// Test: `a_slot_with_a_held_cargo_lock_is_not_replaced`,
+/// `a_stale_unheld_cargo_lock_does_not_block_seeding`.
+fn hold_idle_build_locks(path: &Path) -> Result<Vec<std::fs::File>, PathBuf> {
+    let mut dirs = vec![path.to_path_buf()];
+    for child in subdirectories(path) {
+        dirs.extend(subdirectories(&child));
+        dirs.push(child);
+    }
+    let mut held = Vec::new();
+    for lock in dirs
+        .iter()
+        .flat_map(|dir| CARGO_LOCK_NAMES.iter().map(|name| dir.join(name)))
+    {
+        let file = match std::fs::File::open(&lock) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(lock),
+        };
+        match file.try_lock() {
+            Ok(()) => held.push(file),
+            // A filesystem with no `flock` support: cargo skips locking there
+            // too, so no lock can be held and there is nothing to read.
+            Err(std::fs::TryLockError::Error(err))
+                if err.kind() == std::io::ErrorKind::Unsupported => {}
+            Err(_) => return Err(lock),
+        }
+    }
+    Ok(held)
+}
+
+/// The real (non-symlink) subdirectories of `dir`; none when it cannot be read.
+fn subdirectories(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Nanoseconds since the epoch, for per-run unique file names.
+fn unique_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 /// This run's private staging directory for `dst`.
@@ -301,12 +577,10 @@ fn seed_marker_body(seed: &SeedKind) -> String {
 /// What: `<parent>/.<slot>.seeding.<pid>.<nanos>`.
 /// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
 fn staging_path(parent: &Path, slot: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
     parent.join(format!(
-        "{STAGING_PREFIX_DOT}{slot}.seeding.{}.{nanos}",
-        std::process::id()
+        "{STAGING_PREFIX_DOT}{slot}.seeding.{}.{}",
+        std::process::id(),
+        unique_nanos()
     ))
 }
 
@@ -386,26 +660,40 @@ fn create_cold(path: &Path) -> Result<(), SlotPoolError> {
 /// cannot see — unable to delete this run's tree or to overwrite a slot a
 /// builder was granted (#8261 critic round 3).
 ///
+/// **A live build's directory is never replaced (#8794).** The cargo locks in
+/// `dst` are taken ([`hold_idle_build_locks`]) right before the replace and
+/// held until the clone is in place; a held one aborts with
+/// [`CloneError::ActiveBuild`] and `dst` is left as it was.
+///
 /// # Errors
 ///
-/// A human-readable reason the clone did not happen, for [`SeedKind::ColdDirectory`].
+/// [`CloneError`], which tells the caller whether a cold slot, a refusal, or an
+/// unseeded retry is the right outcome.
 ///
 /// Test: `a_missing_clone_source_still_yields_a_usable_cold_slot`,
 /// `two_staging_trees_for_one_index_publish_exactly_one_slot`, and
 /// `a_fresh_slot_is_cloned_from_the_shared_directory`,
-/// `an_unmarked_directory_is_reseeded_without_nesting` on macOS.
-fn clone_directory(src: &Path, dst: &Path) -> Result<(), String> {
+/// `an_unmarked_directory_is_reseeded_without_nesting`,
+/// `a_slot_with_a_held_cargo_lock_is_not_replaced`,
+/// `a_failed_replace_leaves_no_seeded_marker` on macOS.
+fn clone_directory(src: &Path, dst: &Path) -> Result<(), CloneError> {
     if !cfg!(target_os = "macos") {
-        return Err(format!(
-            "copy-on-write clone is macOS/APFS only; this is {}",
+        return Err(CloneError::Unsupported(format!(
+            "{UNSUPPORTED_PREFIX}; this is {}",
             std::env::consts::OS
-        ));
+        )));
     }
     let Some(parent) = dst.parent() else {
-        return Err(format!("{} has no parent directory", dst.display()));
+        return Err(CloneError::Failed(format!(
+            "{} has no parent directory",
+            dst.display()
+        )));
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        return Err(format!("could not create {}: {err}", parent.display()));
+        return Err(CloneError::Failed(format!(
+            "could not create {}: {err}",
+            parent.display()
+        )));
     }
     let slot = dst
         .file_name()
@@ -421,35 +709,81 @@ fn clone_directory(src: &Path, dst: &Path) -> Result<(), String> {
         .arg(src)
         .arg(&staging)
         .output()
-        .map_err(|err| format!("could not run cp: {err}"))?;
+        .map_err(|err| CloneError::Failed(format!("could not run cp: {err}")))?;
     if !output.status.success() {
         drop(std::fs::remove_dir_all(&staging));
-        return Err(format!(
+        return Err(CloneError::Failed(format!(
             "cp -c exited {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        )));
     }
     // Re-read the marker here, not only at `seed`'s entry: a run that survived
     // a daemon restart can have published this slot while `cp` was running, and
     // replacing a MARKED directory would destroy a tree a builder holds.
-    if dst.join(SEED_MARKER).is_file() {
+    if marker_reads_seeded(dst) {
         drop(std::fs::remove_dir_all(&staging));
-        return Err(format!("another seed published {} first", dst.display()));
+        return Err(CloneError::Published);
     }
+    // #8794: `cp` can run for minutes, so a build that started meanwhile is
+    // caught here, and the locks stay held until the clone is in place.
+    let _locks = match hold_idle_build_locks(dst) {
+        Ok(locks) => locks,
+        Err(lock) => {
+            drop(std::fs::remove_dir_all(&staging));
+            return Err(CloneError::ActiveBuild(lock));
+        }
+    };
     if dst.exists()
         && let Err(err) = std::fs::remove_dir_all(dst)
     {
         drop(std::fs::remove_dir_all(&staging));
-        return Err(format!(
+        return Err(CloneError::Failed(format!(
             "could not replace the unseeded {}: {err}",
             dst.display()
-        ));
+        )));
     }
     std::fs::rename(&staging, dst).map_err(|err| {
         drop(std::fs::remove_dir_all(&staging));
-        format!("could not move the clone into {}: {err}", dst.display())
+        CloneError::Failed(format!(
+            "could not move the clone into {}: {err}",
+            dst.display()
+        ))
     })
+}
+
+/// Why a clone did not land, sorted by what the seed should do next (#8794).
+#[derive(Debug)]
+enum CloneError {
+    /// This platform cannot clone at all: a cold slot is the documented outcome.
+    Unsupported(String),
+    /// Another run published the slot first: the warm case.
+    Published,
+    /// A live build holds this lock in the slot: refuse, touch nothing.
+    ActiveBuild(PathBuf),
+    /// The clone or the replace failed: no marker, retry next time.
+    Failed(String),
+}
+
+/// Fixtures shared by every suite that hands a pool slot over (#8794).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// Make `dir` a checkout whose `Cargo.lock` names one path package
+    /// (`widgets-core`) and one registry package (`serde`), and return it. A
+    /// handover refuses a pool with no resolvable path package (#8794).
+    pub(crate) fn write_checkout(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("checkout");
+        std::fs::write(
+            dir.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"widgets-core\"\nversion = \"0.1.0\"\n\n\
+             [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .expect("Cargo.lock");
+        dir.to_path_buf()
+    }
 }
 
 #[cfg(test)]
@@ -466,12 +800,13 @@ mod tests {
     /// Every test here roots the pool in a temp dir. #8311: tests that wrote
     /// under the real `~/.trusty-tools` leaked 42,000 directories.
     fn pool(root: &Path) -> SlotPool {
-        SlotPool::new(root.to_path_buf(), identity())
+        SlotPool::new(root.to_path_buf(), identity(), 8)
     }
 
     #[test]
     fn slot_paths_are_keyed_by_owner_and_repo() {
-        let pool = SlotPool::new(PathBuf::from("/pool"), identity());
+        let pool = SlotPool::new(PathBuf::from("/pool"), identity(), 0);
+        assert_eq!(pool.ceiling(), 1, "a pool can always hold one slot");
         assert_eq!(
             pool.slot_path(3),
             Path::new("/pool/bobmatnyc/trusty-tools/slot-3")
@@ -741,6 +1076,206 @@ mod tests {
                 .expect("marker mtime"),
             marked_at,
             "the marker is written exactly once"
+        );
+    }
+
+    /// A shared target directory carrying one sentinel artifact.
+    fn warm_shared(root: &Path) -> PathBuf {
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).expect("a shared dir");
+        std::fs::write(shared.join("sentinel"), b"warm").expect("an artifact");
+        shared
+    }
+
+    /// #8794: slot-6 on 2026-09-27 — an unseeded slot a live cargo build was
+    /// writing to was deleted by the seed. A HELD lock must refuse the replace.
+    #[test]
+    fn a_slot_with_a_held_cargo_lock_is_not_replaced() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let shared = warm_shared(tmp.path());
+        let pool = pool(&tmp.path().join("pool"));
+        let slot = pool.slot_path(0);
+        std::fs::create_dir_all(slot.join("debug")).expect("a live build dir");
+        std::fs::write(slot.join("debug/in-progress.rlib"), b"live").expect("an artifact");
+        let lock_path = slot.join("debug/.cargo-lock");
+        let cargo = std::fs::File::create(&lock_path).expect("cargo's lock file");
+        cargo
+            .lock()
+            .expect("hold the lock the way a running cargo does");
+
+        let err = pool
+            .seed(0, Some(&shared))
+            .expect_err("a slot holding a live build must not be replaced");
+
+        match err {
+            SlotPoolError::ActiveBuild { path, lock } => {
+                assert_eq!(path, slot);
+                assert_eq!(lock, lock_path, "the refusal names the held lock");
+            }
+            other => panic!("expected ActiveBuild, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(slot.join("debug/in-progress.rlib")).expect("the build's artifact"),
+            b"live",
+            "the live build's tree is left as it was"
+        );
+        assert!(
+            !slot.join("sentinel").exists(),
+            "nothing was cloned over it"
+        );
+        assert!(
+            !slot.join(SEED_MARKER).exists(),
+            "a refusal writes no marker"
+        );
+        assert!(matches!(
+            pool.reserve_path(0).expect("a writable root"),
+            SlotReservation::Seeding(_)
+        ));
+        drop(cargo);
+    }
+
+    /// #8794: cargo leaves `.cargo-lock` behind after every build, so a lock
+    /// FILE nobody holds must not block the seed — only a held lock does.
+    #[test]
+    fn a_stale_unheld_cargo_lock_does_not_block_seeding() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let shared = warm_shared(tmp.path());
+        let pool = pool(&tmp.path().join("pool"));
+        let slot = pool.slot_path(0);
+        std::fs::create_dir_all(slot.join("debug")).expect("a finished build dir");
+        std::fs::write(slot.join("debug/.cargo-lock"), b"").expect("a stale lock file");
+
+        let (path, seed) = pool
+            .seed(0, Some(&shared))
+            .expect("a stale lock file is no live build");
+
+        assert!(marker_reads_seeded(&path), "the slot is seeded");
+        if cfg!(target_os = "macos") {
+            assert_eq!(seed, SeedKind::ClonedFromShared);
+            assert!(path.join("sentinel").is_file(), "the clone landed");
+        }
+    }
+
+    /// Restores a directory's mode on drop, so the temp root can be removed.
+    struct Writable(PathBuf);
+    impl Drop for Writable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            drop(std::fs::set_permissions(
+                &self.0,
+                std::fs::Permissions::from_mode(0o755),
+            ));
+        }
+    }
+
+    /// #8794: a replace that fails partway (slot-6: `Directory not empty`)
+    /// leaves a tree in an unknown state. It must write NO marker — the old
+    /// code stamped `ColdDirectory("<error>")`, which read as seeded — and the
+    /// failure is recorded beside the slot instead.
+    #[test]
+    fn a_failed_replace_leaves_no_seeded_marker() {
+        if !cfg!(target_os = "macos") {
+            // No clone runs off macOS, so there is no replace to fail.
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("temp root");
+        let shared = warm_shared(tmp.path());
+        let pool = pool(&tmp.path().join("pool"));
+        let slot = pool.slot_path(0);
+        let pinned = slot.join("debug/pinned");
+        std::fs::create_dir_all(&pinned).expect("an unseeded slot tree");
+        std::fs::write(pinned.join("artifact.rlib"), b"x").expect("an undeletable file");
+        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555))
+            .expect("make the replace fail");
+        let _restore = Writable(pinned.clone());
+
+        let err = pool
+            .seed(0, Some(&shared))
+            .expect_err("a failed replace is a failed seed");
+
+        assert!(
+            matches!(&err, SlotPoolError::SeedFailed { detail, .. } if detail.contains("could not replace")),
+            "{err:?}"
+        );
+        assert!(
+            !slot.join(SEED_MARKER).exists(),
+            "a failed seed must leave no marker"
+        );
+        let recorded = std::fs::read_to_string(seed_failure_path(&slot)).expect("the failure");
+        assert!(recorded.contains("could not replace"), "{recorded}");
+        assert!(matches!(
+            pool.reserve_path(0).expect("a writable root"),
+            SlotReservation::Seeding(_)
+        ));
+    }
+
+    /// #8794 migration: slot-6's marker holds the text of a failed replace. It
+    /// must read as unseeded, and the next seed must replace it with a real one.
+    #[test]
+    fn a_failure_text_marker_is_treated_as_unseeded() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let shared = warm_shared(tmp.path());
+        let pool = pool(&tmp.path().join("pool"));
+        let slot = pool.slot_path(0);
+        std::fs::create_dir_all(&slot).expect("a slot");
+        std::fs::write(
+            slot.join(SEED_MARKER),
+            "#8261 builder slot pool\nseed: ColdDirectory(\"could not replace the unseeded \
+             /pool/slot-6: Directory not empty (os error 66)\")\n",
+        )
+        .expect("a pre-#8794 failure marker");
+
+        assert!(
+            matches!(
+                pool.reserve_path(0).expect("a writable root"),
+                SlotReservation::Seeding(_)
+            ),
+            "a failure-text marker must not make the slot Ready"
+        );
+        let (path, seed) = pool.seed(0, Some(&shared)).expect("the re-seed");
+
+        assert_ne!(seed, SeedKind::AlreadySeeded, "the slot was re-seeded");
+        assert!(marker_reads_seeded(&path), "the new marker reads as seeded");
+        assert!(
+            !seed_failure_path(&path).exists(),
+            "a successful seed clears the failure record"
+        );
+    }
+
+    /// #8794 migration: a pre-#8794 marker reads as seeded exactly when the
+    /// current code would have written it.
+    #[test]
+    fn legacy_markers_read_as_seeded_only_when_the_seed_succeeded() {
+        let head = "#8261 builder slot pool\n";
+        let cases = [
+            ("seed: ClonedFromShared\n", true),
+            (
+                "seed: ColdDirectory(\"no warm shared target directory to clone from\")\n",
+                true,
+            ),
+            (
+                "seed: ColdDirectory(\"copy-on-write clone is macOS/APFS only; this is linux\")\n",
+                true,
+            ),
+            (
+                "seed: ColdDirectory(\"could not replace the unseeded /p/slot-6: \
+                 Directory not empty (os error 66)\")\n",
+                false,
+            ),
+            (
+                "seed: ColdDirectory(\"cp -c exited exit status: 1: cp: no such file\")\n",
+                false,
+            ),
+            ("", false),
+        ];
+        for (seed_line, seeded) in cases {
+            let body = format!("{head}{seed_line}");
+            assert_eq!(body_reads_seeded(&body), seeded, "{body:?}");
+        }
+        assert!(
+            !body_reads_seeded(""),
+            "an empty marker is a half-written one"
         );
     }
 

@@ -493,7 +493,8 @@ mod tests {
     /// localhost and reported dead.
     /// Test: this test.
     #[test]
-    #[serial_test::serial]
+    // #5937: OLLAMA_HOST writers share `dotenv_credential_env`.
+    #[serial_test::serial(dotenv_credential_env)]
     fn local_host_reads_the_env_override() {
         // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
         unsafe { std::env::set_var(LOCAL_HOST_ENV, "http://192.168.1.50:11434/") };
@@ -505,7 +506,8 @@ mod tests {
     /// survive an unset AND a blank override.
     /// Test: this test.
     #[test]
-    #[serial_test::serial]
+    // #5937: OLLAMA_HOST writers share `dotenv_credential_env`.
+    #[serial_test::serial(dotenv_credential_env)]
     fn local_host_defaults_when_unset() {
         // SAFETY: guarded by `#[serial]`; no other thread reads the env here.
         unsafe { std::env::remove_var(LOCAL_HOST_ENV) };

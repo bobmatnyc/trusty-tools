@@ -44,6 +44,8 @@ fn entry(path: &Path) -> AllowlistEntry {
 
 // ── Denylist tests ────────────────────────────────────────────────────────────
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_blocks_ssh_dir() {
     // Why: ~/.ssh is a canonical secrets directory; indexing it must always
@@ -55,6 +57,8 @@ fn denylist_blocks_ssh_dir() {
     );
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_blocks_aws_dir() {
     let path = PathBuf::from(format!("{}/.aws", dirs::home_dir().unwrap().display()));
@@ -110,6 +114,8 @@ fn denylist_allowing_sensitive_path_permits_tmp_and_var_folders() {
 /// What: asserts `is_denied_allowing_sensitive_path` still returns `Some` for
 /// `~/.ssh` and for `$HOME` itself.
 /// Test: this test.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_allowing_sensitive_path_still_blocks_ssh_and_home() {
     let home = dirs::home_dir().unwrap();
@@ -131,6 +137,8 @@ fn denylist_blocks_env_file_in_path() {
     assert!(super::is_denied(&path).is_some());
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_blocks_home_toplevel() {
     // Why: indexing $HOME itself or ~/Desktop would capture enormous amounts
@@ -160,6 +168,8 @@ fn denylist_allows_safe_path() {
     );
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_allows_projects_under_home() {
     // Why: ~/Projects/my-repo is the typical developer setup and must be
@@ -296,6 +306,8 @@ fn allowlist_misses_unknown_path() {
 
 // ── check_path tests ──────────────────────────────────────────────────────────
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn check_path_denied_by_denylist() {
     // Why: denylist check must run even when the path is in the allowlist.
@@ -359,6 +371,8 @@ fn check_path_allowed() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_takes_priority_over_allowlist() {
     // Why: the hard denylist must override the allowlist. Even if a user
@@ -396,6 +410,8 @@ fn add_to_allowlist_persists_entry() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn add_to_allowlist_blocked_by_denylist() {
     // Why: `add_to_allowlist` must refuse to persist a sensitive path.
@@ -503,6 +519,8 @@ fn denylist_blocks_exact_secrets_component() {
     );
 }
 
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn denylist_blocks_dot_config_component() {
     // Why: ~/.config contains application secrets; ".config" as an exact

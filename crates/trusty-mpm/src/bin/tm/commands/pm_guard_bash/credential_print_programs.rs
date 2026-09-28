@@ -338,7 +338,8 @@ pub(super) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a st
 
 /// Whether `program` runs text it is handed as code: an [`EVALUATORS`] entry,
 /// or a shell reading its program from stdin or an argument.
-pub(super) fn is_evaluator(program: &str) -> bool {
+// #8756: crate-visible so `substitutions` can ask which heredoc bodies run.
+pub(crate) fn is_evaluator(program: &str) -> bool {
     evaluator_name(program).is_some()
 }
 

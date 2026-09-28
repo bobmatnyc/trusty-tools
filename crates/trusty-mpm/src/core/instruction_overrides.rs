@@ -287,7 +287,23 @@ const MEMORY_OVERRIDE_HEADING: &str = "## Memory Behavior (project override)";
 /// the robustness tests, and (in `claude_md_sections_tests.rs`)
 /// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
-    let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    resolve_pm_prompt_for(project_dir, profile)
+}
+
+/// [`resolve_pm_prompt`] for a profile the caller already resolved (#8453).
+///
+/// Why: a launch resolves the profile once and hands the same value to the
+/// composer, the style, the model and the settings, so they cannot disagree.
+/// What: [`resolve_pm_prompt_with_roster_for`] with the live roster scan.
+/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+pub fn resolve_pm_prompt_for(
+    project_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+) -> String {
+    let (prompt, source) = resolve_pm_prompt_with_roster_for(project_dir, profile, || {
+        crate::core::delegation_authority::deployed_roster_section(project_dir)
+    });
     // `info!`, deliberately: this is the operator-visible record of WHICH
     // composer produced the session's prompt, and the two are byte-identical by
     // contract so nothing else can reveal it. `debug!` sits below the default
@@ -308,7 +324,8 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 /// operator a log line saying which model produced their prompt.
 /// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
 /// [`PromptSource::Legacy`] for the two override configurations and for the
-/// compose-error degradation.
+/// compose-error degradation, [`PromptSource::Supervisor`] for a supervisor
+/// project (#8453).
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +334,8 @@ pub(crate) enum PromptSource {
     Package,
     /// Assembled by the legacy string concatenation.
     Legacy,
+    /// The supervisor profile's instructions, in place of the PM prompt (#8453).
+    Supervisor,
 }
 
 /// [`resolve_pm_prompt`], additionally reporting which composer ran.
@@ -328,6 +347,7 @@ pub(crate) enum PromptSource {
 /// scanned from the real tiers.
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
+#[cfg(test)] // #8453: production composes through `resolve_pm_prompt_for`.
 pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
     resolve_pm_prompt_with_roster(project_dir, || {
         crate::core::delegation_authority::deployed_roster_section(project_dir)
@@ -362,6 +382,39 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     project_dir: &Path,
     roster_source: impl FnOnce() -> Option<String>,
 ) -> (String, PromptSource) {
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    resolve_pm_prompt_with_roster_for(project_dir, profile, roster_source)
+}
+
+/// [`resolve_pm_prompt_with_roster`] for an already-resolved profile (#8453).
+///
+/// Why: see [`resolve_pm_prompt_for`].
+/// What: the supervisor prompt for a supervisor profile; otherwise the PM
+/// composition, unchanged.
+/// Test: `a_supervisor_project_needs_no_claude_md_override_blocks`.
+pub(crate) fn resolve_pm_prompt_with_roster_for(
+    project_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+    roster_source: impl FnOnce() -> Option<String>,
+) -> (String, PromptSource) {
+    // #8453: a supervisor session receives the supervisor profile INSTEAD of
+    // the PM prompt. CLAUDE.md named sections are PM-section overrides, so none
+    // applies; an undecidable profile is already the PM path below.
+    if profile.is_supervisor() {
+        let named = crate::core::claude_md_sections::scan_project(project_dir);
+        if !named.overrides.is_empty() {
+            tracing::warn!(
+                count = named.overrides.len(),
+                "CLAUDE.md named-section overrides are PM sections; the supervisor \
+                 profile ignores them"
+            );
+        }
+        return (
+            crate::core::session_profile::supervisor_prompt(),
+            PromptSource::Supervisor,
+        );
+    }
+
     // #4286: named sections in `CLAUDE.md` are now the ONLY project override
     // surface. Scanned first because every branch below consumes the result.
     let named = crate::core::claude_md_sections::scan_project(project_dir);

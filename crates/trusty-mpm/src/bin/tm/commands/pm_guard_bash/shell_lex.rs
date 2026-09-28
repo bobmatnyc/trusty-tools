@@ -106,7 +106,8 @@ pub(super) fn has_live_ansi_c_quoting(segment: &str) -> bool {
 /// What: see the variants.
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
 /// `an_unparseable_wrapped_command_is_denied`,
-/// `wrappers_around_benign_commands_still_allow`.
+/// `wrappers_around_benign_commands_still_allow`,
+/// `refuses_a_dump_run_through_eval`.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum WrappedCommand {
     /// No wrapper — classify the segment as given.
@@ -117,8 +118,8 @@ pub(super) enum WrappedCommand {
     Unlexable,
 }
 
-/// Resolve the command a leading `sh -c` / `bash -c` / `env -S` / `xargs`
-/// wrapper would actually run (#6660).
+/// Resolve the command a leading `sh -c` / `bash -c` / `env -S` / `xargs` /
+/// `eval` wrapper would actually run (#6660).
 ///
 /// Why: [`strip_wrapper_prefix`] advances past a wrapper TOKEN but never
 /// descends into an argument that is itself a command — a `-c` string or an
@@ -127,9 +128,10 @@ pub(super) enum WrappedCommand {
 /// makes one fix reach all of them.
 /// What: shlex-splits `segment`, skips leading `KEY=value` assignments and
 /// [`COMMAND_WRAPPERS`] tokens, then: a [`DASH_C_SHELLS`] program yields the
-/// token after its `-c` (a short cluster ending in `c`, such as `-lc`, counts);
+/// command string its `-c` flag runs ([`dash_c_argument`]);
 /// `env` yields the value of `-S`/`--split-string` in any of its three
-/// spellings; `xargs` yields its argv past [`XARGS_OPTS_WITH_ARG`], re-joined.
+/// spellings; `xargs` yields its argv past [`XARGS_OPTS_WITH_ARG`], re-joined;
+/// `eval` yields its operands joined by spaces, as the shell does.
 /// The result is [`WrappedCommand::Unlexable`] when the inner text will not
 /// shlex-split, and [`WrappedCommand::None`] when the segment carries no such
 /// wrapper — an unlexable OUTER segment included, since that case already falls
@@ -166,6 +168,14 @@ pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
         if base == "xargs" {
             return inner_or_none(xargs_argument(rest));
         }
+        // #8756: `eval "pm2 jlist"` runs its operands; unread, it hid them.
+        if base == "eval" {
+            let operands = rest
+                .split_first()
+                .filter(|(head, _)| *head == "--")
+                .map_or(rest, |(_, tail)| tail);
+            return inner_or_none(Some(operands.join(" ")));
+        }
         if COMMAND_WRAPPERS.contains(&tok) {
             i += 1;
             continue;
@@ -195,24 +205,46 @@ fn inner_or_none(inner: Option<String>) -> WrappedCommand {
     }
 }
 
+/// Shell long options that consume the FOLLOWING token as their value.
+const SHELL_LONG_OPTS_WITH_ARG: &[&str] = &["--rcfile", "--init-file"];
+
 /// The command string a shell's `-c` option carries, if present.
 ///
-/// Why: shells accept their options in any order and in clusters, so scanning
-/// for the exact token `-c` alone would miss `bash -lc "…"`, a spelling a
-/// wrapper script reaches for routinely.
-/// What: the token after the first `-c`, or after the first short cluster
-/// (`-`-led, not `--`-led) ending in `c`. `None` when the shell runs a script
-/// file instead, or when `-c` ends the argv.
-/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+/// Why: shells accept their options in any order and in clusters (`bash -lc`).
+/// `-c` is a flag, not an option taking a value: the shell runs its FIRST
+/// operand, so reading the token after `-c` missed `bash -ce "…"`,
+/// `bash -c -e "…"` and `sh -c -- "…"` (#8756).
+/// What: walks the options — a `-`/`+` short cluster (an `o`/`O` in it takes
+/// the next token as its value), a long option (those in
+/// [`SHELL_LONG_OPTS_WITH_ARG`] take the next token), and a `--` or `-` that
+/// ends them. When a `-` cluster contained `c`, the first operand is the
+/// command string. `None` when the shell runs a script file instead, or when
+/// no operand follows.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
+/// `refuses_a_dump_through_every_dash_c_spelling`.
 fn dash_c_argument(rest: &[String]) -> Option<String> {
-    for (n, tok) in rest.iter().enumerate() {
-        let cluster =
-            tok.starts_with('-') && !tok.starts_with("--") && tok.len() > 1 && tok.ends_with('c');
-        if tok == "-c" || cluster {
-            return rest.get(n + 1).cloned();
+    let mut saw_c = false;
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        if tok == "--" || tok == "-" {
+            i += 1;
+            break;
         }
+        if tok.starts_with("--") {
+            i += if SHELL_LONG_OPTS_WITH_ARG.contains(&tok.as_str()) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        let Some(cluster) = tok.strip_prefix('-').or_else(|| tok.strip_prefix('+')) else {
+            break;
+        };
+        saw_c |= tok.starts_with('-') && cluster.contains('c');
+        i += if cluster.contains(['o', 'O']) { 2 } else { 1 };
     }
-    None
+    if saw_c { rest.get(i).cloned() } else { None }
 }
 
 /// The command string `env -S` / `--split-string` carries, if present.

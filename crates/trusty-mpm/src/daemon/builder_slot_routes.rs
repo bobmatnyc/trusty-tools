@@ -158,6 +158,9 @@ pub struct SlotClaimOutcome {
     pub response: BuilderSlotResponse,
     /// The slot index still needing a seed, off the answering path.
     pub seed_index: Option<u32>,
+    /// #8794: trash trees of invalidated fingerprints, deleted off the
+    /// answering path by [`spawn_purge`].
+    pub purge: Vec<std::path::PathBuf>,
 }
 
 /// The builder-slot sub-router (#6892).
@@ -175,14 +178,85 @@ pub fn router() -> Router<Arc<DaemonState>> {
             "/api/v1/sessions/{id}/delegations/builder-slot",
             post(builder_slot_route),
         )
+        // #8794: the hook's release for a claim it gave up waiting on.
+        .route(
+            "/api/v1/sessions/{id}/delegations/builder-slot/release",
+            post(builder_slot_release_route),
+        )
         .route("/api/v1/builder-slots", get(builder_slot_census_route))
+}
+
+/// Response of [`builder_slot_release_route`] (#8794).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct BuilderSlotReleaseResponse {
+    /// Whether a record was cancelled or a tombstone written.
+    pub released: bool,
+}
+
+/// `POST /api/v1/sessions/{id}/delegations/builder-slot/release` (#8794).
+///
+/// Why: the hook times out a claim at 2 s and denies, but the claim runs on to
+/// completion here and records a `Running` lease for a dispatch that never
+/// starts. Nothing else ends that lease before the 45-minute
+/// `BUILDER_LEASE_TTL_SECS`, so each timeout under load took a slot out of
+/// service exactly when slots were scarce.
+/// What: [`builder_slot_release_op`] on the same body the claim route takes.
+/// Test: `a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794`.
+pub async fn builder_slot_release_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+    Json(req): Json<BuilderSlotRequest>,
+) -> Result<Json<BuilderSlotReleaseResponse>, DaemonError> {
+    builder_slot_release_op(&state, &id, &req.payload).map(Json)
+}
+
+/// Release the lease a denied dispatch's claim wrote, or will write (#8794).
+///
+/// Why: the release can arrive BEFORE the claim finishes — the claim may still
+/// be waiting on the claim mutex or running a handover when the hook gives up.
+/// So this never takes that mutex: it tombstones the `tool_use_id`, and the
+/// claim's own record then finds a terminal record and writes nothing live
+/// (see [`DaemonState::claim_builder_slot_with_pool`]).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `id` is not a UUID.
+///
+/// What: re-derives eligibility as the claim route does — a builder dispatch
+/// carrying a `tool_use_id` — and releases nothing otherwise. Then
+/// [`release_unlaunched_dispatch`](crate::daemon::services::delegation_tracker::release_unlaunched_dispatch):
+/// only the record keyed by this `tool_use_id`, and never one whose agent has
+/// launched.
+/// Test: `a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794`,
+/// `a_release_that_beats_its_claim_leaves_no_lease_8794`,
+/// `a_release_keeps_a_live_builder_with_another_tool_use_id_8794`,
+/// `a_release_never_frees_a_builder_whose_agent_launched_8794`.
+pub fn builder_slot_release_op(
+    state: &DaemonState,
+    id: &str,
+    payload: &Value,
+) -> Result<BuilderSlotReleaseResponse, DaemonError> {
+    let session = uuid::Uuid::parse_str(id)
+        .map(SessionId)
+        .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
+    let released = claims_a_builder_slot(payload)
+        && crate::daemon::services::delegation_tracker::release_unlaunched_dispatch(
+            state, session, payload,
+        );
+    tracing::info!(
+        released,
+        tool_use_id = str_field(payload, "tool_use_id").unwrap_or_default(),
+        "builder slot: the hook gave up on this claim and released it (#8794)"
+    );
+    Ok(BuilderSlotReleaseResponse { released })
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/builder-slot` (#6892).
 ///
 /// Why: see the module doc.
-/// What: parses the session id, resolves the machine's cap, and hands the
-/// scan-and-claim to [`builder_slot_op`]. A malformed session id is a 400; an
+/// What: resolves the machine's cap through [`capacity_for`], which first
+/// releases any user-stopped holder (#8548), and hands the scan-and-claim to
+/// [`builder_slot_op`]. A malformed session id is a 400; an
 /// unknown session is not an error — a session the daemon has no record of has
 /// no delegations, and a 404 would read to the guard as "the daemon could not
 /// answer", which this guard denies on.
@@ -202,7 +276,12 @@ pub async fn builder_slot_route(
     // cap is — `builders.slot_pool_root` and the repo identity are the daemon's
     // to read, and a hook deriving them itself would be a second authority.
     let project_dir = str_field(&req.payload, "cwd").map(std::path::PathBuf::from);
-    let resolved = resolve_slot_pool(&config, dirs::home_dir(), project_dir.as_deref());
+    let resolved = resolve_slot_pool(
+        &config,
+        dirs::home_dir(),
+        project_dir.as_deref(),
+        capacity.ceiling,
+    );
     let outcome = builder_slot_op_with_pool(
         &state,
         &id,
@@ -216,7 +295,29 @@ pub async fn builder_slot_route(
     if let (Some(index), Some(pool)) = (outcome.seed_index, resolved.pool) {
         spawn_seed(Arc::clone(&state), pool, resolved.clone_from, index);
     }
+    // #8794 critic round 3: likewise the handover's delete of the previous
+    // holder's builds, which outran the 2-second budget under the mutex.
+    if !outcome.purge.is_empty() {
+        spawn_purge(outcome.purge);
+    }
     Ok(Json(outcome.response))
+}
+
+/// Delete a handover's invalidated fingerprints off the answering path (#8794).
+///
+/// Why: about 9,000 files on the real pool; see [`SlotPool::purge_invalidated`].
+/// What: `spawn_blocking`, like [`spawn_seed`]. A tree it cannot delete stays
+/// listed, and the slot's next handover retries it.
+/// Test: `a_leftover_trash_tree_is_purged_at_the_next_handover`.
+fn spawn_purge(trees: Vec<std::path::PathBuf>) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let purged = SlotPool::purge_invalidated(&trees);
+        tracing::info!(
+            purged,
+            listed = trees.len(),
+            "builder slot handover: purged invalidated fingerprints"
+        );
+    })
 }
 
 /// Run one slot's seed off the answering path, then release its claim (#8261).
@@ -241,26 +342,29 @@ fn spawn_seed(
     index: u32,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let _guard = SeedGuard { state, index };
+        let _guard = SeedGuard {
+            state,
+            slot: pool.slot_path(index),
+        };
         if let Err(err) = pool.seed(index, clone_from.as_deref()) {
             tracing::warn!("builder slot {index} could not be seeded: {err}");
         }
     })
 }
 
-/// Holds one slot index's seed claim for as long as the seed runs (#8261).
+/// Holds one slot's seed claim for as long as the seed runs (#8261).
 ///
 /// Why: see [`spawn_seed`] — the release must survive a panic, and only `Drop`
 /// runs during an unwind.
 /// Test: `a_panicking_seed_still_releases_its_index`.
 struct SeedGuard {
     state: Arc<DaemonState>,
-    index: u32,
+    slot: std::path::PathBuf,
 }
 
 impl Drop for SeedGuard {
     fn drop(&mut self) {
-        self.state.finish_builder_seed(self.index);
+        self.state.finish_builder_seed(&self.slot);
     }
 }
 
@@ -287,14 +391,19 @@ struct ResolvedPool {
 /// builder it was supposed to refuse. The exclusion is the same
 /// `tool_use_id` the claim itself excludes, read from the same payload, so the
 /// number that admits and the number that counts cannot disagree.
-/// What: [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
-/// Test: `the_throttle_excludes_the_claimants_own_record`.
+/// What: reconciles the builder stop markers (#8548), then
+/// [`DaemonState::builder_capacity`] with `tool_use_id` excluded.
+/// Test: `the_throttle_excludes_the_claimants_own_record`,
+/// `the_claim_route_releases_a_user_stopped_holder_8548`.
 fn capacity_for(
     state: &DaemonState,
     config: &crate::core::builders::BuildersConfig,
     ceiling: u32,
     payload: &Value,
 ) -> Capacity {
+    // #8548: free a user-stopped holder's slot before anything counts holders,
+    // so the claim that needs the slot does not wait for the 60 s sweep.
+    state.reconcile_builder_stop_markers();
     state.builder_capacity(config, ceiling, str_field(payload, "tool_use_id"))
 }
 
@@ -313,6 +422,7 @@ fn resolve_slot_pool(
     config: &crate::core::builders::BuildersConfig,
     home: Option<std::path::PathBuf>,
     project_dir: Option<&std::path::Path>,
+    ceiling: u32,
 ) -> ResolvedPool {
     let no_pool = |why: &str| {
         tracing::warn!("no builder slot pool for this dispatch: {why}");
@@ -351,10 +461,12 @@ fn resolve_slot_pool(
     .ok()
     .map(|env| env.cargo_target_dir);
     ResolvedPool {
-        pool: Some(SlotPool::new(
-            config.effective_slot_pool_root(&home),
-            identity,
-        )),
+        // #8794: the checkout's Cargo.lock names the packages a handover
+        // invalidates; the ceiling bounds how many slots are ever seeded.
+        pool: Some(
+            SlotPool::new(config.effective_slot_pool_root(&home), identity, ceiling)
+                .with_checkout(project_dir.to_path_buf()),
+        ),
         clone_from,
         notice: None,
     }
@@ -405,10 +517,7 @@ pub fn builder_slot_op(
 
     let payload = &req.payload;
     let exclude = str_field(payload, "tool_use_id");
-    let input = payload.get("input");
-    let eligible = exclude.is_some()
-        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
-        && dispatch_agent(input).is_some_and(agent_is_builder);
+    let eligible = claims_a_builder_slot(payload);
 
     let (holders, claimed) = state.claim_builder_slot(
         cap,
@@ -492,10 +601,7 @@ pub fn builder_slot_op_with_pool(
 
     let payload = &req.payload;
     let exclude = str_field(payload, "tool_use_id");
-    let input = payload.get("input");
-    let eligible = exclude.is_some()
-        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
-        && dispatch_agent(input).is_some_and(agent_is_builder);
+    let eligible = claims_a_builder_slot(payload);
 
     let grant = state.claim_builder_slot_with_pool(
         capacity.n_effective,
@@ -544,6 +650,7 @@ pub fn builder_slot_op_with_pool(
             slot_refused: grant.slot_refused,
         },
         seed_index: grant.seed_index,
+        purge: grant.purge,
     })
 }
 
@@ -595,6 +702,19 @@ pub async fn builder_slot_census_route(
     Json(state.builder_slot_census(resolve_max_concurrent()))
 }
 
+/// Does this payload claim a builder slot: a dispatch tool naming a builder,
+/// with a `tool_use_id` to key the claim by?
+///
+/// Why: the claim routes and the #8794 release re-derive the same rule; one
+/// copy keeps them from disagreeing about which records they may touch.
+/// Test: `builder_slot_route_claims_nothing_for_a_non_builder`,
+/// `a_payload_with_no_tool_use_id_is_ineligible_not_full`.
+fn claims_a_builder_slot(payload: &Value) -> bool {
+    str_field(payload, "tool_use_id").is_some()
+        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
+        && dispatch_agent(payload.get("input")).is_some_and(agent_is_builder)
+}
+
 /// Read a non-empty string field from the forwarded hook payload.
 fn str_field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
     payload
@@ -638,15 +758,21 @@ mod tests {
         state.upsert_delegation(d);
     }
 
-    /// A pool rooted at `root`, for a fixed test identity.
+    /// A pool rooted at `root`, for a fixed test identity, whose checkout (a
+    /// sibling of `root`) names a path package — a handover needs one (#8794).
     fn test_pool(root: std::path::PathBuf) -> SlotPool {
+        let checkout = crate::core::builder_slot_pool::test_support::write_checkout(
+            &root.with_file_name("checkout"),
+        );
         SlotPool::new(
             root,
             trusty_common::github_path::GithubPath {
                 owner: "acme".to_string(),
                 repo: "widgets".to_string(),
             },
+            4,
         )
+        .with_checkout(checkout)
     }
 
     /// #8261: the answer must carry the DIRECTORY, not only the verdict — the
@@ -855,7 +981,7 @@ mod tests {
         // The seed task's own release is what makes the index seedable again —
         // without it slot 0 could never be warmed by anyone.
         state.release_denied_builder_dispatch(session, Some("toolu_B"));
-        state.finish_builder_seed(0);
+        state.finish_builder_seed(&pool.slot_path(0));
         let third = builder_slot_op_with_pool(
             &state,
             &session.0.to_string(),
@@ -985,7 +1111,7 @@ mod tests {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = SeedGuard {
                 state: Arc::clone(&state),
-                index: 0,
+                slot: pool.slot_path(0),
             };
             panic!("the clone died mid-copy");
         }));
@@ -1087,6 +1213,42 @@ mod tests {
             !body.claimed,
             "the third builder on a throttled two-holder machine must be refused"
         );
+    }
+
+    /// #8548 critic: the claim path itself releases a user-stopped holder. On a
+    /// one-slot machine whose only holder the user stopped, the next builder is
+    /// admitted without waiting for the 60 s sweep.
+    #[test]
+    fn the_claim_route_releases_a_user_stopped_holder_8548() {
+        let (state, dir, session) = hermetic();
+        let mut stopped =
+            Delegation::new(session, None, "rust-engineer", ModelTier::Sonnet, "build");
+        stopped.status = DelegationStatus::Running;
+        stopped.started_at = Some(chrono::Utc::now());
+        stopped.agent_id = Some("a1b2c3stopped".to_string());
+        stopped.tool_use_id = Some("toolu_STOPPED".to_string());
+        stopped.transcript_path = Some(dir.path().join("proj").join("sess.jsonl"));
+        state.upsert_delegation(stopped);
+        let sidecar = dir.path().join("proj").join("sess").join("subagents");
+        std::fs::create_dir_all(&sidecar).expect("sidecar dir");
+        std::fs::write(
+            sidecar.join("agent-a1b2c3stopped.meta.json"),
+            r#"{"toolUseId":"toolu_STOPPED","stoppedByUser":true}"#,
+        )
+        .expect("sidecar");
+        let config = crate::core::builders::BuildersConfig {
+            max_concurrent: Some(1),
+            ..crate::core::builders::BuildersConfig::default()
+        };
+        let request = dispatch("rust-engineer", Some("toolu_NEXT"));
+
+        let measured = capacity_for(&state, &config, 1, &request.payload);
+        let body =
+            builder_slot_op_with_capacity(&state, &session.0.to_string(), request, &measured)
+                .expect("a well-formed session id");
+
+        assert!(body.claimed, "the stopped holder's slot is free: {body:?}");
+        assert!(body.holders.is_empty(), "{:?}", body.holders);
     }
 
     /// #8261: a `Capacity` the test scripts outright, so no reading of the real
@@ -1568,5 +1730,204 @@ mod tests {
         // The cap comes from the host config; only its presence is assertable
         // here, since the number depends on the machine running the test.
         assert!(census.cap <= 64);
+    }
+
+    // ---- #8794: the release for a claim the hook gave up on -------------
+
+    /// POST the hook's release for `payload` through the router, as the hook
+    /// does. Driven through the router so a missing route answers 404 rather
+    /// than failing to compile.
+    async fn post_release(
+        state: &Arc<DaemonState>,
+        session: SessionId,
+        payload: &Value,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        router()
+            .with_state(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/sessions/{}/delegations/builder-slot/release",
+                        session.0
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "payload": payload }).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("router responds")
+            .status()
+    }
+
+    /// Is the record carrying `tool_use_id` still live?
+    fn is_live(state: &DaemonState, session: SessionId, tool_use_id: &str) -> bool {
+        let id = state
+            .find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+            .expect("the dispatch has a record");
+        state
+            .all_delegations()
+            .into_iter()
+            .any(|d| d.id == id && d.status.is_live())
+    }
+
+    /// #8794: the hook timed out on a claim the daemon then completed, so a
+    /// `Running` lease exists for a dispatch that was denied and never starts.
+    /// Fails before #8794: no release route (404), the lease stays held.
+    #[tokio::test]
+    async fn a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794() {
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_GAVE_UP"));
+        let payload = req.payload.clone();
+        let body = builder_slot_op(&state, &session.0.to_string(), req, 2).expect("route succeeds");
+        assert!(body.claimed, "premise: the daemon completed the claim");
+
+        let before = state.builder_slot_holders(None).len();
+        let status = post_release(&state, session, &payload).await;
+        let after = state.builder_slot_holders(None).len();
+
+        assert_eq!(
+            (before, after),
+            (1, 0),
+            "holders before/after the release (release answered {status})"
+        );
+    }
+
+    /// #8794: the release can reach the daemon before the slow claim finishes.
+    /// Two orders, driven in-process: the release lands inside the claim's
+    /// critical section (after its record, before its handover), and before the
+    /// claim records at all (still waiting on the mutex). Either way no lease is
+    /// held once the claim completes, and the next builder on a cap of one is
+    /// admitted.
+    /// Fails before #8794: the release 404s and the lease is held.
+    #[test]
+    fn a_release_that_beats_its_claim_leaves_no_lease_8794() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        // Order 1: mid-claim, with a seeded pool slot being handed over.
+        let (state, dir, session) = hermetic();
+        let pool = test_pool(dir.path().join("pool"));
+        pool.seed(0, None).expect("a seeded slot 0");
+        let payload = dispatch("rust-engineer", Some("toolu_SLOW")).payload;
+        let releaser = Arc::clone(&state);
+        let mut status = None;
+        state.claim_builder_slot_with_pool(
+            1,
+            Some("toolu_SLOW"),
+            true,
+            Some(&pool),
+            |s| {
+                crate::daemon::services::delegation_tracker::observe(
+                    s,
+                    session,
+                    HookEvent::PreToolUse,
+                    &payload,
+                );
+                status = Some(rt.block_on(post_release(&releaser, session, &payload)));
+            },
+            |_| {},
+        );
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            0,
+            "a release landing mid-claim must leave no lease (release answered {status:?})"
+        );
+        let next = builder_slot_op(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_NEXT")),
+            1,
+        )
+        .expect("route succeeds");
+        assert!(next.claimed, "the released slot admits the next builder");
+
+        // Order 2: the release lands before the claim has recorded anything.
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_QUEUED"));
+        let status = rt.block_on(post_release(&state, session, &req.payload));
+        let body = builder_slot_op(&state, &session.0.to_string(), req, 1).expect("route succeeds");
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            0,
+            "a release landing before the claim must leave no lease (release answered {status})"
+        );
+        assert!(!body.claimed, "a released dispatch is not admitted");
+    }
+
+    /// #8794: the release is keyed by `tool_use_id` alone — a builder that
+    /// really runs under another id keeps its lease.
+    /// Fails before #8794: both leases stay held.
+    #[tokio::test]
+    async fn a_release_keeps_a_live_builder_with_another_tool_use_id_8794() {
+        let (state, _dir, session) = hermetic();
+        let id = session.0.to_string();
+        let gave_up = dispatch("rust-engineer", Some("toolu_GAVE_UP"));
+        let gave_up_payload = gave_up.payload.clone();
+        let live = dispatch("rust-engineer", Some("toolu_LIVE"));
+        assert!(
+            builder_slot_op(&state, &id, live, 2)
+                .expect("claim")
+                .claimed
+        );
+        assert!(
+            builder_slot_op(&state, &id, gave_up, 2)
+                .expect("claim")
+                .claimed
+        );
+
+        let status = post_release(&state, session, &gave_up_payload).await;
+
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            1,
+            "only the released claim frees its slot (release answered {status})"
+        );
+        assert!(
+            is_live(&state, session, "toolu_LIVE"),
+            "the live builder keeps its lease"
+        );
+        assert!(!is_live(&state, session, "toolu_GAVE_UP"));
+    }
+
+    /// #8794: a record that learned an `agent_id` belongs to an agent that ran;
+    /// a release naming its own `tool_use_id` must not free its slot.
+    #[tokio::test]
+    async fn a_release_never_frees_a_builder_whose_agent_launched_8794() {
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_RAN"));
+        let payload = req.payload.clone();
+        assert!(
+            builder_slot_op(&state, &session.0.to_string(), req, 2)
+                .expect("claim")
+                .claimed
+        );
+        crate::daemon::services::delegation_tracker::observe(
+            &state,
+            session,
+            HookEvent::PostToolUse,
+            &serde_json::json!({
+                "tool": "Agent",
+                "tool_use_id": "toolu_RAN",
+                "tool_response": {"isAsync": true, "status": "async_launched", "agentId": "a8794"},
+            }),
+        );
+
+        let status = post_release(&state, session, &payload).await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(
+            is_live(&state, session, "toolu_RAN"),
+            "a launched builder keeps its lease"
+        );
+        assert_eq!(state.builder_slot_holders(None).len(), 1);
     }
 }

@@ -90,6 +90,23 @@ fn arm_home_write_fence() {
     trusty_mpm::core::home_write_fence::arm_for_this_process();
 }
 
+/// Give this test binary its own default tmux server, before `main` (#6542).
+///
+/// Aborts the binary when the private directory cannot be created, rather than
+/// let a test reach the operator's server. See `core::tmux_test_isolation`.
+/// Test: `tests::this_test_binary_runs_on_a_relocated_tmux_server`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
@@ -205,6 +222,22 @@ mod tests {
         assert!(
             fenced_root(&scratch.path().join(".trusty-mpm"), armed_roots()).is_none(),
             "a test temp root must stay writable"
+        );
+    }
+
+    /// #6542: the constructor ran, so no tmux call in this binary can reach
+    /// the host's server through `$TMUX` or the default socket.
+    #[test]
+    fn this_test_binary_runs_on_a_relocated_tmux_server() {
+        let dir = trusty_mpm::core::tmux_test_isolation::relocated_dir()
+            .expect("this binary's test_support constructor relocates tmux");
+        assert_eq!(
+            std::env::var_os("TMUX_TMPDIR").as_deref(),
+            Some(dir.as_os_str())
+        );
+        assert!(
+            std::env::var_os("TMUX").is_none(),
+            "the host's $TMUX must not reach a test"
         );
     }
 

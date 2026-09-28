@@ -47,11 +47,24 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
     println!("cargo:rerun-if-env-changed=FORCE_UI_BUILD");
-    println!("cargo:rerun-if-changed=ui/package.json");
-    println!("cargo:rerun-if-changed=ui/vite.config.js");
-    println!("cargo:rerun-if-changed=ui/index.html");
-    println!("cargo:rerun-if-changed=ui/src");
-    println!("cargo:rerun-if-changed=Makefile");
+    // Only paths that EXIST may be declared: cargo treats a declared-but-absent
+    // path as changed, so the `ui/` entries (gone since #6155) re-ran this
+    // script and rebuilt the crate and its dependents on every build. They stay
+    // listed, guarded, in case the source tree returns. `ui-dist` is watched
+    // because `include_dir!` does not track it: the always-stale script was
+    // what used to pick up a remirrored bundle.
+    for rel in [
+        "ui/package.json",
+        "ui/vite.config.js",
+        "ui/index.html",
+        "ui/src",
+        "ui-dist",
+        "Makefile",
+    ] {
+        if crate_root.join(rel).exists() {
+            println!("cargo:rerun-if-changed={rel}");
+        }
+    }
 
     // #5078: a plain `cargo build -p trusty-search` used to run `make
     // release-prep` unconditionally, and that writes files git tracks — the

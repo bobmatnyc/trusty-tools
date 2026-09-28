@@ -81,6 +81,7 @@ fn outcome_with(removal_failed: Vec<String>, removed: Vec<PathBuf>) -> ReclaimOu
         removed_bytes: 0,
         refused_at_recheck: Vec::new(),
         removal_failed,
+        partially_removed: Vec::new(),
     }
 }
 
@@ -184,9 +185,15 @@ async fn reclaim_loop_exits_on_cancel() {
 async fn reclaim_on_an_empty_root_reclaims_nothing() {
     let (state, _dir) = scratch_root_state();
     let empty_root = tempfile::tempdir().expect("empty workspace root");
-    let out = reclaim(&state, empty_root.path(), ReclaimMode::Remove, None)
-        .await
-        .expect("the probe assembly must not panic");
+    let out = reclaim(
+        &state,
+        empty_root.path(),
+        ReclaimMode::Remove,
+        None,
+        crate::session_manager::worktree_scope::WorktreeScope::all(),
+    )
+    .await
+    .expect("the probe assembly must not panic");
     assert!(
         out.removed.is_empty() && out.removal_failed.is_empty(),
         "a workspace root with no registered worktree has nothing to reclaim: {out:?}"

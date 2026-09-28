@@ -479,7 +479,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
     let path = fx.add_worktree_at(&parent, "live-agent-sweep-5661");
     land(&path);
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-still-working");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -491,6 +491,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(
         out.survey.reclaimable, 0,
@@ -520,7 +521,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
     let path = fx.add_worktree_at(&parent, "spared-agent-5829");
     land(&path);
     GitWorktreeFixture::stamp_agent_sentinel(&path, "agent-mid-task-5829");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -532,6 +533,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(
         out.removed.is_empty(),
@@ -563,7 +565,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("no-agent-5829");
     land(&path);
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -577,6 +579,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(
         out.survey.agent_owned.is_empty(),
@@ -1015,7 +1018,7 @@ fn reclaim_report_mode_removes_nothing() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("report-2919");
     land(&path);
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1027,6 +1030,7 @@ fn reclaim_report_mode_removes_nothing() {
         },
         ReclaimMode::Report,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "it IS reclaimable…");
     assert!(out.removed.is_empty(), "…but Report mode removed it");
@@ -1054,7 +1058,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
         &fx.repo,
         ClaimLiveness::SessionGone,
     )]);
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1066,6 +1070,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
         },
         ReclaimMode::Report,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(
         out.survey.reclaimable, 1,
@@ -1091,7 +1096,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
         &path,
         ClaimLiveness::Live,
     )]);
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1103,6 +1108,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
         },
         ReclaimMode::Report,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 0);
     assert!(
@@ -1142,7 +1148,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
             )]))
         }
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1154,6 +1160,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(
@@ -1181,7 +1188,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
         }
         Some(nobody())
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1193,6 +1200,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "destroyed new work: {out:?}");
@@ -1224,7 +1232,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
         }
         Some(nobody())
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1236,6 +1244,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted a locked worktree: {out:?}");
@@ -1260,7 +1269,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
             open_index("session/pr-race-2919", 35)
         }
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1272,6 +1281,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted a reopened branch: {out:?}");
@@ -1289,7 +1299,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
         *n += 1;
         if *n == 1 { Some(nobody()) } else { None }
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1301,6 +1311,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 1, "must reach the delete loop");
     assert!(out.removed.is_empty(), "deleted on an unknown live set");
@@ -1387,7 +1398,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
             KeepList::from_patterns(&[path.to_string_lossy().to_string()])
         }
     };
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1399,6 +1410,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(
         out.survey.reclaimable, 1,
@@ -1458,7 +1470,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
     .expect("write config");
 
     let keep_list = || crate::core::trusty_tools_config::load_disk_keep_list_at(home.path());
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1470,6 +1482,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
 
     assert!(
@@ -1495,7 +1508,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("reclaim-2919");
     land(&path);
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1507,11 +1520,77 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.removed, vec![path.clone()], "outcome: {out:?}");
     assert!(!path.exists(), "the directory must be gone");
     assert!(out.removed_bytes > 0);
     assert!(out.removal_failed.is_empty());
+}
+
+/// A scanned path replaced by a symlink to another registered worktree, after
+/// every other gate passed, is refused and the target is untouched (#8782).
+///
+/// Why: once git no longer lists the scanned path, `git worktree remove
+/// --force` matches it by its resolved path and removes the worktree the
+/// symlink points at. The swap lands in the guard's claim read, the last read
+/// before git. Fails on `e3503272d`, which deletes the target's unsaved work.
+#[test]
+fn a_merged_pr_path_replaced_by_a_symlink_is_not_removed() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("symlinked-8782");
+    land(&path);
+    let other = fx.add_worktree("other-8782");
+    std::fs::write(other.join("work.rs"), "// unsaved\n").expect("write");
+    let entries = |dir: &Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let before = entries(&other);
+    let calls = RefCell::new(0usize);
+    let in_use_now = || {
+        let mut n = calls.borrow_mut();
+        *n += 1;
+        // Read 1 is the survey's, 2 the re-check's, 3 the guard's.
+        if *n == 3 {
+            std::fs::remove_dir_all(&path).expect("remove the scanned tree");
+            let pruned = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&fx.repo)
+                .args(["worktree", "prune"])
+                .status()
+                .expect("run git worktree prune");
+            assert!(pruned.success(), "git worktree prune: {pruned}");
+            std::os::unix::fs::symlink(&other, &path).expect("symlink");
+        }
+        Some(nobody())
+    };
+    let out = reclaim_scoped(
+        &fx.repos_root,
+        &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
+            launched_from: &[],
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &in_use_now,
+            index_for: &|_: &Path| merged_index("session/symlinked-8782", 38),
+        },
+        ReclaimMode::Remove,
+        &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
+    );
+    assert_eq!(*calls.borrow(), 3, "the swap must land in the guard's read");
+    assert_eq!(entries(&other), before, "the symlink's target was touched");
+    assert!(out.removed.is_empty(), "{out:?}");
+    assert!(
+        out.refused_at_recheck
+            .iter()
+            .any(|r| r.contains("no longer resolves to the scanned worktree")),
+        "{out:?}"
+    );
 }
 
 /// A worktree a live process was launched from is spared, merged and clean
@@ -1521,7 +1600,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
 /// `reclaim_remove_mode_reclaims_a_clean_merged_worktree` above DELETES. The
 /// only difference is the launch directory, so the test cannot pass for any
 /// reason other than the gate — and deleting the gate from
-/// `reclaim_with_probes` makes it fail by deleting the directory.
+/// `reclaim_scoped` makes it fail by deleting the directory.
 #[test]
 fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
     let fx = GitWorktreeFixture::new();
@@ -1531,7 +1610,7 @@ fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
     let inside = vec![path.join("crates")];
     std::fs::create_dir_all(&inside[0]).expect("create the launch directory");
 
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -1543,6 +1622,7 @@ fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
 
     assert!(
@@ -1600,7 +1680,7 @@ fn reclaim_leaves_classification_unbounded() {
 /// concurrent `rustc` processes, and once dropped the connection outright.
 /// Measurement decides nothing — an unmeasured candidate is already reported as
 /// `None`, not zero — so the bound cannot shrink what gets reclaimed. Fails on
-/// `0f2bd5134`, where `reclaim_with_probes` passes `SurveyBudget::unbounded()`
+/// `0f2bd5134`, where `reclaim_scoped` passes `SurveyBudget::unbounded()`
 /// and `measure` is `None`.
 #[test]
 fn worktree_7884_the_reclaim_pass_bounds_its_measurement_phase() {
@@ -1614,7 +1694,7 @@ fn worktree_7884_the_reclaim_pass_bounds_its_measurement_phase() {
         "the bound must be well inside the client's own request timeout, or it \
          is not a bound the operator ever sees: {measure:?}"
     );
-    // `for_reclaim` has exactly one call site — `reclaim_with_probes`, the
+    // `for_reclaim` has exactly one call site — `reclaim_scoped`, the
     // destructive entry point — and `unbounded` no longer exists, so the
     // constructor's value IS the value that path runs under.
 }
@@ -2022,7 +2102,7 @@ fn restarted_registry(_: &AgentWorktreeOwner) -> AgentDelegationState {
 fn survey_offers_a_merged_agent_worktree_the_harness_released() {
     let fx = GitWorktreeFixture::new();
     let path = released_agent_worktree(&fx, "agent-6561e2e");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2034,6 +2114,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
         },
         ReclaimMode::Report,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     let found = out
         .survey
@@ -2057,7 +2138,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
 fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
     let fx = GitWorktreeFixture::new();
     let path = released_agent_worktree(&fx, "agent-6561reclaim");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2069,6 +2150,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.removed, vec![path.clone()], "outcome: {out:?}");
     assert!(!path.exists(), "the directory must be gone");
@@ -2084,7 +2166,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
 fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
     let fx = GitWorktreeFixture::new();
     let path = released_agent_worktree(&fx, "agent-6561open");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2096,6 +2178,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
     assert!(out.removed.is_empty() && path.exists());
@@ -2119,7 +2202,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = released_agent_worktree(&fx, "agent-6561dirty");
     std::fs::write(path.join("in-flight.rs"), "// unsaved\n").expect("write unsaved file");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2131,6 +2214,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert_eq!(out.survey.reclaimable, 0, "outcome: {out:?}");
     assert!(out.removed.is_empty() && path.exists());
@@ -2159,7 +2243,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
     let fx = GitWorktreeFixture::new();
     let path = released_agent_worktree(&fx, "agent-6561locked");
     fx.harness_lock_worktree(&path, "agent-6561locked");
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2171,6 +2255,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(out.removed.is_empty() && path.exists(), "outcome: {out:?}");
     let disclosed = out.survey.agent_owned.join("\n");
@@ -2340,7 +2425,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
         }
     };
 
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2352,6 +2437,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
         },
         ReclaimMode::Report,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
 
     let seen = seen.into_inner();
@@ -2412,7 +2498,7 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     let out = tracing::subscriber::with_default(subscriber, || {
-        reclaim_with_probes(
+        reclaim_scoped(
             &fx.repos_root,
             &FreshProbes {
                 prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -2424,6 +2510,7 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
             },
             ReclaimMode::Report,
             &[],
+            &crate::session_manager::worktree_scope::WorktreeScope::all(),
         )
     });
     let lines = buffer.tail(256);

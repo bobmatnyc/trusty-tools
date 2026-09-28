@@ -406,6 +406,14 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    /// #5937: the lib target's one env lock, taken by this module's
+    /// `TRUSTY_MEMORY_PALACE` writers and its `HOME` readers.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn init_git_repo(tmp: &TempDir) {
         let p = tmp.path();
         Command::new("git")
@@ -550,7 +558,10 @@ mod tests {
     /// directly rather than trusting the write above, so a regression that
     /// ignored `state_root` and wrote to BOTH would still fail here.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn run_catchup_advance_leaves_the_home_state_dir_alone() {
+        // #5937: reads HOME, which other tests in this binary set.
+        let _env = env_lock();
         let tmp = TempDir::new().unwrap();
         init_git_repo(&tmp);
         let state_root = TempDir::new().unwrap();
@@ -689,8 +700,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn derive_palace_id_for_agrees_with_daemon_path_no_remote_no_env() {
-        // SAFETY: #[serial] serialises this against the other TRUSTY_MEMORY_PALACE
-        // mutating test in this module; ensure a clean slate first.
+        // Lock order: `#[serial]` (taken by the attribute), then `env_lock()`.
+        let _env = env_lock();
+        // SAFETY: serialised by `env_lock()`; ensure a clean slate first.
         unsafe {
             std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
         }
@@ -721,8 +733,9 @@ mod tests {
     #[serial_test::serial]
     fn derive_palace_id_for_env_override_unchanged() {
         let tmp = TempDir::new().unwrap();
-        // SAFETY: #[serial] serialises env access against the other
-        // TRUSTY_MEMORY_PALACE-mutating test in this module.
+        // Lock order: `#[serial]` (taken by the attribute), then `env_lock()`.
+        let _env = env_lock();
+        // SAFETY: serialised by `env_lock()`, held for the whole test.
         unsafe {
             std::env::set_var(crate::PALACE_OVERRIDE_ENV, "My Override");
         }
@@ -743,8 +756,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn derive_palace_id_for_git_remote_unchanged() {
-        // SAFETY: #[serial] serialises env access against the other
-        // TRUSTY_MEMORY_PALACE-mutating tests in this module.
+        // Lock order: `#[serial]` (taken by the attribute), then `env_lock()`.
+        let _env = env_lock();
+        // SAFETY: serialised by `env_lock()`, held for the whole test.
         unsafe {
             std::env::remove_var(crate::PALACE_OVERRIDE_ENV);
         }
@@ -837,7 +851,10 @@ mod tests {
     /// old code left one behind. No other test in this crate uses that id.
     /// Test: itself.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing it drives takes ENV_LOCK
     async fn malformed_pin_does_not_advance_the_shared_watermark() {
+        // #5937: reads HOME, which other tests in this binary set.
+        let _env = env_lock();
         let placeholder = dirs::home_dir()
             .expect("home dir")
             .join(".trusty-mpm/projects/unknown-project/catchup-state.json");
