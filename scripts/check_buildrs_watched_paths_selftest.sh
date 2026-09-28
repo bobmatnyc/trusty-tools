@@ -10,14 +10,19 @@
 #   working (#4618). Each case drives the real script over a synthetic
 #   workspace in a throwaway git repository, so no cargo and no build.
 #
-# What: seven cases, then the live repository scan must pass.
+# What: nine cases, then the live repository scan must pass.
 #   1. an unguarded literal watch of a missing path fails, naming the path;
 #   2. the same watch passes once the path is committed;
 #   3. an unguarded array loop with a missing entry fails;
 #   4. an `.exists()`-guarded array loop with a missing entry passes;
 #   5. a path on disk but not tracked (a build output) fails;
 #   6. a commented-out directive is ignored;
-#   7. a tree with no build scripts trips the scan floor.
+#   7. a tree with no build scripts trips the scan floor;
+#   8. an unreadable build.rs fails loudly instead of scanning as empty
+#      (#8306-critic: a discarded process-substitution exit status used to
+#      turn this into a silent pass);
+#   9. perl missing from PATH fails before any build.rs is scanned, instead
+#      of the same silent-EOF pass (#8306-critic).
 #
 # Usage: bash scripts/check_buildrs_watched_paths_selftest.sh
 # Exit: 0 when every case behaves; 1 otherwise.
@@ -70,6 +75,33 @@ expect() {
         fail "${label}: output lacks '${pattern}'"
         cat "${OUT}" >&2
     fi
+}
+
+# expect_path <exit> <label> <ws> <path> <grep-pattern> — like expect, but runs
+# the gate under a caller-built PATH (#8306-critic cases 8/9 need a farmed or
+# perl-less PATH, never the ambient one).
+expect_path() {
+    local want="$1" label="$2" ws="$3" path="$4" pattern="$5" got=0
+    PATH="${path}" "${GATE}" "${ws}" > "${OUT}" 2>&1 || got=$?
+    if [[ "${got}" != "${want}" ]]; then
+        fail "${label}: exit ${got}, want ${want}"
+        cat "${OUT}" >&2
+    elif [[ -n "${pattern}" ]] && ! grep -q -- "${pattern}" "${OUT}"; then
+        fail "${label}: output lacks '${pattern}'"
+        cat "${OUT}" >&2
+    fi
+}
+
+# farm_path <dir> — a minimal PATH-worthy directory of symlinks to every
+# external tool the gate needs EXCEPT perl, built from the ambient PATH so
+# case 9 can prove "perl missing" fails fast rather than scanning as empty.
+farm_path() {
+    local dir="$1" tool p
+    mkdir -p "${dir}"
+    for tool in bash dirname git find sort cut head; do
+        p="$(command -v "${tool}" 2> /dev/null || true)"
+        [[ "${p}" == /* ]] && ln -sf "${p}" "${dir}/${tool}"
+    done
 }
 
 # Case 1 + 2: literal watch, missing then committed.
@@ -127,6 +159,33 @@ ws="$(new_ws empty)"
 track "${ws}"
 expect 1 "empty scan" "${ws}" 'refusing an empty scan'
 
+# Case 8: an unreadable build.rs must FAIL loudly (#8306-critic) — the old
+# gate fed it through a process substitution whose exit status bash discards,
+# so a Permission-denied read produced silent EOF and a passing scan. Skipped
+# under root, which ignores file-mode read permission entirely.
+ws="$(new_ws unreadable)"
+printf 'fn main() {\n    println!("cargo:rerun-if-changed=src");\n}\n' \
+    > "${ws}/crates/pkg/build.rs"
+track "${ws}"
+if [[ "$(id -u)" == "0" ]]; then
+    echo "skip: unreadable build.rs case (running as root)" >&2
+else
+    chmod 000 "${ws}/crates/pkg/build.rs"
+    expect 1 "unreadable build.rs" "${ws}" 'could not analyze'
+    chmod 644 "${ws}/crates/pkg/build.rs"
+fi
+
+# Case 9: perl missing from PATH must FAIL before any build.rs is scanned
+# (#8306-critic) — the old gate's extractor call silently produced zero
+# findings when `perl: command not found` gave it empty stdin-turned-stdout.
+ws="$(new_ws noperl)"
+printf 'fn main() {\n    println!("cargo:rerun-if-changed=missing.txt");\n}\n' \
+    > "${ws}/crates/pkg/build.rs"
+track "${ws}"
+farm="${WORK}/noperl-bin"
+farm_path "${farm}"
+expect_path 1 "perl missing from PATH" "${ws}" "${farm}" 'perl not found'
+
 # Live tree.
 expect 0 "live repository" "${REPO_ROOT}"
 
@@ -134,4 +193,4 @@ if [[ "${failures}" -gt 0 ]]; then
     echo "check_buildrs_watched_paths selftest: ${failures} case(s) failed." >&2
     exit 1
 fi
-echo "check_buildrs_watched_paths selftest: all 7 cases and the live scan pass."
+echo "check_buildrs_watched_paths selftest: all 9 cases and the live scan pass."

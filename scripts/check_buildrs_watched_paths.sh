@@ -57,6 +57,14 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
     IN_GIT=1
 fi
 
+# #8306-critic: extract() shells out to perl; a missing perl silently turns
+# every scan into zero findings (see the loop-level check below), so fail
+# fast and unambiguously instead of blaming the first build.rs it touches.
+command -v perl > /dev/null 2>&1 || {
+    echo "FAIL: perl not found in PATH; required to parse build.rs rerun-if-changed directives." >&2
+    exit 1
+}
+
 # Print `<kind>\t<path>` per watched path in the build script on stdin, where
 # kind is `plain`, `guarded` or `dynamic`. Comment lines are dropped first so
 # prose that quotes a directive is not read as one.
@@ -105,6 +113,18 @@ while IFS= read -r buildrs; do
     [[ -f "$dir/Cargo.toml" ]] || continue
     SCRIPTS=$((SCRIPTS + 1))
     rel_script="${buildrs#"$ROOT"/}"
+    # #8306-critic: `extract < "$buildrs"` used to feed a process substitution
+    # directly, and bash discards a process substitution's exit status — an
+    # unreadable build.rs or a failing perl produced silent EOF (zero
+    # findings), not a FAIL. Capture the extractor's own output and status
+    # via a plain command substitution instead, so a non-zero status is
+    # caught before its (empty or partial) output is trusted.
+    extracted=$(extract < "$buildrs") && extract_status=0 || extract_status=$?
+    if [[ "$extract_status" != 0 ]]; then
+        echo "FAIL: could not analyze $rel_script (extractor exited $extract_status)." >&2
+        FAILED=1
+        continue
+    fi
     while IFS="$(printf '\t')" read -r kind path; do
         [[ -n "$kind" ]] || continue
         if [[ "$kind" == dynamic ]]; then
@@ -124,7 +144,7 @@ while IFS= read -r buildrs; do
         if [[ "$LIST" == 1 ]]; then
             printf '%s\t%s\t%s\n' "$rel_script" "$path" "$status"
         fi
-    done < <(extract < "$buildrs")
+    done <<< "$extracted"
 done < <(find "$ROOT/crates" \( -name node_modules -o -name 'target*' -o -name .git \) -prune \
     -o -name build.rs -type f -print | LC_ALL=C sort)
 
