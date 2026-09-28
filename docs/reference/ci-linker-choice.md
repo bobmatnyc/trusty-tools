@@ -63,3 +63,6 @@ the `Test` job, and linking is ~12% of that build — the remaining bulk is
 codegen. The structural inefficiency worth chasing is that four runners each
 perform the same full workspace build from scratch; sharing or splitting that
 work would beat any linker swap.
+
+<!-- CI gate probe; PR not for merge -->
+
