@@ -64,6 +64,8 @@ set -euo pipefail
 
 SELF_PATH="scripts/ci-website-relevance.sh"
 WORKFLOW_PATH=".github/workflows/website-tests.yml"
+# The `corpus` mode's job moved to ci.yml (#8378).
+CORPUS_WORKFLOW_PATH=".github/workflows/ci.yml"
 
 # Rust SOURCE files the website unit suite reads and pins values out of:
 # `site.test.ts`'s `STABLE_SET matches stable_set.rs` re-derives the advertised
@@ -176,6 +178,8 @@ is_relevant() {
       has_prefix "$p" "website/" && return 0
       ;;
     corpus)
+      # #8378: the corpus job lives in ci.yml, so that file is its workflow.
+      [ "$p" = "$CORPUS_WORKFLOW_PATH" ] && return 0
       # The website library every corpus suite exercises: changelog, docs,
       # flagship, install and the site/tools records they assert against.
       has_prefix "$p" "website/src/lib/" && return 0
