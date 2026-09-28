@@ -1422,6 +1422,43 @@ else
     "SemVer: ACCEPTED BREAK" - \
     "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
     "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
+
+  # (o) Same arity entry as (n), but the baseline path itself contains a
+  #     space (a macOS "/Users/Jane Example/" home) — a plain `[^ ]*` class
+  #     stops at the first space and leaves the rest of the name (and the
+  #     rest of the location) in the record; the `[^:]*` class must span it.
+  main_decl "$DECL_OK"
+  SPACED="${ACC}/spaced.out"
+  sed 's# in /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes# in file /Users/Jane Example/.cargo/registry/src/index.crates.io-0000000000000000/trusty-mpm-1.6.3/src/runtime/claude_code.rs:1015, but now takes#' \
+    "$ONE" > "$SPACED"
+  ci_enforce "(o) a space inside the baseline path" "$SPACED" trusty-mpm - 0 \
+    "SemVer: ACCEPTED BREAK" - \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "method_parameter_count_changed: trusty_mpm::runtime::ClaudeCodeAdapter::new takes 2 parameters, but now takes 3 parameters"
+
+  # (p) A single-clause `function_missing` entry, the shape
+  #     `X, previously in file /path:line` cargo-semver-checks prints with no
+  #     second clause. Stripping the location must not leave a dangling
+  #     `, previously` in the record. Built by splicing one extra failure
+  #     block into $ONE right after its "N checks: P pass, F fail" summary
+  #     line, with the fail count bumped to match the new block count.
+  FN_MISSING="${ACC}/fn-missing.out"
+  {
+    sed -n '1,10p' "$ONE"
+    sed -n '11p' "$ONE" | sed 's/[0-9]\{1,\} fail,/8 fail,/'
+    printf '\n--- failure function_missing: pub fn removed or renamed ---\n\nDescription:\nA publicly-visible function that other crates could name is no longer available under that name.\n        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove\n       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_missing.ron\n\nFailed in:\n  function trusty_mpm::core::instruction_pipeline::install_system_prompt, previously in file /Users/example/.cargo/registry/src/index.crates.io-0000000000000000/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:313\n'
+    sed -n '12,$p' "$ONE"
+  } > "$FN_MISSING"
+  main_decl "$(printf '%s\naccept function_missing install_system_prompt' "$DECL_OK")"
+  # must_not is anchored on a trailing newline: the raw gate log always
+  # echoes "...install_system_prompt, previously in file ..." (a space, not
+  # a newline, follows "previously" there), so this needle can only match
+  # the NORMALISED "Computed break list" line, one entry per line, if the
+  # dangling ", previously" survived the strip.
+  ci_enforce "(p) single-clause previously-in-file leaves no dangling comma" "$FN_MISSING" trusty-mpm - 0 \
+    "SemVer: ACCEPTED BREAK" $'install_system_prompt, previously\n' \
+    "[WARN] semver: ACCEPTED BREAK — trusty-mpm 1.6.4" \
+    "function_missing: function trusty_mpm::core::instruction_pipeline::install_system_prompt"
 fi
 rm -rf "$ACC"
 
