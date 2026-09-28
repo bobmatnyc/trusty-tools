@@ -1,5 +1,7 @@
 # trusty-git-analytics
 
+Published from [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics); this copy is not published from trusty-tools.
+
 Analyze git repositories to measure developer productivity — classify commit work types, track weekly velocity, and export CSV/JSON/Markdown reports.
 
 ## What It Does

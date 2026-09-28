@@ -45,6 +45,12 @@
 # --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
 # on every workspace-wide cargo invocation.
 #
+# `tga` and `trusty-audit` carry a second `--exclude tga --exclude trusty-audit`
+# on the clippy, test-shard and test-doc invocations (owner ruling 2026-09-27):
+# both publish from bobmatnyc/trusty-git-analytics, whose CI tests them. They
+# still COMPILE here as path dependencies of trusty-audit-ui and
+# trusty-crate-contracts, so msrv keeps checking them and is left unexcluded.
+#
 # Each of the four gets a DEDICATED job that installs the WebKit2GTK toolchain
 # and runs `cargo clippy -p <crate> --all-targets -- -D warnings`, so exclusion
 # from the headless jobs never means the crate goes uncompiled: `agents-ui`
@@ -501,7 +507,7 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --exclude tga --exclude trusty-audit -- -D warnings
 
       # `codex-config` is enabled by no crate in the workspace, so the
       # `--workspace` run above never pulls `codex_config` in via feature
@@ -1177,7 +1183,7 @@ jobs:
       # fingerprint and forced a ~91s recompile — measured in #4402.)
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-run
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --exclude tga --exclude trusty-audit --no-run
 
       # The `.rcgu.o` sweep that used to sit here (#3668) was deleted as dead
       # code. It found nothing left to delete: `CARGO_PROFILE_TEST_DEBUG=
@@ -1233,7 +1239,7 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-fail-fast \
+          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --exclude tga --exclude trusty-audit --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 
@@ -1343,7 +1349,7 @@ jobs:
 
       - name: cargo test --doc
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --doc
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --exclude tga --exclude trusty-audit --doc
 
   # --------------------------------------------------------------------------
   # test: the aggregate gate over the sharded suite above.

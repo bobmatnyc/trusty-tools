@@ -33,6 +33,10 @@ name = "trusty-audit"
 # gate on PR #7308 reports a breaking public-API change already on main since
 # 0.14.x, so a 0.y breaking change bumps the y (MINOR), not the z (PATCH).
 version = "0.15.0"
+# Owner ruling 2026-09-27: crates.io publishes trusty-audit from
+# bobmatnyc/trusty-git-analytics. This copy stays a workspace member
+# (trusty-audit-ui builds against it by path) but is never published from here.
+publish = false
 description = "Auditor client — installs its pinned audit tooling and drives an audit engagement on the recipient's own codebases."
 readme = "README.md"
 homepage = "https://trustytools.dev"
