@@ -178,7 +178,77 @@ pub fn router() -> Router<Arc<DaemonState>> {
             "/api/v1/sessions/{id}/delegations/builder-slot",
             post(builder_slot_route),
         )
+        // #8794: the hook's release for a claim it gave up waiting on.
+        .route(
+            "/api/v1/sessions/{id}/delegations/builder-slot/release",
+            post(builder_slot_release_route),
+        )
         .route("/api/v1/builder-slots", get(builder_slot_census_route))
+}
+
+/// Response of [`builder_slot_release_route`] (#8794).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct BuilderSlotReleaseResponse {
+    /// Whether a record was cancelled or a tombstone written.
+    pub released: bool,
+}
+
+/// `POST /api/v1/sessions/{id}/delegations/builder-slot/release` (#8794).
+///
+/// Why: the hook times out a claim at 2 s and denies, but the claim runs on to
+/// completion here and records a `Running` lease for a dispatch that never
+/// starts. Nothing else ends that lease before the 45-minute
+/// `BUILDER_LEASE_TTL_SECS`, so each timeout under load took a slot out of
+/// service exactly when slots were scarce.
+/// What: [`builder_slot_release_op`] on the same body the claim route takes.
+/// Test: `a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794`.
+pub async fn builder_slot_release_route(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+    Json(req): Json<BuilderSlotRequest>,
+) -> Result<Json<BuilderSlotReleaseResponse>, DaemonError> {
+    builder_slot_release_op(&state, &id, &req.payload).map(Json)
+}
+
+/// Release the lease a denied dispatch's claim wrote, or will write (#8794).
+///
+/// Why: the release can arrive BEFORE the claim finishes — the claim may still
+/// be waiting on the claim mutex or running a handover when the hook gives up.
+/// So this never takes that mutex: it tombstones the `tool_use_id`, and the
+/// claim's own record then finds a terminal record and writes nothing live
+/// (see [`DaemonState::claim_builder_slot_with_pool`]).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `id` is not a UUID.
+///
+/// What: re-derives eligibility as the claim route does — a builder dispatch
+/// carrying a `tool_use_id` — and releases nothing otherwise. Then
+/// [`release_unlaunched_dispatch`](crate::daemon::services::delegation_tracker::release_unlaunched_dispatch):
+/// only the record keyed by this `tool_use_id`, and never one whose agent has
+/// launched.
+/// Test: `a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794`,
+/// `a_release_that_beats_its_claim_leaves_no_lease_8794`,
+/// `a_release_keeps_a_live_builder_with_another_tool_use_id_8794`,
+/// `a_release_never_frees_a_builder_whose_agent_launched_8794`.
+pub fn builder_slot_release_op(
+    state: &DaemonState,
+    id: &str,
+    payload: &Value,
+) -> Result<BuilderSlotReleaseResponse, DaemonError> {
+    let session = uuid::Uuid::parse_str(id)
+        .map(SessionId)
+        .map_err(|_| DaemonError::InvalidRequest(format!("malformed session id: {id}")))?;
+    let released = claims_a_builder_slot(payload)
+        && crate::daemon::services::delegation_tracker::release_unlaunched_dispatch(
+            state, session, payload,
+        );
+    tracing::info!(
+        released,
+        tool_use_id = str_field(payload, "tool_use_id").unwrap_or_default(),
+        "builder slot: the hook gave up on this claim and released it (#8794)"
+    );
+    Ok(BuilderSlotReleaseResponse { released })
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/builder-slot` (#6892).
@@ -447,10 +517,7 @@ pub fn builder_slot_op(
 
     let payload = &req.payload;
     let exclude = str_field(payload, "tool_use_id");
-    let input = payload.get("input");
-    let eligible = exclude.is_some()
-        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
-        && dispatch_agent(input).is_some_and(agent_is_builder);
+    let eligible = claims_a_builder_slot(payload);
 
     let (holders, claimed) = state.claim_builder_slot(
         cap,
@@ -534,10 +601,7 @@ pub fn builder_slot_op_with_pool(
 
     let payload = &req.payload;
     let exclude = str_field(payload, "tool_use_id");
-    let input = payload.get("input");
-    let eligible = exclude.is_some()
-        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
-        && dispatch_agent(input).is_some_and(agent_is_builder);
+    let eligible = claims_a_builder_slot(payload);
 
     let grant = state.claim_builder_slot_with_pool(
         capacity.n_effective,
@@ -636,6 +700,19 @@ pub async fn builder_slot_census_route(
     State(state): State<Arc<DaemonState>>,
 ) -> Json<BuilderSlotCensus> {
     Json(state.builder_slot_census(resolve_max_concurrent()))
+}
+
+/// Does this payload claim a builder slot: a dispatch tool naming a builder,
+/// with a `tool_use_id` to key the claim by?
+///
+/// Why: the claim routes and the #8794 release re-derive the same rule; one
+/// copy keeps them from disagreeing about which records they may touch.
+/// Test: `builder_slot_route_claims_nothing_for_a_non_builder`,
+/// `a_payload_with_no_tool_use_id_is_ineligible_not_full`.
+fn claims_a_builder_slot(payload: &Value) -> bool {
+    str_field(payload, "tool_use_id").is_some()
+        && str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool)
+        && dispatch_agent(payload.get("input")).is_some_and(agent_is_builder)
 }
 
 /// Read a non-empty string field from the forwarded hook payload.
@@ -1653,5 +1730,204 @@ mod tests {
         // The cap comes from the host config; only its presence is assertable
         // here, since the number depends on the machine running the test.
         assert!(census.cap <= 64);
+    }
+
+    // ---- #8794: the release for a claim the hook gave up on -------------
+
+    /// POST the hook's release for `payload` through the router, as the hook
+    /// does. Driven through the router so a missing route answers 404 rather
+    /// than failing to compile.
+    async fn post_release(
+        state: &Arc<DaemonState>,
+        session: SessionId,
+        payload: &Value,
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        router()
+            .with_state(Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/sessions/{}/delegations/builder-slot/release",
+                        session.0
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "payload": payload }).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("router responds")
+            .status()
+    }
+
+    /// Is the record carrying `tool_use_id` still live?
+    fn is_live(state: &DaemonState, session: SessionId, tool_use_id: &str) -> bool {
+        let id = state
+            .find_delegation(session, |d| d.tool_use_id.as_deref() == Some(tool_use_id))
+            .expect("the dispatch has a record");
+        state
+            .all_delegations()
+            .into_iter()
+            .any(|d| d.id == id && d.status.is_live())
+    }
+
+    /// #8794: the hook timed out on a claim the daemon then completed, so a
+    /// `Running` lease exists for a dispatch that was denied and never starts.
+    /// Fails before #8794: no release route (404), the lease stays held.
+    #[tokio::test]
+    async fn a_claim_whose_client_gave_up_holds_no_lease_after_the_release_8794() {
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_GAVE_UP"));
+        let payload = req.payload.clone();
+        let body = builder_slot_op(&state, &session.0.to_string(), req, 2).expect("route succeeds");
+        assert!(body.claimed, "premise: the daemon completed the claim");
+
+        let before = state.builder_slot_holders(None).len();
+        let status = post_release(&state, session, &payload).await;
+        let after = state.builder_slot_holders(None).len();
+
+        assert_eq!(
+            (before, after),
+            (1, 0),
+            "holders before/after the release (release answered {status})"
+        );
+    }
+
+    /// #8794: the release can reach the daemon before the slow claim finishes.
+    /// Two orders, driven in-process: the release lands inside the claim's
+    /// critical section (after its record, before its handover), and before the
+    /// claim records at all (still waiting on the mutex). Either way no lease is
+    /// held once the claim completes, and the next builder on a cap of one is
+    /// admitted.
+    /// Fails before #8794: the release 404s and the lease is held.
+    #[test]
+    fn a_release_that_beats_its_claim_leaves_no_lease_8794() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        // Order 1: mid-claim, with a seeded pool slot being handed over.
+        let (state, dir, session) = hermetic();
+        let pool = test_pool(dir.path().join("pool"));
+        pool.seed(0, None).expect("a seeded slot 0");
+        let payload = dispatch("rust-engineer", Some("toolu_SLOW")).payload;
+        let releaser = Arc::clone(&state);
+        let mut status = None;
+        state.claim_builder_slot_with_pool(
+            1,
+            Some("toolu_SLOW"),
+            true,
+            Some(&pool),
+            |s| {
+                crate::daemon::services::delegation_tracker::observe(
+                    s,
+                    session,
+                    HookEvent::PreToolUse,
+                    &payload,
+                );
+                status = Some(rt.block_on(post_release(&releaser, session, &payload)));
+            },
+            |_| {},
+        );
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            0,
+            "a release landing mid-claim must leave no lease (release answered {status:?})"
+        );
+        let next = builder_slot_op(
+            &state,
+            &session.0.to_string(),
+            dispatch("rust-engineer", Some("toolu_NEXT")),
+            1,
+        )
+        .expect("route succeeds");
+        assert!(next.claimed, "the released slot admits the next builder");
+
+        // Order 2: the release lands before the claim has recorded anything.
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_QUEUED"));
+        let status = rt.block_on(post_release(&state, session, &req.payload));
+        let body = builder_slot_op(&state, &session.0.to_string(), req, 1).expect("route succeeds");
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            0,
+            "a release landing before the claim must leave no lease (release answered {status})"
+        );
+        assert!(!body.claimed, "a released dispatch is not admitted");
+    }
+
+    /// #8794: the release is keyed by `tool_use_id` alone — a builder that
+    /// really runs under another id keeps its lease.
+    /// Fails before #8794: both leases stay held.
+    #[tokio::test]
+    async fn a_release_keeps_a_live_builder_with_another_tool_use_id_8794() {
+        let (state, _dir, session) = hermetic();
+        let id = session.0.to_string();
+        let gave_up = dispatch("rust-engineer", Some("toolu_GAVE_UP"));
+        let gave_up_payload = gave_up.payload.clone();
+        let live = dispatch("rust-engineer", Some("toolu_LIVE"));
+        assert!(
+            builder_slot_op(&state, &id, live, 2)
+                .expect("claim")
+                .claimed
+        );
+        assert!(
+            builder_slot_op(&state, &id, gave_up, 2)
+                .expect("claim")
+                .claimed
+        );
+
+        let status = post_release(&state, session, &gave_up_payload).await;
+
+        assert_eq!(
+            state.builder_slot_holders(None).len(),
+            1,
+            "only the released claim frees its slot (release answered {status})"
+        );
+        assert!(
+            is_live(&state, session, "toolu_LIVE"),
+            "the live builder keeps its lease"
+        );
+        assert!(!is_live(&state, session, "toolu_GAVE_UP"));
+    }
+
+    /// #8794: a record that learned an `agent_id` belongs to an agent that ran;
+    /// a release naming its own `tool_use_id` must not free its slot.
+    #[tokio::test]
+    async fn a_release_never_frees_a_builder_whose_agent_launched_8794() {
+        let (state, _dir, session) = hermetic();
+        let req = dispatch("rust-engineer", Some("toolu_RAN"));
+        let payload = req.payload.clone();
+        assert!(
+            builder_slot_op(&state, &session.0.to_string(), req, 2)
+                .expect("claim")
+                .claimed
+        );
+        crate::daemon::services::delegation_tracker::observe(
+            &state,
+            session,
+            HookEvent::PostToolUse,
+            &serde_json::json!({
+                "tool": "Agent",
+                "tool_use_id": "toolu_RAN",
+                "tool_response": {"isAsync": true, "status": "async_launched", "agentId": "a8794"},
+            }),
+        );
+
+        let status = post_release(&state, session, &payload).await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(
+            is_live(&state, session, "toolu_RAN"),
+            "a launched builder keeps its lease"
+        );
+        assert_eq!(state.builder_slot_holders(None).len(), 1);
     }
 }

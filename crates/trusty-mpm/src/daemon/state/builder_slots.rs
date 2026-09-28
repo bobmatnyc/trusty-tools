@@ -452,6 +452,11 @@ impl DaemonState {
     /// With no seeded slot free, the builder is admitted with NO slot, a notice,
     /// and [`BuilderSlotGrant::seed_index`] set for the caller to seed afterwards.
     ///
+    /// **A claim whose dispatch was already released is not admitted (#8794).**
+    /// The hook's release for a claim it gave up on can land while this claim
+    /// still waits on the mutex; `record` then finds that tombstone, and the
+    /// claim answers `claimed: false` without handing over a slot.
+    ///
     /// **A slot the pool cannot RESERVE is NO slot.** `reserve_path` failing
     /// runs `release` and returns `claimed: false` with
     /// [`BuilderSlotGrant::slot_refused`] set; it never admits a builder that
@@ -487,6 +492,13 @@ impl DaemonState {
         };
         if admitted {
             record(self);
+            // #8794: the hook gave up on this claim and its release landed
+            // first, so `record` found the tombstone. Nothing will run: skip the
+            // handover rather than hold this mutex for one.
+            if self.builder_claim_released(exclude_tool_use_id) {
+                grant.claimed = false;
+                return grant;
+            }
             // #8261: the slot is chosen INSIDE this critical section, against
             // the same holder set admission was decided from. Choosing it after
             // the lock releases would let two admitted builders pick the same
@@ -613,6 +625,20 @@ impl DaemonState {
     /// Test: `a_second_reservation_does_not_spawn_a_second_seed`.
     pub fn finish_builder_seed(&self, slot: &Path) {
         self.builder_seeding.lock().remove(slot);
+    }
+
+    /// Has this dispatch's record already been released (#8794)?
+    ///
+    /// Why: a release that reaches the daemon before its claim leaves a
+    /// terminal record the claim's `record` does not overwrite.
+    /// Test: `a_release_that_beats_its_claim_leaves_no_lease_8794`.
+    fn builder_claim_released(&self, tool_use_id: Option<&str>) -> bool {
+        tool_use_id.is_some_and(|id| {
+            self.delegations.iter().any(|entry| {
+                entry.value().tool_use_id.as_deref() == Some(id)
+                    && entry.value().status.is_terminal()
+            })
+        })
     }
 
     /// Record the directory [`SlotPool::hand_over`] provided onto the lease.

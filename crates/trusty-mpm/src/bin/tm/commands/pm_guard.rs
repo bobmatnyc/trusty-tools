@@ -856,9 +856,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         )
         .await
         {
-            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason) => {
-                audit_denied_tool(&refused, "builder-cap", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
+            // #8794: the deny holds the exit, capped, for any release it spawned.
+            pm_guard_builder_cap::BuilderCapVerdict::Deny(reason, release) => {
+                pm_guard_builder_cap::emit_deny(&refused, &reason, release).await;
                 return Ok(());
             }
             pm_guard_builder_cap::BuilderCapVerdict::Allow(notice) => slot_notice = notice,
