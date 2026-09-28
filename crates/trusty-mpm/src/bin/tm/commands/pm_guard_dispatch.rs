@@ -771,24 +771,57 @@ pub(crate) async fn post_shared_tree(
     payload: &Value,
     route: &str,
 ) -> SharedTreeReply {
+    post_shared_tree_with(shared_tree_client, url, session_id, cwd, payload, route).await
+}
+
+/// The shared-tree client: 500 ms to connect, 2 s for the whole request.
+fn shared_tree_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+}
+
+/// [`post_shared_tree`] with the client constructor supplied.
+///
+/// Why: #8492 — the constructor is the synchronous step a caller's deadline
+/// must be able to preempt, and only a supplied one can be made slow on demand.
+/// What: runs `build` on the blocking pool, then POSTs as [`post_shared_tree`].
+/// Test: `a_deadline_fires_while_the_client_build_is_still_running`.
+async fn post_shared_tree_with<B>(
+    build: B,
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+    route: &str,
+) -> SharedTreeReply
+where
+    B: FnOnce() -> reqwest::Result<reqwest::Client> + Send + 'static,
+{
     if session_id.is_empty() {
         return SharedTreeReply::Unavailable(
             "the hook payload carries no session id, so no session's delegations can be addressed"
                 .to_string(),
         );
     }
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
+    // #8492: built on the blocking pool, not inside this poll, so a caller's
+    // deadline (`tokio::time::timeout`) can fire while the build still runs.
+    let client = match tokio::task::spawn_blocking(build).await {
+        Ok(Ok(client)) => client,
         // #5923: a client that cannot be built never reached the network, and
         // no retry in this process would change that — the guard is off, not
         // uncertain.
-        Err(error) => {
+        Ok(Err(error)) => {
             return SharedTreeReply::Unavailable(format!(
                 "the guard's HTTP client could not be built: {error}"
+            ));
+        }
+        // #8492: a panicking build panics here, exactly as the inline build did.
+        Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+        Err(join) => {
+            return SharedTreeReply::Unavailable(format!(
+                "the guard's HTTP client build did not finish: {join}"
             ));
         }
     };
@@ -1327,21 +1360,69 @@ mod tests {
         assert!(writers_of(claim_against("http://127.0.0.1:1").await).is_empty());
     }
 
+    /// A bound listener that never accepts, and its base URL (#8492).
+    ///
+    /// Why: a dial completes its handshake into the kernel's accept queue with
+    /// no `accept` call, so whether anything dialled is a fact read afterwards
+    /// by [`was_dialled`] — not a stopwatch, which loses the race under load.
+    fn unaccepted_listener() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        (listener, url)
+    }
+
+    /// Did anything connect to `listener`? A queued connection accepts at once.
+    fn was_dialled(listener: &std::net::TcpListener) -> bool {
+        listener.set_nonblocking(true).expect("nonblocking");
+        listener.accept().is_ok()
+    }
+
     #[tokio::test]
     async fn claim_shared_tree_is_empty_without_a_session_id() {
         // A hook payload with no `session_id` cannot address a session's
-        // delegations at all. Fail open before dialling anything — an unroutable
-        // URL would cost a real (bounded) wait if this branch were removed.
-        let started = std::time::Instant::now();
-        let claim = claim_shared_tree(
-            "http://127.0.0.1:1",
-            "",
-            Path::new("/repo"),
-            &serde_json::json!({}),
-        )
-        .await;
+        // delegations at all. Fail open before dialling anything.
+        let (listener, url) = unaccepted_listener();
+        let claim = claim_shared_tree(&url, "", Path::new("/repo"), &serde_json::json!({})).await;
+        // #8492: whether the daemon was dialled, not how long the call took.
+        assert!(!was_dialled(&listener), "no session id must not dial");
         assert!(writers_of(claim).is_empty());
-        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    /// 🔴 REGRESSION (#8492): the client is built off the calling runtime, so a
+    /// caller's deadline fires while a slow build is still running. On
+    /// origin/main the build ran inside the first poll and held the runtime
+    /// thread until it returned, so no deadline could fire before it.
+    #[tokio::test]
+    async fn a_deadline_fires_while_the_client_build_is_still_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let built = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&built);
+        let slow_build = move || {
+            // Released only after the deadline decides; the bound only ends a
+            // run where the build held the runtime and nothing could release it.
+            let _ = gate.recv_timeout(std::time::Duration::from_secs(10));
+            flag.store(true, Ordering::SeqCst);
+            shared_tree_client()
+        };
+        let (_listener, url) = unaccepted_listener();
+        let payload = serde_json::json!({});
+        let post = post_shared_tree_with(
+            slow_build,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &payload,
+            SHARED_TREE_ROUTE,
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), post).await;
+        let built_before_the_deadline = built.load(Ordering::SeqCst);
+        let _ = release.send(());
+        assert!(
+            !built_before_the_deadline,
+            "the deadline fired only after the client build returned: the build held the runtime"
+        );
+        assert!(outcome.is_err(), "the caller's deadline must decide");
     }
 
     #[tokio::test]
@@ -1625,22 +1706,22 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_never_calls_the_daemon_for_a_non_dispatch_tool() {
-        // An unroutable URL would cost a real (bounded) wait if it were dialled;
-        // returning instantly proves the classify-first ordering holds.
+        // Classify first, ask second: a non-dispatch tool never reaches the
+        // daemon. #8492: proven by the listener's accept queue, not a stopwatch.
+        let (listener, url) = unaccepted_listener();
         let payload = serde_json::json!({"cwd": "/repo"});
-        let started = std::time::Instant::now();
         let verdict = evaluate(
-            "http://127.0.0.1:1",
+            &url,
             &payload,
             "Read",
             Some(&input("rust-engineer", None)),
             "11111111-1111-1111-1111-111111111111",
         )
         .await;
-        assert_eq!(verdict, None);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(400),
+            !was_dialled(&listener),
             "the daemon must not be dialled for a non-dispatch tool"
         );
+        assert_eq!(verdict, None);
     }
 }

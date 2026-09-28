@@ -279,16 +279,19 @@ fn a_recheck_that_panics_denies() {
 }
 
 /// 🔴 REGRESSION (#8082): the daemon owner query runs INSIDE the removal
-/// budget. With 300 ms of budget left and a daemon that accepts the connection
-/// but never answers, the removal denies within that budget and names
-/// `sole-owner`. On origin/main the query waited out its own 2 s request
-/// timeout first, so the deny landed well after the deadline.
+/// budget. With the budget spent and a daemon that accepts the connection but
+/// never answers, the removal denies at once and names `sole-owner`. On
+/// origin/main the query waited out its own 2 s request timeout first, so the
+/// deny landed well after the deadline and named `clean-tree`.
+///
+/// #8492: the reason is the proof, not a stopwatch — a wall-clock bound here
+/// failed under load at 3.3 s and 7.7 s. A spent budget also leaves no race
+/// between the budget and the query's own 2 s timeout.
 #[tokio::test]
 async fn a_silent_owner_query_denies_inside_the_remaining_budget() {
     let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", silent.local_addr().expect("addr"));
-    let started = Instant::now() - (REMOVAL_GUARD_BUDGET - Duration::from_millis(300));
-    let t = Instant::now();
+    let started = Instant::now() - REMOVAL_GUARD_BUDGET;
     let reason = super::removal_recheck_deny(
         &url,
         "11111111-1111-1111-1111-111111111111",
@@ -298,11 +301,6 @@ async fn a_silent_owner_query_denies_inside_the_remaining_budget() {
     )
     .await
     .expect("a silent owner query past the budget must deny");
-    assert!(
-        t.elapsed() < Duration::from_millis(1000),
-        "the owner query must not outlive the budget: {:?}",
-        t.elapsed()
-    );
     assert!(reason.contains("ran out of time"), "{reason}");
     assert!(reason.contains(CHECK_SOLE_OWNER), "{reason}");
     drop(silent);
