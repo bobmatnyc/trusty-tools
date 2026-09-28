@@ -1,0 +1,4 @@
+Fixed
+- A file removed while a deferred-embed pass runs no longer gets its vectors back when the pass commits. The commit now keeps only the chunks the corpus still holds, and evicts the vector of any chunk removed while the upsert ran. Before, the removed file's vectors stayed in the HNSW store with no chunk behind them, and nothing removed them (#8761).
+- A chunk edited while a deferred-embed pass runs no longer has its current vector replaced by the embedding of its pre-edit content. The pass skips it, and the next pass embeds the new content (#8761).
+- A deferred-embed commit that cannot read the chunk map, because the map was evicted and could not be rehydrated, now fails the pass instead of treating every chunk as removed. The pending-embed marker is kept, so the next pass retries (#8761).

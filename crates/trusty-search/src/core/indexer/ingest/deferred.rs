@@ -11,7 +11,7 @@
 //! Test: `status_answers_during_an_embed_pass_with_a_writer_queued`, plus the
 //! #6524 pause tests through `embed_deferred_chunks_gated`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::core::chunker::RawChunk;
 
@@ -101,27 +101,43 @@ impl CodeIndexer {
     /// snapshots its prefix too, then returns the stall as the `Err` that
     /// settles the pass `Failed`. A DURABLE WRITE — the caller must hold the
     /// per-index teardown read-guard (#3049).
+    ///
+    /// #8761: the plan is a snapshot and the embed phase holds no lock, so a
+    /// chunk can be removed or edited before this runs. Only chunks the live
+    /// corpus still holds with the snapshot's content are committed, and a
+    /// chunk removed while the upsert ran has its vector evicted afterwards.
+    /// Errors when the chunk map is evicted and cannot be rehydrated, since
+    /// neither check can be answered then.
     /// Test: `a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`,
-    /// `a_stalled_wave_commits_the_waves_before_it`.
+    /// `a_stalled_wave_commits_the_waves_before_it`,
+    /// `a_file_removed_or_edited_during_the_embed_phase_gets_no_vector`,
+    /// `a_file_removed_during_the_upsert_has_its_vector_evicted`.
     pub(crate) async fn commit_deferred_embed(
         &self,
         plan: DeferredEmbedPlan,
         run: EmbedRun,
     ) -> Result<EmbedCatchUp> {
-        if plan.to_embed.is_empty() {
-            return Ok(EmbedCatchUp::finished(0, plan.total));
+        let DeferredEmbedPlan {
+            mut to_embed,
+            total,
+            embed: _,
+        } = plan;
+        if to_embed.is_empty() {
+            return Ok(EmbedCatchUp::finished(0, total));
         }
         let EmbedRun {
             mut embeddings,
             stalled,
         } = run;
         let done = embeddings.iter().take_while(|e| e.is_some()).count();
-        let paused = done < plan.to_embed.len();
+        let paused = done < to_embed.len();
         embeddings.truncate(done);
-        self.commit_vectors_batch(&plan.to_embed[..done], &embeddings)
-            .await?;
-        self.commit_embeddings_cache(&plan.to_embed[..done], embeddings)
-            .await;
+        to_embed.truncate(done);
+        // #8761: the snapshot may name chunks removed or edited while it embedded.
+        let (live, embeddings) = self.retain_live_snapshot(to_embed, embeddings).await?;
+        self.commit_vectors_batch(&live, &embeddings).await?;
+        self.commit_embeddings_cache(&live, embeddings).await;
+        self.evict_vectors_removed_during_commit(&live).await?;
         if let Some(stall) = stalled {
             // #8600: the completed waves are committed; make them durable
             // before the pass settles `Failed`, as the paused arm does.
@@ -132,8 +148,76 @@ impl CodeIndexer {
         }
         Ok(EmbedCatchUp {
             embedded: done,
-            total: plan.total,
+            total,
             paused,
         })
+    }
+
+    /// Drop snapshot chunks the live corpus no longer holds unchanged (#8761).
+    ///
+    /// Why: an embedding of a removed chunk re-inserted an orphan vector that
+    /// no removal path reclaims; an embedding of an edited chunk overwrote the
+    /// vector of its current content with the pre-edit one.
+    /// What: keeps each chunk whose id the corpus holds with identical
+    /// content, with its embedding. Errors when the map cannot be read as the
+    /// whole corpus.
+    /// Test: `a_file_removed_or_edited_during_the_embed_phase_gets_no_vector`,
+    /// `commit_refuses_when_the_chunk_map_cannot_be_rehydrated`.
+    async fn retain_live_snapshot(
+        &self,
+        snapshot: Vec<RawChunk>,
+        embeddings: Vec<Option<Vec<f32>>>,
+    ) -> Result<(Vec<RawChunk>, Vec<Option<Vec<f32>>>)> {
+        self.ensure_corpus_view_is_current()
+            .await
+            .context("confirm the embedded chunks are still in the corpus")?;
+        let corpus = self.chunks.read().await;
+        Ok(snapshot
+            .into_iter()
+            .zip(embeddings)
+            .filter(|(chunk, _)| {
+                corpus
+                    .get(&chunk.id)
+                    .is_some_and(|now| now.content == chunk.content)
+            })
+            .unzip())
+    }
+
+    /// Evict the vectors of chunks removed while they were being upserted (#8761).
+    ///
+    /// Why: `retain_live_snapshot` reads the corpus before the upsert, so a
+    /// removal that lands between the two finds no vector to remove and the
+    /// upsert then inserts an orphan. `drop_chunk_ids_from_memory` drops the
+    /// map entry before the vector, so a removal this check misses removes the
+    /// vector itself.
+    /// What: removes the vector and cached embedding of every committed chunk
+    /// the corpus no longer holds. Errors when the map cannot be read as the
+    /// whole corpus or a vector cannot be removed.
+    /// Test: `a_file_removed_during_the_upsert_has_its_vector_evicted`,
+    /// `a_failed_eviction_after_the_upsert_is_an_error`,
+    /// `post_upsert_check_refuses_when_the_chunk_map_cannot_be_rehydrated`.
+    async fn evict_vectors_removed_during_commit(&self, committed: &[RawChunk]) -> Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        self.ensure_corpus_view_is_current()
+            .await
+            .context("find chunks removed during the vector upsert")?;
+        let removed: Vec<&str> = {
+            let corpus = self.chunks.read().await;
+            committed
+                .iter()
+                .filter(|chunk| !corpus.contains_key(&chunk.id))
+                .map(|chunk| chunk.id.as_str())
+                .collect()
+        };
+        for id in removed {
+            store
+                .remove(id)
+                .await
+                .with_context(|| format!("evict the vector of removed chunk {id}"))?;
+            self.chunk_embeddings.write().await.pop(id);
+        }
+        Ok(())
     }
 }

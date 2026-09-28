@@ -687,19 +687,24 @@ impl CodeIndexer {
     /// there is a write transaction that changes nothing.
     /// [`Self::remove_chunks_from_stores`] keeps the redb delete for the
     /// deletion paths, which need it.
-    /// What: best-effort `store.remove` per id (HNSW deletion is non-fatal
-    /// here), then one write lock per in-memory structure for the whole batch.
-    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`.
+    /// What: drops the ids from the chunk map, then best-effort `store.remove`
+    /// per id (HNSW deletion is non-fatal here), then one write lock per
+    /// remaining in-memory structure for the whole batch.
+    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`,
+    /// `a_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
     async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
-        if let Some(store) = &self.store {
-            for id in ids {
-                store.remove(id).await.ok();
-            }
-        }
+        // #8761: map before vector. A deferred-embed commit that upserts one of
+        // these ids either finds it gone on its post-upsert check or upserted
+        // before the `store.remove` below.
         {
             let mut chunks = self.chunks.write().await;
             for id in ids {
                 chunks.remove(id);
+            }
+        }
+        if let Some(store) = &self.store {
+            for id in ids {
+                store.remove(id).await.ok();
             }
         }
         {
