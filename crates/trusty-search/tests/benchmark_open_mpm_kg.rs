@@ -767,7 +767,7 @@ fn print_per_query_table(results: &[QueryResult]) {
 /// search_kg − search_semantic delta table, and (c) the per-query forensic
 /// detail.
 #[tokio::test]
-#[ignore]
+#[ignore = "benchmark: needs the isolated fixture daemon and corpus (support/isolated_benchmark.rs)"]
 async fn benchmark_open_mpm_kg_per_lane_tools() {
     let client = make_client();
     let health = assert_daemon_healthy(&client).await;

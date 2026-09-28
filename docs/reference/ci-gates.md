@@ -37,13 +37,80 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
 
+## `CI gate` stands in for fourteen required contexts (#8378)
+
+🔴 **`CI gate` (`ci.yml`, job `ci-gate`) fails whenever any context it covers
+fails.** The covered list is the `CONTEXTS` table in
+`scripts/ci-gate-verdict.sh` — Format check, Clippy, MSRV check, Rust tests
+(affected crates), the four Tauri UI clippies, the daemon smoke test, the
+teardown guard, the tmux exact-target gate, the three release-decision
+selftests, and Website content corpus. `scripts/ci-gate-selftest.sh` holds that
+table equal to the job's `needs:`. The job runs under `if: always()` and goes
+red on a failed or cancelled need, a failed `changes` classifier, a job
+missing from `needs:`, or a skip the classifier did not order.
+
+- **Not required yet.** The owner-approved list is CI gate, line-cap,
+  generation-artifact-lint, test-pointers, PR version bump and
+  capabilities-drift. Branch protection changes by hand, after the probes pass
+  on GitHub.
+- **Why the covered jobs live in `ci.yml`.** `needs:` cannot name a job in
+  another workflow file, so #8378 moved the teardown guard, the tmux gate, the
+  three `Tag/publish parity` selftests and `Website content corpus` into
+  `ci.yml`. Every check name is unchanged.
+- **Job-level path filters.** `Durable writes hold the teardown guard` and
+  `Every tmux -t target is exact` skip at the job level when
+  `scripts/ci-gate-relevance.sh` says the diff reaches none of their inputs. A
+  job skipped by `if:` still reports, and branch protection counts the skip as
+  passing; a `paths:` trigger filter reports nothing. Every error arm of the
+  classifier answers `true`.
+- **`vmtest harness` is path-filtered at the trigger** on both `push` and
+  `pull_request`: `vmtest-harness/**` and its own workflow file. It is not a
+  required context, so a missing check run blocks nothing.
+
+## Instruction content is Cargo-inert when added or modified (#8378)
+
+🔴 **Owner ruling 2026-09-27 (ADR-0064).** An ADDED or MODIFIED `.md` under
+`crates/trusty-mpm/src/assets/**` or `crates/trusty-agents-common/src/assets/**`,
+or any added or modified file under `content/**`, is Cargo-inert:
+`scripts/detect-docs-only.sh` reports `docs_only=true`, and clippy, fmt, MSRV,
+the Rust tests, the GUI clippies and the daemon smoke test report success
+without building. A DELETE, a rename (a delete plus an add under
+`--no-renames`) or a type change is code, because it removes a path an
+`include_str!` names. A non-`.md` file under the asset roots is code.
+
+What still runs for such a diff: `tm-capabilities generated-skill drift check`
+(both roots are in trusty-mpm's build closure, so the job builds, which also
+proves every `include_str!` still compiles), its resident-budget tests, and —
+for a Cargo-inert diff that touches an instruction root — the
+`Asset-content tests (filtered list, …)` step. It runs exactly the rows of
+`scripts/asset-content-tests.tsv`: every test, in any crate and target, that
+reads Cargo-inert instruction content — the paths
+`scripts/detect-docs-only.sh --instruction-assets` accepts, the same predicate
+that routes the diff to this step. A reader of any other asset (a hook script,
+a TOML or JSON file, trusty-code's own compiled-in `.md`) is not listed: an
+edit to that asset is code, so the affected-crates job runs its crate. One
+`cargo test` runs per crate + target with the rows' name filters, and the step
+fails on a failing test or on a row that selects no test. The job runs on the
+push to main as well, so the merge of an asset-only PR runs the same list
+there, where the test shards skip it. The tmux gate also scans
+`crates/*/src/assets/**/*.md`, so it runs too.
+
+🔴 **A new test that reads instruction `.md` joins the list in the same PR.**
+The same job runs `scripts/check_asset_test_filter.py check` on every diff. It
+fails when test code reads such a file outside the list: an `include_str!` of
+it or of its directory, a `src/assets` literal naming it, a manifest asset that
+names it by path (the PM instruction package), or an asset constant or loader
+it derives by search. Add a row naming the test, or its module; `check
+--verbose` prints what it found. A test that reaches the `.md` only through a
+run-time lookup is invisible to the guard; its row carries a `runtime:` reason.
+
 ## The agent resident-budget tests gate merge through the drift check
 
 🔴 **The required `tm-capabilities generated-skill drift check` job also runs
 the step `Agent resident-budget tests (reuse the build above)`** (#8700). It
-runs the three `*_stays_within_its_resident_budget` tests in
+runs the three `*_stays_within_its_resident_budget` tests and the #7915 ledger test in
 `crates/trusty-mpm/src/core/bundle_tests.rs`, named in full under `--exact`.
-The step fails unless exactly those three run, so renaming one fails it;
+The step fails unless exactly those four run, so renaming one fails it;
 `scripts/check_test_count.sh` also refuses a zero-test run, and an edit to that
 script makes the step run. Before
 this, they ran only in the non-required pre-publish shards, and PR #8695 grew
@@ -76,7 +143,7 @@ gate and keeps running.
 **DOCS-ONLY** means every changed path matches one of `docs/**`, a repo-root
 `*.md`, `crates/*/changelog.d/**`, `crates/*/README.md`, `crates/*/CHANGELOG.md`,
 or `website/src/content/**`. Three path classes are **not** docs-only by
-design: anything under `crates/*/src/**` **even when it ends in `.md`** —
+design: anything under `crates/*/src/**` **even when it ends in `.md`**, except the instruction-content case in the #8378 section above —
 bundled agent and skill assets are compiled into binaries with `include_str!`
 and tests assert on their text — plus `.github/**` and `scripts/**`.
 `scripts/detect-docs-only.sh` is the Cargo-side classifier;
@@ -90,7 +157,7 @@ run on every PR, and the job still reports. The documentation gates —
 path-citation lint, the public-docs allowlist — are deliberately NOT gated
 this way: they are what a docs change owes.
 
-🟡 **New check name: `Website content corpus`** (`website-tests.yml`). Every
+🟡 **New check name: `Website content corpus`** (`ci.yml` since #8378). Every
 website test that reads real repository content — the six-crate changelog
 parse, the 27-page docs corpus, the flagship pages, the landing-page claims
 grounded in `crates/**` — now lives in `*.corpus.test.ts` files and the vitest

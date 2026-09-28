@@ -56,6 +56,12 @@ on:
     # crate builds against — so a PR that touches none of it has nothing here to
     # verify. The workflow file itself is in the filter so changes to this gate
     # still exercise it.
+    #
+    # #8378: the key this comment describes was missing, so the job ran on
+    # every PR on a macos-14 runner (26 s on docs-only PR #8787).
+    paths:
+      - "vmtest-harness/**"
+      - ".github/workflows/vmtest-harness.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push

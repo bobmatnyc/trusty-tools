@@ -217,7 +217,7 @@ publish-check:
 #
 # Test: scripts/check-tag-publish-parity-selftest.sh drives every failure
 # branch against synthetic repos; CI runs it via
-# .github/workflows/tag-publish-parity.yml.
+# .github/workflows/ci.yml (job parity-selftest, moved there by #8378).
 #
 # Usage:
 #   make publish-verify CRATE=trusty-mpm     # run right after `cargo publish`

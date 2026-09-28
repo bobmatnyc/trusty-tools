@@ -261,7 +261,7 @@ fn cache_round_trip() {
 /// Test: tagged #[ignore] because it shells out; run manually with
 /// `cargo test -p trusty-common --features update-check -- --include-ignored`.
 #[tokio::test]
-#[ignore]
+#[ignore = "runs `cargo install` against crates.io (network)"]
 async fn perform_upgrade_fails_cleanly_on_nonexistent_crate() {
     let result = super::perform_upgrade("___trusty_test_crate_does_not_exist___").await;
     // Should be Err because cargo install would fail for a nonexistent crate.
@@ -384,7 +384,7 @@ fn run_isolated_inner_test(inner_test_name: &str) {
 /// `run_with_mode_capture_never_leaks_to_parent_stdio`).
 #[cfg(unix)]
 #[tokio::test]
-#[ignore]
+#[ignore = "re-entry helper: run alone in a child by run_with_mode_capture_never_leaks_to_parent_stdio"]
 async fn run_with_mode_capture_never_leaks_to_parent_stdio_inner() {
     use std::io::Read;
 
@@ -450,7 +450,7 @@ fn run_with_mode_capture_never_leaks_to_parent_stdio() {
 /// `run_with_mode_inherit_leaks_to_parent_stdio`).
 #[cfg(unix)]
 #[tokio::test]
-#[ignore]
+#[ignore = "re-entry helper: run alone in a child by run_with_mode_inherit_leaks_to_parent_stdio"]
 async fn run_with_mode_inherit_leaks_to_parent_stdio_inner() {
     use std::io::Read;
 
@@ -527,10 +527,9 @@ async fn run_with_mode_capture_folds_stderr_into_error() {
 ///
 /// Why: We need a real binary that is always present to test the happy path
 /// without installing anything. `cargo --version` is a safe no-side-effect probe.
-/// Test: tagged #[ignore] (shells out); run manually with `--include-ignored`.
+/// Test: this test; it runs by default (shells out to local `cargo`, no network).
 // #5937: resolves ~/.cargo/bin from HOME, which the tests below set.
 #[test]
-#[ignore]
 fn verify_installed_binary_passes_for_cargo() {
     let _env = env_lock();
     let result = block_on(super::verify_installed_binary("cargo"));
@@ -966,7 +965,7 @@ async fn verify_installed_binary_at_path_fails_for_missing_binary() {
 // Tagged #[ignore] so it is skipped in normal CI runs.
 
 #[tokio::test]
-#[ignore]
+#[ignore = "live crates.io query (network)"]
 async fn live_crates_io_with_old_version_returns_some() {
     // Deliberately old version — should show trusty-search is newer.
     let result = check_crates_io("trusty-search", "0.0.1").await;
