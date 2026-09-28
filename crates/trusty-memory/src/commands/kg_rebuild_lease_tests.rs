@@ -38,10 +38,14 @@ fn auto_triple(subject: &str, predicate: &str, object: &str) -> Triple {
 /// A ready `AppState` on `root` holding palace `a`, with the palace's KG.
 async fn palace_a(root: &std::path::Path) -> Result<(AppState, Arc<KnowledgeGraph>)> {
     trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
-    // Issue #88: bypass palace-slug enforcement for test palaces.
-    // SAFETY: idempotent constant write "1"; safe across test threads.
-    unsafe {
-        std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+    // Issue #88: bypass palace-slug enforcement for test palaces. #5937: the
+    // write happens under the crate's env lock.
+    {
+        let _env = crate::commands::env_test_lock().lock().await;
+        // SAFETY: idempotent constant write "1", made under the env lock.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
     }
     let state = AppState::new(root.to_path_buf());
     state.set_ready();
