@@ -33,11 +33,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Why: see the module docs — an interrupted direct write corrupts the target.
 /// What: refuses a symlinked target, creates the parent directory, creates a
 /// fresh `<name>.<pid>.<n>.tm-tmp` beside the target with `create_new` (never
-/// truncating an existing file), writes and `fsync`s it, copies the target's
-/// permission bits onto it when the target exists, renames it over `path`, then
-/// `fsync`s the parent directory. A failure after the temp file exists removes
-/// it and leaves `path` byte-identical. Concurrent callers on one `path` each
-/// stage their own file, so the last rename wins with a complete document.
+/// truncating an existing file) and, on Unix, mode `0600`, so a crash-stranded
+/// copy is owner-only (#8733). It writes and `fsync`s it, gives it the mode the
+/// target will publish with (the target's own, or the plain-create default for
+/// a new target), renames it over `path`, then `fsync`s the parent directory.
+/// A failure after the temp file exists removes it and leaves `path`
+/// byte-identical. Concurrent callers on one `path` each stage their own file,
+/// so the last rename wins with a complete document.
 ///
 /// The two syncs are what make the atomicity survive a power loss rather than
 /// only a process crash: the content has to be on disk before the rename that
@@ -51,6 +53,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `write_atomic_leaves_the_original_intact_when_staging_fails`,
 /// `write_atomic_removes_its_temp_file_when_the_rename_fails`,
 /// `write_atomic_leaves_no_temp_file_behind`,
+/// `staging_file_is_owner_only_and_never_truncates`,
+/// `write_atomic_gives_a_new_target_the_default_create_mode`,
 /// `temp_sibling_is_unique_per_call_and_beside_the_target`,
 /// `two_concurrent_dream_stats_writers_never_publish_a_partial_file`.
 ///
@@ -76,12 +80,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = temp_sibling(path);
-    // #8733: `create_new` — never truncate a file this call did not create. A
-    // failure here leaves nothing of ours on disk, so there is nothing to clean.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
+    // #8733: a failure here leaves nothing of ours on disk, so there is
+    // nothing to clean.
+    let mut file = create_staging_file(&tmp)?;
 
     let result = (|| -> io::Result<()> {
         file.write_all(bytes)?;
@@ -150,17 +151,62 @@ fn temp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Carry `from`'s permission bits onto `to`, when `from` exists.
+/// Create one call's staging file: `create_new`, and owner-only on Unix.
+///
+/// Why (#8733): the bytes sit in this file from the write until the rename. A
+/// crash in that window strands it under a name nothing reuses, and a stray
+/// copy of a scrubbed LaunchAgent plist must not be world-readable. What:
+/// `create_new` never truncates an existing file; on Unix the mode is `0600`
+/// (further narrowed by the umask). [`copy_mode`] sets the published mode.
+/// Test: `staging_file_is_owner_only_and_never_truncates`.
+fn create_staging_file(tmp: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // #8733: owner-only while it holds the payload; a crash may strand it.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(tmp)
+}
+
+/// Give `to` the mode `from` will publish with: `from`'s own, or — when `from`
+/// does not exist yet — the mode a plain create would give it.
 ///
 /// Why: a `0600` plist that the repair widened to the umask default would
-/// undo part of what #8236 is about. An absent target has no mode to copy, and
-/// the umask default is then correct.
+/// undo part of what #8236 is about. A new target keeps the umask default
+/// (`0666 & !umask`, `0644` under the usual `022`) that it had before the
+/// staging file became `0600` (#8733).
+/// Test: `write_atomic_preserves_the_targets_mode`,
+/// `write_atomic_gives_a_new_target_the_default_create_mode`.
 fn copy_mode(from: &Path, to: &Path) -> io::Result<()> {
     match std::fs::metadata(from) {
         Ok(meta) => std::fs::set_permissions(to, meta.permissions()),
+        #[cfg(unix)]
+        // #8733: undo the `0600` staging mode for a new target.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            std::fs::set_permissions(to, default_create_mode(from)?)
+        }
+        #[cfg(not(unix))]
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// The mode a plain create beside `target` gets, read without touching the
+/// process-global umask.
+///
+/// Why (#8733): `umask(2)` can only be read by setting it, which races every
+/// other thread's creates. What: creates an EMPTY probe sibling with the
+/// default mode, reads its permissions, removes it. Runs only for a new target.
+#[cfg(unix)]
+fn default_create_mode(target: &Path) -> io::Result<std::fs::Permissions> {
+    let probe = temp_sibling(target);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    let perms = std::fs::metadata(&probe).map(|m| m.permissions());
+    let _ = std::fs::remove_file(&probe);
+    perms
 }
 
 #[cfg(test)]
@@ -236,6 +282,48 @@ mod tests {
         write_atomic(&path, b"replacement").expect_err("rename over a directory must fail");
         assert_eq!(entries(dir.path()), ["unit.plist"]);
         assert_eq!(std::fs::read(path.join("keep")).expect("read"), b"kept");
+    }
+
+    /// Why (#8733): the staging file holds the full payload until the rename;
+    /// a crash strands it, so it must be owner-only from creation, and it
+    /// must never open (and truncate) a file that already exists.
+    #[cfg(unix)]
+    #[test]
+    fn staging_file_is_owner_only_and_never_truncates() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tmp = temp_sibling(&dir.path().join("unit.plist"));
+
+        let mut file = create_staging_file(&tmp).expect("create");
+        file.write_all(b"secret").expect("write");
+        let mode = std::fs::metadata(&tmp).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "staging file created at {mode:o}");
+
+        let err = create_staging_file(&tmp).expect_err("an existing file must not be reopened");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(std::fs::read(&tmp).expect("read"), b"secret");
+    }
+
+    /// Why (#8733): a `0600` staging file must not make a NEW target `0600` —
+    /// it keeps the mode a plain create gives it, as before.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_gives_a_new_target_the_default_create_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reference = dir.path().join("reference");
+        std::fs::File::create(&reference).expect("plain create");
+        let expected = std::fs::metadata(&reference)
+            .expect("stat")
+            .permissions()
+            .mode();
+        let path = dir.path().join("fresh.json");
+
+        write_atomic(&path, b"{}").expect("write");
+
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, expected & 0o777, "new target got {mode:o}");
+        assert_eq!(entries(dir.path()), ["fresh.json", "reference"]);
     }
 
     /// Why (#8733): a shared staging name let concurrent writers truncate
