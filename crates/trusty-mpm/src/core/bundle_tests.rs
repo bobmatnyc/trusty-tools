@@ -132,6 +132,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
         "skills/tm-secrets.md",
+        "skills/tm-supervisor-setup.md",
         // #8376: entry file plus its four reference files.
         "skills/tm-epic.md",
         "skills/tm-epic/references/tracker-template.md",
@@ -300,6 +301,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
         ("tm-secrets", TM_SECRETS),
+        ("tm-supervisor-setup", TM_SUPERVISOR_SETUP),
         ("tm-epic", TM_EPIC),
     ];
     for (name, content) in skills {
@@ -552,11 +554,13 @@ fn bundle_table_is_complete() {
     // Issue #8376 (+5): `skills/tm-epic.md` is NEW — tracker + phase-issue
     //   authoring — plus four `references/*.md` files (tracker-template,
     //   phase-template, manual-procedure, anti-patterns). 185 + 5 = 190.
-    assert_eq!(ALL.len(), 190);
+    // Issue #8436 (+1): `skills/tm-supervisor-setup.md` is NEW — the
+    //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
+    assert_eq!(ALL.len(), 191);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 190, "artifact paths must be unique");
+    assert_eq!(paths.len(), 191, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

@@ -214,6 +214,10 @@ pub const ALL: &[BundledArtifact] = &[
         "skills/tm-epic/references/anti-patterns.md",
         TM_EPIC_ANTI_PATTERNS,
     ),
+    // --- Issue #8436 (P1): Architect setup skill; the canonical copy lives in
+    // python/trusty-architect/skills/ and scripts/check_architect_subproject.sh
+    // fails on drift ---
+    overwrite("skills/tm-supervisor-setup.md", TM_SUPERVISOR_SETUP),
     // --- DOC-28 R1: canonical self-description doc ---
     overwrite("docs/WHAT-IS-TRUSTY-MPM.md", WHAT_IS_TRUSTY_MPM),
     // --- Issue #2034: architecture doc covering memory/sessions/search ---

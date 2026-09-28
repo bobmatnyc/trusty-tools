@@ -306,6 +306,7 @@ universal = [
   "tm-session-pause",
   "tm-session-resume",
   "tm-slack",
+  "tm-supervisor-setup",
   "tm-teaching-templates",
   "tm-ticketing",
   "tm-tool-usage-guide",
