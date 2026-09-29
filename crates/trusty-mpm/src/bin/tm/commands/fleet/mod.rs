@@ -7,7 +7,7 @@
 //! config file; `tm fleet init` does it in one idempotent command.
 //! What: [`init`] creates the project (local git repo, no remote), writes the
 //! profile request and the allowlist entry — each an atomic write that keeps
-//! the rest of the file — and starts the `tm-architect` session. [`status`]
+//! the rest of the file — and starts the `tm-architect` session. [`status()`]
 //! reads the same four facts back and exits 1 when any is missing. Twin mode
 //! (#8878) is out of scope (ruling Q7). `add` and `remove` are phase P3.
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
@@ -36,7 +36,7 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
-/// What: resolves the home and the directory, runs [`init`] or [`status`],
+/// What: resolves the home and the directory, runs [`init`] or [`status()`],
 /// and prints the report. `status` returns an error, so exit 1, when the
 /// setup is incomplete.
 /// Test: `tests/tm_fleet.rs`.
