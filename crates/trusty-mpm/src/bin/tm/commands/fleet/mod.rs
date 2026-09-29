@@ -10,10 +10,12 @@
 //! the rest of the file — and starts the `tm-architect` session. [`status`]
 //! reads the same four facts back and exits 1 when any is missing. Twin mode
 //! (#8878) is out of scope (ruling Q7). `add` and `remove` are phase P3.
-//! Test: `commands::fleet::tests`, `tests/tm_fleet.rs`.
+//! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
+//! `tests/tm_fleet.rs`.
 
 mod config;
 mod launch;
+mod preflight;
 mod status;
 
 use std::path::{Path, PathBuf};
@@ -121,8 +123,10 @@ impl InitReport {
 ///
 /// Why: acceptance 1-3 of #8436, under the P2 brief: idempotent, atomic, and
 /// fail-closed on a file it cannot parse.
-/// What: reads and parses both config files BEFORE writing anything, then
-/// refuses when another Architect exists (an allow-listed supervisor project
+/// What: first refuses a directory fleet init must never own (see
+/// [`preflight::check`]) and continues with its canonical path. Reads and
+/// parses both config files BEFORE writing anything, then refuses when
+/// another Architect exists (an allow-listed supervisor project
 /// elsewhere, or `tm-architect` running in another directory). Then, in
 /// order: create `dir`; `git init` when `dir/.git` is absent (no remote is
 /// ever added); request the profile; add the allowlist entry; start the
@@ -131,8 +135,13 @@ impl InitReport {
 /// Test: `a_second_run_changes_nothing`,
 /// `a_malformed_config_fails_and_is_left_byte_identical`,
 /// `an_unrelated_key_and_comment_survive_the_allowlist_write`,
-/// `a_second_architect_elsewhere_is_refused`.
+/// `a_second_architect_elsewhere_is_refused`,
+/// `the_home_directory_is_refused_however_it_is_spelled`.
 pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<InitReport> {
+    // #8436: the preflight runs before any read or write, and every later step
+    // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
+    let checked = preflight::check(dir, home)?;
+    let dir = checked.as_path();
     let config_path = user_config_path(home);
     let config_raw = read_or_empty(&config_path)?;
     let (_, user_config) = config::parse_user_config(&config_raw, &config_path)?;
@@ -148,8 +157,6 @@ pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Init
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         Step::Changed(format!("created project directory {}", dir.display()))
     });
-    let dir =
-        &std::fs::canonicalize(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
     report.steps.push(git_init(dir)?);
 
     let edit = config::request_supervisor_profile(&project_raw, &project_path)?;
@@ -217,7 +224,7 @@ fn git_init(dir: &Path) -> anyhow::Result<Step> {
             "git repository (no remote added)".to_owned(),
         ));
     }
-    let out = std::process::Command::new("git")
+    let out = preflight::git()
         .args(["init", "--quiet"])
         .arg(dir)
         .output()

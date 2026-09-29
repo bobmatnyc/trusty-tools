@@ -130,3 +130,24 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         text(&out)
     );
 }
+
+/// #8436: `--dir` goes through the same preflight as the default, so the
+/// binary refuses `$HOME` and writes no grant.
+#[test]
+fn fleet_init_refuses_the_home_directory_before_writing() {
+    let env = FleetEnv::new();
+    let home = env.home.path();
+    let out = env.tm(&["fleet", "init", "--no-launch", "--dir", dir_arg(home)]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("it is your home directory"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !home.join(".trusty-mpm/config.toml").exists(),
+        "the grant was written: {}",
+        text(&out)
+    );
+    assert!(!home.join(".trusty-mpm.toml").exists(), "{}", text(&out));
+}

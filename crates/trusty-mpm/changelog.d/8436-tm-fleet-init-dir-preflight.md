@@ -1,0 +1,2 @@
+Security
+- `tm fleet init` refuses, before it writes the project or the `[supervisor] projects` grant, a directory the Architect must never own: `/` or a mount root, `$HOME`, a path inside another git work tree, a repository with a remote, and a workspace parent (a projects root, an ancestor of `$HOME` or of a projects root, or a directory with a repository anywhere beneath it). The check runs on the canonical path, and a fact it cannot establish is a refusal (#8436).
