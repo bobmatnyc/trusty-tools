@@ -28,12 +28,12 @@
 //! `pm_guard_still_denies_every_key_print_or_copy_sink_8869` in
 //! `tests/tm_hook_pm_guard_pem_consumers.rs`.
 //!
-//! #8875: the design's `gh api -X DELETE` DENY row lives here too, as
-//! [`evaluate_gh_api_secret_delete`], because a DELETE of `…/secrets/NAME`
-//! names no secret-shaped word for the read rule to see.
+//! #8875: the design's `gh api -X DELETE` DENY row is the child module
+//! `pm_guard_secret_gh_api_delete.rs`, re-exported as
+//! [`evaluate_gh_api_secret_delete`].
 
 use crate::commands::pm_guard_bash::{
-    RedirectRole, input_redirect_operand, redirect_role, split_shell_segments, tokenize,
+    RedirectRole, input_redirect_operand, redirect_role, tokenize,
 };
 use crate::commands::pm_guard_secret_read::{
     NESTED_COMMAND_MARKERS, Scan, command_basename, secret_files_named_in,
@@ -484,205 +484,10 @@ fn is_name(segment: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
 }
 
-/// `gh api` switches: they take no value (pflag also accepts `--name=bool`).
-const GH_API_SWITCHES: &[&str] = &[
-    "--include",
-    "--paginate",
-    "--silent",
-    "--slurp",
-    "--verbose",
-    "--help",
-];
-
-/// `gh api` long options that take one value.
-const GH_API_VALUED: &[&str] = &[
-    "--method",
-    "--header",
-    "--raw-field",
-    "--field",
-    "--input",
-    "--jq",
-    "--template",
-    "--cache",
-    "--preview",
-    "--hostname",
-];
-
-/// Refuse a `gh api` call that DELETEs a GitHub secret (#8875, the #8869
-/// design's `gh api -X DELETE` DENY row): `Some(reason)` denies.
-///
-/// Why: the read rule judges a path by its basename, and in
-/// `repos/O/R/actions/secrets/NAME` that is the secret's name, which is not a
-/// secret-shaped word, so the rule never looked. The call deletes a repo's,
-/// org's or environment's Actions, Dependabot or Codespaces secret — damage,
-/// not a leak — so it is judged by method and path, not by the file class.
-/// What: a command whose de-quoted, percent-decoded text names no `secrets`
-/// word returns `None` at once. Otherwise each segment that runs `gh api` is
-/// parsed the way gh's pflag parser reads it (`-X DELETE`, `-XDELETE`,
-/// `-X=DELETE`, `--method DELETE`, `--method=DELETE`, any case, before or after
-/// the endpoint). It denies when a method is `DELETE` and the endpoint names a
-/// `secrets` word or is not literal (`"$EP"` bound elsewhere in the command).
-/// A DELETE of a literal non-secrets endpoint, and every non-DELETE, is left to
-/// the other rules, so the #8869 GET listing still passes.
-///
-/// Fail closed: an unlexable segment, an unknown option, a method option with
-/// no value or a non-literal one, or a DELETE with other than one endpoint
-/// denies.
-/// Test: `denies_a_gh_api_delete_of_any_secret_8875`,
-/// `keeps_the_get_listing_and_non_secret_deletes_8875`,
-/// `every_gh_api_delete_arm_fails_closed_8875`; end to end,
-/// `pm_guard_denies_a_gh_api_delete_of_a_secret_8875`.
-pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
-    if !names_secrets(command) {
-        return None;
-    }
-    split_shell_segments(command)
-        .iter()
-        .any(|segment| segment_deletes_a_secret(segment))
-        .then(gh_api_delete_deny_reason)
-}
-
-/// Whether one segment runs `gh api` with a DELETE aimed at a secret, or runs
-/// `gh api` in a shape this parser cannot read.
-fn segment_deletes_a_secret(segment: &str) -> bool {
-    let Ok(argv) = tokenize(segment) else {
-        // #8875: fail closed — an unlexable `gh api` call of a secrets command.
-        let flat = segment.replace(['\'', '"', '\\'], " ");
-        let words: Vec<&str> = flat.split_whitespace().collect();
-        return words.windows(2).any(|w| is_gh_api(w[0], w[1]));
-    };
-    let Some(at) = argv.windows(2).position(|w| is_gh_api(&w[0], &w[1])) else {
-        return false;
-    };
-    let Some((methods, endpoints)) = parse_gh_api(&argv[at + 2..]) else {
-        return true;
-    };
-    if !methods.iter().any(|m| m.eq_ignore_ascii_case("DELETE")) {
-        return false;
-    }
-    match endpoints.as_slice() {
-        [endpoint] => names_secrets(endpoint) || !is_literal_endpoint(endpoint),
-        _ => true,
-    }
-}
-
-/// Whether `program` `sub` is a `gh api` call, by the program's basename.
-fn is_gh_api(program: &str, sub: &str) -> bool {
-    command_basename(program) == "gh" && sub == "api"
-}
-
-/// The method values and the endpoint words of a `gh api` argv tail, read as
-/// pflag reads it; `None` when a token cannot be read (see
-/// [`evaluate_gh_api_secret_delete`]).
-fn parse_gh_api(args: &[String]) -> Option<(Vec<&str>, Vec<&str>)> {
-    let mut methods = Vec::new();
-    let mut endpoints = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let tok = args[i].as_str();
-        i += 1;
-        if tok == "--" {
-            endpoints.extend(args[i..].iter().map(String::as_str));
-            break;
-        }
-        if is_redirect_shaped(tok) {
-            // A bare operator (`>`, `2>`, `<`) takes the next word as its file.
-            i += usize::from(tok.ends_with(['<', '>']));
-            continue;
-        }
-        let value = if let Some(long) = tok.strip_prefix("--") {
-            let (name, joined) = long
-                .split_once('=')
-                .map_or((long, None), |(n, v)| (n, Some(v)));
-            let name = &tok[..name.len() + 2];
-            if GH_API_SWITCHES.contains(&name) {
-                continue;
-            }
-            GH_API_VALUED.contains(&name).then_some(())?;
-            (name == "--method", joined)
-        } else if let Some(cluster) = tok.strip_prefix('-').filter(|c| !c.is_empty()) {
-            // `-i` is gh api's one short switch; the first valued letter takes
-            // the rest of the word, past an optional `=`, as its value.
-            let letters = cluster.trim_start_matches(['i', 'h']);
-            let mut chars = letters.chars();
-            let Some(letter) = chars.next() else {
-                continue;
-            };
-            matches!(letter, 'X' | 'H' | 'f' | 'F' | 'q' | 't' | 'p').then_some(())?;
-            let rest = chars.as_str();
-            let rest = rest.strip_prefix('=').unwrap_or(rest);
-            (letter == 'X', (!rest.is_empty()).then_some(rest))
-        } else {
-            endpoints.push(tok);
-            continue;
-        };
-        let (is_method, joined) = value;
-        let value = match joined {
-            Some(v) => v,
-            None => {
-                i += 1;
-                args.get(i - 1)?.as_str()
-            }
-        };
-        if is_method {
-            // #8875: a method the guard cannot read literally could be DELETE.
-            (!value.is_empty() && value.bytes().all(|b| b.is_ascii_alphabetic())).then_some(())?;
-            methods.push(value);
-        }
-    }
-    Some((methods, endpoints))
-}
-
-/// Whether `text`, de-quoted, percent-decoded and lower-cased, carries the word
-/// `secrets` between non-alphanumeric bytes (`…/secrets/N`, `organization-secrets`).
-fn names_secrets(text: &str) -> bool {
-    let decoded = percent_decode(&text.replace(['\'', '"', '\\'], "")).to_ascii_lowercase();
-    decoded
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .any(|word| word == "secrets")
-}
-
-/// `text` with each `%XX` escape decoded; a malformed escape is kept as is.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| std::str::from_utf8(h).ok());
-        match hex
-            .filter(|_| bytes[i] == b'%')
-            .and_then(|h| u8::from_str_radix(h, 16).ok())
-        {
-            Some(b) => {
-                out.push(b);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Whether an endpoint word is literal: no expansion, glob or brace-list byte
-/// that could turn it into a `secrets` path when the shell runs it.
-fn is_literal_endpoint(endpoint: &str) -> bool {
-    !endpoint.contains(['$', '`', '*', '[', ','])
-}
-
-/// The #8875 refusal; it never echoes the command.
-fn gh_api_delete_deny_reason() -> String {
-    "a `gh api` DELETE of a GitHub secret (`…/secrets/NAME` of a repo, org, user or \
-     environment, Actions, Dependabot or Codespaces) is refused (issue #8875) — it destroys a \
-     secret other workflows depend on. A GET that lists secret names is still allowed (issue \
-     #8869). A `gh api` call on a secrets path whose method or endpoint this guard cannot read \
-     literally is refused too. Ask the operator to delete the secret."
-        .to_string()
-}
+// #8875: the `gh api` secret-DELETE rule, split out for the 500-SLOC cap.
+#[path = "pm_guard_secret_gh_api_delete.rs"]
+mod gh_api_delete;
+pub(crate) use gh_api_delete::evaluate_gh_api_secret_delete;
 
 #[cfg(test)]
 #[path = "pm_guard_secret_consumers_tests.rs"]

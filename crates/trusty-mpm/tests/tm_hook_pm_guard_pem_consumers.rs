@@ -143,6 +143,9 @@ fn pm_guard_denies_a_gh_api_delete_of_a_secret_8875() {
         "gh api -XDELETE repos/example-org/apex/environments/production/secrets/APEX_KEY",
         "gh api repos/example-org/apex/dependabot/secrets/APEX_KEY --method=delete",
         "gh api --method DELETE orgs/example-org/codespaces/secrets/APEX_KEY",
+        // #8875 round 2: an endpoint the guard cannot read, no `secrets` word.
+        "gh api -X DELETE \"$EP\"",
+        "ssh build-host 'gh api -X DELETE repos/example-org/apex/actions/secrets/K'",
     ] {
         let stdout = run_bash(command, cwd.path());
         assert_denied(&stdout, command);
