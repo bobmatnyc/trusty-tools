@@ -503,7 +503,7 @@ impl CodeIndexer {
     /// eviction flags and bumps the rehydrate generation under the chunk-map
     /// write guard (the lock order `clear_in_memory_chunks` uses). The next
     /// reader rehydrates from the installed corpus, and a rehydrate already in
-    /// flight from the old one does not commit. Returns what
+    /// flight from the old one does not clear the evicted flags. Returns what
     /// `reclaim_memory_now` reclaimed.
     /// Test: `a_resumed_first_walk_embeds_the_chunks_it_adopted`.
     pub(crate) async fn invalidate_corpus_caches(&self) -> usize {

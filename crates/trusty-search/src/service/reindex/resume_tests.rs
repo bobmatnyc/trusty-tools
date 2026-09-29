@@ -767,6 +767,21 @@ async fn a_resumed_first_walk_embeds_the_chunks_it_adopted() {
     wait_for_the_embed_pass(&handle).await;
 
     let indexer = handle.indexer.read().await;
+    // #8884 review: an adopted chunk must answer a lexical query.
+    let hits = indexer
+        .search(&crate::core::indexer::SearchQuery {
+            text: "alpha".to_string(),
+            top_k: 5,
+            stage: Some(crate::core::indexer::SearchStage::Lexical),
+            ..Default::default()
+        })
+        .await
+        .expect("lexical search");
+    assert!(
+        hits.iter().any(|hit| hit.file.ends_with("a.rs")),
+        "#8884: the adopted `a.rs` must be searchable; got {:?}",
+        hits.iter().map(|hit| &hit.file).collect::<Vec<_>>()
+    );
     let chunks = indexer
         .corpus_store()
         .expect("promoted corpus")
