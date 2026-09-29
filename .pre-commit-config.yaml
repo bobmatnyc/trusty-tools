@@ -70,7 +70,8 @@ repos:
         entry: scripts/check_line_cap.sh
         language: system
         pass_filenames: true
-        files: \.rs$
+        # #8891: every extension the gate measures (.swift #7856, .py #8891).
+        files: \.(rs|swift|py)$
         types: [file]
 
   # Test: doc-comment pointer lint (issue #2458). Fails the commit when a

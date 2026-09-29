@@ -4,6 +4,8 @@
 # Test/benchmark = basename is tests.rs, ends with _test.rs or _tests.rs,
 #   or path contains /tests/ or /benches/ segment. All others = production.
 # Swift (#7856): .swift files are measured the same way; the test rules apply to a .swift basename.
+# Python (#8891): .py files drop # comments only (docstrings count); test = test_*.py, *_test.py,
+#   conftest.py, or a /tests/ or /benches/ segment.
 # SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,
 # and /* ... */ block comments (including multi-line spans). Trailing-comment lines count.
 # SLOC also excludes inline '#[cfg(test)] mod <name> { ... }' bodies (issue #5153).
@@ -12,3 +14,4 @@
 crates/trusty-mpm/src/daemon/api.rs	1176
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	578
 crates/trusty-search/src/main.rs	617
+scripts/check_asset_test_filter.py	677

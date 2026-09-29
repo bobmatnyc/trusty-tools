@@ -26,6 +26,20 @@ Swift measurement found `PaintHarness.swift` (862) and `TrustyConsoleSaver.swift
 (629) in `crates/trusty-console/macos/saver/` over cap; #7856 split both and
 dropped their `.line-cap-allowlist.tsv` entries.
 
+**Python sources (#8891).** Tracked `.py` files are measured too, by their own
+counter (`SLOC_PY_AWK` in `scripts/lib/sloc_awk.sh`). A `.py` file is a test
+file (3000) when its basename is `test_*.py`, `*_test.py` or `conftest.py`, or
+its path has a `/tests/` or `/benches/` segment; every other `.py` file is
+production, capped at 500. The counter drops blank lines and `#` comments, and
+lexes string literals so a `#` inside a string is not a comment. **Docstrings
+count.** The Rust rules strip comment syntax only, and a docstring is a string
+literal, like a Rust string literal, which counts. Excluding docstrings would
+need a position guess that fails open on data strings, which the #5153 rule
+below forbids. The first measurement found
+`python/trusty-architect/scripts/fleet-poll.py` (561, and its shipped copy)
+over cap; #8891 split it into `fleet-poll.py` and `fleet-classify.py`.
+`scripts/check_asset_test_filter.py` (677) was also over and is allowlisted.
+
 🟡 Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153) — only that
 exact shape. `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
 `fn`/`impl`/`use`, and `all(test, …)` / `any(test, …)` predicates are all still
@@ -35,7 +49,7 @@ counted.
 
 As of issue #610 the production cap is no longer advice: it is gated by
 `scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
-and the local pre-commit hook (`line-cap`). A new tracked production `.rs` or
+and the local pre-commit hook (`line-cap`). A new tracked production `.rs`, `.py` or
 `.swift` file over 500 SLOC **cannot merge**; a new test/benchmark file over 3000 SLOC
 **cannot merge**. Files approaching their limit are a signal to split into
 focused submodules as part of the next change that lands on them — see "When a

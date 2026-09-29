@@ -61,6 +61,7 @@ skills/tm-supervisor-setup.md|crates/trusty-mpm/src/assets/skills/tm-supervisor-
 skills/tm-fleet-check.md|crates/trusty-mpm/src/assets/architect/skills/tm-fleet-check.md
 skills/tm-context-refresh.md|crates/trusty-mpm/src/assets/architect/skills/tm-context-refresh.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
+scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
 scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
 scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
 scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
