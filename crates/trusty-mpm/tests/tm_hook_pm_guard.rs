@@ -1023,6 +1023,29 @@ fn pm_guard_denies_destructive_delete_of_a_worktree_root() {
     assert_denied(&run_pm_guard(payload, &[]));
 }
 
+/// #8735: a delete inside a command substitution or backticks reaches the
+/// universal floor end to end, for a dispatched agent too.
+#[test]
+fn pm_guard_denies_a_destructive_delete_inside_a_substitution() {
+    for command in [
+        "echo \"$(rm -rf /)\"",
+        "echo `rm -rf /root`",
+        // #8735 round 2: a `-c` string behind a wrapper, and a split body
+        // run from the directory its segment reached.
+        "timeout 60 bash -c 'rm -rf ~'",
+        "cd / && x=$(true; rm -rf Users)",
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "agent_id": "agent-8735",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+        })
+        .to_string();
+        assert_denied(&run_pm_guard(&payload, &[]));
+    }
+}
+
 #[test]
 fn pm_guard_denies_secret_file_copy_into_a_worktree_from_native_subagent() {
     // Issue #7122: a `local-ops` agent `cp`'d a live `terraform.tfvars` into

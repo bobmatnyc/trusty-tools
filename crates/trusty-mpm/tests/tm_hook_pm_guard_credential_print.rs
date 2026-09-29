@@ -103,6 +103,20 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "security find-generic-password -s fake-svc -w > /dev/./tty",
         ),
         ("local-ops", "gh auth token"),
+        // #8735: a printer behind a wrapper word and its options.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); timeout 5 cat \"$T\"",
+        ),
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); noglob echo \"$T\"",
+        ),
+        // #8735 round 2: a command string behind `env -S` and a wrapper.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); timeout 5 env -S 'cat $T'",
+        ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();

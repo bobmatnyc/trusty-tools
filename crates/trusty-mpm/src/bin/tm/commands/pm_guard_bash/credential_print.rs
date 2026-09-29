@@ -31,7 +31,8 @@
 //! Fail-closed: once the text names a credential subcommand, anything the
 //! scanner cannot read — broken quoting, an unclosed substitution, nesting past
 //! [`MAX_DEPTH`], an unlexable wrapper string, a descriptor chosen at run
-//! time, a panic — denies. A command naming none of [`TRIGGERS`], no
+//! time, a wrapper option the shared program-word resolver cannot measure
+//! (#8735), a panic — denies. A command naming none of [`TRIGGERS`], no
 //! interactive `security` and no sibling credential call (#8677) is never
 //! parsed at all.
 //!
@@ -87,7 +88,7 @@ mod credential_print_taint_sinks;
 
 use super::bash_tokens::tokenize;
 use super::shell_lex::{WrappedCommand, wrapped_command};
-use crate::commands::hook_rewrite::strip_wrapper_prefix;
+use crate::commands::program_word::resolve_program_word;
 use credential_print_clis::{interactive_security, judge_cli_echoes, names_cli_trigger};
 use credential_print_heredoc::strip_comments_and_heredocs;
 use credential_print_programs::{
@@ -232,7 +233,14 @@ struct Lifted {
 /// `credential_print_tests::denies_the_sibling_credential_clis_8677`,
 /// `credential_print_tests::allows_the_8677_neighbours`,
 /// `credential_print_tests::denies_a_credential_operand_reported_on_stderr_8735`,
-/// `credential_print_tests::denies_an_unreadable_stderr_of_a_reporting_printer_8735`.
+/// `credential_print_tests::denies_an_unreadable_stderr_of_a_reporting_printer_8735`,
+/// `credential_print_tests::denies_a_printer_behind_a_wrapper_8735`,
+/// `credential_print_tests::denies_a_wrapper_option_it_cannot_read_8735`,
+/// `credential_print_tests::allows_the_wrapped_neighbours_8735`,
+/// `credential_print_tests::denies_a_command_string_behind_a_wrapper_option_8735`,
+/// `credential_print_tests::denies_a_trigger_word_behind_a_wrapper_option_8735`,
+/// `credential_print_tests::denies_a_printer_behind_a_new_wrapper_8735`,
+/// `credential_print_tests::allows_the_new_wrapper_neighbours_8735`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
         return None;
@@ -435,8 +443,9 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     emitted.text = argv.iter().any(|w| input_is_program_text(w)) || routed.here_program_text;
     let (keywords, coproc) = keyword_words(argv, header);
     let kw = header + keywords;
-    let resolved = argv.get(kw..).and_then(strip_wrapper_prefix);
-    let start = kw + resolved.unwrap_or(0);
+    // #8735: past wrappers with their options (`nice -n 5`, `timeout 5`).
+    let resolved = resolve_program_word(argv.get(kw..).unwrap_or_default());
+    let start = kw + resolved.map_or(0, |w| w.index);
     let program_word = argv.get(start).map(String::as_str).unwrap_or_default();
     let program = basename(program_word);
     let args = argv.get(start + 1..).unwrap_or_default();
@@ -513,7 +522,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     };
     // A wrapper with flags (`sudo -u x bash -c …`) hides its program, so the
     // first evaluator word after it stands in.
-    let evaluator_at = if resolved.is_some() {
+    let evaluator_at = if resolved.is_ok() {
         is_evaluator(&program).then_some(start)
     } else {
         argv.iter()
@@ -544,7 +553,20 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
             return Err(Refusal::Unreadable("text handed to a program that runs it"));
         }
     }
+    // #8735: a wrapper option the resolver cannot measure hides the program;
+    // round 2: so does a trigger word it hands to a runner the guard never reads.
+    let carried = stdin_carries
+        || call.is_some()
+        || argv.iter().any(|w| carries(w, lifted) || has_trigger(w));
+    if resolved.is_err() && wrapped == WrappedCommand::None && carried {
+        return Err(Refusal::Unreadable("the program behind a wrapper option"));
+    }
     let (out, err) = (routed.out, routed.err);
+    // #8735: `xargs` may sit behind a wrapper; its own options follow it.
+    let xargs_args = match resolved.ok().and_then(|w| w.xargs_at) {
+        Some(x) => argv.get(kw + x + 1..),
+        None => (program == "xargs").then_some(args),
+    };
     match wrapped {
         WrappedCommand::Unlexable => return Err(Refusal::Unreadable("its wrapped command")),
         WrappedCommand::Inner(inner) => {
@@ -556,7 +578,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
                 Sink::Pipe | Sink::Captured => Sink::Captured,
                 Sink::Discarded => Sink::Discarded,
             };
-            let prints = if program == "xargs" && stdin_carries {
+            let prints = if let Some(xargs_args) = xargs_args.filter(|_| stdin_carries) {
                 // #8596 finding 10: xargs hands stdin to its program as
                 // arguments; only a printing program leaks them.
                 let mut with_value = lifted.clone();
@@ -565,7 +587,7 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
                     kind: SubKind::Command,
                     yields: true,
                 });
-                let text = inject_xargs_value(&inner, args, &mark);
+                let text = inject_xargs_value(&inner, xargs_args, &mark);
                 scan(&text, Sink::Captured, inner_err, ctx.depth + 1, &with_value)?
             } else {
                 // A wrapper reading a credential on stdin (`| sh -c cat`)

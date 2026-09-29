@@ -377,6 +377,8 @@ pub(super) fn keyword_words(argv: &[String], from: usize) -> (usize, bool) {
         && KEYWORDS.contains(&word)
     {
         at += 1;
+        // #8735: bash's `time -p` keyword option precedes the program too.
+        at += usize::from(word == "time" && argv.get(at).is_some_and(|w| w == "-p"));
         if word == "coproc" {
             coproc = true;
             let named = argv.get(at).is_some_and(|n| is_identifier(n))
