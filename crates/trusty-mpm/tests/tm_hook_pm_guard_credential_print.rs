@@ -112,6 +112,11 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "gcp-ops",
             "T=$(gcloud auth print-access-token); noglob echo \"$T\"",
         ),
+        // #8735 round 2: a command string behind `env -S` and a wrapper.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); timeout 5 env -S 'cat $T'",
+        ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();

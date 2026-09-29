@@ -1,6 +1,6 @@
 //! #8735: the shared program-word resolver.
 
-use super::{COMMAND_WRAPPERS, GRAMMARS, precommand_index, resolve_program_word};
+use super::{COMMAND_WRAPPERS, GRAMMARS, precommand_index, resolve_program_word, sample_operand};
 
 /// The program word `command` resolves to, or `None` when resolution fails.
 fn program(command: &str) -> Option<String> {
@@ -39,6 +39,21 @@ fn resolves_past_each_wrapper_and_its_options() {
         ("xargs -n 1 -0 echo", "echo"),
         ("FOO=1 '\\timeout' 5 cat x", "cat"),
         ("sudo -- cat x", "cat"),
+        // #8735 round 2: Homebrew's g-prefixed coreutils and the runners.
+        ("gtimeout 5 echo x", "echo"),
+        ("gnice -n 5 echo x", "echo"),
+        ("gstdbuf -oL echo x", "echo"),
+        ("gnohup echo x", "echo"),
+        ("genv -i FOO=1 echo x", "echo"),
+        ("setsid -f echo x", "echo"),
+        ("chrt -f 10 echo x", "echo"),
+        ("taskset -c 0-3,5 echo x", "echo"),
+        ("taskset 0x3 echo x", "echo"),
+        ("unbuffer -p echo x", "echo"),
+        ("flock -n -w 5 /tmp/lock echo x", "echo"),
+        ("sudo -k rm -f x", "rm"),
+        ("xargs -J % rm %", "rm"),
+        ("xargs -R 2 -I % rm %", "rm"),
         // A wrapper with nothing after it runs as itself.
         ("env", "env"),
         ("env -i", "env"),
@@ -61,8 +76,12 @@ fn an_unknown_or_unmeasurable_option_fails() {
         "sudo -X cat x",
         "sudo --bogus cat x",
         "env -S 'cat x'",
-        "command -v cat",
+        "genv -S 'cat x'",
         "noglob -x echo",
+        "chrt -f high echo x",
+        "taskset zz echo x",
+        "flock /tmp/lock -c 'cat x'",
+        "flock -c 'cat x' /tmp/lock",
         "xargs --bogus echo",
         "sudo -u",
     ] {
@@ -74,10 +93,33 @@ fn an_unknown_or_unmeasurable_option_fails() {
 fn every_wrapper_has_a_grammar() {
     assert_eq!(COMMAND_WRAPPERS.len(), GRAMMARS.len());
     for wrapper in COMMAND_WRAPPERS {
-        let operand = if *wrapper == "timeout" { " 5" } else { "" };
-        let command = format!("{wrapper}{operand} cat x");
+        let command = format!("{wrapper} {} cat x", sample_operand(wrapper));
         assert_eq!(program(&command).as_deref(), Some("cat"), "{command}");
     }
+}
+
+/// #8735 round 2: `command -v rm` and `sudo -l rm` print where `rm` lives or
+/// whether it may run; the wrapper is the program and runs nothing.
+#[test]
+fn a_lookup_option_runs_nothing() {
+    for (command, at) in [
+        ("command -v rm", 0),
+        ("command -V rm -rf /", 0),
+        ("command -pv rm", 0),
+        ("sudo -l rm -rf /", 0),
+        ("sudo -u root -l rm", 0),
+        ("nice -n 5 command -v rm", 3),
+    ] {
+        let argv = shlex::split(command).expect("test rows lex");
+        let word = resolve_program_word(&argv).expect("a lookup resolves");
+        assert!(word.lookup && word.index == at, "{command}: {word:?}");
+    }
+    let argv = shlex::split("sudo -u l rm x").expect("lexes");
+    let word = resolve_program_word(&argv).expect("resolves");
+    assert!(
+        !word.lookup && word.index == 3,
+        "`-u l` is a value, not `-l`"
+    );
 }
 
 /// The `strip_wrapper_prefix` contract: `xargs` is a program, and any wrapper

@@ -101,11 +101,13 @@
 //! `pm_guard_denies_destructive_delete_of_repo_root` and siblings in
 //! `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path.
 
-use std::path::{Component, Path};
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::substitutions::segment_substitutions;
+use super::substitutions::{Substitution, blank_inert_heredocs, segment_substitutions};
 use super::{MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::program_word::resolve_program_word;
@@ -225,8 +227,17 @@ fn classify_destructive_delete_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<DeleteTarget> {
-    classify_at_depth(command, cwd, env, 0)
+    classify_at_depth(command, cwd, env, 0, &Cell::new(0))
 }
+
+/// Calls to [`classify_at_depth`] one command may make before it denies as
+/// unresolved (#8735 round 2): each split body is judged from every working
+/// directory its level saw, so nested bodies multiply the work.
+const MAX_DELETE_WORK: usize = 4096;
+
+/// Programs whose here-document body a shell runs (`sudo -s`, `su`,
+/// `parallel`), so its substitutions stay live for the floor.
+const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
 
 /// [`classify_destructive_delete_in`] for text nested `depth` substitutions
 /// deep (#8735).
@@ -234,37 +245,50 @@ fn classify_destructive_delete_in(
 /// Why: the lexer returns `$(rm -rf /)` as one word, so a delete inside a
 /// command substitution, a backtick or a process substitution never reached
 /// the verb scan (`echo "$(rm -rf /)"`).
-/// What: each segment's substitution bodies are judged first, as commands of
-/// their own, from the segment's working directory; a body a separator split
-/// across segments is judged whole afterwards, from `cwd`. Past
-/// [`MAX_WRAPPER_DEPTH`] levels the text is not read further, and a delete
-/// verb anywhere in it denies as unresolved.
+/// What: each segment's substitution bodies are judged, as commands of their
+/// own, from the segment's working directory. The substitution scan skips a
+/// here-document body that is stdin text, but judges what an unquoted-delimiter
+/// body runs ([`blank_inert_heredocs`], #8735 round 2); the verb scan still
+/// reads the body, since a captured body can run again (`eval $(cat <<'X'…)`).
+/// A body a separator split across segments is judged whole afterwards from
+/// every working directory the segments saw, and the most severe class kept
+/// (#8735 round 2). Past [`MAX_WRAPPER_DEPTH`]
+/// levels the text is not read further, and a delete verb anywhere in it
+/// denies as unresolved; past [`MAX_DELETE_WORK`] calls, anything does.
 /// Test: `denies_a_delete_inside_a_substitution_body`,
 /// `denies_a_delete_nested_past_the_depth_cap`,
-/// `allows_a_scratch_delete_inside_a_substitution`.
+/// `allows_a_scratch_delete_inside_a_substitution`,
+/// `judges_a_split_body_from_every_directory_seen`,
+/// `allows_a_backtick_in_a_quoted_heredoc_body`.
 fn classify_at_depth(
     command: &str,
     cwd: &Path,
     env: &PathEnv,
     depth: usize,
+    work: &Cell<usize>,
 ) -> Option<DeleteTarget> {
+    work.set(work.get() + 1);
+    if work.get() > MAX_DELETE_WORK {
+        return Some(DeleteTarget::Unresolved);
+    }
     // #8735: past the cap nothing is read; a delete verb in sight denies.
     if depth > MAX_WRAPPER_DEPTH {
         return segment_mentions_a_delete_verb(command).then_some(DeleteTarget::Unresolved);
     }
     let mut worst: Option<DeleteTarget> = None;
     let mut effective_cwd = cwd.to_path_buf();
-    let mut judged: Vec<String> = Vec::new();
+    let mut cwds_seen: Vec<PathBuf> = vec![effective_cwd.clone()];
+    let mut judged: HashSet<String> = HashSet::new();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
         // #8735: each `$(…)`, backtick, `<(…)` and `>(…)` body runs on its own.
-        for body in segment_substitutions(trimmed) {
-            let inner = classify_at_depth(body.text(), &effective_cwd, env, depth + 1);
+        for body in substitution_bodies(trimmed) {
+            let inner = classify_at_depth(body.text(), &effective_cwd, env, depth + 1, work);
             worst = worst.max(inner);
-            judged.push(body.text().to_string());
+            judged.insert(body.text().to_string());
         }
         // Same `cd`-tracking shape as `evaluate_worktree_add_command_in`: a
         // deliberate, partial closing of `cd /tmp && rm -rf x` — see that
@@ -279,6 +303,9 @@ fn classify_at_depth(
                 && let Some(dest) = argv.get(1)
             {
                 effective_cwd = resolve_target_path(dest, &effective_cwd, env);
+                if !cwds_seen.contains(&effective_cwd) {
+                    cwds_seen.push(effective_cwd.clone());
+                }
             }
             continue;
         }
@@ -297,6 +324,10 @@ fn classify_at_depth(
         let resolved = resolve_program_word(&argv);
         if resolved.is_err() && segment_mentions_a_delete_verb(trimmed) {
             return Some(DeleteTarget::Unresolved);
+        }
+        // #8735 round 2: `command -v rm` and `sudo -l rm` run nothing.
+        if resolved.is_ok_and(|w| w.lookup) {
+            continue;
         }
         let program_at = resolved.ok().map(|w| w.index).filter(|&at| {
             argv.get(at)
@@ -336,12 +367,28 @@ fn classify_at_depth(
     }
     // #8735: an unquoted `;`, `&&` or `|` inside a body splits it across
     // segments (`x=$(true; rm -rf /)`), so a body not seen whole is judged here.
-    for body in segment_substitutions(command) {
-        if !judged.iter().any(|seen| seen == body.text()) {
-            worst = worst.max(classify_at_depth(body.text(), cwd, env, depth + 1));
+    // Round 2: from every directory seen (`cd / && x=$(true; rm -rf Users)`),
+    // since which segment's directory it runs in is not known.
+    for body in substitution_bodies(command) {
+        if !judged.insert(body.text().to_string()) {
+            continue;
+        }
+        for dir in &cwds_seen {
+            worst = worst.max(classify_at_depth(body.text(), dir, env, depth + 1, work));
         }
     }
     worst
+}
+
+/// The substitution bodies `text` runs: those of its argv text with each
+/// stdin-text here-document body blanked, then those an unquoted-delimiter
+/// body expands (#8735 round 2 — a backtick in `git commit -F - <<'EOF'` is
+/// text).
+fn substitution_bodies(text: &str) -> Vec<Substitution> {
+    let (argv_text, expanded) = blank_inert_heredocs(text, HEREDOC_RUNNERS);
+    let mut bodies = segment_substitutions(&argv_text);
+    bodies.extend(expanded);
+    bodies
 }
 
 /// A word's program name: a leading `\` and any directory dropped (#8735).
@@ -1090,5 +1137,109 @@ mod tests {
         );
         assert_eq!(class_of("timeout 30 cargo test -p x"), None);
         assert_eq!(class_of("nice -n 10 cargo build"), None);
+    }
+
+    /// #8735 round 2: a wrapper and its operand in front of a `-c` string hid
+    /// the string from `wrapped_command`. The first two rows were allowed at
+    /// 7cb9de9271; all fail against the fail-open mutation of the resolved arm.
+    #[test]
+    fn denies_a_delete_in_a_command_string_behind_a_wrapper() {
+        for command in [
+            "timeout 60 bash -c 'rm -rf ~'",
+            "nice -n 5 sh -c 'rm -rf /'",
+            "timeout 5 env -S 'rm -rf /'",
+            "flock /tmp/lock -c 'rm -rf ~'",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+    }
+
+    /// #8735 round 2: a body split across segments ran in the directory its
+    /// segment reached, not the starting one. The deny rows were allowed at
+    /// 7cb9de9271.
+    #[test]
+    fn judges_a_split_body_from_every_directory_seen() {
+        for command in [
+            "cd / && x=$(true; rm -rf Users)",
+            "cd /; x=$(true; rm -rf Users)",
+            "cd /Users && y=$(true; rm -rf agent)",
+        ] {
+            assert_eq!(class_of(command), Some(DeleteTarget::Root), "{command}");
+        }
+        assert_eq!(class_of("cd /tmp && x=$(true; rm -rf scratch)"), None);
+    }
+
+    /// #8735 round 2: the fan-out over directories is bounded; past
+    /// [`MAX_DELETE_WORK`] calls the command denies as unresolved.
+    #[test]
+    fn denies_when_the_split_body_work_runs_out() {
+        let nest = |levels: usize| {
+            let cds: String = (0..9).map(|n| format!("cd /tmp/d{n}; ")).collect();
+            let mut text = "rm -f scratch".to_string();
+            for _ in 0..levels {
+                text = format!("{cds}x=$(true; {text})");
+            }
+            text
+        };
+        assert_eq!(class_of(&nest(2)), None);
+        assert_eq!(class_of(&nest(5)), Some(DeleteTarget::Unresolved));
+    }
+
+    /// #8735 round 2: a quoted-delimiter here-document body is text, so a
+    /// backtick in a commit message or PR body is not a command. Both allow
+    /// rows were denied at 7cb9de9271. A live substitution in an expanding
+    /// body, and a body a shell, `sudo` or `xargs` reads, still deny.
+    #[test]
+    fn allows_a_backtick_in_a_quoted_heredoc_body() {
+        for command in [
+            "git commit -F - <<'EOF'\nfloor denies `rm -rf ~`\nEOF",
+            "gh pr create --title t --body \"$(cat <<'EOF'\nthe floor denies `rm -rf ~`\nEOF\n)\"",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+        for command in [
+            "cat <<EOF\n$(rm -rf /)\nEOF",
+            "cat <<EOF\n`rm -rf ~`\nEOF",
+            "bash <<'EOF'\nrm -rf ~\nEOF",
+            "sudo -s <<'EOF'\nrm -rf ~\nEOF",
+            "xargs rm -rf <<'EOF'\n/\nEOF",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+    }
+
+    /// #8735 round 2: a lookup runs nothing, and `sudo -k` and BSD `xargs -J`
+    /// are grammar the resolver reads. Each row was denied at 7cb9de9271.
+    #[test]
+    fn allows_a_lookup_and_the_bsd_xargs_options() {
+        for command in [
+            "command -v rm",
+            "sudo -l rm -rf /",
+            "sudo -k rm -f x",
+            "xargs -J % rm %",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+        assert_eq!(class_of("sudo -k rm -rf /"), Some(DeleteTarget::Root));
+    }
+
+    /// #8735 round 2: behind an option the resolver cannot measure, the first
+    /// word carrying a command string stands in. A quoted verb (`r""m`) hides
+    /// from the raw-text verb check, so only that scan reads it. Allowed at
+    /// 7cb9de9271, and under the fail-open mutation of the unresolved scan.
+    #[test]
+    fn denies_a_delete_in_a_command_string_behind_an_unknown_option() {
+        for command in [
+            "sudo --bogus bash -c 'r\"\"m -rf ~'",
+            "timeout 5 env -S 'r\"\"m -rf /'",
+        ] {
+            assert_eq!(class_of(command), Some(DeleteTarget::Root), "{command}");
+        }
     }
 }

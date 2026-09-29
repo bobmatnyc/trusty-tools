@@ -1269,11 +1269,12 @@ mod tests {
     #[test]
     fn strip_wrapper_prefix_skips_every_known_wrapper() {
         for wrapper in COMMAND_WRAPPERS {
-            // #8735: `timeout` takes a duration operand before its program.
-            let (tokens, program) = if *wrapper == "timeout" {
-                (vec![*wrapper, "5", "rm", "-rf", "/root"], 2)
-            } else {
+            // #8735: `timeout`, `chrt`, `taskset`, `flock` take an operand.
+            let operand = crate::commands::program_word::sample_operand(wrapper);
+            let (tokens, program) = if operand.is_empty() {
                 (vec![*wrapper, "rm", "-rf", "/root"], 1)
+            } else {
+                (vec![*wrapper, operand, "rm", "-rf", "/root"], 2)
             };
             assert_eq!(
                 strip_wrapper_prefix(&tokens),

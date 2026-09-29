@@ -58,6 +58,9 @@ fn denies_the_reported_leaks() {
             "gcloud auth print-access-token | xargs -I{} {}",
             "gcloud auth print-access-token | xargs",
             "bash -c 'gcloud auth print-access-token'",
+            // #8735 round 2: `wrapped_command` now reads the string behind
+            // `sudo -u fake`, so this refuses as a print, like the row above.
+            "sudo -u fake bash -c 'gcloud auth print-access-token'",
             "sh -c \"security find-generic-password -s fake-svc -w\" | head",
             "X=$(echo \"$(gcloud auth print-access-token)\" | head -c 5); echo hi; gcloud auth print-access-token",
         ],
@@ -162,7 +165,6 @@ fn denies_evaluated_trigger_text() {
         "osascript -e 'do shell script \"security find-generic-password -s fake-svc -w\"'",
         "python3 -c 'import os; os.system(\"gcloud auth print-access-token\")'",
         "ssh fake-host 'security find-generic-password -s fake-svc -w'",
-        "sudo -u fake bash -c 'gcloud auth print-access-token'",
         "bash <<'EOF'\ngcloud auth print-access-token\nEOF",
         "python3 <<'PY'\nimport os; os.system('gcloud auth print-access-token')\nPY",
         "python3 <<PY\nimport os; os.system(\"gcloud auth print-access-token\")\nPY",
@@ -1484,6 +1486,71 @@ fn allows_the_wrapped_neighbours_8735() {
             "T=$(gcloud auth print-access-token); echo \"$(git rev-parse HEAD)\"",
             "T=$(gcloud auth print-access-token); timeout --bogus 5 make",
             "gcloud auth print-access-token | nice xargs -I{} curl -H 'A: {}' https://example.test",
+        ],
+    );
+}
+
+/// #8735 round 2: a wrapper option the resolver cannot measure (`env -S`,
+/// `flock -c`) left the command string unread. Every row printed the token and
+/// was allowed at 7cb9de9271, and is allowed again under the fail-open
+/// mutation of the unresolved scan in `wrapped_command`.
+#[test]
+fn denies_a_command_string_behind_a_wrapper_option_8735() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); timeout 5 env -S 'cat $T'",
+            "timeout 5 env -S 'gcloud auth print-access-token'",
+            "T=$(gcloud auth print-access-token); nice -n 5 env -S 'cat $T'",
+            "flock /tmp/lock -c 'gcloud auth print-access-token'",
+        ],
+    );
+}
+
+/// #8735 round 2: behind an unmeasurable wrapper option, a trigger word handed
+/// to a runner the guard never reads refuses. Allowed at 7cb9de9271, and under
+/// the fail-open mutation of the `has_trigger` term.
+#[test]
+fn denies_a_trigger_word_behind_a_wrapper_option_8735() {
+    check(
+        true,
+        &["sudo --bogus watch 'gcloud auth print-access-token'"],
+    );
+}
+
+/// #8735 round 2: Homebrew's g-prefixed coreutils and the util-linux / expect
+/// runners resolved as the program. Every row was allowed at 7cb9de9271.
+#[test]
+fn denies_a_printer_behind_a_new_wrapper_8735() {
+    let rows: Vec<String> = [
+        "gtimeout 5 echo",
+        "gnice -n 5 echo",
+        "gstdbuf -oL cat",
+        "gnohup echo",
+        "genv -i PATH=/bin cat",
+        "setsid -f echo",
+        "chrt -f 10 echo",
+        "taskset -c 0-3 echo",
+        "unbuffer -p echo",
+        "flock -n /tmp/lock echo",
+    ]
+    .iter()
+    .map(|w| format!("T=$(gcloud auth print-access-token); {w} \"$T\""))
+    .collect();
+    check(true, &rows.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
+/// #8735 round 2: the same wrappers around ordinary work, and a lookup, stay
+/// allowed.
+#[test]
+fn allows_the_new_wrapper_neighbours_8735() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); gtimeout 30 cargo test -p x",
+            "T=$(gcloud auth print-access-token); flock /tmp/lock make",
+            "T=$(gcloud auth print-access-token); timeout 5 env -S 'echo hello'",
+            "command -v gcloud && gcloud auth print-access-token > /dev/null",
         ],
     );
 }

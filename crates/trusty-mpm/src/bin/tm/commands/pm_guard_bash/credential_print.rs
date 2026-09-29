@@ -236,7 +236,11 @@ struct Lifted {
 /// `credential_print_tests::denies_an_unreadable_stderr_of_a_reporting_printer_8735`,
 /// `credential_print_tests::denies_a_printer_behind_a_wrapper_8735`,
 /// `credential_print_tests::denies_a_wrapper_option_it_cannot_read_8735`,
-/// `credential_print_tests::allows_the_wrapped_neighbours_8735`.
+/// `credential_print_tests::allows_the_wrapped_neighbours_8735`,
+/// `credential_print_tests::denies_a_command_string_behind_a_wrapper_option_8735`,
+/// `credential_print_tests::denies_a_trigger_word_behind_a_wrapper_option_8735`,
+/// `credential_print_tests::denies_a_printer_behind_a_new_wrapper_8735`,
+/// `credential_print_tests::allows_the_new_wrapper_neighbours_8735`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
         return None;
@@ -549,8 +553,11 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
             return Err(Refusal::Unreadable("text handed to a program that runs it"));
         }
     }
-    // #8735: a wrapper option the resolver cannot measure hides the program.
-    let carried = stdin_carries || call.is_some() || argv.iter().any(|w| carries(w, lifted));
+    // #8735: a wrapper option the resolver cannot measure hides the program;
+    // round 2: so does a trigger word it hands to a runner the guard never reads.
+    let carried = stdin_carries
+        || call.is_some()
+        || argv.iter().any(|w| carries(w, lifted) || has_trigger(w));
     if resolved.is_err() && wrapped == WrappedCommand::None && carried {
         return Err(Refusal::Unreadable("the program behind a wrapper option"));
     }

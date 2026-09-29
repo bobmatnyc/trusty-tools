@@ -10,12 +10,15 @@
 //! What: [`COMMAND_WRAPPERS`] is the one list of wrapper and precommand words,
 //! generated with each word's option grammar. [`resolve_program_word`] skips
 //! leading `KEY=value` words and every wrapper with its options, option values,
-//! assignments (`env`, `sudo`) and operands (`timeout`'s duration), plus
-//! `xargs` and its options. An option the grammar does not know, a value-taking
-//! option with no value, or a `timeout` duration that is not a duration FAILS
-//! the resolution rather than guessing where the program starts.
+//! assignments (`env`, `sudo`) and operands (`timeout`'s duration, `chrt`'s
+//! priority, `taskset`'s mask, `flock`'s file), plus `xargs` and its options.
+//! An option the grammar does not know, a value-taking option with no value,
+//! or an operand of the wrong shape FAILS the resolution rather than guessing
+//! where the program starts. A lookup option (`command -v`, `sudo -l`) stops
+//! at the wrapper, which runs nothing.
 //! Test: `resolves_past_each_wrapper_and_its_options`,
-//! `an_unknown_or_unmeasurable_option_fails`, `every_wrapper_has_a_grammar`.
+//! `an_unknown_or_unmeasurable_option_fails`, `every_wrapper_has_a_grammar`,
+//! `a_lookup_option_runs_nothing`.
 
 use super::hook_rewrite::is_env_assignment;
 
@@ -29,8 +32,26 @@ struct Grammar {
     assignments: bool,
     /// A bare numeric option is valid (`nice -5`).
     numeric: bool,
-    /// One duration operand precedes the program (`timeout 5`).
-    duration: bool,
+    /// The operand that precedes the program, if any (`timeout 5`).
+    operand: Operand,
+    /// Options that make the wrapper look its operands up instead of running
+    /// them (`command -v rm`, `sudo -l rm`). Read as flags otherwise.
+    lookups: &'static [&'static str],
+}
+
+/// The one operand some wrappers read before their program word.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    None,
+    /// `timeout 5`: a duration ([`is_duration`]).
+    Duration,
+    /// `chrt 0`: a scheduling priority, all digits.
+    Priority,
+    /// `taskset 0x3` / `taskset -c 0-3,5`: a CPU mask or list.
+    CpuMask,
+    /// `flock FILE`: any word. `flock FILE -c STRING` runs a shell string, so
+    /// a `-c` after the file leaves the program unresolved.
+    LockFile,
 }
 
 /// A wrapper with no options (`nohup`, `noglob`).
@@ -39,7 +60,47 @@ const BARE: Grammar = Grammar {
     valued: &[],
     assignments: false,
     numeric: false,
-    duration: false,
+    operand: Operand::None,
+    lookups: &[],
+};
+
+/// `env` and Homebrew's `genv`.
+const ENV: Grammar = Grammar {
+    // `-S` is absent on purpose: its value is a command string, which
+    // `shell_lex::wrapped_command` reads; here it fails the resolution.
+    flags: &[
+        "-",
+        "-0",
+        "-i",
+        "-v",
+        "--debug",
+        "--ignore-environment",
+        "--null",
+    ],
+    valued: &["-C", "-P", "-u", "--chdir", "--unset"],
+    assignments: true,
+    ..BARE
+};
+
+/// `nice` and Homebrew's `gnice`.
+const NICE: Grammar = Grammar {
+    valued: &["-n", "--adjustment"],
+    numeric: true,
+    ..BARE
+};
+
+/// `timeout` and Homebrew's `gtimeout`.
+const TIMEOUT: Grammar = Grammar {
+    flags: &["-v", "--foreground", "--preserve-status", "--verbose"],
+    valued: &["-k", "-s", "--kill-after", "--signal"],
+    operand: Operand::Duration,
+    ..BARE
+};
+
+/// `stdbuf` and Homebrew's `gstdbuf`.
+const STDBUF: Grammar = Grammar {
+    valued: &["-e", "-i", "-o", "--error", "--input", "--output"],
+    ..BARE
 };
 
 /// Declare [`COMMAND_WRAPPERS`] and its grammars from one table, so a wrapper
@@ -51,7 +112,8 @@ macro_rules! wrappers {
         /// Why: #4031 review pass 2 — each wrapper enumerated alone (`sudo`, then
         /// `env`, then `command`) left the next one (`nice rm -rf /`) through,
         /// so every caller shares this one list. #8735 adds the zsh
-        /// precommand modifiers `noglob` and `nocorrect`.
+        /// precommand modifiers `noglob` and `nocorrect`, then Homebrew's
+        /// g-prefixed coreutils and the util-linux / expect runners.
         /// What: matched exactly, after a leading `\` and any path are stripped.
         pub(crate) const COMMAND_WRAPPERS: &[&str] = &[$($name,)*];
 
@@ -63,9 +125,10 @@ macro_rules! wrappers {
 wrappers! {
     "sudo" => Grammar {
         flags: &[
-            "-A", "-b", "-B", "-E", "-H", "-i", "-n", "-N", "-P", "-S", "-s", "--askpass",
-            "--background", "--bell", "--login", "--non-interactive", "--preserve-env",
-            "--preserve-groups", "--set-home", "--shell", "--stdin",
+            "-A", "-b", "-B", "-E", "-H", "-i", "-k", "-K", "-n", "-N", "-P", "-S", "-s",
+            "--askpass", "--background", "--bell", "--login", "--non-interactive",
+            "--preserve-env", "--preserve-groups", "--remove-timestamp", "--reset-timestamp",
+            "--set-home", "--shell", "--stdin",
         ],
         valued: &[
             "-C", "-D", "-g", "-h", "-p", "-R", "-r", "-T", "-t", "-U", "-u", "--chdir",
@@ -73,20 +136,16 @@ wrappers! {
             "--other-user", "--prompt", "--role", "--type", "--user",
         ],
         assignments: true,
+        // `sudo -l rm` lists whether `rm` may run; `-v` refreshes the ticket.
+        lookups: &["-l", "-v", "--list", "--validate"],
         ..BARE
     },
-    "env" => Grammar {
-        // `-S` is absent on purpose: its value is a command string, which
-        // `shell_lex::wrapped_command` reads; here it fails the resolution.
-        flags: &["-", "-0", "-i", "-v", "--debug", "--ignore-environment", "--null"],
-        valued: &["-C", "-P", "-u", "--chdir", "--unset"],
-        assignments: true,
-        ..BARE
-    },
-    "command" => Grammar { flags: &["-p"], ..BARE },
+    "env" => ENV,
+    // `command -v rm` prints where `rm` lives; it runs nothing.
+    "command" => Grammar { flags: &["-p"], lookups: &["-v", "-V"], ..BARE },
     "builtin" => BARE,
     "doas" => Grammar { flags: &["-n", "-s"], valued: &["-u"], ..BARE },
-    "nice" => Grammar { valued: &["-n", "--adjustment"], numeric: true, ..BARE },
+    "nice" => NICE,
     "time" => Grammar {
         flags: &["-a", "-l", "-p", "-q", "-v", "--append", "--portability", "--quiet", "--verbose"],
         valued: &["-f", "-o", "--format", "--output"],
@@ -99,19 +158,44 @@ wrappers! {
         valued: &["-c", "-n", "--class", "--classdata"],
         ..BARE
     },
-    "timeout" => Grammar {
-        flags: &["-v", "--foreground", "--preserve-status", "--verbose"],
-        valued: &["-k", "-s", "--kill-after", "--signal"],
-        duration: true,
-        ..BARE
-    },
-    "stdbuf" => Grammar {
-        valued: &["-e", "-i", "-o", "--error", "--input", "--output"],
-        ..BARE
-    },
+    "timeout" => TIMEOUT,
+    "stdbuf" => STDBUF,
     "caffeinate" => Grammar { flags: &["-d", "-i", "-m", "-s", "-u"], valued: &["-t", "-w"], ..BARE },
     "noglob" => BARE,
     "nocorrect" => BARE,
+    // #8735 round 2: Homebrew coreutils' g-prefixed names run the same tools.
+    "gtimeout" => TIMEOUT,
+    "gnice" => NICE,
+    "gstdbuf" => STDBUF,
+    "gnohup" => BARE,
+    "genv" => ENV,
+    "setsid" => Grammar { flags: &["-c", "-f", "-w", "--ctty", "--fork", "--wait"], ..BARE },
+    "chrt" => Grammar {
+        flags: &[
+            "-a", "-b", "-d", "-f", "-i", "-o", "-r", "-R", "-v", "--all-tasks", "--batch",
+            "--deadline", "--fifo", "--idle", "--other", "--reset-on-fork", "--rr", "--verbose",
+        ],
+        valued: &["-D", "-P", "-T", "--sched-deadline", "--sched-period", "--sched-runtime"],
+        operand: Operand::Priority,
+        ..BARE
+    },
+    "taskset" => Grammar {
+        flags: &["-a", "-c", "--all-tasks", "--cpu-list"],
+        operand: Operand::CpuMask,
+        ..BARE
+    },
+    "unbuffer" => Grammar { flags: &["-p"], ..BARE },
+    // `-c STRING` is absent on purpose: it runs a shell string, which
+    // `shell_lex::wrapped_command` reads.
+    "flock" => Grammar {
+        flags: &[
+            "-e", "-F", "-n", "-o", "-s", "-u", "-x", "--close", "--exclusive", "--nb",
+            "--no-fork", "--nonblock", "--shared", "--unlock", "--verbose",
+        ],
+        valued: &["-E", "-w", "--conflict-exit-code", "--timeout", "--wait"],
+        operand: Operand::LockFile,
+        ..BARE
+    },
 }
 
 /// `xargs` options that consume the FOLLOWING token as their value.
@@ -128,6 +212,10 @@ pub(crate) const XARGS_OPTS_WITH_ARG: &[&str] = &[
     "-e",
     "-I",
     "-i",
+    // #8735 round 2: BSD (macOS) `xargs -J %`, `-R n`, `-S size`.
+    "-J",
+    "-R",
+    "-S",
     "-L",
     "-l",
     "-n",
@@ -176,6 +264,9 @@ pub(crate) struct ProgramWord {
     pub(crate) took_options: bool,
     /// Index of the `xargs` word skipped on the way, if any.
     pub(crate) xargs_at: Option<usize>,
+    /// #8735 round 2: a lookup option (`command -v`, `sudo -l`) made the
+    /// wrapper at `index` print its operands instead of running them.
+    pub(crate) lookup: bool,
 }
 
 /// The program word could not be located: a wrapper carries an option whose
@@ -193,7 +284,7 @@ pub(crate) struct Unresolved;
 /// attached or separate value), then its assignments or duration operand; `--`
 /// ends its options. See [`ProgramWord`] for the index returned.
 /// Test: `resolves_past_each_wrapper_and_its_options`,
-/// `an_unknown_or_unmeasurable_option_fails`.
+/// `an_unknown_or_unmeasurable_option_fails`, `a_lookup_option_runs_nothing`.
 pub(crate) fn resolve_program_word<T: AsRef<str>>(tokens: &[T]) -> Result<ProgramWord, Unresolved> {
     resolve(tokens, true)
 }
@@ -219,6 +310,7 @@ fn resolve<T: AsRef<str>>(tokens: &[T], through_xargs: bool) -> Result<ProgramWo
         index: 0,
         took_options: false,
         xargs_at: None,
+        lookup: false,
     };
     while let Some(raw) = tokens.get(word.index) {
         let tok = raw.as_ref().strip_prefix('\\').unwrap_or(raw.as_ref());
@@ -232,8 +324,14 @@ fn resolve<T: AsRef<str>>(tokens: &[T], through_xargs: bool) -> Result<ProgramWo
         if tok.rsplit('/').next() == Some("xargs") {
             word.xargs_at = Some(word.index);
         }
-        let (after, took) = skip_wrapper_args(grammar, tokens, word.index + 1)?;
-        word.took_options |= took;
+        let skipped = skip_wrapper_args(grammar, tokens, word.index + 1)?;
+        word.took_options |= skipped.took;
+        if skipped.lookup {
+            // The wrapper runs as itself and prints its operands.
+            word.lookup = true;
+            return Ok(word);
+        }
+        let after = skipped.at;
         if after >= tokens.len() {
             // Nothing follows: the wrapper runs as itself.
             return Ok(word);
@@ -255,51 +353,115 @@ fn grammar_of(word: &str, through_xargs: bool) -> Option<&'static Grammar> {
         .and_then(|at| GRAMMARS.get(at))
 }
 
+/// What [`skip_wrapper_args`] consumed.
+struct Skipped {
+    /// The index past the wrapper's options, assignments and operand.
+    at: usize,
+    /// An option was consumed.
+    took: bool,
+    /// A [`Grammar::lookups`] option was among them.
+    lookup: bool,
+}
+
 /// The index past one wrapper's options, assignments and operand, starting at
-/// `from`, and whether an option was consumed.
+/// `from`, whether an option was consumed, and whether one was a lookup.
 fn skip_wrapper_args<T: AsRef<str>>(
     grammar: &Grammar,
     tokens: &[T],
     from: usize,
-) -> Result<(usize, bool), Unresolved> {
-    let mut at = from;
-    let mut took = false;
-    while let Some(tok) = tokens.get(at).map(AsRef::as_ref) {
+) -> Result<Skipped, Unresolved> {
+    let mut skipped = Skipped {
+        at: from,
+        took: false,
+        lookup: false,
+    };
+    while let Some(tok) = tokens.get(skipped.at).map(AsRef::as_ref) {
         if tok == "--" {
-            at += 1;
-            took = true;
+            skipped.at += 1;
+            skipped.took = true;
             break;
         }
         let is_option = tok.starts_with('-') && (tok.len() > 1 || grammar.flags.contains(&"-"));
         if !is_option {
             break;
         }
-        at += option_width(grammar, tok, tokens.get(at + 1).is_some())?;
-        took = true;
+        skipped.at += option_width(grammar, tok, tokens.get(skipped.at + 1).is_some())?;
+        skipped.took = true;
+        skipped.lookup |= names_lookup(grammar, tok);
     }
     if grammar.assignments {
         while tokens
-            .get(at)
+            .get(skipped.at)
             .is_some_and(|t| is_env_assignment(t.as_ref()))
         {
-            at += 1;
+            skipped.at += 1;
         }
     }
-    if grammar.duration {
-        let operand = tokens.get(at).ok_or(Unresolved)?;
-        if !is_duration(operand.as_ref()) {
+    if grammar.operand != Operand::None && !skipped.lookup {
+        let operand = tokens.get(skipped.at).ok_or(Unresolved)?.as_ref();
+        if !operand_fits(grammar.operand, operand) {
             return Err(Unresolved);
         }
-        at += 1;
+        skipped.at += 1;
+        // #8735 round 2: `flock FILE -c STRING` runs a shell string.
+        let next = tokens.get(skipped.at).map(AsRef::as_ref);
+        if grammar.operand == Operand::LockFile
+            && next.is_some_and(|n| n == "-c" || n.starts_with("--command"))
+        {
+            return Err(Unresolved);
+        }
     }
-    Ok((at, took))
+    Ok(skipped)
+}
+
+/// Whether `word` is a valid `kind` operand.
+fn operand_fits(kind: Operand, word: &str) -> bool {
+    match kind {
+        Operand::None => true,
+        Operand::Duration => is_duration(word),
+        Operand::Priority => !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()),
+        Operand::CpuMask => {
+            !word.is_empty()
+                && word.bytes().any(|b| b.is_ascii_hexdigit())
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() || matches!(b, b'x' | b'X' | b',' | b'-' | b':'))
+        }
+        Operand::LockFile => !word.starts_with('-'),
+    }
+}
+
+/// Whether option `tok` is, or clusters, one of the grammar's lookups.
+fn names_lookup(grammar: &Grammar, tok: &str) -> bool {
+    if grammar.lookups.contains(&tok) {
+        return true;
+    }
+    let Some(cluster) = tok.strip_prefix('-').filter(|c| !c.starts_with('-')) else {
+        return false;
+    };
+    for c in cluster.chars() {
+        if is_short(grammar.lookups, c) {
+            return true;
+        }
+        // A value-taking letter ends the cluster: the rest is its value.
+        if !is_short(grammar.flags, c) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether `list` holds the short option `-c`.
+fn is_short(list: &[&str], c: char) -> bool {
+    list.iter()
+        .any(|o| o.len() == 2 && o.ends_with(c) && !o.starts_with("--"))
 }
 
 /// How many tokens option `tok` spans (1 or 2), or [`Unresolved`] when the
 /// grammar does not know it or its value is missing.
 fn option_width(grammar: &Grammar, tok: &str, has_next: bool) -> Result<usize, Unresolved> {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if grammar.flags.contains(&tok) {
+    if grammar.flags.contains(&tok) || grammar.lookups.contains(&tok) {
         return Ok(1);
     }
     if grammar.numeric && digits(tok.trim_start_matches('-')) {
@@ -319,14 +481,10 @@ fn option_width(grammar: &Grammar, tok: &str, has_next: bool) -> Result<usize, U
     // whose value is the rest of the cluster or the next token.
     let cluster = &tok[1..];
     for (at, c) in cluster.char_indices() {
-        let short = |list: &[&str]| {
-            list.iter()
-                .any(|o| o.len() == 2 && o.ends_with(c) && !o.starts_with("--"))
-        };
-        if short(grammar.flags) {
+        if is_short(grammar.flags, c) || is_short(grammar.lookups, c) {
             continue;
         }
-        if short(grammar.valued) {
+        if is_short(grammar.valued, c) {
             let rest = &cluster[at + c.len_utf8()..];
             return match (rest.is_empty(), has_next) {
                 (false, _) => Ok(1),
@@ -347,6 +505,17 @@ fn is_duration(word: &str) -> bool {
         && number.bytes().any(|b| b.is_ascii_digit())
         && number.bytes().all(|b| b.is_ascii_digit() || b == b'.')
         && number.bytes().filter(|b| *b == b'.').count() <= 1
+}
+
+/// A valid operand for `wrapper`, for tests that run every wrapper: `5` for
+/// `timeout`, a lock file for `flock`, and `""` for a wrapper with none.
+#[cfg(test)]
+pub(crate) fn sample_operand(wrapper: &str) -> &'static str {
+    match grammar_of(wrapper, true).map(|g| g.operand) {
+        Some(Operand::Duration | Operand::Priority | Operand::CpuMask) => "5",
+        Some(Operand::LockFile) => "/tmp/lock",
+        _ => "",
+    }
 }
 
 #[cfg(test)]

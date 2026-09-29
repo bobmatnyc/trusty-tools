@@ -18,7 +18,7 @@
 //! `inert_heredoc_bodies_leave_the_argv_text`; the forbidden-verb callers in
 //! `evaluate_bash_command_*`.
 
-use super::heredoc::{blank_spans, data_bodies};
+use super::heredoc::{DataBody, blank_spans, data_bodies};
 use super::shell_lex::QuoteScan;
 use super::{is_evaluator, split_shell_segments};
 
@@ -160,23 +160,62 @@ fn escaped(bytes: &[u8], i: usize) -> bool {
 /// body's quotes are literal characters.
 /// Test: `substitutions_read_an_expanding_heredoc_body_only`.
 pub(crate) fn command_substitutions(command: &str) -> Vec<Substitution> {
-    let bodies = data_bodies(command);
+    let owned = data_bodies(command);
+    let bodies: Vec<&DataBody> = owned.iter().collect();
     let spans: Vec<(usize, usize)> = bodies.iter().map(|b| b.span).collect();
     let argv_text = blank_spans(command, &spans);
     let mut found: Vec<Substitution> = split_shell_segments(&argv_text)
         .iter()
         .flat_map(|segment| segment_substitutions(segment.trim()))
         .collect();
-    for body in bodies.iter().filter(|b| b.expands) {
-        let text = &command[body.span.0..body.span.1];
-        found.extend(scan_bodies(
-            text,
-            true,
-            |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
-            |_| true,
-        ));
-    }
+    found.extend(expanding_substitutions(command, &bodies));
     found
+}
+
+/// The `$( … )` and backtick bodies an unquoted-delimiter here-document body
+/// among `bodies` runs, quotes included, since its quotes are literal.
+fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitution> {
+    bodies
+        .iter()
+        .filter(|b| b.expands)
+        .flat_map(|body| {
+            scan_bodies(
+                &command[body.span.0..body.span.1],
+                true,
+                |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
+                |_| true,
+            )
+        })
+        .collect()
+}
+
+/// `command` with each here-document body that is stdin text blanked, and the
+/// substitutions those blanked bodies still run (#8735 round 2).
+///
+/// Why: the delete floor read a backtick in a commit message
+/// (`git commit -F - <<'EOF'`) as a live substitution and denied it. A body is
+/// kept when its operator line runs it as code ([`runs_as_code`]) or names one
+/// of `runners` — a program that runs its stdin as shell text.
+/// What: blanks the other data bodies ([`blank_spans`]); an unquoted-delimiter
+/// body's `$( … )` and backticks are returned, since the shell runs them.
+/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`.
+pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, Vec<Substitution>) {
+    let bodies = data_bodies(command);
+    let inert: Vec<&DataBody> = bodies
+        .iter()
+        .filter(|b| {
+            let line = &command[b.operator_line.0..b.operator_line.1];
+            !runs_as_code(line)
+                && !line
+                    .split_whitespace()
+                    .any(|w| runners.contains(&w.rsplit('/').next().unwrap_or(w)))
+        })
+        .collect();
+    let spans: Vec<(usize, usize)> = inert.iter().map(|b| b.span).collect();
+    (
+        blank_spans(command, &spans),
+        expanding_substitutions(command, &inert),
+    )
 }
 
 /// `command` with each here-document body that no program runs as code

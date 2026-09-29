@@ -19,9 +19,9 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
-use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_wrapper_prefix};
+use crate::commands::hook_rewrite::strip_wrapper_prefix;
 // #8735: the xargs option table moved beside the other wrapper grammars.
-use crate::commands::program_word::XARGS_OPTS_WITH_ARG;
+use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word};
 
 /// Shell programs that run their `-c` argument as a command string.
 ///
@@ -97,63 +97,68 @@ pub(super) enum WrappedCommand {
 /// `xargs` argv. Every rule downstream therefore classified the wrapper instead
 /// of the command. Doing the descent here, on the shared segment text, is what
 /// makes one fix reach all of them.
-/// What: shlex-splits `segment`, skips leading `KEY=value` assignments and
-/// [`COMMAND_WRAPPERS`] tokens, then: a [`DASH_C_SHELLS`] program yields the
-/// command string its `-c` flag runs ([`dash_c_argument`]);
-/// `env` yields the value of `-S`/`--split-string` in any of its three
-/// spellings; `xargs` yields its argv past [`XARGS_OPTS_WITH_ARG`], re-joined;
-/// `eval` yields its operands joined by spaces, as the shell does.
+/// What: shlex-splits `segment` and asks [`resolve_program_word`] for its
+/// program, past assignments, wrappers and their options (#8735 round 2 — a
+/// `timeout 60` or `nice -n 5` in front hid the string). The stop word then
+/// names the string: a [`DASH_C_SHELLS`] program's `-c` string
+/// ([`dash_c_argument`]); an `xargs` argv past [`XARGS_OPTS_WITH_ARG`],
+/// re-joined; `eval`'s operands joined by spaces, as the shell does. `env -S`
+/// and `flock -c` fail the resolution by design, so when it fails the words are
+/// scanned for the first of those carriers, `env -S`/`--split-string` and
+/// `flock -c` included ([`carried_string`]).
 /// The result is [`WrappedCommand::Unlexable`] when the inner text will not
 /// shlex-split, and [`WrappedCommand::None`] when the segment carries no such
 /// wrapper — an unlexable OUTER segment included, since that case already falls
-/// back to the quote-unaware scan and is not this function's to change.
-/// Test: as [`WrappedCommand`].
+/// back to the quote-unaware scan and is not this function's to change. A
+/// lookup (`command -v bash`) runs nothing and is `None`.
+/// Test: as [`WrappedCommand`], and
+/// `denies_a_delete_in_a_command_string_behind_a_wrapper`,
+/// `denies_a_command_string_behind_a_wrapper_option_8735`,
+/// `denies_a_delete_in_a_command_string_behind_an_unknown_option`.
 pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
     let Some(argv) = shlex::split(segment) else {
         return WrappedCommand::None;
     };
-    let mut i = 0;
-    while i < argv.len() {
-        let raw = argv[i].as_str();
-        let tok = raw.strip_prefix('\\').unwrap_or(raw);
-        if is_env_assignment(tok) {
-            i += 1;
-            continue;
-        }
-        let base = tok.rsplit('/').next().unwrap_or(tok);
-        let rest = &argv[i + 1..];
-        if DASH_C_SHELLS.contains(&base) {
-            return inner_or_none(dash_c_argument(rest));
-        }
-        if base == "env" {
-            match env_split_string(rest) {
-                Some(inner) => return inner_or_none(Some(inner)),
-                // Plain `env` / `env FOO=1 cmd` — keep walking to the real
-                // program, exactly as `strip_wrapper_prefix` would.
-                None => {
-                    i += 1;
-                    continue;
-                }
+    match resolve_program_word(&argv) {
+        Ok(word) if word.lookup => WrappedCommand::None,
+        Ok(word) => {
+            // `xargs` runs its whole argv, whatever program heads it.
+            let at = word.xargs_at.unwrap_or(word.index);
+            match argv.get(at) {
+                Some(program) => inner_or_none(carried_string(program, &argv[at + 1..])),
+                None => WrappedCommand::None,
             }
         }
-        if base == "xargs" {
-            return inner_or_none(xargs_argument(rest));
-        }
+        // #8735 round 2: an option the resolver cannot measure hides the
+        // program, so the first word that carries a command string stands in,
+        // as `evaluator_at` does for the credential rules.
+        Err(Unresolved) => (0..argv.len())
+            .find_map(|at| carried_string(&argv[at], &argv[at + 1..]))
+            .map_or(WrappedCommand::None, |inner| inner_or_none(Some(inner))),
+    }
+}
+
+/// The command string word `program` runs from its arguments `rest`, if it
+/// is a carrier: a shell's `-c`, `env`/`genv` `-S`, `flock -c`, `xargs`' argv
+/// or `eval`'s operands.
+fn carried_string(program: &str, rest: &[String]) -> Option<String> {
+    let tok = program.strip_prefix('\\').unwrap_or(program);
+    let base = tok.rsplit('/').next().unwrap_or(tok);
+    match base {
+        _ if DASH_C_SHELLS.contains(&base) => dash_c_argument(rest),
+        "env" | "genv" => env_split_string(rest),
+        "flock" => flock_command(rest),
+        "xargs" => xargs_argument(rest),
         // #8756: `eval "pm2 jlist"` runs its operands; unread, it hid them.
-        if base == "eval" {
+        "eval" => {
             let operands = rest
                 .split_first()
                 .filter(|(head, _)| *head == "--")
                 .map_or(rest, |(_, tail)| tail);
-            return inner_or_none(Some(operands.join(" ")));
+            Some(operands.join(" "))
         }
-        if COMMAND_WRAPPERS.contains(&tok) {
-            i += 1;
-            continue;
-        }
-        return WrappedCommand::None;
+        _ => None,
     }
-    WrappedCommand::None
 }
 
 /// Classify an extracted inner command string.
@@ -223,24 +228,88 @@ fn dash_c_argument(rest: &[String]) -> Option<String> {
 /// Why: `env -S "git worktree remove …"` runs the string as a command, and
 /// [`strip_wrapper_prefix`] refuses a wrapper followed by a flag — so this shape
 /// resolved to nothing at all and every rule allowed it.
-/// What: handles `-S <str>`, `-S<str>` and `--split-string=<str>`. `None` for a
-/// plain `env`, which stays an ordinary wrapper for the caller to walk past.
+/// What: handles `-S <str>`, `-S<str>`, a flag cluster ending in `S`
+/// (`-iS <str>`) and `--split-string[=]<str>`, read only among env's own
+/// options — `env git commit -S` signs a commit. `None` for a plain `env`.
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
 fn env_split_string(rest: &[String]) -> Option<String> {
-    for (n, tok) in rest.iter().enumerate() {
-        if tok == "-S" || tok == "--split-string" {
-            return rest.get(n + 1).cloned();
+    option_string(
+        rest,
+        'S',
+        "--split-string",
+        &["-C", "-P", "-u", "--chdir", "--unset"],
+    )
+}
+
+/// The command string `flock -c` / `--command` runs, before or right after
+/// the lock file (`flock -c 'cmd' FILE`, `flock FILE -c 'cmd'`).
+fn flock_command(rest: &[String]) -> Option<String> {
+    let valued = &["-E", "-w", "--conflict-exit-code", "--timeout", "--wait"];
+    if let Some(string) = option_string(rest, 'c', "--command", valued) {
+        return Some(string);
+    }
+    let file = options_end(rest, valued);
+    option_string(rest.get(file + 1..)?, 'c', "--command", &[])
+}
+
+/// The value of the string option `-<short>` / `<long>` among the leading
+/// options of `rest`; `valued` options there consume the next token.
+fn option_string(rest: &[String], short: char, long: &str, valued: &[&str]) -> Option<String> {
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        // `env -` is `-i`; `--` or any other non-option ends the options.
+        if tok == "-" {
+            i += 1;
+            continue;
         }
-        if let Some(value) = tok.strip_prefix("--split-string=") {
+        if tok == "--" || !tok.starts_with('-') {
+            return None;
+        }
+        if tok == long {
+            return rest.get(i + 1).cloned();
+        }
+        if let Some(value) = tok.strip_prefix(long).and_then(|v| v.strip_prefix('=')) {
             return Some(value.to_string());
         }
-        if let Some(value) = tok.strip_prefix("-S")
-            && !value.is_empty()
-        {
-            return Some(value.to_string());
+        let mut width = 1;
+        if !tok.starts_with("--") {
+            for (at, c) in tok.char_indices().skip(1) {
+                let value = &tok[at + c.len_utf8()..];
+                if c == short {
+                    // Letters before it were flags (`-iS`); the rest is its value.
+                    return if value.is_empty() {
+                        rest.get(i + 1).cloned()
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                if valued.iter().any(|v| v.len() == 2 && v.ends_with(c)) {
+                    // A value-taking letter ends the cluster (`-uNAME`, `-u NAME`).
+                    width = if value.is_empty() { 2 } else { 1 };
+                    break;
+                }
+            }
+        } else if valued.contains(&tok.as_str()) {
+            width = 2;
         }
+        i += width;
     }
     None
+}
+
+/// The index of the first non-option word of `rest`.
+fn options_end(rest: &[String], valued: &[&str]) -> usize {
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        if tok == "--" {
+            return i + 1;
+        }
+        if !tok.starts_with('-') || tok == "-" {
+            return i;
+        }
+        i += if valued.contains(&tok.as_str()) { 2 } else { 1 };
+    }
+    i
 }
 
 /// The command `xargs` would run, re-joined into a command string.
