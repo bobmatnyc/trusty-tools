@@ -54,7 +54,7 @@ async fn probe_health(base: &str) -> bool {
 /// currently-running executable so a `cargo run` session boots its own debug
 /// daemon and a production install boots the production binary. The
 /// `--foreground` flag prevents recursive self-spawning.
-/// What: delegates to `trusty_common::daemon_guard::spawn_current_exe`.
+/// What: delegates to `spawn_daemon_with_device(None)`.
 #[allow(dead_code)]
 pub(crate) fn spawn_daemon() -> Result<u32> {
     spawn_daemon_with_device(None)
@@ -68,8 +68,9 @@ pub(crate) fn spawn_daemon() -> Result<u32> {
 /// inference runs. Auto-spawning the daemon with `--device cpu` sidesteps
 /// CoreML init entirely for the indexing path.
 /// What: invokes `<exe> start --foreground` and, when `device` is `Some`,
-/// appends `--device <device>`. Delegates to `spawn_current_exe`.
-/// Test: `cargo check -p trusty-search` plus manual live testing.
+/// appends `--device <device>`. Delegates to
+/// `spawn_current_exe_forwarding_parent_link`.
+/// Test: `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`.
 pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
     let mut args = vec!["start", "--foreground"];
     let device_str;
@@ -78,7 +79,10 @@ pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
         device_str = dev.to_string();
         args.push(&device_str);
     }
-    trusty_common::daemon_guard::spawn_current_exe(&args)
+    // #8900: forward a parent-death stamp, so a daemon a stamped CLI (a test)
+    // auto-starts dies with that test rather than outliving the run. No stamp
+    // in the environment — every production invocation — forwards nothing.
+    trusty_common::daemon_guard::spawn_current_exe_forwarding_parent_link(&args)
         .map_err(|e| anyhow!("trusty-search daemon spawn failed: {e}"))
 }
 

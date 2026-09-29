@@ -14,8 +14,10 @@
 //! the PATH-plus-flag shape and `reindex` are driven here too.
 //! Test: `cargo test -p trusty-search --test index_remove_residency_8687`
 
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Request, State};
@@ -142,18 +144,17 @@ fn cli(base: &str, args: &[&str], fake_home: &Path) -> (i32, String) {
     )
     .expect("http_addr");
     let cwd = tempfile::tempdir().expect("cli cwd");
-    let out = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
-        .args(args)
+    // #8900: stamped and bounded, so a daemon the CLI auto-starts can neither
+    // outlive the run nor hold this call open.
+    let mut cmd = test_daemon::command();
+    cmd.args(args)
         .current_dir(cwd.path())
         .env("TRUSTY_DATA_DIR", data_dir.path())
         .env("HOME", fake_home)
         .env("XDG_CONFIG_HOME", fake_home)
-        .env_remove("TRUSTY_INDEX")
-        .output()
-        .expect("spawn trusty-search");
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), text)
+        .env_remove("TRUSTY_INDEX");
+    let out = test_daemon::run_bounded(&mut cmd, std::time::Duration::from_secs(120));
+    (out.code.unwrap_or(-1), out.combined)
 }
 
 fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
