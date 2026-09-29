@@ -456,6 +456,29 @@ pub struct Finding {
     /// Whether this finding is eligible for tracker-issue filing.
     #[serde(default)]
     pub issue_eligible: bool,
+    /// #8905: set when the citation gate moved `line` to the line that holds
+    /// the code the finding quotes or names; `None` when the cited line held it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_correction: Option<CitationCorrection>,
+}
+
+/// A line correction the citation gate applied to a finding (#8905).
+///
+/// Why: a re-anchored finding is posted at a line the model did not emit, so
+/// the move is recorded on the finding itself, not only in the log.
+/// What: `from_line` is the line the model cited (`None` when it cited none);
+/// `to_line` is the line the gate verified holds the quoted or named code.
+/// Test: `a_finding_cited_twelve_lines_off_is_reanchored`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitationCorrection {
+    /// The line the model cited.
+    pub from_line: Option<u32>,
+    /// The line the gate moved the citation to (a new-side line number).
+    pub to_line: u32,
+    /// The code sits on a line the change REMOVES; `to_line` is the new-side
+    /// position of that deletion (#8905 row 2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed_code: bool,
 }
 
 impl Finding {
@@ -488,6 +511,7 @@ impl Finding {
             code_provable: false,
             verified: None,
             issue_eligible: false,
+            citation_correction: None,
         }
     }
 
