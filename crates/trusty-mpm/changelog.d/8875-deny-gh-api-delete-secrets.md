@@ -1,0 +1,2 @@
+Fixed
+- pm-guard now refuses a `gh api` DELETE of a GitHub secret (`…/secrets/NAME` of a repo, org, user or environment, including Actions, Dependabot and Codespaces secrets) in every method spelling: `-X DELETE`, `-XDELETE`, `--method DELETE`, `--method=DELETE`, any case, before or after the endpoint. A `gh api` call on a secrets path whose method or endpoint the guard cannot read literally is refused too. The GET that lists secret names (#8869) and a DELETE of a non-secret endpoint are unchanged (#8875).
