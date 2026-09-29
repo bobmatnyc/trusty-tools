@@ -238,7 +238,11 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             // that finishes with the live store still empty must publish
             // `Failed`, not `Ready`. Gathered before the stages write lock so
             // the indexer lock is never nested inside it.
-            let broken = super::stages::semantic_health_reason(&handle).await;
+            let broken = match super::stages::semantic_health_reason(&handle).await {
+                Some(reason) => Some(reason),
+                // #8884: a pass that left corpus chunks without a vector is not `Ready`.
+                None => crate::service::vector_gap::gap_after_embed_pass(&handle).await,
+            };
             // #4390: clear the durable pending marker only when this pass
             // reached a state that owes no further work — `Ready` (the vectors
             // are committed and snapshotted) or `Skipped` (the vector lane was

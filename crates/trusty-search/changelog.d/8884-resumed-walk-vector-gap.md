@@ -1,0 +1,3 @@
+Fixed
+- A reindex that resumes a first walk killed before its promotion now embeds the chunks it adopted from the interrupted run (#8884). The resumed run left the in-memory chunk map and BM25 index holding only the files it walked, so the deferred-embed pass skipped the adopted chunks and `semantic` read `ready` with `vectors_present` below `chunk_count` until the next restart. The adopted corpus is now reloaded before the run commits.
+- A deferred-embed pass that finishes with corpus chunks still lacking a vector now settles `semantic` as `failed`, naming the gap, instead of `ready`. The deferred-embed marker is kept, so the next boot re-arms the pass.

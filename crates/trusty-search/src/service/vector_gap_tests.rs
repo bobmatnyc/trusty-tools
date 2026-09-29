@@ -353,3 +353,68 @@ async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
         "the failure must name the missing embedder: {semantic:?}"
     );
 }
+
+/// Why (#8884): a deferred pass whose plan cannot see a corpus row finishes
+/// without error. Publishing `Ready` then hides that row's missing vector
+/// until a restart, which is the fail-open settle this issue reported.
+/// What: commits [`SOURCE`] through the indexer, writes one more chunk straight
+/// into the durable corpus so the chunk map never sees it, runs the pass, and
+/// requires `Failed` naming the gap, never `Ready`.
+/// Test: this test.
+#[tokio::test]
+async fn a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready() {
+    let id = "vector-gap-8884-hidden-row";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("corpus"),
+    );
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let mut indexer = CodeIndexer::new(id, dir.path()).with_components(embedder, store);
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let (hidden, _) = chunk_ast("src/hidden.rs", "pub fn hidden() -> u32 {\n    3\n}\n");
+    corpus
+        .upsert_chunks(&hidden)
+        .expect("write a row around the chunk map");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        dir.path().to_path_buf(),
+    ));
+
+    crate::service::reindex::run_embed_catch_up(
+        Arc::clone(&handle),
+        Arc::new(crate::service::reindex::ReindexProgress::new()),
+    )
+    .await;
+
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "#8884: a pass that left a corpus chunk without a vector must not read ready: \
+         {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("still without a vector")),
+        "the failure must name the gap: {semantic:?}"
+    );
+}

@@ -12,7 +12,9 @@
 //! What: [`semantic_vector_gap`] is the pure rule; [`reconcile_semantic_vector_gap`]
 //! applies it to a live handle and queues the catch-up through the serialized
 //! deferred-embed queue. Called after a restore registers a handle and after
-//! the boot migration chain succeeds.
+//! the boot migration chain succeeds. [`gap_after_embed_pass`] applies the same
+//! rule when a deferred-embed pass settles, so the pass cannot publish `Ready`
+//! over a gap it did not close (#8884).
 //! Test: `tests` below, and through the boot migration path
 //! `m005_vector_gap_is_not_ready_and_is_backfilled` in
 //! `core::migration::m005::tests`.
@@ -49,6 +51,43 @@ pub fn semantic_vector_gap(
     (vectors < chunk_count).then(|| chunk_count - vectors)
 }
 
+/// The durable corpus chunk count, falling back to the in-memory map.
+fn corpus_chunk_count(indexer: &crate::core::indexer::CodeIndexer) -> usize {
+    indexer
+        .corpus_arc()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or_else(|| indexer.chunk_count())
+}
+
+/// Why a finished deferred-embed pass must not publish `Ready` (#8884).
+///
+/// Why: the pass plans from the in-memory chunk map, so a map that has lost
+/// sight of corpus rows — the resumed-first-walk adoption of #8884 — finishes
+/// without error while those rows still have no vector. Publishing `Ready`
+/// then hides the gap until a restart runs the restore reconcile.
+/// What: reads the durable chunk count and the live vector count under one
+/// indexer read guard. Returns `Some(reason)` when [`semantic_vector_gap`]
+/// reports a gap for a `Ready` stage. `None` when no embedder is wired (the
+/// index is legitimately vectorless, as in #4707), or when no store is wired
+/// or its size cannot be read; `stages::semantic_health_reason` owns those.
+/// Test: `a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready`.
+pub(crate) async fn gap_after_embed_pass(handle: &IndexHandle) -> Option<String> {
+    let (chunk_count, vectors) = {
+        let indexer = handle.indexer.read().await;
+        if !indexer.has_embedder() {
+            return None;
+        }
+        (corpus_chunk_count(&indexer), indexer.vector_count().await)
+    };
+    let gap = semantic_vector_gap(StageStatus::Ready, chunk_count, vectors)?;
+    Some(format!(
+        "the semantic embed pass finished with {gap} of {chunk_count} chunks still without a \
+         vector, so the stage is not reported ready. The deferred-embed marker is kept, so the \
+         next boot re-arms the pass; `PATCH /indexes/{{id}}/config {{\"vector\": true}}` re-arms \
+         it now (#8884)"
+    ))
+}
+
 /// Settle the semantic stage of a restored handle whose store is short of the
 /// corpus, and queue the backfill that closes the gap (#8726, #8863).
 ///
@@ -81,12 +120,8 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
     }
     let (chunk_count, vectors, has_store, has_embedder) = {
         let indexer = handle.indexer.read().await;
-        let chunks = indexer
-            .corpus_arc()
-            .and_then(|c| c.chunk_count().ok())
-            .unwrap_or_else(|| indexer.chunk_count());
         (
-            chunks,
+            corpus_chunk_count(&indexer),
             indexer.vector_count().await,
             indexer.has_vector_store(),
             indexer.has_embedder(),
