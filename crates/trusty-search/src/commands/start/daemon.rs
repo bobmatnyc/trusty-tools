@@ -236,6 +236,12 @@ pub async fn handle_start(
         return Ok(());
     }
 
+    // #8900: opt-in parent-death linkage, armed before anything can block. A
+    // test stamps its spawn with `parent_death::exit_with_parent`; SIGKILL that
+    // test and no `Drop` runs, so without this watchdog the daemon outlives the
+    // run. Absent `TRUSTY_EXIT_WITH_PARENT` (launchd, a hand run) it arms nothing.
+    trusty_common::parent_death::arm_from_env("trusty-search");
+
     // Issue #35: the foreground daemon owns tracing init so it can wire the
     // in-memory `LogBuffer` that backs `GET /logs/tail`.
     let (log_buffer, _error_store) = trusty_common::init_tracing_with_buffer_and_capture(

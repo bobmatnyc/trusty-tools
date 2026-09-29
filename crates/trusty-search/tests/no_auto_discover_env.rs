@@ -31,7 +31,10 @@
 //!
 //! Test: `cargo test -p trusty-search --test no_auto_discover_env`
 
-use std::process::Command;
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
+use std::time::Duration;
 
 /// Exit status clap uses for an argument-parsing failure.
 const CLAP_USAGE_EXIT: i32 = 2;
@@ -54,7 +57,9 @@ fn run_start(value: Option<&str>) -> (i32, String) {
     let unusable = scratch.path().join("data-dir-is-a-file");
     std::fs::write(&unusable, b"").expect("create unusable data-dir sentinel");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-search"));
+    // #8900: stamped and bounded, so a probe that boots a daemon instead of
+    // aborting can neither outlive the run nor hang it.
+    let mut cmd = test_daemon::command();
     cmd.args(["start", "--foreground", "--port", "17999"])
         .arg("--data-dir")
         .arg(&unusable)
@@ -64,10 +69,8 @@ fn run_start(value: Option<&str>) -> (i32, String) {
         cmd.env("TRUSTY_NO_AUTO_DISCOVER", v);
     }
 
-    let out = cmd.output().expect("spawn trusty-search");
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), combined)
+    let out = test_daemon::run_bounded(&mut cmd, Duration::from_secs(120));
+    (out.code.unwrap_or(-1), out.combined)
 }
 
 /// Why (issue #4823): `TRUSTY_NO_AUTO_DISCOVER=1` is what the reporter's

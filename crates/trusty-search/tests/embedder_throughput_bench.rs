@@ -49,6 +49,8 @@
 
 #[path = "support/isolated_benchmark.rs"]
 mod isolated_benchmark;
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
 
 use std::path::Path;
 use std::process::Stdio;
@@ -139,7 +141,9 @@ fn spawn_daemon(
     project_registry: &Path,
     port: u16,
 ) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_trusty-search"))
+    // #8900: stamped, so a daemon this bench starts dies with the test
+    // binary even when `kill_on_drop` never runs.
+    Command::from(test_daemon::command())
         .args([
             "start",
             "--foreground",

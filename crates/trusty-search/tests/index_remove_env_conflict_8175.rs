@@ -38,6 +38,9 @@
 //! Test: `cargo test -p trusty-search --test index_remove_env_conflict_8175`
 
 use std::path::Path;
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -158,7 +161,7 @@ fn write_discovery_file(data_dir: &Path, base: &str) {
 /// resolve to the operator's real config directory even on the code path
 /// that performs a real `DELETE`. See [`RealAllowlistGuard`].
 fn remove_command(data_dir: &Path, fake_home: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-search"));
+    let mut cmd = test_daemon::command();
     cmd.args(["index", "remove"])
         .env("TRUSTY_DATA_DIR", data_dir)
         .env("HOME", fake_home)
@@ -166,11 +169,11 @@ fn remove_command(data_dir: &Path, fake_home: &Path) -> Command {
     cmd
 }
 
+// #8900: stamped by `test_daemon::command` and bounded here, so a daemon the
+// CLI auto-starts can neither outlive the run nor hold this call open.
 fn run(mut cmd: Command) -> (i32, String) {
-    let out = cmd.output().expect("spawn trusty-search index remove");
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), combined)
+    let out = test_daemon::run_bounded(&mut cmd, std::time::Duration::from_secs(120));
+    (out.code.unwrap_or(-1), out.combined)
 }
 
 /// `GET /indexes` against the test router — the list of currently-registered

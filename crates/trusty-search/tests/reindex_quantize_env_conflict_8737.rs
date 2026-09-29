@@ -20,6 +20,9 @@
 //! Test: `cargo test -p trusty-search --test reindex_quantize_env_conflict_8737`
 
 use std::path::Path;
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -176,7 +179,7 @@ impl Scratch {
     /// `trusty-search <args>` with every path the CLI could write pinned to a
     /// tempdir and no inherited `TRUSTY_INDEX`.
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-search"));
+        let mut cmd = test_daemon::command();
         cmd.args(args)
             .env("TRUSTY_DATA_DIR", self.data_dir.path())
             .env("HOME", self.home.path())
@@ -188,11 +191,11 @@ impl Scratch {
     }
 }
 
+// #8900: stamped by `test_daemon::command` and bounded here, so a daemon the
+// CLI auto-starts can neither outlive the run nor hold this call open.
 fn run(mut cmd: Command) -> (i32, String) {
-    let out = cmd.output().expect("spawn trusty-search");
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), combined)
+    let out = test_daemon::run_bounded(&mut cmd, std::time::Duration::from_secs(120));
+    (out.code.unwrap_or(-1), out.combined)
 }
 
 /// Assert an env-only invocation refused with NO request at all.

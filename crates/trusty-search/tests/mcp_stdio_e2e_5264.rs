@@ -40,9 +40,12 @@
 //!
 //! Test: `cargo test -p trusty-search --test mcp_stdio_e2e_5264`
 
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -149,7 +152,9 @@ impl Session {
         std::fs::write(data_dir.join("daemon.port"), addr.port().to_string())
             .expect("seed daemon.port");
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
+        // #8900: stamped, so a daemon `serve` auto-starts if discovery ever
+        // misses dies with this test binary instead of outliving the run.
+        let mut child = test_daemon::command()
             .arg("serve")
             .env("TRUSTY_DATA_DIR", data_dir)
             .env("HOME", home)

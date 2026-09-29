@@ -21,8 +21,12 @@
 //!
 //! Test: `cargo test -p trusty-search --test daemon_env_precedence`
 
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
+
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 /// Exit status clap uses for an argument-parsing failure.
 const CLAP_USAGE_EXIT: i32 = 2;
@@ -41,7 +45,9 @@ const CLAP_USAGE_EXIT: i32 = 2;
 /// adds whatever per-test environment the case needs.
 /// Test: used by every test in this file.
 fn daemon_command(data_dir: &Path, port: &str) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-search"));
+    // #8900: stamped, so a daemon that boots instead of aborting dies with
+    // this test binary rather than outliving the run.
+    let mut cmd = test_daemon::command();
     cmd.args(["start", "--foreground", "--port", port])
         .env("TRUSTY_DATA_DIR", data_dir)
         .env("TRUSTY_SKIP_RAM_CHECK", "1");
@@ -49,11 +55,12 @@ fn daemon_command(data_dir: &Path, port: &str) -> Command {
 }
 
 /// Run the daemon and return `(exit_code, stdout ++ stderr)`.
+///
+/// #8900: bounded, so a daemon that boots instead of aborting fails the test
+/// with exit -1 rather than hanging it.
 fn run_to_completion(cmd: &mut Command) -> (i32, String) {
-    let out = cmd.output().expect("spawn trusty-search");
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), combined)
+    let out = test_daemon::run_bounded(cmd, Duration::from_secs(120));
+    (out.code.unwrap_or(-1), out.combined)
 }
 
 /// Run `trusty-search start --foreground` against a scratch data dir seeded
