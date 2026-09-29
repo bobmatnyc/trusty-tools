@@ -354,6 +354,37 @@ fn a_first_run_seeds_the_architect_project() {
     );
 }
 
+/// #8891: a sibling the poller loads by path must be seeded beside it, or the
+/// deployed poller fails at import.
+#[test]
+fn every_script_a_seeded_script_loads_by_path_is_seeded() {
+    let seeded: Vec<&str> = super::seed::FILES.iter().map(|f| f.dest).collect();
+    let mut checked = 0;
+    for file in super::seed::FILES
+        .iter()
+        .filter(|f| f.dest.ends_with(".py"))
+    {
+        for call in file.contents.split("_load_by_path(").skip(1) {
+            let args = call.split(')').next().unwrap_or_default();
+            let Some(arg) = args.split(',').nth(1).map(str::trim) else {
+                continue;
+            };
+            // The `def _load_by_path(name, filename)` line passes no literal.
+            let Some(name) = arg.strip_prefix('"').and_then(|a| a.strip_suffix('"')) else {
+                continue;
+            };
+            let dest = format!("scripts/{name}");
+            assert!(
+                seeded.contains(&dest.as_str()),
+                "{} loads {dest}, which tm fleet init does not seed",
+                file.dest
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 4, "found only {checked} load-by-path calls");
+}
+
 #[test]
 fn an_edited_seed_or_script_is_never_overwritten() {
     let fx = Fixture::new();

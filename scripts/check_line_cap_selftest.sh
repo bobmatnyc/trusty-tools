@@ -129,7 +129,14 @@ FIXTURE_DIR="$SCRIPT_DIR/test-data"
 # - sloc-swift-comments.swift: `//`, `///`, a block comment, a nested block
 #                              comment and a trailing `//` after code; 4 code
 #                              lines count.
-CASES="sloc-swift-comments.swift	4
+#
+# Python (issue #8891) — measured by $SLOC_PY_AWK:
+# - sloc-python-comments.py:   full-line, indented and trailing `#` comments are
+#                              dropped; a `#` inside a single-, double- or
+#                              triple-quoted string is text, so its line counts;
+#                              docstrings count; `"'''"` opens nothing. 14 lines.
+CASES="sloc-python-comments.py	14
+sloc-swift-comments.swift	4
 sloc-normal.rs	7
 sloc-pathglob-doc.rs	6
 sloc-real-block-comment.rs	2
@@ -158,7 +165,10 @@ while IFS="$(printf '\t')" read -r fixture expected; do
     fail=1
     continue
   fi
-  actual="$(awk "$SLOC_AWK" "$path")"
+  case "$fixture" in
+    *.py) actual="$(awk "$SLOC_PY_AWK" "$path")" ;;
+    *) actual="$(awk "$SLOC_AWK" "$path")" ;;
+  esac
   if [ "$actual" -eq "$expected" ]; then
     echo "PASS: $fixture -> $actual SLOC (expected $expected)"
   else
@@ -291,6 +301,30 @@ elif grep -q 'Small.swift' <<<"$swift_out"; then
   e2e_fail=1
 else
   echo "  ok  Swift 600 SLOC -> FAILED by name; 400 SLOC + 200 comment lines -> not reported"
+fi
+rm -rf "$f"
+
+# ---- Python (issue #8891): measured, capped, test files get the test cap ---
+# 600 SLOC of production Python must FAIL by name. 400 SLOC padded with 200
+# `#` lines, and 600 SLOC in each Python test-file shape, must not be reported.
+f="$(new_gate_fixture)"
+mkdir -p "$f/py/tests"
+emit_py() { awk -v n="$1" -v p="$2" 'BEGIN { for (i = 0; i < n; i++) printf "%s%d = %d\n", p, i, i }'; }
+emit_py 600 big > "$f/py/big.py"
+{ awk 'BEGIN { for (i = 0; i < 200; i++) printf "# note %d\n", i }'; emit_py 400 small; } > "$f/py/small.py"
+for t in test_a.py b_test.py conftest.py tests/helpers.py; do emit_py 600 t > "$f/py/$t"; done
+git -C "$f" add -A >/dev/null && git -C "$f" commit -qm fixture
+py_out="$(cd "$f" && bash scripts/check_line_cap.sh 2>&1)" && py_rc=0 || py_rc=$?
+if [ "$py_rc" -eq 0 ] || ! grep -q 'py/big.py is 600 SLOC' <<<"$py_out"; then
+  echo "SELF-TEST FAIL: a 600-SLOC Python file was not reported over the cap (#8891):" >&2
+  printf '%s\n' "$py_out" | sed 's/^/       /' >&2
+  e2e_fail=1
+elif grep -qE 'small\.py|test_a\.py|b_test\.py|conftest\.py|helpers\.py' <<<"$py_out"; then
+  echo "SELF-TEST FAIL: a Python file under its applicable cap was reported (#8891):" >&2
+  printf '%s\n' "$py_out" | sed 's/^/       /' >&2
+  e2e_fail=1
+else
+  echo "  ok  Python 600 SLOC -> FAILED by name; comment-padded and test-file shapes -> not reported"
 fi
 rm -rf "$f"
 
