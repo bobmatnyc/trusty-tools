@@ -817,6 +817,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: OptimizerAction,
     },
+    /// Set up and inspect the Architect, the one fleet supervisor per user.
+    ///
+    /// Why: #8436 — one command gives a user a working supervisor session.
+    /// What: `init` and `status`; see [`FleetAction`].
+    /// Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    Fleet {
+        /// Fleet action to perform.
+        #[command(subcommand)]
+        action: FleetAction,
+    },
     /// Inspect the session overseer.
     Overseer {
         /// Overseer action to perform.
