@@ -14,7 +14,8 @@
 //! reported skipped, never overwritten.
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
-//! `every_path_a_ported_skill_names_exists_after_init`.
+//! `every_path_a_ported_skill_names_exists_after_init`,
+//! `every_script_a_seeded_script_loads_by_path_is_seeded`.
 
 use std::path::Path;
 
@@ -50,6 +51,12 @@ pub(crate) const FILES: &[Seeded] = &[
     seeded!("records/state.md", "templates/records/state.md", false),
     seeded!("records/actions.md", "templates/records/actions.md", false),
     seeded!("scripts/fleet-poll.py", "scripts/fleet-poll.py", true),
+    // #8891: fleet-poll.py loads this sibling by path; it must ship beside it.
+    seeded!(
+        "scripts/fleet-classify.py",
+        "scripts/fleet-classify.py",
+        false
+    ),
     seeded!("scripts/input-state.py", "scripts/input-state.py", true),
     seeded!(
         "scripts/quiet-sessions.py",
