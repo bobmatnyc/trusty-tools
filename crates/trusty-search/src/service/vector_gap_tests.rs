@@ -630,3 +630,63 @@ async fn an_unreadable_store_does_not_let_a_pass_settle_ready() {
         "the failure must name the unreadable store: {semantic:?}"
     );
 }
+
+/// Whether `indexes.toml` holds the deferred-embed marker for `id`.
+fn deferred_embed_marker(id: &str) -> bool {
+    use crate::service::persistence::{indexes_toml_path, load_index_registry_at};
+    let path = indexes_toml_path().expect("indexes.toml path");
+    load_index_registry_at(&path)
+        .expect("registry must load")
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("entry {id} must exist in indexes.toml"))
+        .deferred_embed_pending
+}
+
+/// Why (#8884 review): a corpus whose chunk ids cannot be read cannot confirm
+/// coverage. Falling back to the chunk-map count reads a full store as covered,
+/// settles `Ready` and clears the marker over chunks that may lack a vector.
+/// What: every chunk already has a vector, so the chunk map reads as covered;
+/// the `chunks` table is then broken. The pass must settle `Failed` naming the
+/// unreadable corpus ids and keep the deferred-embed marker.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unreadable_corpus_does_not_let_a_pass_settle_ready() {
+    let id = "vector-gap-8884-unreadable-corpus";
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, total, corpus, dir) = corpus_handle(id, embedder, Arc::clone(&store)).await;
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    for chunk in &chunks {
+        store
+            .upsert(&chunk.id, vec![0.5; DIM])
+            .await
+            .expect("seed vector");
+    }
+    assert_eq!(store.len().await.expect("store len"), total, "sanity");
+    crate::service::persistence::upsert_index_registry_entry(
+        crate::service::persistence::PersistedIndex::new(id.to_owned(), dir.path().to_path_buf()),
+    )
+    .expect("persist entry");
+    crate::service::boot_markers::persist_deferred_embed_pending(id, true);
+    crate::core::corpus::test_support::break_chunks_table(&corpus).expect("break chunks");
+
+    let semantic = run_pass(&handle).await;
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a corpus whose ids cannot be read must not settle ready: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("corpus chunk ids could not be read")),
+        "the failure must name the unreadable corpus: {semantic:?}"
+    );
+    assert!(
+        deferred_embed_marker(id),
+        "a pass that could not confirm coverage must keep the marker"
+    );
+}
