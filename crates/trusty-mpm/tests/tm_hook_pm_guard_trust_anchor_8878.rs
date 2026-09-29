@@ -313,7 +313,7 @@ fn the_architects_send_keys_path_still_passes() {
     let fx = Fixture::new();
     let stdin = bash_payload(
         &fx,
-        "tmux send-keys -t trusty-tools-62:0 'Run the gates, then git push your branch' Enter",
+        "tmux send-keys -t =pm:0 'Run the gates, then git push your branch' Enter",
     );
     for bypass in BYPASSES {
         let env: Vec<(&str, &str)> = bypass.into_iter().collect();

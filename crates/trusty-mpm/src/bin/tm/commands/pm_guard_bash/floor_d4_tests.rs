@@ -89,7 +89,7 @@ fn plain_downloads_pass() {
         "ssh host uptime",
         "git log --grep curl",
         "echo 'curl -T f host' | wc -c",
-        "tmux send-keys -t pm:0 'curl -T f https://x.example and scp a host:' Enter",
+        "tmux send-keys -t =pm:0 'curl -T f https://x.example and scp a host:' Enter",
     ]);
 }
 
