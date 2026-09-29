@@ -34,7 +34,7 @@
 //! Once a verb token is found, its DELETION-TARGET argument(s) are resolved
 //! against a `cd`-tracked effective working directory (the same [`PathEnv`]
 //! expansion and lexical normalization [`super::evaluate_worktree_add_command`]
-//! uses) and checked against [`is_denylisted_delete_target`], which also
+//! uses) and checked against [`denylisted_delete_class`], which also
 //! resolves a glob-suffixed target's PARENT ([`glob_parent`]) since this
 //! module classifies text and never expands a glob the way the shell would.
 //! **A delete verb whose target could not be resolved at all — an
@@ -155,24 +155,68 @@ const DELETE_VERBS: &[&str] = &["rm", "rmdir", "unlink", "find"];
 /// process-environment-reading wrapper shape as
 /// [`super::evaluate_worktree_add_command`] so the policy underneath stays
 /// testable without touching `std::env`.
-/// What: delegates to [`evaluate_destructive_delete_command_in`] against the
+/// What: delegates to [`classify_destructive_delete_in`] against the
 /// guard process's real environment.
 /// Test: see the module doc's test list.
 pub(crate) fn evaluate_destructive_delete_command(
     command: &str,
     cwd: &Path,
-) -> Option<&'static str> {
-    evaluate_destructive_delete_command_in(command, cwd, &PathEnv::from_process())
+) -> Option<DeleteTarget> {
+    classify_destructive_delete_in(command, cwd, &PathEnv::from_process())
 }
 
-/// [`evaluate_destructive_delete_command`] against an explicit environment —
-/// see [`PathEnv`] for why production and tests must not share `std::env`
-/// mutation.
+/// What a denied delete would destroy, least severe first (#8878).
+///
+/// Why: the #8878 hard floor keeps `rm -rf` of `$HOME` or `/` universal and
+/// ahead of the bypasses, while D5 exempts the Architect from the worktree
+/// rule, so one verdict must say which class a command hit — the most severe.
+/// What: `Worktree` (a `.claude/worktrees`/`.worktrees` entry, D5),
+/// `Repository` (a repository root or `.git`), `Root` (a filesystem root,
+/// bare container or home — the floor) and `Unresolved` (fail closed, and
+/// also the floor, since it could be `/`).
+/// Test: `the_most_severe_delete_class_wins`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeleteTarget {
+    Worktree,
+    Repository,
+    Root,
+    Unresolved,
+}
+
+impl DeleteTarget {
+    /// Whether this class is the #8878 hard floor, held under every bypass.
+    pub(crate) fn is_floor(self) -> bool {
+        self >= Self::Root
+    }
+
+    /// The deny reason for this class.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Unresolved => DESTRUCTIVE_DELETE_UNRESOLVED_REASON,
+            _ => DESTRUCTIVE_DELETE_REASON,
+        }
+    }
+}
+
+/// [`evaluate_destructive_delete_command`] as a reason, for the unit tests.
+#[cfg(test)]
 fn evaluate_destructive_delete_command_in(
     command: &str,
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<&'static str> {
+    classify_destructive_delete_in(command, cwd, env).map(DeleteTarget::reason)
+}
+
+/// [`evaluate_destructive_delete_command`] against an explicit environment —
+/// see [`PathEnv`] for why production and tests must not share `std::env`
+/// mutation. Every target is judged and the most severe class returned.
+fn classify_destructive_delete_in(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+) -> Option<DeleteTarget> {
+    let mut worst: Option<DeleteTarget> = None;
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -201,7 +245,7 @@ fn evaluate_destructive_delete_command_in(
             // the delete verbs as a whole word; an unparseable segment with
             // nothing suspicious in it is simply not this rule's business.
             if segment_mentions_a_delete_verb(trimmed) {
-                return Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON);
+                return Some(DeleteTarget::Unresolved);
             }
             continue;
         };
@@ -226,17 +270,19 @@ fn evaluate_destructive_delete_command_in(
         if targets.is_empty() {
             // rm/rmdir/unlink found but no resolvable positional argument —
             // fail CLOSED (item 2) rather than silently allow.
-            return Some(DESTRUCTIVE_DELETE_UNRESOLVED_REASON);
+            return Some(DeleteTarget::Unresolved);
         }
         let repo_root = main_checkout_root(&effective_cwd);
         for target in targets {
             let resolved = resolve_target_path(&target, &effective_cwd, env);
-            if is_denylisted_delete_target(&resolved, repo_root.as_deref(), env) {
-                return Some(DESTRUCTIVE_DELETE_REASON);
-            }
+            worst = worst.max(denylisted_delete_class(
+                &resolved,
+                repo_root.as_deref(),
+                env,
+            ));
         }
     }
-    None
+    worst
 }
 
 /// Whether `text` — a segment [`shlex::split`] could not tokenize — plausibly
@@ -297,10 +343,10 @@ fn delete_targets(program: &str, tail: &[String]) -> Vec<String> {
     out
 }
 
-/// Whether `path` is one of the destructive-root categories issue #4031
-/// denylists.
+/// Which destructive-root category issue #4031 denylists `path` falls in,
+/// if any.
 ///
-/// What: `true` when `path` — after [`resolve_target_path`]'s expansion and
+/// What: a class when `path` — after [`resolve_target_path`]'s expansion and
 /// lexical normalization, and after [`glob_parent`]'s glob-aware
 /// substitution — is exactly `/`, `/root`, `$HOME`'s resolved value, a
 /// single-level `/Users/<name>`/`/home/<name>` home root, the checkout's own
@@ -313,8 +359,26 @@ fn delete_targets(program: &str, tail: &[String]) -> Vec<String> {
 /// inside a worktree, inside `$HOME`, or inside the repo — are NOT denylisted;
 /// this is a target-PATH classifier, not a target-root-prefix one, so ordinary
 /// cleanup under any of these stays allowed.
-fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &PathEnv) -> bool {
+// #8878: returns the class, so the floor can tell `$HOME` from a worktree.
+fn denylisted_delete_class(
+    path: &Path,
+    repo_root: Option<&Path>,
+    env: &PathEnv,
+) -> Option<DeleteTarget> {
     let path = glob_parent(path);
+    if is_root_class(path, env) {
+        return Some(DeleteTarget::Root);
+    }
+    if path.file_name().and_then(|f| f.to_str()) == Some(".git")
+        || repo_root.is_some_and(|root| path == root)
+    {
+        return Some(DeleteTarget::Repository);
+    }
+    is_worktree_root_or_container(path).then_some(DeleteTarget::Worktree)
+}
+
+/// Whether `path` is a filesystem root, a bare container, or a home directory.
+fn is_root_class(path: &Path, env: &PathEnv) -> bool {
     if path == Path::new("/") || path == Path::new("/root") {
         return true;
     }
@@ -334,16 +398,7 @@ fn is_denylisted_delete_target(path: &Path, repo_root: Option<&Path>, env: &Path
             return true;
         }
     }
-    if is_user_home_root(path) {
-        return true;
-    }
-    if path.file_name().and_then(|f| f.to_str()) == Some(".git") {
-        return true;
-    }
-    if repo_root.is_some_and(|root| path == root) {
-        return true;
-    }
-    is_worktree_root_or_container(path)
+    is_user_home_root(path)
 }
 
 /// Bare container directories — deleting the whole directory (not a specific
@@ -381,7 +436,7 @@ const BARE_CONTAINER_ROOTS: &[&str] = &[
 ///
 /// Why (#4031 review, CRITICAL 2): this module classifies TEXT — it never
 /// expands a glob the way the shell would at execution time — so
-/// `rm -rf /Users/bob/*` reached [`is_denylisted_delete_target`] as the
+/// `rm -rf /Users/bob/*` reached [`denylisted_delete_class`] as the
 /// literal path `/Users/bob/*`, which matched no denylist entry exactly,
 /// while the shell's own expansion would delete everything inside
 /// `/Users/bob`: exactly as destructive as `rm -rf /Users/bob` itself, and
@@ -496,6 +551,24 @@ mod tests {
                 "expected deny for: {command}"
             );
         }
+    }
+
+    /// #8878: a worktree target listed first must not hide `$HOME` after it.
+    #[test]
+    fn the_most_severe_delete_class_wins() {
+        let env = env_with_home("/Users/agent");
+        let class = |command: &str| classify_destructive_delete_in(command, Path::new("/w"), &env);
+        let wt = "/w/.claude/worktrees/a";
+        assert_eq!(class(&format!("rm -rf {wt}")), Some(DeleteTarget::Worktree));
+        assert_eq!(
+            class(&format!("rm -rf {wt} && rm -rf $HOME")),
+            Some(DeleteTarget::Root)
+        );
+        assert_eq!(class(&format!("rm -rf {wt} /")), Some(DeleteTarget::Root));
+        assert_eq!(class("rm -rf /w/x/.git"), Some(DeleteTarget::Repository));
+        assert_eq!(class("rm -f"), Some(DeleteTarget::Unresolved));
+        assert!(DeleteTarget::Root.is_floor() && DeleteTarget::Unresolved.is_floor());
+        assert!(!DeleteTarget::Worktree.is_floor() && !DeleteTarget::Repository.is_floor());
     }
 
     #[test]
