@@ -47,17 +47,31 @@ pub(super) fn withhold_verdict(
         "{} findings withheld: citation unverifiable",
         report.dropped
     );
-    let blocking = matches!(*verdict, Verdict::Block | Verdict::RequestChanges);
-    if survivors.is_empty() {
-        *verdict = Verdict::Unknown;
-    } else if blocking {
-        let rederived = derive_verdict(Verdict::Approve, survivors);
-        *verdict = match rederived {
-            Verdict::Approve | Verdict::ApproveWithReservations => Verdict::Unknown,
-            other => other,
-        };
-    }
+    *verdict = settle_withheld(verdict.clone(), survivors);
     Some(note)
+}
+
+/// The verdict a review keeps after at least one finding was withheld.
+///
+/// Why: #8904 — the verifier withholds findings too, and one policy must
+/// settle every withheld finding, whichever gate withheld it.
+/// What: no survivors → `Unknown`; a BLOCK / REQUEST_CHANGES review with
+/// survivors → the verdict the survivors alone derive, or `Unknown` when that
+/// would approve; any other verdict is returned unchanged. Never APPROVE from
+/// a verdict that was not already APPROVE.
+/// Test: `gate_posted_findings_never_approves_a_blocking_review`,
+/// `verify_refuting_every_finding_of_a_block_review_is_unknown`.
+pub(crate) fn settle_withheld(verdict: Verdict, survivors: &[Finding]) -> Verdict {
+    if survivors.is_empty() {
+        return Verdict::Unknown;
+    }
+    if !matches!(verdict, Verdict::Block | Verdict::RequestChanges) {
+        return verdict;
+    }
+    match derive_verdict(Verdict::Approve, survivors) {
+        Verdict::Approve | Verdict::ApproveWithReservations => Verdict::Unknown,
+        other => other,
+    }
 }
 
 /// Remove withheld findings from the review body (#8905 row 5).
@@ -66,7 +80,7 @@ pub(super) fn withhold_verdict(
 /// as an object (the posted findings come from the gated list, not the body),
 /// and replaces each withheld `file:line` in the remaining text.
 /// Test: `run_review_body_carries_no_dropped_citation`.
-pub(super) fn scrub_body(body: &str, withheld: &[String]) -> String {
+pub(crate) fn scrub_body(body: &str, withheld: &[String]) -> String {
     let mut out = FENCED_JSON_RE
         .replace_all(body, |caps: &Captures| {
             let inner = caps.get(1).map_or("", |m| m.as_str());

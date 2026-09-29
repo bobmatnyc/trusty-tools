@@ -622,7 +622,7 @@ pub struct ReviewResult {
     /// two canonical exit points as `findings_count`. `#[serde(default)]` keeps
     /// pre-#4459 serialised results deserialising with `0`.
     /// Test: `unverified_count_matches_the_unverified_findings` (post_tests),
-    /// `verify_permanent_transport_failure_lands_in_unverified`.
+    /// `verify_permanent_transport_failure_is_withheld`.
     #[serde(default)]
     pub unverified_count: usize,
     /// Per-line inline review comments that were (or, in dry-run, would be)

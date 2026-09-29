@@ -708,9 +708,6 @@ crates/trusty-review/src/pipeline/verify.rs	parse_judgment_confirmed
 crates/trusty-review/src/pipeline/verify.rs	parse_judgment_refuted
 crates/trusty-review/src/pipeline/verify.rs	parse_judgment_unparseable
 crates/trusty-review/src/pipeline/verify.rs	rederive_confirmed_medium_caps_at_approve_star
-crates/trusty-review/src/pipeline/verify.rs	verify_one_confirmed
-crates/trusty-review/src/pipeline/verify.rs	verify_one_model_unavailable_emits_signal
-crates/trusty-review/src/pipeline/verify.rs	verify_one_refuted
 crates/trusty-review/src/pipeline/voice_config.rs	build_voice_config_principles_on
 crates/trusty-review/src/report/analyze_adapter.rs	http_source_maps_from_mock
 crates/trusty-review/src/report/investigate/mod.rs	investigation_survives_one_truncated_batch_of_three

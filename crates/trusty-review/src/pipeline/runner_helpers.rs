@@ -27,7 +27,7 @@ use crate::{
         post::{PostContext, finalize_review},
         prompt::ReviewPrMeta,
     },
-    store::DedupStore,
+    store::{ClaimOutcome, DedupError, DedupStore},
 };
 
 use super::runner::{ReviewDeps, ReviewInput};
@@ -433,6 +433,54 @@ pub(super) fn ground_parsed_findings(
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 // Split into a sibling file to keep this file under the 500-line cap.
+
+/// What the runner does with a `claim()` outcome.
+///
+/// Why: naming the outcomes makes the fail-closed rule reviewable in one place.
+/// It used to be an inline `match` whose error arm proceeded with the review,
+/// so a store failure produced an ungated live comment — and on the next
+/// redelivery, another one.
+/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a review that
+/// already ran to completion; `InProgressElsewhere` blocks a review that has
+/// NOT run because another holder owns the slot (#5126); `Abort` carries the
+/// reason a claim could not be established.
+/// Test: `classify_claim_*` in `runner_tests.rs`.
+pub(super) enum ClaimGate {
+    /// This caller owns the review slot.
+    Proceed,
+    /// A completed review already exists for this head SHA.
+    DuplicateSkip,
+    /// Another holder owns a fresh in-progress claim; nothing was reviewed.
+    InProgressElsewhere,
+    /// The claim gate did not engage; abort without posting.
+    Abort(String),
+}
+
+/// Decide what a `claim()` result means for the review about to run.
+///
+/// Why: #5064 — every `DedupError` means the same thing operationally. The
+/// caller does not know whether this head SHA was already reviewed, and could
+/// not record that it is reviewing it now. Proceeding posts an unguarded
+/// comment; aborting drops the review. The webhook handler has already returned
+/// 202 by this point (`service::webhook`), so GitHub will NOT redeliver — the
+/// review is lost until a human re-requests it. That is still the better half
+/// of the trade: a dropped review is visible and re-requestable, a duplicate
+/// comment cannot be retracted. Every error aborts, `Contended` included, which
+/// is the variant a stuck sibling process produces during a rolling upgrade.
+/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`,
+/// `Ok(InProgressElsewhere)` → `InProgressElsewhere` (#5126), and every `Err` →
+/// `Abort` carrying the error's `Display`.
+/// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
+/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`,
+/// `stranded_in_progress_claim_is_not_a_duplicate_skip`.
+pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
+    match outcome {
+        Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
+        Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
+        Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
+        Err(e) => ClaimGate::Abort(e.to_string()),
+    }
+}
 
 #[cfg(test)]
 #[path = "runner_helpers_tests.rs"]

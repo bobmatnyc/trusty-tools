@@ -127,7 +127,7 @@ fn ungrounded_version_claim_is_never_sent_to_the_verifier() {
     let mut findings = vec![ruff_version_finding()];
 
     assert_eq!(
-        select_candidates(Verdict::Block, &findings),
+        select_candidates(&findings),
         vec![0],
         "precondition: on a blocking verdict the wide net picks it up"
     );
@@ -135,7 +135,7 @@ fn ungrounded_version_claim_is_never_sent_to_the_verifier() {
     sanitize_findings(&mut findings);
 
     assert!(
-        select_candidates(Verdict::Block, &findings).is_empty(),
+        select_candidates(&findings).is_empty(),
         "a claim the pipeline cannot check must not be put to the verifier"
     );
 }
@@ -194,7 +194,7 @@ fn verification_backed_finding_still_confirms_and_still_blocks() {
 
     // It is still put to the verifier...
     assert_eq!(
-        select_candidates(Verdict::Block, &findings),
+        select_candidates(&findings),
         vec![0],
         "a checkable finding must still be verified"
     );
