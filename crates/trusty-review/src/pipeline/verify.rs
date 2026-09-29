@@ -11,7 +11,9 @@
 //! REFUTED / UNVERIFIABLE judgment. `verify_posted::enforce_outcomes` then
 //! drops every refuted, unjudged, or over-cap finding and settles the verdict:
 //! nothing dropped → `rederive_verdict`; anything dropped → the #8905 withhold
-//! policy, which never yields APPROVE. `probe_verifier_liveness` is the startup
+//! policy, which never turns a non-APPROVE verdict into APPROVE, floored at the
+//! pre-verification verdict when the verifier failed on a finding.
+//! `probe_verifier_liveness` is the startup
 //! gate that refuses live mode when the verifier model is unavailable.
 //!
 //! ## Every posted finding (#8904)
@@ -57,9 +59,11 @@
 //! off. `VerifyPolicy` now carries the width and a per-finding attempt budget
 //! from `[verification] concurrency` / `max_attempts`, `verify_one` retries a
 //! transient failure with exponential backoff and jitter, and a finding still
-//! unreachable after the last attempt is recorded `Unverifiable` — counted by
-//! `ReviewResult::unverified_count` — rather than `ErrorRefuted`, which reads as
-//! a judgment nothing made.
+//! unreachable after the last attempt is recorded `Unverifiable` rather than
+//! `ErrorRefuted`, which reads as a judgment nothing made. #8904 withholds such
+//! a finding; `ReviewResult::withheld_unverified_count` counts it, and
+//! `ReviewResult::unverified_count` includes that count (Test:
+//! `run_review_partial_verifier_outage_reports_the_withheld_count`).
 //!
 //! Test: `verify_tests.rs` — candidate selection, CONFIRMED/REFUTED outcomes,
 //! verdict re-derivation, truncation regression (#726), transient-error
@@ -201,9 +205,10 @@ impl VerifyPolicy {
 /// What: when `config.verification.enabled` and a `verifier` provider is present,
 /// runs [`run_verification_round_with_policy`] with the resolved verifier role
 /// and `[verification]` policy (`per_file` from the caller) and returns its
-/// report; otherwise logs why it was skipped and returns `None` (findings and
-/// verdict untouched).
+/// report; otherwise returns `None` (findings and verdict untouched), logging
+/// at debug when disabled and at warn when enabled with no verifier (#8904).
 /// Test: `run_review_verification_disabled_skips_round`,
+/// `run_review_enabled_without_a_verifier_notes_unverified_findings`,
 /// `run_review_posts_no_refuted_advisory_finding`.
 pub async fn maybe_verify(
     config: &ReviewConfig,
@@ -219,7 +224,8 @@ pub async fn maybe_verify(
         return None;
     }
     let Some(verifier) = verifier else {
-        debug!("verification enabled but no verifier provider wired — skipping");
+        // #8904: findings will be posted unchecked; `gate_then_verify` notes it.
+        warn!("verification enabled but no verifier provider wired — posting unverified");
         return None;
     };
     let role = &config.role_models.verifier;
@@ -690,8 +696,8 @@ const VERIFIER_UNVERIFIABLE_REASON: &str = "the verifier could not settle this f
 /// no room for "the verifier examined it and could not tell", which is the whole
 /// point of the third judgment.
 /// What: mirrors the `judgment` enum in `verify_prompt::verify_response_schema`.
-/// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
-/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+/// Test: `parse_judgment_unverifiable`,
+/// `parse_judgment_truncated_refuted_json_is_refuted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Judgment {
     /// The finding is real and grounded in the diff.
@@ -702,37 +708,75 @@ enum Judgment {
     Unverifiable,
 }
 
-/// Parse the verifier's forced JSON judgment, or `None` if unparseable.
+/// Parse a single-finding verifier answer, or `None` when it judges nothing.
 ///
-/// Why: the verifier output is forced JSON `{judgment, reason}`; a robust parse
-/// (with a keyword fallback for non-structured providers) keeps the outcome
-/// deterministic.
-/// What: tries direct JSON deserialisation first; falls back to a case-insensitive
-/// keyword scan so a provider that ignored the schema still produces a decision.
-/// UNVERIFIABLE is scanned FIRST in the fallback because it is the only token
-/// that could be swallowed by a substring match on another — a prose answer
-/// reading "not confirmed, unverifiable from this diff" contains both tokens, and
-/// the safe reading of an ambiguous answer is the one that does not confirm.
-/// Returns `None` only when no token appears.
-/// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
-/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+/// Why: the verifier output is forced JSON `{judgment, reason}`, but a
+/// truncated answer or a provider that ignored the schema must fail closed
+/// like the batched path (#8904): `{"judgment":"REFUTED","reason":"not
+/// confirmed by` once parsed as CONFIRMED and was posted.
+/// What: whole JSON first; then a structured `"judgment": "<X>"` token, which
+/// outranks every keyword in the text around it; then [`keyword_judgment`].
+/// Test: `parse_judgment_truncated_refuted_json_is_refuted`,
+/// `parse_judgment_ambiguous_prose_never_confirms`,
+/// `parse_judgment_unverifiable`.
 fn parse_judgment(text: &str) -> Option<Judgment> {
     let trimmed = text.trim();
     if let Ok(j) = serde_json::from_str::<VerifyJudgment>(trimmed) {
         return judgment_from(&j.judgment);
     }
-    // Fallback keyword scan for providers that ignored the forced schema.
-    let upper = trimmed.to_uppercase();
+    if let Some(structured) = structured_judgment(trimmed) {
+        return structured;
+    }
+    keyword_judgment(&trimmed.to_uppercase())
+}
+
+/// The `"judgment": "<X>"` value of an answer that is not whole JSON (#8904).
+///
+/// What: `None` when no `"judgment"` key appears. `Some(None)` when a key's
+/// value is cut off or is not a judgment token, or when two keys disagree.
+/// `Some(Some(j))` otherwise.
+fn structured_judgment(text: &str) -> Option<Option<Judgment>> {
+    const KEY: &str = "\"judgment\"";
+    let mut found: Option<Option<Judgment>> = None;
+    for (at, _) in text.match_indices(KEY) {
+        let value = text[at + KEY.len()..]
+            .trim_start()
+            .strip_prefix(':')
+            .and_then(|v| v.trim_start().strip_prefix('"'))
+            .and_then(|v| v.split_once('"'))
+            .and_then(|(token, _)| judgment_from(token));
+        found = match found {
+            None => Some(value),
+            Some(prev) if prev == value => Some(prev),
+            Some(_) => Some(None),
+        };
+    }
+    found
+}
+
+/// Words that make a CONFIRMED keyword ambiguous (#8904).
+const NEGATIONS: &[&str] = &["NOT", "NO", "NOR", "NEVER", "CANNOT", "UNCONFIRMED"];
+
+/// Keyword fallback for a provider that ignored the forced schema (#8904).
+///
+/// What: UNVERIFIABLE wins, then REFUTED — the readings that do not confirm.
+/// CONFIRMED is returned only when neither appears and the text carries no
+/// negation ("not confirmed", "unconfirmed", "can't"); an ambiguous answer is
+/// `None`, which the round withholds. `None` when no token appears.
+fn keyword_judgment(upper: &str) -> Option<Judgment> {
     if upper.contains("UNVERIFIABLE") {
         return Some(Judgment::Unverifiable);
-    }
-    if upper.contains("CONFIRMED") {
-        return Some(Judgment::Confirmed);
     }
     if upper.contains("REFUTED") {
         return Some(Judgment::Refuted);
     }
-    None
+    if !upper.contains("CONFIRMED") {
+        return None;
+    }
+    let negated = upper
+        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        .any(|w| NEGATIONS.contains(&w) || w.ends_with("N'T") || w.ends_with("N\u{2019}T"));
+    (!negated).then_some(Judgment::Confirmed)
 }
 
 /// Map an exact judgment token (any case, trimmed) to a [`Judgment`].

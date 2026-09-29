@@ -57,8 +57,8 @@ pub(super) fn withhold_verdict(
 /// settle every withheld finding, whichever gate withheld it.
 /// What: no survivors → `Unknown`; a BLOCK / REQUEST_CHANGES review with
 /// survivors → the verdict the survivors alone derive, or `Unknown` when that
-/// would approve; any other verdict is returned unchanged. Never APPROVE from
-/// a verdict that was not already APPROVE.
+/// would approve; any other verdict is returned unchanged. It never turns a
+/// non-APPROVE verdict into APPROVE.
 /// Test: `gate_posted_findings_never_approves_a_blocking_review`,
 /// `verify_refuting_every_finding_of_a_block_review_is_unknown`.
 pub(crate) fn settle_withheld(verdict: Verdict, survivors: &[Finding]) -> Verdict {

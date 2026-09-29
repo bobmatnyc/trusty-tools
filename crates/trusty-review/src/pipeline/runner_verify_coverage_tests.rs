@@ -28,11 +28,12 @@ fn billing_diff() -> String {
     diff
 }
 
-/// (a) A non-verdict-changing fabricated finding — an advisory Medium at 0.80
-/// on an APPROVE review — is sent to the verifier, refuted, and not posted;
-/// the emptied review is withheld as UNKNOWN, never APPROVE.
-#[tokio::test]
-async fn run_review_posts_no_refuted_advisory_finding() {
+/// Review [`billing_diff`] with one advisory Medium (0.80) on an APPROVE
+/// review, cited at [`SUM_LINE`] so the #8905 gate keeps it.
+async fn review_advisory(
+    config: &ReviewConfig,
+    verifier: Option<Arc<dyn LlmProvider>>,
+) -> ReviewResult {
     let (source, _tmp) = local_diff_source(&billing_diff());
     let finding = serde_json::json!({
         "title": "overflow",
@@ -49,9 +50,6 @@ async fn run_review_posts_no_refuted_advisory_finding() {
         error: None,
         output_tokens: None,
     };
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
-        judgment: "REFUTED",
-    });
     let input = ReviewInput {
         diff_source: source,
         reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
@@ -63,22 +61,88 @@ async fn run_review_posts_no_refuted_advisory_finding() {
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    let result = run_review(
-        &default_config(),
-        input,
-        ready_deps(Arc::new(llm), Some(verifier)),
-    )
-    .await;
+    run_review(config, input, ready_deps(Arc::new(llm), verifier)).await
+}
+
+/// (a) A non-verdict-changing fabricated finding — an advisory Medium at 0.80
+/// on an APPROVE review — is sent to the verifier, refuted, and not posted;
+/// the emptied review is withheld as UNKNOWN with no grade, an error, and the
+/// withhold note leading the body.
+#[tokio::test]
+async fn run_review_posts_no_refuted_advisory_finding() {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
+        judgment: "REFUTED",
+    });
+    let result = review_advisory(&default_config(), Some(verifier)).await;
 
     assert!(
         result.findings.is_empty(),
         "#8904: a refuted finding must not be posted, got {:?}",
         result.findings
     );
-    assert_ne!(
-        result.verdict,
-        Verdict::Approve,
-        "a drop never yields APPROVE"
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
+    assert!(result.error.is_some());
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: not verified (1 refuted by the verifier)"),
+        "{}",
+        result.review_body
+    );
+    assert_eq!(
+        result.withheld_unverified_count, 0,
+        "a refutation is a judgment"
+    );
+}
+
+/// #8904: a finding the verifier could not judge is withheld and counted on
+/// the result, both as withheld and in `unverified_count`.
+#[tokio::test]
+async fn run_review_unjudged_finding_is_counted_as_withheld_unverified() {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
+        judgment: "GARBLED",
+    });
+    let result = review_advisory(&default_config(), Some(verifier)).await;
+
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_unverified_count, 1);
+    assert_eq!(result.unverified_count, 1);
+}
+
+/// #8904: verification enabled but no verifier provider (its build failed)
+/// posts the finding unchecked behind a "not verified" note.
+#[tokio::test]
+async fn run_review_enabled_without_a_verifier_notes_unverified_findings() {
+    let config = default_config();
+    assert!(config.verification.enabled, "precondition");
+    let result = review_advisory(&config, None).await;
+
+    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
+    assert!(result.findings[0].verified.is_none());
+    assert!(
+        result
+            .review_body
+            .starts_with(&crate::pipeline::verify_posted::no_verifier_note(1)),
+        "{}",
+        result.review_body
+    );
+}
+
+/// Disabled verification is unchanged by #8904: the finding is posted with
+/// no outcome and the body carries no note.
+#[tokio::test]
+async fn run_review_disabled_verification_adds_no_note() {
+    let mut config = default_config();
+    config.verification.enabled = false;
+    let result = review_advisory(&config, None).await;
+
+    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
+    assert!(result.findings[0].verified.is_none());
+    assert!(
+        !result.review_body.contains("not verified"),
+        "{}",
+        result.review_body
     );
 }
 

@@ -161,7 +161,7 @@ async fn verify_unparsable_reply_withholds_the_finding() {
     assert_eq!(
         report.verdict,
         Verdict::Unknown,
-        "a drop never yields APPROVE"
+        "a drop never turns a non-APPROVE verdict into APPROVE"
     );
 }
 

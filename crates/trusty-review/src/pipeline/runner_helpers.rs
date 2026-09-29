@@ -293,7 +293,8 @@ pub(super) async fn abort_dry(
     result.findings_count = result.findings.len();
     // #4459: the same sync for the unverified count, so an aborted run reports
     // it too rather than leaving a stale zero.
-    result.unverified_count = crate::pipeline::post::count_unverified(&result.findings);
+    result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
+        + result.withheld_unverified_count; // #8904
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
     if claim == DedupClaim::Held

@@ -13,7 +13,8 @@
 //! unparseable or truncated answer), and one past the `max_calls` cap. A
 //! dropped finding is never posted; the verdict then follows the #8905
 //! withhold policy (`citation_gate::verdict::settle_withheld`), so a drop
-//! never yields APPROVE, and the body leads with "N findings withheld: …".
+//! never turns a non-APPROVE verdict into APPROVE, and the body leads with
+//! "N findings withheld: …".
 //! Test: `verify_posted_tests.rs`.
 
 use std::sync::Arc;
@@ -87,11 +88,15 @@ impl VerifyReport {
 /// What: applies each outcome with `apply_outcome`; drops `Refuted`, every
 /// `VerifierReach::Failed` outcome, and every `over_cap` index, logging each;
 /// then settles the verdict — `Unknown` stays `Unknown`; nothing dropped →
-/// `rederive_verdict`; anything dropped → `settle_withheld` (never APPROVE).
+/// `rederive_verdict`; anything dropped → `settle_withheld`, which never turns
+/// a non-APPROVE verdict into APPROVE. When any finding went unjudged the
+/// result is floored at `primary` (the #8653 verdict): a verifier outage never
+/// relaxes a review; only refutations take the relaxing path.
 /// Test: `verify_refuted_drops_and_block_is_withheld`,
 /// `verify_permanent_transport_failure_is_withheld`,
 /// `verify_cap_withholds_findings_past_the_last_call`,
-/// `verify_refuting_every_finding_of_a_block_review_is_unknown`.
+/// `verify_refuting_every_finding_of_a_block_review_is_unknown`,
+/// `run_review_withheld_blocker_keeps_its_block_floor`.
 pub(crate) fn enforce_outcomes(
     primary: Verdict,
     findings: &mut Vec<Finding>,
@@ -139,7 +144,14 @@ pub(crate) fn enforce_outcomes(
     } else if report.dropped() == 0 {
         rederive_verdict(primary, findings)
     } else {
-        withhold::settle_withheld(primary, findings)
+        let settled = withhold::settle_withheld(primary.clone(), findings);
+        // #8904 (owner decision pending): a verifier failure keeps the #8653
+        // floor — the pre-verification verdict — so it never relaxes a review.
+        if report.unjudged > 0 && settled.ordinal() < primary.ordinal() {
+            primary
+        } else {
+            settled
+        }
     };
     report
 }
@@ -149,11 +161,16 @@ pub(crate) fn enforce_outcomes(
 /// Why: both review paths must run the same two gates in the same order, and
 /// the citation gate first saves a verifier call on every finding it drops.
 /// What: runs `gate_posted_findings` (#8905), then `maybe_verify` on
-/// `result.findings` with `result.verdict` as the primary verdict. When the
-/// round withheld findings, scrubs their citations from the body, prepends the
-/// report's note, and on `Unknown` clears the grade and records the note as
-/// the error — the same shape the citation gate uses.
+/// `result.findings` with `result.verdict` as the primary verdict. Records
+/// the unjudged and over-cap drops in `result.withheld_unverified_count`. When
+/// the round withheld findings, scrubs their citations from the body, prepends
+/// the report's note, and on `Unknown` clears the grade and records the note as
+/// the error — the same shape the citation gate uses. Verification enabled
+/// with no verifier wired posts the findings unchecked behind
+/// [`no_verifier_note`]; disabled verification adds nothing.
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
+/// `run_review_partial_verifier_outage_reports_the_withheld_count`,
+/// `run_review_enabled_without_a_verifier_notes_unverified_findings`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
@@ -177,9 +194,14 @@ pub(crate) async fn gate_then_verify(
     )
     .await
     else {
+        if config.verification.enabled && !result.findings.is_empty() {
+            let note = no_verifier_note(result.findings.len());
+            result.review_body = format!("{note}\n\n{}", result.review_body);
+        }
         return;
     };
     result.verdict = report.verdict.clone();
+    result.withheld_unverified_count = report.unjudged + report.over_cap;
     let Some(note) = report.note() else {
         return;
     };
@@ -189,6 +211,12 @@ pub(crate) async fn gate_then_verify(
         result.grade = None;
         result.error.get_or_insert(note);
     }
+}
+
+/// Body line for findings posted with verification enabled but no verifier
+/// provider wired — its build failed (#8904).
+pub(crate) fn no_verifier_note(n: usize) -> String {
+    format!("{n} findings not verified: no verifier provider could be built")
 }
 
 #[cfg(test)]

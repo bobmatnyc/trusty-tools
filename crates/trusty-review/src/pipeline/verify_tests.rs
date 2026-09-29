@@ -614,6 +614,53 @@ fn parse_judgment_unverifiable() {
     );
 }
 
+/// #8904: a truncated single-finding answer whose structured token is REFUTED
+/// must not be read as CONFIRMED because its cut-off reason says "confirmed".
+#[test]
+fn parse_judgment_truncated_refuted_json_is_refuted() {
+    assert_eq!(
+        parse_judgment(r#"{"judgment":"REFUTED","reason":"not confirmed by"#),
+        Some(Judgment::Refuted)
+    );
+    // The structured token wins over the keywords around it.
+    assert_eq!(
+        parse_judgment(r#"{"judgment": "REFUTED", "reason": "CONFIRMED elsewhere"#),
+        Some(Judgment::Refuted)
+    );
+    // A cut-off or conflicting token judges nothing (withheld, not posted).
+    assert_eq!(parse_judgment(r#"{"judgment":"CONF"#), None);
+    assert_eq!(
+        parse_judgment(r#"{"judgment":"CONFIRMED"} {"judgment":"REFUTED"}"#),
+        None
+    );
+}
+
+/// #8904: the keyword fallback never resolves an ambiguous answer to CONFIRMED.
+#[test]
+fn parse_judgment_ambiguous_prose_never_confirms() {
+    assert_eq!(
+        parse_judgment("REFUTED, not confirmed"),
+        Some(Judgment::Refuted)
+    );
+    for ambiguous in [
+        "not confirmed",
+        "This is UNCONFIRMED.",
+        "I can't say it is confirmed",
+        "Confirmed? No.",
+    ] {
+        assert_ne!(
+            parse_judgment(ambiguous),
+            Some(Judgment::Confirmed),
+            "{ambiguous:?}"
+        );
+    }
+    // An unambiguous prose confirmation still parses.
+    assert_eq!(
+        parse_judgment("CONFIRMED: the handle is dereferenced first"),
+        Some(Judgment::Confirmed)
+    );
+}
+
 /// #5309: an `Unverifiable` outcome must strip the signals that let a finding
 /// pin the BLOCK floor — the same demotion the hygiene passes apply when they
 /// pre-stamp it — so a claim carries identical weight whichever route

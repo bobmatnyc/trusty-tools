@@ -704,9 +704,6 @@ crates/trusty-review/src/pipeline/prompt_templates.rs	system_prompt_coverage_gat
 crates/trusty-review/src/pipeline/runner.rs	run_review_dedup_skips_completed
 crates/trusty-review/src/pipeline/runner_context.rs	gather_context_degrades_gracefully_on_search_failure
 crates/trusty-review/src/pipeline/verify.rs	error_class_maps_alarm_variants
-crates/trusty-review/src/pipeline/verify.rs	parse_judgment_confirmed
-crates/trusty-review/src/pipeline/verify.rs	parse_judgment_refuted
-crates/trusty-review/src/pipeline/verify.rs	parse_judgment_unparseable
 crates/trusty-review/src/pipeline/verify.rs	rederive_confirmed_medium_caps_at_approve_star
 crates/trusty-review/src/pipeline/voice_config.rs	build_voice_config_principles_on
 crates/trusty-review/src/report/analyze_adapter.rs	http_source_maps_from_mock
