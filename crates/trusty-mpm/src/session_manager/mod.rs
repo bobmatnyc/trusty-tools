@@ -112,6 +112,9 @@ pub(crate) mod worktree_reclaim_ownership;
 // #7771: Claude Code's per-process session registry, the proof that an owner
 // session no record names has ended.
 pub(crate) mod worktree_claude_registry;
+// #7771: which running processes are Claude Code, so an unregistered one
+// keeps the registry's proof incomplete.
+pub(crate) mod worktree_claude_processes;
 // #7232: the ONE place a claim set is built from the store, so the liveness
 // probe that keeps a tombstoned record from blocking reclaim cannot be omitted
 // by a call site.

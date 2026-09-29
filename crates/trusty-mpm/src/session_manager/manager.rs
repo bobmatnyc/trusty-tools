@@ -309,10 +309,11 @@ pub struct SessionManager {
     /// path and the supervisor tick), and a fresh process has no resume in
     /// flight to remember. See `resume_in_flight.rs`.
     pub(crate) resume_in_flight: super::resume_in_flight::InFlightSet,
-    /// #7771: the Claude config dirs whose session registry proves an owner
+    /// #7771: reads the Claude session registry that proves an owner
     /// session ended. Installed by the host daemon and supervisor only; see
     /// `worktree_claude_registry.rs`.
-    pub(crate) claude_registry_roots: std::sync::OnceLock<Vec<PathBuf>>,
+    pub(crate) claude_registry:
+        std::sync::OnceLock<super::worktree_claude_registry::RegistryReader>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -358,7 +359,7 @@ impl SessionManager {
             // #8233 item 4: empty at construction; every entry is added and
             // removed by a `ResumeInFlightGuard` within one resume call.
             resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
-            claude_registry_roots: std::sync::OnceLock::new(),
+            claude_registry: std::sync::OnceLock::new(),
         })
     }
 

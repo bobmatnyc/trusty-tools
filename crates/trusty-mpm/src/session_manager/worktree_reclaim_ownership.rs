@@ -260,9 +260,12 @@ impl SessionOwners {
     /// compacted, has nothing in the store to prove it ended. What: a running
     /// process registered to `id` makes it `Live` whatever the history says;
     /// an `Undeterminable` becomes `Ended` only on the registry's positive
-    /// proof ([`ClaudeRegistry::session_end`]), and otherwise keeps both
+    /// proof ([`ClaudeRegistry::session_end`]), which a read missing any
+    /// running Claude Code process never gives, and otherwise keeps both
     /// reasons.
     /// Test: `worktree_7771_an_unrecorded_owner_whose_process_is_gone_is_reclaimed`,
+    /// `worktree_7771_an_unregistered_claude_process_keeps_a_live_delegations_tree`,
+    /// `session_end_a_live_registry_entry_outranks_a_superseded_history`,
     /// `worktree_7771_a_registry_probe_error_keeps_the_tree`,
     /// `worktree_7771_an_unreadable_sidecar_outranks_the_registry`.
     fn registry_end(&self, id: &str, end: SessionEnd) -> SessionEnd {
@@ -270,6 +273,7 @@ impl SessionOwners {
             return end;
         }
         match (end, self.claude.session_end(id)) {
+            // #7771: a running process outranks a history-superseded `Ended`.
             (_, Some(SessionEnd::Live)) => SessionEnd::Live,
             (SessionEnd::Undeterminable(_), Some(SessionEnd::Ended)) => SessionEnd::Ended,
             (SessionEnd::Undeterminable(why), Some(SessionEnd::Undeterminable(more))) => {
@@ -286,6 +290,7 @@ impl SessionOwners {
     /// Claude session and no process running `id` — a relaunch the record's
     /// `claude_session_id` never caught up with.
     /// Test: `worktree_7771_a_session_replaced_in_its_tmux_window_is_reclaimed`,
+    /// `worktree_7771_a_live_id_beside_a_newer_one_keeps_the_tree`,
     /// `worktree_7771_a_live_record_with_no_registered_process_is_kept`.
     fn alias_end(&self, id: &str, managed: &str) -> SessionEnd {
         let end = self.record_end(managed);

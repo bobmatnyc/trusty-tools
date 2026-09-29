@@ -317,6 +317,7 @@ impl OwnerGate<'_> {
 /// `owner_refusal_keeps_a_tree_a_live_pid_locks`,
 /// `owner_refusal_keeps_a_live_delegations_tree`,
 /// `worktree_7771_a_dead_sessions_open_delegation_is_stale`,
+/// `worktree_7771_an_unregistered_claude_process_keeps_a_live_delegations_tree`,
 /// `worktree_7771_a_stale_delegation_still_yields_to_a_held_lock`,
 /// `owner_refusal_keeps_another_live_sessions_tree`,
 /// `owner_refusal_permits_the_callers_own_agent_tree`,
@@ -337,6 +338,8 @@ pub(crate) fn owner_refusal(path: &Path, gate: &OwnerGate<'_>) -> Option<String>
             // session provably ended is stale — the agent ran inside that
             // session and died with it. Only `Ended` releases it; the caller's
             // own live agent, and every unproven session, still keep the tree.
+            // A registry-only `Ended` needs a complete registry read, one that
+            // lists every running Claude Code process (#7771 critic).
             if end != SessionEnd::Ended && (gate.agent_state)(&owner) == AgentDelegationState::Live
             {
                 return Some(format!(

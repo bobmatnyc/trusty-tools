@@ -23,9 +23,10 @@
 //! `cli_tree_gate_keeps_another_sessions_agent_tree`.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use super::driver::{ClaimEnder, UnavailableClaims};
-use crate::session_manager::worktree_claude_registry::ClaudeRegistry;
+use crate::session_manager::worktree_claude_registry::{ClaudeRegistry, RegistryReader};
 use crate::session_manager::worktree_owner_gate::{
     OwnerGate, SessionEnd, owner_refusal, release_stale_lock,
 };
@@ -84,15 +85,19 @@ impl ClaimOwnership for UnavailableClaims {}
 /// Why: the CLI reaches the daemon over HTTP and cannot observe tmux, so tmux
 /// proves no foreign session ended; only its managed id and Claude Code
 /// session id are the caller. #7771: Claude Code's own per-process registry
-/// can still prove a foreign Claude session ended.
+/// can still prove a foreign Claude session ended. It is read afresh at every
+/// [`ClaimOwnership::holder_state`] and [`ClaimOwnership::tree_gate`] call, so
+/// [`regate`]'s pre-removal answer never comes from the first gate's snapshot.
 /// Test: `cli_tree_gate_keeps_another_sessions_agent_tree`,
 /// `cli_7771_tree_gate_reclaims_a_tree_whose_owner_process_is_gone`,
+/// `cli_7771_tree_gate_rereads_the_registry_at_each_call`,
 /// `worktree_7771_a_registry_probe_error_keeps_the_tree`.
 pub(crate) struct CallerOwnership {
     /// Every id naming the calling session.
     callers: Vec<String>,
-    /// #7771: the registry a foreign Claude session's end is proven from.
-    claude: ClaudeRegistry,
+    /// #7771: reads the registry a foreign Claude session's end is proven
+    /// from, at each gate call.
+    claude: RegistryReader,
 }
 
 impl CallerOwnership {
@@ -112,29 +117,29 @@ impl CallerOwnership {
     pub(crate) fn new(callers: Vec<String>) -> Self {
         Self {
             callers,
-            claude: ClaudeRegistry::NotRead,
+            claude: Arc::new(|| ClaudeRegistry::NotRead),
         }
     }
 
-    /// This ownership, proving foreign Claude sessions ended from `claude`
-    /// (#7771).
-    pub(crate) fn with_claude(mut self, claude: ClaudeRegistry) -> Self {
+    /// This ownership, proving foreign Claude sessions ended from the
+    /// registry `claude` reads at each gate call (#7771).
+    pub(crate) fn with_claude(mut self, claude: RegistryReader) -> Self {
         self.claude = claude;
         self
     }
 
-    /// Condition (d) as this process can answer it.
+    /// Condition (d) as this process can answer it, from `claude`.
     ///
     /// What: the caller, else Claude Code's registry answer
     /// ([`ClaudeRegistry::session_end`]), else undeterminable. #7771: an
     /// unobservable tmux is never the reason a tree is judged ended.
-    fn session_end(&self, id: &str) -> SessionEnd {
+    fn session_end(&self, claude: &ClaudeRegistry, id: &str) -> SessionEnd {
         if self.callers.iter().any(|c| c == id) {
             return SessionEnd::Caller;
         }
         let why = "this process cannot observe tmux to prove it; `tm session prune-worktrees \
                    --merged-prs` reclaims the tree once it has ended";
-        match self.claude.session_end(id) {
+        match claude.session_end(id) {
             None => SessionEnd::Undeterminable(why.into()),
             Some(SessionEnd::Undeterminable(more)) => {
                 SessionEnd::Undeterminable(format!("{why}; {more}"))
@@ -146,12 +151,14 @@ impl CallerOwnership {
 
 #[async_trait::async_trait]
 impl ClaimOwnership for CallerOwnership {
+    // #7771 critic: each call reads the registry now, never a run-long snapshot.
     async fn holder_state(&self, id: &str) -> HolderState {
-        holder_state_of(self.session_end(id))
+        holder_state_of(self.session_end(&(self.claude)(), id))
     }
 
     async fn tree_gate(&self, path: &Path) -> Result<(), String> {
-        host_tree_gate(path, &|id: &str| self.session_end(id))
+        let claude = (self.claude)();
+        host_tree_gate(path, &|id: &str| self.session_end(&claude, id))
     }
 
     async fn release_stale_lock(&self, path: &Path) -> Result<(), String> {

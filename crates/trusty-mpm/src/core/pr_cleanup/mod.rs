@@ -205,9 +205,11 @@ pub async fn run<G: Gh, T: Git, C: ClaimEnder>(
     probe_dirt: DirtProbe<'_>,
     req: &CleanupRequest,
 ) -> CleanupReport {
-    // #7771: Claude Code's registry proves a foreign owner session ended.
-    let ownership = CallerOwnership::from_env()
-        .with_claude(crate::session_manager::worktree_claude_registry::host_claude_registry());
+    // #7771: Claude Code's registry, read at each gate call, proves a foreign
+    // owner session ended.
+    let ownership = CallerOwnership::from_env().with_claude(std::sync::Arc::new(
+        crate::session_manager::worktree_claude_registry::host_claude_registry,
+    ));
     run_with(gh, git, claims, landing, probe_dirt, req, &ownership).await
 }
 
