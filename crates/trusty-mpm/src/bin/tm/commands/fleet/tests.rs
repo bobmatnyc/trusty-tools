@@ -292,6 +292,47 @@ fn status_reports_incomplete_setup() {
     );
 }
 
+/// #8878 PR-I: `tm fleet status` names the failed identity check in the
+/// hook's words, and never folds it into `complete`.
+#[test]
+fn fleet_status_names_why_this_session_is_not_bound() {
+    use crate::commands::pm_guard_architect_reason::NotArchitect;
+    use crate::commands::pm_guard_trust_anchor::HookEnv;
+    use crate::commands::pm_guard_trust_anchor::tests as anchor;
+    use trusty_mpm::core::architect_launch::LaunchRefusal;
+
+    let fx = anchor::fixture();
+    let granted = || anchor::allowlist(&fx);
+    // The bound Architect, run from a Bash call with no `CLAUDE_PROJECT_DIR`.
+    let bash_call = HookEnv {
+        project_dir: None,
+        ..anchor::architect_env(&fx)
+    };
+    let bound = status::this_session_check(&fx.project, bash_call, granted);
+    assert!(bound.ok, "{}", bound.detail);
+    // No process table: the hook's own reason, and no PID.
+    let unbound = status::this_session_check(&fx.project, anchor::spoof_env(&fx), granted);
+    let why = NotArchitect::Launch(LaunchRefusal::ProcessLookup).to_string();
+    assert!(!unbound.ok);
+    assert!(unbound.detail.ends_with(&why), "{}", unbound.detail);
+    assert!(!unbound.detail.chars().any(|c| c.is_ascii_digit()));
+    // Not the supervisor profile at all.
+    let pm = status::this_session_check(&fx.project, HookEnv::default(), granted);
+    assert!(
+        pm.detail
+            .ends_with(&NotArchitect::NoSupervisorStamp.to_string())
+    );
+
+    let home = Fixture::new();
+    let mut report = home.status();
+    report.this_session = Some(unbound);
+    assert!(report.render().contains(&format!(
+        "UNBOUND  this_session {}",
+        report.this_session.as_ref().unwrap().detail
+    )));
+    assert!(!report.complete);
+}
+
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
 /// The two Architect-only skills, as shipped.

@@ -117,6 +117,7 @@ pub(crate) mod prompt_feedback_hook;
 pub(crate) mod program_word;
 
 pub(crate) mod pm_guard;
+pub(crate) mod pm_guard_architect_reason;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
