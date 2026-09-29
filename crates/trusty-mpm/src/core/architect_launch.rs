@@ -48,15 +48,59 @@ pub fn record_architect(root: &Path, pid: u32, project_dir: &Path) -> Result<Arm
     ARCHITECT_RECORDS.record_claude(root, pid, project_dir)
 }
 
+/// Why the hook's process is not the `claude` tm launched as the Architect.
+///
+/// Why: #8878 PR-I — the deny text and `tm fleet status` name the first
+/// failed check. Each arm carries no PID, start time, path or error detail,
+/// so its text reveals nothing `tm fleet status` does not already print.
+/// Test: `each_identity_failure_names_its_own_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchRefusal {
+    /// The process table could not be read.
+    ProcessLookup,
+    /// No `claude` process is an ancestor of the hook.
+    NoClaudeAncestor,
+    /// No launch record exists for the `claude` ancestor.
+    NoLaunchRecord,
+    /// The launch record could not be read or parsed.
+    UnreadableRecord,
+    /// The record's own PID differs from the one its file name gives.
+    RecordPidMismatch,
+    /// The record's start time differs: the PID was reused.
+    StartTimeMismatch,
+    /// The record was written for another project directory.
+    OtherProject,
+}
+
+impl std::fmt::Display for LaunchRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProcessLookup => "the process table could not be read",
+            Self::NoClaudeAncestor => "no `claude` process is an ancestor of the hook",
+            Self::NoLaunchRecord => {
+                "the `claude` ancestor has no Architect launch record (`tm fleet init` did not \
+                 launch it)"
+            }
+            Self::UnreadableRecord => "the Architect launch record could not be read or parsed",
+            Self::RecordPidMismatch => {
+                "the Architect launch record names a PID other than its file name"
+            }
+            Self::StartTimeMismatch => {
+                "the Architect launch record's start time differs from the `claude` ancestor's \
+                 (PID reuse)"
+            }
+            Self::OtherProject => {
+                "the Architect launch record was written for another project directory"
+            }
+        })
+    }
+}
+
 /// Whether the hook runs under the `claude` tm launched as the Architect.
 ///
 /// Why: the process half of the Architect identity (ruling A); the caller
 /// adds the thread and profile checks.
-/// What: `true` only when `nearest` yields a `claude`, a record exists for its
-/// PID under `root`, and the record's PID, start time and project directory
-/// equal the live process's and `project_dir`. A table error, no `claude`, a
-/// missing or unreadable record, a reused PID (another start time) or another
-/// project is `false`.
+/// What: [`check_launched_architect`] is `Ok`.
 /// Test: `a_launch_record_binds_one_process`,
 /// `a_supervisor_stamp_without_a_launch_record_is_denied`.
 pub fn is_launched_architect(
@@ -64,13 +108,38 @@ pub fn is_launched_architect(
     project_dir: &Path,
     nearest: impl FnOnce() -> Result<Option<ClaudeProcess>, String>,
 ) -> bool {
-    let Ok(Some(claude)) = nearest() else {
-        return false;
-    };
-    let Ok(Some(record)) = ARCHITECT_RECORDS.read(root, claude.pid) else {
-        return false;
-    };
-    record.pid == claude.pid
-        && record.start_time == claude.start_time
-        && same_dir(&record.project_dir, project_dir)
+    check_launched_architect(root, project_dir, nearest).is_ok()
+}
+
+/// [`is_launched_architect`], naming the first check that failed.
+///
+/// Why: #8878 PR-I; the verdict is unchanged, only the reason is new.
+/// What: `Ok` only when `nearest` yields a `claude`, a record exists for its
+/// PID under `root`, and the record's PID, start time and project directory
+/// equal the live process's and `project_dir`. Otherwise the first failure,
+/// in that order, as a [`LaunchRefusal`].
+/// Test: `each_identity_failure_names_its_own_reason`,
+/// `the_reason_verdict_equals_the_bool_verdict`.
+pub fn check_launched_architect(
+    root: &Path,
+    project_dir: &Path,
+    nearest: impl FnOnce() -> Result<Option<ClaudeProcess>, String>,
+) -> Result<(), LaunchRefusal> {
+    let claude = nearest()
+        .map_err(|_| LaunchRefusal::ProcessLookup)?
+        .ok_or(LaunchRefusal::NoClaudeAncestor)?;
+    let record = ARCHITECT_RECORDS
+        .read(root, claude.pid)
+        .map_err(|_| LaunchRefusal::UnreadableRecord)?
+        .ok_or(LaunchRefusal::NoLaunchRecord)?;
+    if record.pid != claude.pid {
+        return Err(LaunchRefusal::RecordPidMismatch);
+    }
+    if record.start_time != claude.start_time {
+        return Err(LaunchRefusal::StartTimeMismatch);
+    }
+    if !same_dir(&record.project_dir, project_dir) {
+        return Err(LaunchRefusal::OtherProject);
+    }
+    Ok(())
 }

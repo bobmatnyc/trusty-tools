@@ -14,7 +14,7 @@
 //! the classifier plus the `cp`/`mv`/`ln`/`install`/`sed -i` destinations and
 //! the sources of `ln`, `mv`, `cp -l` and `cp -s` ([`anchor_writes`]) — and
 //! allows a call that writes nothing. It then allows the Architect's main
-//! thread ([`is_architect_main_thread`], the one identity predicate): the
+//! thread ([`architect_main_thread`], the one identity predicate): the
 //! `claude` `tm fleet init` launched, matched on PID and start time, not an
 //! environment claim. Every other writer is denied when a target or source
 //! resolves, symlinks and hard links followed, to an anchor or to a directory
@@ -47,10 +47,11 @@ use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
 use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
-use trusty_mpm::core::twin_identity::{ClaudeProcess, ThreadKind, thread_kind};
+use trusty_mpm::core::twin_identity::ClaudeProcess;
 
 use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
+use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
 use crate::commands::pm_guard_bash::{AnchorWrite, UnplaceableWrite, anchor_writes};
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -63,7 +64,7 @@ use crate::commands::pm_guard_trust_anchor_paths::{
 pub(crate) const TRUST_ANCHOR_RULE: &str = "trust-anchor-write";
 
 /// The `~/.trusty-mpm` root, relative to the home directory.
-const ANCHOR_ROOT: &str = ".trusty-mpm";
+pub(crate) const ANCHOR_ROOT: &str = ".trusty-mpm";
 
 /// The config anchor, under [`ANCHOR_ROOT`].
 const CONFIG_ANCHOR: &str = "config.toml";
@@ -122,7 +123,8 @@ impl ClaudeLookup {
         Self::new(|| twin_arming::nearest_claude_ancestor(std::process::id()))
     }
 
-    fn get(&self) -> Result<Option<ClaudeProcess>, String> {
+    /// Run the lookup.
+    pub(crate) fn get(&self) -> Result<Option<ClaudeProcess>, String> {
         (self.0)()
     }
 }
@@ -176,11 +178,12 @@ pub(crate) fn evaluate(
     let tool_name = payload.get("tool_name").and_then(Value::as_str)?;
     let writes = call_writes(tool_name, payload.get("tool_input"))?;
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
-    if is_architect_main_thread(payload, env, config) {
+    // #8878 PR-I: the deny names the identity check that failed.
+    let Err(why) = architect_main_thread(payload, env, config) else {
         return None;
-    }
+    };
     let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
-    decide(writes, cwd, env.home.as_deref())
+    decide(writes, cwd, env.home.as_deref()).map(|reason| with_identity(reason, why))
 }
 
 /// Whether the call comes from the Architect session's main thread.
@@ -189,35 +192,31 @@ pub(crate) fn evaluate(
 /// environment alone is spoofable, so ruling A (#8878, 2026-09-29) binds the
 /// Architect to the `claude` process `tm fleet init` launched; a subagent of
 /// it is an agent.
-/// What: `true` only when ALL hold, cheapest first: [`thread_kind`] is
-/// [`ThreadKind::Main`]; [`session_profile::hook_profile`] resolves the
-/// supervisor (stamp, `CLAUDE_PROJECT_DIR`, the project's `.trusty-mpm.toml`
-/// and the user-level allowlist agree); and
-/// [`architect_launch::is_launched_architect`] matches the hook's nearest
-/// `claude` ancestor to a launch record on PID, start time and project. Any
-/// missing or unreadable input is `false`.
+/// What: `true` only when ALL hold, cheapest first: the thread is the main
+/// thread; [`session_profile::hook_profile`] resolves the supervisor (stamp,
+/// `CLAUDE_PROJECT_DIR`, the project's `.trusty-mpm.toml` and the user-level
+/// allowlist agree); and [`architect_launch::is_launched_architect`] matches
+/// the hook's nearest `claude` ancestor to a launch record on PID, start time
+/// and project. Any missing or unreadable input is `false`. #8878 PR-I: a
+/// wrapper over [`architect_main_thread`], which names the check that failed.
 /// Test: `the_architect_main_thread_may_write_the_anchor`,
 /// `a_supervisor_stamp_without_a_launch_record_is_denied`,
 /// `a_launch_record_binds_one_process`, `an_architect_subagent_is_denied`,
-/// `an_unestablished_identity_is_denied`.
+/// `an_unestablished_identity_is_denied`,
+/// `the_reason_verdict_equals_the_bool_verdict`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "#8878 PR-I: the bool API; the hook's callers need the reason"
+    )
+)]
 pub(crate) fn is_architect_main_thread(
     payload: &Value,
     env: &HookEnv,
     config: impl FnOnce() -> MpmConfig,
 ) -> bool {
-    if thread_kind(payload, env.sub_agent) != ThreadKind::Main
-        || !session_profile::hook_profile(env.stamp.clone(), env.project_dir.clone(), config)
-            .is_supervisor()
-    {
-        return false;
-    }
-    let (Some(home), Some(project)) = (
-        env.home.as_deref(),
-        session_profile::hook_project_dir(env.project_dir.clone()),
-    ) else {
-        return false;
-    };
-    architect_launch::is_launched_architect(&home.join(ANCHOR_ROOT), &project, || env.claude.get())
+    architect_main_thread(payload, env, config).is_ok()
 }
 
 /// The writes a tool call makes; `None` when it makes none.
@@ -348,7 +347,7 @@ impl Anchors {
         let mut fence = fence;
         // #8878 ruling A: the Architect launch directory is sealed — itself,
         // every directory above it, and everything under it.
-        let launch = root.join(ARCHITECT_DIR);
+        let launch = root.join(architect_launch::ARCHITECT_DIR);
         paths.push(launch.clone());
         match resolve(&launch) {
             Resolved::Path(dir) => {

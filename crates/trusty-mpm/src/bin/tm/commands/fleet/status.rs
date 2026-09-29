@@ -5,15 +5,21 @@
 //! missing piece named.
 //! What: [`status`] reads the allowlist, the profile request, the
 //! `tm-architect` session and its launch stamp. It writes nothing.
-//! Test: `status_reports_incomplete_setup`, `tests/tm_fleet.rs`.
+//! [`this_session_check`] adds whether the calling session is bound as the
+//! Architect, naming the failed identity check as the hook does (#8878 PR-I).
+//! Test: `status_reports_incomplete_setup`,
+//! `fleet_status_names_why_this_session_is_not_bound`, `tests/tm_fleet.rs`.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
 
 use super::{ARCHITECT_SESSION, Probe, user_config_path};
+use crate::commands::pm_guard_architect_reason::session_binding;
+use crate::commands::pm_guard_trust_anchor::HookEnv;
 
 /// One check's verdict.
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +43,9 @@ pub(crate) struct StatusReport {
     pub(crate) checks: Vec<Check>,
     /// Whether every check passed.
     pub(crate) complete: bool,
+    /// Whether the calling session is bound as the Architect; informational,
+    /// never part of `complete`. `None` when not evaluated.
+    pub(crate) this_session: Option<Check>,
 }
 
 impl StatusReport {
@@ -45,6 +54,10 @@ impl StatusReport {
         let mut out = format!("Architect: {}\n", self.dir.display());
         for c in &self.checks {
             let mark = if c.ok { "ok     " } else { "MISSING" };
+            out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
+        }
+        if let Some(c) = &self.this_session {
+            let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
         }
         out.push_str(if self.complete {
@@ -80,6 +93,34 @@ pub(crate) fn status(dir: &Path, home: &Path, probe: Probe) -> StatusReport {
         session: ARCHITECT_SESSION,
         checks,
         complete,
+        this_session: None,
+    }
+}
+
+/// Whether the session running `tm fleet status` is bound as the Architect.
+///
+/// Why: #8878 PR-I — an unbound Architect is denied by the hook, and the
+/// operator needs the failed check named here too, in the same words.
+/// What: [`session_binding`] over `env` and `config`. A Bash tool call
+/// carries no `CLAUDE_PROJECT_DIR`, so when `env` has none, `dir` stands in
+/// as the launch directory. The detail names the reason, never a PID.
+/// Test: `fleet_status_names_why_this_session_is_not_bound`.
+pub(crate) fn this_session_check(
+    dir: &Path,
+    mut env: HookEnv,
+    config: impl FnOnce() -> MpmConfig,
+) -> Check {
+    if session_profile::hook_project_dir(env.project_dir.clone()).is_none() {
+        env.project_dir = Some(dir.as_os_str().to_owned());
+    }
+    let (ok, detail) = match session_binding(&env, config) {
+        Ok(()) => (true, "this session is the Architect".to_owned()),
+        Err(why) => (false, format!("this session is not the Architect: {why}")),
+    };
+    Check {
+        name: "this_session",
+        ok,
+        detail,
     }
 }
 

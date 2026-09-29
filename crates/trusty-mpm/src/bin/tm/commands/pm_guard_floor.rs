@@ -16,10 +16,10 @@
 //! order. Architect-exempt, on every path: the D4 remainder
 //! (`pm_guard_bash::evaluate_d4_floor`). [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
-//! it asks [`is_architect_main_thread`] at most once, and only when a rule
-//! would deny.
+//! it asks [`architect_main_thread`] at most once, and only when a rule
+//! would deny. A D4 deny names the identity check that failed (#8878 PR-I).
 //! FAIL-CLOSED: the exemption is granted only when
-//! [`is_architect_main_thread`] establishes the identity; every failure
+//! [`architect_main_thread`] establishes the identity; every failure
 //! there is "not the Architect", so the rule denies.
 //! Test: `pm_guard_floor_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_trust_anchor_8878.rs`.
@@ -30,6 +30,9 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_mpm::core::config::MpmConfig;
 
+use crate::commands::pm_guard_architect_reason::{
+    NotArchitect, architect_main_thread, with_identity,
+};
 use crate::commands::pm_guard_bash::{
     GitProbe, LiveGit, evaluate_d4_floor, evaluate_destructive_delete_command,
     unclassifiable_command,
@@ -38,9 +41,7 @@ use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
-use crate::commands::pm_guard_trust_anchor::{
-    self, HookEnv, TRUST_ANCHOR_RULE, is_architect_main_thread,
-};
+use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
 
 /// The rule name recorded with a D4-remainder deny.
 pub(crate) const D4_FLOOR_RULE: &str = "d4-floor";
@@ -49,15 +50,16 @@ pub(crate) const D4_FLOOR_RULE: &str = "d4-floor";
 ///
 /// Why: the D4 remainder and the D5 rules share one exemption, and the
 /// identity walks the process table, so it is resolved lazily and cached.
-/// What: [`Self::is_architect`] runs [`is_architect_main_thread`] over the
-/// payload, the hook environment and the user config on first use.
+/// What: [`Self::identity`] runs [`architect_main_thread`] over the payload,
+/// the hook environment and the user config on first use, and caches the
+/// verdict with its reason.
 /// Test: `the_architect_is_exempt_from_the_d4_remainder`,
 /// `every_identity_failure_denies_the_d4_remainder`.
 pub(crate) struct ArchitectGate<'a> {
     payload: &'a Value,
     env: HookEnv,
     config: Box<dyn Fn() -> MpmConfig + 'a>,
-    verdict: OnceCell<bool>,
+    verdict: OnceCell<Result<(), NotArchitect>>,
 }
 
 impl<'a> ArchitectGate<'a> {
@@ -82,9 +84,14 @@ impl<'a> ArchitectGate<'a> {
 
     /// Whether the call is the Architect's main thread (#8878, ruling A).
     pub(crate) fn is_architect(&self) -> bool {
+        self.identity().is_ok()
+    }
+
+    /// [`Self::is_architect`], naming the first failed check (#8878 PR-I).
+    pub(crate) fn identity(&self) -> Result<(), NotArchitect> {
         *self
             .verdict
-            .get_or_init(|| is_architect_main_thread(self.payload, &self.env, &*self.config))
+            .get_or_init(|| architect_main_thread(self.payload, &self.env, &*self.config))
     }
 }
 
@@ -149,11 +156,12 @@ pub(crate) fn evaluate_floors(
     }
     // #8878 D4 remainder: the process-bound Architect is exempt.
     if let Some(reason) = command.and_then(|c| evaluate_d4_floor(c, hook_cwd, git))
-        && !gate.is_architect()
+        && let Err(why) = gate.identity()
     {
+        // #8878 PR-I: the deny names the identity check that failed.
         return Some(FloorDeny {
             rule: D4_FLOOR_RULE,
-            reason,
+            reason: with_identity(reason, why),
         });
     }
     None

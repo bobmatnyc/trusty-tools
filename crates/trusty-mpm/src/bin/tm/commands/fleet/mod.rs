@@ -57,7 +57,13 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
         }
         FleetAction::Status { dir, json } => {
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let report = status(&dir, &home, TMUX);
+            let mut report = status(&dir, &home, TMUX);
+            // #8878 PR-I: name why this session is not the bound Architect.
+            report.this_session = Some(status::this_session_check(
+                &report.dir,
+                crate::commands::pm_guard_trust_anchor::HookEnv::ambient(),
+                trusty_mpm::core::config::MpmConfig::load_default,
+            ));
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
