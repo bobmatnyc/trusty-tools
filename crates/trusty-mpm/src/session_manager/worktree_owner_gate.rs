@@ -34,7 +34,7 @@ use super::worktree_registry::{
 ///
 /// Why: both sides are whole seconds, taken by different clocks at different
 /// moments, so exact equality would call a live holder "reused".
-const START_TOLERANCE_SECS: i64 = 2;
+pub(crate) const START_TOLERANCE_SECS: i64 = 2;
 
 /// What git's lock on a tree says about who holds it (#7771 condition a).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +70,16 @@ impl LockLiveness {
 /// `lock_start_is_none_for_a_reason_without_one`.
 pub(crate) fn parse_lock_start(reason: &str) -> Option<i64> {
     let rest = reason.split_once(" start ")?.1;
-    let stamp = rest.split_once(')').map_or(rest, |(s, _)| s);
+    parse_start_stamp(rest.split_once(')').map_or(rest, |(s, _)| s))
+}
+
+/// A `Thu Sep 24 02:08:36 2026` UTC process-start stamp as Unix seconds.
+///
+/// Why: #7771 — Claude Code's own session registry writes a process's start in
+/// the same shape the harness lock does, so both are read by one parser.
+/// Test: `lock_start_reads_the_measured_reason_shape`,
+/// `claude_registry_reads_the_measured_entry_shape`.
+pub(crate) fn parse_start_stamp(stamp: &str) -> Option<i64> {
     // The weekday is dropped: it restates the date, and a writer that got it
     // wrong must not turn a readable start into "no start".
     let normal = stamp
@@ -308,6 +317,7 @@ impl OwnerGate<'_> {
 /// `owner_refusal_keeps_a_tree_a_live_pid_locks`,
 /// `owner_refusal_keeps_a_live_delegations_tree`,
 /// `worktree_7771_a_dead_sessions_open_delegation_is_stale`,
+/// `worktree_7771_an_unregistered_claude_process_keeps_a_live_delegations_tree`,
 /// `worktree_7771_a_stale_delegation_still_yields_to_a_held_lock`,
 /// `owner_refusal_keeps_another_live_sessions_tree`,
 /// `owner_refusal_permits_the_callers_own_agent_tree`,
@@ -328,6 +338,8 @@ pub(crate) fn owner_refusal(path: &Path, gate: &OwnerGate<'_>) -> Option<String>
             // session provably ended is stale — the agent ran inside that
             // session and died with it. Only `Ended` releases it; the caller's
             // own live agent, and every unproven session, still keep the tree.
+            // A registry-only `Ended` needs a complete registry read, one that
+            // lists every running Claude Code process (#7771 critic).
             if end != SessionEnd::Ended && (gate.agent_state)(&owner) == AgentDelegationState::Live
             {
                 return Some(format!(
