@@ -62,6 +62,7 @@ pub use snapshot_guard::SnapshotOverwriteRefused;
 pub mod typeahead;
 mod types;
 
+pub(crate) use ingest::deferred::VectorCoverage;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.

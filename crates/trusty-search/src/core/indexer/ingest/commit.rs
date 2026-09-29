@@ -179,7 +179,8 @@ impl CodeIndexer {
     /// returns 0.0 for the affected neighbours.
     /// What: filters chunks without embeddings (BM25-only mode), validates each
     /// vector for NaN/all-zero content, then delegates to `store.upsert_batch`.
-    /// No-op when no store is wired or no embeddings were computed.
+    /// No-op when no store is wired or no embeddings were computed. Returns
+    /// the ids whose vector was refused as NaN or all-zero (#8884).
     ///
     /// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
     /// re-enable): a chunk committed here WITHOUT an embedding (vector lane
@@ -209,12 +210,13 @@ impl CodeIndexer {
         &self,
         chunks: &[RawChunk],
         embeddings: &[Option<Vec<f32>>],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let Some(store) = &self.store else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let mut items: Vec<(String, Vec<f32>)> = Vec::new();
         let mut unembedded_ids: Vec<String> = Vec::new();
+        let mut rejected: Vec<String> = Vec::new();
         for (chunk, vec_opt) in chunks.iter().zip(embeddings.iter()) {
             let Some(v) = vec_opt.as_ref() else {
                 // No embedding was computed for this chunk in this batch —
@@ -231,6 +233,7 @@ impl CodeIndexer {
                      This indicates a sidecar or model defect; \
                      check embedderd logs."
                 );
+                rejected.push(chunk.id.clone());
                 continue;
             }
             // Issue #764: reject all-zero vectors.
@@ -242,6 +245,7 @@ impl CodeIndexer {
                      This indicates a sidecar or model defect; \
                      check embedderd logs."
                 );
+                rejected.push(chunk.id.clone());
                 continue;
             }
             items.push((chunk.id.clone(), v.clone()));
@@ -274,12 +278,13 @@ impl CodeIndexer {
         }
 
         if items.is_empty() {
-            return Ok(());
+            return Ok(rejected);
         }
         store
             .upsert_batch(&items)
             .await
-            .context("batch upsert chunk vectors")
+            .context("batch upsert chunk vectors")?;
+        Ok(rejected)
     }
 
     /// Upsert every chunk's BM25 document under a single write lock.
