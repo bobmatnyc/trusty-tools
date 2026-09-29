@@ -1,14 +1,23 @@
 //! Tests for `tm fleet init|status` (#8436). Every test runs under a temp
-//! home and a temp project, and none launches a session (`launch = false`),
-//! so nothing reaches the operator's `~/.trusty-mpm` or tmux server.
+//! home and a temp project, none launches a session (`launch = false`), and
+//! every `init`/`status`/poller call reads tmux through a stub [`Probe`]
+//! ([`NO_TMUX`] unless the test plants a state), so nothing reaches the
+//! operator's `~/.trusty-mpm` or any tmux server.
 
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
 use super::config::{self, Edit};
+use super::launch::PaneState;
 use super::*;
 use crate::cli::{Cli, Command};
+
+/// A tmux with no session and no stamp; the preflight tests use it too.
+pub(super) const NO_TMUX: Probe = Probe {
+    pane: |_| PaneState::Absent,
+    stamp: || None,
+};
 
 /// A scratch home plus the default Architect directory under it.
 struct Fixture {
@@ -45,7 +54,11 @@ impl Fixture {
     }
 
     fn init(&self) -> anyhow::Result<InitReport> {
-        init(&self.dir(), self.home(), false)
+        init(&self.dir(), self.home(), false, NO_TMUX)
+    }
+
+    fn status(&self) -> super::status::StatusReport {
+        status(&self.dir(), self.home(), NO_TMUX)
     }
 }
 
@@ -233,7 +246,7 @@ fn dir_overrides_the_default() {
         resolve_dir(Some(other.to_str().unwrap()), fx.home()).unwrap(),
         other
     );
-    init(&other, fx.home(), false).unwrap();
+    init(&other, fx.home(), false, NO_TMUX).unwrap();
     assert!(other.join(".trusty-mpm.toml").exists());
     assert!(!fx.dir().exists(), "the default directory was created");
     assert!(fx.config().contains(&canonical(&other)));
@@ -245,7 +258,7 @@ fn a_second_architect_elsewhere_is_refused() {
     fx.init().unwrap();
     let config_before = fx.config();
     let other = fx.home().join("second");
-    let err = init(&other, fx.home(), false).expect_err("a second Architect");
+    let err = init(&other, fx.home(), false, NO_TMUX).expect_err("a second Architect");
     assert!(format!("{err:#}").contains("one per user"), "{err:#}");
     assert!(!other.exists());
     assert_eq!(fx.config(), config_before);
@@ -254,13 +267,13 @@ fn a_second_architect_elsewhere_is_refused() {
 #[test]
 fn status_reports_incomplete_setup() {
     let fx = Fixture::new();
-    let fresh = status(&fx.dir(), fx.home());
+    let fresh = fx.status();
     assert!(!fresh.complete);
     assert!(fresh.checks.iter().all(|c| !c.ok), "{}", fresh.render());
     assert!(fresh.render().contains("incomplete"), "{}", fresh.render());
 
     fx.init().unwrap();
-    let set_up = status(&fx.dir(), fx.home());
+    let set_up = fx.status();
     let ok: Vec<_> = set_up.checks.iter().map(|c| (c.name, c.ok)).collect();
     assert_eq!(
         ok,
@@ -450,11 +463,41 @@ fn a_failing_start_script_is_an_error_with_its_cause() {
     let script = dir.path().join(super::poller::START_SCRIPT);
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, "echo 'no tmux here' >&2\nexit 7\n").unwrap();
-    let err = super::poller::start(dir.path()).expect_err("a failing script must fail");
+    let err = super::poller::start(dir.path(), NO_TMUX).expect_err("a failing script must fail");
     let text = format!("{err:#}");
     assert!(
         text.contains("no tmux here") && text.contains('7'),
         "{text}"
+    );
+}
+
+/// #8436 P4 fix: a live `tm-architect` on this test process's tmux server
+/// (the #6542 relocated one, never the operator's) reaches no fixture: `init`
+/// and `status` read the stubbed probe, not tmux.
+#[test]
+fn a_live_architect_on_the_test_server_does_not_reach_a_fixture() {
+    use crate::test_support::tmux_session::ScratchTmuxSession;
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    assert!(
+        ScratchTmuxSession::tmux_available(&tmux_bin),
+        "tmux is required"
+    );
+    let elsewhere = tempfile::tempdir().unwrap();
+    let _live = ScratchTmuxSession::spawn_in(
+        &tmux_bin,
+        ARCHITECT_SESSION,
+        Some(elsewhere.path()),
+        "sleep 300",
+    );
+    let fx = Fixture::new();
+    let report = fx.init().unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(report.changed(), "{}", report.render());
+    let status = fx.status();
+    let session = status.checks.iter().find(|c| c.name == "session").unwrap();
+    assert!(
+        session.detail.ends_with("is not running"),
+        "{}",
+        status.render()
     );
 }
 
@@ -465,9 +508,135 @@ fn a_failed_step_fails_the_report() {
             Step::Changed("wrote CLAUDE.md".to_owned()),
             Step::Failed("poller start: boom".to_owned()),
         ],
+        unbound: false,
     };
     assert!(report.failed());
     let text = report.render();
     assert!(text.contains("FAILED     poller start: boom"), "{text}");
     assert!(!text.contains("Architect set up"), "{text}");
+}
+
+/// #8436 P4 fix, item 8: a started but unbound Architect exits 0, and the
+/// summary says it is not bound instead of only "Architect set up".
+#[test]
+fn an_unbound_architect_is_named_in_the_summary() {
+    let mut report = InitReport {
+        steps: vec![Step::Changed(
+            "started tmux session tm-architect".to_owned(),
+        )],
+        unbound: true,
+    };
+    assert!(!report.failed());
+    let text = report.render();
+    assert!(
+        text.contains(
+            "Architect set up (NOT bound: anchor writes will be denied; see the warning above)"
+        ),
+        "{text}"
+    );
+    report.unbound = false;
+    assert!(!report.render().contains("NOT bound"));
+}
+
+/// The fixed Architect directory the poller stubs below report.
+const STUB_DIR: &str = "/fleet-stub/architect";
+
+/// #8436 P4 fix, item 1: a dead pane in this directory, a tmux answer that
+/// cannot be read, and a poller that dies after a clean start are each a
+/// FAILED step, never "running".
+#[test]
+fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
+    let dead = Probe {
+        pane: |_| PaneState::Dead(PathBuf::from(STUB_DIR)),
+        ..NO_TMUX
+    };
+    let unknown = Probe {
+        pane: |_| PaneState::Unknown("server exited".to_owned()),
+        ..NO_TMUX
+    };
+    let live = Probe {
+        pane: |_| PaneState::Live(PathBuf::from(STUB_DIR)),
+        ..NO_TMUX
+    };
+    let dir = Path::new(STUB_DIR);
+    let text = |step: Step| match step {
+        Step::Failed(text) => text,
+        other => panic!("expected a FAILED step, got {other:?}"),
+    };
+    assert!(text(super::poller::step(dir, true, dead)).contains("pane is dead"));
+    assert!(text(super::poller::step(dir, true, unknown)).contains("server exited"));
+    assert!(matches!(
+        super::poller::step(dir, true, live),
+        Step::Unchanged(_)
+    ));
+
+    // The start arm: the script exits 0, then the pane reads dead.
+    let scratch = tempfile::tempdir().unwrap();
+    let script = scratch.path().join(super::poller::START_SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "exit 0\n").unwrap();
+    for (probe, cause) in [(dead, "pane is dead"), (unknown, "server exited")] {
+        let err = super::poller::start(scratch.path(), probe).expect_err(cause);
+        assert!(format!("{err:#}").contains(cause), "{err:#}");
+    }
+}
+
+/// #8436 P4 fix, item 4: the start script never sees the caller's
+/// `TMUX_SOCKET`, so it and tm's own tmux calls address one server.
+#[test]
+fn the_start_command_drops_tmux_socket() {
+    let cmd = super::poller::start_command(Path::new(STUB_DIR));
+    let removed = cmd
+        .get_envs()
+        .any(|(key, value)| key == "TMUX_SOCKET" && value.is_none());
+    assert!(removed, "TMUX_SOCKET is not removed");
+}
+
+/// The `#{pane_dead} #{session_path}` answers `pane_state` reads.
+#[test]
+fn a_pane_answer_parses_to_its_state() {
+    use super::launch::parse_pane;
+    assert_eq!(parse_pane(""), PaneState::Absent);
+    assert_eq!(parse_pane("\n"), PaneState::Absent);
+    assert_eq!(
+        parse_pane("0 /fleet-stub/a b\n"),
+        PaneState::Live(PathBuf::from("/fleet-stub/a b"))
+    );
+    assert_eq!(
+        parse_pane("1 /fleet-stub/a\n"),
+        PaneState::Dead(PathBuf::from("/fleet-stub/a"))
+    );
+    for bad in ["/fleet-stub/a", "0 ", "2 /fleet-stub/a"] {
+        assert!(matches!(parse_pane(bad), PaneState::Unknown(_)), "{bad:?}");
+    }
+}
+
+/// #8436 P4 fix, item 7: every Architect-only skill asset is seeded to
+/// `.claude/skills/`, and every seeded skill has an asset.
+#[test]
+fn every_architect_skill_asset_is_seeded() {
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/skills");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&assets)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    on_disk.sort();
+    let mut seeded: Vec<String> = ported_skills()
+        .iter()
+        .map(|f| {
+            let name = f
+                .dest
+                .strip_prefix(".claude/skills/")
+                .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+                .unwrap_or_else(|| panic!("{} is not a SKILL.md", f.dest));
+            format!("{name}.md")
+        })
+        .collect();
+    seeded.sort();
+    assert_eq!(on_disk, seeded);
+    for skill in ported_skills() {
+        let name = skill.dest.split('/').nth(2).unwrap();
+        let asset = std::fs::read_to_string(assets.join(format!("{name}.md"))).unwrap();
+        assert_eq!(asset, skill.contents, "{}", skill.dest);
+    }
 }

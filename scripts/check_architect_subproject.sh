@@ -21,6 +21,8 @@
 #                       or a <projects>/<owner>/supervisor checkout path
 #     SECRET            a sub-project file carries a GitHub or API token shape
 #     DRIFT             a shipped copy is missing or differs from its source
+#     UNPAIRED          a file under crates/trusty-mpm/src/assets/architect/
+#                       is no pair's shipped copy, so no source guards it
 #     EMPTY             the sub-project holds no files (a vacuous pass)
 #   Runtime state (inbox/, __pycache__/, .pytest_cache/) is not scanned.
 #
@@ -131,6 +133,25 @@ for pair in $PAIRS; do
     report DRIFT "${pair#*|} differs from $SUB_REL/${pair%%|*}"
   fi
 done
+
+# #8436 P4 fix: a new asset file with no pair would ship unguarded.
+ASSET_REL="crates/trusty-mpm/src/assets/architect"
+NL="
+"
+if [ -d "$ROOT/$ASSET_REL" ]; then
+  shipped="$(find "$ROOT/$ASSET_REL" -type f ! -name .DS_Store \
+    ! -path '*/__pycache__/*' | LC_ALL=C sort)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$ROOT"/}"
+    case "$PAIRS" in
+      *"|$rel$NL"*) ;;
+      *) report UNPAIRED "$rel is shipped, but no pair names it; add it to PAIRS" ;;
+    esac
+  done <<EOF
+$shipped
+EOF
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "check_architect_subproject: FAILED (fix the lines above)" >&2

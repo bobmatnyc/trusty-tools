@@ -84,11 +84,15 @@ its `CLAUDE.md`.
 
    ```sh
    tmux send-keys -t '=<session>:' -l '[<Name> supervisor HH:MMZ] Supervisor answer: … (basis: …)'
-   python3 scripts/input-state.py '=<session>:'    # typed | <exactly your text>
+   python3 scripts/input-state.py '=<session>:'    # typed | <the start of your text>
    tmux send-keys -t '=<session>:' Enter
    tmux capture-pane -p -t '=<session>:' -S -20    # a submitted turn and an acknowledgement
    ```
 
+   Press Enter only when the state is `typed` and your message starts with
+   the printed text. The script prints only the `❯` row, cut at 100
+   characters, so a message that wraps shows its first row alone. Otherwise
+   do not press Enter; record it and check again next pass.
    `HH:MMZ` comes from `date -u`. When the fleet runs on a non-default tmux
    server, add `-S "$TMUX_SOCKET"` to each `tmux` call and export
    `TMUX_SOCKET` for `scripts/input-state.py`.

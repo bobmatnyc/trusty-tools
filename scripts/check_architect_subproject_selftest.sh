@@ -72,6 +72,7 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     drift) printf 'edited\n' >>"$t/$SKILL_DST" ;;
     drift:*) printf 'edited\n' >>"$t/${1#drift:}" ;;
     shipped-missing) rm "$t/$SKILL_DST" ;;
+    unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/skills/extra.md" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
   esac
 }
@@ -90,6 +91,7 @@ private-checkout${TAB}OPERATOR_PATH
 secret${TAB}SECRET
 drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
+unpaired${TAB}UNPAIRED
 empty${TAB}EMPTY"
 # One planted drift per shipped copy the gate lists.
 for pair in $PAIRS; do

@@ -4,7 +4,8 @@
 //! the binary proves that `init` starts `tm-architect` detached with the
 //! supervisor stamp, and that `status` exits 1 until it does.
 //! What: each test owns a scratch HOME and its own tmux server directory
-//! (`TMUX_TMPDIR`), and puts a fake `claude` first on `PATH`; the server is
+//! (`TMUX_TMPDIR`, with `TMUX_SOCKET` removed), and puts a fake `claude`
+//! first on `PATH`; the server is
 //! killed when the test ends. Nothing reaches the operator's home or tmux.
 //! Test: `cargo test -p trusty-mpm --test integration tm_fleet::`.
 
@@ -57,6 +58,9 @@ impl FleetEnv {
         common::tm_command_in(self.home.path())
             .args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
+            // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
+            // take their tmux off the private server above.
+            .env_remove("TMUX_SOCKET")
             // #5784: the scratch HOME trips the host-state guard; the private
             // TMUX_TMPDIR above is what keeps tmux off the operator's server.
             .env("TRUSTY_MPM_ALLOW_HOST_STATE", "1")
@@ -76,6 +80,7 @@ impl Drop for FleetEnv {
             .arg("kill-server")
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
             .output();
     }
 }
@@ -210,6 +215,56 @@ fn fleet_init_fails_closed_when_the_poller_does_not_start() {
             "the edited script was overwritten"
         );
     }
+}
+
+/// #8436 P4 fix: a poller whose pane is dead (a crashed `python3` under
+/// `remain-on-exit on`) is a FAILED step, both right after the start and on a
+/// later run that finds the session in this directory.
+#[test]
+fn fleet_init_fails_when_the_poller_pane_is_dead() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("scripts")).unwrap();
+    let script = "tmux new-session -d -s \"$ARCHITECT_POLL_SESSION\" -c \"$PWD\" \
+                  'sleep 0.2; exit 3' \\; set-option -w remain-on-exit on\n";
+    std::fs::write(dir.join("scripts/start-fleet-poll.sh"), script).unwrap();
+    for run in ["first", "second"] {
+        let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(1), "{run} run: {}", text(&out));
+        assert!(stdout.contains("FAILED"), "{run} run: {}", text(&out));
+        assert!(stdout.contains("pane is dead"), "{run} run: {}", text(&out));
+        assert!(!stdout.contains("Architect set up"), "{}", text(&out));
+    }
+}
+
+/// #8436 P4 fix, item 8: an Architect that cannot be bound to its `claude`
+/// (#8878 ruling A) is a warning and exit 0, because an npm/node `claude`
+/// never binds. The summary names it, instead of only "Architect set up".
+/// A file where the launch record directory goes makes the record fail.
+#[test]
+fn fleet_init_names_an_unbound_architect_in_the_summary() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let root = env.home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("architect-launch"), "not a directory\n").unwrap();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(stdout.contains("NOT bound to its claude"), "{}", text(&out));
+    assert!(
+        stdout.contains(
+            "Architect set up (NOT bound: anchor writes will be denied; see the warning above)"
+        ),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the Architect process was NOT recorded"),
+        "{}",
+        text(&out)
+    );
 }
 
 /// #8436: `--dir` goes through the same preflight as the default, so the

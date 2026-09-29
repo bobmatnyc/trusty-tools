@@ -25,38 +25,83 @@ use trusty_mpm::core::twin_identity::ArmingRecord;
 /// The Architect's tmux session; the P1 poller's `ARCHITECT_SESSION` default.
 pub(crate) const ARCHITECT_SESSION: &str = "tm-architect";
 
-/// The directory the running `tm-architect` session was created in.
-///
-/// Why: status and the one-Architect check both need to know whether the
-/// running session is THIS project's.
-/// What: `None` when no session of that exact name runs; otherwise tmux's
-/// `#{session_path}`, canonicalized when it can be.
-/// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
-pub(crate) fn running_session_dir() -> Option<PathBuf> {
-    session_dir(ARCHITECT_SESSION)
+/// What tmux reports about one session and its first pane (#8436 P4 fix).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PaneState {
+    /// No session of that exact name runs, or no tmux server runs.
+    Absent,
+    /// The session runs in this directory and its pane's process is alive.
+    Live(PathBuf),
+    /// The session runs in this directory but its pane's process exited; a
+    /// `remain-on-exit on` pane stays after a crash.
+    Dead(PathBuf),
+    /// tmux could not be asked, or gave an answer that cannot be read.
+    Unknown(String),
 }
 
-/// The directory tmux session `name` was created in, when it runs.
+impl PaneState {
+    /// The session's directory when the session exists, live pane or dead.
+    pub(crate) fn dir(self) -> Option<PathBuf> {
+        match self {
+            Self::Live(dir) | Self::Dead(dir) => Some(dir),
+            Self::Absent | Self::Unknown(_) => None,
+        }
+    }
+}
+
+/// tmux session `name`'s directory and whether its first pane is dead.
 ///
-/// What: as [`running_session_dir`] for any exact session name; the poller
-/// check (#8436 P4) reads `tm-architect-poll` through it.
-/// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
-pub(crate) fn session_dir(name: &str) -> Option<PathBuf> {
+/// Why: status and the one-Architect check need to know whether the running
+/// session is THIS project's; the poller check also needs to know that the
+/// process in it still runs, because a session alone reads a crashed poller
+/// as running.
+/// What: one `display-message -p -t =<name>: '#{pane_dead} #{session_path}'`.
+/// Empty output, or a failure because no server runs, is [`PaneState::Absent`];
+/// any other failure or answer is [`PaneState::Unknown`]. The path is
+/// canonicalized when it can be.
+/// Test: `a_pane_answer_parses_to_its_state`,
+/// `fleet_init_fails_when_the_poller_pane_is_dead`.
+pub(crate) fn pane_state(name: &str) -> PaneState {
     let argv = [
         "display-message",
         "-p",
         "-t",
         &tmux::exact_window_target(name),
-        "#{session_path}",
+        "#{pane_dead} #{session_path}",
     ]
     .map(str::to_owned);
-    let out = tmux::run_tmux_argv(&argv).ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if !out.status.success() || text.is_empty() {
-        return None;
+    let out = match tmux::run_tmux_argv(&argv) {
+        Ok(out) => out,
+        Err(err) => return PaneState::Unknown(format!("cannot run tmux: {err}")),
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        if ["no server running", "error connecting to"]
+            .iter()
+            .any(|m| err.contains(m))
+        {
+            return PaneState::Absent;
+        }
+        return PaneState::Unknown(format!("tmux display-message failed: {err}"));
     }
-    let path = PathBuf::from(text);
-    Some(std::fs::canonicalize(&path).unwrap_or(path))
+    parse_pane(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse [`pane_state`]'s `<pane_dead> <session_path>` answer.
+pub(crate) fn parse_pane(answer: &str) -> PaneState {
+    let answer = answer.trim_end_matches(['\n', '\r']);
+    if answer.trim().is_empty() {
+        return PaneState::Absent;
+    }
+    let canonical = |path: &str| {
+        let path = PathBuf::from(path);
+        std::fs::canonicalize(&path).unwrap_or(path)
+    };
+    match answer.split_once(' ') {
+        Some(("0", path)) if !path.is_empty() => PaneState::Live(canonical(path)),
+        Some(("1", path)) if !path.is_empty() => PaneState::Dead(canonical(path)),
+        _ => PaneState::Unknown(format!("unreadable tmux answer {answer:?}")),
+    }
 }
 
 /// The profile stamp recorded on the running `tm-architect` session, if any.

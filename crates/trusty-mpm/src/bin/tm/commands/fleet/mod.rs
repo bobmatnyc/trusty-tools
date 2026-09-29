@@ -48,7 +48,7 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     match action {
         FleetAction::Init { dir, no_launch } => {
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let report = init(&dir, &home, !no_launch)?;
+            let report = init(&dir, &home, !no_launch, TMUX)?;
             print!("{}", report.render());
             if report.failed() {
                 bail!("tm fleet init failed; see the FAILED step above");
@@ -57,7 +57,7 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
         }
         FleetAction::Status { dir, json } => {
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let report = status(&dir, &home);
+            let report = status(&dir, &home, TMUX);
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -81,6 +81,26 @@ pub(crate) fn resolve_dir(dir: Option<&str>, home: &Path) -> anyhow::Result<Path
     }
 }
 
+/// How `init` and `status` read tmux (#8436 P4 fix).
+///
+/// Why: the unit tests must never reach a real tmux server, where a running
+/// `tm-architect` made every fixture fail with "already runs".
+/// What: production passes [`TMUX`]; every unit test passes a stub.
+/// Test: `a_live_architect_on_the_test_server_does_not_reach_a_fixture`.
+#[derive(Clone, Copy)]
+pub(crate) struct Probe {
+    /// Session `name` and its first pane; see [`launch::pane_state`].
+    pub(crate) pane: fn(&str) -> launch::PaneState,
+    /// The launch stamp on `tm-architect`; see [`launch::launch_stamp`].
+    pub(crate) stamp: fn() -> Option<String>,
+}
+
+/// The real tmux server.
+pub(crate) const TMUX: Probe = Probe {
+    pane: launch::pane_state,
+    stamp: launch::launch_stamp,
+};
+
 /// What one `init` step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -99,6 +119,9 @@ pub(crate) enum Step {
 pub(crate) struct InitReport {
     /// One entry per step.
     pub(crate) steps: Vec<Step>,
+    /// This run started the Architect but could not bind it to its `claude`
+    /// (#8878 ruling A); a warning, never a failure.
+    pub(crate) unbound: bool,
 }
 
 impl InitReport {
@@ -126,6 +149,10 @@ impl InitReport {
         }
         out.push_str(if self.failed() {
             "The Architect is not fully set up: fix the FAILED step and run `tm fleet init` again.\n"
+        } else if self.unbound {
+            // #8436 P4 fix: an unbound Architect is set up, but not fully.
+            "Architect set up (NOT bound: anchor writes will be denied; see the warning above). \
+             Check it with `tm fleet status`.\n"
         } else if self.changed() {
             "Architect set up. Check it with `tm fleet status`.\n"
         } else {
@@ -156,7 +183,12 @@ impl InitReport {
 /// `the_home_directory_is_refused_however_it_is_spelled`,
 /// `a_first_run_seeds_the_architect_project`,
 /// `fleet_init_fails_closed_when_the_poller_does_not_start`.
-pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<InitReport> {
+pub(crate) fn init(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
     let checked = preflight::check(dir, home)?;
@@ -167,7 +199,7 @@ pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Init
     let project_path = dir.join(PROJECT_CONFIG_FILE);
     let project_raw = read_or_empty(&project_path)?;
     config::request_supervisor_profile(&project_raw, &project_path)?;
-    refuse_second_architect(&user_config, dir)?;
+    refuse_second_architect(&user_config, dir, probe)?;
 
     let mut report = InitReport::default();
     report.steps.push(if dir.is_dir() {
@@ -194,8 +226,10 @@ pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Init
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir)?);
-    report.steps.push(launch_step(dir, home, launch)?);
-    report.steps.push(poller::step(dir, launch));
+    let (step, unbound) = launch_step(dir, home, launch, probe)?;
+    report.steps.push(step);
+    report.unbound = unbound;
+    report.steps.push(poller::step(dir, launch, probe));
     Ok(report)
 }
 
@@ -217,6 +251,7 @@ fn read_or_empty(path: &Path) -> anyhow::Result<String> {
 fn refuse_second_architect(
     user_config: &trusty_mpm::core::config::MpmConfig,
     dir: &Path,
+    probe: Probe,
 ) -> anyhow::Result<()> {
     if let Some(other) = config::other_architects(user_config, dir).first() {
         bail!(
@@ -227,7 +262,7 @@ fn refuse_second_architect(
         );
     }
     let wanted = std::fs::canonicalize(dir).ok();
-    match launch::running_session_dir() {
+    match (probe.pane)(ARCHITECT_SESSION).dir() {
         Some(running) if Some(&running) != wanted.as_ref() => bail!(
             "tmux session {ARCHITECT_SESSION} already runs in {}; there is one Architect per user",
             running.display()
@@ -272,34 +307,46 @@ fn write_edit(path: &Path, edit: Edit, label: &str) -> anyhow::Result<Step> {
     }
 }
 
-/// Start the session unless told not to or already running.
-fn launch_step(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Step> {
-    if launch::running_session_dir().is_some() {
-        return Ok(Step::Unchanged(format!(
-            "tmux session {ARCHITECT_SESSION} is running"
-        )));
+/// Start the session unless told not to or already running; the flag is
+/// whether a started Architect is unbound (see [`InitReport::unbound`]).
+fn launch_step(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+) -> anyhow::Result<(Step, bool)> {
+    if (probe.pane)(ARCHITECT_SESSION).dir().is_some() {
+        return Ok((
+            Step::Unchanged(format!("tmux session {ARCHITECT_SESSION} is running")),
+            false,
+        ));
     }
     if !launch {
-        return Ok(Step::Skipped(format!(
-            "session start (--no-launch); start it with `tm fleet init --dir {}`",
-            dir.display()
-        )));
+        return Ok((
+            Step::Skipped(format!(
+                "session start (--no-launch); start it with `tm fleet init --dir {}`",
+                dir.display()
+            )),
+            false,
+        ));
     }
     // #8878 ruling A: the record binds the Architect identity to this claude.
-    let bound = match launch::start(dir, home)? {
-        Ok(record) => format!("bound to claude pid {}", record.pid),
+    let (bound, unbound) = match launch::start(dir, home)? {
+        Ok(record) => (format!("bound to claude pid {}", record.pid), false),
         Err(err) => {
             eprintln!("warning: the Architect process was NOT recorded: {err}");
-            format!(
+            let text = format!(
                 "NOT bound to its claude ({err}), so it cannot write the trust anchors; stop \
                  the session and re-run `tm fleet init` to bind it"
-            )
+            );
+            (text, true)
         }
     };
-    Ok(Step::Changed(format!(
+    let step = Step::Changed(format!(
         "started tmux session {ARCHITECT_SESSION} on the `opus` alias, {bound}; attach with \
          `tmux attach -t ={ARCHITECT_SESSION}`"
-    )))
+    ));
+    Ok((step, unbound))
 }
 
 #[cfg(test)]
