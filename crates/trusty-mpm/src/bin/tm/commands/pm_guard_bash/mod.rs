@@ -93,6 +93,7 @@ mod write_targets;
 mod anchor_verbs;
 // #8902: the Architect pane floor — no tmux verb aimed at the Architect's pane.
 mod architect_pane;
+mod architect_pane_env;
 mod architect_pane_parse;
 mod architect_pane_probe;
 mod architect_pane_verbs;

@@ -18,17 +18,23 @@
 //! current pane when it is unknown or the command touches a `TMUX` variable —
 //! and so does an unreadable hit (see `Hit::opaque`) or a pane list tmux will
 //! not give. The pane list is the server the hook process sees, read before
-//! the command runs, so a relative `-S`, a `TMUX`/`TMUX_TMPDIR` change,
-//! `sudo`/`doas`/`env -i`, a session renamed or created in the same command,
-//! and a nested command with no target in a pane tmux picks all deny (#8902
-//! review). A server with no Architect pane on it is never protected.
+//! the command runs, so a relative `-S`, a `TMUX`/`TMUX_TMPDIR` change
+//! (`${TMUX:=…}` included), `sudo`/`doas`/`env -i`/`exec -c`, and a nested
+//! command with no target in a pane tmux picks all deny (#8902 review). A
+//! session renamed or created in the same command denies each hit whose
+//! server holds an Architect pane. A nested `tmux` with no `-L`/`-S`, in keys
+//! typed into a pane or a command a server runs, reaches that server. A
+//! server with no Architect pane on it is never protected.
 //! Residual: a `command-alias` that shadows a built-in name and was defined
-//! before this call, a tmux config file, a script the command runs, and a
-//! runner or interpreter that is not a shared wrapper — `watch`, `script -q
-//! /dev/null`, `su -c`, `ssh`, `python3 -c`.
+//! before this call, a tmux config file, a script the command runs, a runner
+//! or interpreter that is not a shared wrapper — `watch`, `script -q
+//! /dev/null`, `su -c`, `ssh`, `python3 -c` — and a command typed in pieces
+//! into a plain shell pane, across several `send-keys` calls or as keys
+//! that only spell it once the shell joins them.
 //! Test: `architect_pane_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
 
+use super::architect_pane_env::RETARGET;
 use super::architect_pane_parse::{Hit, Target, tmux_hits};
 
 /// One pane as `tmux list-panes -a` reports it.
@@ -72,12 +78,14 @@ pub(crate) const ARCHITECT_PANE_RULE: &str = "architect-pane";
 /// Why: the one entry point `pm_guard_floor` calls for a Bash command.
 /// What: no deny-set tmux command, or no live Architect, is `None`. Otherwise
 /// each hit's server is listed once, and the first hit that is unreadable,
-/// whose server cannot be listed, or whose target reaches or may reach an
-/// Architect session denies.
+/// whose server cannot be listed, or — on a server holding an Architect pane
+/// — that is retargeted or whose target reaches or may reach an Architect
+/// session denies.
 /// Test: `every_deny_verb_is_denied_in_each_target_form`,
 /// `an_unresolvable_target_denies_while_an_architect_is_live`,
 /// `no_live_architect_means_the_rule_does_not_apply`,
-/// `a_non_architect_target_and_a_read_verb_pass`.
+/// `a_non_architect_target_and_a_read_verb_pass`,
+/// `a_retarget_denies_only_on_a_server_holding_the_architect`.
 pub(crate) fn evaluate_architect_pane(command: &str, probe: &dyn PaneProbe) -> Option<String> {
     let hits = tmux_hits(command);
     if hits.is_empty() || probe.architect_live() == Ok(false) {
@@ -102,6 +110,10 @@ pub(crate) fn evaluate_architect_pane(command: &str, probe: &dyn PaneProbe) -> O
         };
         if !panes.iter().any(|p| p.architect) {
             continue;
+        }
+        // #8902 LOW-1: a rename or creation only matters where the Architect is.
+        if hit.retargeted {
+            return Some(unresolved(hit, "", RETARGET));
         }
         for target in &hit.targets {
             match reaches_architect(target, panes, current.as_deref()) {

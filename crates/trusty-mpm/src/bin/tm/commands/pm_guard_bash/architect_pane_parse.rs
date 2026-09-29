@@ -9,10 +9,14 @@
 //! yields a [`Hit`] with its targets. Every argument of a known command is
 //! also read as a shell command, as a tmux command string, and as the start of
 //! a tmux argv — the forms `run-shell`, `if-shell`, `bind-key`, `new-window`
-//! and typed keys carry. An omitted target there is read in its [`Context`].
+//! and typed keys carry. An omitted target there is read in its [`Context`],
+//! and a nested `tmux` with no `-L`/`-S` reaches that context's server.
 //! FAIL-CLOSED: see [`Hit::opaque`].
 //! Test: `architect_pane_tests.rs`.
 
+use super::architect_pane_env::{
+    ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, moves_server_env, resets_env,
+};
 use super::architect_pane_verbs::{DENY_VERBS, Resolved, Verb, resolve};
 use super::floor_d4::{program_positions, segments};
 use super::shell_lex::QuoteScan;
@@ -60,6 +64,9 @@ pub(super) struct Hit {
     /// an alias defined to a deny verb, or an unknown or valueless option.
     /// Such a hit denies while an Architect is live, whatever its targets.
     pub(super) opaque: Option<&'static str>,
+    /// The same command renames or creates a session: the hit denies when its
+    /// server holds an Architect pane (`architect_pane_env::RETARGET`).
+    pub(super) retargeted: bool,
 }
 
 impl Hit {
@@ -69,6 +76,7 @@ impl Hit {
             server: server.to_vec(),
             targets: Vec::new(),
             opaque: Some(why),
+            retargeted: false,
         }
     }
 }
@@ -78,11 +86,23 @@ impl Hit {
 enum Context {
     /// The caller's own shell: an omitted `-t` is the caller's pane.
     Caller,
-    /// Keys `send-keys` types into these targets: an omitted `-t` is one of them.
-    Keys(Vec<Target>),
-    /// A command tmux runs in a pane it picks (`bind-key`, `set-hook`,
+    /// Keys `send-keys` types into these targets, on this server: an omitted
+    /// `-t` is one of them.
+    Keys(Vec<Target>, Vec<String>),
+    /// A command this server runs in a pane it picks (`bind-key`, `set-hook`,
     /// `if-shell`, `run-shell`, a new window): an omitted `-t` is unknown.
-    Deferred,
+    Deferred(Vec<String>),
+}
+
+impl Context {
+    /// The server a nested `tmux` with no `-L`/`-S` reaches: its `TMUX` names
+    /// the server that runs it (#8902). The caller's shell inherits none.
+    fn server(&self) -> &[String] {
+        match self {
+            Self::Caller => &[],
+            Self::Keys(_, server) | Self::Deferred(server) => server,
+        }
+    }
 }
 
 /// The walk's state: the hits so far, and what the rest of the walk needs.
@@ -93,32 +113,17 @@ struct Scan {
     context: Context,
 }
 
-/// Why a hit denies when the command changes `TMUX` or `TMUX_TMPDIR`.
-const SERVER_ENV: &str = "the command sets or unsets `TMUX` or `TMUX_TMPDIR`, so its tmux \
-     server may not be the one the guard lists";
-
-/// Why a hit denies behind `sudo`, `doas` or `env -i`.
-const ENV_RESET: &str = "`sudo`, `doas` or `env -i` changes the environment tmux finds its \
-     server in";
-
-/// Why a hit denies under a relative `-S`: the probe cannot know its directory.
-const RELATIVE_SOCKET: &str = "a relative `-S` socket path resolves against a directory the \
-     guard does not know";
-
-/// Why a hit denies beside a session rename or creation.
-const RETARGET: &str = "the command also renames or creates a session, and targets resolve \
-     against the sessions that exist before it runs";
-
 /// Every deny-set or unreadable tmux command `command` runs.
 ///
 /// What: see the module doc. #8902 review: the pane list is read before the
 /// command runs, on the server the hook process sees. A command that changes
-/// `TMUX`/`TMUX_TMPDIR`, or that renames or creates a session, makes every
-/// hit opaque.
+/// `TMUX`/`TMUX_TMPDIR` makes every hit opaque; one that renames or creates
+/// a session marks every hit [`Hit::retargeted`].
 /// Test: `every_deny_verb_is_denied_in_each_target_form`,
 /// `a_tmux_command_reached_through_a_wrapper_or_argument_is_found`,
 /// `a_server_the_command_selects_differently_denies`,
-/// `a_target_the_same_command_retargets_denies`.
+/// `a_target_the_same_command_retargets_denies`,
+/// `a_nested_invocation_inherits_the_outer_server`.
 pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
     let mut scan = Scan {
         hits: Vec::new(),
@@ -126,53 +131,14 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
         context: Context::Caller,
     };
     shell(command, 0, &mut scan);
-    let why = if moves_server_env(command) {
-        Some(SERVER_ENV)
-    } else {
-        scan.retargets.then_some(RETARGET)
-    };
-    if let Some(why) = why {
-        for hit in &mut scan.hits {
-            hit.opaque.get_or_insert(why);
+    let moved = moves_server_env(command);
+    for hit in &mut scan.hits {
+        if moved {
+            hit.opaque.get_or_insert(SERVER_ENV);
         }
+        hit.retargeted = scan.retargets;
     }
     scan.hits
-}
-
-/// Whether `command` names `TMUX` or `TMUX_TMPDIR` other than in a `$`
-/// expansion: an assignment, `unset`, `env -u`, `export -n`.
-fn moves_server_env(command: &str) -> bool {
-    command.match_indices("TMUX").any(|(at, _)| {
-        let after = &command[at + 4..];
-        let after = after.strip_prefix("_TMPDIR").unwrap_or(after);
-        let whole = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
-        let expanded = command[..at]
-            .trim_end_matches(['{', '#', '!'])
-            .ends_with('$');
-        whole && !expanded
-    })
-}
-
-/// Whether the words before a `tmux` program word reset its environment:
-/// `sudo`, `doas`, or `env` with `-i`, `-` or `--ignore-environment`.
-fn resets_env(before: &[String]) -> bool {
-    let mut in_env = false;
-    for word in before {
-        let tok = word.strip_prefix('\\').unwrap_or(word);
-        match tok.rsplit('/').next().unwrap_or(tok) {
-            "sudo" | "doas" => return true,
-            "env" | "genv" => in_env = true,
-            _ if in_env
-                && (tok == "-"
-                    || tok == "--ignore-environment"
-                    || (tok.starts_with('-') && !tok.starts_with("--") && tok.contains('i'))) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Whether shell text that does not parse could run a deny-set tmux command:
@@ -310,7 +276,8 @@ fn invocation(words: &[Word], depth: usize, reset: bool, out: &mut Scan) {
 /// The body of [`invocation`]; `Some(why)` when the server the global options
 /// select cannot be resolved.
 fn options_then_commands(words: &[Word], depth: usize, out: &mut Scan) -> Option<&'static str> {
-    let mut server: Vec<String> = Vec::new();
+    let mut server: Vec<String> = out.context.server().to_vec();
+    let mut own_server = false;
     let mut unknown = None;
     let mut i = 0;
     while let Some(word) = words.get(i) {
@@ -364,6 +331,9 @@ fn options_then_commands(words: &[Word], depth: usize, out: &mut Scan) -> Option
                 if c == 'S' && !value.text.starts_with('/') {
                     unknown = Some(RELATIVE_SOCKET);
                 }
+                if !std::mem::replace(&mut own_server, true) {
+                    server.clear();
+                }
                 server.extend([format!("-{c}"), value.text]);
             } else if c == 'c' && depth < MAX_DEPTH {
                 shell(&value.text, depth + 1, out);
@@ -413,7 +383,7 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
     }
     // Keys `send-keys` types run in its target panes; other arguments run
     // where tmux picks.
-    let mut inner = Context::Deferred;
+    let mut inner = Context::Deferred(server.to_vec());
     match resolve(&head.text, nested) {
         Resolved::Unknown if nested => {
             // #8902: `command-alias[N] name=kill-server` defines a deny verb.
@@ -443,13 +413,14 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
             match found {
                 Ok(Some(targets)) => {
                     if verb.name == "send-keys" {
-                        inner = Context::Keys(targets.clone());
+                        inner = Context::Keys(targets.clone(), server.to_vec());
                     }
                     out.hits.push(Hit {
                         verb: verb.name.to_string(),
                         server: server.to_vec(),
                         targets,
                         opaque: None,
+                        retargeted: false,
                     });
                 }
                 Ok(None) => {}
@@ -496,7 +467,7 @@ fn retargets(head: &str, args: &[Word], context: &Context) -> bool {
         head == alias || (head.len() >= unique && full.starts_with(head))
     };
     let verb = named("rename-session", "rename", 8) || named("new-session", "new", 5);
-    verb && (!matches!(context, Context::Keys(_)) || args.iter().any(|w| w.text.starts_with('-')))
+    verb && (!matches!(context, Context::Keys(..)) || args.iter().any(|w| w.text.starts_with('-')))
 }
 
 /// `targets` with an omitted target read in `context`.
@@ -507,11 +478,11 @@ fn in_context(targets: Vec<Target>, context: &Context) -> Result<Vec<Target>, &'
     let defaulted = |t: &Target| matches!(t, Target::Current | Target::Marked);
     match context {
         Context::Caller => Ok(targets),
-        Context::Deferred if targets.iter().any(defaulted) => {
+        Context::Deferred(_) if targets.iter().any(defaulted) => {
             Err("a nested command with no target acts on a pane tmux picks when it runs")
         }
-        Context::Deferred => Ok(targets),
-        Context::Keys(typed_into) => Ok(targets
+        Context::Deferred(_) => Ok(targets),
+        Context::Keys(typed_into, _) => Ok(targets
             .into_iter()
             .flat_map(|t| match t {
                 Target::Current => typed_into.clone(),

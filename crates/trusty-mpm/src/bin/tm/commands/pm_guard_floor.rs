@@ -226,4 +226,4 @@ fn universal_floor(
 
 #[cfg(test)]
 #[path = "pm_guard_floor_tests.rs"]
-mod tests;
+pub(crate) mod tests;

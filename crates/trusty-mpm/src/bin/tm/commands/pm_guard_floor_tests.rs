@@ -26,7 +26,7 @@ impl GitProbe for OnMain {
 }
 
 /// No live Architect launch record: the #8902 pane floor does not apply.
-struct NoArchitect;
+pub(crate) struct NoArchitect;
 
 impl PaneProbe for NoArchitect {
     fn architect_live(&self) -> Result<bool, String> {
@@ -45,7 +45,7 @@ impl PaneProbe for NoArchitect {
 
 /// A live Architect in session `$1` (`tm-architect`, pane `%1`); the caller
 /// is pane `%2` of session `$2` (`pm`).
-struct ArchitectPane;
+pub(crate) struct ArchitectPane;
 
 impl PaneProbe for ArchitectPane {
     fn architect_live(&self) -> Result<bool, String> {

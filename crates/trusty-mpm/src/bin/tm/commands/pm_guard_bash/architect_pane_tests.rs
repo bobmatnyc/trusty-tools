@@ -44,9 +44,13 @@ impl PaneProbe for Fake {
         self.live.clone()
     }
     fn panes(&self, server: &[String]) -> Result<Vec<Pane>, String> {
-        // A private `-L other` server holds no Architect.
-        if server.iter().any(|w| w == "other") {
+        // A private `-L other` or `-L scratch` server holds no Architect; an
+        // `-L arch` server holds the one `fake()` lists.
+        if server.iter().any(|w| w == "other" || w == "scratch") {
             return Ok(vec![pane(9, 9, "tm-architect-test", false)]);
+        }
+        if server.iter().any(|w| w == "arch") {
+            return fake().panes;
         }
         self.panes.clone()
     }
@@ -263,6 +267,11 @@ fn a_server_the_command_selects_differently_denies() {
         "sudo tmux kill-session -t =pm",
         "doas tmux kill-session -t =pm",
         "sh -c 'unset TMUX; tmux kill-session -t =pm'",
+        // #8902 MEDIUM-1: an empty environment, and a default that assigns.
+        // `=pm:` needs no current pane, so only the server rule can deny.
+        "exec -c tmux kill-session -t =pm:",
+        ": \"${TMUX:=/tmp/x/default,1,0}\"; tmux kill-session -t =pm:",
+        ": ${TMUX=/tmp/x/default,1,0}; tmux kill-session -t =pm:",
     ] {
         assert!(denied(&probe, command), "{command}");
     }
@@ -300,6 +309,52 @@ fn a_target_the_same_command_retargets_denies() {
         "tmux send-keys -t =pm 'please send the report' Enter",
     ] {
         assert_eq!(evaluate_architect_pane(command, &probe), None, "{command}");
+    }
+}
+
+/// #8902 MEDIUM-1: a nested `tmux` with no `-L`/`-S` runs with the `TMUX` of
+/// the server that runs it — typed keys and commands a server runs — so it
+/// reaches that server. The caller's own `tmux -c` shell does not.
+#[test]
+fn a_nested_invocation_inherits_the_outer_server() {
+    // The default server holds no Architect; `-L arch` does.
+    let probe = Fake {
+        panes: Ok(vec![pane(2, 2, "pm", false), pane(3, 3, "w", false)]),
+        ..fake()
+    };
+    for command in [
+        "tmux -L arch run-shell 'tmux kill-pane -t %1'",
+        "tmux -L arch send-keys -t =pm 'tmux kill-session -t =tm-architect' Enter",
+    ] {
+        assert!(denied(&probe, command), "{command}");
+    }
+    for command in [
+        "tmux run-shell 'tmux kill-pane -t %1'",
+        "tmux -L arch run-shell 'tmux -L other kill-server'",
+        "tmux -L arch -c 'tmux kill-pane -t %1'",
+    ] {
+        assert_eq!(evaluate_architect_pane(command, &probe), None, "{command}");
+    }
+}
+
+/// #8902 LOW-1: a session renamed or created in the same command denies a hit
+/// only on a server that holds an Architect pane.
+#[test]
+fn a_retarget_denies_only_on_a_server_holding_the_architect() {
+    let probe = fake();
+    let scratch = "tmux -L scratch new -d -s w \\; send-keys -t =w x";
+    assert_eq!(evaluate_architect_pane(scratch, &probe), None);
+    for command in [
+        "tmux -L arch new -d -s w \\; send-keys -t =w x",
+        "tmux new -d -s w \\; send-keys -t =w x",
+    ] {
+        let reason = evaluate_architect_pane(command, &probe);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|r| r.contains("renames or creates")),
+            "{command}: {reason:?}"
+        );
     }
 }
 

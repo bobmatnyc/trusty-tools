@@ -9,7 +9,7 @@
 //! What: a private tmux server (its own `TMUX_TMPDIR`) runs `tm-architect` and
 //! `tm8902-pm`; a scratch `$HOME` records a live `sleep` as the Architect's
 //! launch. `tm hook --pm-guard` runs as a PM under each bypass.
-//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_pane_8902::`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_pane_8902:: -- --include-ignored`.
 
 use crate::common;
 
@@ -106,7 +106,11 @@ impl Fixture {
             .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
             .env_remove("CLAUDE_MPM_SUB_AGENT")
             .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
-            .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT");
+            .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+            // #8902: `TMUX` outranks `TMUX_TMPDIR`; the guard must list the
+            // private server, not the operator's, as `Fixture::tmux` does.
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
         for (k, v) in env {
             cmd.env(k, v);
         }
