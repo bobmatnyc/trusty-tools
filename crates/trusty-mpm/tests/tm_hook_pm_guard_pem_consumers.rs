@@ -146,6 +146,11 @@ fn pm_guard_denies_a_gh_api_delete_of_a_secret_8875() {
         // #8875 round 2: an endpoint the guard cannot read, no `secrets` word.
         "gh api -X DELETE \"$EP\"",
         "ssh build-host 'gh api -X DELETE repos/example-org/apex/actions/secrets/K'",
+        // #8875 round 3: an unlexable call, `gh secret delete`, a curl DELETE.
+        "gh api -X DEL\"ETE\" repos/o/r/actions/sec{r..r}ets/K --jq . <<EOF\nit's\nEOF",
+        "gh secret delete APEX_KEY -R example-org/apex --env production",
+        "curl -X DELETE https://api.github.com/repos/example-org/apex/actions/secrets/K",
+        "gh alias set rmk 'api -X DELETE repos/example-org/apex/actions/secrets/K'",
     ] {
         let stdout = run_bash(command, cwd.path());
         assert_denied(&stdout, command);
@@ -155,6 +160,9 @@ fn pm_guard_denies_a_gh_api_delete_of_a_secret_8875() {
         "gh api repos/example-org/apex/actions/secrets/APEX_KEY",
         "gh api -X GET repos/example-org/apex/environments/production/secrets --jq '.secrets[].name'",
         "gh api -X DELETE repos/example-org/apex/git/refs/heads/old-branch",
+        "gh pr view 8875 --json state,title",
+        "gh api repos/example-org/apex/issues/1/comments --paginate",
+        "gh api repos/example-org/apex/pulls/$N",
     ] {
         let stdout = run_bash(command, cwd.path());
         assert!(stdout.is_empty(), "{command} must allow: {stdout}");

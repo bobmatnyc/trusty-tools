@@ -115,21 +115,107 @@ fn keeps_the_get_listing_and_literal_non_secret_deletes_8875() {
         "gh api -X POST repos/o/r/issues -f title=x",
         "ssh build-host 'gh api -X DELETE repos/o/r/git/refs/heads/x'",
         "gh secret list --repo example-org/apex",
+        // #8875 round 3: normal PM work and the forms the new arms read.
+        "gh pr view 8875 --json state,title",
+        "gh api repos/o/r/issues/1/comments --paginate",
+        "gh api repos/o/r/pulls/$N",
+        "gh secret set APEX_KEY --body x -R o/r",
+        "gh alias list",
+        // Adjacent expansions are no `gh secret` call without a delete word.
+        "echo \"$A\" \"$B\" \"$C\" $(echo $(echo x))",
+        "gh alias set co 'pr checkout'",
+        "curl -s -H \"Authorization: Bearer $T\" https://api.github.com/repos/o/r/issues/1",
+        "curl -X DELETE -H \"Authorization: Bearer $T\" https://api.github.com/repos/o/r/git/refs/heads/x",
+        "eval eval eval eval eval eval eval eval gh api -X DELETE repos/o/r/git/refs/heads/x",
     ] {
         assert_eq!(evaluate_gh_api_secret_delete(command), None, "{command}");
         assert_eq!(bash(command), None, "{command} must allow");
     }
 }
 
+/// Nine `eval` layers around a literal non-secret DELETE: one past
+/// [`MAX_DEPTH`], so only the depth cap refuses it.
+const NINE_EVALS: &str =
+    "eval eval eval eval eval eval eval eval eval gh api -X DELETE repos/o/r/git/refs/heads/x";
+
+/// 🔴 REGRESSION (#8875 round 3): the owner-ruled forms. Each row was allowed
+/// by the rule at 8a451f2698: an unlexable call (the critic's here-document
+/// row), a DELETE hidden by a brace in the method, a rewritten `api` word or
+/// program word, a rewritten shell's `-c` text, `gh secret delete`, a
+/// `gh alias` that deletes, a `curl` DELETE of a secrets URL, and nesting past
+/// the depth cap.
+#[test]
+fn denies_the_round_three_forms_8875() {
+    assert_rule_denies(ROUND_THREE_ROWS);
+}
+
+/// The rows of `denies_the_round_three_forms_8875`.
+const ROUND_THREE_ROWS: &[&str] = &[
+    "gh api -X DEL\"ETE\" repos/o/r/actions/sec{r..r}ets/K --jq . <<EOF\nit's\nEOF",
+    "gh api -X D{E..E}LETE repos/o/r/issues/1 --jq . <<EOF\nit's\nEOF",
+    "gh alias set rmk 'api -X D{E..E}LETE repos/o/r/actions/secrets/K'",
+    "A=api; gh $A -X DELETE repos/o/r/actions/secrets/K",
+    "gh {api,} -X DELETE repos/o/r/actions/secrets/K",
+    "g[h] api -X DELETE repos/o/r/actions/secrets/K",
+    "/opt/homebrew/bin/g[h] api -X DELETE repos/o/r/actions/secrets/K",
+    "S=sh; $S -c 'gh api -X DELETE repos/o/r/actions/secrets/K'",
+    "gh secret delete APEX_KEY",
+    "gh secret delete APEX_KEY -R example-org/apex --env production",
+    "gh secret delete APEX_KEY --org example-org",
+    "gh secret remove APEX_KEY -R o/r",
+    "gh secret -R o/r delete APEX_KEY",
+    "curl -X DELETE -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/repos/o/r/actions/secrets/K",
+    "curl --request DELETE https://api.github.com/repos/o/r/actions/secrets/K",
+    "curl -sXDELETE https://api.github.com/orgs/o/actions/secrets/K",
+    "curl --request=DELETE \"https://api.github.com/repos/o/r/environments/prod/secrets/K\"",
+    "gh alias set rmk 'api -X DELETE repos/o/r/actions/secrets/K'",
+    "gh alias set rmref 'api --method DELETE repos/o/r/git/refs/heads/$1'",
+    "gh alias set rms 'secret delete $1'",
+    "gh alias set --shell rms 'gh api -X DELETE repos/o/r/actions/secrets/$1'",
+    "gh alias import aliases.yml",
+    NINE_EVALS,
+];
+
 /// #8875 Fail-Open Check: one row per arm that cannot read the call, asked
 /// of the rule directly, so a fail-open mutation of any arm leaves a row red.
 #[test]
 fn every_gh_api_delete_arm_fails_closed_8875() {
     let rows: &[(&str, &str)] = &[
+        // #8875 round 3: no `secrets` or `delete` word, so only the
+        // unlexable arm can refuse it.
         (
             "unlexable segment",
-            "gh api -X DELETE 'repos/o/r/actions/secrets/K",
+            "gh api repos/o/r/issues/1 --jq . <<EOF\nit's\nEOF",
         ),
+        // `--method`, not `-X`: the curl arm, which also reads a rewritten
+        // program word, does not know it, so only the `api` arm can refuse.
+        (
+            "rewritten subcommand",
+            "gh $A --method DELETE repos/o/r/actions/secrets/K",
+        ),
+        (
+            "glob program word",
+            "g[h] api -X DELETE repos/o/r/actions/secrets/K",
+        ),
+        (
+            "rewritten shell -c",
+            "$S -c 'gh api -X DELETE repos/o/r/actions/secrets/K'",
+        ),
+        ("gh secret delete", "gh secret delete APEX_KEY -R o/r"),
+        (
+            "gh alias api DELETE",
+            "gh alias set rm 'api -X DELETE repos/o/r/git/refs/heads/x'",
+        ),
+        (
+            "gh alias secret delete",
+            "gh alias set rms 'secret delete $1'",
+        ),
+        ("gh alias import", "gh alias import aliases.yml"),
+        (
+            "curl DELETE",
+            "curl -X DELETE https://api.github.com/repos/o/r/actions/secrets/K",
+        ),
+        ("depth cap", NINE_EVALS),
         (
             "non-literal method",
             "gh api -X \"$M\" repos/o/r/actions/secrets/K",
