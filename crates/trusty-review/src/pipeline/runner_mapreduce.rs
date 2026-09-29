@@ -403,6 +403,8 @@ async fn fold_reduced_into_result(
     )
     .await;
     result.findings = findings;
+    // #8905: last gate before posting — every citation holds its code or drops.
+    crate::pipeline::citation_gate::gate_posted_findings(result, &run.filtered);
 
     // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).
@@ -410,6 +412,9 @@ async fn fold_reduced_into_result(
     // #4044: `reconcile_grade_with_verdict`, not `clamp_grade_to_verdict` — the
     // clamp leaves a too-SEVERE grade untouched, so a refuted blocking finding
     // relaxed the verdict while the model's "F" stood. Same fix as `runner.rs`.
+    // #8905: a withheld review (UNKNOWN) carries no grade, as #1474 requires.
+    let original_llm_grade =
+        original_llm_grade.filter(|_| result.verdict != crate::models::Verdict::Unknown);
     result.grade =
         original_llm_grade.map(|g| reconcile_grade_with_verdict(g, &result.verdict).to_string());
 

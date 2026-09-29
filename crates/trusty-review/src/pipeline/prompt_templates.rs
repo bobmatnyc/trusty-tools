@@ -70,9 +70,9 @@ mod tests {
         // #PR84 follow-up; then the `code_provable` worked examples —
         // adversarial-review item 4; then the `[confluence: …]` citation form,
         // #5022; then the `[apex: …]` citation form was dropped with APEX
-        // retrieval, #4999).
-        assert_eq!(SYSTEM_PROMPT_STOCK.len(), 13974);
-        assert_eq!(SYSTEM_PROMPT_COVERAGE_GATING.len(), 14290);
+        // retrieval, #4999; then the quote-the-cited-line rule, #8905).
+        assert_eq!(SYSTEM_PROMPT_STOCK.len(), 14239);
+        assert_eq!(SYSTEM_PROMPT_COVERAGE_GATING.len(), 14555);
 
         // The coverage-gating variant is distinguished by its coverage-floor note.
         assert!(SYSTEM_PROMPT_COVERAGE_GATING.contains("deterministic\ncoverage floor"));

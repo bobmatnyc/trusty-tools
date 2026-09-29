@@ -191,6 +191,11 @@ coverage floor after your response based on the configured policy.
   consequence (see below), suggested_replacement (see below),
   source_citation (see below), code_provable (see below).
 
+`body` must quote, in backticks, code copied verbatim from the cited `file`
+at `line` (a short fragment or an identifier on that line). A finding whose
+cited line does not hold the code it quotes or names is moved to the line
+that does, or dropped before posting.
+
 `consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
 wrong in practice if this finding is not addressed (e.g. "panics on empty input",
 "silently drops the last row", "leaks the DB connection under load"). One short

@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
+#[path = "runner_truncation.rs"]
+mod truncation;
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     fetch_github_pr_meta, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
@@ -46,6 +48,11 @@ use crate::{
         voice_config::build_voice_config,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
+};
+use truncation::is_truncated;
+#[cfg(test)]
+use truncation::{
+    DEFAULT_TRUNCATION_TOKEN_RATIO, TRUNCATION_TOKEN_RATIO_ENV, truncation_token_ratio,
 };
 
 // ─── Pipeline input ───────────────────────────────────────────────────────────
@@ -734,6 +741,7 @@ pub async fn run_review(
     )
     .await;
     result.findings = findings;
+    crate::pipeline::citation_gate::gate_posted_findings(&mut result, &filtered); // #8905
 
     // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
     // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
@@ -763,6 +771,8 @@ pub async fn run_review(
     // still resting on evidence the pipeline had already discarded.
     // `reconcile_grade_with_verdict` moves it in both directions; `grade.rs`
     // already switched to it for the #PR84 case and this call site was missed.
+    // #8905: a withheld review (UNKNOWN) carries no grade, as #1474 requires.
+    let original_llm_grade = original_llm_grade.filter(|_| result.verdict != Verdict::Unknown);
     result.grade = original_llm_grade.map(|g| {
         crate::pipeline::letter_grade::reconcile_grade_with_verdict(g, &result.verdict).to_string()
     });
@@ -831,96 +841,6 @@ pub async fn run_review(
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
 }
-
-/// Default fraction of the output-token ceiling at/above which a response is
-/// treated as truncated when no `finish_reason` is available (closes #1241).
-///
-/// Why: this is the FALLBACK heuristic.  Some providers stop generating exactly
-/// at `max_tokens` without surfacing a `finish_reason`; when the completion lands
-/// at ≥95 % of the ceiling the structured JSON is very likely cut off mid-object,
-/// so trusting its parse risks a silent wrong-APPROVE.  95 % (not 100 %) leaves a
-/// small margin for provider-side token-count rounding so a genuinely-complete
-/// response that lands a few tokens under the ceiling is not mis-flagged.  As of
-/// #1357 this ratio is only consulted when `finish_reason` is absent — a provider
-/// that reports `finish_reason: "stop"` at 99 % of the ceiling is NOT flagged.
-/// What: the default multiplier applied to `max_tokens`, overridable at runtime
-/// via `truncation_token_ratio` (env seam) so operators can retune without a
-/// rebuild.
-/// Test: `is_truncated_ratio_fallback_*` unit tests in `runner_tests.rs`.
-const DEFAULT_TRUNCATION_TOKEN_RATIO: f64 = 0.95;
-
-/// Environment variable that overrides [`DEFAULT_TRUNCATION_TOKEN_RATIO`].
-///
-/// Why: #1357 asked for the fallback ratio to be configurable.  A single env seam
-/// (rather than threading a config field through every call site) keeps the change
-/// small while still letting operators retune the fallback band without a rebuild.
-/// What: parsed as `f64` in `truncation_token_ratio`; ignored when unset, empty,
-/// unparseable, or outside `(0.0, 1.0]`.
-const TRUNCATION_TOKEN_RATIO_ENV: &str = "TRUSTY_REVIEW_TRUNCATION_TOKEN_RATIO";
-
-/// Resolve the effective truncation token ratio (env override, else default).
-///
-/// Why: centralises the configurable-ratio seam (#1357) so both the runner and its
-/// tests read the ratio through one place; an out-of-range or unparseable override
-/// falls back to the default rather than silently disabling the safety check.
-/// What: reads `TRUSTY_REVIEW_TRUNCATION_TOKEN_RATIO`; returns the parsed value when
-/// it is a finite `f64` in `(0.0, 1.0]`, else `DEFAULT_TRUNCATION_TOKEN_RATIO`.
-/// Test: `truncation_ratio_env_override_applies`, `truncation_ratio_env_invalid_falls_back`.
-fn truncation_token_ratio() -> f64 {
-    match std::env::var(TRUNCATION_TOKEN_RATIO_ENV) {
-        Ok(raw) => match raw.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v > 0.0 && v <= 1.0 => v,
-            _ => DEFAULT_TRUNCATION_TOKEN_RATIO,
-        },
-        Err(_) => DEFAULT_TRUNCATION_TOKEN_RATIO,
-    }
-}
-
-/// Return `true` when an LLM completion appears truncated at the token ceiling.
-///
-/// Why: a truncated reviewer response must fail CLOSED to UNKNOWN rather than be
-/// parsed into a (likely wrong) APPROVE — the #1241 safety fix.  Before #1357 the
-/// detection was purely arithmetic (token-ratio), which FALSE-POSITIVED on large
-/// but complete responses that legitimately landed in the ≥95 % band.  The
-/// provider's own `finish_reason` is the authoritative truncation signal, so #1357
-/// makes it PRIMARY and keeps the token-ratio only as a fallback when the provider
-/// did not surface a reason.
-/// What:
-///   1. PRIMARY — when `finish_reason` is present: return `true` iff it is a
-///      length/truncation reason (`"length"` / `"max_tokens"` / `"max_token"`),
-///      and `false` for any natural-stop reason (`"stop"`, `"end_turn"`, …).  The
-///      token ratio is NOT consulted, so a complete response at 99 % of the ceiling
-///      is not mis-flagged.
-///   2. FALLBACK — when `finish_reason` is `None`: return `true` when `max_tokens > 0`
-///      AND `output_tokens >= ceil(max_tokens * truncation_token_ratio())`.  A
-///      `max_tokens` of 0 (unknown ceiling) disables the check (returns `false`).
-///
-/// `finish_reason` is matched case-insensitively (providers already lowercase it,
-/// but we trim/lowercase defensively).
-///
-/// Test: `is_truncated_finish_reason_length_true`,
-/// `is_truncated_finish_reason_stop_at_high_ratio_false`,
-/// `is_truncated_ratio_fallback_at_ceiling_true`,
-/// `is_truncated_ratio_fallback_well_under_false`,
-/// `is_truncated_unset_ceiling_false`.
-fn is_truncated(finish_reason: Option<&str>, output_tokens: u32, max_tokens: u32) -> bool {
-    // PRIMARY: trust the provider's explicit completion reason when present.
-    if let Some(reason) = finish_reason {
-        let r = reason.trim().to_ascii_lowercase();
-        if !r.is_empty() {
-            return matches!(r.as_str(), "length" | "max_tokens" | "max_token");
-        }
-    }
-
-    // FALLBACK: no usable finish_reason — use the token-ratio heuristic.
-    if max_tokens == 0 {
-        return false;
-    }
-    let threshold = (f64::from(max_tokens) * truncation_token_ratio()).ceil() as u32;
-    output_tokens >= threshold
-}
-
-// ─── Dedup claim gate (#5064) ────────────────────────────────────────────────
 
 /// What the runner does with a `claim()` outcome.
 ///

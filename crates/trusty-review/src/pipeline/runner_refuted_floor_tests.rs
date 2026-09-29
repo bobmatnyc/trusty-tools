@@ -68,7 +68,8 @@ fn blocks_on(findings_json: &str) -> FakeLlm {
 fn finding_json(title: &str, body: &str, severity: &str, category: &str) -> String {
     serde_json::json!({
         "title": title,
-        "body": body,
+        // #8905: the citation gate drops a finding that quotes no code.
+        "body": format!("{body} in `fn bad()`"),
         "severity": severity,
         "confidence": 0.9,
         "file": "src/a.rs",
