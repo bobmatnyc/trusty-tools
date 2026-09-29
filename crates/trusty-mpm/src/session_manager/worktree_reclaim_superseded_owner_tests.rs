@@ -35,15 +35,15 @@ use crate::session_manager::worktree_reclaim_sweep::{
 const PR: u64 = 7771;
 
 /// A merged, clean agent-store tree and the Claude session its owner file names.
-struct Scene {
-    fx: GitWorktreeFixture,
-    wt: PathBuf,
-    branch: String,
+pub(super) struct Scene {
+    pub(super) fx: GitWorktreeFixture,
+    pub(super) wt: PathBuf,
+    pub(super) branch: String,
     /// The Claude session id the owner file names as the dispatcher.
-    dispatcher: String,
+    pub(super) dispatcher: String,
 }
 
-fn scene(name: &str) -> Scene {
+pub(super) fn scene(name: &str) -> Scene {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree_at(&fx.repo.join(".claude").join("worktrees"), name);
     std::fs::write(wt.join("landed.rs"), "// landed\n").expect("write landed file");
@@ -58,7 +58,7 @@ fn scene(name: &str) -> Scene {
 }
 
 /// The PM session's record: live in tmux, carrying `current` as its Claude id.
-fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
+pub(super) fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
     SessionRecord {
         id: ManagedSessionId::for_adopted_tmux_name(tmux_name),
         tmux_name: tmux_name.to_owned(),
@@ -139,7 +139,7 @@ async fn claims(scene: &Scene, links: Links) -> LiveClaims {
         .await
 }
 
-fn agent_live(_: &AgentWorktreeOwner) -> AgentDelegationState {
+pub(super) fn agent_live(_: &AgentWorktreeOwner) -> AgentDelegationState {
     AgentDelegationState::Live
 }
 
@@ -147,7 +147,7 @@ fn no_agents(_: &AgentWorktreeOwner) -> AgentDelegationState {
     AgentDelegationState::Unknown
 }
 
-fn merged_index(branch: &str) -> PrIndex {
+pub(super) fn merged_index(branch: &str) -> PrIndex {
     PrIndex::from_json(
         &format!(r#"[{{"number": {PR}, "headRefName": "{branch}", "state": "MERGED"}}]"#),
         400,
@@ -155,7 +155,7 @@ fn merged_index(branch: &str) -> PrIndex {
 }
 
 /// The survey's verdict for the scene's worktree.
-fn verdict(
+pub(super) fn verdict(
     scene: &Scene,
     claims: &LiveClaims,
     agent_state: &dyn Fn(&AgentWorktreeOwner) -> AgentDelegationState,
@@ -179,7 +179,7 @@ fn verdict(
 }
 
 /// The refusal text, panicking on any grant.
-fn refused(v: &ReclaimVerdict) -> String {
+pub(super) fn refused(v: &ReclaimVerdict) -> String {
     match v {
         ReclaimVerdict::Blocked { reason, .. } | ReclaimVerdict::BlockedByAgent { reason, .. } => {
             reason.clone()

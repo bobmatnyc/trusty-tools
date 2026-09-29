@@ -25,6 +25,7 @@
 use std::path::Path;
 
 use super::driver::{ClaimEnder, UnavailableClaims};
+use crate::session_manager::worktree_claude_registry::ClaudeRegistry;
 use crate::session_manager::worktree_owner_gate::{
     OwnerGate, SessionEnd, owner_refusal, release_stale_lock,
 };
@@ -80,13 +81,18 @@ impl ClaimOwnership for UnavailableClaims {}
 
 /// The ownership a process can prove about itself alone: its own session ids.
 ///
-/// Why: the CLI reaches the daemon over HTTP and cannot observe tmux, so it
+/// Why: the CLI reaches the daemon over HTTP and cannot observe tmux, so tmux
 /// proves no foreign session ended; only its managed id and Claude Code
-/// session id are the caller.
-/// Test: `cli_tree_gate_keeps_another_sessions_agent_tree`.
+/// session id are the caller. #7771: Claude Code's own per-process registry
+/// can still prove a foreign Claude session ended.
+/// Test: `cli_tree_gate_keeps_another_sessions_agent_tree`,
+/// `cli_7771_tree_gate_reclaims_a_tree_whose_owner_process_is_gone`,
+/// `worktree_7771_a_registry_probe_error_keeps_the_tree`.
 pub(crate) struct CallerOwnership {
     /// Every id naming the calling session.
     callers: Vec<String>,
+    /// #7771: the registry a foreign Claude session's end is proven from.
+    claude: ClaudeRegistry,
 }
 
 impl CallerOwnership {
@@ -104,19 +110,37 @@ impl CallerOwnership {
 
     /// Ownership naming exactly `callers` as the calling session.
     pub(crate) fn new(callers: Vec<String>) -> Self {
-        Self { callers }
+        Self {
+            callers,
+            claude: ClaudeRegistry::NotRead,
+        }
+    }
+
+    /// This ownership, proving foreign Claude sessions ended from `claude`
+    /// (#7771).
+    pub(crate) fn with_claude(mut self, claude: ClaudeRegistry) -> Self {
+        self.claude = claude;
+        self
     }
 
     /// Condition (d) as this process can answer it.
+    ///
+    /// What: the caller, else Claude Code's registry answer
+    /// ([`ClaudeRegistry::session_end`]), else undeterminable. #7771: an
+    /// unobservable tmux is never the reason a tree is judged ended.
     fn session_end(&self, id: &str) -> SessionEnd {
         if self.callers.iter().any(|c| c == id) {
             return SessionEnd::Caller;
         }
-        SessionEnd::Undeterminable(
-            "this process cannot observe tmux to prove it; `tm session prune-worktrees \
-             --merged-prs` reclaims the tree once it has ended"
-                .into(),
-        )
+        let why = "this process cannot observe tmux to prove it; `tm session prune-worktrees \
+                   --merged-prs` reclaims the tree once it has ended";
+        match self.claude.session_end(id) {
+            None => SessionEnd::Undeterminable(why.into()),
+            Some(SessionEnd::Undeterminable(more)) => {
+                SessionEnd::Undeterminable(format!("{why}; {more}"))
+            }
+            Some(end) => end,
+        }
     }
 }
 
