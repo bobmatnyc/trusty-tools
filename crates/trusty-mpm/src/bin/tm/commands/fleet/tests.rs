@@ -278,3 +278,196 @@ fn status_reports_incomplete_setup() {
         "no session runs, so the setup is incomplete"
     );
 }
+
+// --- #8436 P4: the seeded fleet files and the poller start ---
+
+/// The two Architect-only skills, as shipped.
+fn ported_skills() -> Vec<&'static super::seed::Seeded> {
+    super::seed::FILES
+        .iter()
+        .filter(|f| f.dest.starts_with(".claude/skills/"))
+        .collect()
+}
+
+#[test]
+fn a_first_run_seeds_the_architect_project() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    let report = fx.init().unwrap();
+    let dir = fx.dir();
+    for file in super::seed::FILES {
+        let path = dir.join(file.dest);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            file.contents.as_bytes(),
+            "{}",
+            file.dest
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o111 != 0,
+            file.executable,
+            "{}: mode {mode:o}",
+            file.dest
+        );
+    }
+    for rel in super::seed::DIRS {
+        assert!(dir.join(rel).is_dir(), "{rel}");
+    }
+    for skill in ["tm-fleet-check", "tm-context-refresh"] {
+        assert!(
+            dir.join(".claude/skills")
+                .join(skill)
+                .join("SKILL.md")
+                .is_file(),
+            "{skill}"
+        );
+    }
+    let claude_md = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+    assert!(
+        !claude_md.contains("TRUSTY-MPM:"),
+        "an override marker was seeded"
+    );
+    assert!(!claude_md.contains("TRUSTY_MPM_PM_UNRESTRICTED"));
+    assert!(claude_md.contains("records/"), "{claude_md}");
+    let rendered = report.render();
+    assert!(
+        rendered.contains("poller start (--no-launch)"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("lands in"),
+        "a stale P4 note survived: {rendered}"
+    );
+}
+
+#[test]
+fn an_edited_seed_or_script_is_never_overwritten() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let edited = [
+        ("CLAUDE.md", "# my fleet\n"),
+        ("scripts/fleet-poll.py", "print('mine')\n"),
+    ];
+    for (rel, text) in edited {
+        std::fs::write(dir.join(rel), text).unwrap();
+    }
+    std::fs::remove_file(dir.join("records/actions.md")).unwrap();
+    let report = fx.init().unwrap();
+    for (rel, text) in edited {
+        assert_eq!(
+            std::fs::read_to_string(dir.join(rel)).unwrap(),
+            text,
+            "{rel} was overwritten"
+        );
+        assert!(
+            report.steps.iter().any(
+                |s| matches!(s, Step::Skipped(t) if t.starts_with(rel) && t.contains("left as is"))
+            ),
+            "{rel} not reported skipped:\n{}",
+            report.render()
+        );
+    }
+    assert!(
+        report
+            .steps
+            .contains(&Step::Changed("wrote records/actions.md".to_owned()))
+    );
+    assert!(!report.failed(), "{}", report.render());
+    let again = fx.init().unwrap();
+    assert!(!again.changed(), "{}", again.render());
+}
+
+/// Acceptance 2: every Architect-relative path and script a ported skill
+/// names exists in a freshly initialised project. `inbox/` is excluded: it is
+/// the poller's runtime directory, and `events.jsonl` is absent until #8392.
+#[test]
+fn every_path_a_ported_skill_names_exists_after_init() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for skill in ported_skills() {
+        let mut checked = 0;
+        for raw in skill
+            .contents
+            .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
+        {
+            let word = raw.trim_end_matches(['.', ':', ';']);
+            let architect_path = ["scripts/", "records/", ".claude/"]
+                .iter()
+                .any(|p| word.starts_with(p))
+                || word == "CLAUDE.md";
+            if !architect_path {
+                continue;
+            }
+            // `records/projects/<project>.md` names a directory of per-project files.
+            let path = match word.find('<') {
+                Some(i) => dir.join(&word[..i]),
+                None => dir.join(word),
+            };
+            assert!(
+                path.exists(),
+                "{}: `{word}` is missing after init",
+                skill.dest
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "{}: only {checked} paths found", skill.dest);
+    }
+}
+
+/// Acceptance 3: with no `events.jsonl` the pass is a full poll, and the
+/// every-4th-pass and empty-inbox fallbacks stay.
+#[test]
+fn the_fleet_check_skill_runs_a_full_poll_without_events() {
+    let text = |name: &str| {
+        ported_skills()
+            .into_iter()
+            .find(|s| s.dest.contains(name))
+            .unwrap()
+            .contents
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let check = text("tm-fleet-check");
+    for needle in [
+        "Run a full poll when `events.jsonl` is absent",
+        "has no new lines this pass (an empty inbox)",
+        "every 4th pass (`poll_count % 4 == 0`)",
+    ] {
+        assert!(check.contains(needle), "missing: {needle}");
+    }
+    assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
+}
+
+/// The fail-closed arm: a start script that fails is an error naming its
+/// exit status and output, never a pass.
+#[test]
+fn a_failing_start_script_is_an_error_with_its_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join(super::poller::START_SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "echo 'no tmux here' >&2\nexit 7\n").unwrap();
+    let err = super::poller::start(dir.path()).expect_err("a failing script must fail");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("no tmux here") && text.contains('7'),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_failed_step_fails_the_report() {
+    let report = InitReport {
+        steps: vec![
+            Step::Changed("wrote CLAUDE.md".to_owned()),
+            Step::Failed("poller start: boom".to_owned()),
+        ],
+    };
+    assert!(report.failed());
+    let text = report.render();
+    assert!(text.contains("FAILED     poller start: boom"), "{text}");
+    assert!(!text.contains("Architect set up"), "{text}");
+}

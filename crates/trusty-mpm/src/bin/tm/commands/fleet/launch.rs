@@ -33,11 +33,20 @@ pub(crate) const ARCHITECT_SESSION: &str = "tm-architect";
 /// `#{session_path}`, canonicalized when it can be.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
 pub(crate) fn running_session_dir() -> Option<PathBuf> {
+    session_dir(ARCHITECT_SESSION)
+}
+
+/// The directory tmux session `name` was created in, when it runs.
+///
+/// What: as [`running_session_dir`] for any exact session name; the poller
+/// check (#8436 P4) reads `tm-architect-poll` through it.
+/// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
+pub(crate) fn session_dir(name: &str) -> Option<PathBuf> {
     let argv = [
         "display-message",
         "-p",
         "-t",
-        &tmux::exact_window_target(ARCHITECT_SESSION),
+        &tmux::exact_window_target(name),
         "#{session_path}",
     ]
     .map(str::to_owned);

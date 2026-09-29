@@ -15,6 +15,8 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 | Path | Purpose |
 | --- | --- |
 | `skills/tm-supervisor-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
+| `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
+| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `records/`. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
 | `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
 | `scripts/self-ctx.py` | Measures the Architect's own context from its newest interactive Claude Code transcript. |
@@ -49,9 +51,17 @@ cd python/trusty-architect && python3 -m pytest
 The tests need pytest and nothing else. CI runs them, plus the drift check's
 selftest, only when this directory or the check changes.
 
+## Deployment
+
+trusty-mpm ships a byte-identical copy of every file under `scripts/`,
+`skills/` and `templates/`, and the drift check fails when one differs.
+`tm fleet init` writes them into the Architect project: `scripts/`,
+`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore` and `records/`.
+It writes a file only when it is absent and reports an edited one as skipped.
+With a launch it starts the poller through `scripts/start-fleet-poll.sh`, and
+a start that fails fails the command.
+
 ## Not here yet
 
-The relay tooling, the question collector, the project templates and the
-operations skills stay in the prototype for now. `tm fleet init` (P2) seeds
-the Architect project, P3 adds the watched-project hooks, and P4 deploys this
-poller and adds the operations skills.
+The relay tooling, the question collector, the review, drift-check and
+provision skills, and `fleet-restart` stay in the prototype for now (#8536).

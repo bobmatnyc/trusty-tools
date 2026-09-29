@@ -1,4 +1,4 @@
-//! `tm fleet init|status` — set up and inspect the Architect (#8436, phase P2).
+//! `tm fleet init|status` — set up and inspect the Architect (#8436, P2 and P4).
 //!
 //! Why: the Architect is the one fleet supervisor per user. Its session runs
 //! the supervisor profile only when three things agree (#8453): the user-level
@@ -7,15 +7,18 @@
 //! config file; `tm fleet init` does it in one idempotent command.
 //! What: [`init`] creates the project (local git repo, no remote), writes the
 //! profile request and the allowlist entry — each an atomic write that keeps
-//! the rest of the file — and starts the `tm-architect` session. [`status()`]
-//! reads the same four facts back and exits 1 when any is missing. Twin mode
-//! (#8878) is out of scope (ruling Q7). `add` and `remove` are phase P3.
+//! the rest of the file — seeds the fleet files ([`seed`]), and starts the
+//! `tm-architect` session and its poller ([`poller`]). [`status()`] reads the
+//! four session facts back and exits 1 when any is missing. Twin mode (#8878)
+//! is out of scope (ruling Q7). `add` and `remove` are phase P3.
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `tests/tm_fleet.rs`.
 
 mod config;
 mod launch;
+mod poller;
 mod preflight;
+mod seed;
 mod status;
 
 use std::path::{Path, PathBuf};
@@ -37,8 +40,8 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
 /// What: resolves the home and the directory, runs [`init`] or [`status()`],
-/// and prints the report. `status` returns an error, so exit 1, when the
-/// setup is incomplete.
+/// and prints the report. `init` returns an error, so exit 1, when a step
+/// failed; `status` does when the setup is incomplete.
 /// Test: `tests/tm_fleet.rs`.
 pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     let home = dirs::home_dir().context("cannot resolve the home directory")?;
@@ -47,6 +50,9 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             let dir = resolve_dir(dir.as_deref(), &home)?;
             let report = init(&dir, &home, !no_launch)?;
             print!("{}", report.render());
+            if report.failed() {
+                bail!("tm fleet init failed; see the FAILED step above");
+            }
             Ok(())
         }
         FleetAction::Status { dir, json } => {
@@ -84,6 +90,8 @@ pub(crate) enum Step {
     Unchanged(String),
     /// The step did not run.
     Skipped(String),
+    /// The step ran and failed; `init` reports it and the command exits 1.
+    Failed(String),
 }
 
 /// The steps one `init` run took, in order.
@@ -99,6 +107,11 @@ impl InitReport {
         self.steps.iter().any(|s| matches!(s, Step::Changed(_)))
     }
 
+    /// Whether any step failed.
+    pub(crate) fn failed(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::Failed(_)))
+    }
+
     /// One line per step, then a summary line.
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
@@ -107,10 +120,13 @@ impl InitReport {
                 Step::Changed(t) => ("done     ", t),
                 Step::Unchanged(t) => ("unchanged", t),
                 Step::Skipped(t) => ("skipped  ", t),
+                Step::Failed(t) => ("FAILED   ", t),
             };
             out.push_str(&format!("  {mark}  {text}\n"));
         }
-        out.push_str(if self.changed() {
+        out.push_str(if self.failed() {
+            "The Architect is not fully set up: fix the FAILED step and run `tm fleet init` again.\n"
+        } else if self.changed() {
             "Architect set up. Check it with `tm fleet status`.\n"
         } else {
             "Nothing changed: the Architect is already set up.\n"
@@ -129,14 +145,17 @@ impl InitReport {
 /// another Architect exists (an allow-listed supervisor project
 /// elsewhere, or `tm-architect` running in another directory). Then, in
 /// order: create `dir`; `git init` when `dir/.git` is absent (no remote is
-/// ever added); request the profile; add the allowlist entry; start the
-/// session when `launch` and it is not already running. Template seeding is
-/// reported as skipped: no Architect templates ship yet (P4).
+/// ever added); request the profile; add the allowlist entry; write the
+/// fleet files ([`seed::deploy`], P4); start the session when `launch` and it
+/// is not already running; start the poller ([`poller::step`], P4). A poller
+/// that cannot start is a [`Step::Failed`], never a warning.
 /// Test: `a_second_run_changes_nothing`,
 /// `a_malformed_config_fails_and_is_left_byte_identical`,
 /// `an_unrelated_key_and_comment_survive_the_allowlist_write`,
 /// `a_second_architect_elsewhere_is_refused`,
-/// `the_home_directory_is_refused_however_it_is_spelled`.
+/// `the_home_directory_is_refused_however_it_is_spelled`,
+/// `a_first_run_seeds_the_architect_project`,
+/// `fleet_init_fails_closed_when_the_poller_does_not_start`.
 pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
@@ -172,11 +191,11 @@ pub(crate) fn init(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Init
     let label = format!("`[supervisor] projects` entry {} in", dir.display());
     report.steps.push(write_edit(&config_path, edit, &label)?);
 
-    report.steps.push(Step::Skipped(
-        "template seeding: no Architect templates ship yet; CLAUDE.md seeding lands in #8436 P4"
-            .to_owned(),
-    ));
+    // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
+    // instruction pipeline creates a stub CLAUDE.md when none is there.
+    report.steps.extend(seed::deploy(dir)?);
     report.steps.push(launch_step(dir, home, launch)?);
+    report.steps.push(poller::step(dir, launch));
     Ok(report)
 }
 
