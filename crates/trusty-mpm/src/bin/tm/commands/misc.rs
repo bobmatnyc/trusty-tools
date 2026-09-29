@@ -614,6 +614,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
+    // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
+    super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd);
     // #2610 (idle-parking flags), #1956 (tool/input), #2864 (subagent
     // correlation keys: tool_use_id / agent_id / transcript paths). Built by
     // `commands::hook_payload` — a pure, unit-tested function that performs no
@@ -641,37 +643,9 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         return Ok(());
     }
 
-    // Build a hook-specific client with a tight connect timeout so a
-    // pathological OS-level TCP-connect stall never eats into the 2 s
-    // total budget. The shared `client` parameter is used for all other
-    // subcommands; for the hook we build a short-lived client here so
-    // the connect guard applies only to this hot path.
-    let hook_client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            // Client build failure is programmer-class; degrade to the
-            // shared client (no connect timeout) rather than blocking.
-            let req = client
-                .post(format!("{url}/hooks"))
-                .timeout(std::time::Duration::from_secs(2))
-                .json(&body)
-                .send();
-            let _ = req.await;
-            return Ok(());
-        }
-    };
-
-    // Best-effort POST — any failure (daemon down, network blip, malformed
-    // url) becomes a silent Ok(()) so Claude Code never sees a non-zero exit.
-    let _ = hook_client
-        .post(format!("{url}/hooks"))
-        .json(&body)
-        .send()
-        .await;
+    // #8392: moved to `hook_notify` (this file is over the SLOC cap); same
+    // 500 ms connect / 2 s total bounds, every failure dropped.
+    super::hook_notify::post_best_effort(client, url, &body).await;
     Ok(())
 }
 

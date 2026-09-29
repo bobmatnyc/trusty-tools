@@ -1,0 +1,3 @@
+Added
+- Opt-in `Notification` hook: with `[notification_hook] enabled = true` in `~/.trusty-mpm/config.toml`, `tm install` and `tm doctor --fix --yes` write one `Notification` entry running `tm hook` into the managed settings file, and remove only that entry when the opt-in is off. Off is the default; any value other than `true` is off, and a malformed settings file is refused and left unchanged (#8392).
+- Optional push target for `Notification` events: `TRUSTY_MPM_NOTIFY_INBOX`, else `[notification_hook] inbox`, names an absolute inbox directory. `tm hook` appends one JSON line to `<inbox>/events.jsonl`, waits at most 1 second, and on any failure logs one line and still exits 0. No target configured means no forward (#8392).
