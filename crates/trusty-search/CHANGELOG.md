@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.6] — 2026-09-29
+
+### Fixed
+
+- At most one reindex runs per index (#8889). A second `POST /indexes/{id}/reindex` (and so the MCP `reindex` tool and the CLI) while one is running now answers `409 reindex_already_running`, naming the running job (`running.run_id`, `origin`, `started_unix_ms`, `force`) and its `stream_url`, instead of `queued: true`. The refused request no longer replaces the running job's progress entry, so its SSE stream stays live. Boot reconcile and library callers (`spawn_reindex`, `spawn_reindex_with_cleanup`, which now return `Result`) are refused the same way. If the guard itself cannot be checked, the reindex is refused with `503 reindex_guard_unavailable`. The guard is released when the run ends by success, error, panic, or cancellation.
+- Each reindex stages into its own `index.redb.run-<pid>-<run>-<ms>.tmp` instead of the shared `index.redb.tmp`, so two runs can never swap each other's staging corpus. Earlier runs' leftover staging files are adopted for resume (#3979) or deleted; a leftover that cannot be deleted, such as a directory, no longer fails every later incremental reindex.
+- The CLI prints the daemon's refusal message when a reindex kickoff is rejected.
+
 ## [0.54.5] — 2026-09-28
 
 ### Fixed
