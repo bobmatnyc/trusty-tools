@@ -13,7 +13,7 @@
 //!
 //! What: `run_mapreduce_branch` is the single entry point.  The verdict is
 //! derived DETERMINISTICALLY inside `reduce` (never by a summariser), then the
-//! existing `apply_grade_and_floor` → coverage-floor → `maybe_verify` → grade
+//! existing `apply_grade_and_floor` → coverage-floor → citation gate → verify (#8904) → grade
 //! clamp → inline-comment → finalize chain runs exactly as for the unified path.
 //!
 //! Test: `run_review_oversized_diff_mapreduce_reviews_tail_signature`,
@@ -36,7 +36,7 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
-        verify::maybe_verify,
+        verify_posted::gate_then_verify,
         voice_config::build_voice_config,
     },
 };
@@ -382,29 +382,26 @@ async fn fold_reduced_into_result(
         (final_verdict, final_grade)
     };
 
-    let mut findings = parsed.findings;
-    // Verification round — re-derives the verdict from surviving findings.  The
-    // verifier sees the RAW diff so it can check any finding's location.
-    // Pass the caller-supplied PR description + discussion as author rationale
-    // (#1618) so the adversarial verifier can REFUTE a finding the author has
-    // already empirically addressed.  `build_author_rationale` returns None when
-    // neither is present, leaving the verifier prompt unchanged for existing callers.
+    // Citation gate (#8905), then verification of every surviving finding from
+    // every chunk (#8904). The verifier gets each finding's own file sections of
+    // the RAW diff (`per_file`), since the whole diff is over the size cap.
+    // Author rationale (#1618) lets the verifier REFUTE an addressed finding.
+    result.verdict = final_verdict;
+    result.findings = parsed.findings;
     let author_rationale = build_author_rationale(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    result.verdict = maybe_verify(
+    gate_then_verify(
         config,
         deps.verifier.as_ref(),
+        result,
+        &run.filtered,
         &run.raw_diff,
-        final_verdict,
-        &mut findings,
+        true,
         author_rationale.as_deref(),
     )
     .await;
-    result.findings = findings;
-    // #8905: last gate before posting — every citation holds its code or drops.
-    crate::pipeline::citation_gate::gate_posted_findings(result, &run.filtered);
 
     // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).

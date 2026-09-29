@@ -198,7 +198,10 @@ impl LlmProvider for FakeVerifier {
     }
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            text: format!(r#"{{"judgment":"{}","reason":"test"}}"#, self.judgment),
+            // #8904: batch-aware — several findings may share one request.
+            text: crate::pipeline::verify_batch::test_support::answer(&req, |_| {
+                self.judgment.to_string()
+            }),
             model: req.model.clone(),
             input_tokens: 5,
             output_tokens: 3,
@@ -1697,15 +1700,16 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
     );
 
     let result = run_review(&config, input, deps).await;
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "refuting the sole finding must relax REQUEST_CHANGES to APPROVE"
-    );
-    assert_eq!(
-        result.findings.len(),
-        1,
-        "the finding is demoted, not dropped"
+    // #8904: the refuted finding is withheld, and an emptied review is
+    // UNKNOWN — dropping a finding never yields APPROVE.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: not verified (1 refuted by the verifier)"),
+        "{}",
+        result.review_body
     );
 }
 
@@ -1860,34 +1864,12 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
 
     let result = run_review(&config, input, deps).await;
 
-    // After verification refutes the High-effort finding, the verdict must relax.
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "#1486: verification refutes the only blocking finding → verdict must be APPROVE (got {:?})",
-        result.verdict,
-    );
-
-    // The envelope grade must be consistent with APPROVE, not the pre-verification F.
-    let grade = result.grade.as_deref().unwrap_or("(none)");
-    // B- maps to APPROVE; any APPROVE-band grade (A+ through B-) is correct here.
-    // The specific value is B- (the original LLM grade, clamped to APPROVE which
-    // accepts any grade, so no clamping occurs → grade stays B-).
-    assert_eq!(
-        grade, "B-",
-        "#1486: envelope grade must be the original LLM grade B- after verification \
-         relaxes the verdict to APPROVE (before fix, it was F)"
-    );
-
-    // Sanity: the finding is preserved (demoted, not dropped) and is refuted.
-    assert_eq!(result.findings.len(), 1, "finding must be preserved");
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(crate::models::VerifyOutcome::Refuted)
-        ),
-        "the High-effort finding must be marked Refuted"
-    );
+    // #8904: the refuted finding is withheld, the emptied review is UNKNOWN,
+    // and an UNKNOWN review carries no grade (#1474) — so neither the
+    // pre-verification F nor an APPROVE grade survives.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None, "#1474: UNKNOWN carries no grade");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
 /// REGRESSION GUARD (#1486 — stable-escalation path): when a High-effort finding
@@ -2393,36 +2375,20 @@ async fn run_review_refuted_finding_does_not_drive_grade_or_summary() {
 
     let result = run_review(&default_config(), input, deps).await;
 
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "refuting the sole blocking finding must relax BLOCK"
-    );
-    assert_eq!(
-        result.grade.as_deref(),
-        Some("B-"),
-        "the model's own F rested on the refuted finding — it must not survive \
-         the relaxed verdict (#4044), got {:?}",
-        result.grade
-    );
-    assert!(
-        result.review_body.contains("Verification notice"),
-        "the summary predates verification and must be qualified (#4044):\n{}",
-        result.review_body
-    );
+    // #8904: the refuted finding is withheld. The emptied review is UNKNOWN
+    // with no grade, so the model's F cannot stand (#4044), and the body leads
+    // with the withheld note so the prose's "finding #1" is qualified.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None, "the model's F must not survive (#4044)");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(
         result
             .review_body
-            .contains("finding #1 — `src/a.rs`: missing await"),
-        "the qualifier must name the refuted finding by the index the prose \
-         uses (#4044):\n{}",
+            .contains("1 findings withheld: not verified"),
+        "the summary predates verification and must be qualified (#4044):\n{}",
         result.review_body
     );
-    assert_eq!(
-        result.findings_count,
-        result.findings.len(),
-        "the refuted finding stays in the array for transparency (REV-606)"
-    );
+    assert_eq!(result.findings_count, result.findings.len());
 }
 
 /// A reviewer response carrying #5309's finding near-verbatim: `code_provable`,
@@ -2779,3 +2745,7 @@ mod refuted_floor;
 // #8905: every posted finding cites the line that holds its code.
 #[path = "runner_citation_gate_tests.rs"]
 mod citation_gate;
+
+// #8904: every posted finding has passed the verifier.
+#[path = "runner_verify_coverage_tests.rs"]
+mod verify_coverage;

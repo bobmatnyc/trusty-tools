@@ -42,8 +42,14 @@ impl LlmProvider for FixedVerifier {
         "fixed-verifier"
     }
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #8904: batch-aware — answer every finding in the request with the
+        // judgment `text` carries.
+        let judgment = serde_json::from_str::<serde_json::Value>(&self.text)
+            .ok()
+            .and_then(|v| v["judgment"].as_str().map(str::to_string))
+            .unwrap_or_default();
         Ok(LlmResponse {
-            text: self.text.clone(),
+            text: crate::pipeline::verify_batch::test_support::answer(&req, |_| judgment.clone()),
             model: req.model.clone(),
             input_tokens: 10,
             output_tokens: 5,
@@ -115,26 +121,16 @@ fn truncated_provider() -> Arc<dyn LlmProvider> {
 // ── Candidate selection ───────────────────────────────────────────────────────
 
 #[test]
-fn select_candidates_block_uses_wide_net() {
-    // On a BLOCK verdict every finding ≥ 0.50 is a candidate.
+fn select_candidates_takes_every_undecided_finding() {
+    // #8904: every finding is a candidate, whatever its confidence — the old
+    // verdict-dependent floor (0.90 on APPROVE*, 0.50 on BLOCK) left 9 of 10
+    // reviews unverified.
     let findings = vec![
-        finding(Effort::High, 0.95),   // candidate
-        finding(Effort::Medium, 0.55), // candidate (>= 0.50)
-        finding(Effort::Low, 0.30),    // NOT a candidate (< 0.50)
+        finding(Effort::High, 0.95),
+        finding(Effort::Medium, 0.80),
+        finding(Effort::Low, 0.30),
     ];
-    let idxs = select_candidates(Verdict::Block, &findings);
-    assert_eq!(
-        idxs,
-        vec![0, 1],
-        "block verdict casts a wide net down to 0.50"
-    );
-}
-
-#[test]
-fn select_candidates_request_changes_uses_wide_net() {
-    let findings = vec![finding(Effort::Medium, 0.50), finding(Effort::Low, 0.49)];
-    let idxs = select_candidates(Verdict::RequestChanges, &findings);
-    assert_eq!(idxs, vec![0], "0.50 is included; 0.49 is excluded");
+    assert_eq!(select_candidates(&findings), vec![0, 1, 2]);
 }
 
 #[test]
@@ -144,45 +140,16 @@ fn select_candidates_skips_findings_with_a_decided_outcome() {
     // package-registry claim precisely so the verifier — a second model with the
     // same stale training knowledge — can never launder it into `Confirmed`.
     let mut findings = vec![finding(Effort::High, 0.95), finding(Effort::High, 0.95)];
-    assert_eq!(
-        select_candidates(Verdict::Block, &findings),
-        vec![0, 1],
-        "precondition: both clear the confidence net"
-    );
+    assert_eq!(select_candidates(&findings), vec![0, 1]);
 
     findings[0].verified = Some(VerifyOutcome::Unverifiable {
         reason: "no registry lookup performed".to_string(),
     });
     assert_eq!(
-        select_candidates(Verdict::Block, &findings),
+        select_candidates(&findings),
         vec![1],
         "an already-decided outcome must not be re-verified"
     );
-}
-
-#[test]
-fn select_candidates_approve_uses_block_tier_only() {
-    // On an APPROVE* verdict only blocking-tier (>= 0.90) findings are verified.
-    let findings = vec![
-        finding(Effort::High, 0.92),   // candidate (>= 0.90)
-        finding(Effort::Medium, 0.80), // NOT a candidate
-        finding(Effort::Medium, 0.55), // NOT a candidate
-    ];
-    let idxs = select_candidates(Verdict::ApproveWithReservations, &findings);
-    assert_eq!(
-        idxs,
-        vec![0],
-        "approve verdict only verifies block-tier findings"
-    );
-
-    let idxs_plain = select_candidates(Verdict::Approve, &findings);
-    assert_eq!(idxs_plain, vec![0], "plain APPROVE behaves the same");
-}
-
-#[test]
-fn select_candidates_unknown_is_empty() {
-    let findings = vec![finding(Effort::High, 0.99)];
-    assert!(select_candidates(Verdict::Unknown, &findings).is_empty());
 }
 
 // ── Outcome application ───────────────────────────────────────────────────────
@@ -228,26 +195,11 @@ fn apply_outcome_error_refuted_also_demotes() {
 // ── Verdict re-derivation (refuted exclusion) ─────────────────────────────────
 
 #[test]
-fn rederive_excludes_refuted_relaxes() {
-    // Path (b): one High finding, clean REFUTED, nothing confirmed → excluded +
-    // neutral baseline → APPROVE.
-    let mut f = finding(Effort::High, 0.95);
-    apply_outcome(&mut f, VerifyOutcome::Refuted);
-    // any_clean_refuted=true triggers path (b): drop to APPROVE baseline.
-    let verdict = rederive_verdict(Verdict::Block, false, true, &[f], &[]);
-    assert_eq!(
-        verdict,
-        Verdict::Approve,
-        "a cleanly-refuted candidate set must relax BLOCK to APPROVE (path b)"
-    );
-}
-
-#[test]
 fn rederive_keeps_confirmed_block() {
     // Path (a): one High finding, confirmed → survives → BLOCK floor.
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
+    let verdict = rederive_verdict(Verdict::Block, &[f]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -276,7 +228,7 @@ fn rederive_confirmed_but_disqualified_high_does_not_pin_block() {
     let mut f = finding(Effort::High, 0.95);
     f.code_provable = false; // disqualify: no citation, not diff-provable
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, false, &[f], &[]);
+    let verdict = rederive_verdict(Verdict::Block, &[f]);
     assert_ne!(
         verdict,
         Verdict::Block,
@@ -296,7 +248,7 @@ fn rederive_confirmed_medium_still_escalates_to_request_changes() {
     // REQUEST_CHANGES even though the baseline itself was capped.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med], &[]);
+    let verdict = rederive_verdict(Verdict::RequestChanges, &[med]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
@@ -317,7 +269,7 @@ fn rederive_confirmed_praise_keeps_clean_approve() {
     // APPROVE*) = APPROVE, so the verdict stays APPROVE and the grade stays A-.
     let mut praise = finding(Effort::Low, 1.0);
     apply_outcome(&mut praise, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise], &[]);
+    let verdict = rederive_verdict(Verdict::Approve, &[praise]);
     assert_eq!(
         verdict,
         Verdict::Approve,
@@ -343,7 +295,7 @@ fn rederive_confirmed_high_effort_still_escalates_from_approve() {
     // keeps primary_verdict, and derive_verdict's BLOCK floor then escalates.
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high], &[]);
+    let verdict = rederive_verdict(Verdict::Approve, &[high]);
     assert_eq!(
         verdict,
         Verdict::Block,
@@ -351,101 +303,18 @@ fn rederive_confirmed_high_effort_still_escalates_from_approve() {
     );
 }
 
+/// Path (c), #8904 form: a round that confirmed nothing — every survivor was
+/// judged UNVERIFIABLE — never relaxes the model's verdict.
 #[test]
-fn rederive_mixed_keeps_only_surviving_floor() {
-    // Path (a2): High refuted + confirmed Medium@0.85, model said APPROVE*.
-    // #1876: the surviving Medium alone now floors to REQUEST_CHANGES (a single
-    // confident Medium is sufficient, superseding the pre-#1876 APPROVE* result).
-    let mut high = finding(Effort::High, 0.95);
-    apply_outcome(&mut high, VerifyOutcome::Refuted);
-    let mut med = finding(Effort::Medium, 0.85);
-    apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(
-        Verdict::ApproveWithReservations,
-        true,
-        true,
-        &[high, med],
-        &[],
-    );
-    assert_eq!(
-        verdict,
-        Verdict::RequestChanges,
-        "surviving single confident Medium floors to REQUEST_CHANGES; refuted \
-         High is excluded but does not silently clear the still-standing Medium \
-         (path a2 + #1876 floor)"
-    );
-}
-
-#[test]
-fn rederive_refuted_finding_does_not_clear_standing_medium_finding() {
-    // #1876 regression: a refuted High finding must not silently clear an
-    // unrelated, still-standing confirmed Medium finding down to the weaker
-    // APPROVE*/APPROVE baseline. Two findings originally drove BLOCK; the
-    // verifier refutes the High and confirms the Medium. The Medium alone now
-    // floors to REQUEST_CHANGES (single confident Medium, #1876), so the review
-    // does not silently soften just because one finding among several was
-    // refuted.
-    let mut high = finding(Effort::High, 0.95);
-    apply_outcome(&mut high, VerifyOutcome::Refuted);
-    let mut med = finding(Effort::Medium, 0.85);
-    apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med], &[]);
-    assert_eq!(
-        verdict,
-        Verdict::RequestChanges,
-        "a still-standing confirmed Medium must keep the review at REQUEST_CHANGES \
-         even though a different finding (the High) was refuted (#1876)"
-    );
-}
-
-#[test]
-fn rederive_error_refuted_preserves_primary_verdict() {
-    // Path (c): all demotions are ErrorRefuted (infra fail) → preserve primary.
+fn rederive_unverifiable_only_preserves_primary_verdict() {
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(
         &mut f,
-        VerifyOutcome::ErrorRefuted {
-            error_class: "ModelNotFound".to_string(),
+        VerifyOutcome::Unverifiable {
+            reason: "outside the diff".to_string(),
         },
     );
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "all-ErrorRefuted must preserve primary_verdict (path c)"
-    );
-}
-
-#[test]
-fn rederive_truncation_refuted_preserves_primary_verdict() {
-    // Path (c): all demotions are TruncationRefuted → preserve primary (#726).
-    let mut f = finding(Effort::High, 0.85);
-    apply_outcome(&mut f, VerifyOutcome::TruncationRefuted);
-    let verdict = rederive_verdict(Verdict::Block, false, false, &[f], &[]);
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "all-TruncationRefuted must preserve primary_verdict (path c)"
-    );
-}
-
-#[test]
-fn rederive_refuted_blocker_beside_truncated_low_nit_still_relaxes() {
-    // #8653 over-correction guard: the unverified floor carries only what the
-    // failed-verification finding drove, and a Low nit drove nothing.
-    let mut blocker = finding(Effort::High, 0.95);
-    apply_outcome(&mut blocker, VerifyOutcome::Refuted);
-    let nit_pre_demotion = finding(Effort::Low, 0.9);
-    let mut nit = nit_pre_demotion.clone();
-    apply_outcome(&mut nit, VerifyOutcome::TruncationRefuted);
-    let verdict = rederive_verdict(
-        Verdict::Block,
-        false,
-        true,
-        &[blocker, nit],
-        &[nit_pre_demotion],
-    );
-    assert_eq!(verdict, Verdict::Approve);
+    assert_eq!(rederive_verdict(Verdict::Block, &[f]), Verdict::Block);
 }
 
 // ── End-to-end verification round ─────────────────────────────────────────────
@@ -479,133 +348,80 @@ async fn verify_confirmed_keeps_and_block_holds() {
     assert!((findings[0].confidence - 0.95).abs() < f32::EPSILON);
 }
 
-#[tokio::test]
-async fn verify_refuted_demotes_and_block_relaxes() {
-    // The ONLY blocking finding is REFUTED → demoted → derive_verdict relaxes
-    // from BLOCK down to APPROVE (no substantive findings remain).
-    let verifier = refuted_provider();
-    let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round(
-        &verifier,
-        "us.anthropic.claude-haiku-4-5",
-        "+ some diff",
-        Verdict::Block,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        verdict,
-        Verdict::Approve,
-        "refuting the only blocking finding must relax BLOCK to APPROVE"
-    );
-    assert!(matches!(findings[0].verified, Some(VerifyOutcome::Refuted)));
-    assert!(
-        (findings[0].confidence - VERIFY_REFUTED_CONFIDENCE).abs() < f32::EPSILON,
-        "refuted finding is demoted, not dropped"
-    );
+/// A policy with no backoff sleep, so failure-path tests run instantly.
+fn fast_policy() -> VerifyPolicy {
+    VerifyPolicy {
+        backoff_base_ms: 0,
+        ..VerifyPolicy::default()
+    }
 }
 
-#[tokio::test]
-async fn verify_no_candidates_is_noop() {
-    // APPROVE verdict with only sub-block-tier findings → no candidates → the
-    // findings are untouched and the verdict re-derives unchanged.
-    let verifier = refuted_provider(); // would refute, but is never called
-    let mut findings = vec![finding(Effort::Low, 0.40)];
-    let verdict = run_verification_round(
-        &verifier,
+/// Run a round under [`fast_policy`] and return its report.
+async fn round(
+    verifier: &Arc<dyn LlmProvider>,
+    primary: Verdict,
+    findings: &mut Vec<Finding>,
+) -> crate::pipeline::verify_posted::VerifyReport {
+    run_verification_round_with_policy(
+        verifier,
         "m",
-        "diff",
-        Verdict::Approve,
-        &mut findings,
+        "+ diff",
+        primary,
+        findings,
         None,
         None,
         None,
+        fast_policy(),
     )
-    .await;
-    assert_eq!(verdict, Verdict::Approve);
-    assert!(
-        findings[0].verified.is_none(),
-        "no candidate must stay unverified"
-    );
-    assert!((findings[0].confidence - 0.40).abs() < f32::EPSILON);
+    .await
 }
 
 #[tokio::test]
-async fn verify_unknown_is_passthrough() {
-    let verifier = refuted_provider();
+async fn verify_refuted_drops_and_block_is_withheld() {
+    // #8904: the ONLY finding is REFUTED → it is dropped, not demoted, and the
+    // #8905 withhold policy settles the verdict: no survivors → UNKNOWN, never
+    // the pre-#8904 APPROVE.
     let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round(
-        &verifier,
-        "m",
-        "diff",
-        Verdict::Unknown,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        verdict,
-        Verdict::Unknown,
-        "UNKNOWN passes through untouched"
-    );
-    assert!(findings[0].verified.is_none(), "UNKNOWN must not verify");
+    let report = round(&refuted_provider(), Verdict::Block, &mut findings).await;
+    assert!(findings.is_empty(), "a refuted finding is never posted");
+    assert_eq!(report.refuted, 1);
+    assert_eq!(report.verdict, Verdict::Unknown);
 }
 
 #[tokio::test]
-async fn verify_model_unavailable_marks_error_refuted_and_preserves_verdict() {
-    // ModelNotFound → ErrorRefuted (path c) → primary_verdict preserved (#726).
+async fn verify_no_findings_is_noop() {
+    let mut findings: Vec<Finding> = Vec::new();
+    let report = round(&refuted_provider(), Verdict::Approve, &mut findings).await;
+    assert_eq!(report.verdict, Verdict::Approve);
+    assert_eq!(report.calls, 0, "no finding, no verifier call");
+}
+
+#[tokio::test]
+async fn verify_unknown_still_verifies_and_stays_unknown() {
+    // #8904: an UNKNOWN review's findings are posted too, so they are verified;
+    // the verdict stays UNKNOWN.
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    let report = round(&refuted_provider(), Verdict::Unknown, &mut findings).await;
+    assert!(findings.is_empty(), "a refuted finding is never posted");
+    assert_eq!(report.verdict, Verdict::Unknown);
+}
+
+#[tokio::test]
+async fn verify_one_model_unavailable_emits_signal() {
+    // ModelNotFound (#726) → ErrorRefuted → #8904: withheld, never APPROVE.
     let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
         make_err: || LlmError::ModelNotFound("stale-verifier".to_string()),
     });
     let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round(
-        &verifier,
-        "stale-verifier",
-        "+ diff",
-        Verdict::Block,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert!(matches!(
-        findings[0].verified,
-        Some(VerifyOutcome::ErrorRefuted { .. })
-    ));
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "ErrorRefuted-only round must preserve primary verdict"
-    );
+    let report = round(&verifier, Verdict::Block, &mut findings).await;
+    assert!(findings.is_empty(), "an unjudged finding is never posted");
+    assert_eq!((report.refuted, report.unjudged), (0, 1));
+    assert_eq!(report.verdict, Verdict::Unknown);
 }
 
-/// #1876 fail-open regression: a TRANSIENT (non-alarm) verifier error — rate
-/// limiting, a transport blip, an upstream 5xx — must map to `ErrorRefuted`
-/// ("unable to verify"), NOT plain `Refuted` ("the model refuted this").
-///
-/// Why: before this fix, `verify_one`'s transient-error branch returned plain
-/// `VerifyOutcome::Refuted`, structurally identical to a clean model REFUTED
-/// judgment. That set `any_clean_refuted = true` in `run_verification_round`,
-/// which sent `rederive_verdict` down path (b) — dropping the WHOLE review's
-/// baseline to APPROVE — even though the verifier never examined the finding at
-/// all (it just could not be reached). This is the textbook fail-open bug: an
-/// infrastructure hiccup silently downgraded a real BLOCK to APPROVE.
-/// What: a `LlmError::RateLimited` (a non-alarm, transient error per
-/// `LlmError::is_alarm`) on the ONLY candidate finding must NOT record plain
-/// `Refuted`, and the round must take a path that preserves `primary_verdict`
-/// instead of path (b) — collapse to APPROVE.
-///
-/// #4459 moved where that lands: an exhausted retry budget now records
-/// `Unverifiable` rather than `ErrorRefuted`, because nothing examined the
-/// finding. The invariant this test was written for is unchanged and still
-/// asserted here — a transient error is never a refutation, and never
-/// fail-opens the review.
+/// #1876 fail-open regression, #8904 form: a TRANSIENT verifier error is never a
+/// refutation and never fail-opens the review to APPROVE. Since #8904 the
+/// finding is withheld (fail closed) and counted as unjudged, not refuted.
 /// Test: this test itself.
 #[tokio::test]
 async fn verify_transient_error_is_not_plain_refuted() {
@@ -613,91 +429,31 @@ async fn verify_transient_error_is_not_plain_refuted() {
         make_err: || LlmError::RateLimited,
     });
     let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round(
-        &verifier,
-        "m",
-        "+ diff",
-        Verdict::Block,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert!(
-        !matches!(findings[0].verified, Some(VerifyOutcome::Refuted)),
-        "a transient verifier error must never read as a refutation (#1876)"
-    );
-    assert!(
-        findings[0]
-            .verified
-            .as_ref()
-            .is_some_and(|v| v.is_unverified()),
-        "a transient verifier error must record an unable-to-verify outcome (#1876, #4459), \
-         got {:?}",
-        findings[0].verified
-    );
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "a transient-error-only round must preserve primary_verdict, \
-         not fail-open to APPROVE (path b) (#1876)"
-    );
+    let report = round(&verifier, Verdict::Block, &mut findings).await;
+    assert_eq!(report.refuted, 0, "a transient error is not a refutation");
+    assert_eq!(report.unjudged, 1);
+    assert!(findings.is_empty());
+    assert_ne!(report.verdict, Verdict::Approve, "#1876: never fail open");
 }
 
 // ── Truncation path (#726 regression) ─────────────────────────────────────────
 
 #[tokio::test]
-async fn verify_truncated_response_is_truncation_refuted() {
-    // Unparseable/truncated verifier output → TruncationRefuted, confidence demoted.
+async fn verify_truncated_response_is_withheld() {
+    // Unparseable/truncated verifier output (#726) is not a judgment: #8904
+    // withholds the finding and never relaxes to APPROVE.
     let mut findings = vec![finding(Effort::High, 0.95)];
-    run_verification_round(
-        &truncated_provider(),
-        "m",
-        "+ diff",
-        Verdict::Block,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert!(matches!(
-        findings[0].verified,
-        Some(VerifyOutcome::TruncationRefuted)
-    ));
-    assert!((findings[0].confidence - VERIFY_REFUTED_CONFIDENCE).abs() < f32::EPSILON);
-}
-
-#[tokio::test]
-async fn verify_truncation_preserves_primary_verdict() {
-    // All-TruncationRefuted (path c) → primary verdict preserved (#726 root cause).
-    let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round(
-        &truncated_provider(),
-        "m",
-        "+ diff",
-        Verdict::Block,
-        &mut findings,
-        None,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "truncation-only round must preserve primary verdict (path c)"
-    );
+    let report = round(&truncated_provider(), Verdict::Block, &mut findings).await;
+    assert!(findings.is_empty());
+    assert_eq!((report.refuted, report.unjudged), (0, 1));
+    assert_eq!(report.verdict, Verdict::Unknown);
 }
 
 /// Regression for the dropped-JoinHandle true-positive (PR #720, #726 incident).
 /// Why: (a) CONFIRMED Medium → REQUEST_CHANGES (path a2 baseline capped at
-/// APPROVE*, but the #1876 confidence-gated floor re-escalates a single
-/// confident Medium; pre-#1876 this landed on APPROVE*, and pre-#1015 on
-/// REQUEST_CHANGES via the old count heuristic — #1876 restores the
-/// REQUEST_CHANGES outcome via a confidence gate instead of a count gate);
-/// (b) TruncationRefuted must NOT collapse to APPROVE (path c, #726).
+/// APPROVE*, the #1876 confidence-gated floor re-escalates a single confident
+/// Medium); (b) a truncated answer must NOT collapse to APPROVE (#726) — since
+/// #8904 the finding is withheld and the review is UNKNOWN.
 /// Test: this test itself.
 #[tokio::test]
 async fn verify_join_handle_regression_pr720() {
@@ -714,9 +470,6 @@ async fn verify_join_handle_regression_pr720() {
                 +    tokio::spawn(async move { warm_boot().await });\n\
                 +}\n";
 
-    // Sub-test (a): CONFIRMED Medium@0.85 → path (a2) baseline is capped at
-    // APPROVE*, but `derive_verdict`'s own floor re-escalates to REQUEST_CHANGES
-    // (#1876: a single confident Medium is sufficient — see `correctness_floor`).
     let mut findings_1 = vec![f.clone()];
     let v1 = run_verification_round(
         &confirmed_provider(),
@@ -733,17 +486,8 @@ async fn verify_join_handle_regression_pr720() {
         findings_1[0].verified,
         Some(VerifyOutcome::Confirmed)
     ));
-    // #1876: a confirmed high-confidence Medium re-escalates to REQUEST_CHANGES
-    // via derive_verdict's floor, even though the a2 baseline itself is capped
-    // at APPROVE* (supersedes the #1015-era APPROVE* result).
-    assert_eq!(
-        v1,
-        Verdict::RequestChanges,
-        "CONFIRMED Medium → REQUEST_CHANGES (path a2 baseline capped, floor \
-         re-escalates — #1876)"
-    );
+    assert_eq!(v1, Verdict::RequestChanges);
 
-    // Sub-test (b): TruncationRefuted → verdict preserved (path c — #726).
     let mut findings_2 = vec![f];
     let v2 = run_verification_round(
         &truncated_provider(),
@@ -756,15 +500,8 @@ async fn verify_join_handle_regression_pr720() {
         None,
     )
     .await;
-    assert!(matches!(
-        findings_2[0].verified,
-        Some(VerifyOutcome::TruncationRefuted)
-    ));
-    assert_eq!(
-        v2,
-        Verdict::RequestChanges,
-        "truncation must NOT collapse to APPROVE (path c — #726)"
-    );
+    assert!(findings_2.is_empty(), "#8904: a truncated answer withholds");
+    assert_eq!(v2, Verdict::Unknown, "never APPROVE (#726, #8904)");
 }
 
 // ── #1015 regression ──────────────────────────────────────────────────────────
@@ -877,6 +614,53 @@ fn parse_judgment_unverifiable() {
     );
 }
 
+/// #8904: a truncated single-finding answer whose structured token is REFUTED
+/// must not be read as CONFIRMED because its cut-off reason says "confirmed".
+#[test]
+fn parse_judgment_truncated_refuted_json_is_refuted() {
+    assert_eq!(
+        parse_judgment(r#"{"judgment":"REFUTED","reason":"not confirmed by"#),
+        Some(Judgment::Refuted)
+    );
+    // The structured token wins over the keywords around it.
+    assert_eq!(
+        parse_judgment(r#"{"judgment": "REFUTED", "reason": "CONFIRMED elsewhere"#),
+        Some(Judgment::Refuted)
+    );
+    // A cut-off or conflicting token judges nothing (withheld, not posted).
+    assert_eq!(parse_judgment(r#"{"judgment":"CONF"#), None);
+    assert_eq!(
+        parse_judgment(r#"{"judgment":"CONFIRMED"} {"judgment":"REFUTED"}"#),
+        None
+    );
+}
+
+/// #8904: the keyword fallback never resolves an ambiguous answer to CONFIRMED.
+#[test]
+fn parse_judgment_ambiguous_prose_never_confirms() {
+    assert_eq!(
+        parse_judgment("REFUTED, not confirmed"),
+        Some(Judgment::Refuted)
+    );
+    for ambiguous in [
+        "not confirmed",
+        "This is UNCONFIRMED.",
+        "I can't say it is confirmed",
+        "Confirmed? No.",
+    ] {
+        assert_ne!(
+            parse_judgment(ambiguous),
+            Some(Judgment::Confirmed),
+            "{ambiguous:?}"
+        );
+    }
+    // An unambiguous prose confirmation still parses.
+    assert_eq!(
+        parse_judgment("CONFIRMED: the handle is dereferenced first"),
+        Some(Judgment::Confirmed)
+    );
+}
+
 /// #5309: an `Unverifiable` outcome must strip the signals that let a finding
 /// pin the BLOCK floor — the same demotion the hygiene passes apply when they
 /// pre-stamp it — so a claim carries identical weight whichever route
@@ -973,7 +757,10 @@ impl LlmProvider for FlakyVerifier {
             return Err(LlmError::Transport("connection reset by peer".into()));
         }
         Ok(LlmResponse {
-            text: r#"{"judgment":"CONFIRMED","reason":"present in diff"}"#.to_string(),
+            // #8904: batch-aware.
+            text: crate::pipeline::verify_batch::test_support::answer(&req, |_| {
+                "CONFIRMED".to_string()
+            }),
             model: req.model.clone(),
             input_tokens: 10,
             output_tokens: 5,
@@ -1009,6 +796,7 @@ fn test_policy(concurrency: usize, max_attempts: u32) -> VerifyPolicy {
         concurrency,
         max_attempts,
         backoff_base_ms: 0,
+        ..VerifyPolicy::default()
     }
 }
 
@@ -1039,7 +827,8 @@ async fn verify_transient_failure_is_retried_until_it_succeeds() {
         None,
         test_policy(4, 3),
     )
-    .await;
+    .await
+    .verdict;
     assert!(
         matches!(findings[0].verified, Some(VerifyOutcome::Confirmed)),
         "a transient failure inside the attempt budget must be retried to a real \
@@ -1053,24 +842,20 @@ async fn verify_transient_failure_is_retried_until_it_succeeds() {
     );
 }
 
-/// #4459 (b): a finding the verifier never reaches, on any attempt, is
-/// UNVERIFIED — not refuted, not confirmed — and the run counts it.
+/// #4459 (b), #8904 form: a finding the verifier never reaches, on any
+/// attempt, is unjudged — not refuted — and #8904 withholds it (fail closed).
 ///
-/// Why: recording `ErrorRefuted` states a judgment nothing made, and
-/// `apply_outcome` clamps every refutation variant to 0.10, so the finding
-/// disappeared from the review while the review itself still read clean. The
-/// count is what makes the failure visible to a consumer.
+/// Why: nothing checked it, so posting it would post an unverified claim, and
+/// withholding it must not read as "nothing wrong": the verdict is UNKNOWN.
 /// What: a verifier that always returns `Transport`, under a 2-attempt budget.
-/// On the pre-fix code this test fails on the `Unverifiable` assertion — the
-/// outcome was `ErrorRefuted`.
 /// Test: this test itself.
 #[tokio::test]
-async fn verify_permanent_transport_failure_lands_in_unverified() {
+async fn verify_permanent_transport_failure_is_withheld() {
     let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
         make_err: || LlmError::Transport("connection refused".into()),
     });
     let mut findings = vec![finding(Effort::High, 0.95)];
-    let verdict = run_verification_round_with_policy(
+    let report = run_verification_round_with_policy(
         &verifier,
         "m",
         "+ diff",
@@ -1082,31 +867,12 @@ async fn verify_permanent_transport_failure_lands_in_unverified() {
         test_policy(4, 2),
     )
     .await;
-
-    let Some(VerifyOutcome::Unverifiable { reason }) = &findings[0].verified else {
-        panic!(
-            "an unreachable verifier must record UNVERIFIED, got {:?}",
-            findings[0].verified
-        );
-    };
-    assert!(
-        reason.contains("2 attempt(s)") && reason.contains("Transport"),
-        "the reason must say what was tried and why it failed, got {reason:?}"
-    );
+    assert!(findings.is_empty(), "an unjudged finding is never posted");
+    assert_eq!((report.refuted, report.unjudged), (0, 1));
     assert_eq!(
-        crate::pipeline::post::count_unverified(&findings),
-        1,
-        "the run must report the finding it could not check"
-    );
-    assert_eq!(
-        verdict,
-        Verdict::Block,
-        "an unverifiable-only round must preserve primary_verdict, never fail-open \
-         to APPROVE"
-    );
-    assert!(
-        !findings[0].code_provable && findings[0].confidence <= 0.65,
-        "an unverified finding must be demoted so it cannot drive escalation"
+        report.verdict,
+        Verdict::Unknown,
+        "never fail open to APPROVE"
     );
 }
 
@@ -1141,7 +907,8 @@ async fn verify_round_never_exceeds_the_configured_concurrency() {
         None,
         test_policy(2, 3),
     )
-    .await;
+    .await
+    .verdict;
 
     assert_eq!(
         peak.load(Ordering::SeqCst),
@@ -1172,6 +939,8 @@ fn policy_from_config_clamps_zero_counts() {
         liveness_check: true,
         concurrency: 0,
         max_attempts: 0,
+        max_calls: 0,
+        batch_size: 0,
     };
     let policy = VerifyPolicy::from_config(&cfg);
     assert_eq!(policy.concurrency, 1, "a 0 width must never verify nothing");
@@ -1179,6 +948,7 @@ fn policy_from_config_clamps_zero_counts() {
         policy.max_attempts, 1,
         "a 0 budget must still make one call"
     );
+    assert_eq!((policy.max_calls, policy.batch_size), (1, 1), "#8904");
 
     let cfg = crate::config::VerificationConfig {
         concurrency: 6,
@@ -1197,6 +967,7 @@ fn backoff_grows_and_stays_within_its_jitter_band() {
         concurrency: 4,
         max_attempts: 4,
         backoff_base_ms: 200,
+        ..VerifyPolicy::default()
     };
     assert!(policy.backoff(1).is_zero(), "the first attempt never waits");
     for (attempt, base) in [(2u32, 200u64), (3, 400), (4, 800)] {

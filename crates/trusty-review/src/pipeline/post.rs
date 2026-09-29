@@ -312,7 +312,8 @@ pub async fn finalize_review(
     result.findings_count = result.findings.len();
     // #4459: same rationale one field over — report how many findings nothing
     // verified, so a review whose verifier was unreachable does not read clean.
-    result.unverified_count = count_unverified(&result.findings);
+    // #8904: plus the findings the verifier round withheld unjudged.
+    result.unverified_count = count_unverified(&result.findings) + result.withheld_unverified_count;
 
     // #4044: the narrative summary was written BEFORE the verification round on
     // both paths, so it can still cite a finding the verifier refuted as a merge

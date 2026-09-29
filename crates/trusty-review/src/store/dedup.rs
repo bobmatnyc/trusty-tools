@@ -28,7 +28,7 @@
 //! review runs, so GitHub does not redeliver and a human must re-request it.
 //! That is still the better half of the trade — a dropped review can be
 //! re-requested, a duplicate comment cannot be retracted.
-//! `pipeline::runner::classify_claim` is the single place that decision is
+//! `pipeline::runner_helpers::classify_claim` is the single place that decision is
 //! made.
 //!
 //! Blocking: the `*_blocking` methods sleep while waiting for the file lock and

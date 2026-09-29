@@ -102,23 +102,35 @@ async fn review_731(finding_1: Outcome) -> ReviewResult {
 
 /// The replay must land every finding in its recorded state, or the verdict
 /// assertions below say nothing about the recorded review.
-fn assert_matches_record(result: &ReviewResult) {
+///
+/// #8904: a refuted finding is withheld, never posted, and a finding recorded
+/// unjudged (below the old candidate floor) is now verified — the fake
+/// verifier confirms it.
+fn assert_matches_record(result: &ReviewResult, finding_1: Outcome) {
+    let posted: Vec<_> = MIX_731
+        .iter()
+        .filter(|r| {
+            let outcome = if r.0 == 1 { finding_1 } else { r.4 };
+            !matches!(outcome, Outcome::Refuted)
+        })
+        .collect();
     assert_eq!(
         result.findings.len(),
-        22,
-        "every recorded finding must survive to the verdict"
+        posted.len(),
+        "every recorded finding but the refuted ones must survive to the verdict"
     );
-    for (f, &(n, _, _, confidence, outcome)) in result.findings.iter().zip(MIX_731.iter()) {
+    for (f, &&(n, _, _, confidence, outcome)) in result.findings.iter().zip(posted.iter()) {
         if n == 1 {
             continue;
         }
         let state_matches = match outcome {
-            Outcome::Confirmed => matches!(f.verified, Some(VerifyOutcome::Confirmed)),
-            Outcome::Refuted => matches!(f.verified, Some(VerifyOutcome::Refuted)),
+            Outcome::Confirmed | Outcome::Unjudged => {
+                matches!(f.verified, Some(VerifyOutcome::Confirmed))
+            }
+            Outcome::Refuted => false,
             Outcome::Unsure | Outcome::SelfAdmitted => {
                 matches!(f.verified, Some(VerifyOutcome::Unverifiable { .. }))
             }
-            Outcome::Unjudged => f.verified.is_none(),
         };
         assert!(state_matches, "finding {n}: got {:?}", f.verified);
         assert!(
@@ -138,7 +150,7 @@ fn assert_matches_record(result: &ReviewResult) {
 async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
     let result = review_731(Outcome::Confirmed).await;
 
-    assert_matches_record(&result);
+    assert_matches_record(&result, Outcome::Confirmed);
     assert!(matches!(
         result.findings[0].verified,
         Some(VerifyOutcome::Confirmed)
@@ -150,18 +162,15 @@ async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
 
 /// #4044 / cto-reports#731: the same mix with its one BLOCK-grade finding
 /// refuted. What remains is two confirmed Mediums below the 0.80 floor
-/// threshold, confirmed Lows, and unverified advisories: the verification
-/// round's baseline is capped at APPROVE* and nothing surviving raises it.
+/// threshold, confirmed Lows, and unverified advisories, which alone would
+/// approve. #8904: the refuted findings are withheld, and a blocking review
+/// whose survivors alone approve is withheld as UNKNOWN (the #8905 policy) —
+/// the model's F must not stand, and neither may an approval.
 #[tokio::test]
 async fn run_review_cto_reports_731_mix_without_finding_1_does_not_block() {
     let result = review_731(Outcome::Refuted).await;
 
-    assert_matches_record(&result);
-    assert!(matches!(
-        result.findings[0].verified,
-        Some(VerifyOutcome::Refuted)
-    ));
-    // #4044: the refuted findings carry no weight; the model's F must not stand.
-    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
-    assert_eq!(result.grade.as_deref(), Some("C-"));
+    assert_matches_record(&result, Outcome::Refuted);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
 }

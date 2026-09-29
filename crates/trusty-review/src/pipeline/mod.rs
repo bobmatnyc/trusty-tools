@@ -66,7 +66,9 @@ pub mod runner_context;
 pub mod runner_mapreduce;
 pub mod trigger;
 pub mod verify;
+pub mod verify_batch;
 pub mod verify_liveness;
+pub mod verify_posted;
 pub mod verify_prompt;
 // Why: the narrative summary is written before the verification round on both
 // pipeline paths and nothing revisits it, so a refuted finding kept being cited
