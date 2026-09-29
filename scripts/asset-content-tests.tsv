@@ -19,6 +19,7 @@
 #   filter  `*` = the whole target; else a test-path prefix (module or test).
 # A module row covers every test in it, including ones added later; a test
 # row covers only that test. Prefer a test row in a large, slow module.
+trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal '../trusty-mpm/src/assets/architect/skills' (#8436)
 trusty-agents-common	lib	agent_assets::tests	15 reads: AGENT_ASSETS, BASE_AGENT, BASE_ENGINEER, ...
 trusty-agents-common	lib	agents::roster_tools_tests	6 reads: AGENT_ASSETS, literal '../trusty-mpm/src/assets/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads AGENT_ASSETS
@@ -34,6 +35,7 @@ trusty-code	lib	events::tests::sm_harness_doc_documents_the_prefix_tcode_emits	r
 trusty-code	lib	run_task::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
 trusty-code	lib	task::executor::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
 trusty-code	test:paths_import_mpm_catalog_e2e	*	reads agent_assets::BASE_AGENT
+trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template through commands::fleet::seed::FILES (#8436)
 trusty-mpm	bin:tm	commands::pr::tests::body_headings_are_named_verbatim_in_the_assets	reads agent_assets::VERSION_CONTROL
 trusty-mpm	bin:tm	commands::pr::tests::metadata_multi_crate_diff	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'
 trusty-mpm	bin:tm	commands::pr::tests::open_applies_pr_metadata	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'

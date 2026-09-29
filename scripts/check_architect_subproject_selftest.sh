@@ -11,8 +11,10 @@
 #   `members = ["crates/*"]`, a sub-project file, and a skill whose shipped
 #   copy matches), asserts the gate passes on it, then for each case copies the
 #   clean tree, plants one violation, and asserts exit 1 plus the expected
-#   "FAIL <CLASS>" text. Token-shaped strings are assembled at run time so this
-#   file carries no literal credential shape.
+#   "FAIL <CLASS>" text. The clean tree holds every pair the gate lists
+#   (`--list-pairs`), and each shipped copy gets its own planted-drift case.
+#   Token-shaped strings are assembled at run time so this file carries no
+#   literal credential shape.
 #
 # Test: this IS the test. Run: scripts/check_architect_subproject_selftest.sh
 #
@@ -27,14 +29,20 @@ trap 'rm -rf "$WORK"' EXIT
 
 SKILL_SRC="python/trusty-architect/skills/tm-supervisor-setup.md"
 SKILL_DST="crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+PAIRS="$("$GATE" --list-pairs)"
+[ -n "$PAIRS" ] || { echo "FAIL: the gate lists no shipped-copy pairs" >&2; exit 1; }
 
 clean="$WORK/clean"
-mkdir -p "$clean/python/trusty-architect/skills" "$clean/python/trusty-architect/scripts" \
-  "$clean/crates/trusty-mpm/src/assets/skills"
+mkdir -p "$clean/python/trusty-architect/scripts"
 printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >"$clean/Cargo.toml"
 printf 'import os\nROOT = os.path.dirname(__file__)\n' >"$clean/python/trusty-architect/scripts/ok.py"
-printf -- '---\nname: tm-supervisor-setup\n---\n# Set up the Architect\n' >"$clean/$SKILL_SRC"
-cp "$clean/$SKILL_SRC" "$clean/$SKILL_DST"
+for pair in $PAIRS; do
+  src="$clean/python/trusty-architect/${pair%%|*}"
+  dst="$clean/${pair#*|}"
+  mkdir -p "$(dirname "$src")" "$(dirname "$dst")"
+  printf 'shipped copy of %s\n' "${pair%%|*}" >"$src"
+  cp "$src" "$dst"
+done
 
 repeat() { # $1 = char, $2 = count
   local s="" i=0
@@ -43,8 +51,12 @@ repeat() { # $1 = char, $2 = count
 }
 TOKEN="ghp""_$(repeat a 36)"
 
-plant() { # $1 = case name; mutates $WORK/$1, a copy of the clean tree
-  local t="$WORK/$1" sub="$WORK/$1/python/trusty-architect"
+case_dir() { # $1 = case name; a directory name without slashes or colons
+  printf '%s' "$1" | tr '/:' '__'
+}
+
+plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
+  local t="$WORK/$(case_dir "$1")" sub="$WORK/$(case_dir "$1")/python/trusty-architect"
   case "$1" in
     cargo-toml) printf '[package]\nname = "x"\n' >"$sub/Cargo.toml" ;;
     workspace-member)
@@ -58,7 +70,9 @@ plant() { # $1 = case name; mutates $WORK/$1, a copy of the clean tree
     private-checkout) printf 'see ~/trusty-mpm-projects/acme/supervisor\n' >"$sub/notes.md" ;;
     secret) printf 'TOKEN = "%s"\n' "$TOKEN" >"$sub/scripts/bad.py" ;;
     drift) printf 'edited\n' >>"$t/$SKILL_DST" ;;
+    drift:*) printf 'edited\n' >>"$t/${1#drift:}" ;;
     shipped-missing) rm "$t/$SKILL_DST" ;;
+    unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/skills/extra.md" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
   esac
 }
@@ -77,7 +91,13 @@ private-checkout${TAB}OPERATOR_PATH
 secret${TAB}SECRET
 drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
+unpaired${TAB}UNPAIRED
 empty${TAB}EMPTY"
+# One planted drift per shipped copy the gate lists.
+for pair in $PAIRS; do
+  CASES="$CASES
+drift:${pair#*|}${TAB}DRIFT"
+done
 
 fail=0
 pass=0
@@ -94,10 +114,10 @@ fi
 
 while IFS="$TAB" read -r name class; do
   [ -n "$name" ] || continue
-  cp -R "$clean" "$WORK/$name"
+  cp -R "$clean" "$WORK/$(case_dir "$name")"
   plant "$name"
   rc=0
-  out="$("$GATE" --root "$WORK/$name" 2>&1)" || rc=$?
+  out="$("$GATE" --root "$WORK/$(case_dir "$name")" 2>&1)" || rc=$?
   if [ "$rc" -ne 1 ]; then
     echo "FAIL: $name -> exit $rc (expected 1)" >&2
     fail=1

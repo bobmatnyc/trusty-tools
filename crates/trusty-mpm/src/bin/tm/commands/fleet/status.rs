@@ -13,7 +13,7 @@ use serde::Serialize;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
 
-use super::{ARCHITECT_SESSION, launch, user_config_path};
+use super::{ARCHITECT_SESSION, Probe, user_config_path};
 
 /// One check's verdict.
 #[derive(Debug, Clone, Serialize)]
@@ -63,16 +63,16 @@ impl StatusReport {
 /// (a malformed config counts as not listed and says so); `profile` — the
 /// project's `.trusty-mpm.toml` requests the supervisor; `session` —
 /// `tm-architect` runs, in `dir`; `launch_stamp` — that session carries the
-/// stamp `supervisor`.
+/// stamp `supervisor`. `probe` reads tmux (see [`Probe`]).
 /// Test: `status_reports_incomplete_setup`,
 /// `fleet_init_launches_the_architect_and_status_is_complete`.
-pub(crate) fn status(dir: &Path, home: &Path) -> StatusReport {
+pub(crate) fn status(dir: &Path, home: &Path, probe: Probe) -> StatusReport {
     let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let checks = vec![
         allowlist_check(&dir, home),
         profile_check(&dir),
-        session_check(&dir),
-        stamp_check(),
+        session_check(&dir, probe),
+        stamp_check(probe),
     ];
     let complete = checks.iter().all(|c| c.ok);
     StatusReport {
@@ -130,8 +130,8 @@ fn profile_check(dir: &Path) -> Check {
 }
 
 /// Is `tm-architect` running, in `dir`?
-fn session_check(dir: &Path) -> Check {
-    let (ok, detail) = match launch::running_session_dir() {
+fn session_check(dir: &Path, probe: Probe) -> Check {
+    let (ok, detail) = match (probe.pane)(ARCHITECT_SESSION).dir() {
         None => (
             false,
             format!("tmux session {ARCHITECT_SESSION} is not running"),
@@ -155,8 +155,8 @@ fn session_check(dir: &Path) -> Check {
 }
 
 /// Does the running session carry the supervisor stamp?
-fn stamp_check() -> Check {
-    let (ok, detail) = match launch::launch_stamp() {
+fn stamp_check(probe: Probe) -> Check {
+    let (ok, detail) = match (probe.stamp)() {
         Some(v) if v == SUPERVISOR_PROFILE_ID => (true, format!("launched as `{v}`")),
         Some(v) => (
             false,
