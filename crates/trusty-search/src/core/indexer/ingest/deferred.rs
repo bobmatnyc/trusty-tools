@@ -48,6 +48,21 @@ pub(crate) struct DeferredEmbedPlan {
     embed: EmbedContext,
 }
 
+/// Vector coverage of the corpus, read by chunk id (#8884).
+///
+/// Why/What: see [`CodeIndexer::vector_coverage`].
+/// Test: `a_rejected_embedding_is_reported_and_does_not_fail_the_stage`,
+/// `an_unreadable_store_does_not_let_a_pass_settle_ready`.
+#[derive(Debug)]
+pub(crate) enum VectorCoverage {
+    /// No embedder or no store is wired: the index is vectorless by design.
+    NotApplicable,
+    /// Coverage cannot be measured; the text says which read failed.
+    Unreadable(String),
+    /// The corpus ids the store holds no vector for, out of `chunks`.
+    Measured { chunks: usize, missing: Vec<String> },
+}
+
 impl DeferredEmbedPlan {
     /// Embed the owed chunks. Holds no indexer lock (#8600).
     ///
@@ -155,7 +170,7 @@ impl CodeIndexer {
         to_embed.truncate(done);
         // #8761: the snapshot may name chunks removed or edited while it embedded.
         let (live, embeddings) = self.retain_live_snapshot(to_embed, embeddings).await?;
-        self.commit_vectors_batch(&live, &embeddings).await?;
+        let rejected = self.commit_vectors_batch(&live, &embeddings).await?;
         self.commit_embeddings_cache(&live, embeddings).await;
         let evicted = self.evict_vectors_removed_during_commit(&live).await?;
         if let Some(stall) = stalled {
@@ -171,7 +186,56 @@ impl CodeIndexer {
             embedded: live.len() - evicted,
             total,
             paused,
+            rejected,
         })
+    }
+
+    /// Measure vector coverage by chunk id: the corpus ids the store holds no
+    /// vector for (#8884).
+    ///
+    /// Why: a count comparison cannot tell a chunk no pass planned from one
+    /// whose embedding the store refused, and an orphan vector hides a missing
+    /// one. The settle of a deferred-embed pass must tell those apart.
+    /// What: `NotApplicable` with no embedder or no store. Otherwise reads the
+    /// durable corpus ids (the chunk map when no corpus is wired), then the
+    /// store's size and membership (`contains_many`). A failed corpus id read,
+    /// or a failed store size read over a non-empty corpus, is `Unreadable`.
+    /// Test: `a_never_attempted_chunk_fails_the_stage_even_when_the_counts_match`,
+    /// `an_unreadable_store_does_not_let_a_pass_settle_ready`.
+    pub(crate) async fn vector_coverage(&self) -> VectorCoverage {
+        let Some(store) = self.store.as_ref().filter(|_| self.embedder.is_some()) else {
+            return VectorCoverage::NotApplicable;
+        };
+        let ids: Vec<String> = match self.corpus.clone() {
+            Some(corpus) => {
+                match tokio::task::spawn_blocking(move || corpus.list_chunk_ids()).await {
+                    Ok(Ok(ids)) => ids.into_iter().collect(),
+                    Ok(Err(e)) => {
+                        let why = format!("the corpus chunk ids could not be read ({e:#})");
+                        return VectorCoverage::Unreadable(why);
+                    }
+                    Err(e) => {
+                        let why = format!("the corpus chunk id read did not finish ({e})");
+                        return VectorCoverage::Unreadable(why);
+                    }
+                }
+            }
+            None => self.chunks.read().await.keys().cloned().collect(),
+        };
+        let chunks = ids.len();
+        if chunks > 0 && store.len().await.is_err() {
+            return VectorCoverage::Unreadable(format!(
+                "the vector store's size could not be read, so the {chunks} corpus chunks \
+                 cannot be reconciled against it"
+            ));
+        }
+        let present = store.contains_many(&ids).await;
+        let missing = ids
+            .into_iter()
+            .zip(present)
+            .filter_map(|(id, has)| (!has).then_some(id))
+            .collect();
+        VectorCoverage::Measured { chunks, missing }
     }
 
     /// Wait, on a background budget, until the chunk map is a view of the

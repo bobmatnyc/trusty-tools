@@ -344,7 +344,8 @@ async fn begin_staged_corpus_swap_with_schema_reader(
 /// Returns `Ok(Some(tmp_path))` — since #4721 the handle is already open, so
 /// there is no adoption failure mode left to fall back from.
 /// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`,
-/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`.
+/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`,
+/// `super::resume_tests::a_resumed_first_walk_embeds_the_chunks_it_adopted`.
 async fn adopt_staged_corpus(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -361,7 +362,9 @@ async fn adopt_staged_corpus(
         let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
     }
     // Drop caches built from the LIVE corpus — see the doc comment above.
-    let reclaimed = handle.indexer.read().await.reclaim_memory_now().await;
+    // #8884: mark them evicted even when empty (a first walk killed before its
+    // promotion), or no reader rehydrates the adopted rows.
+    let reclaimed = handle.indexer.read().await.invalidate_corpus_caches().await;
     tracing::info!(
         "reindex[{}]: adopted staging corpus {} ({} staged chunk(s)); dropped {} \
          in-memory cache entr(ies) built from the pre-crash live corpus so reads \

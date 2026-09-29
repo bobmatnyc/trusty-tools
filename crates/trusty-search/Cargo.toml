@@ -51,9 +51,10 @@ name = "trusty-search"
 # 0.54.5 (Refs #8674): patch — release-opening bump anticipating #8674's new
 # pub `CreateIndexRequest.colocated` field; the break is accepted via
 # scripts/semver-accepted-breaks/trusty-search-0.54.5.txt, per owner ruling
-# 2026-09-26 (a public-API break never forces a major/minor bump here). No
-# source change in this commit.
-version = "0.54.6"
+# 2026-09-26 (a public-API break never forces a major/minor bump here).
+# 0.54.7 (Refs #8884): patch — 0.54.6 is live on crates.io and this change
+# touches src/** (the resumed-walk vector-gap fix).
+version = "0.54.7"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

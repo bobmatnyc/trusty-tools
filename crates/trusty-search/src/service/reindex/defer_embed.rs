@@ -238,7 +238,12 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             // that finishes with the live store still empty must publish
             // `Failed`, not `Ready`. Gathered before the stages write lock so
             // the indexer lock is never nested inside it.
-            let broken = super::stages::semantic_health_reason(&handle).await;
+            use crate::service::vector_gap::{gap_after_embed_pass, PassCoverage};
+            let coverage = match super::stages::semantic_health_reason(&handle).await {
+                Some(reason) => PassCoverage::Short(reason),
+                // #8884: a pass that left corpus chunks without a vector is not `Ready`.
+                None => gap_after_embed_pass(&handle, &outcome.rejected).await,
+            };
             // #4390: clear the durable pending marker only when this pass
             // reached a state that owes no further work — `Ready` (the vectors
             // are committed and snapshotted) or `Skipped` (the vector lane was
@@ -258,15 +263,29 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                          Ready, issue #2984 Phase 1 finding 4)",
                         index_id.0,
                     );
-                } else if let Some(reason) = broken {
-                    tracing::error!("deferred_embed[{}]: {reason}", index_id.0);
-                    stages.semantic = StageState::failed(&reason);
                 } else {
-                    stages.semantic.status = StageStatus::Ready;
-                    stages.semantic.completed_at = Some(now_rfc3339());
-                    stages.semantic.embedded = Some(embedded);
-                    stages.semantic.total = Some(total);
-                    settled = true;
+                    match coverage {
+                        PassCoverage::Short(reason) => {
+                            tracing::error!("deferred_embed[{}]: {reason}", index_id.0);
+                            stages.semantic = StageState::failed(&reason);
+                        }
+                        PassCoverage::Covered { rejected } => {
+                            if rejected > 0 {
+                                // #8884: named on the stage, never a gap (#764).
+                                tracing::warn!(
+                                    "deferred_embed[{}]: {rejected} chunk(s) have no vector: \
+                                     the store refused their NaN or all-zero embedding",
+                                    index_id.0,
+                                );
+                            }
+                            stages.semantic.status = StageStatus::Ready;
+                            stages.semantic.completed_at = Some(now_rfc3339());
+                            stages.semantic.embedded = Some(embedded);
+                            stages.semantic.total = Some(total);
+                            stages.semantic.vectors_rejected = (rejected > 0).then_some(rejected);
+                            settled = true;
+                        }
+                    }
                 }
             }
             if settled {

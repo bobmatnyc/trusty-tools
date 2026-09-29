@@ -35,7 +35,7 @@ use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 /// What: `embedded` is what THIS pass computed, `total` the corpus size, and
 /// `paused` whether an operator pause stopped it before the remainder was done.
 /// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedCatchUp {
     /// Chunks this pass embedded and committed.
     pub embedded: usize,
@@ -43,6 +43,8 @@ pub struct EmbedCatchUp {
     pub total: usize,
     /// The pass stopped on an operator pause and still owes work.
     pub paused: bool,
+    /// #8884: ids whose embedding the store refused — NaN or all-zero (#764).
+    pub rejected: Vec<String>,
 }
 
 impl EmbedCatchUp {
@@ -52,6 +54,7 @@ impl EmbedCatchUp {
             embedded,
             total,
             paused: false,
+            rejected: Vec::new(),
         }
     }
 }

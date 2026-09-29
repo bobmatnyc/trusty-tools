@@ -19,13 +19,13 @@
 //! exists in a shipped binary.
 //!
 //! Test: `service::reindex::root_hijack_tests`, `service::server::tests_5357`,
-//! `core::symbol_graph::contrib_tests`, and
-//! `service::server::tests_contrib_graph` are the only callers.
+//! `core::symbol_graph::contrib_tests`, `service::server::tests_contrib_graph`
+//! and `service::vector_gap::tests` are the only callers.
 
 use anyhow::{Context, Result};
 
 use super::contrib::KG_CONTRIB_TABLE;
-use super::tables::{KG_NODES_TABLE, META_KEY_KG_GRAPH_FORMAT_VERSION};
+use super::tables::{CHUNKS_TABLE, KG_NODES_TABLE, META_KEY_KG_GRAPH_FORMAT_VERSION};
 use super::CorpusStore;
 use crate::core::migration::{META_KEY_INDEXED_ROOT, META_TABLE};
 
@@ -166,5 +166,29 @@ pub(crate) fn corrupt_contrib_row(store: &CorpusStore, producer: &str) -> Result
             .context("insert corrupt contrib row")?;
     }
     txn.commit().context("commit contrib corrupt txn")?;
+    Ok(())
+}
+
+/// Make every `chunks` read fail with a real redb error (#8884).
+///
+/// What: the [`break_meta_table`] trick applied to `chunks`, so
+/// `list_chunk_ids` and `chunk_count` return `TableError::TableTypeMismatch`
+/// while every other table still works.
+/// Test: `an_unreadable_corpus_does_not_let_a_pass_settle_ready`.
+pub(crate) fn break_chunks_table(store: &CorpusStore) -> Result<()> {
+    const DECOY_CHUNKS_TABLE: redb::TableDefinition<&str, u64> =
+        redb::TableDefinition::new("chunks");
+    let txn = store.db.begin_write().context("begin chunks break txn")?;
+    txn.delete_table(CHUNKS_TABLE)
+        .map_err(|e| anyhow::anyhow!("drop chunks table: {e}"))?;
+    {
+        let mut decoy = txn
+            .open_table(DECOY_CHUNKS_TABLE)
+            .map_err(|e| anyhow::anyhow!("create decoy chunks table: {e}"))?;
+        decoy
+            .insert("decoy", 0u64)
+            .context("seed decoy chunk row")?;
+    }
+    txn.commit().context("commit chunks break txn")?;
     Ok(())
 }

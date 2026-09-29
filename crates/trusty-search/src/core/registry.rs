@@ -94,6 +94,17 @@ pub struct StageState {
     /// operator sees WHY a stage failed without reading daemon logs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// #8884: chunks the last embed pass could not give a vector because the
+    /// store refused their embedding as NaN or all-zero (#764).
+    ///
+    /// Why: the embedder returns the same bad vector on every pass, so these
+    /// chunks can never be closed. Counting them as a gap would hold the stage
+    /// `failed`, and a failed stage takes the whole index lexical-only.
+    /// What: set on a `ready` semantic stage; `ready` then means every other
+    /// corpus chunk has a vector. `None` when the pass refused none.
+    /// Test: `a_rejected_embedding_is_reported_and_does_not_fail_the_stage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vectors_rejected: Option<usize>,
     /// #6524: the stage is parked on an operator pause rather than working.
     ///
     /// Why: a paused embedding stage is legitimately `InProgress` — it owes

@@ -353,3 +353,340 @@ async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
         "the failure must name the missing embedder: {semantic:?}"
     );
 }
+
+/// Why (#8884): a deferred pass whose plan cannot see a corpus row finishes
+/// without error. Publishing `Ready` then hides that row's missing vector
+/// until a restart, which is the fail-open settle this issue reported.
+/// What: commits [`SOURCE`] through the indexer, writes one more chunk straight
+/// into the durable corpus so the chunk map never sees it, runs the pass, and
+/// requires `Failed` naming the gap, never `Ready`.
+/// Test: this test.
+#[tokio::test]
+async fn a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready() {
+    let id = "vector-gap-8884-hidden-row";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("corpus"),
+    );
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let mut indexer = CodeIndexer::new(id, dir.path()).with_components(embedder, store);
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let (hidden, _) = chunk_ast("src/hidden.rs", "pub fn hidden() -> u32 {\n    3\n}\n");
+    corpus
+        .upsert_chunks(&hidden)
+        .expect("write a row around the chunk map");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        dir.path().to_path_buf(),
+    ));
+
+    crate::service::reindex::run_embed_catch_up(
+        Arc::clone(&handle),
+        Arc::new(crate::service::reindex::ReindexProgress::new()),
+    )
+    .await;
+
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "#8884: a pass that left a corpus chunk without a vector must not read ready: \
+         {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("still without a vector")),
+        "the failure must name the gap: {semantic:?}"
+    );
+}
+
+/// An embedder that returns an all-zero vector for any text naming `beta`,
+/// which `commit_vectors_batch` refuses on every pass (#764).
+struct ZeroForBeta(MockEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for ZeroForBeta {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(self.embed_batch(&[text]).await?.remove(0))
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let mut out = Embedder::embed_batch(&self.0, texts).await?;
+        for (text, vector) in texts.iter().zip(out.iter_mut()) {
+            if text.contains("beta") {
+                *vector = vec![0.0; DIM];
+            }
+        }
+        Ok(out)
+    }
+    fn dimension(&self) -> usize {
+        DIM
+    }
+}
+
+/// A handle over a real corpus holding [`SOURCE`], committed through the
+/// indexer so the chunk map sees every row. Returns the chunk count, the
+/// corpus, and the tempdir that owns it.
+async fn corpus_handle(
+    id: &str,
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn VectorStore>,
+) -> (
+    Arc<IndexHandle>,
+    usize,
+    Arc<crate::core::corpus::CorpusStore>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("corpus"),
+    );
+    let mut indexer = CodeIndexer::new(id, dir.path()).with_components(embedder, store);
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    let total = chunks.len();
+    indexer
+        .commit_parsed_batch(
+            ParsedBatch {
+                embeddings: vec![None; chunks.len()],
+                chunks,
+                entities_by_file: vec![],
+                parse_ms: 0,
+                embed_ms: 0,
+                vector_count: 0,
+            },
+            false,
+        )
+        .await
+        .expect("commit");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        dir.path().to_path_buf(),
+    ));
+    (handle, total, corpus, dir)
+}
+
+/// Run one deferred-embed pass to its settle and return the semantic stage.
+async fn run_pass(handle: &Arc<IndexHandle>) -> StageState {
+    crate::service::reindex::run_embed_catch_up(
+        Arc::clone(handle),
+        Arc::new(crate::service::reindex::ReindexProgress::new()),
+    )
+    .await;
+    handle.stages.read().await.semantic.clone()
+}
+
+/// A corpus row no chunk-map entry and no vector covers: what the #8884
+/// adoption left, and what `remove_file` leaves between its vector removal
+/// and its redb delete.
+fn write_hidden_row(corpus: &crate::core::corpus::CorpusStore) -> String {
+    let (hidden, _) = chunk_ast("src/hidden.rs", "pub fn hidden() -> u32 {\n    3\n}\n");
+    corpus
+        .upsert_chunks(&hidden)
+        .expect("write a row around the chunk map");
+    hidden[0].id.clone()
+}
+
+/// Why (#8884 review): the store refuses a NaN or all-zero embedding on every
+/// pass, so a count gap over such a chunk never closes and held the stage
+/// `failed` for good, taking the index lexical-only.
+/// What: an embedder zeroes the `beta` chunk; the pass must settle `Ready`
+/// and name the refused chunk in `vectors_rejected`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_rejected_embedding_is_reported_and_does_not_fail_the_stage() {
+    let embedder: Arc<dyn Embedder> = Arc::new(ZeroForBeta(MockEmbedder::new(DIM)));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, total, _corpus, _dir) =
+        corpus_handle("vector-gap-8884-rejected", embedder, store).await;
+
+    let semantic = run_pass(&handle).await;
+    assert_eq!(
+        semantic.status,
+        StageStatus::Ready,
+        "a refused embedding is not a gap a pass can close: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .vectors_rejected
+            .is_some_and(|n| n >= 1 && n < total),
+        "the refused chunk must be reported on the stage: {semantic:?}"
+    );
+}
+
+/// Why (#8884 review): the gap is measured by id. An orphan vector used to
+/// balance the count, so a chunk no pass planned read as covered.
+/// What: a corpus row outside the chunk map plus one orphan vector; the counts
+/// match, and the pass must still settle `Failed` naming the gap.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_never_attempted_chunk_fails_the_stage_even_when_the_counts_match() {
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, _, corpus, _dir) =
+        corpus_handle("vector-gap-8884-orphan", embedder, Arc::clone(&store)).await;
+    write_hidden_row(&corpus);
+    store
+        .upsert("src/orphan.rs:1:3", vec![0.5; DIM])
+        .await
+        .expect("orphan vector");
+
+    let semantic = run_pass(&handle).await;
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a chunk no pass attempted must not read ready: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("1 of") && r.contains("still without a vector")),
+        "the failure must name the gap: {semantic:?}"
+    );
+}
+
+/// Why (#8884 review): `remove_file` removes a vector before its redb row,
+/// under the indexer read guard. A settle that reads between the two saw a
+/// gap the removal was about to close, and failed the stage.
+/// What: a remover holds the read guard over a row whose vector is already
+/// gone, and deletes the row only once the stage settles or two seconds pass.
+/// The pass must wait it out and settle `Ready`, never `Failed`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_removal_racing_the_settle_does_not_fail_the_stage() {
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, _, corpus, _dir) = corpus_handle("vector-gap-8884-race", embedder, store).await;
+    let removing = write_hidden_row(&corpus);
+
+    let guard = Arc::clone(&handle.indexer).read_owned().await;
+    let stages = Arc::clone(&handle.stages);
+    let remover = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let status = stages.read().await.semantic.status;
+            if matches!(status, StageStatus::Ready | StageStatus::Failed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        corpus.delete_chunks(&[removing]).expect("delete the row");
+        drop(guard);
+    });
+
+    let semantic = run_pass(&handle).await;
+    remover.await.expect("remover");
+    assert_eq!(
+        semantic.status,
+        StageStatus::Ready,
+        "an in-flight removal is not a vector gap: {semantic:?}"
+    );
+}
+
+/// Why (#8884 review, mirrors #8863): a store whose size read errors cannot
+/// confirm coverage, and the settle used to fall open to `Ready`, clearing the
+/// pending marker.
+/// What: runs the pass over [`UnreadableStore`] and requires `Failed` naming
+/// the unreadable size.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unreadable_store_does_not_let_a_pass_settle_ready() {
+    let (handle, _) = handle_over_unreadable_store("vector-gap-8884-unreadable").await;
+    let semantic = run_pass(&handle).await;
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "an unreadable store must not settle ready: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("could not be read")),
+        "the failure must name the unreadable store: {semantic:?}"
+    );
+}
+
+/// Whether `indexes.toml` holds the deferred-embed marker for `id`.
+fn deferred_embed_marker(id: &str) -> bool {
+    use crate::service::persistence::{indexes_toml_path, load_index_registry_at};
+    let path = indexes_toml_path().expect("indexes.toml path");
+    load_index_registry_at(&path)
+        .expect("registry must load")
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("entry {id} must exist in indexes.toml"))
+        .deferred_embed_pending
+}
+
+/// Why (#8884 review): a corpus whose chunk ids cannot be read cannot confirm
+/// coverage. Falling back to the chunk-map count reads a full store as covered,
+/// settles `Ready` and clears the marker over chunks that may lack a vector.
+/// What: every chunk already has a vector, so the chunk map reads as covered;
+/// the `chunks` table is then broken. The pass must settle `Failed` naming the
+/// unreadable corpus ids and keep the deferred-embed marker.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unreadable_corpus_does_not_let_a_pass_settle_ready() {
+    let id = "vector-gap-8884-unreadable-corpus";
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, total, corpus, dir) = corpus_handle(id, embedder, Arc::clone(&store)).await;
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    for chunk in &chunks {
+        store
+            .upsert(&chunk.id, vec![0.5; DIM])
+            .await
+            .expect("seed vector");
+    }
+    assert_eq!(store.len().await.expect("store len"), total, "sanity");
+    crate::service::persistence::upsert_index_registry_entry(
+        crate::service::persistence::PersistedIndex::new(id.to_owned(), dir.path().to_path_buf()),
+    )
+    .expect("persist entry");
+    crate::service::boot_markers::persist_deferred_embed_pending(id, true);
+    crate::core::corpus::test_support::break_chunks_table(&corpus).expect("break chunks");
+
+    let semantic = run_pass(&handle).await;
+    assert_eq!(
+        semantic.status,
+        StageStatus::Failed,
+        "a corpus whose ids cannot be read must not settle ready: {semantic:?}"
+    );
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("corpus chunk ids could not be read")),
+        "the failure must name the unreadable corpus: {semantic:?}"
+    );
+    assert!(
+        deferred_embed_marker(id),
+        "a pass that could not confirm coverage must keep the marker"
+    );
+}

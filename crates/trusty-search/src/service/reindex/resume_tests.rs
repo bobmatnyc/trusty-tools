@@ -59,11 +59,28 @@ fn make_root(files: &[(&str, &str)]) -> tempfile::TempDir {
 /// path and stays hermetic), and returns the handle. `defer_embed` is `true`,
 /// matching the daemon's default for a freshly registered index.
 fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
+    make_handle_with(root, id, CodeIndexer::new(id, root.to_path_buf()))
+}
+
+/// [`make_handle`] with a mock embedder and a real HNSW store wired (#8884),
+/// so the run queues the deferred-embed pass a daemon index gets.
+fn make_embedding_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
+    use crate::core::embed::{Embedder, MockEmbedder};
+    use crate::core::store::{UsearchStore, VectorStore};
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(32));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(32).expect("usearch store"));
+    let indexer = CodeIndexer::new(id, root.to_path_buf()).with_components(embedder, store);
+    make_handle_with(root, id, indexer)
+}
+
+/// Wire the colocated live corpus under `root` onto `indexer` and wrap it in
+/// a handle — the shared body of [`make_handle`] and [`make_embedding_handle`].
+fn make_handle_with(root: &Path, id: &str, indexer: CodeIndexer) -> Arc<IndexHandle> {
     let db_path = crate::service::colocated_storage::colocated_redb_path(root).expect("redb path");
     let corpus = CorpusStore::open(&db_path).expect("open live corpus");
-    let mut indexer = CodeIndexer::new(id, root.to_path_buf())
-        // #8438: this fixture models a colocated index; the registry decides.
-        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
+    // #8438: this fixture models a colocated index; the registry decides.
+    let mut indexer =
+        indexer.with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
     indexer.set_corpus_store(Arc::new(corpus));
     let mut skip_dirs = crate::service::walker::default_extra_skip_dirs();
     // Never walk our own storage dir — a redb file is not source.
@@ -698,4 +715,90 @@ async fn a_leftover_staging_directory_does_not_break_the_next_run() {
     );
     let fingerprint = corpus_fingerprint(&handle).await;
     assert!(fingerprint.contains("echo"), "the change must be indexed");
+}
+
+/// Wait until the deferred-embed queue is empty and `semantic` has settled.
+async fn wait_for_the_embed_pass(handle: &IndexHandle) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let settled = handle.stages.read().await.semantic.status
+            != crate::core::registry::StageStatus::InProgress;
+        if settled && super::deferred_embed_queue_depth() == 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the deferred-embed pass never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Why (#8884): a first walk killed before its promotion leaves an empty live
+/// corpus, so the resumed run adopts staging over an empty chunk map. The map
+/// then held only the chunks the resumed run walked, and the deferred-embed
+/// pass, which plans from that map, embedded only those: `semantic` reported
+/// `Ready` with fewer vectors than the corpus held chunks until a restart.
+/// What: plants a staging corpus holding `a.rs`/`b.rs` (built by a donor index,
+/// so the subject's live corpus stays empty), reindexes the subject over all
+/// four files with an embedder wired, waits for the embed pass, and requires a
+/// vector for every corpus chunk, and a search hit on an adopted chunk.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_resumed_first_walk_embeds_the_chunks_it_adopted() {
+    let donor = make_root(&FIXTURE[..2]);
+    let donor_handle = make_handle(donor.path(), "resume-gap-8884-donor");
+    reindex(&donor_handle).await;
+    let donor_live =
+        crate::service::colocated_storage::colocated_redb_path(donor.path()).expect("live path");
+
+    let root = make_root(FIXTURE);
+    let handle = make_embedding_handle(root.path(), "resume-gap-8884");
+    let checkpoint = valid_checkpoint_json(&handle, "resume-gap-8884", root.path());
+    plant_staging_corpus(root.path(), &donor_live, &checkpoint);
+
+    let progress = reindex(&handle).await;
+    assert_eq!(
+        progress.skipped.load(Ordering::Acquire),
+        2,
+        "the fixture must model a resume: the two adopted files are skipped"
+    );
+    wait_for_the_embed_pass(&handle).await;
+
+    let indexer = handle.indexer.read().await;
+    // #8884 review: an adopted chunk must answer a lexical query.
+    let hits = indexer
+        .search(&crate::core::indexer::SearchQuery {
+            text: "alpha".to_string(),
+            top_k: 5,
+            stage: Some(crate::core::indexer::SearchStage::Lexical),
+            ..Default::default()
+        })
+        .await
+        .expect("lexical search");
+    assert!(
+        hits.iter().any(|hit| hit.file.ends_with("a.rs")),
+        "#8884: the adopted `a.rs` must be searchable; got {:?}",
+        hits.iter().map(|hit| &hit.file).collect::<Vec<_>>()
+    );
+    let chunks = indexer
+        .corpus_store()
+        .expect("promoted corpus")
+        .chunk_count()
+        .expect("chunk count");
+    assert!(
+        chunks >= 4,
+        "all four files must be in the corpus; got {chunks}"
+    );
+    assert_eq!(
+        indexer.vector_count().await,
+        Some(chunks),
+        "#8884: the embed pass must cover the adopted chunks, not only the walked ones"
+    );
+    drop(indexer);
+    assert_eq!(
+        handle.stages.read().await.semantic.status,
+        crate::core::registry::StageStatus::Ready
+    );
 }

@@ -12,13 +12,18 @@
 //! What: [`semantic_vector_gap`] is the pure rule; [`reconcile_semantic_vector_gap`]
 //! applies it to a live handle and queues the catch-up through the serialized
 //! deferred-embed queue. Called after a restore registers a handle and after
-//! the boot migration chain succeeds.
+//! the boot migration chain succeeds. [`gap_after_embed_pass`] measures the gap
+//! by chunk id when a deferred-embed pass settles, so the pass cannot publish
+//! `Ready` over a gap it did not close (#8884).
 //! Test: `tests` below, and through the boot migration path
 //! `m005_vector_gap_is_not_ready_and_is_backfilled` in
 //! `core::migration::m005::tests`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::core::indexer::VectorCoverage;
 use crate::core::registry::{IndexHandle, StageState, StageStatus};
 
 /// How many chunks a `Ready` or `Pending` semantic stage is short of a vector
@@ -47,6 +52,96 @@ pub fn semantic_vector_gap(
     }
     let vectors = vector_count?;
     (vectors < chunk_count).then(|| chunk_count - vectors)
+}
+
+/// The durable corpus chunk count, falling back to the in-memory map.
+fn corpus_chunk_count(indexer: &crate::core::indexer::CodeIndexer) -> usize {
+    indexer
+        .corpus_arc()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or_else(|| indexer.chunk_count())
+}
+
+/// How long a settle waits for in-flight index writers before its re-read
+/// (#8884). A pending write lock stalls new readers, so this stays short.
+const WRITER_SETTLE_CEILING: Duration = Duration::from_secs(5);
+
+/// What a finished deferred-embed pass may publish (#8884).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PassCoverage {
+    /// Every corpus chunk has a vector except `rejected`, whose embedding the
+    /// store refused as NaN or all-zero (#764). Settles `Ready`.
+    Covered { rejected: usize },
+    /// Chunks no pass attempted still lack a vector, or coverage cannot be
+    /// measured. Settles `Failed` with this reason and keeps the marker.
+    Short(String),
+}
+
+/// Judge whether a finished deferred-embed pass may publish `Ready` (#8884).
+///
+/// Why: the pass plans from the in-memory chunk map, so a map that has lost
+/// sight of corpus rows — the resumed-first-walk adoption of #8884 — finishes
+/// without error while those rows still have no vector. Publishing `Ready`
+/// then hides the gap until a restart. A count comparison over-reports: a
+/// refused NaN/zero embedding (#764) recurs on every pass, and `remove_file`
+/// drops a vector before its redb row, so a read between the two sees a gap
+/// that the removal is about to close.
+/// What: measures coverage by chunk id (`CodeIndexer::vector_coverage`) and
+/// subtracts `rejected`, the ids this pass's commit refused. What remains is
+/// the unattempted gap. Before judging a gap or an unreadable store `Short`,
+/// waits up to [`WRITER_SETTLE_CEILING`] for the indexer write lock, which
+/// every in-flight `remove_file` holds a read guard against, and re-reads
+/// once. No embedder or no store wired is `Covered` (#4707's vectorless
+/// index).
+/// Test: `a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready`,
+/// `a_rejected_embedding_is_reported_and_does_not_fail_the_stage`,
+/// `a_never_attempted_chunk_fails_the_stage_even_when_the_counts_match`,
+/// `a_removal_racing_the_settle_does_not_fail_the_stage`,
+/// `an_unreadable_store_does_not_let_a_pass_settle_ready`.
+pub(crate) async fn gap_after_embed_pass(
+    handle: &IndexHandle,
+    rejected: &[String],
+) -> PassCoverage {
+    let rejected: HashSet<&str> = rejected.iter().map(String::as_str).collect();
+    let first = judge_coverage(
+        handle.indexer.read().await.vector_coverage().await,
+        &rejected,
+    );
+    if matches!(first, PassCoverage::Covered { .. }) {
+        return first;
+    }
+    // #8884: let an in-flight removal delete its redb row, then re-read once.
+    let _ = tokio::time::timeout(WRITER_SETTLE_CEILING, handle.indexer.write()).await;
+    judge_coverage(
+        handle.indexer.read().await.vector_coverage().await,
+        &rejected,
+    )
+}
+
+/// The verdict for one coverage read; see [`gap_after_embed_pass`].
+fn judge_coverage(coverage: VectorCoverage, rejected: &HashSet<&str>) -> PassCoverage {
+    const RE_ARM: &str = "The deferred-embed marker is kept, so the next boot re-arms the pass; \
+                          `PATCH /indexes/{id}/config {\"vector\": true}` re-arms it now (#8884)";
+    match coverage {
+        VectorCoverage::NotApplicable => PassCoverage::Covered { rejected: 0 },
+        VectorCoverage::Unreadable(why) => PassCoverage::Short(format!(
+            "the semantic embed pass cannot confirm its coverage: {why}. {RE_ARM}"
+        )),
+        VectorCoverage::Measured { chunks, missing } => {
+            let refused = missing
+                .iter()
+                .filter(|id| rejected.contains(id.as_str()))
+                .count();
+            let gap = missing.len() - refused;
+            if gap == 0 {
+                return PassCoverage::Covered { rejected: refused };
+            }
+            PassCoverage::Short(format!(
+                "the semantic embed pass finished with {gap} of {chunks} chunks still without a \
+                 vector, so the stage is not reported ready. {RE_ARM}"
+            ))
+        }
+    }
 }
 
 /// Settle the semantic stage of a restored handle whose store is short of the
@@ -81,12 +176,8 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
     }
     let (chunk_count, vectors, has_store, has_embedder) = {
         let indexer = handle.indexer.read().await;
-        let chunks = indexer
-            .corpus_arc()
-            .and_then(|c| c.chunk_count().ok())
-            .unwrap_or_else(|| indexer.chunk_count());
         (
-            chunks,
+            corpus_chunk_count(&indexer),
             indexer.vector_count().await,
             indexer.has_vector_store(),
             indexer.has_embedder(),
