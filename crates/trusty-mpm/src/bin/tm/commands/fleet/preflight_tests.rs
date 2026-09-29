@@ -5,8 +5,9 @@
 //! every directory. Each runs under a scratch `<outer>/home`, so a write the
 //! old code made still lands inside the scratch tree.
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use super::super::{init, resolve_dir, user_config_path};
 use super::{DirRefusal, check};
@@ -55,22 +56,39 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {out:?}");
 }
 
-/// `init` fails with a [`DirRefusal`] and wrote neither the grant nor the
-/// project file.
+/// What `init` writes: the target directory, its `.git` and project file, and
+/// the user allowlist. Each is `(path, Some((len, mtime)))`, or `None` when
+/// the path does not exist.
+fn write_set(dir: &Path, home: &Path) -> Vec<(PathBuf, Option<(u64, SystemTime)>)> {
+    [
+        dir.to_path_buf(),
+        dir.join(".git"),
+        dir.join(".trusty-mpm.toml"),
+        user_config_path(home),
+    ]
+    .into_iter()
+    .map(|path| {
+        let meta = std::fs::symlink_metadata(&path).ok();
+        let stamp = meta.map(|m| (m.len(), m.modified().expect("mtime")));
+        (path, stamp)
+    })
+    .collect()
+}
+
+/// `init` fails with a [`DirRefusal`] and left its write set as it found it:
+/// the target was not created, and its `.git`, the project file and the
+/// allowlist were neither created nor changed.
 fn refused_under(dir: &Path, home: &Path) -> DirRefusal {
+    let before = write_set(dir, home);
     let err = init(dir, home, false).expect_err(&format!("{} must be refused", dir.display()));
     let refusal = err
         .downcast_ref::<DirRefusal>()
         .unwrap_or_else(|| panic!("{}: not a preflight refusal: {err:#}", dir.display()))
         .clone();
-    assert!(
-        !user_config_path(home).exists(),
-        "{}: the allowlist was written",
-        dir.display()
-    );
-    assert!(
-        !dir.join(".trusty-mpm.toml").exists(),
-        "{}: the project file was written",
+    assert_eq!(
+        write_set(dir, home),
+        before,
+        "{}: init changed what it writes",
         dir.display()
     );
     refusal
@@ -100,6 +118,17 @@ fn the_filesystem_root_is_refused() {
         assert_eq!(
             s.refused(Path::new(root)),
             DirRefusal::FilesystemRoot(PathBuf::from("/"))
+        );
+    }
+    // A mount root runs the device comparison. `/dev` is devfs on macOS and
+    // devtmpfs on Linux; a host with no separate `/dev` has no mount root to
+    // test here, so only this assertion is skipped there.
+    let dev = Path::new("/dev");
+    let device = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).unwrap();
+    if device(dev) != device(Path::new("/")) {
+        assert_eq!(
+            s.refused(dev),
+            DirRefusal::FilesystemRoot(dev.to_path_buf())
         );
     }
 }
@@ -240,6 +269,91 @@ fn a_failing_remote_listing_refuses() {
         matches!(refusal, DirRefusal::GitProbeFailed { .. }),
         "{refusal:?}"
     );
+}
+
+/// `<home>/.trusty-tools/trusty-mpm/config.yaml` holding `yaml`.
+fn write_tm_config(home: &Path, yaml: &str) -> PathBuf {
+    let config = home.join(".trusty-tools/trusty-mpm/config.yaml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, yaml).unwrap();
+    config
+}
+
+/// Fail-Open Check (critic H1): a config that will not parse hides the
+/// configured projects root, so it refuses instead of using the default.
+#[test]
+fn a_malformed_tm_config_refuses() {
+    let s = Scratch::new();
+    let config = write_tm_config(&s.home(), "workspace_root_template: [unclosed\n");
+    let refusal = s.refused(&s.home().join("arch"));
+    assert_unresolvable(refusal, &config.display().to_string());
+}
+
+/// Critic H1: every candidate projects root is refused, not only the one
+/// that wins by precedence. Here, the configured root.
+#[test]
+fn the_configured_projects_root_is_refused() {
+    let s = Scratch::new();
+    let root = s.outer().join("elsewhere");
+    write_tm_config(
+        &s.home(),
+        &format!("workspace_root_template: {}\n", root.display()),
+    );
+    assert_workspace_parent(s.refused(&root), &root, "projects root");
+}
+
+/// Critic M1: `~/.trusty-mpm` holds the `[supervisor] projects` allowlist.
+/// It holds no repository here, so the repository scan cannot refuse it.
+#[test]
+fn the_tm_config_directory_is_refused() {
+    let s = Scratch::new();
+    let config_dir = s.home().join(".trusty-mpm");
+    std::fs::create_dir_all(config_dir.join("sub")).unwrap();
+    for dir in [
+        config_dir.clone(),
+        config_dir.join("sub"),
+        config_dir.join("arch"),
+    ] {
+        assert_eq!(
+            s.refused(&dir),
+            DirRefusal::ConfigDir {
+                path: dir.clone(),
+                config_dir: config_dir.clone()
+            }
+        );
+    }
+}
+
+/// Critic M1: through a symlinked `~/.trusty-mpm`, the directory holding its
+/// real target is refused too.
+#[test]
+fn a_directory_holding_a_symlinked_tm_config_directory_is_refused() {
+    let s = Scratch::new();
+    let dotfiles = s.outer().join("dotfiles");
+    let real = dotfiles.join("trusty-mpm");
+    std::fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink(&real, s.home().join(".trusty-mpm")).unwrap();
+    assert_eq!(
+        s.refused(&dotfiles),
+        DirRefusal::ConfigDir {
+            path: dotfiles.clone(),
+            config_dir: real
+        }
+    );
+}
+
+/// Fail-Open Check (critic L1): an ancestor `.git` that is a symlink to
+/// itself cannot be checked (ELOOP), so it refuses.
+#[test]
+fn a_looping_ancestor_git_entry_refuses() {
+    let s = Scratch::new();
+    let code = s.home().join("code");
+    std::fs::create_dir(&code).unwrap();
+    std::os::unix::fs::symlink(code.join(".git"), code.join(".git")).unwrap();
+    match s.refused(&code.join("arch")) {
+        DirRefusal::Unresolvable { path, .. } => assert_eq!(path, code.join(".git")),
+        other => panic!("expected Unresolvable for the looping .git, got {other:?}"),
+    }
 }
 
 #[test]

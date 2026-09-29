@@ -16,8 +16,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use trusty_common::crate_config::{crate_config_path_at, load_at};
+use trusty_common::workspace_layout::expand_tilde;
 use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo};
-use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
+
+use super::user_config_path;
 
 /// The built-in projects root under the home directory (`~/trusty-mpm-projects`).
 const PROJECTS_ROOT_DIR: &str = "trusty-mpm-projects";
@@ -37,6 +41,9 @@ pub(crate) enum DirRefusal {
     /// A directory holding other projects: a projects root, an ancestor of the
     /// home directory or a projects root, or a directory with a repository in it.
     WorkspaceParent { path: PathBuf, reason: String },
+    /// The tm user config directory (`~/.trusty-mpm`, which holds the
+    /// `[supervisor] projects` allowlist), a path inside it, or one holding it.
+    ConfigDir { path: PathBuf, config_dir: PathBuf },
     /// A path below another git work tree.
     InsideWorkTree { path: PathBuf, work_tree: PathBuf },
     /// An existing repository with a remote configured.
@@ -70,6 +77,13 @@ impl fmt::Display for DirRefusal {
                 "refusing {}: it is a workspace parent ({reason}); {FIX}",
                 path.display()
             ),
+            Self::ConfigDir { path, config_dir } => write!(
+                f,
+                "refusing {}: it overlaps the tm config directory {}, which holds the \
+                 `[supervisor] projects` allowlist; {FIX}",
+                path.display(),
+                config_dir.display()
+            ),
             Self::InsideWorkTree { path, work_tree } => write!(
                 f,
                 "refusing {}: it is inside the git work tree {}; {FIX} outside any repository",
@@ -98,14 +112,18 @@ impl std::error::Error for DirRefusal {}
 /// Why: see the module doc. Every caller writes through the returned path, so
 /// what was checked is what gets written, with no symlink left to re-resolve.
 /// What: in order, refuses (1) a path that cannot be canonicalized; (2) `/` or
-/// a mount root; (3) `home`; (4) a workspace parent, meaning a projects root
-/// (`<home>/trusty-mpm-projects` or the configured workspace root), an
-/// ancestor of `home` or of a projects root, or a directory whose subtree
-/// holds a repository, or whose subtree scan cannot finish; (5) a path with a
-/// `.git` entry in any strict ancestor; (6) a repository whose `git remote`
-/// lists a remote or fails. A fresh directory, and a repository fleet init
-/// created (a no-remote repo at the target), pass.
+/// a mount root; (3) `home`; (4) an ancestor of `home`; (5) the tm config
+/// directory (the parent of [`user_config_path`]), a path inside it, or one
+/// holding it; (6) a workspace parent, meaning any candidate projects root
+/// (`<home>/trusty-mpm-projects`, the configured root, the
+/// `TRUSTY_MPM_WORKSPACE_ROOT` value) or an ancestor of one, or a directory
+/// whose subtree holds a repository or cannot be scanned; (7) a path with a
+/// `.git` entry in any strict ancestor; (8) a repository whose `git remote`
+/// lists a remote or fails. A trusty-mpm config that exists but will not
+/// load is a refusal; a missing one is the default. A fresh directory, and a
+/// repository fleet init created (a no-remote repo at the target), pass.
 /// Test: `the_home_directory_is_refused_however_it_is_spelled`,
+/// `a_malformed_tm_config_refuses`, `the_tm_config_directory_is_refused`,
 /// `a_repository_with_a_remote_is_refused`, `a_failing_remote_listing_refuses`,
 /// `the_default_and_a_fresh_directory_pass`, and the rest of `preflight_tests.rs`.
 pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
@@ -117,6 +135,13 @@ pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
     if target == home {
         return Err(DirRefusal::Home(target));
     }
+    if home.starts_with(&target) {
+        return Err(DirRefusal::WorkspaceParent {
+            reason: format!("it contains your home directory {}", home.display()),
+            path: target,
+        });
+    }
+    refuse_config_dir(&target, &home)?;
     refuse_workspace_parent(&target, &home)?;
     refuse_enclosing_work_tree(&target)?;
     refuse_remote(&target)?;
@@ -176,21 +201,61 @@ fn is_filesystem_root(target: &Path) -> Result<bool, DirRefusal> {
     Ok(own != above.dev())
 }
 
-/// Refuse a projects root, an ancestor of home or a projects root, or a
-/// directory with a repository in its subtree (the #7673 workspace-parent scan).
+/// Refuse the tm config directory, a path inside it, or one holding it.
+// #8436 critic M1: `~/.trusty-mpm` holds the `[supervisor] projects` allowlist.
+fn refuse_config_dir(target: &Path, home: &Path) -> Result<(), DirRefusal> {
+    let config_path = user_config_path(home);
+    let Some(config_dir) = config_path.parent() else {
+        return Ok(());
+    };
+    let config_dir = resolve(config_dir)?;
+    if target.starts_with(&config_dir) || config_dir.starts_with(target) {
+        return Err(DirRefusal::ConfigDir {
+            path: target.to_path_buf(),
+            config_dir,
+        });
+    }
+    Ok(())
+}
+
+/// Every projects root fleet init must not own: the built-in default, the
+/// configured root and the env override, not only the one precedence picks.
+///
+/// What: reads `<home>/.trusty-tools/trusty-mpm/config.yaml` with the fallible
+/// loader. A missing file adds no root; one that cannot be read or parsed is
+/// [`DirRefusal::Unresolvable`] naming the file.
+// #8436 critic H1: `TrustyToolsConfig::load` falls back to the default on a
+// malformed file, which dropped the configured root from the check.
+fn projects_roots(target: &Path, home: &Path) -> Result<Vec<PathBuf>, DirRefusal> {
+    let expand = |raw: Option<&str>| {
+        raw.map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| expand_tilde(raw, home))
+    };
+    let mut roots = vec![home.join(PROJECTS_ROOT_DIR)];
+    let config = crate_config_path_at(home, CRATE_NAME);
+    match load_at::<TrustyToolsConfig>(&config) {
+        Ok(None) => {}
+        Ok(Some(cfg)) => roots.extend(expand(cfg.workspace_root_template.as_deref())),
+        Err(e) => {
+            return Err(DirRefusal::Unresolvable {
+                path: target.to_path_buf(),
+                reason: format!("the trusty-mpm config did not load: {e}"),
+            });
+        }
+    }
+    roots.extend(expand(std::env::var(WORKSPACE_ROOT_ENV).ok().as_deref()));
+    Ok(roots)
+}
+
+/// Refuse any projects root or an ancestor of one, or a directory with a
+/// repository in its subtree (the #7673 workspace-parent scan).
 fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
         reason,
     };
-    if home.starts_with(target) {
-        return Err(parent(format!(
-            "it contains your home directory {}",
-            home.display()
-        )));
-    }
-    let configured = workspace_root(&TrustyToolsConfig::load());
-    for root in [home.join(PROJECTS_ROOT_DIR), configured] {
+    for root in projects_roots(target, home)? {
         let root = resolve(&root)?;
         if root.starts_with(target) {
             return Err(parent(format!(
