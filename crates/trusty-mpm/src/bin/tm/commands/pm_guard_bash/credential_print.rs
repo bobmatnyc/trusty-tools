@@ -14,8 +14,9 @@
 //! assignment, an argument to a non-printing program, or a non-printing stdin
 //! consumer. It is refused when a value reaches the terminal, a reader that
 //! prints (`head`, `diff`, any program not known to swallow its input), an
-//! `echo`/`printf`/`cat` argument, or the command-name position; when xtrace is
-//! on; and when credential-command text is handed to an evaluator (`eval`,
+//! `echo`/`printf`/`cat` argument — or its stderr, when it names that argument
+//! in an error (#8735, `credential_print_stderr`) — or the command-name
+//! position; when xtrace is on; and when credential-command text is handed to an evaluator (`eval`,
 //! `sh` on stdin, `ssh`, `python3 -c`, …) or run through a `$`-named program.
 //! A variable bound from a credential carries it into every stage of the
 //! command (#8676, `credential_print_taint`). While one does, any inline code
@@ -74,6 +75,9 @@ mod credential_print_programs;
 mod credential_print_redirect;
 #[path = "credential_print_split.rs"]
 mod credential_print_split;
+// #8735: printers that repeat a credential operand in their error text.
+#[path = "credential_print_stderr.rs"]
+mod credential_print_stderr;
 #[path = "credential_print_taint.rs"]
 mod credential_print_taint;
 #[path = "credential_print_taint_forms.rs"]
@@ -98,6 +102,7 @@ use credential_print_redirect::{
     apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
 };
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
+use credential_print_stderr::{reports_operand_on_stderr, route_print_unit};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
 use credential_print_taint_sinks::{
@@ -225,7 +230,9 @@ struct Lifted {
 /// `credential_print_tests::denies_a_verbose_curl_carrying_a_credential_8677`,
 /// `credential_print_tests::denies_a_credential_redirected_to_an_unread_target_8677`,
 /// `credential_print_tests::denies_the_sibling_credential_clis_8677`,
-/// `credential_print_tests::allows_the_8677_neighbours`.
+/// `credential_print_tests::allows_the_8677_neighbours`,
+/// `credential_print_tests::denies_a_credential_operand_reported_on_stderr_8735`,
+/// `credential_print_tests::denies_an_unreadable_stderr_of_a_reporting_printer_8735`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
         return None;
@@ -399,7 +406,8 @@ struct Emitted {
 /// name and program text handed to an evaluator, descends into a wrapper, then
 /// decides which descriptors carry a credential: the ones a
 /// [`credential_fds`] call prints, stdout of an [`ARG_PRINTERS`] call given a
-/// credential argument, and stdout of any stage whose stdin — or a `<(…)` file
+/// credential argument (and stderr, when it reports that argument in an error,
+/// #8735), and stdout of any stage whose stdin — or a `<(…)` file
 /// it reads — carries one unless it is a non-printing consumer. Each carrying
 /// descriptor is routed by [`route`].
 fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, Refusal> {
@@ -581,6 +589,15 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
     });
     if ARG_PRINTERS.contains(&program.as_str()) && args.iter().any(|a| carries(a, lifted)) {
         fd1 = true;
+        // #8735: `cat "$T"` names the value in "No such file" on stderr; a
+        // run-time stderr target refuses through `route`'s `Unknown` arm.
+        if reports_operand_on_stderr(&program, args, lifted) {
+            route(err, &mut emitted)?;
+        }
+        // #8735 round 1: zsh `print -u N` writes the value to descriptor N.
+        if program == "print" {
+            route_print_unit(args, &routed.fds, &mut emitted)?;
+        }
     }
     if stdin_carries && !consumer {
         fd1 = true;
