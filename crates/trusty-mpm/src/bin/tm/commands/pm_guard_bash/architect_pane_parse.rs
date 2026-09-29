@@ -4,11 +4,12 @@
 //! command a Bash command can run, and each target exactly as tmux reads it.
 //! What: [`tmux_hits`] walks the command's segments (through `sh -c`, `env -S`,
 //! `xargs` and `eval` wrappers) and its command substitutions, finds each
-//! `tmux` program word, and parses the global options and each `;`-separated
-//! command. A verb in [`DENY_VERBS`] yields a [`Hit`] with its targets. Every
-//! argument of a known command is also read as a shell command, as a tmux
-//! command string, and as the start of a tmux argv — the forms `run-shell`,
-//! `if-shell`, `bind-key`, `new-window` and typed keys carry.
+//! `tmux` program word past the shared wrappers (`program_word`), and parses
+//! the global options and each `;`-separated command. A verb in [`DENY_VERBS`]
+//! yields a [`Hit`] with its targets. Every argument of a known command is
+//! also read as a shell command, as a tmux command string, and as the start of
+//! a tmux argv — the forms `run-shell`, `if-shell`, `bind-key`, `new-window`
+//! and typed keys carry. An omitted target there is read in its [`Context`].
 //! FAIL-CLOSED: see [`Hit::opaque`].
 //! Test: `architect_pane_tests.rs`.
 
@@ -72,14 +73,106 @@ impl Hit {
     }
 }
 
+/// Where a tmux command runs, which decides what an omitted target means.
+#[derive(Debug, Clone)]
+enum Context {
+    /// The caller's own shell: an omitted `-t` is the caller's pane.
+    Caller,
+    /// Keys `send-keys` types into these targets: an omitted `-t` is one of them.
+    Keys(Vec<Target>),
+    /// A command tmux runs in a pane it picks (`bind-key`, `set-hook`,
+    /// `if-shell`, `run-shell`, a new window): an omitted `-t` is unknown.
+    Deferred,
+}
+
+/// The walk's state: the hits so far, and what the rest of the walk needs.
+struct Scan {
+    hits: Vec<Hit>,
+    /// A `rename-session` or `new-session` runs somewhere in the command.
+    retargets: bool,
+    context: Context,
+}
+
+/// Why a hit denies when the command changes `TMUX` or `TMUX_TMPDIR`.
+const SERVER_ENV: &str = "the command sets or unsets `TMUX` or `TMUX_TMPDIR`, so its tmux \
+     server may not be the one the guard lists";
+
+/// Why a hit denies behind `sudo`, `doas` or `env -i`.
+const ENV_RESET: &str = "`sudo`, `doas` or `env -i` changes the environment tmux finds its \
+     server in";
+
+/// Why a hit denies under a relative `-S`: the probe cannot know its directory.
+const RELATIVE_SOCKET: &str = "a relative `-S` socket path resolves against a directory the \
+     guard does not know";
+
+/// Why a hit denies beside a session rename or creation.
+const RETARGET: &str = "the command also renames or creates a session, and targets resolve \
+     against the sessions that exist before it runs";
+
 /// Every deny-set or unreadable tmux command `command` runs.
 ///
+/// What: see the module doc. #8902 review: the pane list is read before the
+/// command runs, on the server the hook process sees. A command that changes
+/// `TMUX`/`TMUX_TMPDIR`, or that renames or creates a session, makes every
+/// hit opaque.
 /// Test: `every_deny_verb_is_denied_in_each_target_form`,
-/// `a_tmux_command_reached_through_a_wrapper_or_argument_is_found`.
+/// `a_tmux_command_reached_through_a_wrapper_or_argument_is_found`,
+/// `a_server_the_command_selects_differently_denies`,
+/// `a_target_the_same_command_retargets_denies`.
 pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
-    let mut out = Vec::new();
-    shell(command, 0, &mut out);
-    out
+    let mut scan = Scan {
+        hits: Vec::new(),
+        retargets: false,
+        context: Context::Caller,
+    };
+    shell(command, 0, &mut scan);
+    let why = if moves_server_env(command) {
+        Some(SERVER_ENV)
+    } else {
+        scan.retargets.then_some(RETARGET)
+    };
+    if let Some(why) = why {
+        for hit in &mut scan.hits {
+            hit.opaque.get_or_insert(why);
+        }
+    }
+    scan.hits
+}
+
+/// Whether `command` names `TMUX` or `TMUX_TMPDIR` other than in a `$`
+/// expansion: an assignment, `unset`, `env -u`, `export -n`.
+fn moves_server_env(command: &str) -> bool {
+    command.match_indices("TMUX").any(|(at, _)| {
+        let after = &command[at + 4..];
+        let after = after.strip_prefix("_TMPDIR").unwrap_or(after);
+        let whole = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        let expanded = command[..at]
+            .trim_end_matches(['{', '#', '!'])
+            .ends_with('$');
+        whole && !expanded
+    })
+}
+
+/// Whether the words before a `tmux` program word reset its environment:
+/// `sudo`, `doas`, or `env` with `-i`, `-` or `--ignore-environment`.
+fn resets_env(before: &[String]) -> bool {
+    let mut in_env = false;
+    for word in before {
+        let tok = word.strip_prefix('\\').unwrap_or(word);
+        match tok.rsplit('/').next().unwrap_or(tok) {
+            "sudo" | "doas" => return true,
+            "env" | "genv" => in_env = true,
+            _ if in_env
+                && (tok == "-"
+                    || tok == "--ignore-environment"
+                    || (tok.starts_with('-') && !tok.starts_with("--") && tok.contains('i'))) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether shell text that does not parse could run a deny-set tmux command:
@@ -120,18 +213,20 @@ fn quote_escaped_semicolons(command: &str) -> String {
 }
 
 /// Read `command` as shell text.
-fn shell(command: &str, depth: usize, out: &mut Vec<Hit>) {
+fn shell(command: &str, depth: usize, out: &mut Scan) {
     let command = &quote_escaped_semicolons(command);
     // #8902: `$'\x74mux'` hides the program name itself, so at the top level
     // any command the guard cannot classify counts.
     if unclassifiable_command(command).is_some() && (depth == 0 || may_run_tmux(command, depth)) {
-        out.push(Hit::opaque("", &[], "the command does not parse"));
+        out.hits
+            .push(Hit::opaque("", &[], "the command does not parse"));
         return;
     }
     for seg in segments(command) {
         let Some(argv) = shlex::split(seg.text.trim()) else {
             if may_run_tmux(&seg.text, depth) {
-                out.push(Hit::opaque("", &[], "the command does not parse"));
+                out.hits
+                    .push(Hit::opaque("", &[], "the command does not parse"));
             }
             continue;
         };
@@ -139,7 +234,8 @@ fn shell(command: &str, depth: usize, out: &mut Vec<Hit>) {
         let texts: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         for (pos, base) in program_positions(&texts) {
             if base == "tmux" {
-                invocation(&words[pos + 1..], depth, out);
+                let reset = resets_env(&texts[..pos]);
+                invocation(&words[pos + 1..], depth, reset, out);
             }
         }
     }
@@ -200,8 +296,22 @@ fn word_dynamics(segment: &str) -> Vec<bool> {
 }
 
 /// Parse one `tmux` invocation: its global options, then its commands.
-fn invocation(words: &[Word], depth: usize, out: &mut Vec<Hit>) {
+/// `reset` when `sudo`, `doas` or `env -i` runs it: every hit is opaque.
+fn invocation(words: &[Word], depth: usize, reset: bool, out: &mut Scan) {
+    let start = out.hits.len();
+    let unknown = options_then_commands(words, depth, out);
+    if let Some(why) = reset.then_some(ENV_RESET).or(unknown) {
+        for hit in &mut out.hits[start..] {
+            hit.opaque.get_or_insert(why);
+        }
+    }
+}
+
+/// The body of [`invocation`]; `Some(why)` when the server the global options
+/// select cannot be resolved.
+fn options_then_commands(words: &[Word], depth: usize, out: &mut Scan) -> Option<&'static str> {
     let mut server: Vec<String> = Vec::new();
+    let mut unknown = None;
     let mut i = 0;
     while let Some(word) = words.get(i) {
         let text = word.text.as_str();
@@ -213,17 +323,18 @@ fn invocation(words: &[Word], depth: usize, out: &mut Vec<Hit>) {
             break;
         }
         if word.dynamic {
-            out.push(Hit::opaque("", &server, "an option the shell expands"));
-            return;
+            out.hits
+                .push(Hit::opaque("", &server, "an option the shell expands"));
+            return None;
         }
         for (k, c) in text.char_indices().skip(1) {
             if c == 'C' {
-                out.push(Hit::opaque(
+                out.hits.push(Hit::opaque(
                     "-C",
                     &server,
                     "control mode reads its commands from stdin",
                 ));
-                return;
+                return None;
             }
             if !"cfLST".contains(c) {
                 continue;
@@ -239,13 +350,19 @@ fn invocation(words: &[Word], depth: usize, out: &mut Vec<Hit>) {
                 })
             };
             let Some(value) = value else {
-                out.push(Hit::opaque("", &server, "an option has no value"));
-                return;
+                out.hits
+                    .push(Hit::opaque("", &server, "an option has no value"));
+                return None;
             };
             if matches!(c, 'L' | 'S') {
                 if value.dynamic {
-                    out.push(Hit::opaque("", &server, "a server the shell expands"));
-                    return;
+                    out.hits
+                        .push(Hit::opaque("", &server, "a server the shell expands"));
+                    return None;
+                }
+                // #8902 review: the probe cannot know the directory it is in.
+                if c == 'S' && !value.text.starts_with('/') {
+                    unknown = Some(RELATIVE_SOCKET);
                 }
                 server.extend([format!("-{c}"), value.text]);
             } else if c == 'c' && depth < MAX_DEPTH {
@@ -256,10 +373,11 @@ fn invocation(words: &[Word], depth: usize, out: &mut Vec<Hit>) {
         i += 1;
     }
     commands(&words[i..], &server, depth, false, out);
+    unknown
 }
 
 /// Split `words` on tmux's `;` separators and judge each command.
-fn commands(words: &[Word], server: &[String], depth: usize, nested: bool, out: &mut Vec<Hit>) {
+fn commands(words: &[Word], server: &[String], depth: usize, nested: bool, out: &mut Scan) {
     let mut argv: Vec<Word> = Vec::new();
     for word in words {
         let text = word.text.as_str();
@@ -279,53 +397,78 @@ fn commands(words: &[Word], server: &[String], depth: usize, nested: bool, out: 
 }
 
 /// Judge one tmux command; `nested` when it came from inside an argument.
-fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &mut Vec<Hit>) {
+fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &mut Scan) {
     let Some((head, args)) = argv.split_first() else {
         return;
     };
     if head.dynamic {
         if !nested {
-            out.push(Hit::opaque("", server, "a command the shell expands"));
+            out.hits
+                .push(Hit::opaque("", server, "a command the shell expands"));
         }
         return;
     }
+    if retargets(&head.text, args, &out.context) {
+        out.retargets = true;
+    }
+    // Keys `send-keys` types run in its target panes; other arguments run
+    // where tmux picks.
+    let mut inner = Context::Deferred;
     match resolve(&head.text, nested) {
         Resolved::Unknown if nested => {
             // #8902: `command-alias[N] name=kill-server` defines a deny verb.
             let aliased = head.text.split_once('=').map(|(_, v)| resolve(v, false));
             if matches!(aliased, Some(Resolved::Deny(_) | Resolved::Opaque)) {
-                out.push(Hit::opaque(&head.text, server, "an alias for a deny verb"));
+                out.hits
+                    .push(Hit::opaque(&head.text, server, "an alias for a deny verb"));
             }
             return;
         }
         Resolved::Unknown => {
-            out.push(Hit::opaque(
+            out.hits.push(Hit::opaque(
                 &head.text,
                 server,
                 "an unknown command, possibly an alias",
             ));
             return;
         }
-        Resolved::Opaque => out.push(Hit::opaque(
+        Resolved::Opaque => out.hits.push(Hit::opaque(
             &head.text,
             server,
             "it runs commands the guard cannot read",
         )),
-        Resolved::Deny(verb) => match deny_targets(verb, args) {
-            Ok(Some(targets)) => out.push(Hit {
-                verb: verb.name.to_string(),
-                server: server.to_vec(),
-                targets,
-                opaque: None,
-            }),
-            Ok(None) => {}
-            Err(why) => out.push(Hit::opaque(verb.name, server, why)),
-        },
+        Resolved::Deny(verb) => {
+            let found = deny_targets(verb, args)
+                .and_then(|t| t.map(|t| in_context(t, &out.context)).transpose());
+            match found {
+                Ok(Some(targets)) => {
+                    if verb.name == "send-keys" {
+                        inner = Context::Keys(targets.clone());
+                    }
+                    out.hits.push(Hit {
+                        verb: verb.name.to_string(),
+                        server: server.to_vec(),
+                        targets,
+                        opaque: None,
+                    });
+                }
+                Ok(None) => {}
+                Err(why) => out.hits.push(Hit::opaque(verb.name, server, why)),
+            }
+        }
         Resolved::Known => {}
     }
     if depth >= MAX_DEPTH {
         return;
     }
+    let outer = std::mem::replace(&mut out.context, inner);
+    arguments(args, server, depth, out);
+    out.context = outer;
+}
+
+/// Read each argument of a known tmux command as shell text, as a tmux
+/// command string, and as the start of a tmux argv.
+fn arguments(args: &[Word], server: &[String], depth: usize, out: &mut Scan) {
     for word in args.iter().filter(|w| !w.dynamic) {
         shell(&word.text, depth + 1, out);
         if let Some(inner) = shlex::split(&word.text) {
@@ -341,6 +484,40 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
     }
     for start in 1..args.len().min(MAX_SUFFIXES) {
         commands(&args[start..], server, depth + 1, true, out);
+    }
+}
+
+/// Whether `head` runs `rename-session` or `new-session`, whose session the
+/// pane list read before the command does not hold. In typed keys, only with
+/// an option, so a message that starts with "new" or "rename" is not one.
+fn retargets(head: &str, args: &[Word], context: &Context) -> bool {
+    // tmux takes an alias or a unique prefix: `rename-s`, `new-s`.
+    let named = |full: &str, alias: &str, unique: usize| {
+        head == alias || (head.len() >= unique && full.starts_with(head))
+    };
+    let verb = named("rename-session", "rename", 8) || named("new-session", "new", 5);
+    verb && (!matches!(context, Context::Keys(_)) || args.iter().any(|w| w.text.starts_with('-')))
+}
+
+/// `targets` with an omitted target read in `context`.
+///
+/// What: the caller's pane in the caller's shell; the `send-keys` targets in
+/// typed keys; `Err` in a command tmux runs later or in a pane it picks.
+fn in_context(targets: Vec<Target>, context: &Context) -> Result<Vec<Target>, &'static str> {
+    let defaulted = |t: &Target| matches!(t, Target::Current | Target::Marked);
+    match context {
+        Context::Caller => Ok(targets),
+        Context::Deferred if targets.iter().any(defaulted) => {
+            Err("a nested command with no target acts on a pane tmux picks when it runs")
+        }
+        Context::Deferred => Ok(targets),
+        Context::Keys(typed_into) => Ok(targets
+            .into_iter()
+            .flat_map(|t| match t {
+                Target::Current => typed_into.clone(),
+                t => vec![t],
+            })
+            .collect()),
     }
 }
 

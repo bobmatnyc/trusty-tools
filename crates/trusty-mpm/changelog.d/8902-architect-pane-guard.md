@@ -14,7 +14,13 @@ Added
   `=name`, prefix name, `%N`, `@N` and `$N` targets. A target the guard
   cannot resolve — a shell variable, `$(…)`, a glob, a special token, an
   unknown current pane — an unknown tmux command or option, `source-file`
-  and control mode are denied too. The rule holds under
+  and control mode are denied too. So is a tmux command whose server or
+  target the guard cannot see before it runs: one reached through a wrapper
+  such as `setsid`, `chrt`, `flock`, `timeout` or `sudo`; a relative `-S`
+  socket; a command that sets or unsets `TMUX` or `TMUX_TMPDIR`, or runs
+  tmux under `sudo`, `doas` or `env -i`; a command that also renames or
+  creates a session; and a hook, binding or `run-shell` command with no
+  target. The rule holds under
   `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS`; read verbs
   such as `capture-pane`, and geometry verbs such as `resize-pane` and
   `select-layout`, are not affected (#8902).

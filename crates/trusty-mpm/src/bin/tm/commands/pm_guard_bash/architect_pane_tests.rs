@@ -3,7 +3,7 @@
 //! The fixtures spell non-exact tmux targets on purpose: each is a command the
 //! classifier judges, never a tmux call.
 
-use super::super::architect_pane_probe::parse_panes;
+use super::super::architect_pane_probe::{Listed, classify_listing, parse_panes};
 use super::super::architect_pane_verbs::DENY_VERBS;
 use super::*;
 
@@ -218,8 +218,88 @@ fn a_tmux_command_reached_through_a_wrapper_or_argument_is_found() {
         "tmux new-window \\; kill-pane -t %1",
         "tmux set -s command-alias[9] zap=kill-server",
         "tmux send-keys -t %2 'tmux kill-session -t =tm-architect' Enter",
+        // #8902 review: every wrapper the shared program resolver knows.
+        "setsid tmux killp -t %1",
+        "noglob tmux killp -t %1",
+        "nocorrect tmux killp -t %1",
+        "chrt 10 tmux killp -t %1",
+        "taskset 1 tmux killp -t %1",
+        "flock /tmp/l tmux killp -t %1",
+        "unbuffer tmux killp -t %1",
+        "gtimeout 5 tmux killp -t %1",
+        "timeout 60 bash -c 'tmux kill-pane -t %1'",
+        "nice -n 5 sh -c 'tmux kill-pane -t %1'",
+        "env tmux killp -t %1",
+        "command tmux killp -t %1",
+        "nice tmux killp -t %1",
+        "nice -n 5 tmux killp -t %1",
+        "sudo -u x tmux killp -t %1",
     ] {
         assert!(denied(&probe, command), "{command}");
+    }
+}
+
+/// #8902 review: the probe lists the server the hook process sees. A command
+/// that picks its server another way — a relative `-S`, a changed `TMUX` or
+/// `TMUX_TMPDIR`, or a wrapper that resets the environment — targets a server
+/// the guard cannot resolve.
+#[test]
+fn a_server_the_command_selects_differently_denies() {
+    let probe = fake();
+    for command in [
+        "tmux -S default kill-session -t =pm",
+        "tmux -Sdefault kill-session -t =pm",
+        "cd /private/tmp/tmux-501 && tmux -S default kill-session -t =tm-architect",
+        "TMUX= tmux kill-session -t =pm",
+        "TMUX=/tmp/tmux-501/default,1,0 tmux kill-session -t =pm",
+        "env -u TMUX tmux kill-session -t =pm",
+        "env -uTMUX tmux kill-session -t =pm",
+        "env --unset=TMUX tmux kill-session -t =pm",
+        "unset TMUX; tmux kill-session -t =pm",
+        "export TMUX_TMPDIR=/tmp/elsewhere; tmux kill-session -t =pm",
+        "TMUX_TMPDIR=/tmp/elsewhere tmux kill-session -t =pm",
+        "env -i tmux kill-session -t =pm",
+        "env - tmux kill-session -t =pm",
+        "sudo tmux kill-session -t =pm",
+        "doas tmux kill-session -t =pm",
+        "sh -c 'unset TMUX; tmux kill-session -t =pm'",
+    ] {
+        assert!(denied(&probe, command), "{command}");
+    }
+    for command in [
+        "tmux -S /tmp/tmux-501/default capture-pane -p -t =tm-architect:",
+        "echo \"$TMUX\"; tmux send-keys -t =pm: x",
+        "TMUX= tmux ls",
+        "sudo tmux ls",
+    ] {
+        assert_eq!(evaluate_architect_pane(command, &probe), None, "{command}");
+    }
+}
+
+/// #8902 review: targets resolve against the panes before the command runs,
+/// so a session the same command renames or creates, and a nested command
+/// whose default target is the pane it runs in, cannot be resolved.
+#[test]
+fn a_target_the_same_command_retargets_denies() {
+    let probe = fake();
+    for command in [
+        "tmux rename-session -t =tm-architect x \\; send-keys -t =x hi Enter",
+        "tmux new-session -d -s g -t =tm-architect \\; send-keys -t =g hi Enter",
+        "tmux set-hook -t =tm-architect after-resize-pane 'send-keys hi Enter' \\; \
+         resize-pane -t =tm-architect -x 80",
+        "tmux rename -t =tm-architect x; tmux send-keys -t =x hi Enter",
+        "tmux new -d -s g -t =tm-architect && tmux kill-session -t =g",
+        "tmux bind-key X kill-pane",
+        "tmux run-shell 'tmux send-keys hi Enter'",
+    ] {
+        assert!(denied(&probe, command), "{command}");
+    }
+    for command in [
+        "tmux new-session -d -s work",
+        "tmux rename-session -t =pm pm2",
+        "tmux send-keys -t =pm 'please send the report' Enter",
+    ] {
+        assert_eq!(evaluate_architect_pane(command, &probe), None, "{command}");
     }
 }
 
@@ -255,4 +335,51 @@ fn a_pane_listing_marks_the_architect_by_lineage_and_session() {
     assert_eq!(marks, [(true, false), (false, true), (true, false)]);
     assert_eq!(panes[2].name, "w x");
     assert!(parse_panes("%1\t@1\n", &[]).is_err());
+}
+
+/// #8902 review: how a `list-panes` run maps to a pane list. No tmux and no
+/// server are an empty list; any other failure is an error; an unreadable
+/// lineage still marks the launch session.
+#[test]
+fn a_pane_listing_run_is_classified() {
+    type Lineage = Result<Vec<u32>, String>;
+    type Marks = Result<Vec<bool>, String>;
+    let text = "%1\t@1\t$1\t100\t0\ttm-architect\n%2\t@2\t$2\t300\t0\tpm\n";
+    let marks = |r: Result<Vec<Pane>, String>| -> Marks {
+        r.map(|panes| panes.iter().map(|p| p.architect).collect())
+    };
+    let ran = |ok, stdout, stderr| Listed::Ran { ok, stdout, stderr };
+    let unreadable: Lineage = Err("records unreadable".into());
+    let cases: [(Listed<'_>, &Lineage, Marks); 7] = [
+        (Listed::NotFound, &Ok(vec![]), Ok(vec![])),
+        (
+            Listed::Failed("spawn".into()),
+            &Ok(vec![]),
+            Err("spawn".into()),
+        ),
+        (
+            ran(false, "", "no server running on /tmp/tmux-501/default\n"),
+            &Ok(vec![]),
+            Ok(vec![]),
+        ),
+        (
+            ran(
+                false,
+                "",
+                "error connecting to /tmp/tmux-501/x (No such file)",
+            ),
+            &Ok(vec![]),
+            Ok(vec![]),
+        ),
+        (
+            ran(false, "", "server exited unexpectedly\n"),
+            &Ok(vec![]),
+            Err("server exited unexpectedly".into()),
+        ),
+        (ran(true, text, ""), &Ok(vec![300]), Ok(vec![true, true])),
+        (ran(true, text, ""), &unreadable, Ok(vec![true, false])),
+    ];
+    for (listed, lineage, want) in cases {
+        assert_eq!(marks(classify_listing(listed, lineage)), want);
+    }
 }

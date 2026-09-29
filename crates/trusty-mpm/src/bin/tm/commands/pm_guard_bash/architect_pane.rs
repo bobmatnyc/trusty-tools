@@ -17,9 +17,15 @@
 //! special token (`{marked}`, `~`, `!`, `+1`), a `#{…}` format, the caller's
 //! current pane when it is unknown or the command touches a `TMUX` variable —
 //! and so does an unreadable hit (see `Hit::opaque`) or a pane list tmux will
-//! not give. A server with no Architect pane on it is never protected.
+//! not give. The pane list is the server the hook process sees, read before
+//! the command runs, so a relative `-S`, a `TMUX`/`TMUX_TMPDIR` change,
+//! `sudo`/`doas`/`env -i`, a session renamed or created in the same command,
+//! and a nested command with no target in a pane tmux picks all deny (#8902
+//! review). A server with no Architect pane on it is never protected.
 //! Residual: a `command-alias` that shadows a built-in name and was defined
-//! before this call, a tmux config file, and a script the command runs.
+//! before this call, a tmux config file, a script the command runs, and a
+//! runner or interpreter that is not a shared wrapper — `watch`, `script -q
+//! /dev/null`, `su -c`, `ssh`, `python3 -c`.
 //! Test: `architect_pane_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
 

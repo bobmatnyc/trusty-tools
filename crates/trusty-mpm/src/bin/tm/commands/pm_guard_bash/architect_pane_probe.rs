@@ -59,29 +59,75 @@ impl PaneProbe for LivePanes {
     fn panes(&self, server: &[String]) -> Result<Vec<Pane>, String> {
         let mut argv = server.to_vec();
         argv.extend(["list-panes", "-a", "-F", PANE_FORMAT].map(str::to_owned));
-        let out = match trusty_mpm::core::tmux::run_tmux_argv(&argv) {
-            Ok(out) => out,
-            // No tmux installed: the command under judgement cannot run either.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err.to_string()),
+        let run = trusty_mpm::core::tmux::run_tmux_argv(&argv);
+        let (stdout, stderr) = match &run {
+            Ok(out) => (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            ),
+            Err(_) => Default::default(),
         };
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        let listed = match &run {
+            Ok(out) => Listed::Ran {
+                ok: out.status.success(),
+                stdout: &stdout,
+                stderr: &stderr,
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Listed::NotFound,
+            Err(err) => Listed::Failed(err.to_string()),
+        };
+        classify_listing(listed, self.lineage())
+    }
+
+    fn current_pane(&self) -> Option<String> {
+        std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
+    }
+}
+
+/// What one `tmux list-panes` run gave.
+#[derive(Debug)]
+pub(super) enum Listed<'a> {
+    /// No tmux binary: the command under judgement cannot run either.
+    NotFound,
+    /// tmux could not be started.
+    Failed(String),
+    /// tmux ran: whether it exited 0, and its output.
+    Ran {
+        ok: bool,
+        stdout: &'a str,
+        stderr: &'a str,
+    },
+}
+
+/// The pane list one `list-panes` run gives, the Architect's panes marked.
+///
+/// What: no tmux binary, and a failure naming no running server or a socket
+/// tmux cannot connect to, are an empty list: the command cannot reach that
+/// server either. Any other failure is `Err`. An unreadable `lineage` still
+/// marks the panes of the launch session.
+/// Test: `a_pane_listing_run_is_classified`.
+pub(super) fn classify_listing(
+    listed: Listed<'_>,
+    lineage: &Result<Vec<u32>, String>,
+) -> Result<Vec<Pane>, String> {
+    match listed {
+        Listed::NotFound => Ok(Vec::new()),
+        Listed::Failed(err) => Err(err),
+        Listed::Ran {
+            ok: false, stderr, ..
+        } => {
+            let err = stderr.trim();
             if ["no server running", "error connecting to"]
                 .iter()
                 .any(|m| err.contains(m))
             {
                 return Ok(Vec::new());
             }
-            return Err(err);
+            Err(err.to_owned())
         }
-        // An unreadable lineage still leaves the launch session protected.
-        let lineage = self.lineage().clone().unwrap_or_default();
-        parse_panes(&String::from_utf8_lossy(&out.stdout), &lineage)
-    }
-
-    fn current_pane(&self) -> Option<String> {
-        std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
+        Listed::Ran {
+            ok: true, stdout, ..
+        } => parse_panes(stdout, lineage.as_deref().unwrap_or_default()),
     }
 }
 
