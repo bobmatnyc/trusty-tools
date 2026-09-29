@@ -1,0 +1,3 @@
+Fixed
+- A posted finding now cites a `file:line` that holds the code it describes. A deterministic gate checks each finding's line, and each `[code: path:line]` citation, against the code the finding quotes or names. It moves a citation that is off by some lines to the line that holds the code, and records the move in the finding's new `citation_correction` field. It drops a finding whose code is not in the cited file, whose line is past the file's last diffed line, that quotes and names no code, or whose file it cannot read. Every drop and move is logged and counted (#8905).
+- The reviewer prompt now asks every finding to quote, in backticks, the code at its cited line (#8905).

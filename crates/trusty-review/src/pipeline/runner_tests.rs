@@ -106,7 +106,7 @@ impl FakeLlm {
                 response: r#"There is a bug.
 
 ```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
+{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1: `fn bad`","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
 ```"#
                     .to_string(),
                 error: None,
@@ -144,7 +144,7 @@ impl FakeLlm {
             response: r#"Looks fine to me.
 
 ```json
-{"verdict":"APPROVE","grade":"A","summary":"LGTM","findings":[{"title":"SQL injection","body":"the query is built by string interpolation","severity":"high","confidence":0.95,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"A","summary":"LGTM","findings":[{"title":"SQL injection","body":"the query is built by string interpolation in `format!(`","severity":"high","confidence":0.95,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
                 .to_string(),
             error: None,
@@ -1829,7 +1829,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
     let llm_response = r#"Code looks good overall, minor concern.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 prints `{s}` unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file(
         "src/render.rs",
@@ -1901,7 +1901,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
     let llm_response = r#"Review with confirmed critical finding.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1: `fn auth(t: &str)`","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file("src/auth.rs", "+fn auth(t: &str) {}");
     let config = default_config();
@@ -2355,7 +2355,7 @@ fn blocks_citing_finding_one() -> FakeLlm {
         response: r#"Finding #1 is a high-effort defect and must be resolved before merge.
 
 ```json
-{"verdict":"BLOCK","grade":"F","summary":"blocking defect","findings":[{"title":"missing await","body":"the future is dropped","severity":"high","confidence":0.9,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"BLOCK","grade":"F","summary":"blocking defect","findings":[{"title":"missing await","body":"the future in `fn bad()` is dropped","severity":"high","confidence":0.9,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
             .to_string(),
         error: None,
@@ -2432,7 +2432,7 @@ fn blocks_on_self_admitted_unverifiable() -> FakeLlm {
         response: r#"One blocking issue.
 
 ```json
-{"verdict":"BLOCK","grade":"F","summary":"un-awaited futures","findings":[{"title":"async functions called without .await","body":"incidents::run, dora::run, pr_metrics::run and report::run are invoked without .await, so half the sweep pipeline would silently no-op. The diff does not show their signatures, so this cannot be confirmed from the diff alone.","severity":"high","confidence":0.72,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"BLOCK","grade":"F","summary":"un-awaited futures","findings":[{"title":"async functions called without .await","body":"incidents::run, dora::run, pr_metrics::run and report::run are invoked without .await, so half the sweep pipeline would silently no-op. The diff does not show their signatures, so this cannot be confirmed from the diff alone. See `fn bad()`.","severity":"high","confidence":0.72,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
             .to_string(),
         error: None,
@@ -2775,3 +2775,7 @@ async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
 // #4044: mixed refuted/confirmed sets through the whole run_review path.
 #[path = "runner_refuted_floor_tests.rs"]
 mod refuted_floor;
+
+// #8905: every posted finding cites the line that holds its code.
+#[path = "runner_citation_gate_tests.rs"]
+mod citation_gate;

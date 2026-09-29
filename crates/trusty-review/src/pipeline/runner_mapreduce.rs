@@ -403,6 +403,8 @@ async fn fold_reduced_into_result(
     )
     .await;
     result.findings = findings;
+    // #8905: last gate before posting — every citation holds its code or drops.
+    crate::pipeline::citation_gate::gate_posted_findings(result, &run.filtered);
 
     // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).

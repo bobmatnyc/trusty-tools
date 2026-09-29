@@ -85,6 +85,7 @@ pub async fn run_map_reduce(
     // never force the deterministic BLOCK / REQUEST_CHANGES floor in
     // `reduce`/`synthesize`, nor reach the rendered review.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
+    let line_index = crate::pipeline::citation_gate::LineIndex::from_filtered(filtered);
     for outcome in &mut outcomes {
         if let MapOutcome::Reviewed {
             findings, verdict, ..
@@ -97,6 +98,8 @@ pub async fn run_map_reduce(
             // ADDS the file it is about to call missing. The whole changeset
             // can, and refutes the claim here before it reaches the floor.
             crate::pipeline::absence_claim::drop_refuted_absence_claims(findings, &cite_index);
+            // #8905: a unit's findings must cite the line that holds their code.
+            crate::pipeline::citation_gate::enforce_line_citations(findings, &line_index);
             // This chunk's own `verdict` field rested on the SAME findings we
             // may have just wiped out — relax it too so a wiped-out chunk
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,

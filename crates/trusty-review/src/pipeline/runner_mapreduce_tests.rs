@@ -775,7 +775,7 @@ impl LlmProvider for MediumRcReviewer {
         let text = if is_synthesis {
             r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"medium nit remains."}"#
         } else if body.contains(self.rc_marker.as_str()) {
-            r#"{"verdict":"REQUEST_CHANGES","summary":"medium nit found","findings":[{"title":"style-nit","body":"missing doc comment","severity":"medium","confidence":0.85,"file":"src/big.rs","line":1}]}"#
+            r#"{"verdict":"REQUEST_CHANGES","summary":"medium nit found","findings":[{"title":"style-nit","body":"missing doc comment on `pub fn build`","severity":"medium","confidence":0.85,"file":"src/big.rs","line":1}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };

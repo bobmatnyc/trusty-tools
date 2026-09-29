@@ -734,6 +734,7 @@ pub async fn run_review(
     )
     .await;
     result.findings = findings;
+    crate::pipeline::citation_gate::gate_posted_findings(&mut result, &filtered); // #8905
 
     // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
     // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
