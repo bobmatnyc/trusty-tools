@@ -20,6 +20,7 @@ use crate::core::entity::RawEntity;
 use crate::core::symbol_graph::SymbolGraph;
 
 use super::super::{CodeIndexer, CommitTimings, ParsedBatch};
+use super::refusals::content_fingerprint;
 
 impl CodeIndexer {
     /// Phase 3+4 of the bulk pipeline: commit a [`ParsedBatch`] into the index.
@@ -180,7 +181,10 @@ impl CodeIndexer {
     /// What: filters chunks without embeddings (BM25-only mode), validates each
     /// vector for NaN/all-zero content, then delegates to `store.upsert_batch`.
     /// No-op when no store is wired or no embeddings were computed. Returns
-    /// the ids whose vector was refused as NaN or all-zero (#8884).
+    /// the ids whose vector was refused as NaN or all-zero (#8884), and folds
+    /// the refused and accepted ids into the durable refusal record
+    /// (`CodeIndexer::record_vector_refusals`) so a restore can tell a refusal
+    /// from a gap.
     ///
     /// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
     /// re-enable): a chunk committed here WITHOUT an embedding (vector lane
@@ -217,6 +221,8 @@ impl CodeIndexer {
         let mut items: Vec<(String, Vec<f32>)> = Vec::new();
         let mut unembedded_ids: Vec<String> = Vec::new();
         let mut rejected: Vec<String> = Vec::new();
+        // #8884: each refusal keyed by the content refused, for the durable record.
+        let mut refused: Vec<(String, String)> = Vec::new();
         for (chunk, vec_opt) in chunks.iter().zip(embeddings.iter()) {
             let Some(v) = vec_opt.as_ref() else {
                 // No embedding was computed for this chunk in this batch —
@@ -234,6 +240,7 @@ impl CodeIndexer {
                      check embedderd logs."
                 );
                 rejected.push(chunk.id.clone());
+                refused.push((chunk.id.clone(), content_fingerprint(&chunk.content)));
                 continue;
             }
             // Issue #764: reject all-zero vectors.
@@ -246,6 +253,7 @@ impl CodeIndexer {
                      check embedderd logs."
                 );
                 rejected.push(chunk.id.clone());
+                refused.push((chunk.id.clone(), content_fingerprint(&chunk.content)));
                 continue;
             }
             items.push((chunk.id.clone(), v.clone()));
@@ -276,6 +284,11 @@ impl CodeIndexer {
                 }
             }
         }
+
+        // #8884: recorded before the upsert. A crash between the two leaves an
+        // accepted id with no excuse and no vector, which reads as a real gap.
+        let accepted = items.iter().map(|(id, _)| id.clone()).collect();
+        self.record_vector_refusals(accepted, refused).await;
 
         if items.is_empty() {
             return Ok(rejected);

@@ -161,8 +161,15 @@ fn judge_coverage(coverage: VectorCoverage, rejected: &HashSet<&str>) -> PassCov
 /// lacks and settles the stage `Ready` or `Failed`. A gap that nothing can close
 /// is a terminal `Failed` naming the reason, never a `Pending` nothing will
 /// start (#8863): no embedder wired, or a `Pending` or `Ready` stage over a
-/// store whose size cannot be read. Returns `true` only when a pass was queued.
+/// store whose size cannot be read. A gap made only of chunks the durable
+/// refusal record excuses at their current content leaves the stage as it is
+/// and records the count in `vectors_rejected` (#8884); an unreadable record
+/// excuses nothing. Returns `true` only when a pass was queued.
 /// Test: `a_gap_demotes_the_stage_and_queues_a_backfill`,
+/// `a_restore_after_a_refused_embedding_does_not_demote_the_stage`,
+/// `an_unreadable_refusal_record_is_treated_as_a_real_gap`,
+/// `a_refused_chunk_whose_content_changed_is_backfilled`,
+/// `a_new_chunk_beside_a_refused_one_is_backfilled`,
 /// `no_gap_leaves_a_ready_stage_alone`,
 /// `a_pending_stage_left_by_a_discarded_snapshot_is_backfilled`,
 /// `an_unreadable_store_fails_a_pending_stage_closed`,
@@ -184,6 +191,12 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
         )
     };
     let index_id = &handle.id.0;
+    // #8884: gathered before the stages write lock, which never nests the indexer's.
+    let refused = if vectors.is_some_and(|v| v < chunk_count) && has_embedder {
+        refusals_behind_gap(handle).await
+    } else {
+        None
+    };
     let gap = {
         let mut stages = handle.stages.write().await;
         let status = stages.semantic.status;
@@ -203,6 +216,16 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
         let Some(gap) = semantic_vector_gap(status, chunk_count, vectors) else {
             return false;
         };
+        if let Some(refused) = refused {
+            // #8884: every missing vector is a recorded refusal of unchanged
+            // content; a backfill would only refuse it again.
+            tracing::info!(
+                "vector_gap[{index_id}]: {refused} of {chunk_count} chunks have no vector because \
+                 the store refused their embedding — semantic stays {status:?} (#8884)"
+            );
+            stages.semantic.vectors_rejected = Some(refused);
+            return false;
+        }
         if !has_embedder {
             // #8863: no embedder means no pass can close the gap — a terminal,
             // named state, not a `Pending` that waits forever.
@@ -231,6 +254,28 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
         gap,
     );
     true
+}
+
+/// How many refused chunks explain the whole gap, failing closed (#8884).
+///
+/// What: `CodeIndexer::refusals_behind_vector_gap`, with a read or parse
+/// fault logged and answered `None`, so the gap is reconciled as real.
+/// Test: `an_unreadable_refusal_record_is_treated_as_a_real_gap`.
+async fn refusals_behind_gap(handle: &IndexHandle) -> Option<usize> {
+    let outcome = handle
+        .indexer
+        .read()
+        .await
+        .refusals_behind_vector_gap()
+        .await;
+    outcome.unwrap_or_else(|e| {
+        tracing::warn!(
+            "vector_gap[{}]: the vector-refusal record could not be read ({e:#}), so the gap \
+             is treated as real (#8884)",
+            handle.id.0,
+        );
+        None
+    })
 }
 
 #[cfg(test)]
