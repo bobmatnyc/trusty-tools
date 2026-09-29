@@ -55,10 +55,14 @@
 
 pub mod fingerprint;
 pub mod layer;
+pub mod rotation;
 pub mod store;
+#[cfg(test)]
+mod store_tests;
 pub mod types;
 
 pub use layer::BugCaptureLayer;
+pub use rotation::RotationPolicy;
 pub use store::{DEFAULT_CAPTURE_CAPACITY, ErrorStore};
 pub use types::CapturedError;
 

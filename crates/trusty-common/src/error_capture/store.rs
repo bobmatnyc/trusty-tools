@@ -13,7 +13,8 @@
 //! What: [`ErrorStore`] wraps a bounded `VecDeque` (ring buffer, same eviction
 //! pattern as `LogBuffer`) plus a path to the JSONL append file. Every
 //! `append` call pushes to the ring and, best-effort, appends one JSON line to
-//! disk. IO errors print to stderr and are swallowed — they must never panic or
+//! disk. The file is size-capped and rotated by [`super::rotation`] (#8028).
+//! IO errors print to stderr and are swallowed — they must never panic or
 //! propagate into the tracing hot path. `recent_errors` and
 //! `errors_by_fingerprint` read from the ring; `load_from_disk` re-populates
 //! it on daemon restart.
@@ -24,9 +25,10 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::error_capture::rotation::{self, RotationPolicy};
 use crate::error_capture::types::CapturedError;
 
 /// Default ring-buffer capacity (records). Mirrors `DEFAULT_LOG_CAPACITY` in
@@ -57,6 +59,12 @@ pub struct ErrorStore {
 struct Inner {
     ring: VecDeque<CapturedError>,
     file_path: Option<PathBuf>,
+    // #8028: size cap and retention for `file_path`.
+    policy: RotationPolicy,
+    // #8028: disk writes refused because a due rotation failed.
+    refused_disk_writes: u64,
+    // #8028: malformed lines skipped when the ring was loaded from disk.
+    corrupt_lines_skipped: u64,
 }
 
 impl ErrorStore {
@@ -72,7 +80,6 @@ impl ErrorStore {
     /// Test: `store_round_trip_write_read`.
     #[must_use]
     pub fn open(app_name: &str, capacity: usize) -> Self {
-        let capacity = capacity.max(1);
         let file_path = match crate::resolve_data_dir(app_name) {
             Ok(dir) => Some(dir.join(ERRORS_FILENAME)),
             Err(e) => {
@@ -80,17 +87,7 @@ impl ErrorStore {
                 None
             }
         };
-
-        let ring = if let Some(ref path) = file_path {
-            load_ring_from_disk(path, capacity)
-        } else {
-            VecDeque::with_capacity(capacity)
-        };
-
-        Self {
-            inner: Arc::new(Mutex::new(Inner { ring, file_path })),
-            capacity,
-        }
+        Self::with_path(file_path, capacity)
     }
 
     /// Create an in-memory-only store backed by a specific file path.
@@ -102,14 +99,35 @@ impl ErrorStore {
     /// Test: all store tests use this constructor.
     #[must_use]
     pub fn with_path(file_path: Option<PathBuf>, capacity: usize) -> Self {
+        Self::with_path_and_rotation(file_path, capacity, RotationPolicy::default())
+    }
+
+    /// Like [`ErrorStore::with_path`], with an explicit size cap and retention.
+    ///
+    /// Why: tests need a cap small enough to cross in a few records (#8028).
+    /// What: loads the ring from the live file and its rotated siblings, then
+    ///      rotates under `policy` on every later append.
+    /// Test: `store_tests::writing_past_the_cap_rotates_and_bounds_disk_use`.
+    #[must_use]
+    pub fn with_path_and_rotation(
+        file_path: Option<PathBuf>,
+        capacity: usize,
+        policy: RotationPolicy,
+    ) -> Self {
         let capacity = capacity.max(1);
-        let ring = if let Some(ref path) = file_path {
-            load_ring_from_disk(path, capacity)
-        } else {
-            VecDeque::with_capacity(capacity)
+        let (ring, corrupt_lines_skipped) = match file_path {
+            Some(ref path) => load_ring_from_disk(path, capacity, policy),
+            None => (VecDeque::with_capacity(capacity), 0),
+        };
+        let inner = Inner {
+            ring,
+            file_path,
+            policy,
+            refused_disk_writes: 0,
+            corrupt_lines_skipped,
         };
         Self {
-            inner: Arc::new(Mutex::new(Inner { ring, file_path })),
+            inner: Arc::new(Mutex::new(inner)),
             capacity,
         }
     }
@@ -118,10 +136,17 @@ impl ErrorStore {
     ///
     /// Why: called by `BugCaptureLayer::on_event` on every ERROR event; must
     ///      be non-blocking (no async, short lock hold) and must never panic.
-    /// What: acquires the mutex, pushes to the ring (evicting oldest when at
-    ///      capacity), then serialises to JSON and appends one line to the open
-    ///      file. IO errors are printed to stderr and discarded.
-    /// Test: `store_round_trip_write_read`.
+    ///      The file is shared by several processes and must stay bounded
+    ///      (#8028).
+    /// What: acquires the mutex, rotates the file if it has reached the cap,
+    ///      appends the record as one full-line `O_APPEND` write, then pushes
+    ///      to the ring (evicting oldest when at capacity). When a due rotation
+    ///      fails, the disk write is refused and counted
+    ///      ([`ErrorStore::refused_disk_writes`]) so the file cannot grow past
+    ///      the cap; the record still enters the ring and the next append
+    ///      retries the rotation. IO errors go to stderr, never to the caller.
+    /// Test: `store_tests::concurrent_writers_produce_only_well_formed_lines`,
+    ///      `store_tests::a_rotation_failure_refuses_the_disk_write_and_counts_it`.
     pub fn append(&self, record: CapturedError) {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -131,12 +156,18 @@ impl ErrorStore {
         // Append JSON line to disk before touching the ring so a crash after
         // write but before ring update at worst leaves the file one record
         // ahead of the ring — acceptable for our best-effort guarantees.
-        if let Some(ref path) = guard.file_path {
-            match serialise_and_append(path, &record) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("[bug-capture] write to {}: {e}", path.display());
-                }
+        if let Some(path) = guard.file_path.clone() {
+            // #8028: fail closed on disk growth, never on logging — a failed
+            // rotation refuses this write instead of appending past the cap.
+            if let Err(e) = rotation::rotate_if_due(&path, guard.policy) {
+                guard.refused_disk_writes += 1;
+                eprintln!(
+                    "[bug-capture] rotating {} failed ({e}); record kept in memory only, {} disk writes refused",
+                    path.display(),
+                    guard.refused_disk_writes
+                );
+            } else if let Err(e) = serialise_and_append(&path, &record) {
+                eprintln!("[bug-capture] write to {}: {e}", path.display());
             }
         }
 
@@ -219,19 +250,44 @@ impl ErrorStore {
         self.len() == 0
     }
 
+    /// Disk writes refused because a due rotation failed (#8028).
+    ///
+    /// Test: `store_tests::a_rotation_failure_refuses_the_disk_write_and_counts_it`.
+    #[must_use]
+    pub fn refused_disk_writes(&self) -> u64 {
+        match self.inner.lock() {
+            Ok(g) => g.refused_disk_writes,
+            Err(p) => p.into_inner().refused_disk_writes,
+        }
+    }
+
+    /// Malformed lines skipped while loading the ring from disk (#8028).
+    ///
+    /// Test: `store_corrupt_line_skipped`.
+    #[must_use]
+    pub fn corrupt_lines_skipped(&self) -> u64 {
+        match self.inner.lock() {
+            Ok(g) => g.corrupt_lines_skipped,
+            Err(p) => p.into_inner().corrupt_lines_skipped,
+        }
+    }
+
     /// Read records from an explicit JSONL file path without a live store handle.
     ///
     /// Why: Phase 2's multi-store reader needs to load records from several
     ///      daemon JSONL files (trusty-search, trusty-memory, trusty-mpm, …)
     ///      and merge them in-process without opening those files in append mode
     ///      or holding locks across daemon boundaries — a snapshot read.
-    /// What: reads the JSONL at `path`, parses up to `limit` records (ring
-    ///      eviction keeps the last `limit` lines), skips corrupt lines.
-    ///      Returns an empty `Vec` when the file is absent — never an error.
-    /// Test: `read_records_loads_file`, `read_records_missing_file_is_empty`.
+    /// What: reads the JSONL at `path` and its rotated siblings under the
+    ///      default [`RotationPolicy`], keeping the newest `limit` records
+    ///      oldest-first, and skips corrupt lines. Returns an empty `Vec` when
+    ///      no file exists — never an error.
+    /// Test: `read_records_loads_file`, `read_records_missing_file_is_empty`,
+    ///      `store_tests::malformed_line_does_not_break_reading`.
     #[must_use]
-    pub fn read_records(path: &std::path::Path, limit: usize) -> Vec<CapturedError> {
-        load_ring_from_disk(&path.to_path_buf(), limit)
+    pub fn read_records(path: &Path, limit: usize) -> Vec<CapturedError> {
+        load_ring_from_disk(path, limit, RotationPolicy::default())
+            .0
             .into_iter()
             .collect()
     }
@@ -239,75 +295,87 @@ impl ErrorStore {
 
 // ── Disk helpers ──────────────────────────────────────────────────────────────
 
-/// Load up to `capacity` records from a JSONL file into a `VecDeque`.
+/// Load the newest `capacity` records from a store's live and rotated files.
 ///
 /// Why: on daemon restart the ring must be pre-populated from the persistent
 ///      store so `recent_errors` reflects prior runs, not just the current
-///      session.
-/// What: reads the file line-by-line; skips blank lines and lines that fail
-///      JSON deserialisation (corrupt / truncated); keeps the last `capacity`
-///      records (oldest lines first, newest lines last). Returns an empty deque
-///      if the file is absent or unreadable — never panics.
-/// Test: `store_round_trip_write_read`, `store_corrupt_line_skipped`.
-fn load_ring_from_disk(path: &PathBuf, capacity: usize) -> VecDeque<CapturedError> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return VecDeque::with_capacity(capacity);
-        }
-        Err(e) => {
-            eprintln!("[bug-capture] cannot read {}: {e}", path.display());
-            return VecDeque::with_capacity(capacity);
-        }
-    };
-
+///      session — including records a rotation just moved to `.1` (#8028).
+/// What: walks the files newest-first, reading at most
+///      [`RotationPolicy::read_limit`] bytes of each, and fills the ring from
+///      the front until it holds `capacity` records (oldest first, newest
+///      last). Lines are split on raw `\n` bytes and parsed one at a time, so
+///      a malformed line — bad JSON or invalid UTF-8 — is skipped and counted
+///      and never fails the rest of the file. Returns the ring and the count.
+/// Test: `store_round_trip_write_read`, `store_corrupt_line_skipped`,
+///      `store_tests::malformed_line_does_not_break_reading`.
+fn load_ring_from_disk(
+    path: &Path,
+    capacity: usize,
+    policy: RotationPolicy,
+) -> (VecDeque<CapturedError>, u64) {
     let mut ring: VecDeque<CapturedError> = VecDeque::with_capacity(capacity);
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+    let mut skipped_total = 0u64;
+    for file in rotation::files_newest_first(path, policy) {
+        if ring.len() >= capacity {
+            break;
         }
-        match serde_json::from_str::<CapturedError>(line) {
-            Ok(rec) => {
-                ring.push_back(rec);
-                while ring.len() > capacity {
-                    ring.pop_front();
-                }
+        let bytes = match rotation::read_tail(&file, policy.read_limit()) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("[bug-capture] cannot read {}: {e}", file.display());
+                continue;
             }
-            Err(_) => {
-                // Corrupt or partial line — skip silently. The line is already
-                // written; we don't truncate the file (it may have more valid
-                // lines after this one in edge cases).
-                eprintln!(
-                    "[bug-capture] skipping corrupt record in {}",
-                    path.display()
-                );
+        };
+        let mut skipped = 0u64;
+        let records: Vec<CapturedError> = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.trim_ascii().is_empty())
+            .filter_map(|line| {
+                // #8028: one bad line costs that line, never the whole file.
+                let parsed = serde_json::from_slice(line.trim_ascii()).ok();
+                skipped += u64::from(parsed.is_none());
+                parsed
+            })
+            .collect();
+        for rec in records.into_iter().rev() {
+            if ring.len() >= capacity {
+                break;
             }
+            ring.push_front(rec);
         }
+        if skipped > 0 {
+            eprintln!(
+                "[bug-capture] skipped {skipped} corrupt record(s) in {}",
+                file.display()
+            );
+        }
+        skipped_total += skipped;
     }
-    ring
+    (ring, skipped_total)
 }
 
 /// Serialise one record as a JSON line and append it to the given path.
 ///
-/// Why: append-only write keeps the file valid JSONL even if the process is
-///      killed mid-write of a different line. We open the file fresh each
-///      write to avoid holding an `std::fs::File` across the mutex boundary
-///      (which would require `Send + Sync` on `File` in `Inner`).
-/// What: opens in append+create mode, writes the JSON bytes + `\n`, flushes,
-///      closes. Returns `Err` on any IO failure; the caller logs to stderr.
-/// Test: `store_round_trip_write_read`.
-fn serialise_and_append(path: &PathBuf, record: &CapturedError) -> std::io::Result<()> {
-    let json = serde_json::to_vec(record)
+/// Why: several processes append to one file with no shared mutex. Writing
+///      the body and the `\n` as two `write(2)` calls let another process's
+///      body land between them and fuse two records into one corrupt line
+///      (#8028). We open the file fresh each write to avoid holding an
+///      `std::fs::File` across the mutex boundary.
+/// What: builds the JSON bytes plus `\n` in one buffer and writes it with a
+///      single `O_APPEND` `write_all`, so each record lands whole at the end of
+///      the file. Returns `Err` on any IO failure; the caller logs to stderr.
+/// Test: `store_tests::concurrent_writers_produce_only_well_formed_lines`.
+fn serialise_and_append(path: &Path, record: &CapturedError) -> std::io::Result<()> {
+    let mut line = serde_json::to_vec(record)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    file.write_all(&json)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
-    Ok(())
+    // #8028: one write per record — a split write interleaves across processes.
+    file.write_all(&line)
 }
 
 #[cfg(test)]
@@ -416,6 +484,11 @@ mod tests {
         let store = ErrorStore::with_path(Some(file_path), 10);
         // Only 2 valid records should be loaded; corrupt line skipped.
         assert_eq!(store.len(), 2, "corrupt line should be skipped");
+        assert_eq!(
+            store.corrupt_lines_skipped(),
+            1,
+            "#8028: the skip is counted"
+        );
         let records = store.recent_errors(10);
         assert_eq!(records[0].message, "valid first");
         assert_eq!(records[1].message, "valid second");
