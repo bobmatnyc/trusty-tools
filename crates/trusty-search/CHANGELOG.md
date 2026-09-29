@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.7] — 2026-09-29
+
+### Fixed
+
+- A restart or lazy restore no longer demotes `semantic` or queues a backfill for chunks whose embedding the store refused as NaN or all-zero (#8884). Each refusal is now recorded in the index corpus with a fingerprint of the refused content. A restore whose only missing vectors are recorded refusals keeps `semantic` as it was and reports them as `stages.semantic.vectors_rejected`. A refused chunk whose content changes, a missing chunk with no refusal record, or a record that cannot be read is still treated as a real gap and backfilled. Indexes written before this change have no record and behave as before.
+- A reindex that resumes a first walk killed before its promotion now embeds the chunks it adopted from the interrupted run (#8884). The resumed run left the in-memory chunk map and BM25 index holding only the files it walked, so the deferred-embed pass skipped the adopted chunks and `semantic` read `ready` with `vectors_present` below `chunk_count` until the next restart. The adopted corpus is now reloaded before the run commits.
+- A deferred-embed pass that finishes with corpus chunks still lacking a vector now settles `semantic` as `failed`, naming the gap, instead of `ready`. The gap is measured by chunk id, and the settle waits for an in-flight file removal before it decides. A store whose size cannot be read also settles `failed`. The deferred-embed marker is kept, so the next boot re-arms the pass.
+- A chunk whose embedding the store refuses as NaN or all-zero no longer counts as a gap for the deferred-embed pass. That pass settles `semantic` as `ready` and reports those chunks as `stages.semantic.vectors_rejected`.
+
 ## [0.54.6] — 2026-09-29
 
 ### Fixed
