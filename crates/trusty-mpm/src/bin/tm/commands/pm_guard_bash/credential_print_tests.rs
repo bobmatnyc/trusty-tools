@@ -1326,3 +1326,77 @@ fn allows_the_8677_round_two_neighbours() {
         ],
     );
 }
+
+/// #8735: a printer that reports a credential operand in its error message
+/// (`cat: <value>: No such file`, `printf: <value>: invalid number`) leaks it
+/// on stderr. Each row was allowed at 474acf447; the first is the reported
+/// shape, where the `<(…)` body's stderr is the outer terminal.
+#[test]
+fn denies_a_credential_operand_reported_on_stderr_8735() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); wc -c < <(cat \"$(echo \"$T\")\")",
+            "T=$(gcloud auth print-access-token); wc -c < <(cat \"$T\")",
+            "wc -c < <(cat \"$(gcloud auth print-access-token)\")",
+            // `>(…)`, `$(…)` and a subshell keep the outer stderr.
+            "T=$(gcloud auth print-access-token); echo hi > >(cat \"$T\" > /dev/null)",
+            "T=$(gcloud auth print-access-token); X=$(cat \"$T\")",
+            "T=$(gcloud auth print-access-token); (cat \"$T\" > /dev/null)",
+            "T=$(gcloud auth print-access-token); { cat \"$T\" > /dev/null; }",
+            // The wrappers the fd1 rule already walks.
+            "T=$(gcloud auth print-access-token); env cat \"$T\" > /dev/null",
+            "T=$(gcloud auth print-access-token); command cat \"$T\" > /dev/null",
+            "gcloud auth print-access-token | xargs cat > /dev/null",
+            // Default stderr, `2>&1` and `|&` into a printing reader.
+            "T=$(gcloud auth print-access-token); cat \"$T\" > /dev/null",
+            "T=$(gcloud auth print-access-token); cat -- \"$T\" 2>&1 > /dev/null | head",
+            "T=$(gcloud auth print-access-token); cat \"$T\" > /dev/null |& head",
+            // `printf` reports an operand a numeric conversion rejects.
+            "T=$(gcloud auth print-access-token); printf '%d' \"$T\" > /dev/null",
+            "T=$(gcloud auth print-access-token); printf '%*s' \"$T\" x > /dev/null",
+            "T=$(gcloud auth print-access-token); printf -v \"$T\" '%s' x > /dev/null",
+            "T=$(gcloud auth print-access-token); printf \"$T\" > /dev/null",
+            "T=$(gcloud auth print-access-token); print -f '%d' \"$T\" > /dev/null",
+        ],
+    );
+}
+
+/// #8735 fail-closed: where the stderr of a reporting printer goes, or what
+/// its `printf` format asks for, is chosen at run time. Each row refuses as
+/// unreadable. Fails against either fail-open mutation named in the fix's
+/// report: routing that stderr only when it is not `Sink::Unknown`, or
+/// reading a run-time `printf` format as one that reports nothing.
+#[test]
+fn denies_an_unreadable_stderr_of_a_reporting_printer_8735() {
+    check(
+        true,
+        &[
+            "T=$(gcloud auth print-access-token); cat \"$T\" > /dev/null 2> \"$ERR\"",
+            "T=$(gcloud auth print-access-token); wc -c < <(cat \"$T\" 2> \"$ERR\")",
+            "T=$(gcloud auth print-access-token); printf \"$FMT\" \"$T\" > /dev/null",
+        ],
+    );
+}
+
+/// #8735: the nearest benign forms stay allowed — stderr discarded or
+/// captured, a printer that never reports its operand, and a `printf` format
+/// that only copies text.
+#[test]
+fn allows_the_8735_neighbours() {
+    check(
+        false,
+        &[
+            "T=$(gcloud auth print-access-token); wc -c < <(cat \"$T\" 2>/dev/null)",
+            "T=$(gcloud auth print-access-token); cat \"$T\" > /dev/null 2> /dev/null",
+            "T=$(gcloud auth print-access-token); cat \"$T\" &> /dev/null",
+            "T=$(gcloud auth print-access-token); cat \"$T\" > /tmp/fake-out 2> /tmp/fake-err",
+            "T=$(gcloud auth print-access-token); X=$(cat \"$T\" 2>&1)",
+            "T=$(gcloud auth print-access-token); cat \"$T\" |& wc -c",
+            "T=$(gcloud auth print-access-token); X=$(echo \"$T\")",
+            "T=$(gcloud auth print-access-token); X=$(printf '%s\\n' \"$T\")",
+            "T=$(gcloud auth print-access-token); X=$(printf -- '%-10.4s|%%|%b' \"$T\" \"$T\")",
+            "T=$(gcloud auth print-access-token); X=$(print -r -- \"$T\")",
+        ],
+    );
+}
