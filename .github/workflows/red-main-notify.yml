@@ -63,6 +63,7 @@ on:
     workflows:
       - "Agent assets" # agent-assets.yml
       - "AL2023 load-dynamic build gate" # al2023-build.yml
+      - "Architect sub-project" # architect-subproject.yml
       - "build.rs sync" # buildrs-sync.yml
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml

@@ -1,0 +1,73 @@
+# The Architect sub-project gate (issue #8436).
+#
+# python/trusty-architect/ is a self-contained, standard-library Python
+# sub-project: the Architect's deterministic fleet poller, its helpers and the
+# canonical copy of the bundled `tm-supervisor-setup` skill. This job runs its
+# pytest suite and the independence/drift check
+# (scripts/check_architect_subproject.sh), selftest first — a gate only seen
+# passing cannot be told apart from one that always exits 0.
+#
+# Path-filtered (owner ruling Q9 on #8436): the sub-project itself, plus every
+# other file the check reads — the shipped skill copy (drift), the root
+# Cargo.toml (workspace membership), the check and its selftest, and this
+# workflow. No Rust toolchain; finishes in seconds.
+name: Architect sub-project
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "python/trusty-architect/**"
+      - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "Cargo.toml"
+      - "scripts/check_architect_subproject.sh"
+      - "scripts/check_architect_subproject_selftest.sh"
+      - ".github/workflows/architect-subproject.yml"
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    paths:
+      - "python/trusty-architect/**"
+      - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "Cargo.toml"
+      - "scripts/check_architect_subproject.sh"
+      - "scripts/check_architect_subproject_selftest.sh"
+      - ".github/workflows/architect-subproject.yml"
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: architect-subproject-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  architect-subproject:
+    name: Architect sub-project (pytest + independence/drift check)
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install "pytest>=8"
+
+      - name: Independence/drift check selftest (planted violations)
+        run: bash scripts/check_architect_subproject_selftest.sh
+
+      - name: Independence/drift check
+        run: bash scripts/check_architect_subproject.sh
+
+      - name: pytest (python/trusty-architect)
+        working-directory: python/trusty-architect
+        run: python -m pytest

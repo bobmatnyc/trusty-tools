@@ -1,0 +1,8 @@
+# The Architect's sub-project (#8436). Standard-library Python only: there is
+# nothing to install and no package to build. This file exists to pin the
+# pytest configuration. It is not a Cargo workspace member, and it imports
+# nothing from the rest of the monorepo (scripts/check_architect_subproject.sh
+# at the repo root enforces both).
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

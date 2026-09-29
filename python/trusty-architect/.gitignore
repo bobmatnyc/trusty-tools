@@ -1,0 +1,3 @@
+# Runtime state the poller writes when run from this directory.
+inbox/
+quiet-sessions.txt

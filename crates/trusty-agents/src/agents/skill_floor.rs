@@ -111,6 +111,8 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-session-pause",
     "tm-session-resume",
     "tm-slack",
+    // #8436: Architect session setup, non-coding like `tm-init`.
+    "tm-supervisor-setup",
     "tm-teaching-templates",
     "tm-ticketing",
     "tm-tool-usage-guide",

@@ -311,3 +311,16 @@ pub const TM_EPIC_MANUAL_PROCEDURE: &str =
 /// Test: `tm_skills_are_in_bundle`, `install_then_deploy_deploys_skills`.
 pub const TM_EPIC_ANTI_PATTERNS: &str =
     include_str!("../assets/skills/tm-epic/references/anti-patterns.md");
+
+/// `tm-supervisor-setup` — set up the Architect, the one fleet supervisor
+/// session per user (issue #8436, phase P1).
+///
+/// Why: a user or PM needs one entry point that yields a working Architect;
+/// the skill ships first so its naming and setup contract are reviewed before
+/// the `tm fleet` commands (P2/P3) commit a Rust API.
+/// What: embedded markdown skill file deployed to
+/// `skills/tm-supervisor-setup.md`. The canonical copy is
+/// `python/trusty-architect/skills/tm-supervisor-setup.md`;
+/// `scripts/check_architect_subproject.sh` fails when the two differ.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_SUPERVISOR_SETUP: &str = include_str!("../assets/skills/tm-supervisor-setup.md");
