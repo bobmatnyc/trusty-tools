@@ -44,7 +44,9 @@ fn refusal(command: &str) -> Option<String> {
         .map(str::to_string)
         .or_else(|| evaluate_secret_file_read_command(command))
         .or_else(|| evaluate_secret_file_copy_command(command, cwd()))
-        .or_else(|| evaluate_destructive_delete_command(command, cwd()).map(str::to_string))
+        .or_else(|| {
+            evaluate_destructive_delete_command(command, cwd()).map(|c| c.reason().to_string())
+        })
 }
 
 /// #7839: a `sed` expression's regex wildcard was read as a dotfile glob.

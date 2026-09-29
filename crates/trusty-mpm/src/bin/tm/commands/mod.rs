@@ -135,6 +135,8 @@ pub(crate) mod repair_delegation_list;
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
+// #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
+pub(crate) mod pm_guard_floor;
 // #8453: the PM delegation rules apply by session profile.
 pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;

@@ -51,6 +51,7 @@ use super::{PathEnv, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_deny_log::DenyContext;
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
+use crate::commands::pm_guard_floor::ArchitectGate;
 
 /// A HEAD move whose target is a linked worktree, awaiting the daemon's answer.
 #[derive(Debug, PartialEq, Eq)]
@@ -178,9 +179,11 @@ pub(crate) async fn deny_linked_worktree_head_move(
     session_id: &str,
     payload: &Value,
     (command, cwd, subagent): (&str, &Path, bool),
+    architect: &ArchitectGate<'_>,
 ) -> bool {
     let deny = linked_worktree_head_move_deny(url, session_id, command, cwd, payload, subagent);
-    let Some(reason) = deny.await else {
+    // #8878 D5: the process-bound Architect is exempt.
+    let Some(reason) = deny.await.filter(|_| !architect.is_architect()) else {
         return false;
     };
     let refused = DenyContext::from_payload(url, payload);
