@@ -10,13 +10,15 @@ use clap::Parser;
 
 use super::config::{self, Edit};
 use super::launch::PaneState;
+use super::session_name::SessionNames;
 use super::*;
 use crate::cli::{Cli, Command};
 
 /// A tmux with no session and no stamp; the preflight tests use it too.
 pub(super) const NO_TMUX: Probe = Probe {
     pane: |_| PaneState::Absent,
-    stamp: || None,
+    stamp: |_| None,
+    claude: |_| None,
 };
 
 /// A scratch home plus the default Architect directory under it.
@@ -58,7 +60,7 @@ impl Fixture {
     }
 
     fn status(&self) -> super::status::StatusReport {
-        status(&self.dir(), self.home(), NO_TMUX)
+        status(&self.dir(), self.home(), NO_TMUX, None)
     }
 }
 
@@ -72,10 +74,16 @@ fn cli_parses_fleet_init() {
     let cli = Cli::try_parse_from(["tm", "fleet", "init", "--dir", "/x/a", "--no-launch"]).unwrap();
     match cli.command.unwrap() {
         Command::Fleet {
-            action: FleetAction::Init { dir, no_launch },
+            action:
+                FleetAction::Init {
+                    dir,
+                    no_launch,
+                    session,
+                },
         } => {
             assert_eq!(dir.as_deref(), Some("/x/a"));
             assert!(no_launch);
+            assert_eq!(session, None);
         }
         other => panic!("expected fleet init, got {other:?}"),
     }
@@ -89,7 +97,8 @@ fn cli_parses_fleet_status() {
         Command::Fleet {
             action: FleetAction::Status {
                 dir: None,
-                json: true
+                json: true,
+                session: None,
             }
         }
     ));
@@ -535,7 +544,9 @@ fn a_failing_start_script_is_an_error_with_its_cause() {
     let script = dir.path().join(super::poller::START_SCRIPT);
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, "echo 'no tmux here' >&2\nexit 7\n").unwrap();
-    let err = super::poller::start(dir.path(), NO_TMUX).expect_err("a failing script must fail");
+    let names = SessionNames::default_names();
+    let err =
+        super::poller::start(dir.path(), NO_TMUX, &names).expect_err("a failing script must fail");
     let text = format!("{err:#}");
     assert!(
         text.contains("no tmux here") && text.contains('7'),
@@ -631,14 +642,15 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
         ..NO_TMUX
     };
     let dir = Path::new(STUB_DIR);
+    let names = SessionNames::default_names();
     let text = |step: Step| match step {
         Step::Failed(text) => text,
         other => panic!("expected a FAILED step, got {other:?}"),
     };
-    assert!(text(super::poller::step(dir, true, dead)).contains("pane is dead"));
-    assert!(text(super::poller::step(dir, true, unknown)).contains("server exited"));
+    assert!(text(super::poller::step(dir, true, dead, &names)).contains("pane is dead"));
+    assert!(text(super::poller::step(dir, true, unknown, &names)).contains("server exited"));
     assert!(matches!(
-        super::poller::step(dir, true, live),
+        super::poller::step(dir, true, live, &names),
         Step::Unchanged(_)
     ));
 
@@ -648,7 +660,7 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, "exit 0\n").unwrap();
     for (probe, cause) in [(dead, "pane is dead"), (unknown, "server exited")] {
-        let err = super::poller::start(scratch.path(), probe).expect_err(cause);
+        let err = super::poller::start(scratch.path(), probe, &names).expect_err(cause);
         assert!(format!("{err:#}").contains(cause), "{err:#}");
     }
 }
@@ -657,7 +669,7 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
 /// `TMUX_SOCKET`, so it and tm's own tmux calls address one server.
 #[test]
 fn the_start_command_drops_tmux_socket() {
-    let cmd = super::poller::start_command(Path::new(STUB_DIR));
+    let cmd = super::poller::start_command(Path::new(STUB_DIR), &SessionNames::default_names());
     let removed = cmd
         .get_envs()
         .any(|(key, value)| key == "TMUX_SOCKET" && value.is_none());

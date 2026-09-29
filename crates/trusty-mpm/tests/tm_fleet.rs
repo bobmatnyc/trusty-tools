@@ -139,6 +139,8 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
     let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
         .expect("the launch record directory")
         .map(|entry| entry.expect("entry").path())
+        // #8878 R1: the `<pid>.session` name sidecar sits beside the record.
+        .filter(|path| path.extension().is_some_and(|ext| ext == "architect"))
         .collect();
     assert_eq!(records.len(), 1, "{records:?}");
     let pid: u32 = records[0]
@@ -152,6 +154,10 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         .expect("the record exists");
     assert_eq!(record.pid, pid);
     assert!(trusty_mpm::core::process::process_name_is_claude(pid));
+    assert_eq!(
+        trusty_mpm::core::architect_launch::architect_session_name(&root, pid).as_deref(),
+        Ok("tm-architect")
+    );
 
     // #8436 P4: the launch also starts the poller, whose ROOT is the
     // Architect directory: it writes its log under `<dir>/inbox/`.
@@ -172,6 +178,7 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
     let report = json(&out);
     assert_eq!(report["complete"], true, "{}", text(&out));
     assert_eq!(report["session"], "tm-architect");
+    assert_eq!(report["binding"]["ok"], true, "{}", text(&out));
 
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
@@ -180,6 +187,103 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
+}
+
+/// #8878 R1: `--session` names the Architect's session, its poller
+/// (`<name>-poll`) and the launch record, and `status` without the flag
+/// finds all three; no `tm-architect` session is started.
+#[test]
+fn fleet_init_with_a_session_override_names_every_session() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&[
+        "fleet",
+        "init",
+        "--session",
+        "tm-sup-x",
+        "--dir",
+        dir_arg(&dir),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{}", text(&out));
+    for want in [
+        "started tmux session tm-sup-x on",
+        "bound to claude pid",
+        "started poller session tm-sup-x-poll",
+        "`[supervisor] session = \"tm-sup-x\"`",
+    ] {
+        assert!(stdout.contains(want), "{want}: {}", text(&out));
+    }
+    let has = |name: &str| {
+        Command::new("tmux")
+            .args(["has-session", "-t", &format!("={name}")])
+            .env("TMUX_TMPDIR", env.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("tmux")
+            .success()
+    };
+    assert!(has("tm-sup-x") && has("tm-sup-x-poll"));
+    assert!(!has("tm-architect") && !has("tm-architect-poll"));
+
+    let root = env.home.path().join(".trusty-mpm");
+    let pid: u32 = std::fs::read_dir(root.join("architect-launch"))
+        .expect("record dir")
+        .filter_map(|e| {
+            e.ok()?
+                .path()
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".architect")?
+                .parse()
+                .ok()
+        })
+        .next()
+        .expect("a launch record");
+    assert_eq!(
+        trusty_mpm::core::architect_launch::architect_session_name(&root, pid).as_deref(),
+        Ok("tm-sup-x")
+    );
+
+    let out = env.tm(&["fleet", "status", "--json", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let report = json(&out);
+    assert_eq!(report["session"], "tm-sup-x", "{}", text(&out));
+    assert_eq!(report["binding"]["ok"], true, "{}", text(&out));
+
+    // Item 6: a re-run against the running session in the same directory.
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Nothing changed"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// #8878 R1 item 2: an invalid `--session` refuses before any write.
+#[test]
+fn fleet_init_refuses_an_invalid_session_name_before_writing() {
+    let env = FleetEnv::new();
+    for bad in ["tm:arch", "tm arch", ""] {
+        let out = env.tm(&[
+            "fleet",
+            "init",
+            "--session",
+            bad,
+            "--dir",
+            dir_arg(&env.dir()),
+        ]);
+        assert!(!out.status.success(), "{bad:?}: {}", text(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid --session"),
+            "{}",
+            text(&out)
+        );
+        assert!(!env.dir().exists(), "{bad:?}: {}", text(&out));
+        assert!(!env.home.path().join(".trusty-mpm/config.toml").exists());
+    }
 }
 
 /// #8436 P4, fail closed: a poller that does not start is a FAILED step and

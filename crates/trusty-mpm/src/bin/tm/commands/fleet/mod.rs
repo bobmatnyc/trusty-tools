@@ -8,9 +8,11 @@
 //! What: [`init`] creates the project (local git repo, no remote), writes the
 //! profile request and the allowlist entry — each an atomic write that keeps
 //! the rest of the file — seeds the fleet files ([`seed`]), and starts the
-//! `tm-architect` session and its poller ([`poller`]). [`status()`] reads the
-//! four session facts back and exits 1 when any is missing. Twin mode (#8878)
-//! is out of scope (ruling Q7). `add` and `remove` are phase P3.
+//! Architect's tmux session and its poller ([`poller`]). [`status()`] reads the
+//! four session facts back and exits 1 when any is missing. The session is
+//! `tm-architect` unless `--session` chose and recorded another name
+//! ([`session_name`], #8878 R1). Twin mode (#8878) is out of scope (ruling
+//! Q7). `add` and `remove` are phase P3.
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `tests/tm_fleet.rs`.
 
@@ -20,6 +22,7 @@ pub(crate) mod launch;
 mod poller;
 mod preflight;
 mod seed;
+mod session_name;
 mod status;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +31,7 @@ use anyhow::{Context, bail};
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 
 use self::config::Edit;
+use self::session_name::SessionNames;
 use crate::cli::FleetAction;
 
 pub(crate) use self::launch::ARCHITECT_SESSION;
@@ -47,18 +51,25 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     let home = dirs::home_dir().context("cannot resolve the home directory")?;
     match action {
-        FleetAction::Init { dir, no_launch } => {
+        FleetAction::Init {
+            dir,
+            no_launch,
+            session,
+        } => {
+            // #8878 R1: a bad name refuses before anything is read or written.
+            let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let report = init(&dir, &home, !no_launch, TMUX)?;
+            let report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
             print!("{}", report.render());
             if report.failed() {
                 bail!("tm fleet init failed; see the FAILED step above");
             }
             Ok(())
         }
-        FleetAction::Status { dir, json } => {
+        FleetAction::Status { dir, json, session } => {
+            let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let mut report = status(&dir, &home, TMUX);
+            let mut report = status(&dir, &home, TMUX, session.as_ref());
             // #8878 PR-I: name why this session is not the bound Architect.
             report.this_session = Some(status::this_session_check(
                 &report.dir,
@@ -98,14 +109,17 @@ pub(crate) fn resolve_dir(dir: Option<&str>, home: &Path) -> anyhow::Result<Path
 pub(crate) struct Probe {
     /// Session `name` and its first pane; see [`launch::pane_state`].
     pub(crate) pane: fn(&str) -> launch::PaneState,
-    /// The launch stamp on `tm-architect`; see [`launch::launch_stamp`].
-    pub(crate) stamp: fn() -> Option<String>,
+    /// The launch stamp on session `name`; see [`launch::launch_stamp`].
+    pub(crate) stamp: fn(&str) -> Option<String>,
+    /// The `claude` PID in session `name`; see [`launch::claude_pid`].
+    pub(crate) claude: fn(&str) -> Option<u32>,
 }
 
 /// The real tmux server.
 pub(crate) const TMUX: Probe = Probe {
     pane: launch::pane_state,
     stamp: launch::launch_stamp,
+    claude: launch::claude_pid,
 };
 
 /// What one `init` step did.
@@ -190,11 +204,36 @@ impl InitReport {
 /// `the_home_directory_is_refused_however_it_is_spelled`,
 /// `a_first_run_seeds_the_architect_project`,
 /// `fleet_init_fails_closed_when_the_poller_does_not_start`.
+#[cfg(test)]
 pub(crate) fn init(
     dir: &Path,
     home: &Path,
     launch: bool,
     probe: Probe,
+) -> anyhow::Result<InitReport> {
+    init_with_session(dir, home, launch, probe, None)
+}
+
+/// `init`, with the `--session` choice (#8878 R1); the production entry point.
+///
+/// Why: see [`session_name`]; the default run must stay what `init` was.
+/// What: the names are `session`, else the recorded `[supervisor] session`,
+/// else `tm-architect`; a recorded value that does not parse or validate
+/// refuses before any write. A `session` that differs from the recorded names
+/// refuses while either recorded session exists or tmux cannot say
+/// ([`refuse_rename`]), and is otherwise recorded after the allowlist write.
+/// Every later step (the one-Architect check, the launch, the stamp, the
+/// launch record, the poller) uses the chosen names.
+/// Test: `init_with_a_session_records_it_and_status_reads_it_back`,
+/// `a_rename_is_refused_while_the_recorded_session_runs`,
+/// `a_malformed_recorded_name_refuses_init_and_fails_status`,
+/// `the_default_session_writes_no_key`.
+pub(crate) fn init_with_session(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+    session: Option<&SessionNames>,
 ) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
@@ -202,11 +241,20 @@ pub(crate) fn init(
     let dir = checked.as_path();
     let config_path = user_config_path(home);
     let config_raw = read_or_empty(&config_path)?;
-    let (_, user_config) = config::parse_user_config(&config_raw, &config_path)?;
+    let (config_doc, user_config) = config::parse_user_config(&config_raw, &config_path)?;
     let project_path = dir.join(PROJECT_CONFIG_FILE);
     let project_raw = read_or_empty(&project_path)?;
     config::request_supervisor_profile(&project_raw, &project_path)?;
-    refuse_second_architect(&user_config, dir, probe)?;
+    // #8878 R1: the recorded names, then the chosen ones, before any write.
+    let current = match session_name::recorded(&config_doc, &config_path)? {
+        Some(name) => SessionNames::new(&name)?,
+        None => SessionNames::default_names(),
+    };
+    let names = session.cloned().unwrap_or_else(|| current.clone());
+    if names != current {
+        refuse_rename(&current, &names, probe)?;
+    }
+    refuse_second_architect(&user_config, dir, probe, &names)?;
 
     let mut report = InitReport::default();
     report.steps.push(if dir.is_dir() {
@@ -227,16 +275,32 @@ pub(crate) fn init(
     // project's write boundary. #8436 ruling Q6 departs from that: `tm fleet
     // init` always writes it, also when a PM session runs the command.
     let edit = config::add_allowlist_entry(&config_raw, dir, &config_path)?;
+    // #8878 R1: the session key is edited over the allowlist edit's text.
+    let session_edit = match (session, &edit) {
+        (None, _) => None,
+        (Some(_), Edit::Changed(text)) => {
+            Some(session_name::record_name(text, &names, &config_path)?)
+        }
+        (Some(_), Edit::Unchanged) => Some(session_name::record_name(
+            &config_raw,
+            &names,
+            &config_path,
+        )?),
+    };
     let label = format!("`[supervisor] projects` entry {} in", dir.display());
     report.steps.push(write_edit(&config_path, edit, &label)?);
+    if let Some(edit) = session_edit {
+        let label = format!("`[supervisor] session = \"{}\"` in", names.architect());
+        report.steps.push(write_edit(&config_path, edit, &label)?);
+    }
 
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir)?);
-    let (step, unbound) = launch_step(dir, home, launch, probe)?;
+    let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;
     report.steps.push(step);
     report.unbound = unbound;
-    report.steps.push(poller::step(dir, launch, probe));
+    report.steps.push(poller::step(dir, launch, probe, &names));
     Ok(report)
 }
 
@@ -254,11 +318,43 @@ fn read_or_empty(path: &Path) -> anyhow::Result<String> {
     }
 }
 
+/// Refuse to rename the Architect's sessions while the recorded ones exist.
+///
+/// Why: #8878 R1 — a new name would start a second Architect (or poller)
+/// beside the one still running under the recorded name.
+/// What: fails when `current`'s Architect or poller session exists (live or
+/// dead pane) or tmux cannot be read for it, naming the command that stops it.
+/// Test: `a_rename_is_refused_while_the_recorded_session_runs`.
+fn refuse_rename(
+    current: &SessionNames,
+    wanted: &SessionNames,
+    probe: Probe,
+) -> anyhow::Result<()> {
+    for session in [current.architect(), current.poll()] {
+        match (probe.pane)(session) {
+            launch::PaneState::Absent => {}
+            launch::PaneState::Unknown(err) => bail!(
+                "cannot rename the Architect session to {}: tmux session {session} cannot be \
+                 read ({err})",
+                wanted.architect()
+            ),
+            launch::PaneState::Live(_) | launch::PaneState::Dead(_) => bail!(
+                "cannot rename the Architect session to {}: the recorded session {session} \
+                 still exists; stop it with `tmux kill-session -t ={session}` first, or run \
+                 without --session",
+                wanted.architect()
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// Refuse when an Architect other than `dir` already exists.
 fn refuse_second_architect(
     user_config: &trusty_mpm::core::config::MpmConfig,
     dir: &Path,
     probe: Probe,
+    names: &SessionNames,
 ) -> anyhow::Result<()> {
     if let Some(other) = config::other_architects(user_config, dir).first() {
         bail!(
@@ -269,9 +365,10 @@ fn refuse_second_architect(
         );
     }
     let wanted = std::fs::canonicalize(dir).ok();
-    match (probe.pane)(ARCHITECT_SESSION).dir() {
+    let session = names.architect();
+    match (probe.pane)(session).dir() {
         Some(running) if Some(&running) != wanted.as_ref() => bail!(
-            "tmux session {ARCHITECT_SESSION} already runs in {}; there is one Architect per user",
+            "tmux session {session} already runs in {}; there is one Architect per user",
             running.display()
         ),
         _ => Ok(()),
@@ -321,10 +418,12 @@ fn launch_step(
     home: &Path,
     launch: bool,
     probe: Probe,
+    names: &SessionNames,
 ) -> anyhow::Result<(Step, bool)> {
-    if (probe.pane)(ARCHITECT_SESSION).dir().is_some() {
+    let session = names.architect();
+    if (probe.pane)(session).dir().is_some() {
         return Ok((
-            Step::Unchanged(format!("tmux session {ARCHITECT_SESSION} is running")),
+            Step::Unchanged(format!("tmux session {session} is running")),
             false,
         ));
     }
@@ -338,7 +437,7 @@ fn launch_step(
         ));
     }
     // #8878 ruling A: the record binds the Architect identity to this claude.
-    let (bound, unbound) = match launch::start(dir, home)? {
+    let (bound, unbound) = match launch::start(dir, home, session)? {
         Ok(record) => (format!("bound to claude pid {}", record.pid), false),
         Err(err) => {
             eprintln!("warning: the Architect process was NOT recorded: {err}");
@@ -350,8 +449,8 @@ fn launch_step(
         }
     };
     let step = Step::Changed(format!(
-        "started tmux session {ARCHITECT_SESSION} on the `opus` alias, {bound}; attach with \
-         `tmux attach -t ={ARCHITECT_SESSION}`"
+        "started tmux session {session} on the `opus` alias, {bound}; attach with `tmux attach \
+         -t ={session}`"
     ));
     Ok((step, unbound))
 }

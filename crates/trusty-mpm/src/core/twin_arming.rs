@@ -272,6 +272,7 @@ pub struct ProcessFacts {
 
 /// Read `pid`'s parent and start time; `Err` when the table has no entry.
 // #8902: public so the Architect pane guard can check a launch record is live.
+// #8878 R1: `architect_session` reads the start time it records.
 pub fn process_facts(pid: u32) -> Result<ProcessFacts, String> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let spid = Pid::from_u32(pid);
