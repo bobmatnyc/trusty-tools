@@ -25,6 +25,59 @@ impl GitProbe for OnMain {
     }
 }
 
+/// No live Architect launch record: the #8902 pane floor does not apply.
+pub(crate) struct NoArchitect;
+
+impl PaneProbe for NoArchitect {
+    fn architect_live(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn panes(
+        &self,
+        _server: &[String],
+    ) -> Result<Vec<crate::commands::pm_guard_bash::Pane>, String> {
+        Ok(Vec::new())
+    }
+    fn current_pane(&self) -> Option<String> {
+        None
+    }
+}
+
+/// A live Architect in session `$1` (`tm-architect`, pane `%1`); the caller
+/// is pane `%2` of session `$2` (`pm`).
+pub(crate) struct ArchitectPane;
+
+impl PaneProbe for ArchitectPane {
+    fn architect_live(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn panes(
+        &self,
+        _server: &[String],
+    ) -> Result<Vec<crate::commands::pm_guard_bash::Pane>, String> {
+        let pane = |n: u8, name: &str, architect| crate::commands::pm_guard_bash::Pane {
+            pane: format!("%{n}"),
+            window: format!("@{n}"),
+            session: format!("${n}"),
+            name: name.into(),
+            architect,
+            marked: false,
+        };
+        Ok(vec![pane(1, "tm-architect", true), pane(2, "pm", false)])
+    }
+    fn current_pane(&self) -> Option<String> {
+        Some("%2".into())
+    }
+}
+
+/// The floors' probes over `panes` and a repository on `main`.
+fn probes(panes: &dyn PaneProbe) -> Probes<'_> {
+    Probes {
+        git: &OnMain,
+        panes,
+    }
+}
+
 /// The floor verdict for a Bash `command` under `env` and `config`.
 fn floor_with(
     fx: &Fixture,
@@ -33,7 +86,36 @@ fn floor_with(
     config: impl Fn() -> MpmConfig,
 ) -> Option<FloorDeny> {
     let gate = ArchitectGate::new(call, env, config);
-    evaluate_floors(call, &fx.cwd, &gate, &OnMain, true)
+    evaluate_floors(call, &fx.cwd, &gate, &probes(&NoArchitect), true)
+}
+
+/// #8902: the pane floor binds a PM with and without a bypass; the
+/// process-bound Architect is exempt, and its send-keys to a PM passes.
+#[test]
+fn the_architect_is_exempt_from_the_pane_floor_and_a_pm_is_not() {
+    let fx = fixture();
+    let verdict = |command: &str, env: HookEnv, bypassed: bool| {
+        let call = bash(&fx, command);
+        let gate = ArchitectGate::new(&call, env, || allowlist(&fx));
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&ArchitectPane), bypassed).map(|d| d.rule)
+    };
+    let into_architect = "tmux send-keys -t =tm-architect: 'hi' Enter";
+    for bypassed in [false, true] {
+        assert_eq!(
+            verdict(into_architect, pm_env(&fx), bypassed),
+            Some(ARCHITECT_PANE_RULE),
+            "a PM, bypassed={bypassed}"
+        );
+        assert_eq!(verdict(into_architect, architect_env(&fx), bypassed), None);
+        assert_eq!(
+            verdict(
+                "tmux send-keys -t =pm:0 'Run the gates' Enter",
+                pm_env(&fx),
+                bypassed
+            ),
+            None
+        );
+    }
 }
 
 fn bash(fx: &Fixture, command: &str) -> Value {
@@ -81,7 +163,10 @@ fn the_universal_floors_bind_the_architect() {
     // The guarded path reaches these rules at their own sites, not here.
     let call = bash(&fx, "rm -rf /");
     let gate = ArchitectGate::new(&call, pm_env(&fx), MpmConfig::default);
-    assert_eq!(evaluate_floors(&call, &fx.cwd, &gate, &OnMain, false), None);
+    assert_eq!(
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), false),
+        None
+    );
 }
 
 /// `$'…'` decoding hides a program or path from every rule, so the bypass
@@ -233,7 +318,10 @@ fn the_gate_walks_the_process_table_lazily_and_once() {
     };
     let call = bash(&fx, "git status");
     let gate = ArchitectGate::new(&call, env, || allowlist(&fx));
-    assert_eq!(evaluate_floors(&call, &fx.cwd, &gate, &OnMain, true), None);
+    assert_eq!(
+        evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), true),
+        None
+    );
     assert_eq!(
         walks.load(Ordering::SeqCst),
         0,
