@@ -89,9 +89,11 @@ impl VerifyReport {
 /// `VerifierReach::Failed` outcome, and every `over_cap` index, logging each;
 /// then settles the verdict — `Unknown` stays `Unknown`; nothing dropped →
 /// `rederive_verdict`; anything dropped → `settle_withheld`, which never turns
-/// a non-APPROVE verdict into APPROVE. When any finding went unjudged the
-/// result is floored at `primary` (the #8653 verdict): a verifier outage never
-/// relaxes a review; only refutations take the relaxing path.
+/// a non-APPROVE verdict into APPROVE but may relax a blocking one. When any
+/// finding went unjudged the result is floored at `primary` (the #8653
+/// verdict), so a verifier failure never relaxes a review. Refuted and
+/// over-cap drops are not floored: with no unjudged finding, either may relax
+/// the verdict through `settle_withheld` (owner ruling on #8904, 2026-09-29).
 /// Test: `verify_refuted_drops_and_block_is_withheld`,
 /// `verify_permanent_transport_failure_is_withheld`,
 /// `verify_cap_withholds_findings_past_the_last_call`,
@@ -145,9 +147,13 @@ pub(crate) fn enforce_outcomes(
         rederive_verdict(primary, findings)
     } else {
         let settled = withhold::settle_withheld(primary.clone(), findings);
-        // #8904 (owner decision pending): a verifier failure keeps the #8653
+        // #8904 (owner ruling 2026-09-29): a verifier failure keeps the #8653
         // floor — the pre-verification verdict — so it never relaxes a review.
-        if report.unjudged > 0 && settled.ordinal() < primary.ordinal() {
+        // `Unknown` means withheld, not relaxed, so it is never floored.
+        if report.unjudged > 0
+            && settled != Verdict::Unknown
+            && settled.ordinal() < primary.ordinal()
+        {
             primary
         } else {
             settled
@@ -165,12 +171,16 @@ pub(crate) fn enforce_outcomes(
 /// the unjudged and over-cap drops in `result.withheld_unverified_count`. When
 /// the round withheld findings, scrubs their citations from the body, prepends
 /// the report's note, and on `Unknown` clears the grade and records the note as
-/// the error — the same shape the citation gate uses. Verification enabled
-/// with no verifier wired posts the findings unchecked behind
-/// [`no_verifier_note`]; disabled verification adds nothing.
+/// the error — the same shape the citation gate uses. When no round ran, the
+/// findings are posted behind [`not_verified_note`] and the verdict is left
+/// alone: with verification enabled but no verifier wired, each finding is
+/// marked `Unverifiable` so `unverified_count` raises the #4459 alarm; with
+/// verification disabled by config — an operator choice — the findings keep
+/// no outcome and are not counted (owner ruling on #8904, 2026-09-29).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
 /// `run_review_enabled_without_a_verifier_notes_unverified_findings`,
+/// `run_review_disabled_verification_notes_unverified_findings`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
@@ -194,10 +204,17 @@ pub(crate) async fn gate_then_verify(
     )
     .await
     else {
-        if config.verification.enabled && !result.findings.is_empty() {
-            let note = no_verifier_note(result.findings.len());
-            result.review_body = format!("{note}\n\n{}", result.review_body);
+        if result.findings.is_empty() {
+            return;
         }
+        let why = if config.verification.enabled {
+            mark_unverifiable(&mut result.findings, NO_VERIFIER);
+            NO_VERIFIER
+        } else {
+            VERIFICATION_DISABLED
+        };
+        let note = not_verified_note(result.findings.len(), why);
+        result.review_body = format!("{note}\n\n{}", result.review_body);
         return;
     };
     result.verdict = report.verdict.clone();
@@ -213,10 +230,31 @@ pub(crate) async fn gate_then_verify(
     }
 }
 
-/// Body line for findings posted with verification enabled but no verifier
-/// provider wired — its build failed (#8904).
-pub(crate) fn no_verifier_note(n: usize) -> String {
-    format!("{n} findings not verified: no verifier provider could be built")
+/// Why verification is enabled yet no verifier is wired: its build failed.
+const NO_VERIFIER: &str = "no verifier provider could be built";
+
+/// Why no round ran when `[verification] enabled` is false.
+const VERIFICATION_DISABLED: &str = "verification is disabled";
+
+/// Body line for `n` findings posted without a verification round (#8904).
+fn not_verified_note(n: usize, why: &str) -> String {
+    format!("{n} findings not verified: {why}")
+}
+
+/// Mark every finding with no recorded outcome `Unverifiable` (#8904).
+///
+/// Why: a finding posted because no verifier could be built was never
+/// checked, and `count_unverified` counts only a recorded outcome.
+/// What: sets `verified` directly, skipping `apply_outcome`'s #5309 demotion,
+/// so the verdict and grade stay as graded. A finding a hygiene pass already
+/// stamped keeps its own outcome and reason.
+/// Test: `run_review_enabled_without_a_verifier_notes_unverified_findings`.
+fn mark_unverifiable(findings: &mut [Finding], reason: &str) {
+    for f in findings.iter_mut().filter(|f| f.verified.is_none()) {
+        f.verified = Some(VerifyOutcome::Unverifiable {
+            reason: reason.into(),
+        });
+    }
 }
 
 #[cfg(test)]

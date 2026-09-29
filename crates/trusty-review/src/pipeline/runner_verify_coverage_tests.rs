@@ -111,7 +111,8 @@ async fn run_review_unjudged_finding_is_counted_as_withheld_unverified() {
 }
 
 /// #8904: verification enabled but no verifier provider (its build failed)
-/// posts the finding unchecked behind a "not verified" note.
+/// posts the finding behind a "not verified" note, marked `Unverifiable` so
+/// `unverified_count` raises the #4459 alarm.
 #[tokio::test]
 async fn run_review_enabled_without_a_verifier_notes_unverified_findings() {
     let config = default_config();
@@ -119,28 +120,44 @@ async fn run_review_enabled_without_a_verifier_notes_unverified_findings() {
     let result = review_advisory(&config, None).await;
 
     assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
-    assert!(result.findings[0].verified.is_none());
+    assert!(
+        matches!(
+            &result.findings[0].verified,
+            Some(crate::models::VerifyOutcome::Unverifiable { reason })
+                if reason == "no verifier provider could be built"
+        ),
+        "{:?}",
+        result.findings[0].verified
+    );
+    assert_eq!(result.unverified_count, 1);
     assert!(
         result
             .review_body
-            .starts_with(&crate::pipeline::verify_posted::no_verifier_note(1)),
+            .starts_with("1 findings not verified: no verifier provider could be built"),
         "{}",
         result.review_body
     );
 }
 
-/// Disabled verification is unchanged by #8904: the finding is posted with
-/// no outcome and the body carries no note.
+/// #8904 (owner ruling 2026-09-29): verification disabled by config still
+/// posts the finding, behind a "not verified" note. Disabling is an operator
+/// choice, so the finding keeps no outcome and raises no #4459 alarm; the
+/// verdict is unchanged.
 #[tokio::test]
-async fn run_review_disabled_verification_adds_no_note() {
+async fn run_review_disabled_verification_notes_unverified_findings() {
     let mut config = default_config();
     config.verification.enabled = false;
     let result = review_advisory(&config, None).await;
 
     assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
     assert!(result.findings[0].verified.is_none());
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.unverified_count, 0, "disabled is not an outage");
+    assert_eq!(result.withheld_unverified_count, 0);
     assert!(
-        !result.review_body.contains("not verified"),
+        result
+            .review_body
+            .starts_with("1 findings not verified: verification is disabled"),
         "{}",
         result.review_body
     );
