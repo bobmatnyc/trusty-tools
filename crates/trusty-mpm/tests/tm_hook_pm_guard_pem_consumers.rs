@@ -130,3 +130,41 @@ fn pm_guard_still_denies_every_key_print_or_copy_sink_8869() {
         assert_denied(&run_bash(command, cwd.path()), command);
     }
 }
+
+/// 🔴 REGRESSION (#8875): a `gh api` DELETE of a named secret is refused by
+/// the real binary in each method spelling, while the #8869 GET of the same
+/// path and a DELETE of a non-secret endpoint still pass. Each deny row was
+/// allowed on 474acf4470.
+#[test]
+fn pm_guard_denies_a_gh_api_delete_of_a_secret_8875() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    for command in [
+        "gh api -X DELETE repos/example-org/apex/actions/secrets/APEX_KEY",
+        "gh api -XDELETE repos/example-org/apex/environments/production/secrets/APEX_KEY",
+        "gh api repos/example-org/apex/dependabot/secrets/APEX_KEY --method=delete",
+        "gh api --method DELETE orgs/example-org/codespaces/secrets/APEX_KEY",
+        // #8875 round 2: an endpoint the guard cannot read, no `secrets` word.
+        "gh api -X DELETE \"$EP\"",
+        "ssh build-host 'gh api -X DELETE repos/example-org/apex/actions/secrets/K'",
+        // #8875 round 3: an unlexable call, `gh secret delete`, a curl DELETE.
+        "gh api -X DEL\"ETE\" repos/o/r/actions/sec{r..r}ets/K --jq . <<EOF\nit's\nEOF",
+        "gh secret delete APEX_KEY -R example-org/apex --env production",
+        "curl -X DELETE https://api.github.com/repos/example-org/apex/actions/secrets/K",
+        "gh alias set rmk 'api -X DELETE repos/example-org/apex/actions/secrets/K'",
+    ] {
+        let stdout = run_bash(command, cwd.path());
+        assert_denied(&stdout, command);
+        assert!(stdout.contains("issue #8875"), "{command}: {stdout}");
+    }
+    for command in [
+        "gh api repos/example-org/apex/actions/secrets/APEX_KEY",
+        "gh api -X GET repos/example-org/apex/environments/production/secrets --jq '.secrets[].name'",
+        "gh api -X DELETE repos/example-org/apex/git/refs/heads/old-branch",
+        "gh pr view 8875 --json state,title",
+        "gh api repos/example-org/apex/issues/1/comments --paginate",
+        "gh api repos/example-org/apex/pulls/$N",
+    ] {
+        let stdout = run_bash(command, cwd.path());
+        assert!(stdout.is_empty(), "{command} must allow: {stdout}");
+    }
+}

@@ -27,6 +27,10 @@
 //! `pm_guard_allows_a_key_handed_to_a_consumer_8869` and
 //! `pm_guard_still_denies_every_key_print_or_copy_sink_8869` in
 //! `tests/tm_hook_pm_guard_pem_consumers.rs`.
+//!
+//! #8875: the design's `gh api -X DELETE` DENY row is the child module
+//! `pm_guard_secret_gh_api_delete.rs`, re-exported as
+//! [`evaluate_gh_api_secret_delete`].
 
 use crate::commands::pm_guard_bash::{
     RedirectRole, input_redirect_operand, redirect_role, tokenize,
@@ -479,6 +483,11 @@ fn is_name(segment: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
 }
+
+// #8875: the `gh api` secret-DELETE rule, split out for the 500-SLOC cap.
+#[path = "pm_guard_secret_gh_api_delete.rs"]
+mod gh_api_delete;
+pub(crate) use gh_api_delete::evaluate_gh_api_secret_delete;
 
 #[cfg(test)]
 #[path = "pm_guard_secret_consumers_tests.rs"]
