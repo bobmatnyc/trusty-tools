@@ -473,8 +473,12 @@ pub struct Finding {
 pub struct CitationCorrection {
     /// The line the model cited.
     pub from_line: Option<u32>,
-    /// The line the gate moved the citation to.
+    /// The line the gate moved the citation to (a new-side line number).
     pub to_line: u32,
+    /// The code sits on a line the change REMOVES; `to_line` is the new-side
+    /// position of that deletion (#8905 row 2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed_code: bool,
 }
 
 impl Finding {

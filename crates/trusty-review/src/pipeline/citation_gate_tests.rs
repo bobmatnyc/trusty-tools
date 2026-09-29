@@ -1,7 +1,7 @@
 //! Unit tests for the line-citation gate (#8905).
 
 use super::*;
-use crate::models::{Effort, Finding};
+use crate::models::{Effort, Finding, Verdict};
 use crate::pipeline::diff_analyzer::models::{
     DroppedFile, FileDisposition, FilteredDiff, FilteredFile, FilteredHunk,
 };
@@ -9,8 +9,11 @@ use std::collections::HashMap;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
-/// The line of `BILLING` that holds the summing code the findings describe.
+/// The line of `src/billing.rs` that holds the summing code.
 const SUM_LINE: u32 = 30;
+
+/// The body every "correct" finding carries: a quote of [`SUM_LINE`].
+const SUM_QUOTE: &str = "`amounts.iter().sum::<u64>()` can overflow on large invoices.";
 
 fn hunk(header: &str, lines: Vec<String>) -> FilteredHunk {
     FilteredHunk {
@@ -19,6 +22,10 @@ fn hunk(header: &str, lines: Vec<String>) -> FilteredHunk {
         substantive_confidence: 1.0,
         reason_kept: "test".to_string(),
     }
+}
+
+fn lines(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(|l| l.to_string()).collect()
 }
 
 fn file(name: &str, disposition: FileDisposition, hunks: Vec<FilteredHunk>) -> FilteredFile {
@@ -55,12 +62,26 @@ fn billing_lines() -> Vec<String> {
         .collect()
 }
 
-fn billing_index() -> LineIndex {
-    LineIndex::from_filtered(&diff(vec![file(
+fn billing_file() -> FilteredFile {
+    file(
         "src/billing.rs",
         FileDisposition::Kept,
         vec![hunk("@@ -0,0 +1,40 @@", billing_lines())],
-    )]))
+    )
+}
+
+fn billing_index() -> LineIndex {
+    LineIndex::from_filtered(&diff(vec![billing_file()]))
+}
+
+/// `src/billing.rs` plus a one-line `src/other.rs` holding `other_line`.
+fn two_file_index(other_line: &str) -> LineIndex {
+    let other = file(
+        "src/other.rs",
+        FileDisposition::Kept,
+        vec![hunk("@@ -0,0 +1,1 @@", lines(&[other_line]))],
+    );
+    LineIndex::from_filtered(&diff(vec![billing_file(), other]))
 }
 
 fn finding(file: &str, line: Option<u32>, body: &str) -> Finding {
@@ -69,99 +90,206 @@ fn finding(file: &str, line: Option<u32>, body: &str) -> Finding {
     f
 }
 
-fn gate(findings: &mut Vec<Finding>, index: &LineIndex) -> GateReport {
-    enforce_line_citations(findings, index)
+/// Run the gate and return `(dropped, reanchored)`.
+fn gate(findings: &mut Vec<Finding>, index: &LineIndex) -> (usize, usize) {
+    let report = enforce_line_citations(findings, index);
+    (report.dropped, report.reanchored)
+}
+
+fn gate_one(file: &str, line: Option<u32>, body: &str, index: &LineIndex) -> Vec<Finding> {
+    let mut findings = vec![finding(file, line, body)];
+    gate(&mut findings, index);
+    findings
 }
 
 // ─── #8905 fail-first cases (a)–(d) ────────────────────────────────────────────
 
 #[test]
 fn a_finding_cited_twelve_lines_off_is_reanchored() {
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(SUM_LINE - 12),
-        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
-    )];
-    let report = gate(&mut findings, &billing_index());
-
-    assert_eq!(
-        report,
-        GateReport {
-            dropped: 0,
-            reanchored: 1
-        }
-    );
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE - 12), SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 1));
     assert_eq!(findings[0].line, Some(SUM_LINE));
     assert_eq!(
         findings[0].citation_correction,
         Some(CitationCorrection {
             from_line: Some(SUM_LINE - 12),
             to_line: SUM_LINE,
+            removed_code: false,
         })
     );
 }
 
 #[test]
 fn a_finding_whose_quoted_code_is_absent_is_dropped() {
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(SUM_LINE),
-        "`flush_all()` is never awaited, so the ledger write is lost.",
-    )];
-    let report = gate(&mut findings, &billing_index());
-
-    assert_eq!(
-        report,
-        GateReport {
-            dropped: 1,
-            reanchored: 0
-        }
-    );
-    assert!(findings.is_empty());
+    let body = "`flush_all()` is never awaited, so the ledger write is lost.";
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
 }
 
 #[test]
 fn a_finding_cited_beyond_eof_is_dropped() {
     // The quote IS in the file, so only the #4999/#5023 line check can drop it.
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(90),
-        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
-    )];
-    let report = gate(&mut findings, &billing_index());
-
-    assert_eq!(
-        report,
-        GateReport {
-            dropped: 1,
-            reanchored: 0
-        }
-    );
-    assert!(findings.is_empty());
+    let mut findings = vec![finding("src/billing.rs", Some(90), SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
 }
 
 #[test]
 fn a_finding_with_no_anchor_is_dropped() {
+    let body = "This total can overflow on large invoices.";
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
+}
+
+// ─── Critic round (#8905 rows 1–3, 6, 7) ───────────────────────────────────────
+
+/// Row 1. Fail-open mutation: `found.iter().all(Vec::is_empty)` in place of
+/// `any` in `check_citation`'s snippet arm.
+#[test]
+fn every_quoted_snippet_must_be_present() {
+    let body = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
+    let kept = gate_one("src/billing.rs", Some(SUM_LINE), body, &billing_index());
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 1: the critic's input — a quote absent from the file, whose words are
+/// on the cited line, does not verify.
+#[test]
+fn a_fabricated_quote_does_not_verify_through_its_own_identifiers() {
+    let body = "`amounts.iter().sum::<u64>().unwrap()` panics on overflow.";
+    let kept = gate_one("src/billing.rs", Some(SUM_LINE), body, &billing_index());
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 2. Fail-open mutation: `Run::new(false, …)` in `flush_removed`.
+#[test]
+fn an_old_side_line_number_never_satisfies_a_citation() {
+    let index = LineIndex::from_filtered(&diff(vec![file(
+        "src/load.rs",
+        FileDisposition::Kept,
+        vec![hunk(
+            "@@ -100,3 +150,3 @@",
+            lines(&[
+                " fn load(x: &str) -> u32 {",
+                "-  let n = parse(x).unwrap();",
+                "+  let n = parse(x)?;",
+                "   n",
+            ]),
+        )],
+    )]));
+    let kept = gate_one(
+        "src/load.rs",
+        Some(101),
+        "`parse(x).unwrap()` panics.",
+        &index,
+    );
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].line, Some(151));
+    assert!(kept[0].citation_correction.is_some_and(|c| c.removed_code));
+}
+
+#[test]
+fn a_removed_line_counts_only_at_its_new_side_position() {
+    let index = LineIndex::from_filtered(&diff(vec![file(
+        "src/a.rs",
+        FileDisposition::Kept,
+        vec![hunk(
+            "@@ -10,3 +10,2 @@",
+            lines(&[" fn run() {", "-    guard.check()?;", "     work();"]),
+        )],
+    )]));
     let mut findings = vec![finding(
+        "src/a.rs",
+        Some(11),
+        "Removing `guard.check()?` drops auth.",
+    )];
+    assert_eq!(gate(&mut findings, &index), (0, 1));
+    assert_eq!(
+        findings[0].citation_correction,
+        Some(CitationCorrection {
+            from_line: Some(11),
+            to_line: 11,
+            removed_code: true,
+        })
+    );
+}
+
+/// Row 3: `b'e'` inside a double-quoted excerpt is not a snippet of its own.
+#[test]
+fn a_char_literal_in_an_excerpt_is_not_a_snippet() {
+    let body = "Bad match [code: `src/billing.rs:17` — \"if b == b'e'\"] here.";
+    let kept = gate_one("src/billing.rs", Some(17), body, &billing_index());
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 3: `?;` and `Ok(())` match almost anywhere, so they anchor nothing.
+#[test]
+fn a_generic_snippet_does_not_anchor() {
+    let index = LineIndex::from_filtered(&diff(vec![file(
+        "src/io.rs",
+        FileDisposition::Kept,
+        vec![hunk(
+            "@@ -0,0 +1,3 @@",
+            lines(&["+    read(a)?;", "+    write(b)?;", "+    Ok(())"]),
+        )],
+    )]));
+    for body in ["`?;` swallows the error.", "`Ok(())` hides the failure."] {
+        let kept = gate_one("src/io.rs", Some(1), body, &index);
+        assert!(kept.is_empty(), "{body}: {kept:?}");
+    }
+}
+
+/// Row 3. Fail-open mutation: `o.len() >= 1` for `o.len() == 1` in the
+/// re-anchor arm of `check_citation`.
+#[test]
+fn an_ambiguous_anchor_off_the_cited_line_is_dropped() {
+    let kept = gate_one(
         "src/billing.rs",
         Some(SUM_LINE),
-        "This total can overflow on large invoices.",
-    )];
-    let report = gate(&mut findings, &billing_index());
-
-    assert_eq!(
-        report,
-        GateReport {
-            dropped: 1,
-            reanchored: 0
-        }
+        "`(input)` is unchecked.",
+        &billing_index(),
     );
-    assert!(findings.is_empty());
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 6: a lineless `[code: …]` locator is checked in its own file.
+#[test]
+fn a_lineless_bracket_is_checked_in_its_own_file() {
+    let body = format!("{SUM_QUOTE} [code: `src/other.rs` — \"never_called_helper()\"]");
+    let kept = gate_one(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        &body,
+        &two_file_index("+fn other_helper() {}"),
+    );
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 6: an excerpt for `src/other.rs` does not anchor `src/billing.rs`.
+#[test]
+fn a_bracket_excerpt_anchors_only_its_own_file() {
+    let body = "Overflow [code: `src/other.rs:1` — \"amounts.iter().sum::<u64>()\"]";
+    let index = two_file_index("+let total = amounts.iter().sum::<u64>();");
+    let kept = gate_one("src/billing.rs", Some(18), body, &index);
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// Row 7: a padded locator is rewritten by byte range.
+#[test]
+fn a_padded_locator_is_rewritten_in_place() {
+    let body =
+        format!("{SUM_QUOTE} [code: ` src/billing.rs:18 ` — \"let total = amounts.iter()\"]");
+    let kept = gate_one("src/billing.rs", Some(SUM_LINE), &body, &billing_index());
+    assert_eq!(kept.len(), 1);
+    assert!(
+        kept[0].description.contains("`src/billing.rs:30`") && !kept[0].description.contains(":18"),
+        "{}",
+        kept[0].description
+    );
 }
 
 // ─── Fail closed (#8905 item 4) ────────────────────────────────────────────────
 
-/// Fail-open mutation this pins: `Err(_) => kept.push(f)` in the error arm of
+/// Fail-open mutation this pins: `Err(_) => None` in the error arm of
 /// `enforce_line_citations`.
 #[test]
 fn a_file_with_a_malformed_hunk_header_fails_closed() {
@@ -170,14 +298,8 @@ fn a_file_with_a_malformed_hunk_header_fails_closed() {
         FileDisposition::Kept,
         vec![hunk("@@ not a header @@", billing_lines())],
     )]));
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(SUM_LINE),
-        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
-    )];
-
-    assert_eq!(gate(&mut findings, &index).dropped, 1);
-    assert!(findings.is_empty());
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &index), (1, 0));
 }
 
 #[test]
@@ -201,116 +323,75 @@ fn a_summary_only_file_fails_closed() {
             "`parse_config(raw)` ignores errors.",
         ),
     ];
-
-    assert_eq!(gate(&mut findings, &index).dropped, 3);
+    assert_eq!(gate(&mut findings, &index), (3, 0));
 }
 
 #[test]
 fn a_finding_citing_no_file_is_dropped() {
-    let mut findings = vec![finding(
-        UNKNOWN_FILE_PLACEHOLDER,
-        None,
-        "`amounts.iter().sum::<u64>()` can overflow.",
-    )];
-    assert_eq!(gate(&mut findings, &billing_index()).dropped, 1);
+    let mut findings = vec![finding(UNKNOWN_FILE_PLACEHOLDER, None, SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
 }
 
 // ─── Kept and re-anchored shapes ───────────────────────────────────────────────
 
 #[test]
 fn a_finding_whose_line_holds_its_code_is_kept_unchanged() {
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(SUM_LINE),
-        "`amounts.iter().sum::<u64>()` can overflow.",
-    )];
-    assert_eq!(gate(&mut findings, &billing_index()), GateReport::default());
-    assert_eq!(findings[0].line, Some(SUM_LINE));
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
     assert_eq!(findings[0].citation_correction, None);
 }
 
 #[test]
 fn an_identifier_anchor_reanchors_when_no_snippet_is_given() {
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(3),
-        "The call to step_12 discards its error.",
-    )];
-    assert_eq!(gate(&mut findings, &billing_index()).reanchored, 1);
-    assert_eq!(findings[0].line, Some(12));
+    let body = "The call to step_12 discards its error.";
+    let kept = gate_one("src/billing.rs", Some(3), body, &billing_index());
+    assert_eq!(kept[0].line, Some(12));
 }
 
 #[test]
 fn a_finding_with_no_line_is_anchored_to_its_code() {
-    let mut findings = vec![finding(
+    let kept = gate_one(
         "src/billing.rs",
         None,
         "`sum::<u64>()` can overflow.",
-    )];
-    assert_eq!(gate(&mut findings, &billing_index()).reanchored, 1);
-    assert_eq!(findings[0].line, Some(SUM_LINE));
+        &billing_index(),
+    );
+    assert_eq!(kept[0].line, Some(SUM_LINE));
 }
 
 #[test]
 fn a_bracket_citation_is_rewritten_to_the_verified_line() {
     let body = "Overflow [code: `src/billing.rs:18` — \"let total = amounts.iter()\"] here.";
-    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
-
-    assert_eq!(gate(&mut findings, &billing_index()).reanchored, 1);
+    let kept = gate_one("src/billing.rs", Some(SUM_LINE), body, &billing_index());
     assert!(
-        findings[0].description.contains("`src/billing.rs:30`"),
+        kept[0].description.contains("`src/billing.rs:30`"),
         "{}",
-        findings[0].description
+        kept[0].description
     );
 }
 
 #[test]
-fn a_removed_line_holds_on_the_old_side() {
-    let index = LineIndex::from_filtered(&diff(vec![file(
-        "src/a.rs",
-        FileDisposition::Kept,
-        vec![hunk(
-            "@@ -10,3 +10,2 @@",
-            vec![
-                " fn run() {".to_string(),
-                "-    guard.check()?;".to_string(),
-                "     work();".to_string(),
-            ],
-        )],
-    )]));
-    let mut findings = vec![finding(
-        "src/a.rs",
-        Some(11),
-        "Removing `guard.check()?` drops auth.",
-    )];
-    assert_eq!(gate(&mut findings, &index), GateReport::default());
-}
-
-#[test]
 fn the_gate_is_idempotent() {
-    let mut findings = vec![finding(
-        "src/billing.rs",
-        Some(SUM_LINE - 12),
-        "`amounts.iter().sum::<u64>()` can overflow.",
-    )];
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE - 12), SUM_QUOTE)];
     let index = billing_index();
     gate(&mut findings, &index);
-    assert_eq!(gate(&mut findings, &index), GateReport::default());
+    assert_eq!(gate(&mut findings, &index), (0, 0));
     assert_eq!(findings[0].line, Some(SUM_LINE));
 }
 
 #[test]
 fn parse_locator_reads_lines_and_ranges() {
+    let parsed = |l: &str| parse_locator(l).ok();
     assert_eq!(
-        parse_locator("a.rs:12").ok(),
+        parsed("a.rs:12"),
         Some(("a.rs".to_string(), Some((12, 12))))
     );
     assert_eq!(
-        parse_locator("a.rs:L3-L5").ok(),
+        parsed("a.rs:L3-L5"),
         Some(("a.rs".to_string(), Some((3, 5))))
     );
     assert_eq!(
-        parse_locator("docs/spec.md").ok(),
+        parsed("docs/spec.md"),
         Some(("docs/spec.md".to_string(), None))
     );
     assert!(matches!(
@@ -319,22 +400,53 @@ fn parse_locator_reads_lines_and_ranges() {
     ));
 }
 
-#[test]
-fn gate_posted_findings_relaxes_the_verdict_when_it_drops_every_finding() {
-    let filtered = diff(vec![file(
-        "src/billing.rs",
-        FileDisposition::Kept,
-        vec![hunk("@@ -0,0 +1,40 @@", billing_lines())],
-    )]);
+// ─── Verdict after the gate (#8905 row 4) ──────────────────────────────────────
+
+fn blocking_result(findings: Vec<Finding>) -> ReviewResult {
     let mut result = ReviewResult::new("acme", "api", 7, "t", "https://example.invalid/pr/7");
-    result.verdict = crate::models::Verdict::Block;
-    result.findings = vec![finding(
+    result.verdict = Verdict::Block;
+    result.grade = Some("F".to_string());
+    result.findings = findings;
+    result
+}
+
+/// Row 4. Fail-open mutation: `*verdict = Verdict::Approve` in the
+/// no-survivors arm of `withhold_verdict`.
+#[test]
+fn gate_posted_findings_withholds_when_it_drops_every_finding() {
+    let mut result = blocking_result(vec![finding(
         "src/billing.rs",
         Some(SUM_LINE),
-        "This can overflow.",
-    )];
+        "An AWS secret key is committed in plain text.",
+    )]);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
-    assert_eq!(gate_posted_findings(&mut result, &filtered).dropped, 1);
     assert!(result.findings.is_empty());
-    assert_eq!(result.verdict, crate::models::Verdict::Approve);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: citation unverifiable"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// Row 4: a partial drop re-derives from the survivors and never approves.
+#[test]
+fn gate_posted_findings_never_approves_a_blocking_review() {
+    let mut nit = finding("src/billing.rs", Some(SUM_LINE), SUM_QUOTE);
+    nit.confidence = 0.3;
+    nit.effort = Effort::Low;
+    let blocker = finding(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        "An AWS secret key is committed in plain text.",
+    );
+    let mut result = blocking_result(vec![blocker, nit]);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.verdict, Verdict::Unknown);
 }

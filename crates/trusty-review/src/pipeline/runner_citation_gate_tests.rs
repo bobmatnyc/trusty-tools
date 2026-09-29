@@ -41,7 +41,7 @@ async fn review_one(body: &str, line: u32) -> ReviewResult {
     });
     let llm = FakeLlm {
         response: format!(
-            "```json\n{{\"verdict\":\"REQUEST_CHANGES\",\"summary\":\"overflow\",\"findings\":[{finding}]}}\n```"
+            "Overflow risk at src/billing.rs:{line}.\n\n```json\n{{\"verdict\":\"REQUEST_CHANGES\",\"summary\":\"overflow\",\"findings\":[{finding}]}}\n```"
         ),
         error: None,
         output_tokens: None,
@@ -86,7 +86,13 @@ async fn run_review_posts_the_reanchored_line() {
 async fn run_review_drops_a_finding_whose_quoted_code_is_absent() {
     let result = review_one("`flush_all()` is never awaited.", SUM_LINE).await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
-    assert_eq!(result.verdict, Verdict::Approve);
+    // #8905 row 4: a review the gate emptied is withheld, never APPROVE.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: citation unverifiable")
+    );
 }
 
 /// (c) A finding citing a line beyond EOF is dropped (#4999/#5023 kept).
@@ -101,5 +107,24 @@ async fn run_review_drops_a_finding_cited_beyond_eof() {
 async fn run_review_drops_a_finding_with_no_anchor() {
     let result = review_one("This total can overflow on large invoices.", SUM_LINE).await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
-    assert_eq!(result.verdict, Verdict::Approve);
+    // #8905 row 4: a review the gate emptied is withheld, never APPROVE.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: citation unverifiable")
+    );
+}
+
+/// Row 5: a dropped finding's citation reaches the posted body by no route —
+/// neither the reviewer's prose nor the fenced findings JSON.
+#[tokio::test]
+async fn run_review_body_carries_no_dropped_citation() {
+    let result = review_one("This total can overflow on large invoices.", SUM_LINE).await;
+    assert!(result.findings.is_empty());
+    assert!(
+        !result.review_body.contains("src/billing.rs"),
+        "{}",
+        result.review_body
+    );
 }

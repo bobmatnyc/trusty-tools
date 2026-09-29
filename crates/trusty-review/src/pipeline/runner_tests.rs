@@ -1829,7 +1829,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
     let llm_response = r#"Code looks good overall, minor concern.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 prints `{s}` unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 prints `println!(\"{s}\")` unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file(
         "src/render.rs",
