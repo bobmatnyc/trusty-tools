@@ -1,0 +1,4 @@
+crate   trusty-search
+version 0.54.7
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field StageState.vectors_rejected
