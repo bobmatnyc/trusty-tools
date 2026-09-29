@@ -250,10 +250,14 @@ fn run_bounded_returns_while_a_grandchild_holds_the_pipes() {
     let started = Instant::now();
     let out = test_daemon::run_bounded(&mut cmd, deadline);
     let took = started.elapsed();
-    let grandchild: Option<u32> = std::fs::read_to_string(&pidfile)
+    let grandchild: u32 = std::fs::read_to_string(&pidfile)
         .ok()
-        .and_then(|s| s.trim().parse().ok());
-    let survived = grandchild.filter(|pid| pid_alive(*pid));
+        .and_then(|s| s.trim().parse().ok())
+        .expect("the sh child records its grandchild's pid");
+    // #8900: the killed grandchild lingers until its new parent reaps it, so
+    // allow a bound for that, as trusty-memory's #8748 test does.
+    let gone = wait_until(Duration::from_secs(5), || !pid_alive(grandchild));
+    let survived = (!gone).then_some(grandchild);
     if let Some(pid) = survived {
         hard_kill(pid);
     }

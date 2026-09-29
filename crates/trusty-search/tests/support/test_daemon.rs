@@ -115,10 +115,39 @@ impl Drop for DaemonGuard {
     }
 }
 
-/// True while a process with `pid` exists (a zombie included).
+/// True while a process with `pid` is running. A zombie counts as exited.
+///
+/// Why (#8900): a killed grandchild is re-parented when its parent dies and
+/// stays a zombie until its new parent reaps it. `kill(pid, 0)` succeeds on a
+/// zombie, and a pid 1 that never reaps (a container without an init) keeps it
+/// there for good, which failed the `run_bounded` test on Linux CI.
+/// What: `kill(pid, 0)`, then on Linux the state in `/proc/<pid>/stat`, where
+/// `Z` (zombie) and `X` (dead) count as exited. Elsewhere existence alone
+/// decides; callers poll, and launchd reaps orphans promptly.
+/// Test: `run_bounded_returns_while_a_grandchild_holds_the_pipes`.
 pub fn pid_alive(pid: u32) -> bool {
     // SAFETY: signal 0 delivers nothing; it only checks existence.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    let exists = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    exists && !is_zombie(pid)
+}
+
+/// True when Linux reports `pid` as a zombie or dead task.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    // The state follows the parenthesised comm, which may itself hold `)`.
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let (_, rest) = stat.rsplit_once(')')?;
+            Some(rest.trim_start().starts_with(['Z', 'X']))
+        })
+        .unwrap_or(false)
+}
+
+/// No portable zombie probe off Linux; see [`pid_alive`].
+#[cfg(not(target_os = "linux"))]
+fn is_zombie(_pid: u32) -> bool {
+    false
 }
 
 /// Serialises every [`run_bounded`] spawn in this test binary.
