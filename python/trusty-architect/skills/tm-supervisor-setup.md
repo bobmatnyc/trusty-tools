@@ -10,9 +10,10 @@ effort: medium
 
 # tm-supervisor-setup — Set Up the Architect
 
-🔴 **`tm fleet` does not ship yet.** It lands in phases P2 (`init`, `status`)
-and P3 (`add`, `remove`) of trusty-tools #8436. Run `tm fleet --help` first.
-When it reports an unknown command, use "Until `tm fleet` ships" below.
+🔴 **`tm fleet init` and `tm fleet status` ship; `add` and `remove` do not.**
+They land in phase P3 of trusty-tools #8436. Run `tm fleet --help` first.
+When it reports an unknown command, your `tm` predates `tm fleet`: use
+"Without `tm fleet`" below.
 
 ## What the Architect is
 
@@ -26,15 +27,18 @@ alias `opus` as its model.
 
 1. **Directory.** It creates the Architect project at
    `~/trusty-mpm-projects/architect`. `--dir <path>` overrides the location.
-2. **One Architect per user.** When an Architect already exists, `init` makes
-   no second project and no second session. A second run edits the watched
-   set of the existing Architect.
+2. **One Architect per user.** A second run in the same directory changes
+   nothing and says so. `init` refuses when another allow-listed project
+   already requests the supervisor profile, or when `tm-architect` runs in
+   another directory. Editing the watched set is `tm fleet add` (P3).
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
-4. **Clean instructions.** The project's `CLAUDE.md` holds fleet specifics
-   only, with no IDENTITY, ENFORCEMENT or WORKFLOW override blocks. The
-   project's `.claude/settings.json` never sets `TRUSTY_MPM_PM_UNRESTRICTED`.
+4. **Clean instructions.** `init` seeds no fleet `CLAUDE.md` yet; that
+   template lands in P4. The launch writes tm's standard project files, whose
+   `CLAUDE.md` declares no IDENTITY, ENFORCEMENT or WORKFLOW override blocks.
+   The project's `.claude/settings.json` never sets
+   `TRUSTY_MPM_PM_UNRESTRICTED`.
 5. **Profile request.** It writes `profile = "supervisor"` into the project's
    `.trusty-mpm.toml`.
 6. **Profile grant.** It always adds the project's canonical absolute path to
@@ -42,7 +46,11 @@ alias `opus` as its model.
    when a PM invokes it. This is an owner ruling on #8436; it departs from the
    #3981 rule that a project must not grant itself the profile. Without this
    entry the launch falls back to the PM profile.
-7. **Launch.** It starts the Architect's session on the `opus` alias.
+7. **Launch.** It starts the Architect's session detached, as tmux session
+   `tm-architect` on the `opus` alias, and records the supervisor launch
+   stamp on that session. Attach with `tmux attach -t =tm-architect`.
+   `--no-launch` sets up the files and the grant without starting it. The
+   session is not registered with the daemon, so `tm ls` does not list it.
 8. **No twin mode.** `init` writes no `[supervisor.twin]` grant and never
    launches with `--twin`. Twin mode (#8878) stays a separate opt-in.
 
@@ -51,12 +59,15 @@ alias `opus` as its model.
 `tm fleet add <dir>` adds a project to the watched set and installs that
 project's notification hook (#8392). `tm fleet remove <dir>` removes that
 project's hook only and leaves every other watched project unchanged.
-`tm fleet status` reports the Architect and its watched set.
+`tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
+the allowlist entry, the profile request, the running `tm-architect` session
+in that directory, and its supervisor launch stamp. It exits 1 when any check
+fails. The watched set joins the report in P3.
 
-## Until `tm fleet` ships
+## Without `tm fleet`
 
-The operator runs these steps in a terminal. They produce the project that
-`tm fleet init` will produce, without the watched-set hooks.
+For a `tm` that predates `tm fleet`, the operator runs these steps in a
+terminal. They produce the files and grant `tm fleet init` writes.
 
 ```sh
 dir="$HOME/trusty-mpm-projects/architect"      # or another path
@@ -77,6 +88,7 @@ Then launch the session: `tm launch "$dir"`.
 
 ## Verify
 
+- `tm fleet status` exits 0 and prints `complete`.
 - `git -C "$dir" remote` prints nothing.
 - `tm doctor`, run in the Architect's directory, shows the `session_profile`
   row saying that a launch here runs the `supervisor` profile.

@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-64 top-level commands.
+65 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -36,6 +36,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
+- `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
+  - `init` — Set up the Architect project and start its session
+  - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
   - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files
 - `gui` — Launch the Tauri desktop GUI (or open the web build in the browser when Tauri is unavailable)

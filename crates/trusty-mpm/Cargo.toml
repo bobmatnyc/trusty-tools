@@ -397,6 +397,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 toml.workspace = true
+# #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
+# unrelated keys; already in this crate's graph through trusty-common.
+toml_edit.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

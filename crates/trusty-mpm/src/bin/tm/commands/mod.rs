@@ -51,6 +51,8 @@ pub(crate) mod doctor_orphan;
 pub(crate) mod doctor_repair;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
+// #8436: `tm fleet init|status` — the Architect's setup.
+pub(crate) mod fleet;
 pub(crate) mod generate;
 // #6483: `tm gui` — split out of main.rs when the TUI view routing pushed that
 // file past the 500-SLOC cap.
