@@ -7,8 +7,8 @@
 //! launch records it beside the process record, in the anchored
 //! `~/.trusty-mpm/architect-launch/` directory.
 //! What: [`validate_session_name`] is the one name rule. [`record_launch`]
-//! writes `<pid>.session` and then the `<pid>.architect` launch record.
-//! [`architect_session_name`] reads the name back for a recorded PID, and
+//! writes `<pid>.architect-session` and then the `<pid>.architect` launch
+//! record. [`architect_session_name`] reads the name back for a recorded PID, and
 //! [`check_session_binding`] says whether the `claude` in a named session is
 //! the launched Architect of a project. The `.architect` record keeps its
 //! shape (`ArmingRecord`, `deny_unknown_fields`, shared with the twin), so the
@@ -33,7 +33,10 @@ pub const POLL_SUFFIX: &str = "-poll";
 pub const MAX_SESSION_NAME: usize = 64;
 
 /// Extension of the session-name sidecar beside `<pid>.architect`.
-pub const SESSION_EXT: &str = "session";
+///
+/// #8878 R1 critic HIGH: distinct from a plain `.session`, so pm-guard can
+/// deny any unplaceable write of this name without denying other files.
+pub const SESSION_EXT: &str = "architect-session";
 
 /// The sidecar's content: which launch it belongs to and the session name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -92,8 +95,8 @@ fn sidecar_path(root: &Path, pid: u32) -> PathBuf {
 ///
 /// Why: the launch path alone knows which session it created, so it writes
 /// the name when it writes the process record.
-/// What: validates `session`, writes the `<pid>.session` sidecar (mode 0600,
-/// atomic) with the process's start time, then the `<pid>.architect` record
+/// What: validates `session`, writes the `<pid>.architect-session` sidecar
+/// (mode 0600, atomic) with the process's start time, then the `<pid>.architect` record
 /// ([`ARCHITECT_RECORDS`]). The sidecar goes first, so a record never exists
 /// without its name from this path; a record from an older tm has none and
 /// reads as [`DEFAULT_ARCHITECT_SESSION`].
@@ -141,8 +144,8 @@ fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {
 /// Architect's session from the launch record, not assume `tm-architect`.
 /// What: reads `<pid>.architect` under `root` (`~/.trusty-mpm`): none is
 /// [`LaunchRefusal::NoLaunchRecord`]; unreadable is
-/// [`LaunchRefusal::UnreadableRecord`]. Then `<pid>.session`: absent means an
-/// older tm launched it, so [`DEFAULT_ARCHITECT_SESSION`]; unreadable, writable
+/// [`LaunchRefusal::UnreadableRecord`]. Then `<pid>.architect-session`: absent
+/// means an older tm launched it, so [`DEFAULT_ARCHITECT_SESSION`]; unreadable, writable
 /// by others, unparseable, naming another PID or start time, or failing
 /// [`validate_session_name`] is [`LaunchRefusal::UnreadableRecord`]. Never
 /// falls back to the default on an error.

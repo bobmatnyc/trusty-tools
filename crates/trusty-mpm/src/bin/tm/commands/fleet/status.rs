@@ -154,7 +154,14 @@ pub(crate) fn binding_check(
     }
 }
 
-fn bound(dir: &Path, home: &Path, probe: Probe, session: &str) -> Result<String, String> {
+/// `Ok` when the `claude` in `session` is the bound Architect of `dir`, else
+/// why not; shared by [`binding_check`] and `init`'s running-session step.
+pub(super) fn bound(
+    dir: &Path,
+    home: &Path,
+    probe: Probe,
+    session: &str,
+) -> Result<String, String> {
     match (probe.pane)(session) {
         PaneState::Live(_) => {}
         PaneState::Dead(_) => return Err(format!("the pane of tmux session {session} is dead")),

@@ -139,7 +139,7 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
     let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
         .expect("the launch record directory")
         .map(|entry| entry.expect("entry").path())
-        // #8878 R1: the `<pid>.session` name sidecar sits beside the record.
+        // #8878 R1: the `<pid>.architect-session` name sidecar sits beside the record.
         .filter(|path| path.extension().is_some_and(|ext| ext == "architect"))
         .collect();
     assert_eq!(records.len(), 1, "{records:?}");
@@ -369,6 +369,23 @@ fn fleet_init_names_an_unbound_architect_in_the_summary() {
         "{}",
         text(&out)
     );
+
+    // #8878 R1 critic MEDIUM: a re-run finds the session running unbound
+    // and says so, never "Nothing changed".
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        stdout.contains("tmux session tm-architect is running but is not a bound Architect"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        stdout.contains("Architect set up (NOT bound"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stdout.contains("Nothing changed"), "{}", text(&out));
 }
 
 /// #8436: `--dir` goes through the same preflight as the default, so the

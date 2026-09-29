@@ -426,6 +426,38 @@ fn a_repository_nested_in_the_private_local_repository_is_refused() {
     );
 }
 
+/// Fail-Open Check (critic LOW): a `local/.git` that cannot be stat'ed
+/// refuses, naming it; it is never read as "no private repository".
+#[test]
+fn an_unstatable_private_repository_refuses() {
+    let s = Scratch::new();
+    let dir = supervisor_with_local(&s);
+    let local = dir.join("local");
+    // Read, no search: `local` lists, but `local/.git` cannot be stat'ed.
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let _unlock = Unlock(local.clone());
+    let refusal = s.refused(&dir);
+    assert!(
+        matches!(&refusal, DirRefusal::Unresolvable { path, reason }
+            if *path == local.join(".git") && reason.contains("Permission denied")),
+        "{refusal:?}"
+    );
+}
+
+/// Fail-Open Check (critic LOW): `git remote` failing on `local/` refuses.
+#[test]
+fn a_failing_remote_listing_on_the_private_repository_refuses() {
+    let s = Scratch::new();
+    let dir = s.home().join("code/supervisor");
+    // A real `.git` directory git does not accept as a repository.
+    std::fs::create_dir_all(dir.join("local/.git")).unwrap();
+    let refusal = s.refused(&dir);
+    assert!(
+        matches!(&refusal, DirRefusal::GitProbeFailed { path, .. } if *path == dir.join("local")),
+        "{refusal:?}"
+    );
+}
+
 /// A symlinked `local`, and a `local/.git` that is a file or a symlink, get
 /// no exception: the ordinary scan refuses them.
 #[test]

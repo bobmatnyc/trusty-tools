@@ -295,13 +295,15 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
 }
 
 /// `<target>/local` when it is a real directory whose `.git` is a real
-/// directory; `None` otherwise, which leaves it to the ordinary scan.
+/// directory; `None` otherwise, which leaves it to the ordinary scan. A stat
+/// error other than not-found is [`DirRefusal::Unresolvable`].
 ///
 /// Why: #8878 R1 — the supervisor keeps a private, remote-less repository in
 /// `local/`. A symlinked `local`, or a `.git` file or symlink (a worktree,
 /// submodule or redirect), gets no exception, so the scan refuses it.
 /// Test: `a_symlinked_local_repository_is_refused`,
-/// `a_private_local_repository_without_a_remote_passes`.
+/// `a_private_local_repository_without_a_remote_passes`,
+/// `an_unstatable_private_repository_refuses`.
 fn private_repo(target: &Path) -> Result<Option<PathBuf>, DirRefusal> {
     let local = target.join(PRIVATE_REPO_DIR);
     for path in [local.clone(), local.join(".git")] {
@@ -326,7 +328,8 @@ fn private_repo(target: &Path) -> Result<Option<PathBuf>, DirRefusal> {
 /// [`DirRefusal::Unresolvable`] and a failing listing
 /// [`DirRefusal::GitProbeFailed`].
 /// Test: `a_private_local_repository_with_a_remote_is_refused`,
-/// `a_repository_nested_in_the_private_local_repository_is_refused`.
+/// `a_repository_nested_in_the_private_local_repository_is_refused`,
+/// `a_failing_remote_listing_on_the_private_repository_refuses`.
 fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),

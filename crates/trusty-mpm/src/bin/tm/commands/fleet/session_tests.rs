@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::architect_session::record_launch;
+use trusty_mpm::core::architect_session::{SESSION_EXT, record_launch};
 
 use super::super::launch::PaneState;
 use super::super::status::{StatusReport, status};
@@ -288,9 +288,88 @@ fn status_binding_needs_the_record_and_the_same_session() {
 
     let sidecar = root
         .join("architect-launch")
-        .join(format!("{}.session", std::process::id()));
+        .join(format!("{}.{SESSION_EXT}", std::process::id()));
     std::fs::write(&sidecar, "{}").expect("corrupt the sidecar");
     unbound(binding(None, LIVE_ME), "could not be read");
+}
+
+thread_local! {
+    /// The directory a [`LIVE_HERE`] session runs in.
+    static HERE: RefCell<PathBuf> = const { RefCell::new(PathBuf::new()) };
+}
+
+/// Every session runs live in [`HERE`], and its `claude` is this test process.
+const LIVE_HERE: Probe = Probe {
+    pane: |_| PaneState::Live(HERE.with(|h| h.borrow().clone())),
+    ..LIVE_ME
+};
+
+/// Critic MEDIUM: `init` against a session already running in its directory
+/// checks the binding. Without a launch record, and with one naming another
+/// session, the report is unbound and says what to do; with the record it
+/// changes nothing.
+#[test]
+fn a_running_unbound_session_is_reported_by_init() {
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("first init");
+    let canonical = std::fs::canonicalize(h.dir()).expect("canonical dir");
+    HERE.with(|here| *here.borrow_mut() = canonical);
+
+    let unbound = |report: InitReport, why: &str| {
+        let text = report.render();
+        assert!(report.unbound && !report.failed(), "{text}");
+        assert!(
+            text.contains("tmux session tm-architect is running but is not a bound Architect")
+                && text.contains(why)
+                && text.contains("exit claude and kill the session, then re-run"),
+            "{text}"
+        );
+        assert!(text.contains("Architect set up (NOT bound"), "{text}");
+    };
+    unbound(
+        h.init(None, LIVE_HERE).expect("init"),
+        "no Architect launch record",
+    );
+
+    let root = h.home().join(".trusty-mpm");
+    record_launch(&root, std::process::id(), &h.dir(), "elsewhere").expect("record");
+    unbound(
+        h.init(None, LIVE_HERE).expect("init"),
+        "names tmux session elsewhere",
+    );
+
+    record_launch(&root, std::process::id(), &h.dir(), "tm-architect").expect("record");
+    let bound = h.init(None, LIVE_HERE).expect("init");
+    assert!(!bound.unbound, "{}", bound.render());
+    assert!(
+        bound.render().contains("Nothing changed"),
+        "{}",
+        bound.render()
+    );
+}
+
+/// Item 5: a rename refuses while only the recorded poller session exists.
+#[test]
+fn a_rename_is_refused_while_only_the_recorded_poller_runs() {
+    let h = Home::new();
+    h.init(Some("tm-supervisor"), NO_TMUX).expect("first init");
+    let before = h.config();
+    let poller_only = Probe {
+        pane: |name| {
+            if name == "tm-supervisor-poll" {
+                PaneState::Live(PathBuf::from("/fleet-stub/any"))
+            } else {
+                PaneState::Absent
+            }
+        },
+        ..NO_TMUX
+    };
+    let err = h.init(Some("other"), poller_only).expect_err("poller runs");
+    assert!(
+        format!("{err:#}").contains("the recorded session tm-supervisor-poll still exists"),
+        "{err:#}"
+    );
+    assert_eq!(h.config(), before);
 }
 
 /// Item 3: the poller starts with the chosen names in its environment.

@@ -141,7 +141,8 @@ pub(crate) struct InitReport {
     /// One entry per step.
     pub(crate) steps: Vec<Step>,
     /// This run started the Architect but could not bind it to its `claude`
-    /// (#8878 ruling A); a warning, never a failure.
+    /// (#8878 ruling A), or found its session running unbound (#8878 R1); a
+    /// warning, never a failure.
     pub(crate) unbound: bool,
 }
 
@@ -324,7 +325,8 @@ fn read_or_empty(path: &Path) -> anyhow::Result<String> {
 /// beside the one still running under the recorded name.
 /// What: fails when `current`'s Architect or poller session exists (live or
 /// dead pane) or tmux cannot be read for it, naming the command that stops it.
-/// Test: `a_rename_is_refused_while_the_recorded_session_runs`.
+/// Test: `a_rename_is_refused_while_the_recorded_session_runs`,
+/// `a_rename_is_refused_while_only_the_recorded_poller_runs`.
 fn refuse_rename(
     current: &SessionNames,
     wanted: &SessionNames,
@@ -412,7 +414,14 @@ fn write_edit(path: &Path, edit: Edit, label: &str) -> anyhow::Result<Step> {
 }
 
 /// Start the session unless told not to or already running; the flag is
-/// whether a started Architect is unbound (see [`InitReport::unbound`]).
+/// whether the Architect is unbound (see [`InitReport::unbound`]).
+///
+/// Why: #8878 R1 critic MEDIUM — a session already running under the chosen
+/// name may hold a `claude` tm never launched, and `init` must not call that
+/// set up.
+/// What: a running session is checked with [`status::bound`]; not bound is a
+/// warning and the unbound flag. Otherwise starts and records the Architect.
+/// Test: `a_running_unbound_session_is_reported_by_init`.
 fn launch_step(
     dir: &Path,
     home: &Path,
@@ -422,10 +431,22 @@ fn launch_step(
 ) -> anyhow::Result<(Step, bool)> {
     let session = names.architect();
     if (probe.pane)(session).dir().is_some() {
-        return Ok((
-            Step::Unchanged(format!("tmux session {session} is running")),
-            false,
-        ));
+        return Ok(match status::bound(dir, home, probe, session) {
+            Ok(_) => (
+                Step::Unchanged(format!(
+                    "tmux session {session} is running, bound as the Architect"
+                )),
+                false,
+            ),
+            Err(why) => {
+                let text = format!(
+                    "tmux session {session} is running but is not a bound Architect ({why}); \
+                     exit claude and kill the session, then re-run `tm fleet init`"
+                );
+                eprintln!("warning: {text}");
+                (Step::Unchanged(text), true)
+            }
+        });
     }
     if !launch {
         return Ok((

@@ -536,6 +536,32 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
     assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
 }
 
+/// #8878 R1 critic MEDIUM: the seeded instructions derive the poller's
+/// session from the Architect's own, so a `--session` Architect is told its
+/// real poller name; only the scripts' env defaults may name the default.
+#[test]
+fn the_seeded_instructions_never_hard_code_the_poller_session() {
+    let seeded = |dest: &str| {
+        super::seed::FILES
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest} is not seeded"))
+            .contents
+    };
+    for dest in ["CLAUDE.md", ".claude/skills/tm-fleet-check/SKILL.md"] {
+        let text = seeded(dest);
+        assert!(!text.contains("tm-architect-poll"), "{dest}");
+        assert!(
+            text.contains("-poll`") || text.contains("-poll\""),
+            "{dest}"
+        );
+    }
+    assert!(
+        seeded(".claude/skills/tm-fleet-check/SKILL.md")
+            .contains(r#"display-message -p -t "$TMUX_PANE" '#S')-poll""#)
+    );
+}
+
 /// The fail-closed arm: a start script that fails is an error naming its
 /// exit status and output, never a pass.
 #[test]

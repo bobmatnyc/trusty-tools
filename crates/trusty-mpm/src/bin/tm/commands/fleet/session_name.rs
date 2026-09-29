@@ -7,8 +7,11 @@
 //! What: [`SessionNames`] holds a validated Architect session and its poller
 //! session, always `<name>-poll`. The chosen name is recorded as `[supervisor]
 //! session` in `~/.trusty-mpm/config.toml`, the file that already holds the
-//! Architect's allowlist grant and that only the Architect may write
-//! (#8878 trust anchors). No key means `tm-architect`, so a run without the
+//! Architect's allowlist grant. pm-guard denies a PM's direct edit of it
+//! (#8878 trust anchors), but under ruling Q6 any session that runs `tm fleet
+//! init` writes it, so the recorded name is only as trusted as that grant; the
+//! launch sidecar ([`trusty_mpm::core::architect_session`]) is what binds a
+//! `claude` to a session. No key means `tm-architect`, so a run without the
 //! flag writes nothing new. [`recorded`] reads the key, failing on a value
 //! that is not a valid name; [`record_name`] writes it.
 //! Test: `session_tests.rs`.
