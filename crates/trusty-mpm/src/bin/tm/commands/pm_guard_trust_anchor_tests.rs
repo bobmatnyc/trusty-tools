@@ -5,15 +5,15 @@ use serde_json::json;
 use trusty_mpm::core::session_profile::SupervisorConfig;
 
 /// A scratch home holding the config anchor, and a working directory.
-struct Fixture {
-    _dir: tempfile::TempDir,
-    home: PathBuf,
-    cwd: PathBuf,
-    anchor: PathBuf,
-    project: PathBuf,
+pub(crate) struct Fixture {
+    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) home: PathBuf,
+    pub(crate) cwd: PathBuf,
+    pub(crate) anchor: PathBuf,
+    pub(crate) project: PathBuf,
 }
 
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
     let home = root.join("home");
@@ -41,7 +41,7 @@ fn fixture() -> Fixture {
 }
 
 /// A PM session: a known home, no supervisor stamp.
-fn pm_env(fx: &Fixture) -> HookEnv {
+pub(crate) fn pm_env(fx: &Fixture) -> HookEnv {
     HookEnv {
         home: Some(fx.home.clone()),
         ..HookEnv::default()
@@ -50,7 +50,7 @@ fn pm_env(fx: &Fixture) -> HookEnv {
 
 /// The fully granted Architect: stamp, launch directory and allowlist agree,
 /// and the hook's parent is the `claude` tm launched and recorded.
-fn architect_env(fx: &Fixture) -> HookEnv {
+pub(crate) fn architect_env(fx: &Fixture) -> HookEnv {
     launch_record(fx, ARCHITECT, &fx.project);
     HookEnv {
         claude: table(architect_table()),
@@ -59,7 +59,7 @@ fn architect_env(fx: &Fixture) -> HookEnv {
 }
 
 /// The environment half of the Architect, with no process behind it.
-fn spoof_env(fx: &Fixture) -> HookEnv {
+pub(crate) fn spoof_env(fx: &Fixture) -> HookEnv {
     HookEnv {
         home: Some(fx.home.clone()),
         stamp: Some("supervisor".into()),
@@ -69,23 +69,23 @@ fn spoof_env(fx: &Fixture) -> HookEnv {
 }
 
 /// The `claude` `tm fleet init` launched: its PID and start time.
-const ARCHITECT: ClaudeProcess = ClaudeProcess {
+pub(crate) const ARCHITECT: ClaudeProcess = ClaudeProcess {
     pid: 60,
     start_time: 600,
 };
 
 /// One fake process-table row: `(pid, parent, is claude)`.
-type Row = (u32, Option<u32>, bool);
+pub(crate) type Row = (u32, Option<u32>, bool);
 
 /// The hook (PID 100) run directly by the Architect's `claude` (PID 60).
-fn architect_table() -> Vec<Row> {
+pub(crate) fn architect_table() -> Vec<Row> {
     vec![(100, Some(60), false), (60, Some(1), true)]
 }
 
 /// The walk from the hook, PID 100, over `rows`, as PR 1's
 /// `nearest_claude_in`: a PID's start time is `pid * 10`, and a PID absent
 /// from `rows` is a table read error.
-fn table(rows: Vec<Row>) -> ClaudeLookup {
+pub(crate) fn table(rows: Vec<Row>) -> ClaudeLookup {
     ClaudeLookup::new(move || {
         let find = |pid: u32| {
             rows.iter()
@@ -107,7 +107,7 @@ fn table(rows: Vec<Row>) -> ClaudeLookup {
 }
 
 /// Write the launch record tm writes for `claude` started in `project`.
-fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path) -> PathBuf {
+pub(crate) fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path) -> PathBuf {
     let record = trusty_mpm::core::twin_identity::ArmingRecord {
         pid: claude.pid,
         start_time: claude.start_time,
@@ -119,7 +119,7 @@ fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path) -> PathBuf
         .expect("write launch record")
 }
 
-fn allowlist(fx: &Fixture) -> MpmConfig {
+pub(crate) fn allowlist(fx: &Fixture) -> MpmConfig {
     MpmConfig {
         supervisor: SupervisorConfig {
             projects: vec![fx.project.clone()],
@@ -130,7 +130,7 @@ fn allowlist(fx: &Fixture) -> MpmConfig {
 }
 
 /// A main-thread payload for `tool`.
-fn payload(fx: &Fixture, tool: &str, input: Value) -> Value {
+pub(crate) fn payload(fx: &Fixture, tool: &str, input: Value) -> Value {
     json!({
         "session_id": "s-1",
         "cwd": fx.cwd.display().to_string(),

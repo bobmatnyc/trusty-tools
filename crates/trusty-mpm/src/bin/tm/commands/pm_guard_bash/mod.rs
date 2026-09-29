@@ -91,10 +91,16 @@ mod worktree_remove_rechecks;
 mod write_targets;
 // #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
 mod anchor_verbs;
+// #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
+mod floor_d4;
+mod floor_d4_rules;
+mod force_push;
 
 pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
-pub(crate) use destructive_delete::evaluate_destructive_delete_command;
+pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_command};
+pub(crate) use floor_d4::evaluate_d4_floor;
+pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
 pub(crate) use main_checkout::{

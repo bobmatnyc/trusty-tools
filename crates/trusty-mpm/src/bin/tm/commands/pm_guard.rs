@@ -215,7 +215,7 @@ use std::path::{Path, PathBuf};
 use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
-    CommitVerdict, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
+    CommitVerdict, DeleteTarget, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     deny_linked_worktree_head_move, docs_commit_deny_reason, evaluate_bash_command,
     evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
     evaluate_main_checkout_destructive_command, evaluate_main_checkout_head_switch,
@@ -235,12 +235,13 @@ use crate::commands::pm_guard_enter_worktree;
 use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktree};
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
+use crate::commands::pm_guard_floor::{self, ArchitectGate};
 pub(crate) use crate::commands::pm_guard_response::{
     build_pm_guard_deny_response, build_pretooluse_context_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
-use crate::commands::pm_guard_secret_read;
+use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
 use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
@@ -347,15 +348,27 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// unit tests.
 pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
     // #8878 (ruling Q5, D8): stdin is read FIRST, ahead of Guards 2 and 3, so
-    // the trust-anchor floor binds both bypasses and an unreadable payload
-    // denies under them too. The floor is the ONLY rule they no longer lift;
+    // the hard floor binds both bypasses and an unreadable payload denies
+    // under them too. The floor is the ONLY set of rules they no longer lift;
     // every other rule below still sits after them.
     // #7975: fail CLOSED. The guard runs on `PreToolUse` only, where Claude Code
     // always sends a JSON object on stdin, so a payload that did not read or
     // parse is a delivery fault, never "nothing to guard".
     let payload = read_stdin_payload_or_deny(url).await;
+    // ADR-0048: hoisted so every rule below judges the same directory.
+    let hook_cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    // #8878 (D8, Architect rulings for PR 2b): the hard floor. The D4
+    // remainder runs here for every call; under a bypass so do the trust
+    // anchors, `rm -rf` of a root and secret values, which the guarded path
+    // reaches at their own sites below, in their original order.
     let bypassed = std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_unrestricted();
-    if bypassed && pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
+    let architect = ArchitectGate::ambient(&payload);
+    if pm_guard_floor::deny_floors(url, &payload, &hook_cwd, &architect, bypassed).await {
         return Ok(());
     }
     // Guard 2: universal opt-out for CI / build shells that can't edit
@@ -413,17 +426,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // escape hatches, not automatic markers; see their comments. DO NOT move
     // this block after Guard 1 or Guard 4, and do NOT fold it into
     // `evaluate_tool`/`evaluate_bash_command` — doing so re-introduces the
-    // no-op this comment exists to prevent.
-    // Hoisted out of the Bash block below (ADR-0048): the main-checkout write
-    // boundary and the worktree grant both need the same directory, and
-    // resolving it twice would be the way the three rules drift into
-    // disagreeing about which tree the call is standing in.
-    let hook_cwd = payload
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default();
+    // no-op this comment exists to prevent. (`hook_cwd` is resolved above,
+    // before the floor, so every rule judges the same directory.)
     // #8572: hoisted from the fan-out check below; the HEAD-switch rule needs it too.
     let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
     // #8722: every deny below records the call it refused through this.
@@ -478,9 +482,13 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // the target-path classifier and what stays allowed (ordinary file
         // cleanup, `cargo clean`, `git clean -fd`, and — untouched by this
         // rule entirely — `git worktree remove` and `git branch -D`).
-        if let Some(reason) = evaluate_destructive_delete_command(command, &hook_cwd) {
-            audit_denied_tool(&refused, "destructive-delete", reason).await;
-            println!("{}", build_pm_guard_deny_response(reason));
+        // #8878: a root-class target already denied in the floor; D5 exempts
+        // the Architect from the worktree class only.
+        if let Some(class) = evaluate_destructive_delete_command(command, &hook_cwd)
+            && !(class == DeleteTarget::Worktree && architect.is_architect())
+        {
+            audit_denied_tool(&refused, "destructive-delete", class.reason()).await;
+            println!("{}", build_pm_guard_deny_response(class.reason()));
             return Ok(());
         }
         // ABSOLUTE guard (issue #7122) — the same placement, and for the same
@@ -506,7 +514,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // `pm_guard_bash::main_checkout` for the scope this piercing is drawn
         // to (irreversible destruction of another session's uncommitted work,
         // nothing wider) and for why no daemon is consulted.
-        if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd) {
+        // #8878 D5: the Architect is exempt from the main-checkout rules below.
+        if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd)
+            && !architect.is_architect()
+        {
             audit_denied_tool(&refused, "main-checkout-destructive", &reason).await;
             println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
@@ -534,7 +545,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // 10's concurrency test — a docs commit moves the shared HEAD exactly
         // as far as a source commit does, so the same directory-keyed writer
         // query decides it. Everything else still denies outright.
-        match evaluate_main_checkout_commit_command(command, &hook_cwd) {
+        match evaluate_main_checkout_commit_command(command, &hook_cwd)
+            .filter(|_| !architect.is_architect())
+        {
             Some(CommitVerdict::Deny(reason)) => {
                 audit_denied_tool(&refused, "main-checkout-commit", &reason).await;
                 println!("{}", build_pm_guard_deny_response(&reason));
@@ -578,7 +591,7 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                 &payload,
             )
             .await;
-            if !live.is_empty() {
+            if !live.is_empty() && !architect.is_architect() {
                 let reason = head_move_deny_reason(&verb, &root, &live);
                 audit_denied_tool(&refused, "head-move", &reason).await;
                 println!("{}", build_pm_guard_deny_response(&reason));
@@ -587,22 +600,18 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         }
         // #8161: the same move aimed at a LINKED worktree — see that module.
         let linked = (command, hook_cwd.as_path(), caller_is_subagent);
-        if deny_linked_worktree_head_move(url, session_id, &payload, linked).await {
+        if deny_linked_worktree_head_move(url, session_id, &payload, linked, &architect).await {
             return Ok(());
         }
     }
 
     // ABSOLUTE guard (issue #7266) — the `secret_file_copy` rule above screens
     // only where a secret-shaped file GOES; this one screens the verb that
-    // prints its bytes, which is what actually leaked an ngrok authtoken
-    // (`sed -n '38,46p' terraform.tfvars`). It answers for a Bash command and
-    // for a `Read` tool call alike, and denies EVERY caller — the PM included —
-    // placed here with the Bash rules and ahead of Guards 1 and 4 for the same
-    // structural reason as its neighbours: the reported caller was a dispatched
-    // agent. See `pm_guard_secret_read` for the verb class, the shared
-    // classifier it reads, and the key-name-only `grep` it still allows.
+    // prints its bytes (`sed -n '38,46p' terraform.tfvars`). It denies EVERY
+    // caller, for a Bash command and a `Read` alike. See `pm_guard_secret_read`.
     // #8523: a launchd plist is judged by CONTENT, so it needs the hook cwd.
-    if let Some(reason) = pm_guard_secret_read::evaluate_secret_file_read(tool_name, tool_input)
+    // #8878 D8: under a bypass `pm_guard_floor` runs this same rule instead.
+    if let Some(reason) = evaluate_secret_file_read(tool_name, tool_input)
         .or_else(|| evaluate_env_plist_read(tool_name, tool_input, &hook_cwd))
     {
         audit_denied_tool(&refused, "secret-file-read", &reason).await;
@@ -618,8 +627,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // is NOT routed through `evaluate_tool` — that path asks who is writing
     // and is budgeted and subagent-exempt, while this one asks where the write
     // lands and holds for everyone. DO NOT move it below either exemption.
+    // #8878 D5: the process-bound Architect is exempt.
     if let Some(reason) =
         pm_guard_write_boundary::evaluate_main_checkout_write(tool_name, tool_input, &hook_cwd)
+        && !architect.is_architect()
     {
         audit_denied_tool(&refused, "main-checkout-write", &reason).await;
         println!("{}", build_pm_guard_deny_response(&reason));

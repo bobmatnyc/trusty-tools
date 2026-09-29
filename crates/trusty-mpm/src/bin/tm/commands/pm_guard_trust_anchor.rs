@@ -141,7 +141,8 @@ impl std::fmt::Debug for ClaudeLookup {
 
 /// Deny a trust-anchor write: audit it, print the deny, and return `true`.
 ///
-/// Why: `pm_guard` calls this from its bypass path and its guarded path.
+/// Why: `pm_guard` calls this on its guarded path; the bypass path reaches
+/// [`evaluate`] through `pm_guard_floor`.
 /// What: [`evaluate`] over the ambient inputs and the user config; `false`
 /// (nothing printed) when it allows.
 /// Test: `the_floor_denies_an_anchor_write_under_each_bypass`.
@@ -621,4 +622,4 @@ fn unplaceable_reason(what: UnplaceableWrite) -> String {
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]
-mod tests;
+pub(crate) mod tests;
