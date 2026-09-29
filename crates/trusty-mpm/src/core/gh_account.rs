@@ -745,13 +745,14 @@ pub async fn resolve_gh_account_env_for_registry(
     let cwd_for_log = cwd.to_path_buf();
     let (pinned_for_task, origin_for_task) = (pinned.clone(), origin.clone());
     let joined = tokio::task::spawn_blocking(move || {
+        let state_root = crate::core::paths::FrameworkPaths::default().root;
         // #8510: an account-only pin gets only a token `GET /user` proves.
         let prove = |login: &str| {
             use crate::core::gh_account_proof::{AccountProver, CliTokenProbe, HttpUserCheck};
             let sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
                 &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
                 &origin_for_task,
-                crate::core::paths::FrameworkPaths::default().root,
+                state_root.clone(),
                 gh_config_dir(),
             );
             let prover = AccountProver {
@@ -764,10 +765,14 @@ pub async fn resolve_gh_account_env_for_registry(
                 crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user();
             spawn_proof(&prover, login, &origin_for_task, &aliases)
         };
-        log_spawn_env(
-            pinned_spawn_env(&pinned_for_task, &origin_for_task, prove),
-            &cwd_for_log,
-        )
+        // #8914: a pin to tm's own account dir is proven, never used bare.
+        let env = crate::core::gh_session_account::session_spawn_env(
+            &pinned_for_task,
+            &origin_for_task,
+            &state_root,
+            prove,
+        );
+        log_spawn_env(env, &cwd_for_log)
     })
     .await;
     joined_spawn_vars(joined, &pinned, &origin, cwd)

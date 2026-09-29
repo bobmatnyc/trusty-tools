@@ -48,6 +48,8 @@ use account_clone::account_clone_env;
 // and `account_clone` can reach it via `super`/direct path without an extra
 // re-export hop.
 mod account_config_dir;
+// #8914: the `--account` session gate builds and checks the same dir.
+pub(crate) use account_config_dir::ensure_account_config_dir;
 
 /// Resolve (building if necessary) the per-account `gh` config directory for
 /// `login`, for callers outside this module that need to persist it (#7166

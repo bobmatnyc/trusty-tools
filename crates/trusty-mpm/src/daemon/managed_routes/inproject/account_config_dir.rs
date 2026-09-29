@@ -100,7 +100,7 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
 /// `ensure_account_config_dir_reuses_an_existing_dir_untouched`,
 /// `ensure_account_config_dir_copies_config_yml_when_present`,
 /// `ensure_account_config_dir_tolerates_a_missing_config_yml`.
-pub(super) fn ensure_account_config_dir(
+pub(crate) fn ensure_account_config_dir(
     state_root: &Path,
     operator_gh_config_dir: &Path,
     login: &str,

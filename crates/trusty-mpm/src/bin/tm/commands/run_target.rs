@@ -402,34 +402,13 @@ async fn run_managed(
     // performs — so later spawns, fetches, pushes, and `gh` calls made from
     // inside the session reuse it (`resolve_gh_account_env_for_registry`
     // already reads `Project::gh_account` at every spawn/relaunch; this is
-    // the one new write path, not a new read path). Best-effort: the
-    // checkout itself already succeeded, so a registry hiccup here is
-    // reported but never turns a working clone into a failed command.
+    // the one new write path, not a new read path).
     if let Some(account) = account {
-        // #7166: the SAME derivation the daemon's own implicit
-        // auto-registration uses (`ProjectRegistry::register_from_session` →
-        // `derive_name_from_url`) — NOT `register_args`' hyphenated
-        // `owner-repo` alias scheme, which is a different registry
-        // (`~/.trusty-mpm/registry.json`) with a different naming
-        // convention. Landing on the same key means the auto-registration
-        // that fires when `launch()` below creates the session sees this
-        // project ALREADY registered and skips — this entry, gh_account and
-        // all, stays authoritative rather than sitting beside a duplicate.
-        let name = trusty_mpm::project::derive_name_from_url(clone_url)
-            .unwrap_or_else(|| format!("{owner}-{repo}"));
-        // #7166 review follow-up CRITICAL/HIGH: shared with `tm register
-        // --account`'s handler — builds/reuses the per-account gh config dir
-        // and preserves the project's current default_branch, rather than
-        // discarding both on every auto-persist call.
-        super::projects::registry::auto_persist_account_selection(
-            client,
-            url,
-            name,
-            clone_url.to_string(),
-            account,
-            &format!("cloned as {account}"),
-        )
-        .await;
+        // #8914: the same gate `tm sessions new --account` runs — prove the
+        // account, then pin it — and a failure refuses the run instead of
+        // warning and spawning as the machine's active account.
+        super::session_account::pin_account_for_dir(client, url, &checkout.base_path, account)
+            .await?;
     }
 
     if checkout.reused {

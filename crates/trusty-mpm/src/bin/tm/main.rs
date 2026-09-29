@@ -42,7 +42,6 @@ use commands::{
     project::project,
     projects::projects,
     services::services,
-    session::session,
     slack::slack,
     telegram::telegram,
 };
@@ -454,7 +453,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Restart) => restart(&client, &url).await,
         Some(Command::Project { action }) => project(&client, &url, action).await,
         // #2116: `sessions` (plural) is the canonical top-level command.
-        Some(Command::Sessions { action }) => session(&client, &url, action).await,
+        // #8914: the global `--account` is applied, never dropped.
+        Some(Command::Sessions { action }) => {
+            let account = account.as_deref();
+            commands::session_account::session_as_account(&client, &url, action, account).await
+        }
         Some(Command::Projects { action }) => projects(&client, &url, action).await,
         Some(Command::Manager { action }) => manager(&client, &url, action).await,
         // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
@@ -462,7 +465,8 @@ async fn main() -> anyhow::Result<()> {
         // which verb was invoked — before dispatching to the identical handler.
         Some(Command::Session { action }) => {
             commands::session::emit_top_level_alias_notice();
-            session(&client, &url, action).await
+            let account = account.as_deref();
+            commands::session_account::session_as_account(&client, &url, action, account).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         // #6336: standalone — the battery runs in-process, so an unreachable
@@ -553,6 +557,12 @@ async fn main() -> anyhow::Result<()> {
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => {
+            // #8914: `tm launch --account X` pins X on the checkout first.
+            if let Some(login) = account.as_deref() {
+                let target = commands::project::resolve_dir(dir.clone())?;
+                commands::session_account::pin_account_for_dir(&client, &url, &target, login)
+                    .await?;
+            }
             let home = dirs::home_dir();
             launch(
                 &client,

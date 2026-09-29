@@ -591,6 +591,48 @@ async fn pinned_config_dir_reaches_the_spawn_env() {
     );
 }
 
+/// 🔴 #8914 FAIL-OPEN CHECK: a project pinned to tm's own
+/// `<state_root>/gh-accounts/<login>` dir used to spawn with only
+/// `GH_CONFIG_DIR` set. That dir holds no token, so the session's gh read the
+/// keyring's active account. Through the whole production path (real git
+/// origin, real registry, no gh or network in a test build) the session must
+/// now get a token variable — here the nobody-token, since a test build never
+/// proves one — and still point `GH_CONFIG_DIR` at the account dir.
+/// Test: itself.
+#[tokio::test]
+async fn a_tm_account_dir_pin_never_leaves_the_session_on_the_active_account() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let account_dir = crate::core::paths::FrameworkPaths::default()
+        .root
+        .join("gh-accounts")
+        .join("octo-8914-test");
+    registry
+        .register(Project {
+            gh_account: Some("octo-8914-test".into()),
+            ..project_with_config_dir(
+                "widget",
+                "https://github.com/acme-8914/widget",
+                &account_dir,
+            )
+        })
+        .await
+        .expect("register");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    workspace_with_origin(workspace.path(), "https://github.com/acme-8914/widget.git");
+
+    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    assert_eq!(
+        value_of(&vars, GH_TOKEN_ENV_VAR),
+        super::REFUSED_GH_TOKEN,
+        "a bare tm account dir resolves to the keyring's active account: {vars:?}"
+    );
+    assert_eq!(
+        value_of(&vars, GH_CONFIG_DIR),
+        account_dir.to_string_lossy()
+    );
+}
+
 /// Why: a project that pins NEITHER key must still resolve to an empty vec via
 /// the full registry path — the no-regression case for every project that
 /// predates #3025/#5851, now proved with a real matching origin rather than
