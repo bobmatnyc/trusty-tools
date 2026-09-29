@@ -111,6 +111,8 @@ pub async fn run_sweep<G: Gh, T: Git, C: ClaimEnder>(
     backoff: &AuthBackoff,
 ) -> usize {
     // #8301: a caller with no session store proves only its own session ids.
+    // #7771: and reads no Claude registry. The supervisor's sweep reads it
+    // through its session store (`supervisor::pr_cleanup_tick::run_sweep`).
     let ownership = CallerOwnership::from_env();
     run_sweep_with(
         gh, git, claims, &ownership, landing, probe_dirt, registry, backoff,

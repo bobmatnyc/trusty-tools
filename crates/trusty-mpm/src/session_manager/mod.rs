@@ -109,6 +109,12 @@ pub(crate) mod worktree_reclaim_launch;
 pub(crate) mod worktree_reclaim_claim;
 // #7652: gate 4 — whether the agent or session a sentinel names has ended.
 pub(crate) mod worktree_reclaim_ownership;
+// #7771: Claude Code's per-process session registry, the proof that an owner
+// session no record names has ended.
+pub(crate) mod worktree_claude_registry;
+// #7771: which running processes are Claude Code, so an unregistered one
+// keeps the registry's proof incomplete.
+pub(crate) mod worktree_claude_processes;
 // #7232: the ONE place a claim set is built from the store, so the liveness
 // probe that keeps a tombstoned record from blocking reclaim cannot be omitted
 // by a call site.
@@ -122,6 +128,10 @@ mod worktree_reclaim_owner_liveness_tests;
 #[cfg(test)]
 #[path = "worktree_reclaim_superseded_owner_tests.rs"]
 mod worktree_reclaim_superseded_owner_tests;
+// #7771: end-to-end coverage for an owner session no record proves ended.
+#[cfg(test)]
+#[path = "worktree_reclaim_unrecorded_owner_tests.rs"]
+mod worktree_reclaim_unrecorded_owner_tests;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;
@@ -286,6 +296,7 @@ pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreDegradation, StoreError};
 pub use submit_probe::{SubmitState, classify_submit};
 pub use task_inject::should_inject_task;
+pub use worktree_claude_registry::host_claude_config_roots;
 pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};
 
 #[cfg(feature = "daemon")]

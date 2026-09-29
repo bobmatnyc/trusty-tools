@@ -88,7 +88,15 @@ impl SessionManager {
         .with_caller(caller.clone())
         // #7771: a Claude id a restart or `/clear` replaced is named only by
         // the #7617 sidecar, never by a record.
-        .with_history(self.link_history());
+        .with_history(self.link_history())
+        // #7771: Claude Code's own process registry proves an owner no record
+        // names ended, or that a live record's tmux runs a newer session.
+        .with_tmux(
+            records
+                .iter()
+                .map(|r| (r.id.to_string(), r.tmux_name.clone())),
+        )
+        .with_claude(self.claude_registry());
         let claims = records
             .into_iter()
             .filter_map(|r| {

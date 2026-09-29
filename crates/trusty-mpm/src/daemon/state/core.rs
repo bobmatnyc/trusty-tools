@@ -941,6 +941,7 @@ impl DaemonState {
                 let refusal =
                     crate::core::host_state_gate::host_state_access_for_root(&self.framework_root)
                         .skip_reason();
+                let host = refusal.is_none();
                 let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
                     match refusal {
                         Some(reason) => {
@@ -973,6 +974,12 @@ impl DaemonState {
                             .expect("temp-dir session store must load")
                     }
                 };
+                // #7771: only a host daemon reads the operator's Claude dirs.
+                if host {
+                    mgr.install_claude_registry_roots(
+                        crate::session_manager::host_claude_config_roots(),
+                    );
+                }
                 // Reconcile persisted session records against live tmux state:
                 // sessions whose tmux is gone are flipped to Stopped (resumable);
                 // live sessions are re-adopted as Active.
