@@ -23,6 +23,8 @@ use super::runner_helpers::{
     fetch_github_pr_meta, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
     resolve_diff_token,
 };
+#[cfg(test)]
+use crate::store::{ClaimOutcome, DedupError};
 use crate::{
     config::{
         DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode,
@@ -42,12 +44,13 @@ use crate::{
         post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
+        runner_helpers::{ClaimGate, classify_claim}, // #8904: moved for SLOC headroom
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
-        verify::maybe_verify,
+        verify_posted::gate_then_verify,
         voice_config::build_voice_config,
     },
-    store::{ClaimOutcome, DedupError, DedupStore},
+    store::DedupStore,
 };
 use truncation::is_truncated;
 #[cfg(test)]
@@ -720,28 +723,27 @@ pub async fn run_review(
         (final_verdict, final_grade)
     };
 
-    let mut findings = parsed.findings;
-    // 7c: verification round — re-derives verdict from surviving findings.
-    // Pass the caller-supplied PR description + discussion as author rationale
-    // (#1618) so the adversarial verifier can REFUTE a finding the author has
-    // already empirically addressed (e.g. "checked the data source; no values
-    // exceed X").  `build_author_rationale` returns None when neither is present,
-    // leaving the verifier prompt unchanged for existing callers.
+    // 7c: citation gate (#8905), then verification of every surviving finding
+    // (#8904). Author rationale (#1618) lets the verifier REFUTE a finding the
+    // author already addressed; `None` leaves the verifier prompt unchanged.
+    result.verdict = final_verdict;
+    result.findings = parsed.findings;
     let author_rationale = build_author_rationale(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    result.verdict = maybe_verify(
+    let verifier = deps.verifier.as_ref();
+    let rationale = author_rationale.as_deref();
+    gate_then_verify(
         config,
-        deps.verifier.as_ref(),
+        verifier,
+        &mut result,
+        &filtered,
         &diff,
-        final_verdict,
-        &mut findings,
-        author_rationale.as_deref(),
+        false,
+        rationale,
     )
     .await;
-    result.findings = findings;
-    crate::pipeline::citation_gate::gate_posted_findings(&mut result, &filtered); // #8905
 
     // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
     // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
@@ -840,54 +842,6 @@ pub async fn run_review(
     attach_inline_comments(&mut result, &raw_diff);
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
-}
-
-/// What the runner does with a `claim()` outcome.
-///
-/// Why: naming the outcomes makes the fail-closed rule reviewable in one place.
-/// It used to be an inline `match` whose error arm proceeded with the review,
-/// so a store failure produced an ungated live comment — and on the next
-/// redelivery, another one.
-/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a review that
-/// already ran to completion; `InProgressElsewhere` blocks a review that has
-/// NOT run because another holder owns the slot (#5126); `Abort` carries the
-/// reason a claim could not be established.
-/// Test: `classify_claim_*` in `runner_tests.rs`.
-pub(super) enum ClaimGate {
-    /// This caller owns the review slot.
-    Proceed,
-    /// A completed review already exists for this head SHA.
-    DuplicateSkip,
-    /// Another holder owns a fresh in-progress claim; nothing was reviewed.
-    InProgressElsewhere,
-    /// The claim gate did not engage; abort without posting.
-    Abort(String),
-}
-
-/// Decide what a `claim()` result means for the review about to run.
-///
-/// Why: #5064 — every `DedupError` means the same thing operationally. The
-/// caller does not know whether this head SHA was already reviewed, and could
-/// not record that it is reviewing it now. Proceeding posts an unguarded
-/// comment; aborting drops the review. The webhook handler has already returned
-/// 202 by this point (`service::webhook`), so GitHub will NOT redeliver — the
-/// review is lost until a human re-requests it. That is still the better half
-/// of the trade: a dropped review is visible and re-requestable, a duplicate
-/// comment cannot be retracted. Every error aborts, `Contended` included, which
-/// is the variant a stuck sibling process produces during a rolling upgrade.
-/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`,
-/// `Ok(InProgressElsewhere)` → `InProgressElsewhere` (#5126), and every `Err` →
-/// `Abort` carrying the error's `Display`.
-/// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
-/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`,
-/// `stranded_in_progress_claim_is_not_a_duplicate_skip`.
-pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
-    match outcome {
-        Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
-        Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
-        Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
-        Err(e) => ClaimGate::Abort(e.to_string()),
-    }
 }
 
 #[cfg(test)]

@@ -1136,3 +1136,136 @@ async fn run_review_mapreduce_both_degraded_triggers_partial_coverage_reason_win
         result.review_body
     );
 }
+
+// ── #8904: every chunk's findings are verified ─────────────────────────────
+
+/// Files in [`chunked_diff`]; together they exceed the unified-path cap.
+const CHUNK_FILES: usize = 4;
+
+/// `CHUNK_FILES` files of distinct lines whose combined size is over
+/// `MAX_DIFF_CHARS`, so the review routes to map-reduce.
+fn chunked_diff() -> String {
+    use crate::config::constants::MAX_DIFF_CHARS;
+    let per_file = MAX_DIFF_CHARS / CHUNK_FILES + 1_000;
+    let mut diff = String::new();
+    for n in 0..CHUNK_FILES {
+        let mut body = String::new();
+        let mut line = 0;
+        while body.len() < per_file {
+            line += 1;
+            body.push_str(&format!("+    let v_{n}_{line} = compute_{n}({line});\n"));
+        }
+        diff.push_str(&format!(
+            "diff --git a/src/mr{n}.rs b/src/mr{n}.rs\n--- a/src/mr{n}.rs\n+++ b/src/mr{n}.rs\n@@ -0,0 +1,{line} @@\n{body}"
+        ));
+    }
+    diff
+}
+
+/// Each map call emits one Medium finding per file in its prompt, quoting that
+/// file's line 5; the synthesis call requests changes.
+struct PerFileFindingReviewer;
+
+#[async_trait]
+impl LlmProvider for PerFileFindingReviewer {
+    fn name(&self) -> &str {
+        "per-file-finding-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body: String = req.messages.iter().map(|m| m.content.as_str()).collect();
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"per-file issues."}"#.to_string()
+        } else {
+            let findings: Vec<serde_json::Value> = (0..CHUNK_FILES)
+                .filter(|n| body.contains(&format!("b/src/mr{n}.rs")))
+                .map(|n| {
+                    serde_json::json!({
+                        "title": format!("issue in mr{n}"),
+                        "body": format!("`let v_{n}_5 = compute_{n}(5)` discards an error."),
+                        "severity": "medium",
+                        "confidence": 0.85,
+                        "file": format!("src/mr{n}.rs"),
+                        "line": 5,
+                    })
+                })
+                .collect();
+            serde_json::json!({"verdict": "REQUEST_CHANGES", "summary": "issue", "findings": findings})
+                .to_string()
+        };
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 400,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// Confirms every finding and records, per request, which chunk files the
+/// request's diff carried.
+#[derive(Default)]
+struct DiffRecordingVerifier {
+    diffs: Mutex<Vec<Vec<usize>>>,
+}
+
+#[async_trait]
+impl LlmProvider for DiffRecordingVerifier {
+    fn name(&self) -> &str {
+        "diff-recording-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let user = req.messages.first().map_or("", |m| m.content.as_str());
+        let carried = (0..CHUNK_FILES)
+            .filter(|n| user.contains(&format!("diff --git a/src/mr{n}.rs")))
+            .collect();
+        self.diffs.lock().expect("lock").push(carried);
+        let text =
+            crate::pipeline::verify_batch::test_support::answer(&req, |_| "CONFIRMED".to_string());
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// (d) #8904: on the map-reduce path the findings from EVERY chunk reach the
+/// verifier and are posted as confirmed, and each request carries only the
+/// diff sections of its own findings' files, not the whole over-cap diff.
+#[tokio::test]
+async fn run_review_mapreduce_verifies_findings_from_every_chunk() {
+    let (source, _tmp) = local_source(&chunked_diff());
+    let verifier = Arc::new(DiffRecordingVerifier::default());
+    let mut review_deps = deps(Arc::new(PerFileFindingReviewer));
+    review_deps.verifier = Some(verifier.clone());
+    let mut config = ReviewConfig::load(None);
+    config.verification.batch_size = 1;
+
+    let result = run_review(&config, input(source), review_deps).await;
+
+    let mut posted: Vec<String> = result.findings.iter().map(|f| f.file.clone()).collect();
+    posted.sort();
+    let expected: Vec<String> = (0..CHUNK_FILES).map(|n| format!("src/mr{n}.rs")).collect();
+    assert_eq!(posted, expected, "one posted finding per chunk");
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| matches!(f.verified, Some(crate::models::VerifyOutcome::Confirmed))),
+        "every chunk's finding passed the verifier: {:?}",
+        result.findings
+    );
+    let diffs = verifier.diffs.lock().expect("lock").clone();
+    assert_eq!(diffs.len(), CHUNK_FILES, "one request per finding");
+    assert!(
+        diffs.iter().all(|carried| carried.len() == 1),
+        "each request carries only its own file's diff: {diffs:?}"
+    );
+}

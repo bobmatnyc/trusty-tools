@@ -19,7 +19,7 @@
 //!    line past the file's last diffed line, or any error reading the file or a
 //!    locator) the finding is dropped, counted, and logged.
 //!
-//! It makes no LLM call. It runs once per review, after `verify::maybe_verify`
+//! It makes no LLM call. It runs once per review, BEFORE the verifier (#8904)
 //! and before inline comments are attached and `finalize_review` posts, via
 //! [`gate_posted_findings`] on both the unified and the map-reduce path.
 //!
@@ -40,7 +40,7 @@ mod anchors;
 use anchors::{Anchors, bracket_anchors, finding_anchors, same_file};
 
 #[path = "citation_gate_verdict.rs"]
-mod verdict;
+pub(crate) mod verdict;
 
 /// One occurrence of an anchor: the new-side line span it covers, and whether
 /// it sits on removed lines.
@@ -535,7 +535,7 @@ pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) ->
     report
 }
 
-/// Run the gate on a finished review, after the verifier and before inline
+/// Run the gate on a graded review, before the verifier (#8904) and inline
 /// comments and posting (#8905).
 ///
 /// Why: this is the last point every review path passes before posting, so the

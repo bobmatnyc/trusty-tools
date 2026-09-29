@@ -616,15 +616,27 @@ pub struct ReviewResult {
     /// `verified` variants. One integer says how much of this review went
     /// unchecked, so a consumer can hold a review whose safety net was down
     /// instead of trusting or discarding it blindly.
-    /// What: the count of findings whose `verified` outcome answers true to
-    /// `VerifyOutcome::is_unverified` — unreachable verifier, truncated
-    /// response, or a claim the pipeline declined to check. Synced at the same
-    /// two canonical exit points as `findings_count`. `#[serde(default)]` keeps
-    /// pre-#4459 serialised results deserialising with `0`.
+    /// What: the posted findings whose `verified` outcome answers true to
+    /// `VerifyOutcome::is_unverified` (unreachable verifier, truncated
+    /// response, or a claim the pipeline declined to check), plus
+    /// `withheld_unverified_count` — the findings #8904 withheld because the
+    /// verifier could not judge them or the call cap left them unsent. Synced at
+    /// the same two canonical exit points as `findings_count`.
+    /// `#[serde(default)]` keeps pre-#4459 serialised results deserialising
+    /// with `0`.
     /// Test: `unverified_count_matches_the_unverified_findings` (post_tests),
-    /// `verify_permanent_transport_failure_lands_in_unverified`.
+    /// `run_review_partial_verifier_outage_reports_the_withheld_count`.
     #[serde(default)]
     pub unverified_count: usize,
+    /// How many findings the verifier round withheld unjudged (#8904).
+    ///
+    /// Why: a withheld finding leaves `findings`, so counting `findings` alone
+    /// reads 0 during a verifier outage.
+    /// What: `VerifyReport::unjudged + over_cap`, set by
+    /// `verify_posted::gate_then_verify`; `unverified_count` includes it.
+    /// Test: `run_review_unjudged_finding_is_counted_as_withheld_unverified`.
+    #[serde(default)]
+    pub withheld_unverified_count: usize,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -792,6 +804,7 @@ impl ReviewResult {
             findings: Vec::new(),
             findings_count: 0,
             unverified_count: 0,
+            withheld_unverified_count: 0,
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,

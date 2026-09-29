@@ -43,6 +43,10 @@ fn all_sent_schemas() -> Vec<(&'static str, ResponseSchema)> {
             crate::pipeline::verify_prompt::verify_response_schema(),
         ),
         (
+            "batch_response_schema",
+            crate::pipeline::verify_batch::batch_response_schema(),
+        ),
+        (
             "synthesis_schema",
             crate::report::synthesize_prompt::synthesis_schema(5, 10),
         ),

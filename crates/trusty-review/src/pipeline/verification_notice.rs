@@ -39,6 +39,10 @@
 //! deliberately PRESERVES the escalation for those. Calling them non-blockers
 //! would contradict the verdict the same review reports.
 //!
+//! #8904: the verification round now withholds every refuted finding before
+//! posting (`verify_posted`), so `run_review` no longer hands this banner a
+//! `Refuted` finding; it still qualifies any result that carries one.
+//!
 //! ## What it deliberately does NOT do
 //!
 //! It does not drop refuted findings from `findings`. Spec REV-606 requires the
