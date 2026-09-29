@@ -8,15 +8,19 @@
 //! config-dir relocation, prompt, scoped MCP), refuses unless the profile
 //! resolves to supervisor, creates `tm-architect` detached in the project and
 //! types the `claude` line on the `opus` alias. It records the launch stamp in
-//! the tmux session environment, where [`launch_stamp`] reads it. No daemon
-//! registration: the session is not in `tm ls` until #8536.
+//! the tmux session environment, where [`launch_stamp`] reads it, and records
+//! the `claude` it started as the Architect's process ([`record_process`],
+//! #8878 ruling A). No daemon registration: the session is not in `tm ls`
+//! until #8536.
 //! Test: `fleet_init_launches_the_architect_and_status_is_complete`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use trusty_mpm::core::architect_launch;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
 use trusty_mpm::core::tmux::{self, TmuxCommand, TmuxTarget};
+use trusty_mpm::core::twin_identity::ArmingRecord;
 
 /// The Architect's tmux session; the P1 poller's `ARCHITECT_SESSION` default.
 pub(crate) const ARCHITECT_SESSION: &str = "tm-architect";
@@ -73,9 +77,10 @@ pub(crate) fn launch_stamp() -> Option<String> {
 /// tier alias, with no manual follow-up.
 /// What: see the module doc. Fails before creating the session when the
 /// profile would resolve to PM; kills the session when the `claude` line
-/// cannot be sent. `home` is the user home every write goes under.
+/// cannot be sent. `home` is the user home every write goes under. Returns
+/// the [`record_process`] outcome.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
-pub(crate) fn start(dir: &Path, home: &Path) -> anyhow::Result<()> {
+pub(crate) fn start(dir: &Path, home: &Path) -> anyhow::Result<Result<ArmingRecord, String>> {
     require_supervisor(dir)?;
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
         Ok(report) => {
@@ -133,7 +138,29 @@ pub(crate) fn start(dir: &Path, home: &Path) -> anyhow::Result<()> {
         });
         return Err(err);
     }
-    Ok(())
+    Ok(record_process(dir, home))
+}
+
+/// Bind the Architect identity to the `claude` [`start`] just launched
+/// (#8878, ruling A).
+///
+/// Why: the trust-anchor floor trusts a process record, not the environment,
+/// and only this launch path may write one.
+/// What: finds the `claude` under the pane shell of the `tm-architect`
+/// session [`start`] created exclusively (one hop through the #2997 disclaim
+/// wrapper), so the PID is always a process tm started, never the caller.
+/// Then records its PID and start time under `home`'s `~/.trusty-mpm`. A
+/// failure leaves the session running unbound — it cannot write the trust
+/// anchors — and is reported, never fatal.
+/// Test: `fleet_init_launches_the_architect_and_status_is_complete`.
+fn record_process(dir: &Path, home: &Path) -> Result<ArmingRecord, String> {
+    let pid = trusty_mpm::core::process::find_claude_pid_in_tmux(
+        ARCHITECT_SESSION,
+        20,
+        std::time::Duration::from_millis(500),
+    )
+    .ok_or_else(|| format!("no `claude` process appeared in {ARCHITECT_SESSION} within 10 s"))?;
+    architect_launch::record_architect(&home.join(".trusty-mpm"), pid, dir)
 }
 
 /// Record the stamp on the session, then type the `claude` line into it.

@@ -58,12 +58,29 @@ const UNLEXABLE_WRAPPER: UnplaceableWrite =
 /// `write_targets_read_tee_substitution_and_subshell_writes`,
 /// `write_targets_refuse_what_they_cannot_place`.
 pub(crate) fn shell_write_targets(command: &str) -> Result<Vec<String>, UnplaceableWrite> {
-    targets_at(command, 0)
+    shell_segments_map(command, &segment_write_targets)
 }
 
-/// [`shell_write_targets`] at one nesting depth: the outer text's segments,
+/// `per_segment` over every segment of `command`, at every nesting depth.
+///
+/// Why (#8878): the trust-anchor rule reads more write shapes per segment than
+/// the write boundary does, and must reach the same nested bodies.
+/// What: [`targets_at`] from depth 0 with `per_segment`; its results in order.
+/// Test: `anchor_verbs_reach_a_nested_body` (`pm_guard_trust_anchor_tests.rs`).
+pub(crate) fn shell_segments_map<T>(
+    command: &str,
+    per_segment: &dyn Fn(&str) -> Result<Vec<T>, UnplaceableWrite>,
+) -> Result<Vec<T>, UnplaceableWrite> {
+    targets_at(command, 0, per_segment)
+}
+
+/// [`shell_segments_map`] at one nesting depth: the outer text's segments,
 /// each wrapper's inner command, then each lifted body.
-fn targets_at(command: &str, depth: usize) -> Result<Vec<String>, UnplaceableWrite> {
+fn targets_at<T>(
+    command: &str,
+    depth: usize,
+    per_segment: &dyn Fn(&str) -> Result<Vec<T>, UnplaceableWrite>,
+) -> Result<Vec<T>, UnplaceableWrite> {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return Err(TOO_DEEP);
     }
@@ -71,15 +88,17 @@ fn targets_at(command: &str, depth: usize) -> Result<Vec<String>, UnplaceableWri
     let mut out = Vec::new();
     for raw in split_shell_segments_raw(&outer) {
         let segment = raw.trim();
-        out.extend(segment_write_targets(segment)?);
+        out.extend(per_segment(segment)?);
         match shell_lex::wrapped_command(segment) {
-            shell_lex::WrappedCommand::Inner(inner) => out.extend(targets_at(&inner, depth + 1)?),
+            shell_lex::WrappedCommand::Inner(inner) => {
+                out.extend(targets_at(&inner, depth + 1, per_segment)?);
+            }
             shell_lex::WrappedCommand::Unlexable => return Err(UNLEXABLE_WRAPPER),
             shell_lex::WrappedCommand::None => {}
         }
     }
     for body in bodies {
-        out.extend(targets_at(&body, depth + 1)?);
+        out.extend(targets_at(&body, depth + 1, per_segment)?);
     }
     Ok(out)
 }
@@ -195,7 +214,8 @@ fn before_unmatched_close(word: &str) -> &str {
 /// `Some(true)` for a bare input redirect (`<`, `<<`, `<<<`, `<<-`) whose
 /// source is the next word, `Some(false)` for one carrying it (`<in`,
 /// `<<EOF`, `<()`), `None` for any other word.
-fn input_redirect(word: &str) -> Option<bool> {
+// #8878: shared with `anchor_verbs`, which drops redirect words from operands.
+pub(super) fn input_redirect(word: &str) -> Option<bool> {
     let after = word
         .trim_start_matches(|c: char| c.is_ascii_digit())
         .strip_prefix('<')?;

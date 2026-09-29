@@ -89,7 +89,10 @@ mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 // #8730: the files a command writes — `tee`, substitution and subshell bodies.
 mod write_targets;
+// #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
+mod anchor_verbs;
 
+pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::evaluate_destructive_delete_command;
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;

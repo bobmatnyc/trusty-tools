@@ -266,9 +266,19 @@ fn launch_step(dir: &Path, home: &Path, launch: bool) -> anyhow::Result<Step> {
             dir.display()
         )));
     }
-    launch::start(dir, home)?;
+    // #8878 ruling A: the record binds the Architect identity to this claude.
+    let bound = match launch::start(dir, home)? {
+        Ok(record) => format!("bound to claude pid {}", record.pid),
+        Err(err) => {
+            eprintln!("warning: the Architect process was NOT recorded: {err}");
+            format!(
+                "NOT bound to its claude ({err}), so it cannot write the trust anchors; stop \
+                 the session and re-run `tm fleet init` to bind it"
+            )
+        }
+    };
     Ok(Step::Changed(format!(
-        "started tmux session {ARCHITECT_SESSION} on the `opus` alias; attach with \
+        "started tmux session {ARCHITECT_SESSION} on the `opus` alias, {bound}; attach with \
          `tmux attach -t ={ARCHITECT_SESSION}`"
     )))
 }

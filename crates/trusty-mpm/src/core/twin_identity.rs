@@ -278,7 +278,7 @@ fn armed_claude(
 }
 
 /// Whether `a` and `b` canonicalize to one directory; `false` if either fails.
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,

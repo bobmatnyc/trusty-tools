@@ -62,9 +62,9 @@
 //! round 2 code-critic review (PR #3978) established that Guards 1/4 are
 //! automatic markers a spawn helper stamps on every nested/dispatched
 //! subagent process (no human decides per-invocation whether they're set),
-//! while nothing in this codebase's Rust source ever sets
-//! `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` programmatically via
-//! `std::env::var` — see [`pm_guard`]'s body for the exact reordering this
+//! while `TRUSTY_MPM_PM_UNRESTRICTED` is never set programmatically (#8878:
+//! `TRUSTY_MPM_DISABLE_HOOKS` is — `divert_worker` stamps it on its worker, and
+//! the trust-anchor floor runs ahead of both) — see [`pm_guard`]'s body for the exact reordering this
 //! required (Guard 1's check moved after the stdin payload read, specifically
 //! so this worktree check — which needs the payload — can run first). **This
 //! is NOT the same as "operator-only"**: Claude Code's `settings.json`
@@ -241,6 +241,7 @@ pub(crate) use crate::commands::pm_guard_response::{
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_read;
+use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
@@ -315,10 +316,10 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// session's `PreToolUse` hook (see `session_launch::settings::write_project_hooks`).
 /// It must be fast and fail-open: CI/build shells (`TRUSTY_MPM_DISABLE_HOOKS`)
 /// and the explicit `TRUSTY_MPM_PM_UNRESTRICTED=1` operator bypass short-circuit
-/// to ALLOW before the stdin payload is even read — both are genuine
-/// human-operated escape hatches (nothing in this codebase sets either
-/// programmatically), so they lift EVERY check below, including the absolute
-/// worktree-tmp guard. Nested MPM sub-agents (`CLAUDE_MPM_SUB_AGENT`) are
+/// to ALLOW right after the stdin payload is read and the #8878 trust-anchor
+/// floor has run — they lift EVERY other check below, including the absolute
+/// worktree-tmp guard. `TRUSTY_MPM_DISABLE_HOOKS` is also set programmatically,
+/// by `divert_worker::spawn_worker_at` on its `claude -p` worker. Nested MPM sub-agents (`CLAUDE_MPM_SUB_AGENT`) are
 /// different: that marker is stamped automatically by a spawn helper, not
 /// operator-decided per call, so it is checked LATER — after the worktree-tmp
 /// guard has already had a chance to fire (issue #3977; PR #3978 round 2) —
@@ -345,16 +346,27 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// (`tests/tm_hook_pm_guard_stdin_7975.rs`); the pure policy by this module's
 /// unit tests.
 pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::Result<()> {
+    // #8878 (ruling Q5, D8): stdin is read FIRST, ahead of Guards 2 and 3, so
+    // the trust-anchor floor binds both bypasses and an unreadable payload
+    // denies under them too. The floor is the ONLY rule they no longer lift;
+    // every other rule below still sits after them.
+    // #7975: fail CLOSED. The guard runs on `PreToolUse` only, where Claude Code
+    // always sends a JSON object on stdin, so a payload that did not read or
+    // parse is a delivery fault, never "nothing to guard".
+    let payload = read_stdin_payload_or_deny(url).await;
+    let bypassed = std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_unrestricted();
+    if bypassed && pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
+        return Ok(());
+    }
     // Guard 2: universal opt-out for CI / build shells that can't edit
-    // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
+    // settings.json without a restart. Checked ahead of Guard 1 (a
     // reordering from this function's original shape — see the code-critic
-    // round 2 finding on PR #3978): this and Guard 3 below are never SET
-    // programmatically anywhere in this codebase's Rust source (verified: no
-    // `std::env::var`/`set_var` occurrence outside doc comments and this
-    // module) — so they must keep working exactly as before, including
-    // against the ABSOLUTE worktree-tmp guard below: whoever sets
-    // `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` gets exactly
-    // that, no exceptions. That is a narrower claim than "operator-only",
+    // round 2 finding on PR #3978). #8878: `TRUSTY_MPM_DISABLE_HOOKS` IS set
+    // programmatically — `divert_worker::spawn_worker_at` stamps it on the
+    // `claude -p` worker it spawns — while `TRUSTY_MPM_PM_UNRESTRICTED` is
+    // not. Both keep lifting every rule below, including the ABSOLUTE
+    // worktree-tmp guard: whoever sets either gets exactly that, bar the
+    // trust-anchor floor above. That is a narrower claim than "operator-only",
     // though: Claude Code's `settings.json` `env` object can set either var
     // for every hook invocation, and a write to `.claude/settings.json` is
     // not itself blocked by this guard (see the module doc above, "This is
@@ -366,18 +378,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // process with no per-invocation env-write decision involved — see
     // Guard 1's own comment below for why it is checked LATER, after the
     // worktree guard, instead of here.
-    if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
+    // Guard 3: explicit operator override — "the user said you do it" — is
+    // folded into `bypassed` above with Guard 2.
+    if bypassed {
         return Ok(());
     }
-    // Guard 3: explicit operator override — "the user said you do it".
-    if pm_unrestricted() {
-        return Ok(());
-    }
-
-    // #7975: fail CLOSED. The guard runs on `PreToolUse` only, where Claude Code
-    // always sends a JSON object on stdin, so a payload that did not read or
-    // parse is a delivery fault, never "nothing to guard".
-    let payload = read_stdin_payload_or_deny(url).await;
     // #7975 round 2: and a parsed payload that names no classifiable tool call
     // is the same fault one step later — it also denies, never allows silently.
     let tool_name = crate::commands::hook_stdin::guarded_tool_name_or_deny(url, &payload).await;
@@ -618,6 +623,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     {
         audit_denied_tool(&refused, "main-checkout-write", &reason).await;
         println!("{}", build_pm_guard_deny_response(&reason));
+        return Ok(());
+    }
+    // #8878: the trust-anchor floor, ahead of Guards 1 and 4 — a subagent,
+    // even the Architect's, is "an agent" under the ruling.
+    if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
         return Ok(());
     }
 

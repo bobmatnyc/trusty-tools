@@ -369,6 +369,8 @@ pub mod transcript_usage;
 pub mod trusty_tools_config;
 // #8878: the supervisor-twin identity (D1) and its arming record.
 pub mod twin_arming;
+// #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
+pub mod architect_launch;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;
