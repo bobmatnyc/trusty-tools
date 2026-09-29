@@ -20,6 +20,8 @@
 //! Test: `shell_lex::tests`.
 
 use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_wrapper_prefix};
+// #8735: the xargs option table moved beside the other wrapper grammars.
+use crate::commands::program_word::XARGS_OPTS_WITH_ARG;
 
 /// Shell programs that run their `-c` argument as a command string.
 ///
@@ -35,37 +37,6 @@ use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_w
 // here-document operator line — a body fed to one of these IS shell source, so
 // its separators must keep splitting.
 pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
-
-/// `xargs` options that consume the FOLLOWING token as their value.
-///
-/// Why: skipping only the flag would leave its value (`4` in `xargs -n 4 git …`)
-/// read as the program. The separated spelling is the one that needs a table;
-/// an attached (`-n4`) or `=`-joined (`--max-args=4`) value is one token and
-/// skips itself.
-/// What: the separated-value option spellings, short and long.
-/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
-const XARGS_OPTS_WITH_ARG: &[&str] = &[
-    "-a",
-    "-d",
-    "-E",
-    "-e",
-    "-I",
-    "-i",
-    "-L",
-    "-l",
-    "-n",
-    "-P",
-    "-s",
-    "--arg-file",
-    "--delimiter",
-    "--eof",
-    "--replace",
-    "--max-lines",
-    "--max-args",
-    "--max-procs",
-    "--max-chars",
-    "--process-slot-var",
-];
 
 /// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
 ///

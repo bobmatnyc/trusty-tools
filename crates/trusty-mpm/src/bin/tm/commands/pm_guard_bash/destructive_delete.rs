@@ -30,7 +30,11 @@
 //! `rm` as a non-verb argument (`echo rm -rf /`) being denied is the safe
 //! direction for a safety rule, not a bug to special-case away — the
 //! alternative (verb-position enumeration) is exactly the defect this
-//! rewrite closes.
+//! rewrite closes. #8735: the shared `program_word` resolver is asked first,
+//! so a path-spelled verb behind wrapper options (`nice -n 5 /bin/rm`) is
+//! found, and a wrapper option it cannot read denies once a verb is in sight;
+//! each `$(…)`, backtick, `<(…)` and `>(…)` body is judged as a command of
+//! its own ([`classify_at_depth`]).
 //! Once a verb token is found, its DELETION-TARGET argument(s) are resolved
 //! against a `cd`-tracked effective working directory (the same [`PathEnv`]
 //! expansion and lexical normalization [`super::evaluate_worktree_add_command`]
@@ -90,7 +94,10 @@
 //! `denies_home_expanded_from_a_literal_dollar_home`,
 //! `denies_wrapper_words_regardless_of_enumeration`,
 //! `denies_bare_container_roots`, `denies_unresolvable_delete_targets`,
-//! `allows_over_matched_non_verb_mentions_that_resolve_to_no_target` below;
+//! `allows_over_matched_non_verb_mentions_that_resolve_to_no_target`,
+//! `denies_a_delete_inside_a_substitution_body`,
+//! `denies_a_delete_nested_past_the_depth_cap`,
+//! `resolves_the_delete_verb_past_wrapper_options` below;
 //! `pm_guard_denies_destructive_delete_of_repo_root` and siblings in
 //! `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path.
 
@@ -98,8 +105,10 @@ use std::path::{Component, Path};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::{PathEnv, resolve_target_path, split_shell_segments};
+use super::substitutions::segment_substitutions;
+use super::{MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
+use crate::commands::program_word::resolve_program_word;
 
 /// Deny reason for `rm`/`rmdir`/`unlink`/`find -delete` targeting a
 /// denylisted destructive root (issue #4031).
@@ -216,12 +225,46 @@ fn classify_destructive_delete_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<DeleteTarget> {
+    classify_at_depth(command, cwd, env, 0)
+}
+
+/// [`classify_destructive_delete_in`] for text nested `depth` substitutions
+/// deep (#8735).
+///
+/// Why: the lexer returns `$(rm -rf /)` as one word, so a delete inside a
+/// command substitution, a backtick or a process substitution never reached
+/// the verb scan (`echo "$(rm -rf /)"`).
+/// What: each segment's substitution bodies are judged first, as commands of
+/// their own, from the segment's working directory; a body a separator split
+/// across segments is judged whole afterwards, from `cwd`. Past
+/// [`MAX_WRAPPER_DEPTH`] levels the text is not read further, and a delete
+/// verb anywhere in it denies as unresolved.
+/// Test: `denies_a_delete_inside_a_substitution_body`,
+/// `denies_a_delete_nested_past_the_depth_cap`,
+/// `allows_a_scratch_delete_inside_a_substitution`.
+fn classify_at_depth(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+    depth: usize,
+) -> Option<DeleteTarget> {
+    // #8735: past the cap nothing is read; a delete verb in sight denies.
+    if depth > MAX_WRAPPER_DEPTH {
+        return segment_mentions_a_delete_verb(command).then_some(DeleteTarget::Unresolved);
+    }
     let mut worst: Option<DeleteTarget> = None;
     let mut effective_cwd = cwd.to_path_buf();
+    let mut judged: Vec<String> = Vec::new();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        // #8735: each `$(…)`, backtick, `<(…)` and `>(…)` body runs on its own.
+        for body in segment_substitutions(trimmed) {
+            let inner = classify_at_depth(body.text(), &effective_cwd, env, depth + 1);
+            worst = worst.max(inner);
+            judged.push(body.text().to_string());
         }
         // Same `cd`-tracking shape as `evaluate_worktree_add_command_in`: a
         // deliberate, partial closing of `cd /tmp && rm -rf x` — see that
@@ -249,17 +292,26 @@ fn classify_destructive_delete_in(
             }
             continue;
         };
-        // #4031 review, item 1: scan EVERY token for a delete verb — no
-        // wrapper enumeration, see the module doc for why. A leading `\` is
-        // stripped before comparison (the same alias-bypass idiom
-        // `hook_rewrite::strip_wrapper_prefix` resolves).
-        let Some(verb_idx) = argv
-            .iter()
-            .position(|tok| DELETE_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))
-        else {
+        // #8735: the shared resolver names the program past wrappers and
+        // their options; one it cannot resolve denies once a verb is in sight.
+        let resolved = resolve_program_word(&argv);
+        if resolved.is_err() && segment_mentions_a_delete_verb(trimmed) {
+            return Some(DeleteTarget::Unresolved);
+        }
+        let program_at = resolved.ok().map(|w| w.index).filter(|&at| {
+            argv.get(at)
+                .is_some_and(|w| DELETE_VERBS.contains(&verb_name(w)))
+        });
+        // #4031 review, item 1: otherwise scan EVERY token for a delete verb —
+        // see the module doc for why. A leading `\` is stripped before
+        // comparison (the same alias-bypass idiom the resolver strips).
+        let Some(verb_idx) = program_at.or_else(|| {
+            argv.iter()
+                .position(|tok| DELETE_VERBS.contains(&tok.strip_prefix('\\').unwrap_or(tok)))
+        }) else {
             continue;
         };
-        let verb = argv[verb_idx].strip_prefix('\\').unwrap_or(&argv[verb_idx]);
+        let verb = verb_name(&argv[verb_idx]);
         let tail = &argv[verb_idx + 1..];
         let targets = delete_targets(verb, tail);
         if verb == "find" && targets.is_empty() {
@@ -282,7 +334,20 @@ fn classify_destructive_delete_in(
             ));
         }
     }
+    // #8735: an unquoted `;`, `&&` or `|` inside a body splits it across
+    // segments (`x=$(true; rm -rf /)`), so a body not seen whole is judged here.
+    for body in segment_substitutions(command) {
+        if !judged.iter().any(|seen| seen == body.text()) {
+            worst = worst.max(classify_at_depth(body.text(), cwd, env, depth + 1));
+        }
+    }
     worst
+}
+
+/// A word's program name: a leading `\` and any directory dropped (#8735).
+fn verb_name(word: &str) -> &str {
+    let word = word.strip_prefix('\\').unwrap_or(word);
+    word.rsplit('/').next().unwrap_or(word)
 }
 
 /// Whether `text` — a segment [`shlex::split`] could not tokenize — plausibly
@@ -951,5 +1016,79 @@ mod tests {
             glob_parent(Path::new("/repo/file.txt")),
             Path::new("/repo/file.txt")
         );
+    }
+
+    /// The class `command` gets, run from `/repo` with `$HOME=/Users/agent`.
+    fn class_of(command: &str) -> Option<DeleteTarget> {
+        classify_destructive_delete_in(command, Path::new("/repo"), &env_with_home("/Users/agent"))
+    }
+
+    /// #8735: every row was allowed on main (bd712bcfa6).
+    #[test]
+    fn denies_a_delete_inside_a_substitution_body() {
+        for command in [
+            "echo \"$(rm -rf /)\"",
+            "echo `rm -rf ~`",
+            "x=$(rm -rf \"$HOME\")",
+            "echo \"$(echo $(rm -rf /))\"",
+            "cat <(rm -rf /root)",
+            "echo x > >(rm -rf /)",
+            "cd /tmp && echo \"$(rm -rf /Users/agent)\"",
+            "x=$(true; rm -rf /)",
+            "echo \"$(true && rm -rf ~)\"",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+    }
+
+    /// #8735: a scratch delete in a body is judged by its target, as it is
+    /// outside one.
+    #[test]
+    fn allows_a_scratch_delete_inside_a_substitution() {
+        for command in [
+            "x=$(rm -f /tmp/scratch/file)",
+            "echo \"$(git rev-parse HEAD)\"",
+            "echo `date` \"$(rm -f stale.txt)\"",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+    }
+
+    /// #8735: nine nested bodies are one past [`MAX_WRAPPER_DEPTH`]; eight are
+    /// read to the bottom.
+    #[test]
+    fn denies_a_delete_nested_past_the_depth_cap() {
+        let nest = |levels: usize| {
+            let mut text = "rm -f /tmp/scratch/file".to_string();
+            for _ in 0..levels {
+                text = format!("echo $({text})");
+            }
+            text
+        };
+        assert_eq!(class_of(&nest(8)), None);
+        assert_eq!(class_of(&nest(9)), Some(DeleteTarget::Unresolved));
+    }
+
+    /// #8735: the shared resolver names a path-spelled verb behind wrapper
+    /// options, and a wrapper option it cannot measure denies.
+    #[test]
+    fn resolves_the_delete_verb_past_wrapper_options() {
+        assert_eq!(
+            class_of("nice -n 5 /bin/rm -rf /"),
+            Some(DeleteTarget::Root)
+        );
+        assert_eq!(
+            class_of("timeout 5 /bin/rm -rf /root"),
+            Some(DeleteTarget::Root)
+        );
+        assert_eq!(
+            class_of("sudo --bogus rm -f /tmp/x"),
+            Some(DeleteTarget::Unresolved)
+        );
+        assert_eq!(class_of("timeout 30 cargo test -p x"), None);
+        assert_eq!(class_of("nice -n 10 cargo build"), None);
     }
 }
