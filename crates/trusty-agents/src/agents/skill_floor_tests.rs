@@ -100,6 +100,16 @@ const PENDING_OWNER_RULING: &[&str] = &[
     "git-workflow",
 ];
 
+/// Skills trusty-mpm ships for the Architect's project only (#8436 rulings D
+/// and E): `tm fleet init` writes them into the Architect project's
+/// `.claude/skills/`, and no other session receives them.
+///
+/// Why: an assistant has no business running the fleet supervisor's pass or
+/// its context refresh, so they stay off the floor; they are neither coding
+/// skills nor an open question, so they get their own list.
+/// Test: `architect_only_skills_are_off_the_floor`.
+const ARCHITECT_ONLY_SKILLS: &[&str] = &["tm-context-refresh", "tm-fleet-check"];
+
 /// Skill names on the floor that belong to NEITHER bundled catalog.
 ///
 /// Why: the four connector/memory skills the shipped `assistant` persona
@@ -150,6 +160,34 @@ fn mpm_bundled_skills() -> Vec<String> {
         .filter_map(|v| v.as_str())
         .map(str::to_string)
         .collect()
+}
+
+/// The Architect-only skill names trusty-mpm ships, one per
+/// `src/assets/architect/skills/<name>.md` (#8436 P4).
+///
+/// Why: those skills are outside the framework manifest, which lists only
+/// what deploys to every session; enumerating the directory is what makes a
+/// new Architect skill force a floor decision too.
+/// What: the `.md` file stems. Panics when the directory is unreadable or
+/// empty, so the check cannot pass vacuously.
+fn mpm_architect_skills() -> Vec<String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trusty-mpm/src/assets/architect/skills");
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            (path.extension()? == "md").then_some(path.file_stem()?.to_str()?.to_string())
+        })
+        .collect();
+    assert!(
+        !out.is_empty(),
+        "no Architect skills found under {}",
+        dir.display()
+    );
+    out
 }
 
 /// The skill names this crate bundles under `.trusty-agents/skills/`.
@@ -215,13 +253,15 @@ fn trusty_agents_bundled_skills() -> Vec<String> {
 fn every_bundled_skill_is_classified() {
     let mut undecided: Vec<String> = Vec::new();
     let mut catalog: Vec<String> = mpm_bundled_skills();
+    catalog.extend(mpm_architect_skills());
     catalog.extend(trusty_agents_bundled_skills());
     catalog.sort();
     catalog.dedup();
     for name in &catalog {
         let decided = ASSISTANT_REACHABLE_SKILLS.contains(&name.as_str())
             || CODING_SKILLS.contains(&name.as_str())
-            || PENDING_OWNER_RULING.contains(&name.as_str());
+            || PENDING_OWNER_RULING.contains(&name.as_str())
+            || ARCHITECT_ONLY_SKILLS.contains(&name.as_str());
         if !decided {
             undecided.push(name.clone());
         }
@@ -233,11 +273,26 @@ fn every_bundled_skill_is_classified() {
          - agents::skill_floor::ASSISTANT_REACHABLE_SKILLS (reachable by an assistant)\n  \
          - CODING_SKILLS in this file (excluded: engineer toolchain, testing, debugging, \
            review, build, language idioms, app work, CI security, VCS, internal orchestration)\n  \
-         - PENDING_OWNER_RULING in this file (ambiguous — excluded, recorded, awaiting a call)\n\
+         - PENDING_OWNER_RULING in this file (ambiguous — excluded, recorded, awaiting a call)\n  \
+         - ARCHITECT_ONLY_SKILLS in this file (the Architect project's own skills, #8436)\n\
          Fail closed: when the split is unclear, PENDING_OWNER_RULING is the answer.\n\
          Catalogs scanned: {} name(s).",
         catalog.len()
     );
+}
+
+/// #8436 ruling D: the Architect's skills are never on the assistant floor,
+/// and each one ships.
+#[test]
+fn architect_only_skills_are_off_the_floor() {
+    let shipped = mpm_architect_skills();
+    for name in ARCHITECT_ONLY_SKILLS {
+        assert!(
+            !ASSISTANT_REACHABLE_SKILLS.contains(name),
+            "'{name}' is Architect-only but on the assistant floor"
+        );
+        assert!(shipped.iter().any(|s| s == name), "'{name}' is not shipped");
+    }
 }
 
 /// A name cannot be both granted and excluded.

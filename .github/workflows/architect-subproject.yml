@@ -8,7 +8,7 @@
 # passing cannot be told apart from one that always exits 0.
 #
 # Path-filtered (owner ruling Q9 on #8436): the sub-project itself, plus every
-# other file the check reads — the shipped skill copy (drift), the root
+# other file the check reads — the shipped copies (drift), the root
 # Cargo.toml (workspace membership), the check and its selftest, and this
 # workflow. No Rust toolchain; finishes in seconds.
 name: Architect sub-project
@@ -19,6 +19,7 @@ on:
     paths:
       - "python/trusty-architect/**"
       - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"
       - "scripts/check_architect_subproject_selftest.sh"
@@ -34,6 +35,7 @@ on:
     paths:
       - "python/trusty-architect/**"
       - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"
       - "scripts/check_architect_subproject_selftest.sh"

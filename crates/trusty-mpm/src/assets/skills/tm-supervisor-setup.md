@@ -34,11 +34,14 @@ alias `opus` as its model.
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
    ask for one. A public remote is never added.
-4. **Clean instructions.** `init` seeds no fleet `CLAUDE.md` yet; that
-   template lands in P4. The launch writes tm's standard project files, whose
-   `CLAUDE.md` declares no IDENTITY, ENFORCEMENT or WORKFLOW override blocks.
-   The project's `.claude/settings.json` never sets
-   `TRUSTY_MPM_PM_UNRESTRICTED`.
+4. **Fleet files.** `init` seeds `CLAUDE.md` with the fleet specifics (the
+   user, the watch set, the cadence, the records layout), creates `records/`,
+   writes the poller to `scripts/`, and writes the Architect-only skills
+   `tm-fleet-check` and `tm-context-refresh` to `.claude/skills/`. It writes
+   each file only when it is absent and reports an edited one as skipped, so
+   your edits survive every later run. The seeded `CLAUDE.md` declares no
+   IDENTITY, ENFORCEMENT or WORKFLOW override blocks, and the project's
+   `.claude/settings.json` never sets `TRUSTY_MPM_PM_UNRESTRICTED`.
 5. **Profile request.** It writes `profile = "supervisor"` into the project's
    `.trusty-mpm.toml`.
 6. **Profile grant.** It always adds the project's canonical absolute path to
@@ -49,8 +52,11 @@ alias `opus` as its model.
 7. **Launch.** It starts the Architect's session detached, as tmux session
    `tm-architect` on the `opus` alias, and records the supervisor launch
    stamp on that session. Attach with `tmux attach -t =tm-architect`.
-   `--no-launch` sets up the files and the grant without starting it. The
-   session is not registered with the daemon, so `tm ls` does not list it.
+   It then starts the poller, `scripts/fleet-poll.py`, in tmux session
+   `tm-architect-poll` unless it already runs; a poller that cannot start
+   fails the command. `--no-launch` sets up the files and the grant without
+   starting either. The session is not registered with the daemon, so `tm ls`
+   does not list it.
 8. **No twin mode.** `init` writes no `[supervisor.twin]` grant and never
    launches with `--twin`. Twin mode (#8878) stays a separate opt-in.
 

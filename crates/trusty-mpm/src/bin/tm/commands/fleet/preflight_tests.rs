@@ -9,6 +9,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::super::tests::NO_TMUX;
 use super::super::{init, resolve_dir, user_config_path};
 use super::{DirRefusal, check};
 
@@ -80,7 +81,8 @@ fn write_set(dir: &Path, home: &Path) -> Vec<(PathBuf, Option<(u64, SystemTime)>
 /// allowlist were neither created nor changed.
 fn refused_under(dir: &Path, home: &Path) -> DirRefusal {
     let before = write_set(dir, home);
-    let err = init(dir, home, false).expect_err(&format!("{} must be refused", dir.display()));
+    let err =
+        init(dir, home, false, NO_TMUX).expect_err(&format!("{} must be refused", dir.display()));
     let refusal = err
         .downcast_ref::<DirRefusal>()
         .unwrap_or_else(|| panic!("{}: not a preflight refusal: {err:#}", dir.display()))
@@ -379,8 +381,8 @@ fn the_default_and_a_fresh_directory_pass() {
     assert_eq!(check(&link, &home), Ok(fresh.clone()));
 
     // A second run over the repository the first run created still passes.
-    init(&default, &home, false).unwrap();
+    init(&default, &home, false, NO_TMUX).unwrap();
     assert_eq!(check(&default, &home), Ok(default.clone()));
-    let again = init(&default, &home, false).unwrap();
+    let again = init(&default, &home, false, NO_TMUX).unwrap();
     assert!(!again.changed(), "{}", again.render());
 }

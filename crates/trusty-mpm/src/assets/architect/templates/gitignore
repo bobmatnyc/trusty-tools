@@ -1,0 +1,3 @@
+# Poller runtime state: alerts, events, dedup state and its log.
+inbox/
+__pycache__/

@@ -17,6 +17,8 @@ done
 # TMUX_SOCKET selects the server, as in every script here; the poller inherits it.
 T=(tmux ${TMUX_SOCKET:+-S "$TMUX_SOCKET"})
 if "${T[@]}" has-session -t "=$S" 2>/dev/null; then echo "running: $S"; exit 0; fi
-"${T[@]}" new-session -d -s "$S" -c "$ROOT" ${E[@]+"${E[@]}"} \
-  "python3 '$ROOT/scripts/fleet-poll.py' $*"
+if ! "${T[@]}" new-session -d -s "$S" -c "$ROOT" ${E[@]+"${E[@]}"} \
+  "python3 '$ROOT/scripts/fleet-poll.py' $*"; then
+  echo "failed to start: $S" >&2; exit 1
+fi
 echo "started: $S"
