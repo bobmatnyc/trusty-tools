@@ -10,20 +10,20 @@
 //! embeddable `keys` feature (`trusty_common::inference::config::ConfigKeysCommand`)
 //! is nested as a new `ConfigAction::Keys` variant. This test proves BOTH
 //! grammars work side by side on the real built binary.
-//! What: drives `CARGO_BIN_EXE_trusty-search` with `config keys --help` /
+//! What: drives the built binary with `config keys --help` /
 //! `config keys list` (new, offline, no key required, no value ever printed)
 //! AND `config get --help` (pre-existing verb — must still parse cleanly).
 //! Test: this file IS the test.
 
-use std::process::Command;
+#[path = "support/test_daemon.rs"]
+mod test_daemon;
 
-/// Absolute path to the freshly built binary (Cargo sets this for integration
-/// tests). Using it guarantees we exercise the real mounted CLI, not a stub.
-const BIN: &str = env!("CARGO_BIN_EXE_trusty-search");
+// #8900: every test starts the binary through `test_daemon::command`, which
+// runs the real built CLI, not a stub.
 
 #[test]
 fn config_keys_help_advertises_keys_feature() {
-    let out = Command::new(BIN)
+    let out = test_daemon::command()
         .args(["config", "keys", "--help"])
         .output()
         .expect("spawn `config keys --help`");
@@ -41,7 +41,7 @@ fn config_keys_help_advertises_keys_feature() {
 
 #[test]
 fn config_keys_list_runs_offline() {
-    let out = Command::new(BIN)
+    let out = test_daemon::command()
         .args(["config", "keys", "list"])
         .output()
         .expect("spawn `config keys list`");
@@ -62,7 +62,7 @@ fn config_keys_list_runs_offline() {
 /// `keys` alongside them — #2405 must not break trusty-search's own domain.
 #[test]
 fn preexisting_config_get_still_parses() {
-    let out = Command::new(BIN)
+    let out = test_daemon::command()
         .args(["config", "get", "--help"])
         .output()
         .expect("spawn `config get --help`");
