@@ -159,6 +159,7 @@ pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_secret_consumers;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
 pub(crate) mod pm_guard_trust_anchor;
+pub(crate) mod pm_guard_trust_anchor_paths;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.

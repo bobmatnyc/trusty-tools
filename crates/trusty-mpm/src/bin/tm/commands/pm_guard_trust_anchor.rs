@@ -9,19 +9,27 @@
 //! holds under `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS`.
 //! What: [`deny_trust_anchor_write`] runs [`evaluate`] and prints the deny.
 //! [`evaluate`] reads the call's writes — the edit tools' target, or for `Bash`
-//! the classifier plus the `cp`/`mv`/`ln`/`install`/`sed -i` destinations
-//! ([`anchor_writes`]) — and allows a call that writes nothing. It then allows
-//! the Architect's main thread ([`is_architect_main_thread`]: the #8453
-//! supervisor profile, which `tm fleet init` grants, AND a main-thread
-//! payload). Every other writer is denied when a target resolves, symlinks and
-//! hard links followed, to an anchor or to a directory above one.
-//! FAIL-CLOSED (Q4/Q5): an unknown home, an anchor location that does not
+//! the classifier plus the `cp`/`mv`/`ln`/`install`/`sed -i` destinations and
+//! the sources of `ln`, `mv`, `cp -l` and `cp -s` ([`anchor_writes`]) — and
+//! allows a call that writes nothing. It then allows the Architect's main
+//! thread ([`is_architect_main_thread`], the one identity predicate). Every
+//! other writer is denied when a target or source resolves, symlinks and hard
+//! links followed, to an anchor or to a directory above one — which includes
+//! `twin/` and `twin/armed/` whether or not a record is live. Anchor names and
+//! the `.json` extension compare ASCII case-insensitively, as APFS does.
+//! FAIL-CLOSED (Q4/Q5): an unknown home, a config location that does not
 //! resolve, a target that does not resolve, a target built from an expansion,
-//! glob or `cd` whose file name could name an anchor, an unplaceable write,
-//! and an identity that cannot be established are each a deny. The caller
-//! reads stdin before the bypass variables, so an unreadable payload denies.
-//! Residual: writers outside Q2 (`dd`, `rsync`, interpreters) and a write from
-//! an executed script file (#8879) are not seen.
+//! glob or `cd` whose file name could name an anchor, an unplaceable write
+//! (including a Q2 verb run by `xargs`), and an identity that cannot be
+//! established are each a deny. An arming directory that does not resolve
+//! fences the `twin/` tree only, not every write. The caller reads stdin before
+//! the bypass variables, so an unreadable payload denies.
+//! Limit: after a `cd`, a relative path cannot be placed, so `cd X && cp Y .`
+//! is denied for every session but the Architect's main thread: `.` could be
+//! `~/.trusty-mpm`, and the guard does not evaluate the `cd`. Spell the
+//! destination as an absolute path instead.
+//! Residual: writers outside Q2 (`dd`, `rsync`, interpreters, `find -exec`)
+//! and a write from an executed script file (#8879) are not seen.
 //! Test: `pm_guard_trust_anchor_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_trust_anchor_8878.rs`.
 
@@ -31,6 +39,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
+use trusty_mpm::core::twin_arming::ARMED_DIR;
 use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
 
 use crate::commands::misc::SUB_AGENT_ENV;
@@ -38,6 +47,10 @@ use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_bash::{AnchorWrite, UnplaceableWrite, anchor_writes};
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use crate::commands::pm_guard_trust_anchor_paths::{
+    FileId, Placed, Resolved, dequote, file_id, has_shell_pattern, is_json, place, resolve,
+    same_ci, starts_with_ci,
+};
 
 /// The rule name recorded with each deny.
 pub(crate) const TRUST_ANCHOR_RULE: &str = "trust-anchor-write";
@@ -47,13 +60,6 @@ const ANCHOR_ROOT: &str = ".trusty-mpm";
 
 /// The config anchor, under [`ANCHOR_ROOT`].
 const CONFIG_ANCHOR: &str = "config.toml";
-
-/// The arming-record directory, under [`ANCHOR_ROOT`]. Its `*.json` files are
-/// anchors only while at least one exists (ruling Q1).
-const ARMED_DIR: &str = "twin/armed";
-
-/// Symlink hops followed through a dangling link before giving up.
-const MAX_LINK_HOPS: usize = 40;
 
 /// The hook's ambient inputs, injectable so every fail-closed arm is testable.
 #[derive(Debug, Clone, Default)]
@@ -116,6 +122,7 @@ pub(crate) fn evaluate(
 ) -> Option<String> {
     let tool_name = payload.get("tool_name").and_then(Value::as_str)?;
     let writes = call_writes(tool_name, payload.get("tool_input"))?;
+    // #8878: the ONE identity decision; an identity ruling swaps this call only.
     if is_architect_main_thread(payload, env, config) {
         return None;
     }
@@ -167,10 +174,11 @@ fn call_writes(
 /// The verdict once the call is known to write and not to be the Architect.
 ///
 /// What: an unknown home ([`unknown_home_reason`]), an unplaceable write, or
-/// anchors that do not resolve deny outright; otherwise the first write
-/// [`Anchors::judge`] denies. A `cd` anywhere in the command makes every
+/// a config location that does not resolve deny outright; otherwise the first
+/// write [`Anchors::judge`] denies. A `cd` anywhere in the command makes every
 /// relative path unplaceable.
-/// Test: `an_unknown_home_denies_every_write`, `an_unplaceable_write_is_denied`.
+/// Test: `an_unknown_home_denies_every_write`, `an_unplaceable_write_is_denied`,
+/// `an_unlocatable_anchor_denies_every_write`.
 fn decide(
     writes: Result<Vec<AnchorWrite>, UnplaceableWrite>,
     cwd: Option<&Path>,
@@ -198,28 +206,23 @@ fn decide(
         .find_map(|write| anchors.judge(write, base, home))
 }
 
-/// A file's `(device, inode)`, so a hard link to an anchor is recognised.
-type FileId = (u64, u64);
-
-#[cfg(unix)]
-fn file_id(path: &Path) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
-}
-
-#[cfg(not(unix))]
-fn file_id(_path: &Path) -> Option<FileId> {
-    None
-}
-
 /// Where the anchors are, resolved once per evaluation.
 struct Anchors {
-    /// `~/.trusty-mpm/config.toml`, resolved (it need not exist).
-    config: PathBuf,
+    /// Resolved paths that are protected together with every directory above
+    /// them: the config, and the arming directory whenever it resolves — so
+    /// `twin/` and `twin/armed/` are protected even with no record live.
+    guarded: Vec<PathBuf>,
     /// The config's identity, when it exists.
     config_id: Option<FileId>,
-    /// The arming directory, when it holds a `*.json` file (or cannot be read).
+    /// The live arming records, when the directory holds a `*.json` (or
+    /// cannot be read).
     armed: Option<ArmedAnchors>,
+    /// When the arming directory does not resolve: the `twin/` tree, every
+    /// path under which is refused. Empty otherwise.
+    fence: Vec<PathBuf>,
+    /// Whether a `*.json` name could be an arming record: records are live,
+    /// or the arming directory cannot be seen.
+    records_live: bool,
     /// Every path component of every anchor, lexical and resolved: the names
     /// an unplaceable target's file name is compared against.
     names: Vec<String>,
@@ -233,25 +236,15 @@ struct ArmedAnchors {
     ids: Vec<FileId>,
 }
 
-/// A target's placement before the filesystem is consulted.
-enum Placed {
-    /// An absolute path.
-    At(PathBuf),
-    /// The path depends on an expansion, glob, `~user` or a `cd`.
-    Unknown,
-}
-
-/// A placed path after symlinks are followed.
-enum Resolved {
-    /// The canonical path, or a missing leaf under a canonical parent.
-    Path(PathBuf),
-    /// A link loop, a permission error, or another error that is not
-    /// "does not exist".
-    Unresolvable,
-}
-
 impl Anchors {
-    /// Resolve the anchors under `home`; `Err(path)` names one that does not.
+    /// Resolve the anchors under `home`; `Err(path)` when the config's own
+    /// location does not resolve.
+    ///
+    /// What: an arming directory that does not resolve (`twin` written as a
+    /// file, a link loop) no longer refuses every write; it fences the `twin/`
+    /// tree, lexical and resolved, and counts records as live.
+    /// Test: `an_unlocatable_anchor_denies_every_write`,
+    /// `a_blocked_arming_dir_fences_only_the_twin_tree`.
     fn locate(home: &Path) -> Result<Self, PathBuf> {
         let root = home.join(ANCHOR_ROOT);
         let lexical = root.join(CONFIG_ANCHOR);
@@ -259,15 +252,28 @@ impl Anchors {
             return Err(lexical);
         };
         let armed_lexical = root.join(ARMED_DIR);
-        let Resolved::Path(armed_dir) = resolve(&armed_lexical) else {
-            return Err(armed_lexical);
+        let mut guarded = vec![config.clone()];
+        let mut paths = vec![lexical, config.clone(), armed_lexical.clone()];
+        let (armed, fence) = match resolve(&armed_lexical) {
+            Resolved::Path(dir) => {
+                guarded.push(dir.clone());
+                paths.push(dir.clone());
+                (live_armed(dir), Vec::new())
+            }
+            // #8878 finding 5: fail closed on the twin tree only.
+            Resolved::Unresolvable => {
+                let twin = Path::new(ARMED_DIR).iter().next().unwrap_or_default();
+                let resolved_root = config.parent().map(|p| p.join(twin));
+                (
+                    None,
+                    [Some(root.join(twin)), resolved_root]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                )
+            }
         };
-        let armed = live_armed(armed_dir);
         let mut names = Vec::new();
-        let mut paths = vec![lexical, config.clone()];
-        if let Some(armed) = &armed {
-            paths.extend([armed_lexical, armed.dir.clone()]);
-        }
         for path in &paths {
             names.extend(path.components().filter_map(|c| match c {
                 Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
@@ -275,17 +281,22 @@ impl Anchors {
             }));
         }
         Ok(Self {
+            guarded,
             config_id: file_id(&config),
-            config,
+            records_live: armed.is_some() || !fence.is_empty(),
             armed,
+            fence,
             names,
         })
     }
 
-    /// Whether a resolved path is an anchor, a directory above one, or a hard
-    /// link to one.
+    /// Whether a resolved path is an anchor, a directory above one, a hard
+    /// link to one, or inside the fenced `twin/` tree.
     fn is_anchor(&self, resolved: &Path) -> bool {
-        if self.config.starts_with(resolved) {
+        if self.guarded.iter().any(|p| starts_with_ci(p, resolved)) {
+            return true;
+        }
+        if self.fence.iter().any(|f| starts_with_ci(resolved, f)) {
             return true;
         }
         let id = file_id(resolved);
@@ -293,16 +304,15 @@ impl Anchors {
             return true;
         }
         self.armed.as_ref().is_some_and(|armed| {
-            armed.dir.starts_with(resolved)
-                || id.is_some_and(|id| armed.ids.contains(&id))
-                || (resolved.parent() == Some(armed.dir.as_path())
-                    && resolved.extension().is_some_and(|ext| ext == "json"))
+            id.is_some_and(|id| armed.ids.contains(&id))
+                || (resolved.parent().is_some_and(|p| same_ci(p, &armed.dir))
+                    && resolved.file_name().is_some_and(is_json))
         })
     }
 
     /// Whether a target whose directory is unknown could still name an
     /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
-    /// anchor path component, or a `*.json` while records are live.
+    /// anchor path component, or a `*.json` while records could be live.
     fn could_be(&self, spelling: &str) -> bool {
         let name = spelling.trim_end_matches('/');
         let name = name.rsplit('/').next().unwrap_or(name);
@@ -311,8 +321,11 @@ impl Anchors {
             || name == ".."
             || name.starts_with('~')
             || has_shell_pattern(name)
-            || self.names.iter().any(|anchor| anchor == name)
-            || (self.armed.is_some() && name.ends_with(".json"))
+            || self
+                .names
+                .iter()
+                .any(|anchor| anchor.eq_ignore_ascii_case(name))
+            || (self.records_live && is_json(name.as_ref()))
     }
 
     /// The deny for one write, or `None` when it misses every anchor.
@@ -323,11 +336,13 @@ impl Anchors {
                 self.judge_placed(&word, place(&word, base, home, true))
             }
             AnchorWrite::Literal(path) => self.judge_placed(path, place(path, base, home, false)),
+            AnchorWrite::Source(word) => self.judge_placed(word, place(word, base, home, true)),
             AnchorWrite::Into {
                 dest,
                 names,
                 dest_too,
             } => self.judge_into(dest, names, *dest_too, base, home),
+            AnchorWrite::IntoUnnamed(dir) => self.judge_unnamed(dir, base, home),
             AnchorWrite::DirChange => None,
         }
     }
@@ -386,12 +401,49 @@ impl Anchors {
             self.judge_placed(&entry(name), Placed::At(resolved.join(name)))
         })
     }
+
+    /// [`Self::judge`] for a directory receiving entries the command does not
+    /// name (`xargs cp -t DIR`, #8878 finding 4).
+    ///
+    /// What: denies a directory that cannot be placed or resolved, that is an
+    /// anchor or above one, or that already holds an entry leading to an
+    /// anchor (the copy would write through it). A missing directory receives
+    /// nothing; one that cannot be listed denies.
+    /// Test: `a_q2_verb_through_xargs_is_denied`.
+    fn judge_unnamed(&self, dir: &str, base: Option<&Path>, home: &Path) -> Option<String> {
+        let Placed::At(path) = place(dir, base, home, true) else {
+            return Some(unknown_reason(dir));
+        };
+        let Resolved::Path(resolved) = resolve(&path) else {
+            return Some(unresolvable_reason(dir));
+        };
+        if self.is_anchor(&resolved) {
+            return Some(anchor_reason(dir));
+        }
+        let entries = match std::fs::read_dir(&resolved) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => return Some(unresolvable_reason(dir)),
+            Ok(entries) => entries,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return Some(unresolvable_reason(dir));
+            };
+            let spelling = entry.path().display().to_string();
+            let reason = self.judge_placed(&spelling, Placed::At(entry.path()));
+            if reason.is_some() {
+                return reason;
+            }
+        }
+        None
+    }
 }
 
 /// The live arming records in `dir`, or `None` when it holds no `*.json`.
 ///
 /// What: a missing directory is not live. A directory that cannot be read, or
 /// an entry that cannot be listed, is live — fail closed.
+/// Test: `a_live_armed_record_is_an_anchor`, `an_unreadable_armed_dir_is_live`.
 fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
     let entries = match std::fs::read_dir(&dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -409,103 +461,12 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
             live = true;
             continue;
         };
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
+        if is_json(&entry.file_name()) {
             live = true;
-            ids.extend(file_id(&path));
+            ids.extend(file_id(&entry.path()));
         }
     }
     live.then_some(ArmedAnchors { dir, ids })
-}
-
-/// Whether a shell word carries an expansion or a pattern the guard does not
-/// evaluate: `$`, a backtick, a glob (`*`, `?`, `[`) or a brace.
-fn has_shell_pattern(word: &str) -> bool {
-    word.contains(['$', '`', '*', '?', '[', '{'])
-}
-
-/// A raw redirect word with its quotes removed, when it lexes to one word.
-/// The redirect scan hands back the word as written (`"$HOME/x"`).
-fn dequote(word: &str) -> String {
-    if !word.contains(['\'', '"', '\\']) {
-        return word.to_string();
-    }
-    match shlex::split(word) {
-        Some(mut words) if words.len() == 1 => words.remove(0),
-        _ => word.to_string(),
-    }
-}
-
-/// Place `word` as an absolute path, or [`Placed::Unknown`].
-///
-/// What: `~` and `~/…` join `home`; `~user` is unknown. With `shell`, a
-/// first segment `$HOME`/`${HOME}` joins `home` and `$PWD`/`${PWD}` joins
-/// `base`, and any other expansion or glob is unknown. A relative path joins
-/// `base`, and is unknown without one.
-fn place(word: &str, base: Option<&Path>, home: &Path, shell: bool) -> Placed {
-    let (root, rest) = if let Some(rest) = word.strip_prefix('~') {
-        if !(rest.is_empty() || rest.starts_with('/')) {
-            return Placed::Unknown;
-        }
-        (Some(home), rest)
-    } else if shell {
-        match word.split_once('/').unwrap_or((word, "")) {
-            ("$HOME" | "${HOME}", rest) => (Some(home), rest),
-            ("$PWD" | "${PWD}", rest) => match base {
-                Some(base) => (Some(base), rest),
-                None => return Placed::Unknown,
-            },
-            _ => (None, word),
-        }
-    } else {
-        (None, word)
-    };
-    if shell && has_shell_pattern(rest) {
-        return Placed::Unknown;
-    }
-    let rest = rest.trim_start_matches('/');
-    match root {
-        Some(root) => Placed::At(root.join(rest)),
-        None if Path::new(word).is_absolute() => Placed::At(PathBuf::from(word)),
-        None => base.map_or(Placed::Unknown, |base| Placed::At(base.join(word))),
-    }
-}
-
-/// Follow `path` through the filesystem.
-///
-/// What: the canonical path when it exists; for a dangling symlink, the link's
-/// destination, resolved in turn (at most [`MAX_LINK_HOPS`]); for a missing
-/// leaf, its resolved parent joined with the leaf name. An entry that exists
-/// but will not canonicalize, and every error other than "not found", is
-/// [`Resolved::Unresolvable`].
-/// Test: `an_unresolvable_target_is_denied`,
-/// `a_dangling_symlink_onto_the_anchor_is_denied`.
-fn resolve(path: &Path) -> Resolved {
-    resolve_hops(path, MAX_LINK_HOPS)
-}
-
-fn resolve_hops(path: &Path, hops: usize) -> Resolved {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return Resolved::Path(canonical);
-    }
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() && hops > 0 => {
-            let (Ok(dest), Some(parent)) = (std::fs::read_link(path), path.parent()) else {
-                return Resolved::Unresolvable;
-            };
-            resolve_hops(&parent.join(dest), hops - 1)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-                return Resolved::Unresolvable;
-            };
-            match resolve_hops(parent, hops) {
-                Resolved::Path(parent) => Resolved::Path(parent.join(name)),
-                Resolved::Unresolvable => Resolved::Unresolvable,
-            }
-        }
-        _ => Resolved::Unresolvable,
-    }
 }
 
 /// The closing sentence every deny carries.
@@ -514,9 +475,12 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml` and, while a
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session.";
 
-/// The deny for a write that resolves to an anchor.
+/// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {
-    format!("Trust-anchor write denied (#8878): `{target}` resolves to a trust anchor. {REMEDY}")
+    format!(
+        "Trust-anchor write denied (#8878): `{target}` resolves to a trust anchor, a directory \
+         holding one, or a link to one. {REMEDY}"
+    )
 }
 
 /// The deny for a write whose target does not resolve (Q4 ii).
