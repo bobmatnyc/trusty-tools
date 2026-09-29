@@ -19,6 +19,9 @@
 //! commit message or PR body naming `pm2 jlist` is text, and a grouping paren
 //! becomes a space, so a subshell group `(pm2 jlist)` reads as `pm2 jlist`.
 //!
+//! #8875: the `gh api` secret-DELETE rule rides the same walk, so a DELETE in
+//! a substitution, a subshell group or a here-document run as code is read too.
+//!
 //! The credential rule (#8596) is NOT re-run on bodies: it follows
 //! substitutions itself, and it allows a value captured into a variable or a
 //! header (`TOKEN=$(gcloud auth print-access-token)`), which a body read alone
@@ -32,6 +35,7 @@ use crate::commands::pm_guard_bash::{
     MAX_SUBSTITUTION_DEPTH, command_substitutions, evaluate_pod_env_dump_command,
     evaluate_process_env_dump_command, without_inert_heredoc_bodies,
 };
+use crate::commands::pm_guard_secret_consumers::evaluate_gh_api_secret_delete;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 
 /// Refuse a pod or process dump anywhere in `command`, or a secret-file read
@@ -68,6 +72,8 @@ fn argv_rules(command: &str, with_file_rule: bool) -> Option<String> {
     let text = ungroup(&without_inert_heredoc_bodies(command));
     file.or_else(|| evaluate_pod_env_dump_command(&text))
         .or_else(|| evaluate_process_env_dump_command(&text))
+        // #8875: a `gh api` DELETE of a secret names no secret-shaped word.
+        .or_else(|| evaluate_gh_api_secret_delete(&text))
 }
 
 /// `text` with each grouping paren turned into a space (#8756).
