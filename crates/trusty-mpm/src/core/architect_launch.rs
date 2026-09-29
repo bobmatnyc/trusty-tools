@@ -21,7 +21,7 @@
 
 use std::path::Path;
 
-use crate::core::twin_arming::RecordStore;
+use crate::core::twin_arming::{RecordStore, process_facts};
 use crate::core::twin_identity::{ArmingRecord, ClaudeProcess, same_dir};
 
 /// Directory, under the `~/.trusty-mpm` root, of the Architect launch records.
@@ -142,4 +142,88 @@ pub fn check_launched_architect(
         return Err(LaunchRefusal::OtherProject);
     }
     Ok(())
+}
+
+/// Parent hops walked above a live Architect `claude`: its disclaim wrapper,
+/// its pane shell and the tmux server.
+const LINEAGE_HOPS: usize = 3;
+
+/// The live Architect `claude` processes and their ancestors, by PID (#8902).
+///
+/// Why: the pane guard binds the Architect's tmux pane to its launch record
+/// rather than a registry of its own. A pane whose `#{pane_pid}` is in this
+/// list runs the recorded `claude`.
+/// What: reads every `<pid>.architect` record under `root`. A record whose
+/// process is gone, or runs with another start time, is stale and skipped.
+/// Each live `claude` adds its PID and up to [`LINEAGE_HOPS`] parents. No
+/// record directory is `Ok(vec![])`. An unreadable directory, a record name
+/// that is not a PID, or a record that does not read is `Err`, which the guard
+/// treats as a live Architect.
+/// Test: `a_live_launch_record_yields_its_lineage_and_a_stale_one_none`.
+pub fn live_architect_lineage(root: &Path) -> Result<Vec<u32>, String> {
+    let dir = root.join(ARCHITECT_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(entries) => entries,
+    };
+    let mut lineage = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(ARCHITECT_EXT) {
+            continue;
+        }
+        let pid = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(|| format!("{} is not named for a PID", path.display()))?;
+        let Some(record) = ARCHITECT_RECORDS.read(root, pid)? else {
+            continue;
+        };
+        let Ok(facts) = process_facts(pid) else {
+            continue;
+        };
+        if facts.start_time != record.start_time {
+            continue;
+        }
+        lineage.push(pid);
+        let mut parent = facts.parent;
+        for _ in 0..LINEAGE_HOPS {
+            let Some(p) = parent.filter(|p| *p > 1) else {
+                break;
+            };
+            lineage.push(p);
+            parent = process_facts(p).ok().and_then(|f| f.parent);
+        }
+    }
+    Ok(lineage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #8902: a record of a running process yields it and its parent (this
+    /// test process); the same record once the process exits yields nothing;
+    /// a record named for no PID is an error the guard fails closed on.
+    #[test]
+    fn a_live_launch_record_yields_its_lineage_and_a_stale_one_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".trusty-mpm");
+        assert_eq!(live_architect_lineage(&root), Ok(Vec::new()), "no records");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        record_architect(&root, child.id(), dir.path()).expect("record");
+        let lineage = live_architect_lineage(&root).expect("lineage");
+        assert_eq!(lineage.first(), Some(&child.id()));
+        assert!(lineage.contains(&std::process::id()), "{lineage:?}");
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        assert_eq!(live_architect_lineage(&root), Ok(Vec::new()), "stale");
+        std::fs::write(root.join(ARCHITECT_DIR).join("x.architect"), "{}").expect("write");
+        assert!(live_architect_lineage(&root).is_err());
+    }
 }

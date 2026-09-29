@@ -15,7 +15,8 @@
 //! `tests/tm_fleet.rs`.
 
 mod config;
-mod launch;
+// #8902: the pm-guard's Architect pane floor names the launch session.
+pub(crate) mod launch;
 mod poller;
 mod preflight;
 mod seed;

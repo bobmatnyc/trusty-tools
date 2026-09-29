@@ -91,6 +91,15 @@ mod worktree_remove_rechecks;
 mod write_targets;
 // #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
 mod anchor_verbs;
+// #8902: the Architect pane floor — no tmux verb aimed at the Architect's pane.
+mod architect_pane;
+mod architect_pane_parse;
+mod architect_pane_probe;
+mod architect_pane_verbs;
+#[cfg(test)]
+pub(crate) use architect_pane::Pane;
+pub(crate) use architect_pane::{ARCHITECT_PANE_RULE, PaneProbe, evaluate_architect_pane};
+pub(crate) use architect_pane_probe::LivePanes;
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
 mod floor_d4;
 mod floor_d4_rules;
