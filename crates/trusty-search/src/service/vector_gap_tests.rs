@@ -690,3 +690,149 @@ async fn an_unreadable_corpus_does_not_let_a_pass_settle_ready() {
         "a pass that could not confirm coverage must keep the marker"
     );
 }
+
+/// A handle rebuilt over an existing corpus and store, as a restart or lazy
+/// restore builds one: fresh in-memory state, `semantic` derived `Ready` from
+/// the snapshot, and nothing carried over from the pass that settled it.
+async fn restored_handle(
+    id: &str,
+    embedder: Arc<dyn Embedder>,
+    store: Arc<dyn VectorStore>,
+    corpus: &Arc<crate::core::corpus::CorpusStore>,
+    dir: &tempfile::TempDir,
+) -> Arc<IndexHandle> {
+    let mut indexer = CodeIndexer::new(id, dir.path()).with_components(embedder, store);
+    indexer.set_corpus_store(Arc::clone(corpus));
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        dir.path().to_path_buf(),
+    ));
+    handle.stages.write().await.semantic.status = StageStatus::Ready;
+    handle
+}
+
+/// Settle one pass over [`SOURCE`] whose `beta` chunk the store refuses, then
+/// rebuild the handle as a restore does. Returns the restored handle, the
+/// corpus and the tempdir that owns it.
+async fn restored_after_a_refusal(
+    id: &str,
+) -> (
+    Arc<IndexHandle>,
+    Arc<crate::core::corpus::CorpusStore>,
+    tempfile::TempDir,
+) {
+    let embedder: Arc<dyn Embedder> = Arc::new(ZeroForBeta(MockEmbedder::new(DIM)));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
+    let (handle, total, corpus, dir) =
+        corpus_handle(id, Arc::clone(&embedder), Arc::clone(&store)).await;
+    let settled = run_pass(&handle).await;
+    assert_eq!(settled.status, StageStatus::Ready, "sanity: {settled:?}");
+    assert!(
+        store.len().await.expect("store len") < total,
+        "sanity: the refused chunk has no vector"
+    );
+    let restored = restored_handle(id, embedder, store, &corpus, &dir).await;
+    (restored, corpus, dir)
+}
+
+/// Why (#8884 follow-up): a pass that settles `Ready` over a refused chunk
+/// kept `vectors_rejected` only in memory. Every restart then read
+/// `chunks > vectors`, demoted `semantic` (dropping the vector lane) and
+/// queued a backfill that refused the same chunk again, forever.
+/// What: settles a pass with one refused chunk, rebuilds the handle as a
+/// restore does, and requires the reconcile to queue nothing and leave
+/// `semantic` `Ready`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_restore_after_a_refused_embedding_does_not_demote_the_stage() {
+    let (restored, _corpus, _dir) =
+        restored_after_a_refusal("vector-gap-8884-restore-refused").await;
+    assert!(
+        !reconcile_semantic_vector_gap(&restored).await,
+        "a refused chunk is not a gap a restore may backfill"
+    );
+    let semantic = restored.stages.read().await.semantic.clone();
+    assert_eq!(
+        semantic.status,
+        StageStatus::Ready,
+        "a restore must not demote semantic over a refused chunk: {semantic:?}"
+    );
+    assert_eq!(semantic.vectors_rejected, Some(1), "{semantic:?}");
+}
+
+/// Assert the reconcile treated the gap as real, then wait for the backfill
+/// it queued to settle so the next serial test starts with an empty queue.
+async fn assert_backfilled(handle: &Arc<IndexHandle>, why: &str) {
+    assert!(reconcile_semantic_vector_gap(handle).await, "{why}");
+    assert_ne!(
+        handle.stages.read().await.semantic.status,
+        StageStatus::Ready,
+        "{why}: the stage must be demoted"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while deferred_embed_queue_depth() > 0
+        || handle.stages.read().await.semantic.status == StageStatus::InProgress
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the backfill never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Why (#8884 follow-up): the refusal record must fail closed. Read as "no
+/// gap", a damaged record would hide every missing vector from every restore.
+/// What: damages the record two ways, unparseable bytes and an unreadable
+/// `_meta` table, and requires the pre-#8895 reconcile each time: demote and
+/// backfill.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_unreadable_refusal_record_is_treated_as_a_real_gap() {
+    let (restored, corpus, _dir) = restored_after_a_refusal("vector-gap-8884-bad-record").await;
+    corpus
+        .write_vector_refusals_sync(Some(b"not a refusal record"))
+        .expect("damage the record");
+    assert_backfilled(&restored, "an unparseable record excuses nothing").await;
+
+    let (restored, corpus, _dir) = restored_after_a_refusal("vector-gap-8884-bad-meta").await;
+    crate::core::corpus::test_support::break_meta_table(&corpus).expect("break _meta");
+    assert_backfilled(&restored, "an unreadable record excuses nothing").await;
+}
+
+/// Why (#8884 follow-up): the excuse is for the content that was refused. A
+/// chunk re-ingested with new content is owed an embedding again.
+/// What: rewrites the refused chunk's content in the corpus after the pass;
+/// the reconcile must treat it as a real gap.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_refused_chunk_whose_content_changed_is_backfilled() {
+    let (restored, corpus, _dir) = restored_after_a_refusal("vector-gap-8884-changed").await;
+    let (chunks, _) = chunk_ast("src/lib.rs", SOURCE);
+    let mut beta = chunks
+        .into_iter()
+        .find(|c| c.content.contains("beta"))
+        .expect("the fixture carries a beta chunk");
+    beta.content.push_str("\n// edited");
+    corpus
+        .upsert_chunks(&[beta])
+        .expect("re-ingest with new content");
+    assert_backfilled(&restored, "a changed refused chunk is owed an embedding").await;
+}
+
+/// Why (#8884 follow-up): a recorded refusal must not hide a real gap beside
+/// it, such as a chunk a crash left unembedded.
+/// What: adds a corpus row with no vector and no refusal after the pass; the
+/// reconcile must demote and backfill as before.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_new_chunk_beside_a_refused_one_is_backfilled() {
+    let (restored, corpus, _dir) = restored_after_a_refusal("vector-gap-8884-new-chunk").await;
+    write_hidden_row(&corpus);
+    assert_backfilled(&restored, "an unrecorded missing chunk is a real gap").await;
+}

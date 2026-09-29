@@ -30,6 +30,8 @@ mod meta_ops;
 // timeout is never reported as a corrupted on-disk format.
 pub mod open_failure;
 pub(crate) mod open_guard;
+// #8884: the durable record of refused embeddings, read at restore.
+mod refusal_ops;
 mod store_impl;
 mod tables;
 // #5357: `_meta` fault injectors for the fail-closed regression tests. Kept out

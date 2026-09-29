@@ -16,6 +16,8 @@
 pub(crate) mod commit;
 pub(crate) mod deferred;
 pub(crate) mod embed;
+// #8884: refused embeddings survive a restart so restore does not re-demote.
+pub(crate) mod refusals;
 
 use anyhow::{Context, Result};
 
