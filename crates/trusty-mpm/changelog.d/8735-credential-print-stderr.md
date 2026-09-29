@@ -6,5 +6,8 @@ Security
   `printf '%d' "$T"` — inside `<(…)`, `>(…)`, `$(…)`, subshells and the
   wrappers the rule already follows, and through `2>&1` and `|&`. Stderr sent
   to `/dev/null` or a file stays allowed; a stderr target or `printf` format
-  chosen at run time refuses. `echo` and a `printf` format of text
-  conversions only (`%s`, `%b`, `%q`, `%c`) are unchanged (#8735).
+  chosen at run time refuses. `echo`, `cat <(…)` (which names a `/dev/fd`
+  path, not the value) and a `printf` format of text conversions only (`%s`,
+  `%b`, `%q`, `%c`) are unchanged. zsh `print -u N` given a credential is
+  routed to descriptor N, and refuses when N is chosen at run time or is the
+  `-p` coprocess (#8735).

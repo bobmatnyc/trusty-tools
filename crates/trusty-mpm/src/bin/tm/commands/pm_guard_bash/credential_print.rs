@@ -102,7 +102,7 @@ use credential_print_redirect::{
     apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
 };
 use credential_print_split::{lift_substitutions, split_stages, ungroup};
-use credential_print_stderr::reports_operand_on_stderr;
+use credential_print_stderr::{reports_operand_on_stderr, route_print_unit};
 use credential_print_taint::{bound_names, dumps_variables, expands_tainted};
 use credential_print_taint_forms::{array_bindings, function_header_words, reads_in_arithmetic};
 use credential_print_taint_sinks::{
@@ -593,6 +593,10 @@ fn judge_stage(stage: &str, lifted: &Lifted, ctx: StageCtx) -> Result<Emitted, R
         // run-time stderr target refuses through `route`'s `Unknown` arm.
         if reports_operand_on_stderr(&program, args, lifted) {
             route(err, &mut emitted)?;
+        }
+        // #8735 round 1: zsh `print -u N` writes the value to descriptor N.
+        if program == "print" {
+            route_print_unit(args, &routed.fds, &mut emitted)?;
         }
     }
     if stdin_carries && !consumer {

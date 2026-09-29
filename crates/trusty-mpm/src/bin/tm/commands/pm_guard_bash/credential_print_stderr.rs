@@ -5,16 +5,23 @@
 //! value as a filename fails with `cat: <value>: No such file`, written to the
 //! stderr the `<(…)` body shares with the outer command. `printf` does the
 //! same for an operand a numeric conversion rejects (`printf: <value>: invalid
-//! number`), and zsh `print -f` likewise.
+//! number`), and zsh `print -f` likewise. zsh `print -u N` writes the value
+//! itself to descriptor N.
 //! What: [`reports_operand_on_stderr`] says whether a `super::ARG_PRINTERS`
 //! call given a carrying operand may write that operand to stderr. `echo`
-//! never does. A `printf` format chosen at run time, or a `print` flag this
-//! module does not know, counts as reporting: the guard cannot read it.
+//! never does, and `cat` only for an operand that holds the value, not a
+//! `<(…)` file it names by path. A `printf` format chosen at run time, or a
+//! `print` flag this module does not know, counts as reporting: the guard
+//! cannot read it. [`route_print_unit`] routes the descriptor `print -u N`
+//! writes to, and refuses a run-time `N` or the `-p` coprocess.
 //! Test: `credential_print_tests::denies_a_credential_operand_reported_on_stderr_8735`,
 //! `credential_print_tests::denies_an_unreadable_stderr_of_a_reporting_printer_8735`,
+//! `credential_print_tests::denies_a_credential_written_by_print_u_8735`,
+//! `credential_print_tests::denies_an_unreadable_print_unit_8735`,
 //! `credential_print_tests::allows_the_8735_neighbours`.
 
-use super::{Lifted, MARK, carries};
+use super::credential_print_taint::expands_tainted;
+use super::{Emitted, Lifted, MARK, Refusal, Sink, SubKind, carries, carries_kind, route};
 
 /// zsh `print` flags that take no operand and report no error.
 const PRINT_QUIET_FLAGS: &str = "rnlNcaoOiRPEebD";
@@ -26,7 +33,10 @@ const TEXT_CONVERSIONS: &str = "sbqc";
 /// stderr in an error message.
 pub(super) fn reports_operand_on_stderr(program: &str, args: &[String], lifted: &Lifted) -> bool {
     match program {
-        "cat" => true,
+        // #8735 round 1: `cat <(…)` names `/dev/fd/63`, never the value.
+        "cat" => args.iter().any(|a| {
+            expands_tainted(a, &lifted.names) || carries_kind(a, lifted, Some(SubKind::Command))
+        }),
         "printf" => printf_reports(args, lifted),
         "print" => print_reports(args, lifted),
         _ => false,
@@ -63,31 +73,80 @@ fn printf_reports(args: &[String], lifted: &Lifted) -> bool {
     rest.first().is_some_and(|f| format_reports(f, lifted))
 }
 
-/// zsh `print`: `-f FORMAT` behaves as `printf`; any flag outside
-/// [`PRINT_QUIET_FLAGS`] (`-u FD`, `-v NAME`, `-m PATTERN`, …) refuses.
-fn print_reports(args: &[String], lifted: &Lifted) -> bool {
-    for (n, word) in args.iter().enumerate() {
-        let Some(flags) = word
+/// zsh `print` flags that take an operand, attached (`-u3`) or next (`-u 3`).
+const PRINT_OPERAND_FLAGS: &str = "fuCxXv";
+
+/// zsh `print`'s option flags, each with its operand, up to the first
+/// non-option word, `-` or `--`.
+fn print_flags(args: &[String]) -> Vec<(char, Option<&str>)> {
+    let mut flags = Vec::new();
+    let mut n = 0;
+    while let Some(word) = args.get(n) {
+        n += 1;
+        let Some(cluster) = word
             .strip_prefix('-')
             .filter(|f| !f.is_empty() && *f != "-")
         else {
-            return false;
+            break;
         };
-        for (at, flag) in flags.char_indices() {
-            if flag == 'f' {
-                let attached = &flags[at + 1..];
-                let format = match attached {
-                    "" => args.get(n + 1).map(String::as_str).unwrap_or_default(),
-                    _ => attached,
-                };
-                return format_reports(format, lifted);
+        for (at, flag) in cluster.char_indices() {
+            if !PRINT_OPERAND_FLAGS.contains(flag) {
+                flags.push((flag, None));
+                continue;
             }
-            if !PRINT_QUIET_FLAGS.contains(flag) {
-                return true;
-            }
+            let attached = &cluster[at + flag.len_utf8()..];
+            let operand = if attached.is_empty() {
+                n += 1;
+                args.get(n - 1).map(String::as_str)
+            } else {
+                Some(attached)
+            };
+            flags.push((flag, operand));
+            break;
         }
     }
-    false
+    flags
+}
+
+/// zsh `print`: `-f FORMAT` behaves as `printf`; `-u N` is routed by
+/// [`route_print_unit`]; any other flag outside [`PRINT_QUIET_FLAGS`]
+/// (`-v NAME`, `-m`, `-C N`, …) counts as reporting.
+fn print_reports(args: &[String], lifted: &Lifted) -> bool {
+    print_flags(args)
+        .into_iter()
+        .any(|(flag, operand)| match flag {
+            'f' => format_reports(operand.unwrap_or_default(), lifted),
+            'u' => false,
+            _ => !PRINT_QUIET_FLAGS.contains(flag),
+        })
+}
+
+/// Route the descriptor a carrying zsh `print -u N` writes the value to
+/// (#8735 round 1): `N` a literal digit routes that descriptor's sink.
+pub(super) fn route_print_unit(
+    args: &[String],
+    fds: &[Sink; 10],
+    emitted: &mut Emitted,
+) -> Result<(), Refusal> {
+    let mut unit = None;
+    for (flag, operand) in print_flags(args) {
+        match flag {
+            'p' => return Err(Refusal::Unreadable("the coprocess `print -p` writes to")),
+            'u' => unit = Some(operand),
+            _ => {}
+        }
+    }
+    let Some(operand) = unit else {
+        return Ok(());
+    };
+    let literal = operand
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.parse::<usize>().ok());
+    match literal.and_then(|n| fds.get(n)) {
+        Some(&sink) => route(sink, emitted),
+        // #8735 round 1: fail closed — a run-time descriptor may be the terminal.
+        None => Err(Refusal::Unreadable("the descriptor `print -u` writes to")),
+    }
 }
 
 /// Whether a `printf` format may make it quote an operand on stderr: the
