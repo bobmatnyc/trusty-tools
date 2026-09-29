@@ -24,7 +24,16 @@ impl FleetEnv {
     fn new() -> Self {
         let bin = tempfile::tempdir().expect("fake bin dir");
         let claude = bin.path().join("claude");
-        std::fs::write(&claude, "#!/bin/sh\nexec sleep 600\n").expect("fake claude");
+        // #8878 ruling A: `tm fleet init` finds its claude by process name, so
+        // the fake execs a `sleep` whose name contains `claude`. A symlink, not
+        // a copy: macOS kills an unsigned copy of a system binary.
+        let sleeper = bin.path().join("claude-sleep");
+        std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
+        std::fs::write(
+            &claude,
+            format!("#!/bin/sh\nexec {:?} 600\n", sleeper.display().to_string()),
+        )
+        .expect("fake claude");
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
         Self {
@@ -115,6 +124,29 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
+    // #8878 ruling A: the launch recorded the claude it started, and only it.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("bound to claude pid"),
+        "{}",
+        text(&out)
+    );
+    let root = env.home.path().join(".trusty-mpm");
+    let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
+        .expect("the launch record directory")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    let pid: u32 = records[0]
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.parse().ok())
+        .expect("a `<pid>.architect` record");
+    let record = trusty_mpm::core::architect_launch::ARCHITECT_RECORDS
+        .read(&root, pid)
+        .expect("the record reads")
+        .expect("the record exists");
+    assert_eq!(record.pid, pid);
+    assert!(trusty_mpm::core::process::process_name_is_claude(pid));
 
     let out = env.tm(&["fleet", "status", "--json", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));

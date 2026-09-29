@@ -5,8 +5,10 @@
 //! and the arming record `tm launch --twin` writes — and writes that record.
 //! What: [`OsProbe`] implements [`TwinProbe`] against `~/.trusty-mpm/` and the
 //! live process table; [`resolve_hook`] is the hook's entry point;
-//! [`arm_claude`] records one launched `claude` as armed. Every read error is
-//! returned as an error, which the resolver turns into "not twin".
+//! [`arm_claude`] records one launched `claude` as armed. [`RecordStore`] and
+//! [`nearest_claude_ancestor`] also bind the Architect to the `claude` tm
+//! launched for it (`core::architect_launch`). Every read error is returned
+//! as an error, which the resolver turns into "not twin".
 //! Test: `twin_identity_tests.rs` (`an_arming_record_round_trips`,
 //! `a_writable_by_others_arming_record_is_refused`,
 //! `the_nearest_claude_ancestor_is_found_with_its_start_time`,
@@ -125,86 +127,138 @@ pub fn load_user_config_strict(root: &Path) -> Result<MpmConfig, String> {
     }
 }
 
-/// Path of the arming record for `pid` under `root`.
-pub fn record_path(root: &Path, pid: u32) -> PathBuf {
-    root.join(ARMED_DIR).join(format!("{pid}.json"))
-}
-
-/// Read the arming record for `pid` (#8878 condition b).
+/// Where one kind of launch record lives under the `~/.trusty-mpm` root.
 ///
-/// What: absent → `Ok(None)`. `Err` for any other read error, a file other
-/// users can write (unix), or content that does not parse as an
-/// [`ArmingRecord`].
+/// Why: the twin arming (#8878 D1) and the Architect's launch (#8878, ruling
+/// A) bind a `claude` the same way — PID and start time, written by the tm
+/// code that started it — and differ only in where the record sits.
+/// What: records are `<root>/<dir>/<pid>.<ext>`, one [`ArmingRecord`] each.
 /// Test: `an_arming_record_round_trips`,
 /// `a_writable_by_others_arming_record_is_refused`.
-pub fn read_record(root: &Path, pid: u32) -> Result<Option<ArmingRecord>, String> {
-    let path = record_path(root, pid);
-    let raw = match std::fs::read(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-        Ok(raw) => raw,
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?
-            .permissions()
-            .mode();
-        if mode & 0o022 != 0 {
-            return Err(format!(
-                "{} is writable by other users (mode {mode:o})",
-                path.display()
-            ));
-        }
-    }
-    serde_json::from_slice(&raw)
-        .map(Some)
-        .map_err(|e| format!("{}: {e}", path.display()))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordStore {
+    /// Directory under the root.
+    pub dir: &'static str,
+    /// File extension, without the dot.
+    pub ext: &'static str,
 }
 
-/// Write `record` atomically as `<root>/twin/armed/<pid>.json`, mode 0600.
-///
-/// Test: `an_arming_record_round_trips`.
+/// The twin arming records: `twin/armed/<pid>.json`.
+pub const TWIN_RECORDS: RecordStore = RecordStore {
+    dir: ARMED_DIR,
+    ext: "json",
+};
+
+impl RecordStore {
+    /// Path of the record for `pid` under `root`.
+    pub fn path(&self, root: &Path, pid: u32) -> PathBuf {
+        root.join(self.dir).join(format!("{pid}.{}", self.ext))
+    }
+
+    /// Read the record for `pid` (#8878 condition b).
+    ///
+    /// What: absent → `Ok(None)`. `Err` for any other read error, a file
+    /// other users can write (unix), or content that does not parse as an
+    /// [`ArmingRecord`].
+    /// Test: `an_arming_record_round_trips`,
+    /// `a_writable_by_others_arming_record_is_refused`.
+    pub fn read(&self, root: &Path, pid: u32) -> Result<Option<ArmingRecord>, String> {
+        let path = self.path(root, pid);
+        let raw = match std::fs::read(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+            Ok(raw) => raw,
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .permissions()
+                .mode();
+            if mode & 0o022 != 0 {
+                return Err(format!(
+                    "{} is writable by other users (mode {mode:o})",
+                    path.display()
+                ));
+            }
+        }
+        serde_json::from_slice(&raw)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Write `record` atomically under `root`, mode 0600.
+    ///
+    /// Test: `an_arming_record_round_trips`.
+    pub fn write(&self, root: &Path, record: &ArmingRecord) -> Result<PathBuf, String> {
+        let path = self.path(root, record.pid);
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("{} has no parent", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let body = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
+        // NamedTempFile is created 0600 on unix, and `persist` renames it in place.
+        let mut staged =
+            tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        staged
+            .write_all(&body)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        staged
+            .persist(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(path)
+    }
+
+    /// Record the `claude` at `pid`, launched in `project_dir`.
+    ///
+    /// Why: binding by PID and start time means a later process that reuses
+    /// the PID is not the recorded one.
+    /// What: reads `pid`'s start time from the process table, then
+    /// [`Self::write`]s it with the canonical `project_dir`.
+    /// Test: `the_nearest_claude_ancestor_is_found_with_its_start_time` (the
+    /// start-time read), `an_arming_record_round_trips` (the write).
+    pub fn record_claude(
+        &self,
+        root: &Path,
+        pid: u32,
+        project_dir: &Path,
+    ) -> Result<ArmingRecord, String> {
+        let start_time = process_facts(pid)?.start_time;
+        let project_dir = std::fs::canonicalize(project_dir)
+            .map_err(|e| format!("{}: {e}", project_dir.display()))?;
+        let record = ArmingRecord {
+            pid,
+            start_time,
+            project_dir,
+            armed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.write(root, &record)?;
+        Ok(record)
+    }
+}
+
+/// Path of the twin arming record for `pid` under `root`.
+pub fn record_path(root: &Path, pid: u32) -> PathBuf {
+    TWIN_RECORDS.path(root, pid)
+}
+
+/// Read the twin arming record for `pid`; see [`RecordStore::read`].
+pub fn read_record(root: &Path, pid: u32) -> Result<Option<ArmingRecord>, String> {
+    TWIN_RECORDS.read(root, pid)
+}
+
+/// Write a twin arming record; see [`RecordStore::write`].
 pub fn write_record(root: &Path, record: &ArmingRecord) -> Result<PathBuf, String> {
-    let path = record_path(root, record.pid);
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", path.display()))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let body = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
-    // NamedTempFile is created 0600 on unix, and `persist` renames it in place.
-    let mut staged =
-        tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    staged
-        .write_all(&body)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    staged
-        .persist(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(path)
+    TWIN_RECORDS.write(root, record)
 }
 
 /// Arm the `claude` at `pid`, launched in `project_dir`, for twin mode.
 ///
-/// Why: `tm launch --twin` binds the arming to the process it started, by PID
-/// and start time, so a later process that reuses the PID is not armed.
-/// What: reads `pid`'s start time from the process table, then
-/// [`write_record`]s it with the canonical `project_dir`.
-/// Test: `the_nearest_claude_ancestor_is_found_with_its_start_time` (the
-/// start-time read), `an_arming_record_round_trips` (the write).
+/// Why: `tm launch --twin` binds the arming to the process it started.
+/// What: [`RecordStore::record_claude`] into [`TWIN_RECORDS`].
 pub fn arm_claude(root: &Path, pid: u32, project_dir: &Path) -> Result<ArmingRecord, String> {
-    let start_time = process_facts(pid)?.start_time;
-    let project_dir = std::fs::canonicalize(project_dir)
-        .map_err(|e| format!("{}: {e}", project_dir.display()))?;
-    let record = ArmingRecord {
-        pid,
-        start_time,
-        project_dir,
-        armed_at: chrono::Utc::now().to_rfc3339(),
-    };
-    write_record(root, &record)?;
-    Ok(record)
+    TWIN_RECORDS.record_claude(root, pid, project_dir)
 }
 
 /// Parent and start time of one process-table entry.

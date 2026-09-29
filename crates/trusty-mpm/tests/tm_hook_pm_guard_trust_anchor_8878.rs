@@ -7,14 +7,18 @@
 //! stdin read moved ahead of them.
 //! What: spawns `tm hook --pm-guard` with a scratch `$HOME` holding the anchor
 //! and an unreachable daemon, and checks each bypass, an unreadable payload
-//! under each bypass, and the Architect's main thread and subagent.
+//! under each bypass, and the Architect's main thread and subagent — run under
+//! a fake `claude` recorded as the Architect's launch, and the same
+//! environment with no record (ruling A).
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_trust_anchor_8878::`.
 
 use crate::common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
+
+use trusty_mpm::core::architect_launch::record_architect;
 
 /// The bypass variables, and `None` for no bypass.
 const BYPASSES: [Option<(&str, &str)>; 3] = [
@@ -67,8 +71,20 @@ impl Fixture {
 /// Run the guard with raw `stdin`, the named env pairs, and `stamp`.
 fn run(fx: &Fixture, stdin: &str, env: &[(&str, &str)], stamp: Option<&str>) -> String {
     let mut cmd = common::tm_command_in(&fx.home);
-    cmd.args(["--url", "http://127.0.0.1:1", "hook", "--pm-guard"])
-        .current_dir(&fx.project)
+    cmd.args(["--url", "http://127.0.0.1:1", "hook", "--pm-guard"]);
+    guard_env(fx, &mut cmd, env, stamp);
+    let child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn `tm hook --pm-guard`");
+    finish(child, stdin)
+}
+
+/// The hook's environment: the project, `stamp`, and `env` over no bypass.
+fn guard_env(fx: &Fixture, cmd: &mut Command, env: &[(&str, &str)], stamp: Option<&str>) {
+    cmd.current_dir(&fx.project)
         .env("CLAUDE_PROJECT_DIR", &fx.project)
         .env_remove("TRUSTY_MPM_SESSION_PROFILE")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
@@ -81,12 +97,10 @@ fn run(fx: &Fixture, stdin: &str, env: &[(&str, &str)], stamp: Option<&str>) -> 
     if let Some(stamp) = stamp {
         cmd.env("TRUSTY_MPM_SESSION_PROFILE", stamp);
     }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn `tm hook --pm-guard`");
+}
+
+/// Write `stdin` to the guard and return its stdout; it must exit 0.
+fn finish(mut child: Child, stdin: &str) -> String {
     child
         .stdin
         .take()
@@ -96,6 +110,42 @@ fn run(fx: &Fixture, stdin: &str, env: &[(&str, &str)], stamp: Option<&str>) -> 
     let out = child.wait_with_output().expect("wait");
     assert!(out.status.success(), "the guard exits 0: {out:?}");
     String::from_utf8(out.stdout).expect("utf-8 stdout")
+}
+
+/// Run the supervisor-stamped guard as the child of a fake `claude` (a
+/// `/bin/sh` symlink named `claude`), recording that `claude` as the
+/// Architect's launch first when `recorded` — what `tm fleet init` does.
+fn run_under_claude(fx: &Fixture, stdin: &str, recorded: bool) -> String {
+    let scratch = fx.home.parent().expect("scratch root");
+    let fake = scratch.join("claude");
+    if !fake.exists() {
+        // A symlink, not a copy: macOS kills an unsigned copy of a system binary.
+        std::os::unix::fs::symlink("/bin/sh", &fake).expect("symlink fake claude");
+    }
+    let go = scratch.join(format!("go-{recorded}"));
+    let mut cmd = Command::new(&fake);
+    common::isolate_spawned_tm(&mut cmd, &fx.home);
+    // The shell waits for the record, then runs the guard as its own child.
+    cmd.args([
+        "-c",
+        "while [ ! -e \"$GO\" ]; do sleep 0.05; done; \"$TM\" --url http://127.0.0.1:1 hook \
+         --pm-guard; exit $?",
+    ])
+    .env("GO", &go)
+    .env("TM", common::tm_bin());
+    guard_env(fx, &mut cmd, &[], Some("supervisor"));
+    let child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the fake claude");
+    if recorded {
+        record_architect(&fx.home.join(".trusty-mpm"), child.id(), &fx.project)
+            .expect("record the fake claude");
+    }
+    std::fs::write(&go, "").expect("release the fake claude");
+    finish(child, stdin)
 }
 
 /// A main-thread `Write` payload targeting `path`.
@@ -137,17 +187,21 @@ fn an_unreadable_payload_denies_under_each_bypass() {
     }
 }
 
+/// Ruling A (#8878): the Architect is the recorded `claude`, over the real
+/// process table; the environment alone is the critic's spoof.
 #[test]
 fn the_architect_main_thread_writes_and_its_subagent_does_not() {
     let fx = Fixture::new();
     let main = write_payload(&fx, &fx.anchor());
-    assert_eq!(
-        run(&fx, &main.to_string(), &[], Some("supervisor")).trim(),
-        ""
-    );
+    assert_eq!(run_under_claude(&fx, &main.to_string(), true).trim(), "");
     let mut sub = main.clone();
     sub["agent_id"] = serde_json::json!("agent-7");
-    let out = run(&fx, &sub.to_string(), &[], Some("supervisor"));
+    let out = run_under_claude(&fx, &sub.to_string(), true);
+    assert!(out.contains("#8878"), "{out}");
+    // The stamp, project and allowlist with no record: the spoof.
+    let out = run_under_claude(&fx, &main.to_string(), false);
+    assert!(out.contains("#8878"), "{out}");
+    let out = run(&fx, &main.to_string(), &[], Some("supervisor"));
     assert!(out.contains("#8878"), "{out}");
     // A PM stamp in the same directory is not the Architect.
     let out = run(&fx, &main.to_string(), &[], Some("pm"));

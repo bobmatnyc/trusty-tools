@@ -48,14 +48,75 @@ fn pm_env(fx: &Fixture) -> HookEnv {
     }
 }
 
-/// The fully granted Architect: stamp, launch directory and allowlist agree.
+/// The fully granted Architect: stamp, launch directory and allowlist agree,
+/// and the hook's parent is the `claude` tm launched and recorded.
 fn architect_env(fx: &Fixture) -> HookEnv {
+    launch_record(fx, ARCHITECT, &fx.project);
+    HookEnv {
+        claude: table(architect_table()),
+        ..spoof_env(fx)
+    }
+}
+
+/// The environment half of the Architect, with no process behind it.
+fn spoof_env(fx: &Fixture) -> HookEnv {
     HookEnv {
         home: Some(fx.home.clone()),
         stamp: Some("supervisor".into()),
         project_dir: Some(fx.project.clone().into_os_string()),
         ..HookEnv::default()
     }
+}
+
+/// The `claude` `tm fleet init` launched: its PID and start time.
+const ARCHITECT: ClaudeProcess = ClaudeProcess {
+    pid: 60,
+    start_time: 600,
+};
+
+/// One fake process-table row: `(pid, parent, is claude)`.
+type Row = (u32, Option<u32>, bool);
+
+/// The hook (PID 100) run directly by the Architect's `claude` (PID 60).
+fn architect_table() -> Vec<Row> {
+    vec![(100, Some(60), false), (60, Some(1), true)]
+}
+
+/// The walk from the hook, PID 100, over `rows`, as PR 1's
+/// `nearest_claude_in`: a PID's start time is `pid * 10`, and a PID absent
+/// from `rows` is a table read error.
+fn table(rows: Vec<Row>) -> ClaudeLookup {
+    ClaudeLookup::new(move || {
+        let find = |pid: u32| {
+            rows.iter()
+                .find(|row| row.0 == pid)
+                .copied()
+                .ok_or_else(|| format!("no pid {pid}"))
+        };
+        twin_arming::nearest_claude_in(
+            100,
+            |pid| {
+                find(pid).map(|row| twin_arming::ProcessFacts {
+                    parent: row.1,
+                    start_time: u64::from(pid) * 10,
+                })
+            },
+            |pid| find(pid).map(|row| row.2),
+        )
+    })
+}
+
+/// Write the launch record tm writes for `claude` started in `project`.
+fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path) -> PathBuf {
+    let record = trusty_mpm::core::twin_identity::ArmingRecord {
+        pid: claude.pid,
+        start_time: claude.start_time,
+        project_dir: project.to_path_buf(),
+        armed_at: String::new(),
+    };
+    architect_launch::ARCHITECT_RECORDS
+        .write(&fx.home.join(ANCHOR_ROOT), &record)
+        .expect("write launch record")
 }
 
 fn allowlist(fx: &Fixture) -> MpmConfig {
@@ -464,4 +525,132 @@ fn an_unreadable_armed_dir_is_live() {
         verdict.is_some(),
         "an unreadable arming dir must count as live"
     );
+}
+
+/// The critic's spoof (#8878, ruling A): the supervisor stamp, a matching
+/// project and the allowlist, as `TRUSTY_MPM_SESSION_PROFILE=supervisor claude`
+/// run from the Architect directory produces, but no tm launch record.
+#[test]
+fn a_supervisor_stamp_without_a_launch_record_is_denied() {
+    let fx = fixture();
+    let spoof = HookEnv {
+        home: Some(fx.home.clone()),
+        stamp: Some("supervisor".into()),
+        project_dir: Some(fx.project.clone().into_os_string()),
+        ..HookEnv::default()
+    };
+    let write = payload(&fx, "Write", write_input(&fx.anchor));
+    assert!(evaluate(&write, &spoof, || allowlist(&fx)).is_some());
+    // The same spoof run under a real `claude` that tm never recorded.
+    let unrecorded = HookEnv {
+        claude: table(architect_table()),
+        ..spoof_env(&fx)
+    };
+    assert!(evaluate(&write, &unrecorded, || allowlist(&fx)).is_some());
+}
+
+/// A launch record admits exactly the process it names (#8878, ruling A).
+#[test]
+fn a_launch_record_binds_one_process() {
+    let write_by = |fx: &Fixture, env: &HookEnv| {
+        evaluate(&payload(fx, "Write", write_input(&fx.anchor)), env, || {
+            allowlist(fx)
+        })
+    };
+    // The hook under the Architect's `claude`, with `record` on disk.
+    let under_architect = |record: ClaudeProcess, project: Option<&Path>| {
+        let fx = fixture();
+        launch_record(&fx, record, project.unwrap_or(&fx.project));
+        let env = HookEnv {
+            claude: table(architect_table()),
+            ..spoof_env(&fx)
+        };
+        write_by(&fx, &env)
+    };
+    assert_eq!(under_architect(ARCHITECT, None), None, "the real Architect");
+    let other = ClaudeProcess {
+        pid: 61,
+        start_time: 610,
+    };
+    assert!(under_architect(other, None).is_some(), "another PID");
+    let reused = ClaudeProcess {
+        start_time: 599,
+        ..ARCHITECT
+    };
+    assert!(under_architect(reused, None).is_some(), "the PID reused");
+    let elsewhere = std::env::temp_dir();
+    assert!(
+        under_architect(ARCHITECT, Some(&elsewhere)).is_some(),
+        "another project"
+    );
+
+    // A dead PID: the table no longer holds the recorded `claude`.
+    let fx = fixture();
+    let dead = HookEnv {
+        claude: table(vec![(100, Some(60), false)]),
+        ..architect_env(&fx)
+    };
+    assert!(write_by(&fx, &dead).is_some(), "a dead PID");
+
+    // A session started from the Architect's Bash tool: the recorded
+    // `claude` is not the hook's parent.
+    let nested = HookEnv {
+        claude: table(vec![
+            (100, Some(80), false),
+            (80, Some(70), false),
+            (70, Some(60), false),
+            (60, Some(1), true),
+        ]),
+        ..architect_env(&fx)
+    };
+    assert!(write_by(&fx, &nested).is_some(), "a nested session");
+}
+
+#[test]
+fn an_unreadable_launch_record_is_denied() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let env = architect_env(&fx);
+    let record = launch_record(&fx, ARCHITECT, &fx.project);
+    std::fs::write(&record, "not json").expect("corrupt record");
+    let write = payload(&fx, "Write", write_input(&fx.anchor));
+    assert!(evaluate(&write, &env, || allowlist(&fx)).is_some());
+    launch_record(&fx, ARCHITECT, &fx.project);
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let unreadable = evaluate(&write, &env, || allowlist(&fx));
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o666)).expect("chmod");
+    assert!(unreadable.is_some(), "an unreadable record");
+    assert!(
+        evaluate(&write, &env, || allowlist(&fx)).is_some(),
+        "a record other users can write"
+    );
+}
+
+/// The launch records are an anchor: no PM may plant, move or edit one.
+#[test]
+fn the_launch_record_dir_is_an_anchor() {
+    let fx = fixture();
+    let dir = fx.home.join(ANCHOR_ROOT).join(ARCHITECT_DIR);
+    // Absent directory: creating it or a record in it is a write to it.
+    for command in [
+        "echo x > ~/.trusty-mpm/architect-launch/100.architect",
+        "cp a.txt ~/.trusty-mpm/architect-launch",
+        "cd /tmp && echo x > 100.architect",
+        "cd /tmp && echo x > 100.ARCHITECT",
+    ] {
+        assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
+    }
+    launch_record(&fx, ARCHITECT, &fx.project);
+    assert!(pm_verdict(&fx, "Write", write_input(&dir.join("60.architect"))).is_some());
+    assert!(pm_verdict(&fx, "Write", write_input(&dir.join("notes.md"))).is_some());
+    for command in [
+        "mv ~/.trusty-mpm/architect-launch/60.architect ~/.trusty-mpm/architect-launch/100.architect",
+        "ln -s ~/.trusty-mpm/architect-launch/60.architect a.architect",
+        "cp a.txt ~/.trusty-mpm/architect-launch/",
+    ] {
+        assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
+    }
+    // The distinct extension keeps other unplaceable writes open.
+    assert_eq!(pm_bash(&fx, "cd /tmp && echo x > r.json"), None);
+    assert_eq!(pm_bash(&fx, "echo x > notes.md"), None);
 }

@@ -7,16 +7,21 @@
 //! `~/.trusty-mpm/twin/armed/*.json` while such files still exist; the
 //! Architect session may write them, no PM and no agent may; and the floor
 //! holds under `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS`.
+//! Ruling A (#8878, 2026-09-29) makes the Architect identity process-bound,
+//! and adds its launch records, `~/.trusty-mpm/architect-launch/`, as an anchor.
 //! What: [`deny_trust_anchor_write`] runs [`evaluate`] and prints the deny.
 //! [`evaluate`] reads the call's writes — the edit tools' target, or for `Bash`
 //! the classifier plus the `cp`/`mv`/`ln`/`install`/`sed -i` destinations and
 //! the sources of `ln`, `mv`, `cp -l` and `cp -s` ([`anchor_writes`]) — and
 //! allows a call that writes nothing. It then allows the Architect's main
-//! thread ([`is_architect_main_thread`], the one identity predicate). Every
-//! other writer is denied when a target or source resolves, symlinks and hard
-//! links followed, to an anchor or to a directory above one — which includes
-//! `twin/` and `twin/armed/` whether or not a record is live. Anchor names and
-//! the `.json` extension compare ASCII case-insensitively, as APFS does.
+//! thread ([`is_architect_main_thread`], the one identity predicate): the
+//! `claude` `tm fleet init` launched, matched on PID and start time, not an
+//! environment claim. Every other writer is denied when a target or source
+//! resolves, symlinks and hard links followed, to an anchor or to a directory
+//! above one — which includes `twin/` and `twin/armed/` whether or not a record
+//! is live — or to anything under `architect-launch/`. Anchor names and the
+//! `.json` and `.architect` extensions compare ASCII case-insensitively, as
+//! APFS does.
 //! FAIL-CLOSED (Q4/Q5): an unknown home, a config location that does not
 //! resolve, a target that does not resolve, a target built from an expansion,
 //! glob or `cd` whose file name could name an anchor, an unplaceable write
@@ -35,12 +40,14 @@
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
+use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
-use trusty_mpm::core::twin_arming::ARMED_DIR;
-use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
+use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
+use trusty_mpm::core::twin_identity::{ClaudeProcess, ThreadKind, thread_kind};
 
 use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
@@ -72,6 +79,8 @@ pub(crate) struct HookEnv {
     pub(crate) stamp: Option<OsString>,
     /// `CLAUDE_PROJECT_DIR`, the session's launch directory.
     pub(crate) project_dir: Option<OsString>,
+    /// The hook's nearest `claude` ancestor, read only when needed.
+    pub(crate) claude: ClaudeLookup,
 }
 
 impl HookEnv {
@@ -83,7 +92,50 @@ impl HookEnv {
             sub_agent: std::env::var_os(SUB_AGENT_ENV).is_some(),
             stamp: std::env::var_os(session_profile::SESSION_PROFILE_ENV),
             project_dir: std::env::var_os(session_profile::PROJECT_DIR_ENV),
+            claude: ClaudeLookup::live(),
         }
+    }
+}
+
+/// The lookup of the hook's nearest `claude` ancestor (#8878, ruling A).
+///
+/// Why: the walk spawns `ps`, so it runs only for a write that could be the
+/// Architect's; a test injects a process table instead.
+/// What: a shared closure. [`Default`] is fail-closed: it reports that no
+/// process table was supplied.
+#[derive(Clone)]
+pub(crate) struct ClaudeLookup(Arc<ClaudeLookupFn>);
+
+/// The closure a [`ClaudeLookup`] runs.
+type ClaudeLookupFn = dyn Fn() -> Result<Option<ClaudeProcess>, String> + Send + Sync;
+
+impl ClaudeLookup {
+    /// A lookup running `f`.
+    pub(crate) fn new(
+        f: impl Fn() -> Result<Option<ClaudeProcess>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// The walk from this process over the live process table.
+    fn live() -> Self {
+        Self::new(|| twin_arming::nearest_claude_ancestor(std::process::id()))
+    }
+
+    fn get(&self) -> Result<Option<ClaudeProcess>, String> {
+        (self.0)()
+    }
+}
+
+impl Default for ClaudeLookup {
+    fn default() -> Self {
+        Self::new(|| Err("no process table was supplied".to_owned()))
+    }
+}
+
+impl std::fmt::Debug for ClaudeLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClaudeLookup")
     }
 }
 
@@ -133,23 +185,38 @@ pub(crate) fn evaluate(
 /// Whether the call comes from the Architect session's main thread.
 ///
 /// Why: ruling Q1 lets the Architect write the anchors and no agent. The
-/// Architect is the #8453 supervisor profile (`tm fleet init` writes both
-/// halves); a subagent of it is an agent.
-/// What: [`thread_kind`] is [`ThreadKind::Main`] (a subagent, or a payload
-/// that cannot establish the thread, is not) AND
-/// [`session_profile::hook_profile`] resolves the supervisor: the launch
-/// stamp, `CLAUDE_PROJECT_DIR`, the project's `.trusty-mpm.toml` and the
-/// user-level allowlist all agree. Any missing or unreadable input is `false`.
+/// environment alone is spoofable, so ruling A (#8878, 2026-09-29) binds the
+/// Architect to the `claude` process `tm fleet init` launched; a subagent of
+/// it is an agent.
+/// What: `true` only when ALL hold, cheapest first: [`thread_kind`] is
+/// [`ThreadKind::Main`]; [`session_profile::hook_profile`] resolves the
+/// supervisor (stamp, `CLAUDE_PROJECT_DIR`, the project's `.trusty-mpm.toml`
+/// and the user-level allowlist agree); and
+/// [`architect_launch::is_launched_architect`] matches the hook's nearest
+/// `claude` ancestor to a launch record on PID, start time and project. Any
+/// missing or unreadable input is `false`.
 /// Test: `the_architect_main_thread_may_write_the_anchor`,
-/// `an_architect_subagent_is_denied`, `an_unestablished_identity_is_denied`.
+/// `a_supervisor_stamp_without_a_launch_record_is_denied`,
+/// `a_launch_record_binds_one_process`, `an_architect_subagent_is_denied`,
+/// `an_unestablished_identity_is_denied`.
 pub(crate) fn is_architect_main_thread(
     payload: &Value,
     env: &HookEnv,
     config: impl FnOnce() -> MpmConfig,
 ) -> bool {
-    thread_kind(payload, env.sub_agent) == ThreadKind::Main
-        && session_profile::hook_profile(env.stamp.clone(), env.project_dir.clone(), config)
+    if thread_kind(payload, env.sub_agent) != ThreadKind::Main
+        || !session_profile::hook_profile(env.stamp.clone(), env.project_dir.clone(), config)
             .is_supervisor()
+    {
+        return false;
+    }
+    let (Some(home), Some(project)) = (
+        env.home.as_deref(),
+        session_profile::hook_project_dir(env.project_dir.clone()),
+    ) else {
+        return false;
+    };
+    architect_launch::is_launched_architect(&home.join(ANCHOR_ROOT), &project, || env.claude.get())
 }
 
 /// The writes a tool call makes; `None` when it makes none.
@@ -217,8 +284,9 @@ struct Anchors {
     /// The live arming records, when the directory holds a `*.json` (or
     /// cannot be read).
     armed: Option<ArmedAnchors>,
-    /// When the arming directory does not resolve: the `twin/` tree, every
-    /// path under which is refused. Empty otherwise.
+    /// Trees every path under which is refused: the Architect launch
+    /// directory, and the `twin/` tree when the arming directory does not
+    /// resolve.
     fence: Vec<PathBuf>,
     /// Whether a `*.json` name could be an arming record: records are live,
     /// or the arming directory cannot be seen.
@@ -242,9 +310,11 @@ impl Anchors {
     ///
     /// What: an arming directory that does not resolve (`twin` written as a
     /// file, a link loop) no longer refuses every write; it fences the `twin/`
-    /// tree, lexical and resolved, and counts records as live.
+    /// tree, lexical and resolved, and counts records as live. The Architect
+    /// launch directory is always fenced.
     /// Test: `an_unlocatable_anchor_denies_every_write`,
-    /// `a_blocked_arming_dir_fences_only_the_twin_tree`.
+    /// `a_blocked_arming_dir_fences_only_the_twin_tree`,
+    /// `the_launch_record_dir_is_an_anchor`.
     fn locate(home: &Path) -> Result<Self, PathBuf> {
         let root = home.join(ANCHOR_ROOT);
         let lexical = root.join(CONFIG_ANCHOR);
@@ -273,6 +343,23 @@ impl Anchors {
                 )
             }
         };
+        let records_live = armed.is_some() || !fence.is_empty();
+        let mut fence = fence;
+        // #8878 ruling A: the Architect launch directory is sealed — itself,
+        // every directory above it, and everything under it.
+        let launch = root.join(ARCHITECT_DIR);
+        paths.push(launch.clone());
+        match resolve(&launch) {
+            Resolved::Path(dir) => {
+                guarded.push(dir.clone());
+                fence.push(dir.clone());
+                paths.push(dir);
+            }
+            Resolved::Unresolvable => {
+                fence.extend(config.parent().map(|p| p.join(ARCHITECT_DIR)));
+                fence.push(launch);
+            }
+        }
         let mut names = Vec::new();
         for path in &paths {
             names.extend(path.components().filter_map(|c| match c {
@@ -283,7 +370,7 @@ impl Anchors {
         Ok(Self {
             guarded,
             config_id: file_id(&config),
-            records_live: armed.is_some() || !fence.is_empty(),
+            records_live,
             armed,
             fence,
             names,
@@ -312,7 +399,8 @@ impl Anchors {
 
     /// Whether a target whose directory is unknown could still name an
     /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
-    /// anchor path component, or a `*.json` while records could be live.
+    /// anchor path component, a `*.architect` launch record, or a `*.json`
+    /// while records could be live.
     fn could_be(&self, spelling: &str) -> bool {
         let name = spelling.trim_end_matches('/');
         let name = name.rsplit('/').next().unwrap_or(name);
@@ -325,6 +413,10 @@ impl Anchors {
                 .names
                 .iter()
                 .any(|anchor| anchor.eq_ignore_ascii_case(name))
+            // #8878 ruling A: a planted launch record would be an identity.
+            || Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case(ARCHITECT_EXT))
             || (self.records_live && is_json(name.as_ref()))
     }
 
@@ -470,7 +562,8 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
 }
 
 /// The closing sentence every deny carries.
-const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml` and, while any exist, \
+const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
+     `~/.trusty-mpm/architect-launch/` and, while any exist, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session.";
