@@ -11,8 +11,11 @@
 //! `hdiutil burn`/`erasekeys`/`resize` and a forced `detach`/`eject`.
 //! Test: `floor_d4_tests.rs`.
 
+use std::path::Path;
+
 use super::credential_print::input_redirect_operand;
 use super::floor_d4::{D4_REMEDY, program_positions};
+use super::{RedirectRole, redirect_role};
 
 /// `curl` short options that take a value (the value ends a cluster).
 const CURL_VALUE_SHORTS: &str = "AbcCdDeEFHKmoPQrtTuUwxXyYz";
@@ -50,9 +53,19 @@ const CURL_DATA_LONGS: &[&str] = &[
 ///
 /// Test: `an_upload_of_local_content_is_denied`, `plain_downloads_pass`.
 pub(super) fn exfiltration_reason(argv: &[String], piped: bool) -> Option<String> {
+    // #8878 fix round: bash's `/dev/tcp` / `/dev/udp` redirect opens a socket.
+    if writes_a_socket(argv) {
+        return Some(format!(
+            "Hard-floor deny (#8878 D4): this command redirects into a `/dev/tcp` or `/dev/udp` \
+             socket — network exfiltration. {D4_REMEDY}"
+        ));
+    }
     for (i, program) in program_positions(argv) {
         let tail = &argv[i + 1..];
         let upload = match program.as_str() {
+            // #8878 fix round: socat relays any stream; sftp runs piped commands.
+            "socat" => true,
+            "sftp" => piped || reads_stdin(tail) || short_flag_present(tail, 'b'),
             "curl" => curl_uploads(tail),
             "wget" => tail.iter().any(|t| {
                 ["--post-file", "--body-file"]
@@ -62,7 +75,7 @@ pub(super) fn exfiltration_reason(argv: &[String], piped: bool) -> Option<String
             "scp" => scp_uploads(tail),
             "rsync" => rsync_uploads(tail),
             "nc" | "ncat" | "netcat" => !short_flag_present(tail, 'z'),
-            "ssh" => piped || reads_a_file(tail),
+            "ssh" => piped || reads_stdin(tail),
             _ => false,
         };
         if upload {
@@ -184,25 +197,76 @@ fn short_flag_present(tail: &[String], flag: char) -> bool {
     })
 }
 
-/// Whether an argv reads its stdin from a file (`< f`, `<f`, `0<f`).
-fn reads_a_file(tail: &[String]) -> bool {
-    tail.iter()
-        .any(|t| input_redirect_operand(t).is_some_and(|(fd, _)| fd == 0))
+/// Whether an argv feeds its stdin from anything but the terminal: a file
+/// (`< f`, `0<f`), a here-document (`<<EOF`) or a here-string (`<<<`).
+// #8878 fix round: `input_redirect_operand` answers `None` for `<<`/`<<<`.
+fn reads_stdin(tail: &[String]) -> bool {
+    tail.iter().any(|t| {
+        let op = t.strip_prefix('0').unwrap_or(t);
+        op.starts_with("<<") || input_redirect_operand(t).is_some_and(|(fd, _)| fd == 0)
+    })
+}
+
+/// Whether an argv redirects output into a `/dev/tcp` or `/dev/udp` socket.
+///
+/// What: an output redirect (`>`, `>>`, `N>`, `&>`, attached or not) or a
+/// read-write `<>` whose target, lexically normalized, is under either.
+fn writes_a_socket(argv: &[String]) -> bool {
+    let socket = |target: &str| {
+        let path = normalize_absolute(target);
+        path.starts_with("/dev/tcp/") || path.starts_with("/dev/udp/")
+    };
+    argv.iter().enumerate().any(|(i, tok)| {
+        let next = || argv.get(i + 1).map(String::as_str).unwrap_or_default();
+        let read_write = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(target) = read_write.strip_prefix("<>") {
+            return socket(if target.is_empty() { next() } else { target });
+        }
+        match redirect_role(tok) {
+            RedirectRole::Target(target) => socket(target),
+            RedirectRole::TargetFollows => socket(next()),
+            RedirectRole::None | RedirectRole::FileDescriptor => false,
+        }
+    })
+}
+
+/// `path` with `//`, `.` and `..` collapsed when absolute; else unchanged.
+pub(super) fn normalize_absolute(path: &str) -> String {
+    if !path.starts_with('/') {
+        return path.to_string();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    let trailing = if path.ends_with('/') && !parts.is_empty() {
+        "/"
+    } else {
+        ""
+    };
+    format!("/{}{trailing}", parts.join("/"))
 }
 
 /// The destructive-disk-tool deny for one segment's argv, or `None`.
 ///
 /// Test: `a_destructive_disk_tool_is_denied`, `read_only_disk_tools_pass`.
-pub(super) fn disk_tool_reason(argv: &[String]) -> Option<String> {
+pub(super) fn disk_tool_reason(argv: &[String], dir: Option<&Path>) -> Option<String> {
     for (i, program) in program_positions(argv) {
         let tail = &argv[i + 1..];
         let lower: Vec<String> = tail.iter().map(|t| t.to_ascii_lowercase()).collect();
         let has = |word: &str| lower.iter().any(|t| t == word);
         let destructive = match program.as_str() {
             "diskutil" => lower.iter().any(|t| diskutil_destroys(t, &lower)),
-            "dd" => tail
-                .iter()
-                .any(|t| t.strip_prefix("of=/dev/").is_some_and(is_a_device)),
+            "dd" => tail.iter().any(|t| {
+                t.strip_prefix("of=")
+                    .is_some_and(|out| dd_writes_a_device(out, dir))
+            }),
             "fdisk" | "asr" => true,
             "hdiutil" => {
                 has("burn")
@@ -236,7 +300,26 @@ fn diskutil_destroys(word: &str, all: &[String]) -> bool {
     ];
     PREFIXES.iter().any(|p| word.starts_with(p))
         || word.contains("partition")
-        || (word.starts_with("unmount") && all.iter().any(|t| t == "force"))
+        // #8878 fix round: `umount`/`umountDisk` are diskutil aliases.
+        || ((word.starts_with("unmount") || word.starts_with("umount"))
+            && all.iter().any(|t| t == "force"))
+}
+
+/// Whether `dd of=<out>` writes a device (#8878 fix round).
+///
+/// What: `out` is placed against `dir` and lexically normalized (`//`, `.`,
+/// `..`) before the `/dev/` test, so `//dev/disk4` and `/dev/fd/../disk4`
+/// are devices. A relative `out` with no known directory (after a `cd`)
+/// could be anywhere, so it counts as one — fail closed.
+fn dd_writes_a_device(out: &str, dir: Option<&Path>) -> bool {
+    let placed = match (out.starts_with('/'), dir) {
+        (true, _) => out.to_string(),
+        (false, Some(dir)) => format!("{}/{out}", dir.display()),
+        (false, None) => return true,
+    };
+    normalize_absolute(&placed)
+        .strip_prefix("/dev/")
+        .is_some_and(is_a_device)
 }
 
 /// Whether a `/dev/` name (without the prefix) is a device `dd` could erase,

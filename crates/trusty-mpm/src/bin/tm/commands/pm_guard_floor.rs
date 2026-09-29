@@ -8,7 +8,8 @@
 //! rules, and keep the existing floors universal, the Architect included.
 //! What: [`deny_floors`] runs first in `pm_guard`, ahead of both bypasses, and
 //! prints the first deny [`evaluate_floors`] returns. Universal: the
-//! trust-anchor rule (with its own Architect exemption), a destructive delete
+//! trust-anchor rule (with its own Architect exemption), a command the guard
+//! cannot classify (`$'…'` quoting, #6660), a destructive delete
 //! of a root-class target or an unresolvable one, and a secret-file read or
 //! printed credential — evaluated here only under a bypass, because the
 //! guarded path reaches the same rules at their own sites, in their original
@@ -31,6 +32,7 @@ use trusty_mpm::core::config::MpmConfig;
 
 use crate::commands::pm_guard_bash::{
     GitProbe, LiveGit, evaluate_d4_floor, evaluate_destructive_delete_command,
+    unclassifiable_command,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -168,6 +170,12 @@ fn universal_floor(
 ) -> Option<FloorDeny> {
     let deny = |rule, reason: String| Some(FloorDeny { rule, reason });
     let tool_input = payload.get("tool_input");
+    // #8878 fix round: `$'\x2f'` decoding hides a path or program from every
+    // rule below, so a command the guard cannot read denies here too, as it
+    // does first on the guarded path (#6660).
+    if let Some(reason) = command.and_then(unclassifiable_command) {
+        return deny("unclassifiable-command", reason.to_string());
+    }
     if let Some(reason) = pm_guard_trust_anchor::evaluate(payload, &gate.env, &*gate.config) {
         return deny(TRUST_ANCHOR_RULE, reason);
     }

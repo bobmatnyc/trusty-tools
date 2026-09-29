@@ -23,7 +23,62 @@ use super::floor_d4::{D4_REMEDY, program_positions};
 const FALLBACK_DEFAULTS: &[&str] = &["main", "master"];
 
 /// `git push` options whose value is a separate token.
-const PUSH_VALUE_OPTS: &[&str] = &["-o", "--push-option", "--repo", "--receive-pack", "--exec"];
+const PUSH_VALUE_OPTS: &[&str] = &["push-option", "repo", "receive-pack", "exec"];
+
+/// Every `git push` long option (git-push(1)), for unique-prefix resolution.
+const PUSH_LONG_OPTS: &[&str] = &[
+    "all",
+    "branches",
+    "prune",
+    "mirror",
+    "dry-run",
+    "porcelain",
+    "delete",
+    "tags",
+    "follow-tags",
+    "no-follow-tags",
+    "signed",
+    "no-signed",
+    "atomic",
+    "no-atomic",
+    "push-option",
+    "receive-pack",
+    "exec",
+    "force-with-lease",
+    "no-force-with-lease",
+    "force",
+    "no-force",
+    "force-if-includes",
+    "no-force-if-includes",
+    "repo",
+    "set-upstream",
+    "thin",
+    "no-thin",
+    "quiet",
+    "verbose",
+    "progress",
+    "no-progress",
+    "recurse-submodules",
+    "no-recurse-submodules",
+    "verify",
+    "no-verify",
+    "ipv4",
+    "ipv6",
+];
+
+/// The `git push` long option `name` names: exact, or its one unique-prefix
+/// match. `None` when it matches none or several.
+/// Test: `a_force_push_to_the_default_branch_is_denied`.
+fn resolve_long(name: &str) -> Option<&'static str> {
+    if let Some(exact) = PUSH_LONG_OPTS.iter().find(|o| **o == name) {
+        return Some(exact);
+    }
+    let mut matches = PUSH_LONG_OPTS.iter().filter(|o| o.starts_with(name));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) if !name.is_empty() => Some(only),
+        _ => None,
+    }
+}
 
 /// The repository facts the rule needs, injectable for tests.
 pub(crate) trait GitProbe {
@@ -123,14 +178,25 @@ fn parse(tail: &[String]) -> Push {
             push.operands.extend(tail[i..].iter().cloned());
             break;
         }
+        if let Some(long) = tok.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(n, _)| (n, true));
+            // #8878 fix round: git takes any unique prefix of a long option.
+            match resolve_long(name) {
+                Some("force" | "force-with-lease") => push.force = true,
+                Some("no-force") => push.force = false,
+                Some("mirror") => push.mirror = true,
+                Some("all" | "branches") => push.all = true,
+                Some(opt) if !attached && PUSH_VALUE_OPTS.contains(&opt) => i += 1,
+                Some(_) => {}
+                // Unknown or ambiguous: it could be a force — fail closed.
+                None => push.force = true,
+            }
+            continue;
+        }
         match tok {
-            "--force" => push.force = true,
-            "--no-force" => push.force = false,
-            "--mirror" => push.mirror = true,
-            "--all" | "--branches" => push.all = true,
-            t if t.starts_with("--force-with-lease") => push.force = true,
-            t if PUSH_VALUE_OPTS.contains(&t) => i += 1,
-            t if t.starts_with("--") => {}
+            "-o" => i += 1,
             t if t.starts_with('-') && t.len() > 1 => {
                 // A short cluster: `-f` anywhere before `-o`, whose value ends it.
                 let cluster = &t[1..];

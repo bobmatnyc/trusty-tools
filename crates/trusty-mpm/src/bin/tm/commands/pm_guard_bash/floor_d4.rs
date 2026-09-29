@@ -70,7 +70,7 @@ pub(crate) fn evaluate_d4_floor(command: &str, cwd: &Path, git: &dyn GitProbe) -
         };
         let dir: Option<PathBuf> = (!seg.after_cd).then(|| cwd.to_path_buf());
         let reason = exfiltration_reason(&argv, seg.piped)
-            .or_else(|| disk_tool_reason(&argv))
+            .or_else(|| disk_tool_reason(&argv, dir.as_deref()))
             .or_else(|| force_push_reason(&argv, dir.as_deref(), git));
         if reason.is_some() {
             return reason;
