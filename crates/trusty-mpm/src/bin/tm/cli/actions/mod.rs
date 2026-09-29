@@ -22,6 +22,8 @@ mod coordinator;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
+// #8436: `tm fleet` — the Architect's setup and status.
+mod fleet;
 mod generate;
 mod hooks;
 mod issue;
@@ -54,6 +56,7 @@ pub(crate) use deliverables::{
     MilestonesAction,
 };
 pub(crate) use divert::DivertAction;
+pub(crate) use fleet::FleetAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
 pub(crate) use issue::{EpicCmd, IssueCmd};

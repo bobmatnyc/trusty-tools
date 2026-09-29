@@ -817,6 +817,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: OptimizerAction,
     },
+    /// Set up and inspect the Architect, the one fleet supervisor per user.
+    ///
+    /// `init` creates the project, grants it the supervisor profile and
+    /// starts tmux session `tm-architect`; `status` checks that setup.
+    // #8436. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    Fleet {
+        /// Fleet action to perform.
+        #[command(subcommand)]
+        action: FleetAction,
+    },
     /// Inspect the session overseer.
     Overseer {
         /// Overseer action to perform.
