@@ -113,6 +113,8 @@ pub(crate) mod picker_launch_new;
 // #7688: the `tm prompt-feedback` read-back and the capture hook behind it.
 pub(crate) mod prompt_feedback_cli;
 pub(crate) mod prompt_feedback_hook;
+// #8735: the one program-word resolver behind the pm-guard rules.
+pub(crate) mod program_word;
 
 pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;
