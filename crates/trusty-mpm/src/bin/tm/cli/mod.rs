@@ -819,9 +819,9 @@ pub(crate) enum Command {
     },
     /// Set up and inspect the Architect, the one fleet supervisor per user.
     ///
-    /// Why: #8436 — one command gives a user a working supervisor session.
-    /// What: `init` and `status`; see [`FleetAction`].
-    /// Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    /// `init` creates the project, grants it the supervisor profile and
+    /// starts tmux session `tm-architect`; `status` checks that setup.
+    // #8436. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
     Fleet {
         /// Fleet action to perform.
         #[command(subcommand)]
