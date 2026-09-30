@@ -449,7 +449,7 @@ mod tests {
                     *record.lock().expect("lock") = Some(params);
                     Ok(serde_json::json!({
                         "id": "s1", "name": "n1", "state": "provisioning",
-                        "attach_cmd": "tmux attach -t n1", "runtime": "claude",
+                        "attach_cmd": "tmux attach -t '=n1'", "runtime": "claude",
                     }))
                 }
             },
