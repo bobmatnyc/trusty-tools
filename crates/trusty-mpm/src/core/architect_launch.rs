@@ -21,6 +21,8 @@
 
 use std::path::Path;
 
+// #8878 R1: the session-name accessor sits beside the launch record it reads.
+pub use crate::core::architect_session::{DEFAULT_ARCHITECT_SESSION, architect_session_name};
 use crate::core::twin_arming::{RecordStore, process_facts};
 use crate::core::twin_identity::{ArmingRecord, ClaudeProcess, same_dir};
 

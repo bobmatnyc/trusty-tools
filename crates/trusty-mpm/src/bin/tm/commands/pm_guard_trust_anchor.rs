@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
+use trusty_mpm::core::architect_session::SESSION_EXT;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
 use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
@@ -399,8 +400,10 @@ impl Anchors {
 
     /// Whether a target whose directory is unknown could still name an
     /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
-    /// anchor path component, a `*.architect` launch record, or a `*.json`
-    /// while records could be live.
+    /// anchor path component, a `*.architect` launch record or its
+    /// `*.architect-session` name sidecar (any case), or a `*.json` while
+    /// records could be live.
+    /// Test: `the_launch_record_dir_is_an_anchor`.
     fn could_be(&self, spelling: &str) -> bool {
         let name = spelling.trim_end_matches('/');
         let name = name.rsplit('/').next().unwrap_or(name);
@@ -413,10 +416,11 @@ impl Anchors {
                 .names
                 .iter()
                 .any(|anchor| anchor.eq_ignore_ascii_case(name))
-            // #8878 ruling A: a planted launch record would be an identity.
-            || Path::new(name)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case(ARCHITECT_EXT))
+            // #8878 ruling A: a planted launch record would be an identity,
+            // and (R1 critic HIGH) a planted name sidecar would rename it.
+            || Path::new(name).extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case(ARCHITECT_EXT) || ext.eq_ignore_ascii_case(SESSION_EXT)
+            })
             || (self.records_live && is_json(name.as_ref()))
     }
 

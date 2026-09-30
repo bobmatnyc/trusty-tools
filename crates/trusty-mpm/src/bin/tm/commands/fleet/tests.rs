@@ -10,13 +10,15 @@ use clap::Parser;
 
 use super::config::{self, Edit};
 use super::launch::PaneState;
+use super::session_name::SessionNames;
 use super::*;
 use crate::cli::{Cli, Command};
 
 /// A tmux with no session and no stamp; the preflight tests use it too.
 pub(super) const NO_TMUX: Probe = Probe {
     pane: |_| PaneState::Absent,
-    stamp: || None,
+    stamp: |_| None,
+    claude: |_| None,
 };
 
 /// A scratch home plus the default Architect directory under it.
@@ -58,7 +60,7 @@ impl Fixture {
     }
 
     fn status(&self) -> super::status::StatusReport {
-        status(&self.dir(), self.home(), NO_TMUX)
+        status(&self.dir(), self.home(), NO_TMUX, None)
     }
 }
 
@@ -72,10 +74,16 @@ fn cli_parses_fleet_init() {
     let cli = Cli::try_parse_from(["tm", "fleet", "init", "--dir", "/x/a", "--no-launch"]).unwrap();
     match cli.command.unwrap() {
         Command::Fleet {
-            action: FleetAction::Init { dir, no_launch },
+            action:
+                FleetAction::Init {
+                    dir,
+                    no_launch,
+                    session,
+                },
         } => {
             assert_eq!(dir.as_deref(), Some("/x/a"));
             assert!(no_launch);
+            assert_eq!(session, None);
         }
         other => panic!("expected fleet init, got {other:?}"),
     }
@@ -89,7 +97,8 @@ fn cli_parses_fleet_status() {
         Command::Fleet {
             action: FleetAction::Status {
                 dir: None,
-                json: true
+                json: true,
+                session: None,
             }
         }
     ));
@@ -527,6 +536,32 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
     assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
 }
 
+/// #8878 R1 critic MEDIUM: the seeded instructions derive the poller's
+/// session from the Architect's own, so a `--session` Architect is told its
+/// real poller name; only the scripts' env defaults may name the default.
+#[test]
+fn the_seeded_instructions_never_hard_code_the_poller_session() {
+    let seeded = |dest: &str| {
+        super::seed::FILES
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap_or_else(|| panic!("{dest} is not seeded"))
+            .contents
+    };
+    for dest in ["CLAUDE.md", ".claude/skills/tm-fleet-check/SKILL.md"] {
+        let text = seeded(dest);
+        assert!(!text.contains("tm-architect-poll"), "{dest}");
+        assert!(
+            text.contains("-poll`") || text.contains("-poll\""),
+            "{dest}"
+        );
+    }
+    assert!(
+        seeded(".claude/skills/tm-fleet-check/SKILL.md")
+            .contains(r#"has-session -t "=$(tmux display-message -p '#S')-poll""#)
+    );
+}
+
 /// The fail-closed arm: a start script that fails is an error naming its
 /// exit status and output, never a pass.
 #[test]
@@ -535,7 +570,9 @@ fn a_failing_start_script_is_an_error_with_its_cause() {
     let script = dir.path().join(super::poller::START_SCRIPT);
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, "echo 'no tmux here' >&2\nexit 7\n").unwrap();
-    let err = super::poller::start(dir.path(), NO_TMUX).expect_err("a failing script must fail");
+    let names = SessionNames::default_names();
+    let err =
+        super::poller::start(dir.path(), NO_TMUX, &names).expect_err("a failing script must fail");
     let text = format!("{err:#}");
     assert!(
         text.contains("no tmux here") && text.contains('7'),
@@ -631,14 +668,15 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
         ..NO_TMUX
     };
     let dir = Path::new(STUB_DIR);
+    let names = SessionNames::default_names();
     let text = |step: Step| match step {
         Step::Failed(text) => text,
         other => panic!("expected a FAILED step, got {other:?}"),
     };
-    assert!(text(super::poller::step(dir, true, dead)).contains("pane is dead"));
-    assert!(text(super::poller::step(dir, true, unknown)).contains("server exited"));
+    assert!(text(super::poller::step(dir, true, dead, &names)).contains("pane is dead"));
+    assert!(text(super::poller::step(dir, true, unknown, &names)).contains("server exited"));
     assert!(matches!(
-        super::poller::step(dir, true, live),
+        super::poller::step(dir, true, live, &names),
         Step::Unchanged(_)
     ));
 
@@ -648,7 +686,7 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, "exit 0\n").unwrap();
     for (probe, cause) in [(dead, "pane is dead"), (unknown, "server exited")] {
-        let err = super::poller::start(scratch.path(), probe).expect_err(cause);
+        let err = super::poller::start(scratch.path(), probe, &names).expect_err(cause);
         assert!(format!("{err:#}").contains(cause), "{err:#}");
     }
 }
@@ -657,7 +695,7 @@ fn a_dead_or_unreadable_poller_pane_is_a_failed_step() {
 /// `TMUX_SOCKET`, so it and tm's own tmux calls address one server.
 #[test]
 fn the_start_command_drops_tmux_socket() {
-    let cmd = super::poller::start_command(Path::new(STUB_DIR));
+    let cmd = super::poller::start_command(Path::new(STUB_DIR), &SessionNames::default_names());
     let removed = cmd
         .get_envs()
         .any(|(key, value)| key == "TMUX_SOCKET" && value.is_none());

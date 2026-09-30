@@ -30,17 +30,24 @@ its `CLAUDE.md`.
    ```
 
    The two are separate sources. The manager can omit a live session or keep
-   a stopped one, and it never lists `tm-architect`. Native tmux decides what
+   a stopped one, and it never lists this session. Native tmux decides what
    runs. Note a disagreement in `records/actions.md`; it is not evidence that
    a session failed.
-2. **Read the alerts.** The poller, `scripts/fleet-poll.py`, runs in tmux
-   session `tm-architect-poll`. It appends each new alert as one JSON line to
-   `inbox/alerts.jsonl` and types a one-line pointer into this pane. Read the
-   lines newer than `last_alert_ts` in `records/state.md`; each line's
-   `display` field already starts with `[<tmux-session>]:`. Check that the
-   poller runs with `tmux has-session -t =tm-architect-poll`. When it does
-   not, report that and record it. Start it with `scripts/start-fleet-poll.sh`
-   only when the user asks: a stopped monitor is never restarted unasked.
+2. **Read the alerts.** The poller, `scripts/fleet-poll.py`, runs in the tmux
+   session named after this one plus `-poll`. It appends each new alert as one
+   JSON line to `inbox/alerts.jsonl` and types a one-line pointer into this
+   pane. Read the lines newer than `last_alert_ts` in `records/state.md`; each
+   line's `display` field already starts with `[<tmux-session>]:`. Check that
+   the poller runs, reading this session's name from tmux, never assuming it:
+
+   ```sh
+   tmux has-session -t "=$(tmux display-message -p '#S')-poll"
+   ```
+
+   `tm fleet status --json` names the same session in its `session` field.
+   When the poller does not run, report that and record it. Start it with
+   `scripts/start-fleet-poll.sh` only when the user asks: a stopped monitor
+   is never restarted unasked.
 3. **Read the push events, when there are any.** The watched projects'
    notification hooks append `permission_prompt`, `idle_prompt` and
    `agent_needs_input` lines to `$ARCHITECT_INBOX_DIR/events.jsonl`

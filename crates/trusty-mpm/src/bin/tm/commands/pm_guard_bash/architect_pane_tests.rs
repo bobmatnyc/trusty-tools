@@ -3,7 +3,7 @@
 //! The fixtures spell non-exact tmux targets on purpose: each is a command the
 //! classifier judges, never a tmux call.
 
-use super::super::architect_pane_probe::{Listed, classify_listing, parse_panes};
+use super::super::architect_pane_probe::{Listed, architect_marks, classify_listing, parse_panes};
 use super::super::architect_pane_verbs::DENY_VERBS;
 use super::*;
 
@@ -385,36 +385,50 @@ fn a_marked_or_linked_architect_pane_is_reached() {
 fn a_pane_listing_marks_the_architect_by_lineage_and_session() {
     let text =
         "%1\t@1\t$1\t100\t0\ttm-architect\n%2\t@2\t$2\t200\t1\tpm\n%3\t@3\t$3\t300\t0\tw x\n";
-    let panes = parse_panes(text, &[300]).expect("parse");
+    let panes = parse_panes(text, &[300], &[]).expect("parse");
     let marks: Vec<(bool, bool)> = panes.iter().map(|p| (p.architect, p.marked)).collect();
     assert_eq!(marks, [(true, false), (false, true), (true, false)]);
     assert_eq!(panes[2].name, "w x");
-    assert!(parse_panes("%1\t@1\n", &[]).is_err());
+    let by_name = parse_panes(text, &[], &["pm".into()]).expect("parse");
+    let marks: Vec<bool> = by_name.iter().map(|p| p.architect).collect();
+    assert_eq!(marks, [true, true, false]);
+    assert!(parse_panes("%1\t@1\n", &[], &[]).is_err());
 }
 
 /// #8902 review: how a `list-panes` run maps to a pane list. No tmux and no
 /// server are an empty list; any other failure is an error; an unreadable
-/// lineage still marks the launch session.
+/// lineage marks `tm-architect` and every recorded session, and with the
+/// records unreadable too no listing is given (#8878 R1 round 2).
 #[test]
 fn a_pane_listing_run_is_classified() {
     type Lineage = Result<Vec<u32>, String>;
+    type Sidecars = Result<Vec<String>, String>;
     type Marks = Result<Vec<bool>, String>;
     let text = "%1\t@1\t$1\t100\t0\ttm-architect\n%2\t@2\t$2\t300\t0\tpm\n";
+    let custom = "%1\t@1\t$1\t100\t0\ttm-supervisor\n%2\t@2\t$2\t300\t0\tpm\n";
     let marks = |r: Result<Vec<Pane>, String>| -> Marks {
         r.map(|panes| panes.iter().map(|p| p.architect).collect())
     };
     let ran = |ok, stdout, stderr| Listed::Ran { ok, stdout, stderr };
     let unreadable: Lineage = Err("records unreadable".into());
-    let cases: [(Listed<'_>, &Lineage, Marks); 7] = [
-        (Listed::NotFound, &Ok(vec![]), Ok(vec![])),
+    let none: Sidecars = Ok(vec![]);
+    let supervisor: Sidecars = Ok(vec!["tm-supervisor".into()]);
+    let stale_pm: Sidecars = Ok(vec!["pm".into()]);
+    let no_sidecars: Sidecars = Err("sidecars unreadable".into());
+    let neither = "the Architect launch records do not read (records unreadable; \
+                   sidecars unreadable)";
+    let cases: [(Listed<'_>, &Lineage, &Sidecars, Marks); 11] = [
+        (Listed::NotFound, &Ok(vec![]), &none, Ok(vec![])),
         (
             Listed::Failed("spawn".into()),
             &Ok(vec![]),
+            &none,
             Err("spawn".into()),
         ),
         (
             ran(false, "", "no server running on /tmp/tmux-501/default\n"),
             &Ok(vec![]),
+            &none,
             Ok(vec![]),
         ),
         (
@@ -424,17 +438,57 @@ fn a_pane_listing_run_is_classified() {
                 "error connecting to /tmp/tmux-501/x (No such file)",
             ),
             &Ok(vec![]),
+            &none,
             Ok(vec![]),
         ),
         (
             ran(false, "", "server exited unexpectedly\n"),
             &Ok(vec![]),
+            &none,
             Err("server exited unexpectedly".into()),
         ),
-        (ran(true, text, ""), &Ok(vec![300]), Ok(vec![true, true])),
-        (ran(true, text, ""), &unreadable, Ok(vec![true, false])),
+        (
+            ran(true, text, ""),
+            &Ok(vec![300]),
+            &none,
+            Ok(vec![true, true]),
+        ),
+        (
+            ran(true, text, ""),
+            &unreadable,
+            &none,
+            Ok(vec![true, false]),
+        ),
+        // #8878: a readable lineage never reads the sidecars, so a stale one
+        // leaves a non-Architect session unmarked.
+        (
+            ran(true, text, ""),
+            &Ok(vec![]),
+            &stale_pm,
+            Ok(vec![true, false]),
+        ),
+        // #8878: a custom-session Architect, lineage and sidecars unreadable.
+        (
+            ran(true, custom, ""),
+            &unreadable,
+            &no_sidecars,
+            Err(neither.into()),
+        ),
+        (
+            ran(true, custom, ""),
+            &unreadable,
+            &supervisor,
+            Ok(vec![true, false]),
+        ),
+        (
+            ran(true, text, ""),
+            &unreadable,
+            &no_sidecars,
+            Err(neither.into()),
+        ),
     ];
-    for (listed, lineage, want) in cases {
-        assert_eq!(marks(classify_listing(listed, lineage)), want);
+    for (row, (listed, lineage, sidecars, want)) in cases.into_iter().enumerate() {
+        let found = architect_marks(lineage, || sidecars.clone());
+        assert_eq!(marks(classify_listing(listed, &found)), want, "row {row}");
     }
 }

@@ -386,3 +386,161 @@ fn the_default_and_a_fresh_directory_pass() {
     let again = init(&default, &home, false, NO_TMUX).unwrap();
     assert!(!again.changed(), "{}", again.render());
 }
+
+/// `<home>/code/supervisor`, holding a remote-less repository at `local/`.
+fn supervisor_with_local(s: &Scratch) -> PathBuf {
+    let dir = s.home().join("code/supervisor");
+    s.repo(&dir.join("local"), false);
+    dir
+}
+
+/// #8878 R1, FAILS BEFORE: the scan refused `local/` as a child repository.
+/// A remote-less `local/` passes, before and after `init` makes its own repo.
+#[test]
+fn a_private_local_repository_without_a_remote_passes() {
+    let s = Scratch::new();
+    let dir = supervisor_with_local(&s);
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+    init(&dir, &s.home(), false, NO_TMUX).unwrap_or_else(|e| panic!("{e:#}"));
+    assert!(dir.join(".git").is_dir(), "init made no repository");
+    assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
+}
+
+#[test]
+fn a_private_local_repository_with_a_remote_is_refused() {
+    let s = Scratch::new();
+    let dir = s.home().join("code/supervisor");
+    s.repo(&dir.join("local"), true);
+    assert_workspace_parent(s.refused(&dir), &dir, "has remote(s) origin");
+}
+
+#[test]
+fn a_repository_nested_in_the_private_local_repository_is_refused() {
+    let s = Scratch::new();
+    let dir = supervisor_with_local(&s);
+    let nested = s.repo(&dir.join("local/vendor-app/app"), false);
+    assert_workspace_parent(
+        s.refused(&dir),
+        &dir,
+        &format!("contains the repository {}", nested.display()),
+    );
+}
+
+/// Fail-Open Check (critic LOW): a `local/.git` that cannot be stat'ed
+/// refuses, naming it; it is never read as "no private repository".
+#[test]
+fn an_unstatable_private_repository_refuses() {
+    let s = Scratch::new();
+    let dir = supervisor_with_local(&s);
+    let local = dir.join("local");
+    // Read, no search: `local` lists, but `local/.git` cannot be stat'ed.
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let _unlock = Unlock(local.clone());
+    let refusal = s.refused(&dir);
+    assert!(
+        matches!(&refusal, DirRefusal::Unresolvable { path, reason }
+            if *path == local.join(".git") && reason.contains("Permission denied")),
+        "{refusal:?}"
+    );
+}
+
+/// Fail-Open Check (critic LOW): `git remote` failing on `local/` refuses.
+#[test]
+fn a_failing_remote_listing_on_the_private_repository_refuses() {
+    let s = Scratch::new();
+    let dir = s.home().join("code/supervisor");
+    // A real `.git` directory git does not accept as a repository.
+    std::fs::create_dir_all(dir.join("local/.git")).unwrap();
+    let refusal = s.refused(&dir);
+    assert!(
+        matches!(&refusal, DirRefusal::GitProbeFailed { path, .. } if *path == dir.join("local")),
+        "{refusal:?}"
+    );
+}
+
+/// A symlinked `local`, and a `local/.git` that is a file or a symlink, get
+/// no exception: the ordinary scan refuses them.
+#[test]
+fn a_symlinked_local_repository_is_refused() {
+    let s = Scratch::new();
+    let elsewhere = s.repo(&s.outer().join("elsewhere"), false);
+    let linked = s.home().join("code/linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, linked.join("local")).unwrap();
+
+    let gitfile = s.home().join("code/gitfile");
+    std::fs::create_dir_all(gitfile.join("local")).unwrap();
+    std::fs::write(gitfile.join("local/.git"), "gitdir: /elsewhere\n").unwrap();
+
+    let gitlink = s.home().join("code/gitlink");
+    std::fs::create_dir_all(gitlink.join("local")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join(".git"), gitlink.join("local/.git")).unwrap();
+
+    for dir in [linked, gitfile, gitlink] {
+        assert_workspace_parent(s.refused(&dir), &dir, "contains the repository");
+    }
+}
+
+/// Only `<dir>/local` is excepted: a second child repository beside it, a
+/// `local` deeper down, and a repository with another name are refused.
+#[test]
+fn every_other_child_repository_is_still_refused() {
+    let s = Scratch::new();
+    let beside = supervisor_with_local(&s);
+    let notes = s.repo(&beside.join("notes"), false);
+    assert_workspace_parent(
+        s.refused(&beside),
+        &beside,
+        &format!("contains the repository {}", notes.display()),
+    );
+
+    let deeper = s.home().join("code/deeper");
+    s.repo(&deeper.join("sub/local"), false);
+    assert_workspace_parent(s.refused(&deeper), &deeper, "contains the repository");
+
+    let named = s.home().join("code/named");
+    s.repo(&named.join("private"), false);
+    assert_workspace_parent(s.refused(&named), &named, "contains the repository");
+}
+
+/// The other refusals hold when the target has a private `local/`: the home
+/// directory, the tm config directory, an ancestor work tree, and a target
+/// repository with a remote.
+#[test]
+fn a_private_local_repository_changes_no_other_refusal() {
+    let s = Scratch::new();
+    let home = s.home();
+    s.repo(&home.join("local"), false);
+    assert_eq!(s.refused(&home), DirRefusal::Home(home.clone()));
+
+    let config_dir = home.join(".trusty-mpm");
+    s.repo(&config_dir.join("local"), false);
+    assert_eq!(
+        s.refused(&config_dir),
+        DirRefusal::ConfigDir {
+            path: config_dir.clone(),
+            config_dir: config_dir.clone()
+        }
+    );
+
+    let repo = s.repo(&home.join("work/app"), false);
+    let inner = repo.join("arch");
+    s.repo(&inner.join("local"), false);
+    assert_eq!(
+        s.refused(&inner),
+        DirRefusal::InsideWorkTree {
+            path: inner.clone(),
+            work_tree: repo
+        }
+    );
+
+    let cloned = s.repo(&home.join("clone"), true);
+    s.repo(&cloned.join("local"), false);
+    assert_eq!(
+        s.refused(&cloned),
+        DirRefusal::HasRemote {
+            path: cloned,
+            remotes: "origin".to_owned()
+        }
+    );
+}
