@@ -54,6 +54,8 @@ pub mod doctor_launchd_process_type;
 // #8415: the observed priority of the RUNNING tmux server, which a plist fix
 // does not lift until the server restarts.
 mod doctor_tmux_priority;
+// #8926: trusty-* processes listening on TCP, against the ADR-0032 allowlist.
+mod doctor_tcp_listeners;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;

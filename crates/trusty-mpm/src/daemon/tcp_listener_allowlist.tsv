@@ -1,0 +1,31 @@
+# TCP listener allowlist (#8926). Only trusty-console may listen on TCP (ADR-0032), plus the RFC 8252 OAuth loopback (owner ruling 135).
+#
+# One file, two readers:
+#   scripts/check_no_tcp_listeners.sh  source lint: every TCP bind/listen site in
+#                                      crates/**/*.rs must sit under a `paths` entry.
+#   tm doctor, row `tcp_listeners`     live probe (include_str!): a trusty-* process
+#                                      listening on TCP must be named in `processes`.
+#
+# Columns, tab-separated:
+#   kind       permanent    the console (ADR-0032) and the gworkspace OAuth loopback
+#                           (owner ruling 135). Source OK; live listener OK.
+#              temporary    a daemon still being migrated. Source OK; live listener WARNs.
+#              source-only  a bind in source that is not a resident daemon. Source OK;
+#                           the doctor treats any live listener from it as FAIL.
+#   crate      the crate that owns the listener.
+#   processes  comma-separated executable basenames the doctor matches; `-` for source-only.
+#   paths      comma-separated repo-relative files, or directories ending in `/`, the lint
+#              excuses. A path that excuses no site fails the lint: delete it with the bind.
+#   issue      ADR-NNNN or ruling-NNN (an owner ruling) for permanent; #N (an open issue) otherwise.
+#   reason     free text.
+#
+# Removing a temporary row: the PR that removes the bind deletes its whole line.
+permanent	trusty-console	trusty-console	crates/trusty-console/src/	ADR-0032	the one TCP surface, 127.0.0.1:7788
+permanent	trusty-gworkspace	trusty-gworkspace-mcp	crates/trusty-gworkspace/src/api/auth/oauth/callback.rs	ruling-135	RFC 8252 loopback redirect (owner ruling 135)
+temporary	trusty-mpm	trusty-mpm,tm	crates/trusty-mpm/src/daemon/mod.rs,crates/trusty-mpm/src/bin/tm/commands/daemon_run.rs	#6288	tm daemon HTTP on 127.0.0.1:7880 (run_http, daemon_run) until it serves UDS only
+temporary	trusty-search	trusty-search	crates/trusty-search/src/service/daemon.rs,crates/trusty-search/src/service/daemon_tests.rs,crates/trusty-search/src/commands/serve.rs,crates/trusty-common/src/port.rs	#6285	daemon HTTP on 127.0.0.1:7878 (bind_with_auto_port, whose only caller is trusty-search) and opt-in `serve --with-http`
+source-only	trusty-agents	-	crates/trusty-agents/src/api/server/routes.rs	#6433	opt-in `tagent --api` / `--serve` HTTP server (serve_with_config)
+source-only	trusty-code	-	crates/trusty-code/src/serve/http.rs	#6637	opt-in `tcode serve --http` listener
+source-only	trusty-code-gui	-	crates/trusty-code-gui/src/bridge/serve.rs	#6637	webview bridge on 127.0.0.1:0; replacing it is #6637's GUI-transport design round
+source-only	trusty-common	-	crates/trusty-common/src/symgraph/server.rs	#8926	symgraph::server::serve binds 0.0.0.0 and has no caller in the workspace; needs an owner ruling
+source-only	trusty-installer	-	crates/trusty-installer/src/commands/port_guard.rs	#6284	port_is_bindable test-binds a fixed port and drops it; retires with the fixed ports
