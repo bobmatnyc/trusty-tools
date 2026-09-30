@@ -75,7 +75,10 @@ fn each_delete_verb_on_each_anchor_is_denied() {
         for shape in DELETE_SHAPES {
             let command = shape.replace('@', &anchor);
             let reason = pm_bash(&fx, &command).unwrap_or_else(|| panic!("allowed: {command}"));
-            assert!(reason.contains("#8878"), "{command}: {reason}");
+            assert!(
+                reason.contains("resolves to a trust anchor"),
+                "{command}: {reason}"
+            );
         }
     }
 }
@@ -107,7 +110,10 @@ fn directory_removal_above_an_anchor_is_denied() {
         (&fx.cwd, "rm -rf /"),
     ] {
         let reason = pm_bash_in(&fx, cwd, command).unwrap_or_else(|| panic!("allowed: {command}"));
-        assert!(reason.contains("#8878"), "{command}: {reason}");
+        assert!(
+            reason.contains("resolves to a trust anchor"),
+            "{command}: {reason}"
+        );
     }
 }
 
@@ -145,7 +151,15 @@ fn an_unplaceable_delete_is_denied() {
         "rm -rf loop/*",
     ] {
         let reason = pm_bash(&fx, command).unwrap_or_else(|| panic!("allowed: {command}"));
-        assert!(reason.contains("#8878"), "{command}: {reason}");
+        // #8878 round 2: each arm names its own reason.
+        let phrase = if command.contains("xargs") {
+            "delete run by `xargs`"
+        } else if command.contains("loop/") {
+            "does not resolve"
+        } else {
+            "depends on a shell expansion"
+        };
+        assert!(reason.contains(phrase), "{command}: {reason}");
     }
 }
 
@@ -167,7 +181,10 @@ fn find_deletes_under_its_start_points() {
         "find ~ -name '*.architect' -delete",
     ] {
         let reason = pm_bash(&fx, command).unwrap_or_else(|| panic!("allowed: {command}"));
-        assert!(reason.contains("#8878"), "{command}: {reason}");
+        assert!(
+            reason.contains("resolves to a trust anchor"),
+            "{command}: {reason}"
+        );
     }
     for command in [
         "find ~/.trusty-mpm -name '*.architect'",
@@ -224,7 +241,9 @@ fn the_architect_main_thread_may_delete_an_anchor() {
     for command in [
         "rm -f ~/.trusty-mpm/architect-launch/60.architect",
         "rm -rf ~/.trusty-mpm/architect-launch",
-        "find ~/.trusty-mpm/twin -delete",
+        // #8878 "Keep the split": a subagent's `find` from above an anchor
+        // (`twin/`) is allowed, so the start point is the arming directory.
+        "find ~/.trusty-mpm/twin/armed -delete",
     ] {
         let main = payload(&fx, "Bash", json!({ "command": command }));
         assert_eq!(evaluate(&main, &env, || allowlist(&fx)), None, "{command}");

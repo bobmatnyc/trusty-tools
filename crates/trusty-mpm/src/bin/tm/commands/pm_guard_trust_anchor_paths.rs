@@ -81,6 +81,16 @@ pub(crate) fn has_shell_pattern(word: &str) -> bool {
     word.contains(['$', '`', '*', '?', '[', '{'])
 }
 
+/// Whether a shell word holds a brace group the shell would expand (#8878 H3):
+/// a `{` not opening a `${…}` parameter, in a word with no whitespace (a
+/// word holding whitespace was quoted, and a quoted brace is literal).
+pub(crate) fn has_brace_group(word: &str) -> bool {
+    !word.contains(char::is_whitespace)
+        && word
+            .char_indices()
+            .any(|(i, c)| c == '{' && !word[..i].ends_with('$'))
+}
+
 /// A raw redirect word with its quotes removed, when it lexes to one word.
 /// The redirect scan hands back the word as written (`"$HOME/x"`).
 pub(crate) fn dequote(word: &str) -> String {
