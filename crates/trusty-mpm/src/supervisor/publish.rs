@@ -167,7 +167,8 @@ pub enum SupervisorMetricsStatus {
         stale_after_secs: i64,
     },
     /// A snapshot past its [`stale_after_secs`] window — the supervisor is
-    /// probably not running.
+    /// probably not running — or one whose last fleet sweep was abandoned
+    /// (#8335).
     Stale {
         /// The published snapshot, still the last real observation.
         snapshot: Box<PublishedMetrics>,
@@ -255,16 +256,20 @@ pub fn read_at(path: &Path) -> Result<Option<PublishedMetrics>, PublishError> {
 /// supervisor on a 15-minute overnight cadence is not called dead 5 minutes into
 /// every cycle. A snapshot dated in the future (a clock step) has a negative age
 /// and counts as current — the alternative, calling it stale, would hide live
-/// counters over a clock adjustment.
+/// counters over a clock adjustment. #8335: a fresh snapshot whose last fleet
+/// sweep was abandoned (`consecutive_sweeps_abandoned > 0`) is `Stale` too —
+/// the loop still publishes while its sweeps are abandoned every tick.
 /// Test: `read_status_absent_is_unavailable`, `read_status_corrupt_is_unavailable`,
 /// `read_status_old_snapshot_is_stale`,
-/// `read_status_respects_a_slow_configured_interval`.
+/// `read_status_respects_a_slow_configured_interval`,
+/// `abandoned_fleet_sweeps_are_counted_and_read_as_stale`.
 pub fn read_status_at(path: &Path, now: DateTime<Utc>) -> SupervisorMetricsStatus {
     match read_at(path) {
         Ok(Some(snapshot)) => {
             let age_secs = (now - snapshot.written_at).num_seconds();
             let stale_after_secs = stale_after_secs(Duration::from_secs(snapshot.interval_secs));
-            if age_secs > stale_after_secs {
+            let abandoned = snapshot.fleet.run_stats.consecutive_sweeps_abandoned > 0;
+            if age_secs > stale_after_secs || abandoned {
                 SupervisorMetricsStatus::Stale {
                     snapshot: Box::new(snapshot),
                     age_secs,

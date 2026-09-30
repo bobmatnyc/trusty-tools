@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
+use crate::core::pr_cleanup::auth_backoff::AuthBackoff;
 use crate::core::pr_cleanup::{
-    ClaimEnder, ClaimOwnership, CleanupRegistry, HolderState, RealGh, RealGit, RealLanding,
+    ClaimEnder, ClaimOwnership, CleanupRegistry, Gh, HolderState, RealGh, RealGit, RealLanding,
     auth_backoff, holder_state_of, host_tree_gate, sweep,
 };
 use crate::session_manager::SessionManager;
@@ -161,9 +162,32 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
         }
     };
     let gh = RealGh::new(env, unset);
+    run_sweep_with_gh(
+        mgr,
+        &gh,
+        &CleanupRegistry::production(),
+        auth_backoff::shared(),
+    )
+    .await
+}
+
+/// [`run_sweep`] with the `gh` seam, registry and backoff gate passed in.
+///
+/// Why (#8335): a test has to drive the supervisor's real cleanup path with a
+/// `gh` that hangs, against a temp registry, without touching the process-wide
+/// backoff gate.
+/// What: the production `git`, landing matcher, dirt probe and session-store
+/// claims around the caller's `gh`, `registry` and `backoff`.
+/// Test: `a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues`.
+pub async fn run_sweep_with_gh<G: Gh>(
+    mgr: &SessionManager,
+    gh: &G,
+    registry: &CleanupRegistry,
+    backoff: &AuthBackoff,
+) -> usize {
     let claims = SessionClaims::new(mgr);
     sweep::run_sweep_with(
-        &gh,
+        gh,
         &RealGit,
         &claims,
         &claims,
@@ -172,8 +196,8 @@ pub async fn run_sweep(mgr: &SessionManager) -> usize {
         &RealLanding,
         // #8534: `git worktree remove` deletes gitignored output; the probe counts it.
         &inspect_dirt_with_ignored_output,
-        &CleanupRegistry::production(),
-        auth_backoff::shared(),
+        registry,
+        backoff,
     )
     .await
 }

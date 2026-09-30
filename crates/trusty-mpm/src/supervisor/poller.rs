@@ -61,7 +61,9 @@ pub struct TickReport {
 /// `Active` session, classifies its pane through `monitor` when `cfg.classify_idle`
 /// is true and a `monitor` is supplied. Never touches `pending_decision` — the
 /// supervisor surfaces decisions via metrics but never answers them. Returns a
-/// [`TickReport`].
+/// [`TickReport`]. #8335: each `resume_auto` and classification is bounded by
+/// `cfg.step_timeout` ([`step_bounded`]); an expired resume counts as a
+/// failure but is not marked errored, so the next sweep retries it.
 /// Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
 /// `tick_fleet_of_n_resumed`, `tick_classifies_active`,
 /// `tick_never_answers_pending_decision`;
@@ -95,7 +97,14 @@ pub async fn run_tick<C: LlmClassifier>(
                 // #6568: `resume_auto`, not `resume` — the automatic path stamps
                 // the attempt so the next runtime exit can be attributed to it.
                 // `resume` is the operator's entry point and forgives the streak.
-                match mgr.resume_auto(&record.id).await {
+                // #8335: bounded per session, so one hung resume cannot use up
+                // the whole sweep's bound.
+                let resume = mgr.resume_auto(&record.id);
+                let Some(outcome) = step_bounded(cfg, "resume_auto", &record, resume).await else {
+                    report.resume_failures += 1;
+                    continue;
+                };
+                match outcome {
                     Ok(_) => {
                         info!(
                             id = %record.id,
@@ -132,10 +141,12 @@ pub async fn run_tick<C: LlmClassifier>(
                 }
             }
             ManagedSessionState::Active if cfg.classify_idle => {
-                if let Some(monitor) = monitor
-                    && classify_active(mgr, monitor, &record.id, &record.tmux_name).await
-                {
-                    report.classified += 1;
+                if let Some(monitor) = monitor {
+                    // #8335: bounded per session, like `resume_auto` above.
+                    let classify = classify_active(mgr, monitor, &record.id, &record.tmux_name);
+                    if step_bounded(cfg, "classify", &record, classify).await == Some(true) {
+                        report.classified += 1;
+                    }
                 }
             }
             _ => {}
@@ -150,6 +161,36 @@ pub async fn run_tick<C: LlmClassifier>(
         "supervisor: sweep complete"
     );
     report
+}
+
+/// Await one per-session sweep step for at most `cfg.step_timeout` (#8335).
+///
+/// Why: one session's hung step must not use up the whole sweep's bound and
+/// starve the sessions after it.
+/// What: `None` on expiry, after logging the session id, name and step at
+/// `error`. The bound fires at an await point — a slow LLM reply, a held store
+/// lock. A step blocked inside a tmux call is caught by the whole-sweep bound
+/// instead ([`super::watchdog::DetachedSweep`]). A dropped `resume_auto`
+/// releases its in-flight marker (an RAII guard), so the next sweep may retry.
+/// Test: `a_hung_classify_step_is_abandoned_and_the_sweep_moves_on`.
+async fn step_bounded<F: std::future::Future>(
+    cfg: &SupervisorConfig,
+    step: &str,
+    record: &SessionRecord,
+    fut: F,
+) -> Option<F::Output> {
+    let out = tokio::time::timeout(cfg.step_timeout, fut).await.ok();
+    if out.is_none() {
+        error!(
+            id = %record.id,
+            name = %record.tmux_name,
+            step,
+            limit_secs = cfg.step_timeout.as_secs(),
+            "supervisor: sweep step did not finish within its bound; abandoned it and \
+             moved to the next session (#8335)"
+        );
+    }
+    out
 }
 
 /// Settle an auto-resume that returned an error not already recorded.

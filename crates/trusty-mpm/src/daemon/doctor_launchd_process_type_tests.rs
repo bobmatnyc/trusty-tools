@@ -36,8 +36,17 @@ fn reading(label: &'static str, reading: ProcessTypeReading) -> PlistReading {
         label,
         path: PathBuf::from(format!("/tmp/LaunchAgents/{label}.plist")),
         reading,
+        modified: Some(at(1_000)),
     }
 }
+
+/// `secs` after the epoch.
+fn at(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+/// #8562: a boot after every fixture's `modified` time.
+const BOOTED_LATER: u64 = 2_000;
 
 fn declared(v: Option<&str>) -> ProcessTypeReading {
     ProcessTypeReading::Declared(v.map(str::to_owned))
@@ -89,21 +98,73 @@ fn deploy_supervisor_template_passes_the_row() {
 /// default, which the daemon's tmux servers inherit: warn, not fail.
 #[test]
 fn keyless_daemon_plist_warns_standard_default() {
-    let row = build_process_type_check(&[
-        reading(MPM, declared(None)),
-        reading(MPM_SUPERVISOR, ProcessTypeReading::NotInstalled),
-    ]);
+    let row = build_process_type_check(
+        &[
+            reading(MPM, declared(None)),
+            reading(MPM_SUPERVISOR, ProcessTypeReading::NotInstalled),
+        ],
+        Some(at(BOOTED_LATER)),
+    );
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     assert!(row.message.contains("Standard"), "{}", row.message);
 }
 
+/// Plists that declare `Interactive` and predate the boot pass.
 #[test]
 fn interactive_plists_pass() {
-    let row = build_process_type_check(&[
-        reading(MPM, declared(Some("Interactive"))),
-        reading(MPM_SUPERVISOR, declared(Some("Interactive"))),
-    ]);
+    let row = build_process_type_check(
+        &[
+            reading(MPM, declared(Some("Interactive"))),
+            reading(MPM_SUPERVISOR, declared(Some("Interactive"))),
+        ],
+        Some(at(BOOTED_LATER)),
+    );
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+}
+
+/// REGRESSION (#8562): after `--fix` wrote the plist, the row showed green
+/// before launchd had loaded the new class. A plist changed since boot, or with
+/// an unknown boot or file time, reports "written; pending reload" with the
+/// label's own load note.
+#[test]
+fn an_interactive_plist_written_since_boot_is_pending_reload() {
+    for (modified, boot) in [
+        (Some(at(3_000)), Some(at(BOOTED_LATER))),
+        (Some(at(1_000)), None),
+        (None, Some(at(BOOTED_LATER))),
+    ] {
+        let mut r = reading(MPM_SUPERVISOR, declared(Some("Interactive")));
+        r.modified = modified;
+        let row = build_process_type_check(&[r], boot);
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(
+            row.message.contains("written; pending reload"),
+            "{}",
+            row.message
+        );
+        assert!(
+            row.message.contains("tm daemon restart does not reload"),
+            "{}",
+            row.message
+        );
+    }
+    let home = home_with(&[(MPM, DEPLOY_SUPERVISOR.as_bytes())]);
+    let dir = AgentsDir {
+        path: home.path().join("Library/LaunchAgents"),
+        from_env: false,
+    };
+    let row = check_launchd_process_type_at(&dir, Some(at(BOOTED_LATER)));
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+}
+
+/// #8562: the boot time comes from `sysctl -n kern.boottime`'s `sec` field.
+#[test]
+fn boot_time_parses_the_sysctl_seconds_field() {
+    assert_eq!(
+        parse_boot_time("{ sec = 1759190000, usec = 123 } Mon Sep 29 20:00:00 2025\n"),
+        Some(at(1_759_190_000))
+    );
+    assert_eq!(parse_boot_time("garbage"), None);
 }
 
 #[test]
@@ -116,10 +177,13 @@ fn no_plists_pass() {
 
 #[test]
 fn binary_plist_is_unknown() {
-    let row = build_process_type_check(&[reading(
-        MPM,
-        ProcessTypeReading::Unjudged("binary plist".to_owned()),
-    )]);
+    let row = build_process_type_check(
+        &[reading(
+            MPM,
+            ProcessTypeReading::Unjudged("binary plist".to_owned()),
+        )],
+        None,
+    );
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
 }
 
@@ -219,11 +283,15 @@ fn process_type_of_takes_the_last_duplicate_key() {
 /// #8415: the printed commands must survive a path with a space in it.
 #[test]
 fn remedy_quotes_a_path_with_a_space() {
-    let row = build_process_type_check(&[PlistReading {
-        label: MPM_SUPERVISOR,
-        path: PathBuf::from("/Users/a b/Library/LaunchAgents/x.plist"),
-        reading: declared(Some("Background")),
-    }]);
+    let row = build_process_type_check(
+        &[PlistReading {
+            label: MPM_SUPERVISOR,
+            path: PathBuf::from("/Users/a b/Library/LaunchAgents/x.plist"),
+            reading: declared(Some("Background")),
+            modified: None,
+        }],
+        None,
+    );
     assert!(
         row.message
             .contains("-string Interactive '/Users/a b/Library/LaunchAgents/x.plist'"),
