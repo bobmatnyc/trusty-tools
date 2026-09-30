@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.36.2] — 2026-09-30
+
+### Fixed
+
+- A review in a freshly provisioned git worktree no longer hard-skips until a manual reindex: when the worktree has no trusty-search index of its own, the review uses its main checkout's index (#8411).
+- A checkout no index covers (for example a fresh clone) now gets a review of the diff alone, labelled DEGRADED with the missing index named, instead of a skip against the unregistered `main` default. Surfaces that require search still skip (#8411).
+- A `default-features = false` build no longer carries the `review_pr` per-call index resolver as dead code, which failed `clippy -D warnings` for any consumer that does not enable `mcp` ([#8649](https://github.com/bobmatnyc/trusty-tools/issues/8649))
+- Every finding is now sent to the verifier before it is posted, on both the unified and the map-reduce path. The verifier used to see only findings that could change the verdict (confidence 0.90 or higher on an APPROVE review, 0.50 or higher on a blocking one), so on 0.36.1 it ran in 1 of 10 reviews and every fabricated finding was posted unchecked (#8904).
+- A finding the verifier refutes, cannot judge (an error, a timeout, or an unparseable or truncated answer), or never reaches because of the call cap is now withheld, not posted. Each drop is logged. The body leads with "N findings withheld: not verified (…)", and the verdict follows the #8905 withhold policy, which never turns a non-APPROVE verdict into APPROVE: a review left with no findings, or a blocking review whose remaining findings alone would approve, is UNKNOWN with no grade (#8904).
+- A verifier failure never lowers the verdict: when the verifier could not judge a finding, the review keeps at least its pre-verification verdict, so a truncated or errored blocker beside a confirmed REQUEST_CHANGES finding still reports BLOCK / F as it did after #8653. Refuted findings still relax the verdict through the withhold policy (#8904).
+- A finding withheld unjudged or past the call cap is now counted: `ReviewResult` carries `withheld_unverified_count`, and `unverified_count` includes it, so a verifier outage no longer reads as 0 unverified findings (#8904).
+- A single-finding verifier answer now fails closed like a batched one. A structured `"judgment": "…"` token outranks any keyword in the text, and the keyword fallback never reads an ambiguous answer as CONFIRMED, so a truncated `{"judgment":"REFUTED","reason":"not confirmed by` or the prose "REFUTED, not confirmed" is no longer posted as confirmed (#8904).
+- With verification enabled but no verifier provider built, the review logs a warning, its body leads with "N findings not verified: no verifier provider could be built", and each posted finding is recorded as unverifiable, so `unverified_count` counts it (#8904).
+- With verification disabled by config, findings are still posted, and the body leads with "N findings not verified: verification is disabled". The verdict and grade are unchanged, and because disabling is an operator choice, these findings are not counted in `unverified_count` (#8904).
+- The line-citation gate now runs before the verifier, so a finding dropped for its citation costs no verifier call (#8904).
+- Findings are verified in batches, several per verifier request (`[verification] batch_size`, `TRUSTY_REVIEW_VERIFY_BATCH_SIZE`, default 4). Each review makes at most `[verification] max_calls` requests (`TRUSTY_REVIEW_VERIFY_MAX_CALLS`, default 8), and the highest-impact findings are verified first. On the map-reduce path each request carries only the diff sections of its findings' files (#8904).
+- A posted finding now cites a `file:line` that holds the code it describes. After the verifier and before posting, a deterministic gate checks each finding's line, and each `[code: path:line]` citation, against the code the finding quotes (every quoted snippet must be in the file) or, when it quotes none, the identifiers it names. Only new-side line numbers count; code on a removed line counts at the new-side position of the deletion. A citation whose code occurs exactly once elsewhere in the file moves there, recorded in the finding's `citation_correction` field. Any other finding is dropped: its code is not in the file, the code is ambiguous, the line is past the file's last diffed line, it quotes and names no code, or its file cannot be read. Every drop and move is logged and counted (#8905).
+- A review the citation gate empties, or a blocking review whose surviving findings alone would approve, is now UNKNOWN with no grade and leads with "N findings withheld: citation unverifiable", never APPROVE. A dropped finding's `file:line` is removed from the posted body, and the fenced findings JSON is stripped from it (#8905).
+- The reviewer prompt now asks every finding to quote, in backticks, the code at its cited line (#8905).
+
+### Changed
+
+- Tests: the paused-clock warm-up timeout test runs by default; the live Bedrock test states its reason (refs #8787 audit).
+- `Finding` has a new public field, `citation_correction: Option<CitationCorrection>`. `Finding` is not `#[non_exhaustive]`, so this is a semver-breaking change for any caller that builds a `Finding` with a struct literal; build it with `Finding::new` instead. The JSON form only gains an optional key (#8905).
+
 ## [0.36.1] — 2026-09-26
 
 ### Fixed
