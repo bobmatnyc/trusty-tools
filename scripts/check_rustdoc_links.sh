@@ -310,12 +310,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# The three Tauri GUI crates are excluded for the same reason every other
+# The Tauri GUI crates are excluded for the same reason every other
 # workspace-wide job in this repo excludes them (ci.yml's clippy, test, doctest
-# and MSRV jobs all carry the same three flags): they need WebKit2GTK, which no
+# and MSRV jobs all carry the same flags): they need WebKit2GTK, which no
 # headless CI runner has. They are not published to crates.io, so they have no
 # docs.rs page for a broken link to land on.
-EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui)
+EXCLUDES=(--exclude trusty-code-gui --exclude trusty-agents-ui)
 
 # Cleanup is the EXIT trap armed at the top of this script, which also writes
 # the terminal VERDICT line (#7633).
@@ -648,7 +648,6 @@ for lane_id, json_path, lane_rc, _lane_feats in lanes:
 # Parsed AFTER the streams so a malformed row is reported beside whatever the
 # run found, not instead of it.
 EXCLUDED_CRATES = {
-    "trusty-mpm-gui",
     "trusty-code-gui",
     "trusty-agents-ui",
 }

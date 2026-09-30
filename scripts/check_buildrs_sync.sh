@@ -12,7 +12,7 @@
 #               build.rs builds all four of its bundles through this block.
 #               (issue #987). Embeds an OPTIONAL web UI; degrades to a
 #               placeholder when the JS toolchain is missing.
-#   "tauri-ui" — trusty-code-gui, trusty-mpm-gui, trusty-agents-ui
+#   "tauri-ui" — trusty-code-gui, trusty-agents-ui
 #               (issue #4699). Embeds the whole desktop
 #               window; ABORTS the crate build on any UI-build failure, because
 #               a placeholder there would ship a blank app. trusty-agents-ui is
@@ -43,7 +43,6 @@ DAEMON_FILES=(
 
 TAURI_UI_FILES=(
     "crates/trusty-code-gui/build.rs"
-    "crates/trusty-mpm-gui/build.rs"
     "crates/trusty-agents/ui/src-tauri/build.rs"
 )
 

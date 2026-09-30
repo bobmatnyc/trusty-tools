@@ -40,8 +40,8 @@
 #       Same bar as scripts/semver-checks-feature-exclusions.tsv, which carries
 #       the matching rows for the same features.
 #
-# The three Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
-# trusty-code-gui, trusty-agents-ui) need no rows: they are never documented,
+# The two Tauri GUI crates the gate excludes outright (trusty-code-gui,
+# trusty-agents-ui) need no rows: they are never documented,
 # and carrying a row for a crate the run excludes is a claim about
 # documentation that never happens.
 #
@@ -95,7 +95,6 @@ NO-CFG	trusty-common	unconditional-only
 NO-CFG	trusty-embedderd	coreml
 NO-CFG	trusty-embedderd	http-server
 NO-CFG	trusty-mpm	cli
-NO-CFG	trusty-mpm	gui
 NO-CFG	trusty-search	bundled-ort
 NO-CFG	trusty-search	coreml
 NO-CFG	trusty-search	cuda

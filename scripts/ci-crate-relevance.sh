@@ -3,12 +3,12 @@
 # ci-crate-relevance.sh — decide whether a change set can affect one crate's
 #   build (#7063).
 #
-# Why: the four Tauri UI clippy jobs in .github/workflows/ci.yml are required
+# Why: the Tauri UI clippy jobs in .github/workflows/ci.yml are required
 #   contexts, so each must run and report a check run on every PR — a job that
 #   never reports leaves the PR BLOCKED rather than fast (#4468). Their only
 #   step gate was `docs_only`, so a PR touching an unrelated crate still paid
 #   for the WebKit2GTK apt chain plus a cargo clippy. On PR #7062
-#   `trusty-mpm-gui`, which has no workspace dependencies at all, spent 1m20s;
+#   `trusty-mpm-gui` (retired, #7964), which had no workspace dependencies at all, spent 1m20s;
 #   `trusty-code-gui` spent 7m and has hit its 30-minute timeout before
 #   (PR #5992).
 #
@@ -31,8 +31,8 @@
 #   compiled-in DEFAULT_DAEMON_URL against trusty-code's DEFAULT_HTTP_PORT.
 #
 #   Matching is PATH-based and on SEGMENT boundaries, never on crate names and
-#   never on string prefixes: `crates/trusty-mpm` must not match
-#   `crates/trusty-mpm-gui`, and a crate whose directory nests inside another's
+#   never on string prefixes: `crates/trusty-code` must not match
+#   `crates/trusty-code-gui`, and a crate whose directory nests inside another's
 #   (trusty-audit-ui lives at crates/trusty-audit/ui/src-tauri) is matched by
 #   its own directory as well as its parent's.
 #
@@ -54,7 +54,7 @@
 #
 # Usage:
 #   git diff -z --name-only --no-renames "$MERGE_BASE" HEAD |
-#     bash scripts/ci-crate-relevance.sh trusty-mpm-gui
+#     bash scripts/ci-crate-relevance.sh trusty-agents-ui
 #   CRATE_RELEVANCE_BASE=origin/main bash scripts/ci-crate-relevance.sh trusty-code-gui
 #
 # Output: `true` or `false` alone on stdout. When $GITHUB_OUTPUT is set, also

@@ -32,7 +32,7 @@
 #      trusty-mpm canary; any other scripts/** or .github/** path selects only
 #      the crates whose Rust source names it literally, often none (#7777); and
 #      its FAIL OPEN applies on any detection error.
-#   4. Drop the three Tauri UI crates. The headless runner has no WebKit2GTK, and
+#   4. Drop the Tauri UI crates. The headless runner has no WebKit2GTK, and
 #      each has its own dedicated job in ci.yml (see that file's header).
 #      Drop trusty-common too, and report it as `trusty_common=true`: its empty
 #      default feature set means no single `-p trusty-common` run covers it, so
@@ -59,7 +59,7 @@ set -uo pipefail
 MAX_LEGS=8
 DOCS_ONLY=""
 EVENT_NAME=""
-UI_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
+UI_CRATES="trusty-agents-ui trusty-code-gui"
 # Tested by ci.yml's `trusty-common-lanes` job, never by a leg.
 LANES_CRATE="trusty-common"
 TRUSTY_COMMON=false

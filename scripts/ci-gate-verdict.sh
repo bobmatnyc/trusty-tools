@@ -44,7 +44,6 @@ msrv|MSRV check|-
 affected|Rust tests (affected crates)|-
 trusty-common-lanes|trusty-common coverage lanes|-
 agents-ui|trusty-agents-ui clippy|-
-mpm-gui|trusty-mpm-gui clippy|-
 code-gui|trusty-code-gui clippy|-
 search-daemon-smoke|trusty-search daemon smoke test|-
 rustdoc-links|Rustdoc intra-doc links|-

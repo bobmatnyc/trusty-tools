@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 // Why: this site is the 8th Foundry v2 consumer (#5097, epic #5092). It follows
-// the convention the three existing Tailwind consumers already established
-// (trusty-agents #3387, trusty-code-gui #3153/#3380, trusty-mpm-gui #3488)
+// the convention the existing Tailwind consumers already established
+// (trusty-agents #3387, trusty-code-gui #3153/#3380)
 // rather than inventing a fourth: every color resolves to a CSS custom
 // property whose VALUE flips between `src/app.css`'s `:root` and `.dark`
 // blocks, so a component never hardcodes a hex and never pairs a light class

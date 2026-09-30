@@ -2,7 +2,7 @@
 
 ## Foundry Design System (v2)
 
-Foundry is the authoritative design system for trusty-* UIs (trusty-search, trusty-memory, trusty-analyze, trusty-mpm-gui, trusty-console). v2 adds the Night Shift dark theme and sample implementation screens.
+Foundry is the authoritative design system for trusty-* UIs (trusty-search, trusty-memory, trusty-analyze, trusty-console). v2 adds the Night Shift dark theme and sample implementation screens.
 
 ### Core Files
 

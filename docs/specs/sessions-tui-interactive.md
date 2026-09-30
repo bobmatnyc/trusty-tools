@@ -562,7 +562,7 @@ hard-codes a port.
   timer-poll + immediate re-poll-after-mutation; a daemon SSE/websocket push so the
   list/transcript update on activity instead of on a timer is **future**.
 - Editing code/files inside a session (the session's own Claude Code owns that).
-- A web/graphical UI (`trusty-console` / `trusty-mpm-gui`).
+- A web/graphical UI (`trusty-console`).
 - Implementing the daemon-side inference/summary layer (DOC-14 owns it; this spec
   consumes its `last_summary` / `summarizing` contract).
 - Fixing #1268 / #1269 (external dependencies consumed, not solved here).
