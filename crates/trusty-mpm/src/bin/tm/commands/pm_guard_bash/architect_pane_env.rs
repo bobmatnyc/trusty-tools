@@ -20,25 +20,109 @@ pub(super) const ENV_RESET: &str = "`sudo`, `doas`, `env -i` or `exec -c` change
 pub(super) const RELATIVE_SOCKET: &str = "a relative `-S` socket path resolves against a \
      directory the guard does not know";
 
+/// Why an omitted target of a `tmux` typed into a pane on another server
+/// cannot be resolved (#8902 follow-up LOW).
+pub(super) const PICKED: &str = "a nested command with no target, on another server than the \
+     keys go to, acts on a pane tmux picks";
+
 /// Why a hit on a server holding the Architect denies beside a session rename
 /// or creation.
 pub(super) const RETARGET: &str = "the command also renames or creates a session, and targets \
      resolve against the sessions that exist before it runs";
 
-/// Whether `command` names `TMUX` or `TMUX_TMPDIR` other than in a `$`
-/// expansion that only reads it: an assignment, `unset`, `env -u`,
-/// `export -n`, and `${TMUX=…}` / `${TMUX:=…}`, which assign when unset.
+/// Whether `command` may change `TMUX` or `TMUX_TMPDIR`.
+///
+/// What: the name outside a `$` expansion that only reads it — an assignment,
+/// `unset`, `env -u`, `export -n`, `${TMUX=…}`, `${TMUX:=…}` and zsh's
+/// `${TMUX::=…}` — also once quotes are removed (`export TM''UX=…`), and any
+/// assigning expansion whose name the guard cannot read
+/// ([`assigns_unread_name`]).
+/// Test: `a_server_the_command_selects_differently_denies`,
+/// `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
 pub(super) fn moves_server_env(command: &str) -> bool {
+    // #8902: quote removal joins a split name, `TM''UX=` or `"TM"UX=`.
+    let unquoted: String = command.chars().filter(|c| !"'\"\\".contains(*c)).collect();
+    names_server_env(command) || names_server_env(&unquoted) || assigns_unread_name(command)
+}
+
+/// The literal-name half of [`moves_server_env`].
+fn names_server_env(command: &str) -> bool {
     command.match_indices("TMUX").any(|(at, _)| {
         let after = &command[at + 4..];
         let after = after.strip_prefix("_TMPDIR").unwrap_or(after);
         let whole = !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
         let before = &command[..at];
         let expanded = before.trim_end_matches(['{', '#', '!']).ends_with('$');
-        // #8902: `${TMUX:=x}` assigns `TMUX` when it is unset or empty.
-        let assigns = before.ends_with("${") && (after.starts_with('=') || after.starts_with(":="));
+        // #8902: `${TMUX:=x}` assigns `TMUX` when it is unset or empty; zsh's
+        // `${TMUX::=x}` always does.
+        let assigns = before.ends_with("${") && starts_assigning(after);
         whole && (!expanded || assigns)
     })
+}
+
+/// Whether `op`, the text after a parameter name, opens `=`, `:=` or `::=`.
+fn starts_assigning(op: &str) -> bool {
+    ["=", ":=", "::="].iter().any(|a| op.starts_with(a))
+}
+
+/// Whether a `${…}` expansion may assign a variable the guard cannot name:
+/// zsh's `(P)` flag, bash's `${!name…}`, or a nested expansion as the name,
+/// with an `=` in the expansion. A `${` with no closing brace counts.
+///
+/// Why: #8902 follow-up — `n=TM; n+=UX; : ${(P)n::=…}` assigns `TMUX` with no
+/// `TMUX` in the text, so an unread name counts as `TMUX` (fail closed).
+/// Test: `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
+fn assigns_unread_name(command: &str) -> bool {
+    command.match_indices("${").any(|(at, _)| {
+        let body = &command[at + 2..];
+        let mut depth = 1usize;
+        let end = body.char_indices().find_map(|(i, c)| {
+            depth = match c {
+                '{' => depth + 1,
+                '}' => depth - 1,
+                _ => depth,
+            };
+            (depth == 0).then_some(i)
+        });
+        let Some(end) = end else {
+            return true;
+        };
+        let body = &body[..end];
+        let (flags, name) = match body.strip_prefix('(') {
+            Some(rest) => rest.split_once(')').unwrap_or((rest, "")),
+            None => ("", body),
+        };
+        let unread = flags.contains('P') || name.starts_with(['!', '$']);
+        unread && body.contains('=')
+    })
+}
+
+/// Whether one segment's argv runs an assignment builtin on a name the shell
+/// expands: `export "${n}UX=…"`, `typeset $n=…`, `unset "$n"`, `read "$n"`,
+/// `printf -v "$n"`, or `eval` of expanded text.
+///
+/// Why: #8902 follow-up — the expanded name may be `TMUX`, which the guard
+/// cannot see, so it counts as one (fail closed). A value the shell expands
+/// (`export PATH="$PATH:/x"`) is not a name and does not count.
+/// Test: `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
+pub(super) fn assigns_dynamic_name(argv: &[String]) -> bool {
+    let Some((program, args)) = argv.split_first() else {
+        return false;
+    };
+    let dynamic = |w: &String| w.contains(['$', '`']);
+    let name = |w: &String| w.split('=').next().unwrap_or_default().to_owned();
+    match program.as_str() {
+        "export" | "declare" | "typeset" | "local" | "readonly" | "integer" | "float" | "unset"
+        | "read" | "let" | "getopts" => args
+            .iter()
+            .filter(|w| !w.starts_with('-'))
+            .any(|w| dynamic(&name(w))),
+        "eval" => args.iter().any(dynamic),
+        "printf" => args
+            .windows(2)
+            .any(|pair| pair[0] == "-v" && dynamic(&pair[1])),
+        _ => false,
+    }
 }
 
 /// Whether the words before a `tmux` program word reset its environment:

@@ -19,12 +19,15 @@
 //! and so does an unreadable hit (see `Hit::opaque`) or a pane list tmux will
 //! not give. The pane list is the server the hook process sees, read before
 //! the command runs, so a relative `-S`, a `TMUX`/`TMUX_TMPDIR` change
-//! (`${TMUX:=…}` included), `sudo`/`doas`/`env -i`/`exec -c`, and a nested
-//! command with no target in a pane tmux picks all deny (#8902 review). A
-//! session renamed or created in the same command denies each hit whose
-//! server holds an Architect pane. A nested `tmux` with no `-L`/`-S`, in keys
-//! typed into a pane or a command a server runs, reaches that server. A
-//! server with no Architect pane on it is never protected.
+//! (`${TMUX:=…}`, zsh `${TMUX::=…}` and a quote-split name included), an
+//! assignment through a name the guard cannot read (`${(P)n::=…}`,
+//! `export "$n=…"`), `sudo`/`doas`/`env -i`/`exec -c`, and a nested command
+//! with no target in a pane tmux picks all deny (#8902 review). A session
+//! renamed or created in the same command denies each hit whose server holds
+//! an Architect pane. A nested `tmux` with no `-L`/`-S` in a command a server
+//! runs reaches that server; in typed keys it is judged on that server and on
+//! the default one, as the pane's process may lack `TMUX`. A server with no
+//! Architect pane on it is never protected.
 //! Residual: a `command-alias` that shadows a built-in name and was defined
 //! before this call, a tmux config file, a script the command runs, a runner
 //! or interpreter that is not a shared wrapper — `watch`, `script -q
@@ -34,7 +37,7 @@
 //! Test: `architect_pane_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
 
-use super::architect_pane_env::RETARGET;
+use super::architect_pane_env::{PICKED, RETARGET};
 use super::architect_pane_parse::{Hit, Target, tmux_hits};
 
 /// One pane as `tmux list-panes -a` reports it.
@@ -139,6 +142,7 @@ fn reaches_architect(
     let sessions = match target {
         Target::Server => return Ok(true),
         Target::Dynamic(_) => return Err("the shell expands it"),
+        Target::Picked => return Err(PICKED),
         Target::Current => current_sessions(panes, current)?,
         Target::Marked => sessions_where(panes, |p| p.marked),
         Target::Literal(text) => literal_sessions(text, panes, current)?,
@@ -247,6 +251,7 @@ fn shown(target: &Target) -> String {
         Target::Current => "(the current pane)".into(),
         Target::Marked => "(the marked or current pane)".into(),
         Target::Server => "(the whole server)".into(),
+        Target::Picked => "(a pane tmux picks)".into(),
     }
 }
 
