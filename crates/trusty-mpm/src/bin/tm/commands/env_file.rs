@@ -140,7 +140,7 @@ pub(crate) fn verb_home(
 /// fix round adds the path policy and the main-thread grant.
 /// What: `this_session_check` over `env` (a missing `CLAUDE_PROJECT_DIR`
 /// falls back to `architect_dir`, as for `tm fleet status`), then
-/// [`authorize`]; either failing is refused before any env file is opened or
+/// [`Scope::authorize`]; either failing is refused before any env file is opened or
 /// the Keychain read. Then `keys` prints one name per line, and `set` prints
 /// `set KEY (added|replaced)`, both on the canonical path the policy checked.
 /// Test: `env_verbs_refuse_a_session_that_is_not_the_architect`,
