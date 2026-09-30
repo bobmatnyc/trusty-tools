@@ -18,6 +18,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
+
+use super::tmux_attach::tmux_pane_id_from_env;
 use trusty_mpm::core::standalone::hooks::notification::{
     INBOX_EVENTS_FILE, NOTIFICATION_EVENT, NOTIFY_INBOX_ENV, NotificationHookConfig, PushTarget,
     resolve_push_target,
@@ -56,7 +58,8 @@ pub(crate) fn forward_notification(event: &str, stdin: Option<&Value>, cwd: &str
         payload: stdin.cloned().unwrap_or(Value::Null),
         cwd: cwd.to_string(),
         project_dir: std::env::var("CLAUDE_PROJECT_DIR").ok(),
-        tmux_pane: std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()),
+        // #8392: only a `%N` pane id is kept; tmux prefix-matches anything else.
+        tmux_pane: tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok()),
     };
     if let Err(reason) = forward_to_target(&target, context, FORWARD_TIMEOUT) {
         eprintln!("trusty-mpm: Notification forward failed (#8392): {reason}");
@@ -71,7 +74,7 @@ pub(crate) struct LineContext {
     pub(crate) cwd: String,
     /// `CLAUDE_PROJECT_DIR`, the project root Claude Code reports.
     pub(crate) project_dir: Option<String>,
-    /// `TMUX_PANE`, when the session runs in tmux.
+    /// `TMUX_PANE`, when the session runs in tmux and it is a `%N` pane id.
     pub(crate) tmux_pane: Option<String>,
 }
 
@@ -126,10 +129,16 @@ fn append_line(file: &Path, line: &str) -> std::io::Result<()> {
     out.write_all(format!("{line}\n").as_bytes())
 }
 
-/// The tmux session that owns `pane`, or `None`.
+/// The tmux session that owns `pane`, or `None`; `None` without running tmux
+/// when `pane` is not a `%N` pane id.
+///
+/// Test: `only_a_percent_n_tmux_pane_is_a_tmux_target`.
 fn tmux_session_of(pane: &str) -> Option<String> {
+    // #8392: the bare `-t pane` below is exact only because this gate admits
+    // an immutable `%N` and nothing else (tmux-exact-targets allowlist row).
+    let pane = tmux_pane_id_from_env(Some(pane.to_owned()))?;
     let out = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "-t", pane, "#S"])
+        .args(["display-message", "-p", "-t", &pane, "#S"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()

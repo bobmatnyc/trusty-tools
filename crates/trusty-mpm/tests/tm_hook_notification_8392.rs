@@ -6,7 +6,8 @@
 //! What: serves `daemon::api::router` on a loopback port, runs `tm --url <it>
 //! hook` with a Claude Code `Notification` payload, and asserts the daemon
 //! recorded a `Notification` and the configured inbox got one line. The
-//! failure paths — no target, a stuck target, a down daemon — each exit 0.
+//! failure paths — no target, a stuck target, a down daemon, a `TMUX_PANE`
+//! that is not a `%N` pane id — each exit 0.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_notification_8392::`.
 
 use crate::common;
@@ -32,9 +33,15 @@ async fn serve(state: Arc<DaemonState>) -> String {
     format!("http://{addr}")
 }
 
-/// Run `tm --url <url> hook` with [`PAYLOAD`] on stdin and `inbox` (if any) as
-/// the push target; return the output and the wall time.
-fn run_hook(url: &str, home: &Path, inbox: Option<&Path>) -> (Output, Duration) {
+/// Run `tm --url <url> hook` with [`PAYLOAD`] on stdin, `inbox` (if any) as
+/// the push target and `pane` (if any) as `TMUX_PANE`; return the output and
+/// the wall time.
+fn run_hook(
+    url: &str,
+    home: &Path,
+    inbox: Option<&Path>,
+    pane: Option<&str>,
+) -> (Output, Duration) {
     let mut cmd = common::tm_command_in(home);
     cmd.args(["--url", url, "hook"])
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
@@ -46,6 +53,9 @@ fn run_hook(url: &str, home: &Path, inbox: Option<&Path>) -> (Output, Duration) 
         .stderr(Stdio::piped());
     if let Some(inbox) = inbox {
         cmd.env("TRUSTY_MPM_NOTIFY_INBOX", inbox);
+    }
+    if let Some(pane) = pane {
+        cmd.env("TMUX_PANE", pane);
     }
     let start = Instant::now();
     let mut child = cmd.spawn().expect("spawn `tm hook`");
@@ -78,7 +88,7 @@ async fn a_notification_reaches_the_daemon_and_the_inbox() {
             home.path().to_path_buf(),
             inbox.path().to_path_buf(),
         );
-        move || run_hook(&url, &home, Some(&inbox))
+        move || run_hook(&url, &home, Some(&inbox), None)
     })
     .await
     .unwrap();
@@ -108,7 +118,7 @@ async fn a_notification_reaches_the_daemon_and_the_inbox() {
 #[test]
 fn an_unset_target_forwards_nothing_and_logs_nothing() {
     let home = tempfile::tempdir().unwrap();
-    let (out, _) = run_hook("http://127.0.0.1:9", home.path(), None);
+    let (out, _) = run_hook("http://127.0.0.1:9", home.path(), None, None);
     assert!(out.status.success());
     assert_eq!(forward_failures(&out), 0);
 }
@@ -127,7 +137,7 @@ fn a_stuck_inbox_costs_one_logged_failure_and_exit_zero() {
             .unwrap()
             .success()
     );
-    let (out, took) = run_hook("http://127.0.0.1:9", home.path(), Some(inbox.path()));
+    let (out, took) = run_hook("http://127.0.0.1:9", home.path(), Some(inbox.path()), None);
     assert!(out.status.success());
     assert_eq!(
         forward_failures(&out),
@@ -152,8 +162,32 @@ fn a_down_daemon_does_not_block_the_hook() {
         &format!("http://127.0.0.1:{port}"),
         home.path(),
         Some(inbox.path()),
+        None,
     );
     assert!(out.status.success());
     assert!(took < Duration::from_secs(5), "hook took {took:?}");
     assert!(inbox.path().join("events.jsonl").exists());
+}
+
+/// #8392: a `TMUX_PANE` that is not a `%N` pane id is dropped — it never
+/// reaches `tmux -t`, where tmux would prefix-match it — and the hook still
+/// forwards and exits 0.
+#[test]
+fn a_non_pane_id_tmux_pane_is_dropped_and_the_hook_exits_zero() {
+    let home = tempfile::tempdir().unwrap();
+    for bad in ["main", "s:0", "=foo", "%", "%12a"] {
+        let inbox = tempfile::tempdir().unwrap();
+        let (out, _) = run_hook(
+            "http://127.0.0.1:9",
+            home.path(),
+            Some(inbox.path()),
+            Some(bad),
+        );
+        assert!(out.status.success(), "{bad}");
+        assert_eq!(forward_failures(&out), 0, "{bad}");
+        let text = std::fs::read_to_string(inbox.path().join("events.jsonl")).unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(line["tmux_pane"], serde_json::Value::Null, "{bad}");
+        assert_eq!(line["tmux_session"], serde_json::Value::Null, "{bad}");
+    }
 }

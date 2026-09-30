@@ -90,3 +90,18 @@ fn a_fifo_with_no_reader_times_out() {
     std::io::Read::read_to_string(&mut std::fs::File::open(&fifo).unwrap(), &mut drained).unwrap();
     assert!(drained.contains("permission_prompt"));
 }
+
+/// #8392: tmux prefix-matches a bare `-t` value, so only a `%N` pane id may
+/// reach `tmux display-message -t`; every other value is dropped before tmux
+/// runs.
+#[test]
+fn only_a_percent_n_tmux_pane_is_a_tmux_target() {
+    for bad in ["main", "s:0", "=foo", "%", "%12a", ""] {
+        assert_eq!(tmux_pane_id_from_env(Some(bad.to_string())), None, "{bad}");
+        assert_eq!(tmux_session_of(bad), None, "{bad}");
+    }
+    assert_eq!(
+        tmux_pane_id_from_env(Some("%12".to_string())),
+        Some("%12".to_string())
+    );
+}
