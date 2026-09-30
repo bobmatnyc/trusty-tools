@@ -1,0 +1,2 @@
+Changed
+- `BASE-AGENT` states one credential rule for every agent: switch account or token only when the brief names it with owner authorization; "no credentials" and "every account needs reauth" are separate blocked states (the latter names `! gcloud auth login` as the operator step); a "no login" brief bars interactive login but allows reusing an existing application-default credential for read-only calls. The per-repo credential mechanism remains a policy decision (Refs #8557, #8371, #8133).
