@@ -240,8 +240,10 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     let subscriber = tracing_subscriber::registry().with(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
-    let line =
-        tracing::subscriber::with_default(subscriber, || super::inplace_session_line(&state));
+    let spec = tracing::subscriber::with_default(subscriber, || {
+        super::inplace_session_spec(target.path(), &state)
+    });
+    let line = crate::test_support::spec_text(&spec);
     let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
         &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::default(),
     )
@@ -618,10 +620,11 @@ async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
 /// #8405: the in-place start seam reads the renderer from its config root,
 /// both directions. Fails if the seam ignores the config.
 #[test]
-fn inplace_session_line_follows_the_configured_renderer() {
+fn inplace_session_spec_follows_the_configured_renderer() {
     for alternate_screen in [true, false] {
         let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
-        let line = super::inplace_session_line(root.path());
+        let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path());
+        let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
     }

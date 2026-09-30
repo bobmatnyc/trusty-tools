@@ -172,6 +172,17 @@ pub(crate) fn enable_event_capture() {
     );
 }
 
+/// A launch spec's assignments and argv as one line of `K=V ` words then args
+/// (#8308), so a seam test can assert with substrings.
+pub(crate) fn spec_text(spec: &trusty_mpm::runtime::launch_spec::LaunchSpec) -> String {
+    let env: String = spec
+        .env_set
+        .iter()
+        .map(|(k, v)| format!("{k}={v} "))
+        .collect();
+    format!("{env}{} {}", spec.program, spec.args.join(" "))
+}
+
 /// A state root whose `config.yaml` sets `tmux.alternate_screen` (#8405).
 ///
 /// Why: every CLI launch seam reads the renderer from a config root; its

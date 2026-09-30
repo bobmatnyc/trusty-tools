@@ -192,7 +192,14 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     // Both shapes must carry the prompt and an isolation flag, so assert on both
     // rather than narrowing this to whichever one the test machine happens to
     // produce.
-    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[], None, None);
+    // #8308: the seam returns a spec; `spec_text` renders it for substrings.
+    let spec = |dir| {
+        let cwd = std::path::Path::new("/work/p");
+        let spec =
+            crate::commands::launch::connect_claude_spec(cwd, Some(path), dir, &[], None, None);
+        crate::test_support::spec_text(&spec)
+    };
+    let fallback = spec(None);
     assert!(
         fallback.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {fallback}"
@@ -204,14 +211,13 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     );
 
     let dir = std::path::Path::new("/tm/claude-config");
-    let relocated =
-        crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[], None, None);
+    let relocated = spec(Some(dir));
     assert!(
         relocated.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {relocated}"
     );
     assert!(
-        relocated.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
+        relocated.contains("CLAUDE_CONFIG_DIR=/tm/claude-config "),
         "the relocated shape must redirect the user tier to the tm-owned home: \
          {relocated}"
     );
@@ -2401,11 +2407,19 @@ fn cli_parses_reinstall_binary() {
 /// #8405: `tm connect` turns the config under its root into the renderer, both
 /// directions. Fails if the seam ignores the config (e.g. a hard-coded `false`).
 #[test]
-fn connect_claude_cmd_follows_the_configured_renderer() {
+fn connect_claude_spec_follows_the_configured_renderer() {
+    let cwd = std::path::Path::new("/work/p");
     for alternate_screen in [true, false] {
         let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
-        let line =
-            crate::commands::launch::connect_claude_cmd(None, None, &[], None, Some(root.path()));
+        let spec = crate::commands::launch::connect_claude_spec(
+            cwd,
+            None,
+            None,
+            &[],
+            None,
+            Some(root.path()),
+        );
+        let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
     }
@@ -2413,10 +2427,12 @@ fn connect_claude_cmd_follows_the_configured_renderer() {
 
 /// #8405: the `tm launch` seam, both directions.
 #[test]
-fn launch_claude_cmd_follows_the_configured_renderer() {
+fn launch_claude_spec_follows_the_configured_renderer() {
+    let cwd = std::path::Path::new("/work/p");
     for alternate_screen in [true, false] {
         let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
-        let line = crate::commands::launch::launch_claude_cmd(
+        let spec = crate::commands::launch::launch_claude_spec(
+            cwd,
             Some(root.path()),
             "opus",
             None,
@@ -2424,6 +2440,7 @@ fn launch_claude_cmd_follows_the_configured_renderer() {
             &[],
             None,
         );
+        let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
     }
