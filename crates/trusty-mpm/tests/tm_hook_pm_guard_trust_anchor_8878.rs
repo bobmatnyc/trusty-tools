@@ -224,6 +224,33 @@ fn the_architect_main_thread_writes_and_its_subagent_does_not() {
     assert!(out.contains("#8878"), "{out}");
 }
 
+/// #8878 Q2 delete ruling: a PM's delete of a launch record is denied under
+/// each bypass, as its wrapped and `find` forms are; the Architect's main
+/// thread may delete one.
+#[test]
+fn a_launch_record_delete_is_denied_under_each_bypass() {
+    let fx = Fixture::new();
+    let launch = fx.home.join(".trusty-mpm/architect-launch");
+    std::fs::create_dir_all(&launch).expect("mkdir launch dir");
+    std::fs::write(launch.join("1.architect"), "{}").expect("write record");
+    let record = launch.join("1.architect").display().to_string();
+    for command in [
+        format!("rm -f {record}"),
+        format!("command rm {record}"),
+        format!("find {} -delete", launch.display()),
+    ] {
+        let stdin = bash_payload(&fx, &command);
+        for bypass in BYPASSES {
+            let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+            let out = run(&fx, &stdin, &env, Some("pm"));
+            assert!(out.contains("\"deny\""), "{bypass:?} {command}: {out}");
+            assert!(out.contains("#8878"), "{bypass:?} {command}: {out}");
+        }
+    }
+    let stdin = bash_payload(&fx, &format!("rm -f {record}"));
+    assert_eq!(run_under_claude(&fx, &stdin, true).trim(), "");
+}
+
 /// A main-thread `Bash` payload running `command` in the project.
 fn bash_payload(fx: &Fixture, command: &str) -> String {
     serde_json::json!({
