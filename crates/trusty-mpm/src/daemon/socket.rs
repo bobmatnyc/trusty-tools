@@ -76,7 +76,10 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     // delegation.
     let router = rpc::registry::register(router, state);
     // #6288 step 1: the routes the sandboxed `tm` CLI still reached over HTTP.
-    rpc::cli_socket::register(router, state)
+    let router = rpc::cli_socket::register(router, state);
+    // #6288 step 2a: MCP dispatch (`POST /rpc`) and the coordinator routes.
+    let router = rpc::mcp::register(router, state);
+    rpc::coordinator::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

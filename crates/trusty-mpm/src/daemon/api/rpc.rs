@@ -34,7 +34,6 @@ use axum::{
 };
 use trusty_mcp::Request as McpRequest;
 
-use crate::daemon::mcp_backend::StateBackend;
 use crate::daemon::state::DaemonState;
 
 /// True when `addr`'s IP is a loopback address (IPv4 `127.0.0.0/8` or IPv6 `::1`).
@@ -80,8 +79,8 @@ pub async fn rpc_handler(
             .into_response();
     }
 
-    let backend = StateBackend::new(Arc::clone(&state));
-    let resp = crate::mcp::dispatch(&backend, req).await;
+    // #6288: the body is shared with `mpm.mcp.dispatch` on the socket.
+    let resp = crate::daemon::rpc::mcp::dispatch_op(&state, req).await;
     Json(resp).into_response()
 }
 

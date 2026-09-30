@@ -292,6 +292,62 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "mpm.builder_slot.claim",
     ),
     ("GET", "/api/v1/builder-slots", "mpm.builder_slot.list"),
+    // ---- #6288 step 2a: rows for methods slices 4-5 served without one, and
+    // for the routes step 2a moved across. `mpm.control.connect` has no row:
+    // it is a stream, and `send` reads one frame. ----
+    ("GET", "/api/v1/control/sessions", "mpm.control.list"),
+    ("POST", "/api/v1/control/sessions/run", "mpm.control.run"),
+    (
+        "POST",
+        "/api/v1/control/sessions/{id}/stop",
+        "mpm.control.stop",
+    ),
+    (
+        "GET",
+        "/api/v1/control/sessions/{id}/auth",
+        "mpm.control.auth",
+    ),
+    ("POST", "/api/v1/sessions/proxy/focus", "mpm.proxy.focus"),
+    (
+        "GET",
+        "/api/v1/sessions/proxy/focus/{conversation_key}",
+        "mpm.proxy.get_focus",
+    ),
+    (
+        "POST",
+        "/api/v1/sessions/proxy/unfocus",
+        "mpm.proxy.unfocus",
+    ),
+    (
+        "POST",
+        "/api/v1/sessions/proxy/message",
+        "mpm.proxy.message",
+    ),
+    (
+        "GET",
+        "/api/v1/sessions/proxy/summary/{conversation_key}",
+        "mpm.proxy.summary",
+    ),
+    ("GET", "/api/v1/delegations", "mpm.delegation.list"),
+    (
+        "POST",
+        "/api/v1/delegations/by-id/{delegation_id}/repair",
+        "mpm.delegation.repair_by_id",
+    ),
+    (
+        "POST",
+        "/api/v1/delegations/{agent_id}/repair",
+        "mpm.delegation.repair",
+    ),
+    ("GET", "/api/v1/sessions/context", "mpm.sessions.context"),
+    (
+        "GET",
+        "/api/v1/session-manager/context",
+        "mpm.sessions.context",
+    ),
+    ("POST", "/api/v1/sessions/chat", "mpm.sessions.chat"),
+    ("POST", "/api/v1/session-manager/chat", "mpm.sessions.chat"),
+    ("POST", "/rpc", "mpm.mcp.dispatch"),
 ];
 
 /// The method and path captures for `method path`, or `None` when the socket
