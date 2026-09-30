@@ -226,14 +226,14 @@ async fn async_main(cli: Cli) -> Result<()> {
     let config = ReviewConfig::from_env_and_file(config_path.as_deref(), None);
 
     match command {
-        Commands::Run(args) => cmd_run(config, args).await,
+        Commands::Run(args) => cmd_run(config, config_path.as_deref(), args).await,
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "mcp")]
         Commands::Mcp(args) => cmd_mcp_stdio(config, args).await,
         // `report` is dispatched above, before the config is built.
         #[cfg(feature = "report")]
         Commands::Report(_) => unreachable!("report dispatched before the config is built"),
-        Commands::Calibrate(args) => cmd_calibrate(config, args).await,
+        Commands::Calibrate(args) => cmd_calibrate(config_path.as_deref(), args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
         // #6913: dispatched in `main`, before the runtime and the config.
