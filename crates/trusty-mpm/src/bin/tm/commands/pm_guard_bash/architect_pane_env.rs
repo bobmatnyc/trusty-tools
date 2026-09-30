@@ -3,8 +3,8 @@
 //! Why: the floor lists the server the hook process sees. A command that
 //! changes the environment tmux finds its server in, or that renames or
 //! creates a session, reaches panes that list does not describe.
-//! What: the reasons such a hit carries, [`moves_server_env`] and
-//! [`resets_env`].
+//! What: the reasons such a hit carries, [`moves_server_env`],
+//! [`assigns_dynamic_name`] and [`resets_env`].
 //! Test: `a_server_the_command_selects_differently_denies`,
 //! `a_nested_invocation_inherits_the_outer_server`.
 
@@ -38,7 +38,8 @@ pub(super) const RETARGET: &str = "the command also renames or creates a session
 /// assigning expansion whose name the guard cannot read
 /// ([`assigns_unread_name`]).
 /// Test: `a_server_the_command_selects_differently_denies`,
-/// `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
+/// `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`,
+/// `an_unreadable_expansion_or_dynamic_name_counts_as_a_server_move`.
 pub(super) fn moves_server_env(command: &str) -> bool {
     // #8902: quote removal joins a split name, `TM''UX=` or `"TM"UX=`.
     let unquoted: String = command.chars().filter(|c| !"'\"\\".contains(*c)).collect();

@@ -369,6 +369,22 @@ fn a_nested_tmux_in_typed_keys_is_judged_on_the_default_server_too() {
     );
 }
 
+/// #8902 follow-up error arms: a `${` with no closing brace cannot be read, so
+/// it counts as a `TMUX` change; a builtin's expanded value is not a name.
+#[test]
+fn an_unreadable_expansion_or_dynamic_name_counts_as_a_server_move() {
+    use super::super::architect_pane_env::{assigns_dynamic_name, moves_server_env};
+    assert!(moves_server_env(": ${n"));
+    assert!(moves_server_env(": ${(P)n::=x}"));
+    assert!(!moves_server_env(": ${n} ${(P)n} ${!n}"));
+    let argv = |s: &str| -> Vec<String> { s.split(' ').map(str::to_owned).collect() };
+    assert!(assigns_dynamic_name(&argv("export ${n}UX=x")));
+    assert!(assigns_dynamic_name(&argv("eval $cmd")));
+    assert!(!assigns_dynamic_name(&argv("export PATH=$PATH:/x")));
+    assert!(!assigns_dynamic_name(&argv("printf %s $x")));
+    assert!(!assigns_dynamic_name(&[]));
+}
+
 /// Every `deny` command the floor lets through and every `pass` command it
 /// denies, so a failing run names each misjudged case.
 fn misjudged(probe: &Fake, deny: &[&str], pass: &[&str]) -> Vec<String> {
