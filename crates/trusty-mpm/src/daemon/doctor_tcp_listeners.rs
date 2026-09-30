@@ -184,9 +184,9 @@ pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry])
             "{} (pid {}) {}:{}",
             sock.process, sock.pid, sock.addr, sock.port
         );
-        let row = allow.iter().find(|r| {
-            r.kind != AllowKind::SourceOnly && r.processes.iter().any(|p| *p == sock.process)
-        });
+        let row = allow
+            .iter()
+            .find(|r| r.kind != AllowKind::SourceOnly && r.processes.contains(&sock.process));
         let (verdict, text) = match row {
             Some(r) if r.kind == AllowKind::Permanent => {
                 (CheckStatus::Ok, format!("{who} allowed ({})", r.issue))
