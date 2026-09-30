@@ -20,7 +20,8 @@
 //! keeps the two protocols distinguishable on the same socket.
 //!
 //! Test: `super::tests` — `dispatch_*` for the codes,
-//! `stream_frames_carry_the_phase_discriminant` for the streaming shapes.
+//! `stream_frames_carry_the_phase_discriminant` for the streaming shapes,
+//! `rpc_error_*` for the error object's optional `data` member.
 
 use serde::{Deserialize, Serialize};
 
@@ -230,12 +231,29 @@ impl RpcStreamFrame {
 }
 
 /// The error half of a response frame, and what a handler returns to refuse.
+///
+/// Carries the three members of a JSON-RPC 2.0 error object: `code`, `message`
+/// and the optional `data`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RpcError {
     /// JSON-RPC error code.
     pub code: i64,
     /// Human-readable reason, reported to the caller verbatim.
     pub message: String,
+    /// Structured detail a caller branches on, beside the code (#6285).
+    ///
+    /// Why: a refusal whose HTTP twin answered with a JSON body — trusty-search's
+    /// index-unavailable 503 carries `index_id`, `retryable`, `restore_via`,
+    /// `reason`, `transient` and `stages` — lost every field but the code when it
+    /// moved onto the socket, because this struct had nowhere to put them.
+    /// What: JSON-RPC 2.0's optional `data` member. Omitted from the frame when
+    /// `None`, and `#[serde(default)]` so a frame from a peer that never sends it
+    /// still parses.
+    /// Test: `rpc_error_data_round_trips_when_present_and_is_omitted_when_absent`,
+    /// `rpc_error_without_a_data_member_still_parses`,
+    /// `a_handlers_error_data_reaches_the_client_verbatim`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 impl RpcError {
@@ -247,7 +265,20 @@ impl RpcError {
         Self {
             code,
             message: message.into(),
+            data: None,
         }
+    }
+
+    /// The same error carrying `data` as its JSON-RPC `data` member (#6285).
+    ///
+    /// Why: every existing constructor keeps its signature; a handler that has
+    /// structured detail to return chains this onto whichever one it used.
+    /// What: sets [`RpcError::data`], replacing any earlier value.
+    /// Test: `rpc_error_data_round_trips_when_present_and_is_omitted_when_absent`.
+    #[must_use]
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
     }
 
     /// [`CODE_INVALID_PARAMS`] — the frame was well-formed but its `params`

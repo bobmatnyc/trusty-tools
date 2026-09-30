@@ -11,10 +11,10 @@ use super::{
     CODE_UNAVAILABLE_PERMANENT,
 };
 
-/// Why: the code is the ONLY thing a socket client can branch on — `RpcError`
-/// carries no body — so the whole index-scoped contract's retryable/permanent
-/// split rides on this table. A 503 that will clear and one that never will
-/// must not collapse onto one code.
+/// Why: the code is the first thing a socket client branches on, and a client
+/// that ignores `data` has nothing else, so the whole index-scoped contract's
+/// retryable/permanent split rides on this table. A 503 that will clear and one
+/// that never will must not collapse onto one code.
 /// Test: this function IS the test.
 #[test]
 fn status_and_permanence_pick_the_code() {
@@ -172,5 +172,45 @@ fn a_permanently_failed_restore_reports_the_permanent_code() {
     assert_eq!(
         err.code, CODE_UNAVAILABLE_PERMANENT,
         "a refusal that never clears must not share a code with one that does"
+    );
+}
+
+/// Why: the MCP bridge's INDEX_UNAVAILABLE contract relays `index_id`,
+/// `retryable`, `restore_via`, `reason`, `transient` and `stages` verbatim, and
+/// #6285 moves that bridge onto the socket. The fields have to ride in the
+/// error's `data`, unchanged, for the bridge to keep relaying them. A refusal
+/// of any other status keeps carrying none.
+/// Test: this function IS the test.
+#[test]
+fn an_index_unavailable_refusal_carries_its_body_as_data() {
+    let body = serde_json::json!({
+        "error": "vector_unavailable",
+        "index_id": "demo",
+        "retryable": true,
+        "restore_via": "POST /indexes/demo/search",
+        "reason": "stage_not_ready",
+        "transient": true,
+        "stages": { "lexical": "ready", "semantic": "in_progress" },
+        "message": "the embed pass has not finished",
+    });
+    let err = rpc_error_from_http(StatusCode::SERVICE_UNAVAILABLE, &body);
+    assert_eq!(err.code, CODE_UNAVAILABLE);
+    assert_eq!(
+        err.data.as_ref(),
+        Some(&body),
+        "the body must pass verbatim"
+    );
+
+    let missing = serde_json::json!({ "error": "unknown index: demo", "index_id": "demo" });
+    assert_eq!(
+        rpc_error_from_http(StatusCode::NOT_FOUND, &missing).data,
+        None
+    );
+
+    // A 503 without a structured verdict is not an availability body.
+    let bare = serde_json::json!("upstream proxy said no");
+    assert_eq!(
+        rpc_error_from_http(StatusCode::SERVICE_UNAVAILABLE, &bare).data,
+        None
     );
 }

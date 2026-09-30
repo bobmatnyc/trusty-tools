@@ -129,6 +129,7 @@ async fn a_refusal_carries_the_daemons_code_and_message() {
         method: "m".into(),
         code: CODE_UNAVAILABLE,
         message: String::new(),
+        data: None,
     };
     assert!(retryable.is_unavailable() && !retryable.is_permanently_unavailable());
     // A not-found refusal is never read as an unavailability, or the reverse.
@@ -136,8 +137,47 @@ async fn a_refusal_carries_the_daemons_code_and_message() {
         method: "m".into(),
         code: CODE_NOT_FOUND,
         message: String::new(),
+        data: None,
     };
     assert!(!missing.is_unavailable() && !retryable.is_not_found());
+}
+
+/// A refusal's `data` member reaches the caller verbatim, and a refusal that
+/// sent none reports none.
+///
+/// Why: #6285 moves the MCP bridge onto this client, and its INDEX_UNAVAILABLE
+/// contract relays the daemon's 503 body field for field. A client that kept
+/// only the code and message would strand `restore_via`, `stages` and the rest.
+#[tokio::test]
+async fn a_refusal_carries_the_daemons_error_data() {
+    let body = json!({
+        "error": "index_not_resident",
+        "index_id": "wt-1",
+        "retryable": true,
+        "restore_via": "POST /indexes/wt-1/search",
+        "reason": "cold_parked",
+        "transient": true,
+        "stages": { "lexical": "ready" },
+    });
+    let sent = body.clone();
+    let daemon = mock_daemon(move |_, _| {
+        Err(RpcError::new(CODE_UNAVAILABLE, "index_not_resident").with_data(sent.clone()))
+    })
+    .await;
+    let err = daemon
+        .client
+        .call("search.index.status", json!({}))
+        .await
+        .expect_err("the mock refuses");
+    assert_eq!(err.data(), Some(&body));
+
+    let bare = mock_daemon(|_, _| Err(RpcError::new(CODE_NOT_FOUND, "unknown index: x"))).await;
+    let err = bare
+        .client
+        .call("search.index.status", json!({}))
+        .await
+        .expect_err("the mock refuses");
+    assert_eq!(err.data(), None, "a refusal without data must report none");
 }
 
 /// A socket nothing serves fails closed, names the path, and says how to fix it.
