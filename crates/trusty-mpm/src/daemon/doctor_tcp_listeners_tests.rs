@@ -188,15 +188,18 @@ fn malformed_allowlist_rows_are_refused() {
 }
 
 #[test]
-fn embedded_allowlist_keeps_the_console_as_the_only_permanent_row() {
+fn embedded_allowlist_permanent_rows_are_the_console_and_gworkspace_oauth() {
     let rows = parse_allowlist(ALLOWLIST_TSV).expect("embedded allowlist parses");
     let permanent: Vec<_> = rows
         .iter()
         .filter(|r| r.kind == AllowKind::Permanent)
         .collect();
-    assert_eq!(permanent.len(), 1);
+    assert_eq!(permanent.len(), 2);
     assert_eq!(permanent[0].crate_name, "trusty-console");
     assert_eq!(permanent[0].issue, "ADR-0032");
+    // Owner ruling 135: RFC 8252 loopback redirect for one login.
+    assert_eq!(permanent[1].crate_name, "trusty-gworkspace");
+    assert_eq!(permanent[1].issue, "ruling-135");
     for r in rows.iter().filter(|r| r.kind != AllowKind::Permanent) {
         assert!(
             r.issue.starts_with('#'),

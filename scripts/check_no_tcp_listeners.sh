@@ -104,8 +104,8 @@ while (my $row = <$af>) {
         push @errors, "$at: kind `$kind` is not permanent, temporary or source-only";
         next;
     }
-    push @errors, "$at: permanent row must cite an ADR (ADR-NNNN), got `$issue`"
-        if $kind eq "permanent" && $issue !~ /^ADR-\d{4}\z/;
+    push @errors, "$at: permanent row must cite an ADR or owner ruling (ADR-NNNN, ruling-NNN), got `$issue`"
+        if $kind eq "permanent" && $issue !~ /^(?:ADR-\d{4}|ruling-\d+)\z/;
     push @errors, "$at: $kind row must cite an issue (#N), got `$issue`"
         if $kind ne "permanent" && $issue !~ /^#\d+\z/;
     push @errors, "$at: source-only row names processes `$procs`; use -"

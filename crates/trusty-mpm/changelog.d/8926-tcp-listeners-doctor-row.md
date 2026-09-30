@@ -3,8 +3,9 @@ Added
 - `tm doctor` has a `tcp_listeners` row. It lists the trusty-* processes that
   listen on TCP, read from libproc on macOS and `/proc` on Linux, and grades
   them against `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv`. Only
-  trusty-console may listen on TCP (ADR-0032). The row is OK when only the
-  console listens, WARNs naming the issue while tm (#6288) or trusty-search
+  trusty-console may listen on TCP (ADR-0032), plus the trusty-gworkspace
+  OAuth loopback redirect (RFC 8252, owner ruling 135). The row is OK when
+  only those listen, WARNs naming the issue while tm (#6288) or trusty-search
   (#6285) still listen, FAILs on any other trusty-* listener, and WARNs on an
   allowlisted listener bound to a non-loopback address. It reports UNKNOWN,
   never OK, when the probe cannot run or cannot read, or on macOS cannot

@@ -112,7 +112,7 @@ pub(crate) struct AllowEntry {
 /// tab-separated fields (`kind crate processes paths issue reason`), a known
 /// kind, and a process list unless the kind is `source-only`.
 /// Test: `malformed_allowlist_rows_are_refused`,
-/// `embedded_allowlist_keeps_the_console_as_the_only_permanent_row`.
+/// `embedded_allowlist_permanent_rows_are_the_console_and_gworkspace_oauth`.
 pub(crate) fn parse_allowlist(text: &str) -> Result<Vec<AllowEntry>, String> {
     let mut rows = Vec::new();
     for (idx, line) in text.lines().enumerate() {
