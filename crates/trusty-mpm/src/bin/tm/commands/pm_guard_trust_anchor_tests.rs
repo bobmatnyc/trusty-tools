@@ -660,3 +660,11 @@ fn the_launch_record_dir_is_an_anchor() {
     assert_eq!(pm_bash(&fx, "cd /tmp && echo x > r.session"), None);
     assert_eq!(pm_bash(&fx, "echo x > notes.md"), None);
 }
+
+// #8878 Q2 delete ruling: deletes are anchor writes.
+#[path = "pm_guard_trust_anchor_delete_tests.rs"]
+mod delete_verbs;
+
+// #8878 Q2 round 2: the critic HIGHs and the PM/agent split.
+#[path = "pm_guard_trust_anchor_split_tests.rs"]
+mod split;

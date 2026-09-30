@@ -29,13 +29,35 @@
 //! established are each a deny. An arming directory that does not resolve
 //! fences the `twin/` tree only, not every write. The caller reads stdin before
 //! the bypass variables, so an unreadable payload denies.
+//! Deletes (#8878 Q2 delete ruling, Architect on PR #8919): `rm`, `unlink`,
+//! `trash`, `rmdir` (with `-p`, each parent too), `shred`, `truncate` and a
+//! `find` that deletes (`-delete`, or `-exec`/`-execdir`/`-ok`/`-okdir` running
+//! a delete verb, `mv` or a shell) are anchor writes, as is `mv` OUT of an
+//! anchor (its source). A delete is judged where the entry sits and where it
+//! leads, so `rm -r` of a directory above an anchor denies; a glob in the last
+//! component judges its directory. Wrappers resolve through the #8735
+//! program-word resolver (`command`, `env`, `sudo`, `nice`, …), past leading
+//! reserved words; brace groups are expanded; a `find` action's command is
+//! read as a command (#8878 round 2).
+//! PM/agent split (owner ruling "Keep the split", #8878): the fail-closed
+//! delete denials — a delete run by `xargs`, a path built from an expansion
+//! or `cd`, a glob judged by its directory, a `find` start point or an
+//! `rmdir -p` parent above an anchor — bind the PM (any thread not known to
+//! be a subagent). A subagent is denied a delete only when its path resolves
+//! to an anchor, inside one, or above one for `rm`/`rmdir`/`unlink`/`shred`/
+//! `truncate`; a glob is expanded against its directory for it. Writes are
+//! judged alike for both, as before.
 //! Limit: after a `cd`, a relative path cannot be placed, so `cd X && cp Y .`
 //! is denied for every session but the Architect's main thread: `.` could be
 //! `~/.trusty-mpm`, and the guard does not evaluate the `cd`. Spell the
 //! destination as an absolute path instead.
-//! Residual: writers outside Q2 (`dd`, `rsync`, interpreters, `find -exec`)
-//! and a write from an executed script file (#8879) are not seen.
-//! Test: `pm_guard_trust_anchor_tests.rs`; end to end in
+//! Residual: writers and deleters outside the verb set — `dd`, `rsync`
+//! (including `--remove-source-files`), `git rm`/`git clean`, `srm`,
+//! interpreters (`python -c`, `perl -e`, `node -e`), a `find -exec` whose
+//! program is none of the above (an interpreter or `env -S` string), and a
+//! write or delete from an executed script file (#8879) — are not seen.
+//! Test: `pm_guard_trust_anchor_tests.rs` and, for deletes,
+//! `pm_guard_trust_anchor_delete_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_trust_anchor_8878.rs`.
 
 use std::ffi::OsString;
@@ -52,13 +74,17 @@ use trusty_mpm::core::twin_identity::ClaudeProcess;
 
 use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
-use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
-use crate::commands::pm_guard_bash::{AnchorWrite, UnplaceableWrite, anchor_writes};
+use crate::commands::pm_guard_architect_reason::{
+    NotArchitect, architect_main_thread, with_identity,
+};
+use crate::commands::pm_guard_bash::{
+    AnchorWrite, UnplaceableWrite, anchor_writes, expand_brace_alternatives,
+};
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_trust_anchor_paths::{
-    FileId, Placed, Resolved, dequote, file_id, has_shell_pattern, is_json, place, resolve,
-    same_ci, starts_with_ci,
+    FileId, Placed, Resolved, dequote, file_id, has_brace_group, has_shell_pattern, is_json, place,
+    resolve, same_ci, starts_with_ci,
 };
 
 /// The rule name recorded with each deny.
@@ -184,7 +210,9 @@ pub(crate) fn evaluate(
         return None;
     };
     let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
-    decide(writes, cwd, env.home.as_deref()).map(|reason| with_identity(reason, why))
+    // #8878 "Keep the split": only a known subagent is judged leniently.
+    let strict = why != NotArchitect::Subagent;
+    decide(writes, cwd, env.home.as_deref(), strict).map(|reason| with_identity(reason, why))
 }
 
 /// Whether the call comes from the Architect session's main thread.
@@ -244,13 +272,15 @@ fn call_writes(
 /// What: an unknown home ([`unknown_home_reason`]), an unplaceable write, or
 /// a config location that does not resolve deny outright; otherwise the first
 /// write [`Anchors::judge`] denies. A `cd` anywhere in the command makes every
-/// relative path unplaceable.
+/// relative path unplaceable. `strict` is the PM's reading of a delete.
 /// Test: `an_unknown_home_denies_every_write`, `an_unplaceable_write_is_denied`,
-/// `an_unlocatable_anchor_denies_every_write`.
+/// `an_unlocatable_anchor_denies_every_write`,
+/// `expansion_and_xargs_deletes_are_denied_to_the_pm_only`.
 fn decide(
     writes: Result<Vec<AnchorWrite>, UnplaceableWrite>,
     cwd: Option<&Path>,
     home: Option<&Path>,
+    strict: bool,
 ) -> Option<String> {
     // #8878 Q4 (i): no home, no anchor location — every write is refused.
     let Some(home) = home else {
@@ -271,7 +301,7 @@ fn decide(
     };
     writes
         .iter()
-        .find_map(|write| anchors.judge(write, base, home))
+        .find_map(|write| anchors.judge(write, base, home, strict))
 }
 
 /// Where the anchors are, resolved once per evaluation.
@@ -381,7 +411,14 @@ impl Anchors {
     /// Whether a resolved path is an anchor, a directory above one, a hard
     /// link to one, or inside the fenced `twin/` tree.
     fn is_anchor(&self, resolved: &Path) -> bool {
-        if self.guarded.iter().any(|p| starts_with_ci(p, resolved)) {
+        self.guarded.iter().any(|p| starts_with_ci(p, resolved)) || self.is_within(resolved)
+    }
+
+    /// [`Self::is_anchor`] without the directories strictly above an anchor
+    /// (#8878 "Keep the split"): the anchor itself, inside a fence, or a link
+    /// to one.
+    fn is_within(&self, resolved: &Path) -> bool {
+        if self.guarded.iter().any(|p| same_ci(p, resolved)) {
             return true;
         }
         if self.fence.iter().any(|f| starts_with_ci(resolved, f)) {
@@ -425,7 +462,46 @@ impl Anchors {
     }
 
     /// The deny for one write, or `None` when it misses every anchor.
-    fn judge(&self, write: &AnchorWrite, base: Option<&Path>, home: &Path) -> Option<String> {
+    ///
+    /// What: #8878 H3 — a shell word holding a brace group is judged once per
+    /// reading, since a group can span `/`; a group the expander cannot read
+    /// denies. Then [`Self::judge_one`].
+    /// Test: `a_brace_group_spanning_a_slash_is_expanded`.
+    fn judge(
+        &self,
+        write: &AnchorWrite,
+        base: Option<&Path>,
+        home: &Path,
+        strict: bool,
+    ) -> Option<String> {
+        let words: Vec<&str> = match write {
+            AnchorWrite::Into { dest, names, .. } => std::iter::once(dest)
+                .chain(names)
+                .map(String::as_str)
+                .collect(),
+            other => other.shell_word().into_iter().collect(),
+        };
+        for word in words.into_iter().filter(|w| has_brace_group(w)) {
+            let Some(readings) = expand_brace_alternatives(word) else {
+                return Some(unknown_reason(word));
+            };
+            if write.shell_word().is_some() {
+                return readings.into_iter().find_map(|reading| {
+                    self.judge_one(&write.with_word(reading), base, home, strict)
+                });
+            }
+        }
+        self.judge_one(write, base, home, strict)
+    }
+
+    /// [`Self::judge`] for one reading.
+    fn judge_one(
+        &self,
+        write: &AnchorWrite,
+        base: Option<&Path>,
+        home: &Path,
+        strict: bool,
+    ) -> Option<String> {
         match write {
             AnchorWrite::File(spelling) => {
                 let word = dequote(spelling);
@@ -439,6 +515,9 @@ impl Anchors {
                 dest_too,
             } => self.judge_into(dest, names, *dest_too, base, home),
             AnchorWrite::IntoUnnamed(dir) => self.judge_unnamed(dir, base, home),
+            AnchorWrite::Delete(word, reach) => self.judge_delete(word, *reach, base, home, strict),
+            // #8878 "Keep the split": an unseen delete denies the PM only.
+            AnchorWrite::UnseenDelete(what) => strict.then(|| unplaceable_reason(what)),
             AnchorWrite::DirChange => None,
         }
     }
@@ -568,8 +647,8 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
 /// The closing sentence every deny carries.
 const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/architect-launch/` and, while any exist, \
-     `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
-     — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
+     `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write or \
+     delete them — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session.";
 
 /// The deny for a write, link or rename that resolves to an anchor.
@@ -622,6 +701,10 @@ fn unplaceable_reason(what: UnplaceableWrite) -> String {
          cannot tell whether the write lands on a trust anchor. {REMEDY}"
     )
 }
+
+// #8878 Q2 delete ruling and its PM/agent split: `Anchors::judge_delete`.
+#[path = "pm_guard_trust_anchor_delete.rs"]
+mod delete;
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]

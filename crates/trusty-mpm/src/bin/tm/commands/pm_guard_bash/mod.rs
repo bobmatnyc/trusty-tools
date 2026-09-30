@@ -91,6 +91,10 @@ mod worktree_remove_rechecks;
 mod write_targets;
 // #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
 mod anchor_verbs;
+// #8878 round 2: the program lookup `anchor_verbs` reads.
+mod anchor_program;
+// #8878 Q2 delete ruling: `rm`, `rmdir`, `find -delete` and kin are anchor writes.
+mod anchor_deletes;
 // #8902: the Architect pane floor — no tmux verb aimed at the Architect's pane.
 mod architect_pane;
 mod architect_pane_env;
@@ -106,7 +110,7 @@ mod floor_d4;
 mod floor_d4_rules;
 mod force_push;
 
-pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
+pub(crate) use anchor_verbs::{AnchorWrite, Reach, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_command};
 pub(crate) use floor_d4::evaluate_d4_floor;

@@ -19,23 +19,29 @@
 //! tokenize, and a Q2 write run by `xargs` (which appends operands the guard
 //! never sees), is an [`UnplaceableWrite`]; the one exception is `xargs cp -t
 //! DIR` / `install -t DIR`, which is [`AnchorWrite::IntoUnnamed`].
+//! #8878 Q2 delete ruling: a delete verb (`rm`, `rmdir`, `unlink`, `shred`,
+//! `truncate`, a deleting `find`) is read by [`super::anchor_deletes`]; run by
+//! `xargs` it is an [`AnchorWrite::UnseenDelete`], which denies the PM only.
+//! #8878 round 2: the program is placed by [`super::anchor_program`] — past
+//! reserved words and measured wrapper options, with brace groups expanded.
 //! Option values: a short option whose value differs between GNU and BSD
 //! (`install -S`, `sed -l`) is read as taking none. A misread value only adds
 //! an operand; consuming a word that is not a value would drop the destination.
 //! Residual: writers outside Q2 — `dd of=`, `rsync`, `curl -o`, `sed`'s `w`
-//! command, interpreters, `find -exec cp` — are not read here; the
+//! command, interpreters — are not read here; the
 //! script-file case is #8879.
 //! Test: `pm_guard_trust_anchor_tests.rs` (`bash_write_shapes_onto_the_anchor_are_denied`,
 //! `a_link_or_rename_source_on_an_anchor_is_denied`,
 //! `bsd_install_s_and_sed_l_keep_their_operands`,
 //! `a_q2_verb_through_xargs_is_denied`, `reads_and_other_writes_stay_allowed`).
 
-use super::bash_tokens::{RedirectRole, redirect_role, tokenize};
-use super::heredoc::split_heredoc_bodies;
+use super::anchor_deletes::{DeleteVerb, delete_verb_of, delete_writes, find_deletes};
+use super::anchor_program::{expand_braces, program_argv, quote_escaped_semicolons};
+use super::bash_tokens::{RedirectRole, redirect_role};
 use super::write_targets::{
     UnplaceableWrite, input_redirect, segment_write_targets, shell_segments_map,
 };
-use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
+use crate::commands::program_word::resolve_program_word;
 
 /// One write a command makes, for the trust-anchor rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,17 +67,61 @@ pub(crate) enum AnchorWrite {
     /// A directory receiving entries whose names the command does not show
     /// (`xargs cp -t DIR`).
     IntoUnnamed(String),
+    /// A shell word a delete verb removes (#8878 Q2 delete ruling), and how
+    /// far the removal reaches.
+    Delete(String, Reach),
+    /// A delete whose operands the guard never sees (`xargs rm`). #8878 owner
+    /// ruling "Keep the split": denied to the PM only.
+    UnseenDelete(UnplaceableWrite),
     /// A `cd`, `pushd` or `popd`: relative paths no longer name the hook cwd.
     DirChange,
 }
 
-/// A verb segment the guard could not lex (#8878).
-const UNLEXABLE_VERB: UnplaceableWrite =
-    "a `cp`/`mv`/`ln`/`install`/`sed`/`cd` whose arguments do not lex";
+/// How far a [`AnchorWrite::Delete`] reaches (#8878 owner ruling "Keep the
+/// split"). The PM is judged on every reach alike; an agent only where the
+/// delete reaches a real anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reach {
+    /// The entry and everything below it (`rm`, `rmdir`, `unlink`, `shred`,
+    /// `truncate`): a directory above an anchor counts for every session.
+    Entry,
+    /// A parent `rmdir -p` removes only when empty: judged for the PM only.
+    Parent,
+    /// A `find` start point, deleted under by the expression: a start point
+    /// above an anchor counts for the PM only.
+    Tree,
+}
+
+impl AnchorWrite {
+    /// The one shell word this write names, when it names exactly one.
+    pub(crate) fn shell_word(&self) -> Option<&str> {
+        match self {
+            Self::File(w) | Self::Source(w) | Self::IntoUnnamed(w) | Self::Delete(w, _) => Some(w),
+            _ => None,
+        }
+    }
+
+    /// This write with its [`Self::shell_word`] replaced by `word`.
+    pub(crate) fn with_word(&self, word: String) -> Self {
+        match self {
+            Self::File(_) => Self::File(word),
+            Self::Source(_) => Self::Source(word),
+            Self::IntoUnnamed(_) => Self::IntoUnnamed(word),
+            Self::Delete(_, reach) => Self::Delete(word, *reach),
+            other => other.clone(),
+        }
+    }
+}
 
 /// A Q2 write run by `xargs` (#8878 finding 4).
 const XARGS_WRITE: UnplaceableWrite = "a `cp`/`mv`/`ln`/`install`/`sed -i` run by `xargs`, \
      which appends operands the guard never sees";
+
+/// A delete verb run by `xargs` (#8878 Q2 delete ruling). The PM-only deny
+/// names the workaround (#8878 round 2).
+const XARGS_DELETE: UnplaceableWrite = "an `rm`/`rmdir`/`unlink`/`shred`/`truncate`/`find` \
+     delete run by `xargs`, which appends operands the guard never sees (delete with \
+     `find DIR … -delete`, or name the paths literally)";
 
 /// The verbs this module reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +141,7 @@ enum Verb {
 /// Test: `bash_write_shapes_onto_the_anchor_are_denied`,
 /// `an_unplaceable_write_is_denied`.
 pub(crate) fn anchor_writes(command: &str) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
-    shell_segments_map(command, &segment_anchor_writes)
+    shell_segments_map(&quote_escaped_semicolons(command), &segment_anchor_writes)
 }
 
 /// [`anchor_writes`] for ONE segment.
@@ -100,59 +150,54 @@ fn segment_anchor_writes(segment: &str) -> Result<Vec<AnchorWrite>, UnplaceableW
         .into_iter()
         .map(AnchorWrite::File)
         .collect();
-    let Some((argv, at)) = program_argv(segment)? else {
+    let Some(program) = program_argv(segment)? else {
         return Ok(out);
     };
-    if is_xargs(&argv[at]) {
-        out.extend(xargs_writes(&argv[at + 1..])?);
-        return Ok(out);
+    // #8878 round 2: `env -C DIR` / `sudo -D DIR` move the directory like a `cd`.
+    if program.chdir {
+        out.push(AnchorWrite::DirChange);
     }
-    let Some(verb) = verb_of(&argv[at]) else {
-        return Ok(out);
-    };
-    let args = operands(&argv[at + 1..]);
-    match verb {
-        Verb::Cd => out.push(AnchorWrite::DirChange),
-        Verb::Sed => out.extend(
-            sed_edits(&args)
-                .unwrap_or_default()
-                .into_iter()
-                .map(AnchorWrite::File),
-        ),
-        copy => out.extend(copy_writes(copy, &args)),
+    for at in program.candidates {
+        out.extend(program_writes(&program.argv, at)?);
     }
     Ok(out)
 }
 
-/// The segment's words and the index of the program they run.
-///
-/// What: tokenizes with here-document bodies blanked and finds the program
-/// past env assignments and wrappers ([`strip_wrapper_prefix`]) — or, when a
-/// wrapper takes a flag, the first verb or `xargs` word. A segment that does
-/// not tokenize is `Err` when its plain first word is a verb or `xargs`, and
-/// `None` otherwise.
-fn program_argv(segment: &str) -> Result<Option<(Vec<String>, usize)>, UnplaceableWrite> {
-    let argv = match tokenize(&split_heredoc_bodies(segment).0) {
-        Ok(argv) => argv,
-        Err(_)
-            if first_command_token(segment)
-                .as_deref()
-                .is_some_and(|word| verb_of(word).is_some() || is_xargs(word)) =>
-        {
-            return Err(UNLEXABLE_VERB);
-        }
-        Err(_) => return Ok(None),
+/// The writes of the program at `argv[at]`.
+fn program_writes(argv: &[String], at: usize) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
+    // #8878 H3: the shell expands brace groups before the verb reads its argv.
+    let tail = expand_braces(&argv[at + 1..]);
+    if is_xargs(&argv[at]) {
+        return xargs_writes(&tail);
+    }
+    // #8878 Q2 delete ruling: a delete is an anchor write.
+    if let Some(verb) = delete_verb_of(&argv[at]) {
+        return delete_writes(verb, &operands(&tail));
+    }
+    let Some(verb) = verb_of(&argv[at]) else {
+        return Ok(Vec::new());
     };
-    let at = strip_wrapper_prefix(&argv).or_else(|| {
-        argv.iter()
-            .position(|word| verb_of(word).is_some() || is_xargs(word))
-    });
-    Ok(at.filter(|at| *at < argv.len()).map(|at| (argv, at)))
+    let args = operands(&tail);
+    Ok(match verb {
+        Verb::Cd => vec![AnchorWrite::DirChange],
+        Verb::Sed => sed_edits(&args)
+            .unwrap_or_default()
+            .into_iter()
+            .map(AnchorWrite::File)
+            .collect(),
+        copy => copy_writes(copy, &args),
+    })
 }
 
-/// A program word's basename, a leading `\` dropped.
+/// Whether a program word is one this module reads: a [`Verb`], `xargs`, or
+/// (#8878 Q2 delete ruling) a [`delete_verb_of`] verb.
+pub(super) fn names_a_verb(word: &str) -> bool {
+    verb_of(word).is_some() || is_xargs(word) || delete_verb_of(word).is_some()
+}
+
+/// A program word's basename, a leading `\` or zsh `=` dropped (#8878 round 2).
 fn program_name(word: &str) -> &str {
-    let word = word.strip_prefix('\\').unwrap_or(word);
+    let word = word.strip_prefix(['\\', '=']).unwrap_or(word);
     word.rsplit('/').next().unwrap_or(word)
 }
 
@@ -204,6 +249,9 @@ fn operands(words: &[String]) -> Vec<String> {
 /// [`XARGS_WRITE`]: its destination, files or sources arrive on stdin.
 /// Test: `a_q2_verb_through_xargs_is_denied`.
 fn xargs_writes(tail: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
+    if let Some(deletes) = xargs_deletes(tail)? {
+        return Ok(deletes);
+    }
     let Some((at, verb)) = tail
         .iter()
         .enumerate()
@@ -232,6 +280,52 @@ fn xargs_writes(tail: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
         }
         _ => Err(XARGS_WRITE),
     }
+}
+
+/// The writes of a delete verb `xargs` runs, or `None` when it runs none
+/// (#8878 Q2 delete ruling).
+///
+/// What: the program word as the #8735 resolver reads `xargs` and its
+/// wrappers. The operands the command shows are judged as deletes for every
+/// session, and an [`AnchorWrite::UnseenDelete`] stands for those stdin adds
+/// (#8878 owner ruling "Keep the split": the PM is denied it, an agent is
+/// not). A `find` is unseen only when its expression deletes. When the
+/// resolver cannot measure an option, every delete-verb word is read as the
+/// program and any one makes the delete unseen (fail closed).
+/// Test: `an_unplaceable_delete_is_denied`, `ordinary_deletes_stay_allowed`,
+/// `expansion_and_xargs_deletes_are_denied_to_the_pm_only`.
+fn xargs_deletes(tail: &[String]) -> Result<Option<Vec<AnchorWrite>>, UnplaceableWrite> {
+    let argv: Vec<&str> = std::iter::once("xargs")
+        .chain(tail.iter().map(String::as_str))
+        .collect();
+    // `argv[i]` is `tail[i - 1]`, so the program at `argv[i]` has operands `tail[i..]`.
+    let resolved = resolve_program_word(&argv);
+    let programs: Vec<(usize, DeleteVerb)> = match resolved {
+        Ok(word) => argv
+            .get(word.index)
+            .and_then(|w| delete_verb_of(w))
+            .map(|verb| (word.index, verb))
+            .into_iter()
+            .collect(),
+        // #8878: the resolver's `Err` arm fails closed.
+        Err(_) => (1..argv.len())
+            .filter_map(|i| delete_verb_of(argv[i]).map(|verb| (i, verb)))
+            .collect(),
+    };
+    if programs.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    let mut unseen = false;
+    for (at, verb) in programs {
+        let args = operands(&tail[at..]);
+        unseen |= verb != DeleteVerb::Find || resolved.is_err() || find_deletes(&args);
+        out.extend(delete_writes(verb, &args)?);
+    }
+    if unseen {
+        out.push(AnchorWrite::UnseenDelete(XARGS_DELETE));
+    }
+    Ok(Some(out))
 }
 
 /// A `cp`/`mv`/`ln`/`install` argv with its options read.
