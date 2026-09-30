@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use super::manager::SessionManager;
+use super::manager::{ManagedError, SessionManager};
 use super::record::ManagedSessionState;
 
 /// Grace window given to each session between signal and tmux kill.
@@ -57,18 +57,26 @@ impl SessionManager {
     /// PID via a single [`crate::core::process::find_claude_pid_in_tmux`] probe
     /// (one attempt — at shutdown we do not retry); awaits the grace window once;
     /// calls `graceful_stop(name, pid)` per session, failing open. Logs a summary.
-    /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs.
+    /// #8942: live protected-kind records, and names the kill floor refuses,
+    /// are left out.
+    /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs;
+    /// `shutdown_skips_a_supervisor_session`.
     pub async fn shutdown(&self) {
         let records = self.list().await;
         // Only stop sessions that have a live runtime: Active and Provisioning.
         // Stopped, Errored, and Decommissioned sessions have no running process.
+        // #8942: the Architect's sessions are left out, and so is any name the
+        // floor cannot clear.
         let live: Vec<_> = records
             .into_iter()
             .filter(|r| {
                 matches!(
                     r.state,
                     ManagedSessionState::Active | ManagedSessionState::Provisioning
-                )
+                ) && !super::supervisor::skip_protected(r, "shutdown")
+                    && self
+                        .kill_gate(&r.tmux_name, "SessionManager::shutdown")
+                        .is_ok()
             })
             .collect();
 
@@ -133,25 +141,39 @@ impl SessionManager {
     /// caller still needs to mark the record `Stopped` / decommissioned even when
     /// the runtime was already gone. Uses `tokio::time::sleep` — never a blocking
     /// `std::thread::sleep` — so it does not starve the Tokio thread pool.
+    /// #8942 (critic HIGH): the one failure that IS returned is a kill-floor
+    /// refusal, [`ManagedError::KillRefused`] — from [`Self::kill_gate`] under
+    /// `caller`'s name before any signal, or from the driver's own floor at the
+    /// kill — so the caller aborts before it removes a workspace or moves the
+    /// record.
     /// Test: `graceful_terminate_runtime_signals_then_kills` in tests.rs (fake
     /// driver records a Ctrl-C then a kill); exercised end-to-end by
-    /// `manager_stop_keeps_workspace` and `manager_decommission_removes_workspace`.
-    pub(crate) async fn graceful_terminate_runtime(&self, tmux_name: &str) {
+    /// `manager_stop_keeps_workspace` and `manager_decommission_removes_workspace`;
+    /// the refusal by `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    pub(crate) async fn graceful_terminate_runtime(
+        &self,
+        tmux_name: &str,
+        caller: &str,
+    ) -> Result<(), ManagedError> {
         // Fast-path: nothing to drain if the pane is already gone. Skips the grace
         // sleep entirely so callers looping over dead sessions (e.g. prune-idle) do
         // not pay SIGTERM_GRACE_SECS per already-terminated session.
         if !self.tmux.session_exists(tmux_name) {
-            return;
+            return Ok(());
         }
+        self.kill_gate(tmux_name, caller)?;
         let pid =
             crate::core::process::find_claude_pid_in_tmux(tmux_name, 1, Duration::from_millis(0));
         self.tmux.signal_terminate(tmux_name, pid);
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
-        if let Err(e) = self.tmux.kill_session(tmux_name) {
-            warn!(
+        match self.tmux.kill_session(tmux_name) {
+            Err(refused @ ManagedError::KillRefused(_)) => return Err(refused),
+            Err(e) => warn!(
                 name = %tmux_name,
                 "graceful_terminate_runtime: kill_session failed (may already be gone): {e}"
-            );
+            ),
+            Ok(()) => {}
         }
+        Ok(())
     }
 }

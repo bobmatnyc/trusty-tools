@@ -332,7 +332,15 @@ impl SessionManager {
         // #5856: `flatten` yields nothing when liveness was never observed, so
         // an unreachable tmux adopts no external session either.
         let mut newly_resolved: Vec<(ManagedSessionId, PathBuf)> = Vec::new();
+        // #8942: a pane an Architect sidecar names is adopted as the
+        // Architect's; with unreadable sidecars no pane is adopted this pass.
+        let sidecars = self.kill_floor().sidecar_names();
+        if let Err(why) = &sidecars {
+            warn!("reconcile: external adoption skipped this pass (#8942) — {why}");
+        }
         for name in live_names.iter().flatten() {
+            let Ok(sidecars) = &sidecars else { break };
+            let role = super::SupervisorFloor::sidecar_role(sidecars, name);
             if known_names.contains(name) {
                 continue;
             }
@@ -403,7 +411,10 @@ impl SessionManager {
             // is a pre-loop snapshot, and a concurrent adopter holding its own
             // stale copy would otherwise write a SECOND record for this pane
             // under a fresh id. Same name, same store key, one record.
-            let id = ManagedSessionId::for_adopted_tmux_name(name);
+            let id = match role {
+                Some(r) => ManagedSessionId::for_supervisor(&canon, r.role),
+                None => ManagedSessionId::for_adopted_tmux_name(name),
+            };
             let external = SessionRecord {
                 id,
                 tmux_name: name.clone(),
@@ -445,9 +456,12 @@ impl SessionManager {
                 worktree_owner: None,
                 terminal_at: None,
                 stop_cause: None,
-                kind: super::SessionKind::Ordinary,
+                kind: role.map_or(super::SessionKind::Ordinary, |r| r.kind),
             };
-            newly_resolved.push((id, resolved_cwd));
+            // #8942: the Architect's directory is `tm fleet init`'s to repair.
+            if role.is_none() {
+                newly_resolved.push((id, resolved_cwd));
+            }
             guard.upsert(external).await?;
             report.external_adopted.push(name.clone());
             info!(name = %name, "reconcile: adopted external managed session");

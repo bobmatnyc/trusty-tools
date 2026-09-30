@@ -10,7 +10,8 @@ use std::sync::Arc;
 use super::{KillVerdict, SupervisorFloor};
 use crate::daemon::tmux::TmuxDriver;
 use crate::session_manager::{
-    ManagedSessionId, ManagedSessionState, RealTmuxDriver, SessionManager, SessionRecord,
+    ManagedError, ManagedSessionId, ManagedSessionState, RealTmuxDriver, SessionKind,
+    SessionManager, SessionRecord, SidecarRole,
 };
 
 /// A scratch `~/.trusty-mpm` root with helpers for sidecars and the store.
@@ -37,26 +38,28 @@ impl Scratch {
     fn sidecar(&self, pid: u32, session: &str) {
         let dir = self.root().join("architect-launch");
         std::fs::create_dir_all(&dir).expect("sidecar dir");
-        let body = format!(r#"{{"pid":{pid},"start_time":1,"session":"{session}"}}"#);
-        std::fs::write(dir.join(format!("{pid}.architect-session")), body).expect("sidecar");
+        let body = serde_json::json!({"pid": pid, "start_time": 1, "session": session});
+        std::fs::write(
+            dir.join(format!("{pid}.architect-session")),
+            body.to_string(),
+        )
+        .expect("sidecar");
     }
 
     /// Write the store with one record per `(tmux_name, state, kind)`.
     fn store(&self, records: &[(&str, &str, &str)]) {
         let dir = self.root().join("session-manager");
         std::fs::create_dir_all(&dir).expect("store dir");
-        let body: Vec<String> = records
+        let sessions: serde_json::Map<String, serde_json::Value> = records
             .iter()
             .map(|(name, state, kind)| {
-                let id = ManagedSessionId::new();
-                format!(
-                    r#""{id}":{}"#,
-                    record_json(&id.to_string(), name, state, kind)
-                )
+                let id = ManagedSessionId::new().to_string();
+                let record = record_json(&id, name, state, kind);
+                (id, record)
             })
             .collect();
-        let raw = format!(r#"{{"sessions":{{{}}}}}"#, body.join(","));
-        std::fs::write(dir.join("sessions.json"), raw).expect("store");
+        let raw = serde_json::json!({ "sessions": sessions });
+        std::fs::write(dir.join("sessions.json"), raw.to_string()).expect("store");
     }
 
     /// A fake tmux that logs every argv line to `calls.log` and lists
@@ -76,16 +79,16 @@ impl Scratch {
     }
 }
 
-/// One persisted record; `kind` is spliced raw, `""` omits it.
-fn record_json(id: &str, name: &str, state: &str, kind: &str) -> String {
-    let kind = if kind.is_empty() {
-        String::new()
-    } else {
-        format!(r#","kind":"{kind}""#)
-    };
-    format!(
-        r#"{{"id":"{id}","task":"t","tmux_name":"{name}","cwd":"/tmp","state":"{state}","created_at":"2026-09-30T00:00:00Z"{kind}}}"#
-    )
+/// One persisted record; `""` omits `kind`.
+fn record_json(id: &str, name: &str, state: &str, kind: &str) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "id": id, "task": "t", "tmux_name": name, "cwd": "/tmp", "state": state,
+        "created_at": "2026-09-30T00:00:00Z",
+    });
+    if !kind.is_empty() {
+        record["kind"] = serde_json::json!(kind);
+    }
+    record
 }
 
 /// Every argv the fake tmux was run with, one line per call.
@@ -241,8 +244,10 @@ fn an_unrelated_name_is_permitted() {
 }
 
 /// #8935 repro: a stale ORDINARY record that carries the Architect's tmux
-/// name is stopped. The record goes to `Stopped`, but neither the signal
-/// (`send-keys` C-c, since no pid resolves) nor the kill reaches the pane.
+/// name is stopped. Neither the signal (`send-keys` C-c, since no pid
+/// resolves) nor the kill reaches the pane; the driver's typed refusal comes
+/// back through `graceful_terminate_runtime`, and the record stays `Active`
+/// (critic HIGH).
 #[serial_test::serial]
 #[tokio::test]
 async fn stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar() {
@@ -259,17 +264,19 @@ async fn stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sid
     .expect("manager");
     let id = ManagedSessionId::new();
     let stale: SessionRecord =
-        serde_json::from_str(&record_json(&id.to_string(), "tm-arch", "active", ""))
+        serde_json::from_value(record_json(&id.to_string(), "tm-arch", "active", ""))
             .expect("stale record");
     mgr.store.write().await.upsert(stale).await.expect("seed");
 
     // Every tmux resolution inside the stop, including the pid probe, goes to
     // the fake, so nothing here can reach a real server.
-    let stopped = crate::core::tmux::with_tmux_binary(PathBuf::from(&bin), mgr.stop(&id))
+    let err = crate::core::tmux::with_tmux_binary(PathBuf::from(&bin), mgr.stop(&id))
         .await
-        .expect("the record-level stop still succeeds");
+        .expect_err("the refused kill aborts the stop");
 
-    assert_eq!(stopped.state, ManagedSessionState::Stopped);
+    assert!(matches!(err, ManagedError::KillRefused(_)), "{err}");
+    let after = mgr.get(&id).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
     let calls = calls(&log);
     assert!(
         !calls.contains("send-keys"),
@@ -283,4 +290,46 @@ async fn stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sid
         calls.contains("list-sessions"),
         "the fake was reached: {calls}"
     );
+}
+
+/// A manager's floor reads the sidecars in the framework root above its
+/// `session-manager` store directory, and the store inside it; any other
+/// directory is its own root.
+#[test]
+fn for_data_dir_reads_the_framework_root_above_the_store() {
+    let s = Scratch::new();
+    s.sidecar(111, "tm-arch");
+    s.store(&[("tm-sup", "active", "supervisor")]);
+    let floor = SupervisorFloor::for_data_dir(&s.root().join("session-manager"));
+    for name in ["tm-arch", "tm-sup"] {
+        let v = floor.verdict(name);
+        assert!(is_protected(&v), "{name}: {v:?}");
+    }
+    let elsewhere = SupervisorFloor::for_data_dir(&s.dir.path().join("data"));
+    assert_eq!(elsewhere.verdict("tm-arch"), KillVerdict::Permit);
+}
+
+/// A sidecar name is the Architect; its `-poll`/`-collector` names are its
+/// helpers, each with its own id role; nothing else is either.
+#[test]
+fn a_sidecar_names_the_architect_and_its_helpers() {
+    let s = Scratch::new();
+    s.sidecar(111, "tm-arch");
+    let names = s.floor().sidecar_names().expect("sidecars read");
+    let role = |name| SupervisorFloor::sidecar_role(&names, name);
+    let expect = |kind, role| Some(SidecarRole { kind, role });
+    assert_eq!(
+        role("tm-arch"),
+        expect(SessionKind::Supervisor, "supervisor")
+    );
+    assert_eq!(
+        role("tm-arch-poll"),
+        expect(SessionKind::SupervisorAux, "-poll")
+    );
+    assert_eq!(
+        role("tm-arch-collector"),
+        expect(SessionKind::SupervisorAux, "-collector")
+    );
+    assert_eq!(role("tm-arch-other"), None);
+    assert_eq!(role("tm-work"), None);
 }

@@ -28,6 +28,7 @@ use super::git_ceiling::bounded_git_output;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
+use super::supervisor::{ProtectedVerb, refuse_protected};
 use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_ignored_output::ignored_output_blocks_removal;
 use super::worktree_protection;
@@ -856,6 +857,9 @@ impl SessionManager {
         caller: Option<ManagedSessionId>,
         id: &ManagedSessionId,
     ) -> Result<(), ManagedError> {
+        // #8942: both decommission paths start here, so the Architect's live
+        // record is refused before either one does anything.
+        refuse_protected(record, ProtectedVerb::Decommission)?;
         if let Some(caller_id) = caller
             && let Some(owner) = self.known_owner_of(record)
             && owner != caller_id
@@ -1035,6 +1039,11 @@ impl SessionManager {
     /// `check_foreign_claim` gates ONLY `check_no_foreign_active_claim`
     /// (#3764) — every other guard (the #3649 owner gate, containment, dirty
     /// checks) still runs regardless.
+    ///
+    /// #8942: a live protected-kind record is refused first, and a kill-floor
+    /// refusal at the runtime teardown aborts before any removal or record
+    /// write. Test: `prune_include_active_never_decommissions_a_supervisor_record`,
+    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
     async fn decommission_with_root_checked(
         &self,
         id: &ManagedSessionId,
@@ -1096,7 +1105,9 @@ impl SessionManager {
         // this name. Acceptable here, where teardown is the caller's stated
         // intent; never acceptable on a listing sweep, which is why the
         // record-only path is a separate function rather than a flag.
-        self.graceful_terminate_runtime(&record.tmux_name).await;
+        // #8942: a kill-floor refusal aborts before effects 2–3.
+        self.graceful_terminate_runtime(&record.tmux_name, "decommission")
+            .await?;
 
         // Effects 2–3. Guard: only remove the workspace directory if the SM
         // provisioned it. Track whether remove_dir_all ACTUALLY RAN (not

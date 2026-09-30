@@ -104,7 +104,13 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.apply_scrollback_options();
     }
 
+    /// #8942: the floor's refusal comes back typed, as
+    /// [`ManagedError::KillRefused`], so a teardown aborts on it.
     fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        let floor = self.driver.supervisor_floor();
+        if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session") {
+            return Err(ManagedError::KillRefused(why));
+        }
         self.driver
             .kill_session(name)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))

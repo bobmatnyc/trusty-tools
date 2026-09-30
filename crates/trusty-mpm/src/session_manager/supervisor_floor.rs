@@ -12,12 +12,30 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::architect_session::recorded_session_names;
+use crate::core::architect_session::{POLL_SUFFIX, recorded_session_names};
 
+use super::session_kind::SessionKind;
 use super::store_integrity;
 
 /// The suffixes of the Architect's helper sessions (`<name>-poll`, …).
-const AUX_SUFFIXES: [&str; 2] = ["-poll", "-collector"];
+const AUX_SUFFIXES: [&str; 2] = [POLL_SUFFIX, "-collector"];
+
+/// The role string [`SidecarRole`] gives the Architect's own session.
+pub const SUPERVISOR_ROLE: &str = "supervisor";
+
+/// What an Architect launch sidecar makes of one tmux name (#8942).
+///
+/// What: the record kind, and the role [`super::ManagedSessionId::for_supervisor`]
+/// keys the stable id on — [`SUPERVISOR_ROLE`] for the Architect, the helper
+/// suffix (`-poll`, `-collector`) for a helper.
+/// Test: `a_sidecar_names_the_architect_and_its_helpers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidecarRole {
+    /// `Supervisor` or `SupervisorAux`.
+    pub kind: SessionKind,
+    /// The id role; see the type doc.
+    pub role: &'static str,
+}
 
 /// Whether a kill-by-name may proceed (#8942).
 ///
@@ -67,9 +85,13 @@ impl SupervisorFloor {
     ///
     /// Why: `tm fleet init` writes the sidecars under the home root, and the
     /// daemon's store lives there too; the pane guard reads the same root.
-    /// What: [`Self::from_home`] of `dirs::home_dir()`. In a unit-test build it
-    /// is unguarded instead, so no test reads the operator's real state.
-    /// Test: `a_missing_or_relative_home_is_undeterminable` covers `from_home`.
+    /// What: [`Self::from_home`] of `dirs::home_dir()`. In the lib's own
+    /// `cfg(test)` build it is unguarded instead, so no unit test reads the
+    /// operator's real state. The `tm` bin tests and `tests/*.rs` link the lib
+    /// without `cfg(test)`, so there it reads `$HOME`: a test there that
+    /// reaches a kill must point `$HOME` at a scratch directory.
+    /// Test: `the_host_floor_reads_the_sidecars_under_home` (`tests/`);
+    /// `a_missing_or_relative_home_is_undeterminable` covers `from_home`.
     pub fn host() -> Self {
         #[cfg(test)]
         {
@@ -113,6 +135,70 @@ impl SupervisorFloor {
         }
     }
 
+    /// The floor a session manager with store directory `data_dir` kills under.
+    ///
+    /// Why: the manager's teardown gate must read the same sidecars and store
+    /// as the host floor in production, and a test manager's scratch
+    /// directory, never the operator's home, in a test.
+    /// What: the store is `data_dir/sessions.json`. The sidecar root is
+    /// `data_dir`'s parent when `data_dir` is named `session-manager` (the
+    /// daemon's `<framework root>/session-manager`), else `data_dir` itself.
+    /// Test: `for_data_dir_reads_the_framework_root_above_the_store`.
+    pub fn for_data_dir(data_dir: &Path) -> Self {
+        let root = match data_dir.parent() {
+            Some(parent) if data_dir.file_name() == Some("session-manager".as_ref()) => parent,
+            _ => data_dir,
+        };
+        Self {
+            source: FloorSource::Root {
+                root: root.to_path_buf(),
+                store: data_dir.join("sessions.json"),
+            },
+        }
+    }
+
+    /// Every session name an Architect launch sidecar records.
+    ///
+    /// Why: boot reconcile reads the list once per pass, then asks
+    /// [`Self::sidecar_role`] per pane.
+    /// What: `recorded_session_names` of the root; `Err` when it fails or
+    /// there is no home. An unguarded test floor records nothing.
+    /// Test: `a_sidecar_names_the_architect_and_its_helpers`.
+    pub fn sidecar_names(&self) -> Result<Vec<String>, String> {
+        match &self.source {
+            FloorSource::Root { root, .. } => {
+                recorded_session_names(root).map_err(|why| format!("architect sidecars: {why}"))
+            }
+            FloorSource::NoHome => Err("no absolute home directory".into()),
+            #[cfg(test)]
+            FloorSource::Unguarded => Ok(Vec::new()),
+        }
+    }
+
+    /// The role `sidecars` give tmux session `name`, if any.
+    ///
+    /// What: `Supervisor` when a sidecar records `name`; `SupervisorAux` when
+    /// `name` is a recorded name plus `-poll` or `-collector`; else `None`.
+    /// Test: `a_sidecar_names_the_architect_and_its_helpers`.
+    pub fn sidecar_role(sidecars: &[String], name: &str) -> Option<SidecarRole> {
+        for recorded in sidecars {
+            if name == recorded {
+                return Some(SidecarRole {
+                    kind: SessionKind::Supervisor,
+                    role: SUPERVISOR_ROLE,
+                });
+            }
+            let suffix = name.strip_prefix(recorded.as_str());
+            if let Some(aux) = AUX_SUFFIXES.iter().find(|s| suffix == Some(**s)) {
+                return Some(SidecarRole {
+                    kind: SessionKind::SupervisorAux,
+                    role: aux,
+                });
+            }
+        }
+        None
+    }
+
     /// Whether tmux session `name` may be killed or signalled.
     ///
     /// Why: #8942, fail closed — "cannot tell" never becomes "not the
@@ -129,25 +215,20 @@ impl SupervisorFloor {
     /// `kill_by_name_fails_closed_when_architect_sidecars_cannot_be_read`,
     /// `an_unreadable_store_is_undeterminable`, `an_unrelated_name_is_permitted`.
     pub fn verdict(&self, name: &str) -> KillVerdict {
-        let (root, store) = match &self.source {
-            FloorSource::Root { root, store } => (root, store),
+        let store = match &self.source {
+            FloorSource::Root { store, .. } => store,
             FloorSource::NoHome => {
                 return KillVerdict::Undeterminable("no absolute home directory".into());
             }
             #[cfg(test)]
             FloorSource::Unguarded => return KillVerdict::Permit,
         };
-        let sidecars = match recorded_session_names(root) {
+        let sidecars = match self.sidecar_names() {
             Ok(names) => names,
-            Err(why) => return KillVerdict::Undeterminable(format!("architect sidecars: {why}")),
+            Err(why) => return KillVerdict::Undeterminable(why),
         };
-        for recorded in &sidecars {
-            let aux = AUX_SUFFIXES
-                .iter()
-                .any(|s| name == format!("{recorded}{s}"));
-            if name == recorded || aux {
-                return KillVerdict::Protected(format!("architect sidecar names `{recorded}`"));
-            }
+        if let Some(role) = Self::sidecar_role(&sidecars, name) {
+            return KillVerdict::Protected(format!("an architect sidecar makes `{name}` {role:?}"));
         }
         match protected_record(store, name) {
             Ok(Some(why)) => KillVerdict::Protected(why),

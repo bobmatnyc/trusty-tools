@@ -634,8 +634,6 @@ fn decommission_outcome_keeps_unmodelled_daemon_fields() {
     }
 }
 
-/// #2595: `unresumable` must round-trip when present, and default `false`
-/// (never spuriously flag a session dead) when an older daemon omits it.
 #[test]
 fn managed_session_summary_carries_the_kind() {
     use crate::session_manager::SessionKind;
@@ -657,6 +655,8 @@ fn managed_session_summary_carries_the_kind() {
     assert_eq!(s.kind, None);
 }
 
+/// #2595: `unresumable` must round-trip when present, and default `false`
+/// (never spuriously flag a session dead) when an older daemon omits it.
 #[test]
 fn managed_session_summary_deserializes_unresumable_flag() {
     let with_flag = serde_json::json!({
