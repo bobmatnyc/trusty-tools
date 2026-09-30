@@ -140,11 +140,16 @@ fn shell_quote(path: &Path) -> String {
 
 /// The remedy for one stale plist, with its real path quoted for the shell.
 ///
-/// Test: `remedy_quotes_a_path_with_a_space`.
+/// What: #8562 — the supported `tm doctor --fix --yes` first, which rewrites
+/// the file for the next restart; then the manual commands, which also reload
+/// the job now.
+/// Test: `remedy_quotes_a_path_with_a_space`,
+/// `background_supervisor_plist_fails`.
 fn remedy(path: &Path) -> String {
     let p = shell_quote(path);
     format!(
-        "`plutil -replace ProcessType -string {EXPECTED_PROCESS_TYPE} {p}`, then \
+        "`tm doctor --fix --yes` (applies at the next daemon restart), or by hand \
+         `plutil -replace ProcessType -string {EXPECTED_PROCESS_TYPE} {p}`, then \
          `launchctl bootout gui/$(id -u) {p}` and `launchctl bootstrap gui/$(id -u) {p}`"
     )
 }
@@ -332,6 +337,14 @@ pub(crate) fn check_launchd_process_type_in(dir: &AgentsDir) -> DoctorCheck {
     row
 }
 
+// #8562: the supported write path for this row, run by `tm doctor --fix`.
+#[path = "doctor_launchd_process_type_repair.rs"]
+pub mod repair;
+
 #[cfg(test)]
 #[path = "doctor_launchd_process_type_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "doctor_launchd_process_type_repair_tests.rs"]
+mod repair_tests;

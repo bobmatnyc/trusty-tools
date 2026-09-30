@@ -180,7 +180,9 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`), the LaunchAgent credential strip
-/// (`launchd_secrets`, #8236), the opt-in `Notification` entry
+/// (`launchd_secrets`, #8236), the `ProcessType=Interactive` plist write
+/// (`launchd_process_type`, #8562 — file only, applies at the next daemon
+/// restart), the opt-in `Notification` entry
 /// (`notification_hook`, #8392), and the ownership-marker move into the git
 /// admin dir across every registered project (`worktree_markers`, #8511) — printing each item's path, what would change,
 /// and the outcome. In dry run it closes by naming the flag that applies. It
@@ -298,6 +300,14 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // the entry does not un-expose the value, so each step says to rotate.
         steps.extend(
             trusty_mpm::daemon::doctor_launchd_secrets_repair::repair_launchd_plist_secrets(
+                &home, mode,
+            ),
+        );
+        // #8562: set ProcessType=Interactive in the daemon and supervisor
+        // plists. The file only — launchd is never reloaded, so each step says
+        // it applies at the next daemon restart (owner ruling 2026-09-28).
+        steps.extend(
+            trusty_mpm::daemon::doctor_launchd_process_type::repair::repair_launchd_process_type(
                 &home, mode,
             ),
         );
