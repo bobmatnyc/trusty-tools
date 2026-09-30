@@ -140,8 +140,7 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.4", default-
 # per-palace subprocess never ran in any shipped configuration, and its index is
 # now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
-# daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
-# because it owns Tauri's build.rs and tauri.conf.json.
+# daemon,cli,tui,telegram} sub-crates).
 trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose

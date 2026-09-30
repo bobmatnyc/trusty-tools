@@ -16,7 +16,6 @@ The source of truth for changes to any crate is its own CHANGELOG:
 | **trusty-review** | [crates/trusty-review/CHANGELOG.md](crates/trusty-review/CHANGELOG.md) |
 | **trusty-common** | [crates/trusty-common/CHANGELOG.md](crates/trusty-common/CHANGELOG.md) |
 | **trusty-embedderd** | [crates/trusty-embedderd/CHANGELOG.md](crates/trusty-embedderd/CHANGELOG.md) |
-| **trusty-mpm-gui** | [crates/trusty-mpm-gui/CHANGELOG.md](crates/trusty-mpm-gui/CHANGELOG.md) |
 
 Other crates (libraries, internal tools) may not maintain per-release changelogs. Consult their git history via `git log crates/<name>/` for changes.
 
