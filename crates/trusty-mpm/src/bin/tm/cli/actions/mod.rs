@@ -22,6 +22,8 @@ mod coordinator;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
+// #8939: `tm env set|keys` — dotenv edits that print no value.
+mod env;
 // #8436: `tm fleet` — the Architect's setup and status.
 mod fleet;
 mod generate;
@@ -56,6 +58,7 @@ pub(crate) use deliverables::{
     MilestonesAction,
 };
 pub(crate) use divert::DivertAction;
+pub(crate) use env::EnvAction;
 pub(crate) use fleet::FleetAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;

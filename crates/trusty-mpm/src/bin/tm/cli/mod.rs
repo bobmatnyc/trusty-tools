@@ -838,6 +838,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: FleetAction,
     },
+    /// Edit a dotenv file without printing a value: `set` and `keys`.
+    ///
+    /// Only the bound Architect may run either verb.
+    // #8939. Test: `cli_parses_env_set_and_keys`.
+    Env {
+        /// Env-file action to perform.
+        #[command(subcommand)]
+        action: EnvAction,
+    },
     /// Inspect the session overseer.
     Overseer {
         /// Overseer action to perform.

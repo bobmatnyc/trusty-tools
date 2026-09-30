@@ -30,14 +30,14 @@ const BYPASSES: [Option<(&str, &str)>; 3] = [
 ];
 
 /// A scratch home with the anchor, and an Architect project allow-listed in it.
-struct Fixture {
+pub(crate) struct Fixture {
     _dir: tempfile::TempDir,
     home: PathBuf,
-    project: PathBuf,
+    pub(crate) project: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
         let home = root.join("home");
@@ -71,7 +71,7 @@ impl Fixture {
 }
 
 /// Run the guard with raw `stdin`, the named env pairs, and `stamp`.
-fn run(fx: &Fixture, stdin: &str, env: &[(&str, &str)], stamp: Option<&str>) -> String {
+pub(crate) fn run(fx: &Fixture, stdin: &str, env: &[(&str, &str)], stamp: Option<&str>) -> String {
     let mut cmd = common::tm_command_in(&fx.home);
     cmd.args(["--url", "http://127.0.0.1:1", "hook", "--pm-guard"]);
     guard_env(fx, &mut cmd, env, stamp);
@@ -117,12 +117,12 @@ fn finish(mut child: Child, stdin: &str) -> String {
 /// Run the supervisor-stamped guard as the child of a fake `claude` (a
 /// `/bin/sh` symlink named `claude`), recording that `claude` as the
 /// Architect's launch first when `recorded` — what `tm fleet init` does.
-fn run_under_claude(fx: &Fixture, stdin: &str, recorded: bool) -> String {
+pub(crate) fn run_under_claude(fx: &Fixture, stdin: &str, recorded: bool) -> String {
     run_under_claude_with(fx, stdin, recorded, &[])
 }
 
 /// [`run_under_claude`] with extra env pairs, such as a bypass.
-fn run_under_claude_with(
+pub(crate) fn run_under_claude_with(
     fx: &Fixture,
     stdin: &str,
     recorded: bool,
@@ -225,7 +225,7 @@ fn the_architect_main_thread_writes_and_its_subagent_does_not() {
 }
 
 /// A main-thread `Bash` payload running `command` in the project.
-fn bash_payload(fx: &Fixture, command: &str) -> String {
+pub(crate) fn bash_payload(fx: &Fixture, command: &str) -> String {
     serde_json::json!({
         "hook_event_name": "PreToolUse",
         "session_id": "s-1",
