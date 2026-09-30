@@ -311,6 +311,12 @@ impl ProvenToken {
         identity_token_vars(Some((&self.host, &self.token)))
     }
 
+    /// The proven token itself, for tm's own 0600 `hosts.yml` (#8914).
+    /// Test: `a_proven_token_is_stored_in_the_private_hosts_yml`.
+    pub(crate) fn secret(&self) -> &str {
+        &self.token
+    }
+
     /// A proven token built by a test fake.
     #[cfg(test)]
     pub(crate) fn for_test(host: &str, token: &str) -> Self {

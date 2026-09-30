@@ -161,6 +161,7 @@ pub(crate) async fn run(
     task: Option<String>,
     root: Option<String>,
     account: Option<String>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
     // `--task` is not implemented on either arm. Per DOC-24 autonomous/task
     // dispatch is the session-manager layer's concern; warn rather than drop
@@ -190,7 +191,17 @@ pub(crate) async fn run(
                      location comes from TRUSTY_MPM_REPOS_ROOT / TRUSTY_MPM_WORKSPACE_ROOT."
                 );
             }
-            run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await
+            let account = account.as_deref();
+            run_managed(
+                client,
+                url,
+                &owner,
+                &repo,
+                &clone_url,
+                account,
+                account_token,
+            )
+            .await
         }
     }
 }
@@ -271,6 +282,7 @@ pub(crate) async fn run_external(
     argv: &[String],
     help: &trusty_common::help::HelpConfig,
     account: Option<String>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
     let Some(target) = resolve_external(tokens, account)? else {
         reject_unknown_subcommand(argv, help);
@@ -282,7 +294,19 @@ pub(crate) async fn run_external(
             repo,
             clone_url,
             account,
-        } => run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await,
+        } => {
+            let account = account.as_deref();
+            run_managed(
+                client,
+                url,
+                &owner,
+                &repo,
+                &clone_url,
+                account,
+                account_token,
+            )
+            .await
+        }
         // `classify_bare` returns `None` rather than an alias, so this is
         // unreachable; routing it to the same cold start keeps the arm total.
         RunTarget::Alias(alias) => Err(super::register_args::rejection(&alias)),
@@ -390,6 +414,7 @@ async fn run_managed(
     repo: &str,
     clone_url: &str,
     account: Option<&str>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
     let checkout =
         trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout(
@@ -402,34 +427,14 @@ async fn run_managed(
     // performs — so later spawns, fetches, pushes, and `gh` calls made from
     // inside the session reuse it (`resolve_gh_account_env_for_registry`
     // already reads `Project::gh_account` at every spawn/relaunch; this is
-    // the one new write path, not a new read path). Best-effort: the
-    // checkout itself already succeeded, so a registry hiccup here is
-    // reported but never turns a working clone into a failed command.
+    // the one new write path, not a new read path).
     if let Some(account) = account {
-        // #7166: the SAME derivation the daemon's own implicit
-        // auto-registration uses (`ProjectRegistry::register_from_session` →
-        // `derive_name_from_url`) — NOT `register_args`' hyphenated
-        // `owner-repo` alias scheme, which is a different registry
-        // (`~/.trusty-mpm/registry.json`) with a different naming
-        // convention. Landing on the same key means the auto-registration
-        // that fires when `launch()` below creates the session sees this
-        // project ALREADY registered and skips — this entry, gh_account and
-        // all, stays authoritative rather than sitting beside a duplicate.
-        let name = trusty_mpm::project::derive_name_from_url(clone_url)
-            .unwrap_or_else(|| format!("{owner}-{repo}"));
-        // #7166 review follow-up CRITICAL/HIGH: shared with `tm register
-        // --account`'s handler — builds/reuses the per-account gh config dir
-        // and preserves the project's current default_branch, rather than
-        // discarding both on every auto-persist call.
-        super::projects::registry::auto_persist_account_selection(
-            client,
-            url,
-            name,
-            clone_url.to_string(),
-            account,
-            &format!("cloned as {account}"),
-        )
-        .await;
+        // #8914: the same gate `tm sessions new --account` runs — prove the
+        // account, then pin it — and a failure refuses the run instead of
+        // warning and spawning as the machine's active account.
+        let base = &checkout.base_path;
+        super::session_account::pin_account_for_dir(client, url, base, account, account_token)
+            .await?;
     }
 
     if checkout.reused {

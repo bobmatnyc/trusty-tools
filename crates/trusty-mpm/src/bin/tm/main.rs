@@ -42,7 +42,6 @@ use commands::{
     project::project,
     projects::projects,
     services::services,
-    session::session,
     slack::slack,
     telegram::telegram,
 };
@@ -431,6 +430,15 @@ async fn main() -> anyhow::Result<()> {
     // `--account` is a `global = true` flag (see `cli::Cli::account`'s doc),
     // so it binds regardless of where in the invocation it appeared.
     let account = cli.account.clone();
+    // #8914: a token for `--account` is read from stdin once, before dispatch.
+    let account_token = if cli.account_token_stdin {
+        Some(commands::session_account::read_stdin_token(
+            std::io::stdin().lock(),
+        )?)
+    } else {
+        None
+    };
+    let token = account_token.as_deref();
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
@@ -454,7 +462,12 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Restart) => restart(&client, &url).await,
         Some(Command::Project { action }) => project(&client, &url, action).await,
         // #2116: `sessions` (plural) is the canonical top-level command.
-        Some(Command::Sessions { action }) => session(&client, &url, action).await,
+        // #8914: the global `--account` is applied, never dropped.
+        Some(Command::Sessions { action }) => {
+            let account = account.as_deref();
+            commands::session_account::session_as_account(&client, &url, action, account, token)
+                .await
+        }
         Some(Command::Projects { action }) => projects(&client, &url, action).await,
         Some(Command::Manager { action }) => manager(&client, &url, action).await,
         // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
@@ -462,7 +475,9 @@ async fn main() -> anyhow::Result<()> {
         // which verb was invoked — before dispatching to the identical handler.
         Some(Command::Session { action }) => {
             commands::session::emit_top_level_alias_notice();
-            session(&client, &url, action).await
+            let account = account.as_deref();
+            commands::session_account::session_as_account(&client, &url, action, account, token)
+                .await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         // #6336: standalone — the battery runs in-process, so an unreachable
@@ -553,6 +568,14 @@ async fn main() -> anyhow::Result<()> {
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => {
+            // #8914: `tm launch --account X` pins X on the checkout first.
+            if let Some(login) = account.as_deref() {
+                let target = commands::project::resolve_dir(dir.clone())?;
+                commands::session_account::pin_account_for_dir(
+                    &client, &url, &target, login, token,
+                )
+                .await?;
+            }
             let home = dirs::home_dir();
             launch(
                 &client,
@@ -711,13 +734,15 @@ async fn main() -> anyhow::Result<()> {
         // a registry alias keeps the unchanged DOC-24 standalone behaviour. The
         // routing decision lives in `run_target` so it is unit-testable.
         Some(Command::Run { target, task, root }) => {
-            commands::run_target::run(&client, &url, &target, task, root, account).await
+            commands::run_target::run(&client, &url, &target, task, root, account, token).await
         }
         // #6441: a leading token that matched no subcommand. A repo shape runs
         // the same cold start as `tm run`; anything else is a typo and gets
         // clap's usage error back.
         Some(Command::External(ref tokens)) => {
-            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP, account).await
+            let (external, argv) = (tokens.as_slice(), argv.as_slice());
+            commands::run_target::run_external(&client, &url, external, argv, &HELP, account, token)
+                .await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
