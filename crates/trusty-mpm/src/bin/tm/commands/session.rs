@@ -48,12 +48,11 @@ use crate::types::{EventRow, SessionRow};
 /// `cli_parses_session_list`, `cli_parses_session_clean`,
 /// `cli_parses_session_info`.
 pub(crate) async fn session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     action: SessionAction,
 ) -> anyhow::Result<()> {
     match action {
-        SessionAction::Start { dir } => start::start_session(client, url, dir).await?,
+        SessionAction::Start { dir } => start::start_session(daemon, dir).await?,
         SessionAction::Stop { id_or_name } => {
             // #1218: `stop` is managed-aware. If the argument resolves to a
             // MANAGED session (by id or friendly name) via the canonical
@@ -62,13 +61,12 @@ pub(crate) async fn session(
             // one intuitive verb that does the right thing for both families (the
             // #842 driver skill documents `stop`).
             if let Some(managed_id) =
-                crate::commands::managed_route::resolve_managed_match(client, url, &id_or_name)
-                    .await
+                crate::commands::managed_route::resolve_managed_match(daemon, &id_or_name).await
             {
-                crate::commands::managed::session_stop(client, url, managed_id).await?;
+                crate::commands::managed::session_stop(daemon, managed_id).await?;
             } else {
-                let resp = client
-                    .delete(format!("{url}/sessions/{id_or_name}"))
+                let resp = daemon
+                    .delete(format!("/sessions/{id_or_name}"))
                     .send()
                     .await?;
                 if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -84,8 +82,8 @@ pub(crate) async fn session(
             struct Body {
                 sessions: Vec<SessionRow>,
             }
-            let body: Body = client
-                .get(format!("{url}/sessions"))
+            let body: Body = daemon
+                .get("/sessions")
                 .query(&[("project", path.to_string_lossy().as_ref())])
                 .send()
                 .await?
@@ -130,8 +128,8 @@ pub(crate) async fn session(
         SessionAction::Clean { dir } => {
             // `dir` is accepted for symmetry; the daemon reaps globally.
             let _ = resolve_dir(dir)?;
-            let body: serde_json::Value = client
-                .delete(format!("{url}/sessions/dead"))
+            let body: serde_json::Value = daemon
+                .delete("/sessions/dead")
                 .send()
                 .await?
                 .error_for_status()?
@@ -145,8 +143,8 @@ pub(crate) async fn session(
             struct Body {
                 sessions: Vec<serde_json::Value>,
             }
-            let body: Body = client
-                .get(format!("{url}/sessions"))
+            let body: Body = daemon
+                .get("/sessions")
                 .send()
                 .await?
                 .error_for_status()?
@@ -170,7 +168,7 @@ pub(crate) async fn session(
                     // store). Fetch the managed list and search there too before
                     // giving up. This fixes the gap where `tm session info <uuid>`
                     // printed "not found" for sessions visible in `tm session ls`.
-                    let managed = info_from_managed_store(client, url, &id_or_name).await;
+                    let managed = info_from_managed_store(daemon, &id_or_name).await;
                     match managed {
                         Some(val) => println!("{}", serde_json::to_string_pretty(&val)?),
                         None => anyhow::bail!("session '{id_or_name}' not found"),
@@ -216,8 +214,7 @@ pub(crate) async fn session(
         }
         SessionAction::Events { id_or_name } => {
             let id = match crate::commands::managed_route::resolve_project_session_id(
-                client,
-                url,
+                daemon,
                 &id_or_name,
             )
             .await?
@@ -231,8 +228,8 @@ pub(crate) async fn session(
             struct Body {
                 events: Vec<EventRow>,
             }
-            let body: Body = client
-                .get(format!("{url}/sessions/{id}/events/poll"))
+            let body: Body = daemon
+                .get(format!("/sessions/{id}/events/poll"))
                 .send()
                 .await?
                 .error_for_status()?
@@ -255,8 +252,8 @@ pub(crate) async fn session(
             struct Body {
                 breakers: Vec<Row>,
             }
-            let body: Body = client
-                .get(format!("{url}/breakers"))
+            let body: Body = daemon
+                .get("/breakers")
                 .send()
                 .await?
                 .error_for_status()?
@@ -295,8 +292,8 @@ pub(crate) async fn session(
             catchup::handle_catchup(all_projects, full).await?;
         }
         SessionAction::Pause { id_or_name, note } => {
-            let resp = client
-                .post(format!("{url}/sessions/{id_or_name}/pause"))
+            let resp = daemon
+                .post(format!("/sessions/{id_or_name}/pause"))
                 .json(&serde_json::json!({ "summary": note }))
                 .send()
                 .await?;
@@ -313,13 +310,12 @@ pub(crate) async fn session(
             // the managed resume endpoint; anything else falls back to the
             // project-session pause/resume path.
             if let Some(managed_id) =
-                crate::commands::managed_route::resolve_managed_match(client, url, &id_or_name)
-                    .await
+                crate::commands::managed_route::resolve_managed_match(daemon, &id_or_name).await
             {
-                crate::commands::managed::session_resume(client, url, managed_id).await?;
+                crate::commands::managed::session_resume(daemon, managed_id).await?;
             } else {
-                let resp = client
-                    .post(format!("{url}/sessions/{id_or_name}/resume"))
+                let resp = daemon
+                    .post(format!("/sessions/{id_or_name}/resume"))
                     .send()
                     .await?;
                 match resp.status() {
@@ -341,7 +337,7 @@ pub(crate) async fn session(
             command,
             summarize,
         } => {
-            let mut req = client.post(format!("{url}/sessions/{id_or_name}/command"));
+            let mut req = daemon.post(format!("/sessions/{id_or_name}/command"));
             if summarize {
                 req = req.query(&[("compress", "summarise")]);
             }
@@ -373,8 +369,8 @@ pub(crate) async fn session(
             if summarize {
                 query.push(("compress", "summarise".to_string()));
             }
-            let resp = client
-                .get(format!("{url}/sessions/{id_or_name}/output"))
+            let resp = daemon
+                .get(format!("/sessions/{id_or_name}/output"))
                 .query(&query)
                 .send()
                 .await?;
@@ -409,8 +405,7 @@ pub(crate) async fn session(
             // only `tm f` narrows to NAME.
             let filter = term.map(crate::commands::session_picker::SessionFilter::visible);
             crate::commands::managed::session_ls(
-                client,
-                url,
+                daemon,
                 json,
                 sid.as_deref(),
                 all,
@@ -427,24 +422,23 @@ pub(crate) async fn session(
         // token, cache, and latency detail that `CommandResult::ManagedActivity`
         // does not model, so routing it through chat-core would regress output.
         SessionAction::Activity { id } => {
-            crate::commands::managed::session_activity(client, url, id).await?
+            crate::commands::managed::session_activity(daemon, id).await?
         }
         SessionAction::PruneIdle { dry_run, json } => {
-            crate::commands::prune::prune_idle(client, url, dry_run, json).await?
+            crate::commands::prune::prune_idle(daemon, dry_run, json).await?
         }
         // #1508: bulk teardown + by-state prune go through direct HTTP (like
         // `PruneIdle`), not chat-core — they are fleet-wide store operations, not
         // single-session intents.
         SessionAction::DecommissionEphemeral { dry_run } => {
-            crate::commands::managed::session_decommission_ephemeral(client, url, dry_run).await?
+            crate::commands::managed::session_decommission_ephemeral(daemon, dry_run).await?
         }
         SessionAction::Prune {
             state,
             dry_run,
             include_active,
         } => {
-            crate::commands::managed::session_prune(client, url, state, dry_run, include_active)
-                .await?
+            crate::commands::managed::session_prune(daemon, state, dry_run, include_active).await?
         }
         SessionAction::PruneWorktrees {
             force,
@@ -463,8 +457,7 @@ pub(crate) async fn session(
             // caller, so the caller names itself; absent outside a managed
             // session, which leaves every claim foreign.
             crate::commands::managed_merged_prs::prune_worktrees_from(
-                client,
-                url,
+                daemon,
                 &std::env::current_dir()?,
                 force,
                 discard_dirty,
@@ -477,8 +470,7 @@ pub(crate) async fn session(
         // #4288: the report-only inventory. No `force`/`dry_run` argument
         // exists because the verb has no destructive form.
         SessionAction::ReconcileWorktrees { json } => {
-            crate::commands::reconcile_worktrees::session_reconcile_worktrees(client, url, json)
-                .await?
+            crate::commands::reconcile_worktrees::session_reconcile_worktrees(daemon, json).await?
         }
         // #6497: the transfer the reconcile report can only propose. Explicit
         // by design — a tree that changes hands on its own is indistinguishable
@@ -491,9 +483,11 @@ pub(crate) async fn session(
             json,
             budget_seconds,
         } => {
+            // #6288: `disk` rides the MCP `POST /rpc` surface, which the
+            // stdio-bridge slice moves; `socket_dispatch` keeps it on HTTP.
             crate::commands::session_disk::session_disk(
-                client,
-                url,
+                daemon.http(),
+                daemon.base_url(),
                 id_or_name,
                 json,
                 budget_seconds,
@@ -501,7 +495,7 @@ pub(crate) async fn session(
             .await?
         }
         SessionAction::AdoptWorktree { path, as_session } => {
-            crate::commands::adopt_worktree::session_adopt_worktree(client, url, &path, &as_session)
+            crate::commands::adopt_worktree::session_adopt_worktree(daemon, &path, &as_session)
                 .await?
         }
         // #2444: re-sync a live session's (or every syncable session's)
@@ -509,26 +503,26 @@ pub(crate) async fn session(
         // operation like `Prune`/`DecommissionEphemeral` above — direct HTTP,
         // not chat-core.
         SessionAction::SyncAssets { id: Some(id), .. } => {
-            crate::commands::sync_assets::session_sync_assets(client, url, id).await?
+            crate::commands::sync_assets::session_sync_assets(daemon, id).await?
         }
         SessionAction::SyncAssets { id: None, .. } => {
-            crate::commands::sync_assets::session_sync_assets_all(client, url).await?
+            crate::commands::sync_assets::session_sync_assets_all(daemon).await?
         }
         // #2012: hard-delete the record; goes through direct HTTP like the
         // other fleet-teardown verbs above (not chat-core — `delete` is a
         // distinct terminal store operation, not a `decommission` alias).
         SessionAction::Delete { id, force } => {
-            crate::commands::delete::session_delete(client, url, id, force).await?
+            crate::commands::delete::session_delete(daemon, id, force).await?
         }
         // Rename a managed session. Direct HTTP (PATCH), like `delete` — a
         // distinct store+tmux mutation, not a chat-core intent.
         SessionAction::Rename { arg1, arg2 } => {
-            crate::commands::rename::session_rename(client, url, arg1, arg2).await?
+            crate::commands::rename::session_rename(daemon, arg1, arg2).await?
         }
         // #7660: decommission prints the daemon's verdict itself so a kept
         // workspace exits non-zero with the reason.
         SessionAction::Decommission { id, force } => {
-            crate::commands::managed::session_decommission_routed(client, url, &id, force).await?
+            crate::commands::managed::session_decommission_routed(daemon, &id, force).await?
         }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
@@ -538,7 +532,7 @@ pub(crate) async fn session(
             emit_managed_alias_notice(&action);
             // `to_command` maps every one of these aliases; `run` therefore
             // always handles it.
-            crate::commands::managed_route::run(client, url, &action).await?;
+            crate::commands::managed_route::run(daemon, &action).await?;
         }
         // Every remaining managed verb (`new`/`ls`/`send`/`answer`/`attach`/
         // `decommission`) routes through the shared chat-core layer. `run`
@@ -549,7 +543,7 @@ pub(crate) async fn session(
                 crate::commands::managed_route::to_command(&action).is_some(),
                 "unrouted session action reached the managed fallthrough: {action:?}"
             );
-            crate::commands::managed_route::run(client, url, &action).await?;
+            crate::commands::managed_route::run(daemon, &action).await?;
         }
     }
     Ok(())
@@ -655,15 +649,10 @@ fn matches_session(session: &serde_json::Value, id_or_name: &str) -> bool {
 /// Test: `info_managed_fallback_matches_by_id_and_name` (unit on match predicate);
 /// HTTP path covered by the integration test.
 async fn info_from_managed_store(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id_or_name: &str,
 ) -> Option<serde_json::Value> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed"))
-        .send()
-        .await
-        .ok()?;
+    let resp = daemon.get("/api/v1/sessions/managed").send().await.ok()?;
     let status = resp.status();
     if !status.is_success() {
         if status != reqwest::StatusCode::NOT_FOUND {

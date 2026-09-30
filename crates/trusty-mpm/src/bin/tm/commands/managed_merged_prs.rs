@@ -209,10 +209,7 @@ fn is_gateway_url(url: &str) -> bool {
 /// Test: `prune_worktrees_url_bypasses_the_gateway_prefix`.
 pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
     let base = if is_gateway_url(url) { direct } else { url };
-    format!(
-        "{}/api/v1/sessions/managed/prune-worktrees",
-        base.trim_end_matches('/')
-    )
+    format!("{}{PRUNE_WORKTREES_PATH}", base.trim_end_matches('/'))
 }
 
 /// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
@@ -275,7 +272,10 @@ pub(crate) async fn prune_endpoint(
 /// is reported as removed, and naming the dry run that shows what remains.
 /// Every other error passes through unchanged.
 /// Test: `prune_worktrees_reports_a_timeout_as_an_error`.
-fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
+/// The route both transports address for a prune-worktrees pass.
+const PRUNE_WORKTREES_PATH: &str = "/api/v1/sessions/managed/prune-worktrees";
+
+fn prune_transport_error(e: trusty_mpm::client::DaemonCallError) -> anyhow::Error {
     if !e.is_timeout() {
         return e.into();
     }
@@ -324,8 +324,7 @@ fn prune_transport_error(e: reqwest::Error) -> anyhow::Error {
 /// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dry_run: bool,
     discard_dirty: bool,
     merged_prs: bool,
@@ -334,10 +333,21 @@ pub(crate) async fn session_prune_worktrees(
 ) -> anyhow::Result<()> {
     // #8347: a loopback gateway is bypassed for the local daemon; a remote one
     // is refused rather than silently retargeted (#1737).
-    let endpoint =
-        prune_endpoint(client, url, || trusty_mpm::core::resolve_daemon_url(None)).await?;
+    // #6288: a socket client never goes through the gateway, so only an HTTP
+    // client's base is checked.
+    let daemon = match daemon.socket_path() {
+        Some(_) => daemon.clone(),
+        None => {
+            let endpoint = prune_endpoint(daemon.http(), daemon.base_url(), || {
+                trusty_mpm::core::resolve_daemon_url(None)
+            })
+            .await?;
+            let base = endpoint.trim_end_matches(PRUNE_WORKTREES_PATH);
+            trusty_mpm::client::DaemonClient::with_client(daemon.http().clone(), base)
+        }
+    };
     let post = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
-        let mut request = client.post(&endpoint).json(&serde_json::json!({
+        let mut request = daemon.post(PRUNE_WORKTREES_PATH).json(&serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,
             // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
@@ -362,11 +372,7 @@ pub(crate) async fn session_prune_worktrees(
         async move {
             // #7884: a timeout is a named error, never a generic transport line.
             let resp = request.send().await.map_err(prune_transport_error)?;
-            let body: serde_json::Value = resp
-                .error_for_status()?
-                .json()
-                .await
-                .map_err(prune_transport_error)?;
+            let body: serde_json::Value = resp.error_for_status()?.json().await?;
             anyhow::Ok(body)
         }
     };
@@ -420,8 +426,7 @@ pub(crate) async fn session_prune_worktrees(
 /// Test: `prune_worktrees_outside_a_repository_posts_nothing`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prune_worktrees_from(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     cwd: &std::path::Path,
     force: bool,
     discard_dirty: bool,
@@ -435,8 +440,7 @@ pub(crate) async fn prune_worktrees_from(
         Some(super::prune_preview::project_root_from(cwd)?)
     };
     session_prune_worktrees(
-        client,
-        url,
+        daemon,
         !force,
         discard_dirty,
         merged_prs,

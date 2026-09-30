@@ -400,8 +400,7 @@ pub(crate) fn plan_lines(sessions: &[ManagedSessionSummary], plan: &GlobDeletePl
 /// Test: the pure seams it composes are unit-tested (see module doc); the
 /// stdin/HTTP path is side-effect-only, as with `picker_delete::confirm_and_delete`.
 pub(crate) async fn confirm_and_delete_glob(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: &[ManagedSessionSummary],
     req: &GlobDeleteRequest,
 ) -> anyhow::Result<usize> {
@@ -497,7 +496,7 @@ pub(crate) async fn confirm_and_delete_glob(
         // operator confirmed a batch, so one unreachable record must not abort
         // the remaining deletions and drop the picker with no account of what
         // already happened.
-        match delete_managed_then_local(client, url, &s.id, false).await {
+        match delete_managed_then_local(daemon, &s.id, false).await {
             Ok(DeleteReport::Deleted { name, .. }) => {
                 deleted += 1;
                 eprintln!("tm: deleted '{name}'.");

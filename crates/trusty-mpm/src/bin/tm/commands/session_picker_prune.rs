@@ -344,14 +344,12 @@ pub(crate) fn default_marker_path() -> PathBuf {
 /// `session_ls_json_passthrough_prunes_dead_records`; the decision logic
 /// itself via [`auto_prune_dead_records_at`] directly.
 pub(crate) async fn prune_and_report(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     hides_dead_rows: bool,
 ) -> PrunedListing {
     prune_and_report_at(
-        client,
-        url,
+        daemon,
         sessions,
         &PruneContext::production(),
         hides_dead_rows,
@@ -371,8 +369,7 @@ pub(crate) async fn prune_and_report(
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
 /// `session_ls_no_prune_makes_the_read_non_mutating`.
 pub(crate) async fn prune_and_report_at(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     ctx: &PruneContext,
     hides_dead_rows: bool,
@@ -388,8 +385,7 @@ pub(crate) async fn prune_and_report_at(
         };
     }
     let outcome = auto_prune_dead_records_at(
-        client,
-        url,
+        daemon,
         sessions,
         &ctx.marker_path,
         ctx.live_tmux_names.clone(),
@@ -821,8 +817,7 @@ async fn is_dead_record(s: &ManagedSessionSummary, live_tmux_names: &HashSet<Str
 /// `auto_prune_dead_records_honors_the_cap`,
 /// `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`.
 pub(crate) async fn auto_prune_dead_records_at(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     marker_path: &Path,
     live_tmux_names: Option<HashSet<String>>,
@@ -940,7 +935,7 @@ pub(crate) async fn auto_prune_dead_records_at(
     } else {
         let mut iter = to_prune.into_iter();
         for s in iter.by_ref() {
-            match decommission_dead_record(client, url, &s.id).await {
+            match decommission_dead_record(daemon, &s.id).await {
                 DecommissionOutcome::Pruned => {
                     pruned += 1;
                     seen.remove(&s.id);
@@ -1137,12 +1132,11 @@ enum DecommissionOutcome {
 /// drives the stale-daemon path through a stub server that ignores
 /// `record_only` and always reports `workspace_removed: true`.
 async fn decommission_dead_record(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
 ) -> DecommissionOutcome {
-    let resp = match client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
+    let resp = match daemon
+        .post(format!("/api/v1/sessions/managed/{id}/decommission"))
         .query(&[("record_only", "true")])
         .send()
         .await

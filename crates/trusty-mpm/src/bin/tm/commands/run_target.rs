@@ -433,8 +433,13 @@ async fn run_managed(
         // account, then pin it — and a failure refuses the run instead of
         // warning and spawning as the machine's active account.
         let base = &checkout.base_path;
-        super::session_account::pin_account_for_dir(client, url, base, account, account_token)
-            .await?;
+        super::session_account::pin_account_for_dir(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+            base,
+            account,
+            account_token,
+        )
+        .await?;
     }
 
     if checkout.reused {

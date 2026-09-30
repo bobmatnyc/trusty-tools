@@ -156,8 +156,7 @@ fn resolve_repo<R: CommandRunner>(runner: &R) -> anyhow::Result<RepoCoordinates>
 /// HTTP spawn round-trip mirrors `session_new` (covered by the managed MVP
 /// integration test) and is exercised end-to-end manually.
 pub(crate) async fn ticket(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     issue_ref: String,
     system: TicketSystemKind,
     notes: Vec<String>,
@@ -204,8 +203,7 @@ pub(crate) async fn ticket(
     let repo = resolve_repo(&runner)?;
     let task = build_task(&issue, &branch, &repo.default_branch);
     spawn_managed(
-        client,
-        url,
+        daemon,
         &repo.url,
         &repo.default_branch,
         &branch,
@@ -231,8 +229,7 @@ pub(crate) async fn ticket(
 /// test.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_managed(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     repo_url: &str,
     base_ref: &str,
     branch: &str,
@@ -248,8 +245,8 @@ async fn spawn_managed(
         #[serde(default)]
         runtime: String,
     }
-    let resp: SpawnResp = client
-        .post(format!("{url}/api/v1/sessions/managed"))
+    let resp: SpawnResp = daemon
+        .post("/api/v1/sessions/managed")
         .json(&serde_json::json!({
             "repo_url": repo_url,
             "ref": base_ref,
@@ -430,5 +427,67 @@ mod tests {
             err.contains("GitHub checkout"),
             "expected checkout hint, got: {err}"
         );
+    }
+
+    /// #6288 step 1: `tm ticket`'s spawn goes to the daemon socket as
+    /// `mpm.managed.spawn`, carrying the same body the HTTP route took.
+    #[tokio::test]
+    async fn spawn_managed_posts_over_the_socket() {
+        use std::sync::{Arc, Mutex};
+        use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("trusty-mpm.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let seen: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
+        let record = Arc::clone(&seen);
+        let router = RpcRouter::new().typed::<serde_json::Value, serde_json::Value, _, _>(
+            "mpm.managed.spawn",
+            move |params: serde_json::Value| {
+                let record = Arc::clone(&record);
+                async move {
+                    *record.lock().expect("lock") = Some(params);
+                    Ok(serde_json::json!({
+                        "id": "s1", "name": "n1", "state": "provisioning",
+                        "attach_cmd": "tmux attach -t n1", "runtime": "claude",
+                    }))
+                }
+            },
+        );
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            serve_until(
+                &listener,
+                Arc::new(router),
+                RpcServeOptions::default(),
+                async {
+                    let _ = shutdown.await;
+                },
+            )
+            .await;
+        });
+
+        let daemon = trusty_mpm::client::DaemonClient::over_socket(&socket);
+        spawn_managed(
+            &daemon,
+            "https://github.com/o/r",
+            "main",
+            "fix/1-x",
+            "address issue #1",
+            trusty_mpm::runtime::RuntimeKind::default(),
+        )
+        .await
+        .expect("spawned over the socket");
+        let _ = stop.send(());
+
+        let params = seen
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("the socket saw the spawn");
+        assert_eq!(params["repo_url"], "https://github.com/o/r");
+        assert_eq!(params["ref"], "main");
+        assert_eq!(params["name_hint"], "fix/1-x");
+        assert_eq!(params["task"], "address issue #1");
     }
 }

@@ -222,8 +222,8 @@ pub(crate) fn argv(parts: &[&str]) -> Vec<String> {
 /// [`EXIT_CHECK_FAILED`].
 /// Test: the verb bodies are unit-tested against [`GhRunner`] fakes; this is
 /// the exit-code wrapper.
-pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
-    let code = match run_inner(cmd, client, url).await {
+pub(crate) async fn run(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> ! {
+    let code = match run_inner(cmd, daemon).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tm pr: {e:#}");
@@ -234,7 +234,7 @@ pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
 }
 
 /// The fallible body of [`run`], split out so every error leaves one way.
-async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::Result<i32> {
+async fn run_inner(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> anyhow::Result<i32> {
     let gh = RealGhRunner::new()?;
     match cmd {
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),
@@ -257,12 +257,12 @@ async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::R
                 }
                 cleanup::PostMerge::AwaitSweep => Ok(EXIT_OK),
                 cleanup::PostMerge::Cleanup { repo } => {
-                    cleanup::after_merge(&args, repo, client, url).await
+                    cleanup::after_merge(&args, repo, daemon).await
                 }
             }
         }
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
         // #7275: the executor every cleanup trigger shares.
-        PrCmd::Cleanup(args) => cleanup::run(&args, client, url).await,
+        PrCmd::Cleanup(args) => cleanup::run(&args, daemon).await,
     }
 }

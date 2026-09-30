@@ -26,9 +26,14 @@ mod managed;
 pub mod manager;
 pub mod projects;
 mod session_connect;
+pub(crate) mod socket_routes;
 #[cfg(test)]
 mod tests;
+// #6288 step 1: the HTTP-or-unix-socket seam every method sends through.
+mod transport;
 mod types;
+
+pub use transport::{DaemonCallError, DaemonRequest, DaemonResponse, resolve_daemon_socket};
 
 // #4488: re-exported so `connectors::tm` binds the SAME provisioning bound as
 // `DaemonClient::spawn_managed_session` rather than keeping its own copy.
@@ -96,6 +101,9 @@ pub struct DaemonClient {
     /// The user home `launch_session` prepares under; `None` resolves the
     /// process home. #8545: only a test pins it.
     pub(in crate::client::http_client) home: Option<std::path::PathBuf>,
+    /// #6288: the daemon's unix socket; `Some` means every request goes there
+    /// and never to `base`/`http`.
+    pub(in crate::client::http_client) socket: Option<std::path::PathBuf>,
 }
 
 impl DaemonClient {
@@ -131,6 +139,7 @@ impl DaemonClient {
             base: base.into(),
             http: client,
             home: None,
+            socket: None,
         }
     }
 
@@ -174,8 +183,8 @@ impl DaemonClient {
         struct Body {
             sessions: Vec<SessionRow>,
         }
-        let url = format!("{}/sessions", self.base);
-        let body: Body = self.http.get(&url).send().await?.json().await?;
+        let url = "/sessions".to_string();
+        let body: Body = self.get(&url).send().await?.json().await?;
         Ok(body.sessions)
     }
 
@@ -191,8 +200,8 @@ impl DaemonClient {
         struct Body {
             events: Vec<EventRow>,
         }
-        let url = format!("{}/events/poll", self.base);
-        let body: Body = self.http.get(&url).send().await?.json().await?;
+        let url = "/events/poll".to_string();
+        let body: Body = self.get(&url).send().await?.json().await?;
         Ok(body.events)
     }
 
@@ -208,8 +217,8 @@ impl DaemonClient {
         struct Body {
             events: Vec<EventRow>,
         }
-        let url = format!("{}/sessions/{id}/events/poll", self.base);
-        let body: Body = self.http.get(&url).send().await?.json().await?;
+        let url = format!("/sessions/{id}/events/poll");
+        let body: Body = self.get(&url).send().await?.json().await?;
         Ok(body.events)
     }
 
@@ -234,8 +243,8 @@ impl DaemonClient {
         struct Body {
             breakers: Vec<WireRow>,
         }
-        let url = format!("{}/breakers", self.base);
-        let body: Body = self.http.get(&url).send().await?.json().await?;
+        let url = "/breakers".to_string();
+        let body: Body = self.get(&url).send().await?.json().await?;
         Ok(body
             .breakers
             .into_iter()
@@ -253,8 +262,8 @@ impl DaemonClient {
     /// What: `GET /health`, true on any 2xx response.
     /// Test: covered by the daemon API tests.
     pub async fn is_healthy(&self) -> bool {
-        let url = format!("{}/health", self.base);
-        matches!(self.http.get(&url).send().await, Ok(r) if r.status().is_success())
+        let url = "/health".to_string();
+        matches!(self.get(&url).send().await, Ok(r) if r.status().is_success())
     }
 
     /// Fetch the daemon's catalog-staleness flag from `GET /health` (HR-3).
@@ -271,8 +280,8 @@ impl DaemonClient {
     /// the parse contract (incl. the missing-field default) is covered by
     /// `catalog_stale_health_body_wire_shape`.
     pub async fn catalog_stale(&self) -> bool {
-        let url = format!("{}/health", self.base);
-        let Ok(resp) = self.http.get(&url).send().await else {
+        let url = "/health".to_string();
+        let Ok(resp) = self.get(&url).send().await else {
             return false;
         };
         if !resp.status().is_success() {
@@ -302,9 +311,8 @@ impl DaemonClient {
     /// Test: `health_snapshot_deserializes` covers the wire shape; the executor's
     /// `execute_health_*` tests exercise the live and dead-daemon paths.
     pub async fn health_snapshot(&self) -> anyhow::Result<HealthSnapshot> {
-        let url = format!("{}/health", self.base);
+        let url = "/health".to_string();
         let snapshot = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -327,24 +335,27 @@ impl DaemonClient {
     /// bound exists because doctor's probe is interactive: the client-level
     /// [`config::DEFAULT_REQUEST_TIMEOUT`] is a correctness ceiling for a
     /// wedged daemon, not a latency budget an operator waits out.
-    /// What: same request as [`Self::health_snapshot`], with
-    /// `RequestBuilder::timeout` overriding the client default for this call
-    /// only, and the `reqwest::Error` returned unwrapped.
+    /// What: same request as [`Self::health_snapshot`], with the per-request
+    /// timeout overriding the client default for this call only. A failure
+    /// after the connection existed (non-2xx, undecodable body) is
+    /// [`DaemonCallError::Failed`]; #6288: over the socket, an absent or
+    /// refusing socket is [`DaemonCallError::Unreachable`], naming the path.
     /// Test: `daemon_probe_reports_not_running_when_nothing_listens`
     /// (`src/bin/tm/commands/doctor_daemon_row_tests.rs`).
     pub async fn health_snapshot_within(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<HealthSnapshot, reqwest::Error> {
-        let url = format!("{}/health", self.base);
-        self.http
-            .get(&url)
-            .timeout(timeout)
-            .send()
-            .await?
-            .error_for_status()?
+    ) -> Result<HealthSnapshot, DaemonCallError> {
+        let resp = self.get("/health").timeout(timeout).send().await?;
+        let failed = |source: anyhow::Error| DaemonCallError::Failed {
+            target: self.transport_label(),
+            source,
+        };
+        resp.error_for_status()
+            .map_err(failed)?
             .json()
             .await
+            .map_err(failed)
     }
 
     /// Pause a session via `POST /sessions/{id}/pause`.
@@ -353,9 +364,8 @@ impl DaemonClient {
     /// What: POSTs `{"summary": null}` and returns the `summary` field.
     /// Test: live HTTP is covered by the daemon's session-lifecycle tests.
     pub async fn pause_session(&self, id: &str) -> anyhow::Result<String> {
-        let url = format!("{}/sessions/{id}/pause", self.base);
+        let url = format!("/sessions/{id}/pause");
         let body: serde_json::Value = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "summary": serde_json::Value::Null }))
             .send()
@@ -376,8 +386,8 @@ impl DaemonClient {
     /// What: POSTs to the resume endpoint and discards the response body.
     /// Test: live HTTP is covered by the daemon's session-lifecycle tests.
     pub async fn resume_session(&self, id: &str) -> anyhow::Result<()> {
-        let url = format!("{}/sessions/{id}/resume", self.base);
-        self.http.post(&url).send().await?.error_for_status()?;
+        let url = format!("/sessions/{id}/resume");
+        self.post(&url).send().await?.error_for_status()?;
         Ok(())
     }
 
@@ -388,8 +398,8 @@ impl DaemonClient {
     /// session existed, `Ok(false)` on a 404, `Err` on transport failure.
     /// Test: covered by the executor's kill test.
     pub async fn kill_session(&self, id: &str) -> anyhow::Result<bool> {
-        let url = format!("{}/sessions/{id}", self.base);
-        let resp = self.http.delete(&url).send().await?;
+        let url = format!("/sessions/{id}");
+        let resp = self.delete(&url).send().await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
         }
@@ -413,9 +423,8 @@ impl DaemonClient {
     /// field from the 200 response.
     /// Test: live HTTP is covered by the daemon's session-lifecycle tests.
     pub async fn session_output(&self, id: &str, lines: u32) -> anyhow::Result<String> {
-        let url = format!("{}/sessions/{id}/output", self.base);
+        let url = format!("/sessions/{id}/output");
         let body: serde_json::Value = self
-            .http
             .get(&url)
             .query(&[("lines", lines.to_string())])
             .send()
@@ -443,9 +452,8 @@ impl DaemonClient {
         id: &str,
         command: &str,
     ) -> anyhow::Result<Option<String>> {
-        let url = format!("{}/sessions/{id}/command", self.base);
+        let url = format!("/sessions/{id}/command");
         let resp = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "command": command }))
             .send()
@@ -468,8 +476,8 @@ impl DaemonClient {
     /// What: returns the enabled flag, handler name, and decision counts.
     /// Test: covered by the executor's overseer test.
     pub async fn overseer_status(&self) -> anyhow::Result<OverseerSnapshot> {
-        let url = format!("{}/overseer", self.base);
-        let body: serde_json::Value = self.http.get(&url).send().await?.json().await?;
+        let url = "/overseer".to_string();
+        let body: serde_json::Value = self.get(&url).send().await?.json().await?;
         let o = &body["overseer"];
         let decisions = &o["decisions"];
         Ok(OverseerSnapshot {
@@ -492,8 +500,8 @@ impl DaemonClient {
     /// session is `managed` when its `origin` field is `trusty_mpm`.
     /// Test: `tmux_session_row_accepts_name`.
     pub async fn tmux_sessions(&self) -> anyhow::Result<Vec<TmuxSessionRow>> {
-        let url = format!("{}/tmux/sessions", self.base);
-        let body: serde_json::Value = self.http.get(&url).send().await?.json().await?;
+        let url = "/tmux/sessions".to_string();
+        let body: serde_json::Value = self.get(&url).send().await?.json().await?;
         let sessions = body["sessions"].as_array().cloned().unwrap_or_default();
         Ok(sessions
             .iter()
@@ -525,8 +533,8 @@ impl DaemonClient {
             #[serde(default)]
             projects: Vec<DiscoveredProjectRow>,
         }
-        let url = format!("{}/projects/discover", self.base);
-        let body: Body = self.http.get(&url).send().await?.json().await?;
+        let url = "/projects/discover".to_string();
+        let body: Body = self.get(&url).send().await?.json().await?;
         Ok(body.projects)
     }
 
@@ -537,9 +545,8 @@ impl DaemonClient {
     /// What: POSTs `{"path": <path>}`; returns `Ok(())` on a 2xx response.
     /// Test: covered by the executor's projects test.
     pub async fn register_project(&self, path: &str) -> anyhow::Result<()> {
-        let url = format!("{}/projects", self.base);
-        self.http
-            .post(&url)
+        let url = "/projects".to_string();
+        self.post(&url)
             .json(&serde_json::json!({ "path": path }))
             .send()
             .await?
@@ -554,8 +561,8 @@ impl DaemonClient {
     /// unknown / tmux is unavailable (the daemon answers 404).
     /// Test: covered by the daemon's tmux tests.
     pub async fn snapshot_tmux_session(&self, name: &str) -> anyhow::Result<Option<String>> {
-        let url = format!("{}/tmux/sessions/{name}/snapshot", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/tmux/sessions/{name}/snapshot");
+        let resp = self.get(&url).send().await?;
         if !resp.status().is_success() {
             return Ok(None);
         }
@@ -570,9 +577,8 @@ impl DaemonClient {
     /// when the session was not found.
     /// Test: covered by the daemon's tmux tests.
     pub async fn adopt_tmux_session(&self, name: &str) -> anyhow::Result<bool> {
-        let url = format!("{}/tmux/adopt", self.base);
+        let url = "/tmux/adopt".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "session": name }))
             .send()
@@ -589,9 +595,8 @@ impl DaemonClient {
     /// sessions reported by the daemon.
     /// Test: `discover_sessions_returns_count` in the daemon's `api_tests.rs`.
     pub async fn discover_sessions(&self) -> anyhow::Result<usize> {
-        let url = format!("{}/sessions/discover", self.base);
+        let url = "/sessions/discover".to_string();
         let body: serde_json::Value = self
-            .http
             .post(&url)
             .send()
             .await?
@@ -610,9 +615,8 @@ impl DaemonClient {
     /// What: POSTs an empty body; returns the generated code and its TTL.
     /// Test: covered by the executor's pairing test.
     pub async fn pair_request(&self) -> anyhow::Result<PairRequest> {
-        let url = format!("{}/pair/request", self.base);
+        let url = "/pair/request".to_string();
         let body: PairRequest = self
-            .http
             .post(&url)
             .send()
             .await?
@@ -628,9 +632,8 @@ impl DaemonClient {
     /// What: POSTs the code and chat id; returns the success / error result.
     /// Test: covered by the executor's pairing test.
     pub async fn pair_confirm(&self, code: &str, chat_id: i64) -> anyhow::Result<PairConfirm> {
-        let url = format!("{}/pair/confirm", self.base);
+        let url = "/pair/confirm".to_string();
         let body: PairConfirm = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "code": code, "chat_id": chat_id }))
             .send()
@@ -662,9 +665,8 @@ impl DaemonClient {
         message: &str,
         history: &[ChatMessage],
     ) -> anyhow::Result<Option<LlmChatOutcome>> {
-        let url = format!("{}/llm/chat", self.base);
+        let url = "/llm/chat".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "message": message, "history": history }))
             .timeout(config::CHAT_REQUEST_TIMEOUT)
@@ -686,9 +688,8 @@ impl DaemonClient {
     /// [`CoordinatorContext`]; `Err` on a transport or decode failure.
     /// Test: `coordinator_context_deserializes` covers the wire shape.
     pub async fn coordinator_context(&self) -> anyhow::Result<CoordinatorContext> {
-        let url = format!("{}/api/v1/sessions/context", self.base);
+        let url = "/api/v1/sessions/context".to_string();
         let context = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -724,9 +725,8 @@ impl DaemonClient {
         history: &[ChatMessage],
         actions: bool,
     ) -> anyhow::Result<Option<CoordinatorChatOutcome>> {
-        let url = format!("{}/api/v1/sessions/chat", self.base);
+        let url = "/api/v1/sessions/chat".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(&coordinator_chat_body(message, history, actions))
             .timeout(config::CHAT_REQUEST_TIMEOUT)
@@ -745,8 +745,8 @@ impl DaemonClient {
     /// What: `GET /pair/status`, returns the paired flag and chat id.
     /// Test: covered by the executor's pairing test.
     pub async fn pair_status(&self) -> anyhow::Result<PairStatus> {
-        let url = format!("{}/pair/status", self.base);
-        let body: PairStatus = self.http.get(&url).send().await?.json().await?;
+        let url = "/pair/status".to_string();
+        let body: PairStatus = self.get(&url).send().await?.json().await?;
         Ok(body)
     }
 
@@ -768,8 +768,8 @@ impl DaemonClient {
         &self,
         project: Option<&str>,
     ) -> anyhow::Result<crate::core::doctor::DoctorReport> {
-        let url = format!("{}/api/v1/doctor", self.base);
-        let mut request = self.http.get(&url).timeout(config::DOCTOR_REQUEST_TIMEOUT);
+        let url = "/api/v1/doctor".to_string();
+        let mut request = self.get(&url).timeout(config::DOCTOR_REQUEST_TIMEOUT);
         if let Some(project) = project {
             request = request.query(&[("project", project)]);
         }

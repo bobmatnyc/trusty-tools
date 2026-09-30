@@ -95,13 +95,18 @@ pub(crate) fn listing_unavailable_line(err: &anyhow::Error) -> String {
 /// reached the daemon — the session listing, whose own failure is reported
 /// through [`listing_unavailable_line`] rather than as an exit code or a
 /// contradictory daemon verdict.
-/// Test: `src/bin/tm/commands/status_daemon_tests.rs` drives both halves
-/// against a loopback server.
-pub(crate) async fn run(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    let (reachability, snapshot) = probe_daemon(url).await;
+/// #6288 step 1: over the socket, a daemon that is not reachable fails the
+/// command with an error naming the socket — never exit 0.
+/// Test: `src/bin/tm/commands/status_daemon_tests.rs` drives both halves;
+/// `tm_status_over_an_absent_socket_fails_naming_it` the error arm.
+pub(crate) async fn run(daemon: &trusty_mpm::client::DaemonClient) -> anyhow::Result<()> {
+    let (reachability, snapshot) = probe_daemon(daemon).await;
     println!("{}", daemon_line(reachability, snapshot.as_ref()));
     if reachability != DaemonReachability::Reachable {
-        return Ok(());
+        anyhow::bail!(
+            "trusty-mpm daemon not reachable over {}",
+            daemon.transport_label()
+        );
     }
     // #8058: a daemon that has parked a subsystem answers `/health` 200 all the
     // same, so the operator only learns of it if something prints it. This is
@@ -109,7 +114,7 @@ pub(crate) async fn run(client: &reqwest::Client, url: &str) -> anyhow::Result<(
     for reason in snapshot.iter().flat_map(|s| s.degraded.iter()) {
         println!("degraded: {reason}");
     }
-    if let Err(e) = super::daemon::print_sessions(client, url).await {
+    if let Err(e) = super::daemon::print_sessions(daemon).await {
         println!("{}", listing_unavailable_line(&e));
     }
     Ok(())

@@ -214,8 +214,10 @@ async fn session_decommission_prints_daemon_verdict_over_http() {
     tokio::spawn(axum::serve(listener, api::router(state)).into_future());
 
     session_decommission(
-        &reqwest::Client::new(),
-        &format!("http://{addr}"),
+        &trusty_mpm::client::DaemonClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}"),
+        ),
         id.to_string(),
     )
     .await
@@ -253,9 +255,12 @@ async fn spawn_test_daemon() -> String {
 async fn session_stop_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_stop(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_stop(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
@@ -267,9 +272,12 @@ async fn session_stop_not_found_errors() {
 async fn session_resume_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_resume(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
@@ -364,9 +372,12 @@ async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, Stri
 async fn session_resume_restart_failure_errors() {
     let (url, id) = spawn_test_daemon_with_unrestartable_stopped_session().await;
     let client = reqwest::Client::new();
-    let err = session_resume(&client, &url, id)
-        .await
-        .expect_err("a daemon-rejected restart must be a hard failure, not Ok(())");
+    let err = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        id,
+    )
+    .await
+    .expect_err("a daemon-rejected restart must be a hard failure, not Ok(())");
     assert!(
         err.to_string().contains("cannot restart"),
         "error should surface the daemon's rejection: {err}"
@@ -494,7 +505,14 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = with_tmux_binary(shim.into(), session_resume(&client, &url, id.to_string())).await;
+    let result = with_tmux_binary(
+        shim.into(),
+        session_resume(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            id.to_string(),
+        ),
+    )
+    .await;
 
     // Killed here, before the assertions, as it always has been. Dropping the
     // guard is now only the EARLIEST it can happen — an assertion failure or
@@ -749,7 +767,14 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = with_tmux_binary(shim.into(), session_resume(&client, &url, id.to_string())).await;
+    let result = with_tmux_binary(
+        shim.into(),
+        session_resume(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            id.to_string(),
+        ),
+    )
+    .await;
 
     // The daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a
     // no-op and this guard is what actually tears the real session down.
@@ -904,7 +929,12 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
     // this zombie instead of dead-ending on the daemon's raw 409. The
     // eventual runtime spawn is environment-dependent (see doc above), so
     // only the ABSENCE of the specific 409 dead-end text is asserted here.
-    if let Err(e) = session_resume(&client, &url, id.to_string()).await {
+    if let Err(e) = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        id.to_string(),
+    )
+    .await
+    {
         let msg = e.to_string();
         assert!(
             !msg.contains("cannot resume a session in state"),
@@ -1109,9 +1139,13 @@ async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
     let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, false)
-        .await
-        .expect_err("a kept workspace must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        false,
+    )
+    .await
+    .expect_err("a kept workspace must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("workspace NOT removed"), "{msg}");
@@ -1128,9 +1162,13 @@ async fn session_decommission_routed_force_removes_a_provisioning_only_worktree(
     let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
-    super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect("--force removes a provisioning-only tree");
+    super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect("--force removes a provisioning-only tree");
 
     assert!(!wt.exists(), "the workspace directory must be gone");
 }
@@ -1143,9 +1181,13 @@ async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
     std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect_err("user work must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect_err("user work must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("notes.rs"), "the file must be named: {msg}");
@@ -1160,9 +1202,13 @@ async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force(
     let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect_err("a kept main checkout must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect_err("a kept main checkout must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("main checkout"), "{msg}");
@@ -1179,10 +1225,12 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
-    let outcome = super::super::managed_route::executor(&client, &url)
-        .decommission_managed_target(&id, false)
-        .await
-        .expect("decommission");
+    let outcome = super::super::managed_route::executor(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+    )
+    .decommission_managed_target(&id, false)
+    .await
+    .expect("decommission");
     let printed = super::decommission_report(&outcome);
     let why = printed.lines().nth(1).expect("a by-design reason line");
     assert!(why.contains("kept by design"), "{printed}");
@@ -1196,9 +1244,13 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     // The CLI entry point itself exits 0 on a second decommission of a
     // fresh launch-on-main session.
     let (url, id, repo2, _tmp2) = spawn_daemon_on_the_main_checkout().await;
-    super::session_decommission_routed(&client, &url, &id, false)
-        .await
-        .expect("a by-design keep exits 0");
+    super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        false,
+    )
+    .await
+    .expect("a by-design keep exits 0");
     assert!(repo.exists() && repo2.join(".git").is_dir());
 }
 
@@ -1211,10 +1263,12 @@ async fn decommission_report_says_nothing_was_on_disk_for_an_absent_workspace() 
     std::fs::remove_dir_all(&wt).expect("remove the worktree out of band");
     let client = reqwest::Client::new();
 
-    let outcome = super::super::managed_route::executor(&client, &url)
-        .decommission_managed_target(&id, false)
-        .await
-        .expect("decommission");
+    let outcome = super::super::managed_route::executor(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+    )
+    .decommission_managed_target(&id, false)
+    .await
+    .expect("decommission");
     let printed = super::decommission_report(&outcome);
 
     assert!(printed.contains("no workspace was on disk"), "{printed}");
@@ -1243,18 +1297,24 @@ async fn session_decommission_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
 
-    let err = session_decommission(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a malformed id must be a hard failure, not a silent Ok(())");
+    let err = session_decommission(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a malformed id must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the rejected id: {err}"
     );
 
     let absent = "11111111-2222-3333-4444-555555555555";
-    let err = session_decommission(&client, &url, absent.to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_decommission(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        absent.to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert_eq!(
         err.to_string(),
         format!("managed session '{absent}' not found"),
@@ -1324,9 +1384,12 @@ async fn decommission_entry_points_agree_on_every_verdict() {
         let url = spawn_decommission_stub(verdict).await;
         let client = reqwest::Client::new();
 
-        let bulk = super::session_decommission_line(&client, &url, STUB_ID)
-            .await
-            .unwrap_or_else(|e| panic!("verdict {verdict:?}: bulk path failed: {e}"));
+        let bulk = super::session_decommission_line(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            STUB_ID,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("verdict {verdict:?}: bulk path failed: {e}"));
         let routed = super::super::managed_route::render_cli(
             &CommandExecutor::with_client(client.clone(), url.clone())
                 .execute(TrustyCommand::ManagedDecommission {
@@ -1352,9 +1415,12 @@ async fn decommission_entry_points_agree_on_every_verdict() {
 async fn session_activity_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_activity(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_activity(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"

@@ -24,9 +24,8 @@ impl DaemonClient {
     /// [`ConfigRecommendation`] per recommendation.
     /// Test: covered by the executor's config test.
     pub async fn analyze_config(&self, project: &str) -> anyhow::Result<Vec<ConfigRecommendation>> {
-        let url = format!("{}/claude-config", self.base);
+        let url = "/claude-config".to_string();
         let body: serde_json::Value = self
-            .http
             .get(&url)
             .query(&[("project", project)])
             .send()
@@ -66,9 +65,8 @@ impl DaemonClient {
         project: &str,
         recommendation_id: &str,
     ) -> anyhow::Result<String> {
-        let url = format!("{}/claude-config/apply", self.base);
+        let url = "/claude-config/apply".to_string();
         let body: serde_json::Value = self
-            .http
             .post(&url)
             .json(&serde_json::json!({
                 "project": project,
@@ -92,9 +90,8 @@ impl DaemonClient {
     /// What: returns the raw checkpoint JSON array.
     /// Test: covered by the daemon's claude-config tests.
     pub async fn list_checkpoints(&self, project: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-        let url = format!("{}/claude-config/checkpoints", self.base);
+        let url = "/claude-config/checkpoints".to_string();
         let body: serde_json::Value = self
-            .http
             .get(&url)
             .query(&[("project", project)])
             .send()
@@ -114,9 +111,8 @@ impl DaemonClient {
         project: &str,
         profile_name: &str,
     ) -> anyhow::Result<String> {
-        let url = format!("{}/claude-config/deploy", self.base);
+        let url = "/claude-config/deploy".to_string();
         let body: serde_json::Value = self
-            .http
             .post(&url)
             .json(&serde_json::json!({
                 "project": project,

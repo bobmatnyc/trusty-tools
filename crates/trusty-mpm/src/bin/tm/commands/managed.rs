@@ -210,8 +210,7 @@ pub(crate) fn filter_live_sessions(
 /// `filter_attached_*`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     json: bool,
     source_id: Option<&str>,
     all: bool,
@@ -227,10 +226,7 @@ pub(crate) async fn session_ls(
     } else {
         crate::commands::session_picker_prune::PruneContext::production()
     };
-    session_ls_at(
-        client, url, json, source_id, all, attached, sort, term, &ctx,
-    )
-    .await
+    session_ls_at(daemon, json, source_id, all, attached, sort, term, &ctx).await
 }
 
 /// [`session_ls`] with an injected auto-prune context — the testable core
@@ -265,8 +261,7 @@ pub(crate) async fn session_ls(
 /// `scope_for_display_all_keeps_dead_record_visible`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls_at(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     json: bool,
     source_id: Option<&str>,
     all: bool,
@@ -279,7 +274,7 @@ pub(crate) async fn session_ls_at(
     // that raw text verbatim (byte-for-byte — preserving exact field
     // order/whitespace for scripts); the table path deserializes the SAME text
     // rather than issuing a second GET.
-    let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
+    let raw = crate::commands::session_picker::fetch_managed_raw(daemon, source_id).await?;
     let parsed = crate::commands::session_picker::parse_managed_sessions(&raw);
     if json {
         // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
@@ -289,7 +284,7 @@ pub(crate) async fn session_ls_at(
             // `--json` echoes the raw body, dead rows included, so the banner
             // must not claim anything was hidden (#4994).
             crate::commands::session_picker_prune::prune_and_report_at(
-                client, url, sessions, ctx, false,
+                daemon, sessions, ctx, false,
             )
             .await;
         }
@@ -297,7 +292,7 @@ pub(crate) async fn session_ls_at(
         return Ok(());
     }
     let listing =
-        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx, !all)
+        crate::commands::session_picker_prune::prune_and_report_at(daemon, parsed?, ctx, !all)
             .await;
     // #4994: scope AFTER the prune, never before — and against that sweep's own
     // verdict, so the rows hidden here are exactly the rows it will reap.
@@ -365,16 +360,15 @@ pub(crate) fn filter_attached(
 /// Test: HTTP path covered by the integration test;
 /// `session_activity_not_found_errors` covers the #2457 exit-code fix.
 pub(crate) async fn session_activity(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: String,
 ) -> anyhow::Result<()> {
     // The raw request is retained here (rather than the typed `DaemonClient`
     // method) only to preserve the 404 → "not found" output contract; the
     // response body is deserialized into the SHARED `ManagedActivityResponse`,
     // dropping the former ad-hoc local struct.
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}/activity"))
+    let resp = daemon
+        .get(format!("/api/v1/sessions/managed/{id}/activity"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -439,12 +433,11 @@ pub(crate) async fn session_activity(
 /// `cli_parses_session_managed_stop_verb`; `session_stop_not_found_errors`
 /// covers the #2457 exit-code fix.
 pub(crate) async fn session_stop(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/runtime-stop"))
+    let resp = daemon
+        .post(format!("/api/v1/sessions/managed/{id}/runtime-stop"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -512,12 +505,11 @@ pub(crate) async fn session_stop(
 /// `guided_resume_plan_active_live_tmux_attaches`) exhaustively cover the
 /// branch selection this handler now shares.
 pub(crate) async fn session_resume(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+    let resp = daemon
+        .get(format!("/api/v1/sessions/managed/{id}"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -528,7 +520,7 @@ pub(crate) async fn session_resume(
     // having a terminal — a headless/scripted caller (no stdin TTY) still gets
     // the daemon-side restart/reconcile, just never a doomed real tmux attach.
     let no_attach = !std::io::stdin().is_terminal();
-    crate::commands::guided_resume::resume_session(client, url, &session, no_attach).await?;
+    crate::commands::guided_resume::resume_session(daemon, &session, no_attach).await?;
     Ok(())
 }
 
@@ -554,11 +546,10 @@ pub(crate) async fn session_resume(
 /// Test: `decommission_entry_points_agree_on_every_verdict`;
 /// `session_decommission_not_found_errors`.
 async fn session_decommission_line(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
 ) -> anyhow::Result<String> {
-    let outcome = super::managed_route::executor(client, url)
+    let outcome = super::managed_route::executor(daemon)
         .decommission_managed_id(id)
         .await?;
     Ok(decommission_message(
@@ -586,11 +577,10 @@ async fn session_decommission_line(
 /// `session_decommission_not_found_errors` covers the #2457 exit-code fix; the
 /// wording itself is covered by `decommission_message_honours_every_verdict`.
 pub(crate) async fn session_decommission(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: String,
 ) -> anyhow::Result<()> {
-    println!("{}", session_decommission_line(client, url, &id).await?);
+    println!("{}", session_decommission_line(daemon, &id).await?);
     Ok(())
 }
 
@@ -605,12 +595,11 @@ pub(crate) async fn session_decommission(
 /// Test: `session_decommission_routed_fails_naming_why_the_workspace_was_kept`,
 /// `session_decommission_routed_force_removes_a_provisioning_only_worktree`.
 pub(crate) async fn session_decommission_routed(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     target: &str,
     force: bool,
 ) -> anyhow::Result<()> {
-    let outcome = super::managed_route::executor(client, url)
+    let outcome = super::managed_route::executor(daemon)
         .decommission_managed_target(target, force)
         .await?;
     println!("{}", decommission_report(&outcome));
@@ -681,14 +670,11 @@ pub(crate) fn decommission_kept_error(reason: Option<&str>) -> Option<anyhow::Er
 /// in tests/session_manager_mvp.rs; CLI parse by `cli_parses_session_decommission_ephemeral`;
 /// the skew refusal by `decommission_ephemeral_refuses_a_dry_run_a_stale_daemon_ignored`.
 pub(crate) async fn session_decommission_ephemeral(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!(
-            "{url}/api/v1/sessions/managed/decommission-ephemeral"
-        ))
+    let resp = daemon
+        .post("/api/v1/sessions/managed/decommission-ephemeral")
         .query(&[("dry_run", if dry_run { "true" } else { "false" })])
         .send()
         .await?;
@@ -745,14 +731,13 @@ pub(crate) fn ephemeral_sweep_line(
 /// `prune_route_rejects_bad_state` in tests/session_manager_mvp.rs; CLI parse by
 /// `cli_parses_session_prune`.
 pub(crate) async fn session_prune(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     state: String,
     dry_run: bool,
     include_active: bool,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/prune"))
+    let resp = daemon
+        .post("/api/v1/sessions/managed/prune")
         .json(&serde_json::json!({
             "state": state,
             "dry_run": dry_run,

@@ -8,9 +8,10 @@
 //! and appends this one row.
 //! What: [`probe_daemon`] issues one bounded `GET /health` against the URL the
 //! CLI already resolved through the gateway/lock-file discovery chain, and
-//! [`daemon_check`] folds the outcome into a [`DoctorCheck`]. The row's message
-//! names no port and no transport, so the probe can move to a Unix socket
-//! (#6288) without the operator-visible wording changing.
+//! [`daemon_check`] folds the outcome into a [`DoctorCheck`]. #6288 step 1:
+//! the probe runs over the daemon's unix socket, and the row names the
+//! transport it used (the brief's answer to the issue's open wording question);
+//! it still names no port.
 //! Test: `src/bin/tm/commands/doctor_daemon_row_tests.rs`.
 
 use std::time::Duration;
@@ -62,23 +63,31 @@ pub(crate) enum DaemonReachability {
 /// `Unresponsive` is `Unknown`, because a socket that accepts and then says
 /// nothing has told us nothing (#4005 precedent).
 /// Test: `daemon_row_is_ok_when_reachable`, `daemon_row_warns_when_not_running`,
-/// `daemon_row_is_unknown_when_unresponsive`, `daemon_row_never_names_a_port`.
-pub(crate) fn daemon_check(reachability: DaemonReachability) -> DoctorCheck {
+/// `daemon_row_is_unknown_when_unresponsive`,
+/// `daemon_row_names_its_transport_and_no_port`.
+pub(crate) fn daemon_check(reachability: DaemonReachability, transport: &str) -> DoctorCheck {
     match reachability {
-        DaemonReachability::Reachable => {
-            DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, "trusty-mpm daemon: reachable")
-        }
+        DaemonReachability::Reachable => DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            format!("trusty-mpm daemon: reachable (via {transport})"),
+        ),
         DaemonReachability::NotRunning => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
-            "trusty-mpm daemon: not running — every local check above still ran; \
-             start it with `tm start` when you need session management or the MCP surface",
+            format!(
+                "trusty-mpm daemon: not running (via {transport}) — every local check above \
+                 still ran; start it with `tm start` when you need session management or the \
+                 MCP surface"
+            ),
         ),
         DaemonReachability::Unresponsive => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Unknown,
-            "trusty-mpm daemon: unresponsive — it accepted the connection but did not \
-             answer the health probe in time; restart it and re-run `tm doctor`",
+            format!(
+                "trusty-mpm daemon: unresponsive (via {transport}) — it accepted the connection \
+                 but did not answer the health probe in time; restart it and re-run `tm doctor`"
+            ),
         ),
     }
 }
@@ -96,11 +105,13 @@ pub(crate) fn daemon_check(reachability: DaemonReachability) -> DoctorCheck {
 /// non-2xx, undecodable body) is `Unresponsive`. Returns the snapshot too,
 /// because the #2332 staleness and #4230 orphan checks reason about that same
 /// single sample rather than probing again.
-/// Test: `daemon_probe_reports_not_running_when_nothing_listens`.
-pub(crate) async fn probe_daemon(url: &str) -> (DaemonReachability, Option<HealthSnapshot>) {
-    // See #6288 — when the trusty-mpm daemon moves off TCP, only this call
-    // swaps transport; the row `daemon_check` renders does not change.
-    let client = DaemonClient::new(url.to_string());
+/// Test: `daemon_probe_reports_not_running_when_nothing_listens`,
+/// `daemon_probe_over_an_absent_socket_is_not_running`.
+pub(crate) async fn probe_daemon(
+    client: &DaemonClient,
+) -> (DaemonReachability, Option<HealthSnapshot>) {
+    // #6288 step 1: the client's transport decides; `tm doctor`/`tm status`
+    // hand in a socket-only client, so an absent socket is `NotRunning`.
     match client.health_snapshot_within(PROBE_TIMEOUT).await {
         Ok(snapshot) => (DaemonReachability::Reachable, Some(snapshot)),
         Err(e) if e.is_connect() => (DaemonReachability::NotRunning, None),
