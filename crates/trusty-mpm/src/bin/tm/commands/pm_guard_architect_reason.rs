@@ -156,4 +156,4 @@ fn session_binding_checks(
 
 #[cfg(test)]
 #[path = "pm_guard_architect_reason_tests.rs"]
-mod tests;
+pub(crate) mod tests;

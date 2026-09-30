@@ -642,6 +642,11 @@ fn the_launch_record_dir_is_an_anchor() {
         "cd /tmp && echo x > 100.architect-session",
         "echo x > $D/100.architect-session",
         "cd /tmp && echo x > 100.Architect-SESSION",
+        // #8939 delta critic HIGH 2: a forged `tm env` grant, unplaceable.
+        "cat x > $D/1.grant",
+        "cd ~/.trusty-mpm/architect-launch/envfile-grants && cat x > 1.grant",
+        "cd /tmp && echo x > 1.GRANT",
+        "cd /tmp && cp g.txt envfile-grants",
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }

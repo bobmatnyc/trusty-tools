@@ -235,13 +235,12 @@ use crate::commands::pm_guard_enter_worktree;
 use crate::commands::{pm_guard_fanout, pm_guard_profile, pm_guard_resume_worktree};
 // #7172: split out of this file to keep it under the 500-SLOC cap; re-exported
 // so every existing `pm_guard::build_pretooluse_*` path still resolves.
+use crate::commands::pm_guard_architect_envfile::gate_secret_file_read;
 use crate::commands::pm_guard_floor::{self, ArchitectGate};
 pub(crate) use crate::commands::pm_guard_response::{
     build_pm_guard_deny_response, build_pretooluse_context_response,
 };
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
-use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
-use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
 use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
@@ -611,8 +610,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // caller, for a Bash command and a `Read` alike. See `pm_guard_secret_read`.
     // #8523: a launchd plist is judged by CONTENT, so it needs the hook cwd.
     // #8878 D8: under a bypass `pm_guard_floor` runs this same rule instead.
-    if let Some(reason) = evaluate_secret_file_read(tool_name, tool_input)
-        .or_else(|| evaluate_env_plist_read(tool_name, tool_input, &hook_cwd))
+    // #8939: one gated decision on both paths; the Architect's `tm env` shapes pass.
+    if let Some(reason) =
+        gate_secret_file_read(&refused, tool_name, tool_input, &hook_cwd, &architect).await
     {
         audit_denied_tool(&refused, "secret-file-read", &reason).await;
         println!("{}", build_pm_guard_deny_response(&reason));
