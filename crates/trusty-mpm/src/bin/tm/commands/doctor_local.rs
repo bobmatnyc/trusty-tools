@@ -17,7 +17,7 @@
 //! Test: `tests/tm_doctor_standalone.rs` drives the real binary against an
 //! address nothing listens on.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
@@ -52,7 +52,9 @@ pub(crate) async fn doctor(
     daemon: &trusty_mpm::client::DaemonClient,
     flags: &crate::cli::DoctorFlags,
 ) -> anyhow::Result<()> {
-    let report = local_report().await?;
+    // #7757: resolve before printing anything, so a bad `--dir` fails closed.
+    let project_dir = resolve_project_dir(flags.dir.as_deref())?;
+    let report = local_report(project_dir.as_deref()).await?;
 
     println!("trusty-mpm doctor");
     let mut overall = report.overall;
@@ -98,7 +100,7 @@ pub(crate) async fn doctor(
 /// file is absent, so a machine that has never run a managed session needs no
 /// daemon, no store, and no tmux.
 /// Test: `tm_doctor_reports_every_local_check_with_no_daemon`.
-async fn local_report() -> anyhow::Result<DoctorReport> {
+async fn local_report(project_dir: Option<&Path>) -> anyhow::Result<DoctorReport> {
     let data_dir = FrameworkPaths::default().root.join("session-manager");
     let tmux: Arc<dyn ManagedTmuxDriver> = match RealTmuxDriver::discover() {
         Ok(driver) => Arc::new(driver),
@@ -108,8 +110,56 @@ async fn local_report() -> anyhow::Result<DoctorReport> {
         Err(_) => Arc::new(NoopTmuxDriver),
     };
     let mgr = SessionManager::new(&data_dir, tmux).await?;
-    let project_dir: Option<PathBuf> = std::env::current_dir().ok();
-    Ok(run_doctor_for_manager(&mgr, project_dir.as_deref()).await)
+    Ok(run_doctor_for_manager(&mgr, project_dir).await)
+}
+
+/// The project directory the report is scoped to.
+///
+/// Why (#7757): `--dir` must never degrade to the cwd; a typo would otherwise
+/// report on the wrong project and read as a clean bill of health.
+/// What: `None` keeps the historical cwd scope. `Some(path)` is canonicalized
+/// and must be a directory, else an error naming the path.
+/// Test: `resolve_project_dir_*` below; `tm_doctor_dir_*` in
+/// `tests/tm_doctor_standalone.rs`.
+fn resolve_project_dir(dir: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(dir) = dir else {
+        return Ok(std::env::current_dir().ok());
+    };
+    let resolved = dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("--dir {}: cannot resolve: {e}", dir.display()))?;
+    if !resolved.is_dir() {
+        anyhow::bail!("--dir {}: not a directory", dir.display());
+    }
+    Ok(Some(resolved))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_project_dir_canonicalizes_an_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = resolve_project_dir(Some(tmp.path())).unwrap().unwrap();
+        assert_eq!(got, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_project_dir_rejects_a_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_project_dir(Some(&tmp.path().join("nope"))).unwrap_err();
+        assert!(err.to_string().contains("cannot resolve"), "{err}");
+    }
+
+    #[test]
+    fn resolve_project_dir_rejects_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        let err = resolve_project_dir(Some(&file)).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+    }
 }
 
 /// The rows that depend on a daemon answering, in the order they print.
