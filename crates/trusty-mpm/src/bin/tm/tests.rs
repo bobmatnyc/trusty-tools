@@ -426,9 +426,21 @@ fn cli_parses_doctor() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));
+}
+
+#[test]
+fn cli_parses_doctor_dir_and_refuses_it_beside_a_write_flag() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor { flags: DoctorFlags { dir: Some(d), .. } } if d == std::path::Path::new("/tmp/x")
+    ));
+    // #7757: repairs act on the cwd, so a scoped report beside them is refused.
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x", "--fix"]).is_err());
 }
 
 #[test]
@@ -446,6 +458,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));
@@ -473,6 +486,7 @@ fn cli_parses_doctor_fix_skills() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));

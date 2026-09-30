@@ -7,6 +7,10 @@
 > and the resolved-refactor history — consult it when running the gate locally,
 > updating the allowlist, or deciding which PR carries a split.
 
+The cap is code-only (`.rs`, `.swift` and the other scanned source files). It
+does not apply to documentation: prose documents carry no line or word cap, and
+the Write Plainly rules limit their verbosity (owner ruling, 2026-09-20, #8309).
+
 ## Which Cap Applies — Production or Test/Benchmark
 
 Moved here from [`CLAUDE.md`](../../CLAUDE.md) by #7423, unchanged.

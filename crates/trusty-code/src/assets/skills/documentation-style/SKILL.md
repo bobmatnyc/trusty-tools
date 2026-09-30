@@ -110,6 +110,12 @@ about the task. Treat every line of doc as a cost, not a free good:
   spec section) instead of inlining it. Progressive disclosure keeps the
   entry point dense and the detail one hop away.
 
+**Prose documents carry no line or word cap** (#8309). Research reports, specs,
+ADRs and other prose documents have no size limit; the 500-SLOC cap is code
+only. The Write Plainly / `tm-prose-style` rules bound their length. Owner
+ruling, 2026-09-20: "Non-coding docs shouldn't have a strict size cap, they
+should apply a writing style limiting verbosity."
+
 A factorial study on coding-agent instruction files found file *structure*
 (length, placement, section architecture) had no detectable effect on
 instruction adherence, while compliance measurably degrades as more content
