@@ -182,7 +182,7 @@ fn a_failed_fallback_keeps_the_source_and_the_writer_moving() {
     assert_eq!(std::fs::read(&src).expect("source kept"), legacy);
     assert_eq!(store.refused_disk_writes(), 1);
     store.append(record("next"));
-    assert_eq!(messages(&[path.clone()]), ["next"]);
+    assert_eq!(messages(std::slice::from_ref(&path)), ["next"]);
 
     std::fs::remove_dir_all(&first).expect("clear .1");
     let second = legacy_bytes("new", 500);

@@ -24,9 +24,11 @@ pub(crate) enum Point {
 }
 
 #[cfg(test)]
+type Hook = Box<dyn FnMut(Point)>;
+
+#[cfg(test)]
 thread_local! {
-    static HOOK: std::cell::RefCell<Option<Box<dyn FnMut(Point)>>> =
-        const { std::cell::RefCell::new(None) };
+    static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run the calling thread's hook, if any, at `point`.
