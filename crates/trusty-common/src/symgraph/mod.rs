@@ -12,8 +12,7 @@
 //! content-addressed registry, and a deterministic emitter. The `symgraph`
 //! feature exposes the pure-data contracts surface (no tree-sitter, no
 //! `links` conflict); the `symgraph-parser` feature pulls in tree-sitter
-//! and the full emitter stack; the `symgraph-server` feature additionally
-//! exposes the HTTP server.
+//! and the full emitter stack.
 //! Test: Each submodule keeps its existing unit tests; integration tests
 //! in `crates/trusty-symgraph/tests/` cover the round-trip through the
 //! thin re-export shim.
@@ -54,9 +53,6 @@ pub mod locality;
 // INTENT: Declare the test-colocation strategy that places tests next to targets.
 #[cfg(feature = "symgraph-parser")]
 pub mod test_colocation;
-
-#[cfg(feature = "symgraph-server")]
-pub mod server;
 
 // Public re-exports — mirrors the legacy `trusty_symgraph` crate root so
 // downstream consumers can adopt the module by changing one path.
