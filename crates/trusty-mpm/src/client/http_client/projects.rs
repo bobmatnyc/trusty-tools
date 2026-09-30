@@ -217,8 +217,8 @@ impl DaemonClient {
     /// `Some`, keeps only projects whose `tags` contain it.
     /// Test: `projects_list_deserializes`; live HTTP via the daemon route tests.
     pub async fn registry_list_projects(&self, tag: Option<&str>) -> anyhow::Result<Vec<Project>> {
-        let url = format!("{}/api/v1/projects", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = "/api/v1/projects".to_string();
+        let resp = self.get(&url).send().await?;
         let body: ProjectsListWire = response_or_body_error(resp)
             .await?
             .json()
@@ -242,8 +242,8 @@ impl DaemonClient {
         &self,
         args: &RegisterProjectArgs,
     ) -> anyhow::Result<Project> {
-        let url = format!("{}/api/v1/projects", self.base);
-        let resp = self.http.post(&url).json(args).send().await?;
+        let url = "/api/v1/projects".to_string();
+        let resp = self.post(&url).json(args).send().await?;
         let project: Project = response_or_body_error(resp)
             .await?
             .json()
@@ -259,8 +259,8 @@ impl DaemonClient {
     /// error via [`response_or_body_error`], carrying the daemon's body text.
     /// Test: live HTTP via the daemon route tests.
     pub async fn registry_get_project(&self, name: &str) -> anyhow::Result<Project> {
-        let url = format!("{}/api/v1/projects/{name}", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/api/v1/projects/{name}");
+        let resp = self.get(&url).send().await?;
         let project: Project = response_or_body_error(resp)
             .await?
             .json()
@@ -289,8 +289,8 @@ impl DaemonClient {
         name: &str,
         args: &PatchProjectArgs,
     ) -> anyhow::Result<Project> {
-        let url = format!("{}/api/v1/projects/{name}", self.base);
-        let resp = self.http.patch(&url).json(args).send().await?;
+        let url = format!("/api/v1/projects/{name}");
+        let resp = self.patch(&url).json(args).send().await?;
         let project: Project = response_or_body_error(resp)
             .await?
             .json()
@@ -307,8 +307,8 @@ impl DaemonClient {
     /// Test: `project_status_wire_tolerates_additive_fields`; live HTTP via the
     /// daemon route tests.
     pub async fn project_status(&self, name: &str) -> anyhow::Result<ProjectStatusWire> {
-        let url = format!("{}/api/v1/projects/{name}/status", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/api/v1/projects/{name}/status");
+        let resp = self.get(&url).send().await?;
         let status: ProjectStatusWire = response_or_body_error(resp)
             .await?
             .json()

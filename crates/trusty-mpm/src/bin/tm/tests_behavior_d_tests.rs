@@ -1698,9 +1698,13 @@ async fn local_delete_refuses_running_session_without_force() {
     let (server, id) = spawn_with_local_session(SessionStatus::Active).await;
     let client = reqwest::Client::new();
 
-    let report = delete_managed_then_local(&client, &server.url, &id, false)
-        .await
-        .expect("routing call must not error");
+    let report = delete_managed_then_local(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
+        &id,
+        false,
+    )
+    .await
+    .expect("routing call must not error");
     assert!(
         matches!(report, DeleteReport::Refused(_)),
         "running local session without --force must be Refused, got {report:?}"
@@ -1726,9 +1730,13 @@ async fn local_delete_allows_stopped_session_without_force() {
     let (server, id) = spawn_with_local_session(SessionStatus::Stopped).await;
     let client = reqwest::Client::new();
 
-    let report = delete_managed_then_local(&client, &server.url, &id, false)
-        .await
-        .expect("routing call must not error");
+    let report = delete_managed_then_local(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
+        &id,
+        false,
+    )
+    .await
+    .expect("routing call must not error");
     match report {
         DeleteReport::Deleted { local, .. } => assert!(local, "must report the local fallback"),
         other => panic!("expected Deleted, got {other:?}"),
@@ -1752,9 +1760,13 @@ async fn local_delete_force_bypasses_guard_on_running_session() {
     let (server, id) = spawn_with_local_session(SessionStatus::Active).await;
     let client = reqwest::Client::new();
 
-    let report = delete_managed_then_local(&client, &server.url, &id, true)
-        .await
-        .expect("routing call must not error");
+    let report = delete_managed_then_local(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
+        &id,
+        true,
+    )
+    .await
+    .expect("routing call must not error");
     match report {
         DeleteReport::Deleted { local, .. } => assert!(local),
         other => panic!("expected Deleted with force=true, got {other:?}"),
@@ -1893,9 +1905,12 @@ async fn fetch_raw_live(
     client: &reqwest::Client,
     url: &str,
 ) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
-    let raw = crate::commands::session_picker::fetch_managed_raw(client, url, None)
-        .await
-        .expect("fetch raw");
+    let raw = crate::commands::session_picker::fetch_managed_raw(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        None,
+    )
+    .await
+    .expect("fetch raw");
     crate::commands::session_picker::parse_managed_sessions(&raw).expect("parse")
 }
 
@@ -1944,8 +1959,7 @@ async fn auto_prune_dead_records_first_sighting_is_not_pruned() {
     assert!(target.unresumable, "seeded session must be unresumable");
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -1988,8 +2002,7 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
     // First call: first sighting, not yet acted on.
     let sessions = fetch_raw_live(&client, &server.url).await;
     let first = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2001,8 +2014,7 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
     // is time-based, not call-count-based.
     let sessions = fetch_raw_live(&client, &server.url).await;
     let immediate = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2017,8 +2029,7 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
     backdate_sightings(&marker_path, 11);
     let sessions = fetch_raw_live(&client, &server.url).await;
     let second = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2095,8 +2106,7 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
     );
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2126,8 +2136,7 @@ async fn auto_prune_dead_records_is_noop_when_nothing_is_dead() {
     let sessions = vec![ls_test_session("healthy", "active", None, None, None, None)];
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        "http://127.0.0.1:1",
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), "http://127.0.0.1:1"),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2161,8 +2170,7 @@ async fn auto_prune_dead_records_honors_the_cap() {
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
     let first = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2177,8 +2185,7 @@ async fn auto_prune_dead_records_honors_the_cap() {
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
     let second = auto_prune_dead_records_at(
-        &client,
-        &server.url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
         sessions,
         &marker_path,
         Some(HashSet::new()),
@@ -2254,8 +2261,7 @@ async fn auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_remov
     b.unresumable = true;
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![a, b],
         &marker_path,
         Some(HashSet::new()),
@@ -2330,8 +2336,7 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![confirmed_session()],
         &marker_path,
         Some(HashSet::new()),
@@ -2354,8 +2359,7 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![confirmed_session()],
         &marker_path,
         Some(HashSet::new()),
@@ -2441,8 +2445,7 @@ async fn auto_prune_counts_failed_decommissions_so_the_banner_still_prints() {
     };
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![
             dead_session("id-a", "gone-a"),
             dead_session("id-b", "gone-b"),
@@ -2576,8 +2579,7 @@ async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
 
     // First sighting records a candidate but never acts.
     let first = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("z1", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -2593,8 +2595,7 @@ async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
     // Second sighting, once the sighting window has genuinely elapsed.
     backdate_sightings(&marker_path, 11);
     let second = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("z1", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -2625,8 +2626,7 @@ async fn auto_prune_keeps_stopped_record_whose_workspace_still_exists() {
 
     for round in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("keeper", &present)],
             &marker_path,
             Some(HashSet::new()),
@@ -2667,8 +2667,7 @@ async fn auto_prune_never_touches_a_running_record() {
 
     for _ in 0..2 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![live.clone()],
             &marker_path,
             Some(HashSet::new()),
@@ -2702,8 +2701,7 @@ async fn auto_prune_never_touches_a_decommissioned_record() {
 
     for _ in 0..2 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![tombstone.clone(), persisted_terminal.clone()],
             &marker_path,
             Some(HashSet::new()),
@@ -2747,11 +2745,16 @@ async fn auto_prune_always_requests_record_only_never_full_teardown() {
     let probed = stopped_session_at("probed", &gone);
 
     let sessions = vec![flagged.clone(), probed.clone()];
-    auto_prune_dead_records_at(&client, &url, sessions, &marker_path, Some(HashSet::new())).await;
+    auto_prune_dead_records_at(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     backdate_sightings(&marker_path, 11);
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![flagged, probed],
         &marker_path,
         Some(HashSet::new()),
@@ -2798,8 +2801,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     // exactly as it does to the picker.
     let ls = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
         crate::commands::managed::session_ls_at(
-            &client,
-            &server.url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
             false, // json = false: the piped/scripted table path
             None,
             false,
@@ -2849,8 +2851,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
 
     let ls_json = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
         crate::commands::managed::session_ls_at(
-            &client,
-            &server.url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
             true, // json = true
             None,
             false,
@@ -2898,8 +2899,7 @@ async fn session_ls_no_prune_makes_the_read_non_mutating() {
 
     let ls_json = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
         crate::commands::managed::session_ls_at(
-            &client,
-            &server.url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), &server.url),
             true, // json = true: the raw passthrough path
             None,
             false,
@@ -2979,8 +2979,7 @@ async fn auto_prune_keeps_record_whose_parent_directory_is_unreachable() {
 
     for round in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("on-the-volume", &unreachable)],
             &marker_path,
             Some(HashSet::new()),
@@ -3035,8 +3034,7 @@ async fn auto_prune_clears_record_whose_worktree_root_survived_the_removal() {
         let client = reqwest::Client::new();
 
         let first = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("tm-deadrt40493-01", &removed)],
             &marker_path,
             Some(HashSet::new()),
@@ -3052,8 +3050,7 @@ async fn auto_prune_clears_record_whose_worktree_root_survived_the_removal() {
 
         backdate_sightings(&marker_path, 11);
         let second = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("tm-deadrt40493-01", &removed)],
             &marker_path,
             Some(HashSet::new()),
@@ -3106,8 +3103,7 @@ async fn auto_prune_keeps_record_when_the_worktree_root_itself_is_gone() {
 
         for round in 0..3 {
             let outcome = auto_prune_dead_records_at(
-                &client,
-                &url,
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
                 vec![stopped_session_at("on-the-volume", &removed)],
                 &marker_path,
                 Some(HashSet::new()),
@@ -3151,8 +3147,7 @@ async fn auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable() {
 
     for _ in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![flagged.clone()],
             &marker_path,
             Some(HashSet::new()),
@@ -3185,8 +3180,7 @@ async fn auto_prune_does_not_confirm_two_calls_in_quick_succession() {
     // Ten back-to-back listings, standing in for a tight scripted loop.
     for round in 0..10 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("hasty", &gone)],
             &marker_path,
             Some(HashSet::new()),
@@ -3235,8 +3229,7 @@ async fn auto_prune_does_not_restamp_a_sighting_still_inside_the_window() {
 
     // A listing at T+6: too recent to confirm, and it must leave the clock alone.
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("midwindow", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -3282,8 +3275,7 @@ async fn auto_prune_confirms_despite_frequent_intervening_listings() {
 
     let listing = async |marker: &std::path::Path| {
         auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![stopped_session_at("patient", &gone)],
             marker,
             Some(HashSet::new()),
@@ -3344,8 +3336,7 @@ async fn auto_prune_never_touches_an_errored_record_with_a_live_detached_pane() 
 
     for round in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![errored.clone()],
             &marker_path,
             Some(live.clone()),
@@ -3385,8 +3376,7 @@ async fn auto_prune_prunes_nothing_when_tmux_cannot_be_enumerated() {
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("confirmed-but-blind", &gone)],
         &marker_path,
         None, // tmux enumeration failed
@@ -3413,8 +3403,7 @@ async fn auto_prune_confirms_once_the_sighting_window_has_elapsed() {
     let client = reqwest::Client::new();
 
     auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("patient", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -3422,8 +3411,7 @@ async fn auto_prune_confirms_once_the_sighting_window_has_elapsed() {
     .await;
     backdate_sightings(&marker_path, 11);
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("patient", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -3452,8 +3440,7 @@ async fn auto_prune_treats_an_unparseable_sighting_as_a_fresh_one() {
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
     let outcome = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![stopped_session_at("corrupt", &gone)],
         &marker_path,
         Some(HashSet::new()),
@@ -3498,8 +3485,7 @@ async fn auto_prune_never_touches_an_attached_record() {
 
     for _ in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![attached.clone()],
             &marker_path,
             Some(HashSet::new()),
@@ -3600,8 +3586,7 @@ async fn session_ls_json_never_refetches_after_pruning() {
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
     crate::commands::managed::session_ls_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         true,
         None,
         false,
@@ -3781,8 +3766,7 @@ async fn auto_prune_clears_an_adopted_record_that_names_no_workspace_at_all() {
     let client = reqwest::Client::new();
 
     let first = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![adopted_ghost_session(
             "ghost-1",
             None,
@@ -3800,8 +3784,7 @@ async fn auto_prune_clears_an_adopted_record_that_names_no_workspace_at_all() {
 
     backdate_sightings(&marker_path, 11);
     let second = auto_prune_dead_records_at(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
         vec![adopted_ghost_session(
             "ghost-1",
             None,
@@ -3848,8 +3831,7 @@ async fn auto_prune_keeps_an_adopted_record_whose_workspace_is_merely_unreachabl
 
     for round in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![adopted_ghost_session(
                 "ghost-2",
                 Some(&unreachable),
@@ -3891,8 +3873,7 @@ async fn auto_prune_keeps_a_legacy_record_that_names_no_workspace_and_no_adoptio
 
     for round in 0..3 {
         let outcome = auto_prune_dead_records_at(
-            &client,
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
             vec![adopted_ghost_session("legacy-1", None, None)],
             &marker_path,
             Some(HashSet::new()),

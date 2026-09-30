@@ -144,9 +144,13 @@ async fn stop_then_delete_deletes_after_a_successful_stop() {
     let stub = StopStub::new(axum::http::StatusCode::OK);
     let (url, handle) = serve_stub(stub.router()).await;
 
-    let report = stop_then_delete(&reqwest::Client::new(), &url, "sid-1", false)
-        .await
-        .expect("routing call must not error");
+    let report = stop_then_delete(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+        "sid-1",
+        false,
+    )
+    .await
+    .expect("routing call must not error");
     assert!(
         matches!(report, DeleteReport::Deleted { local: false, .. }),
         "expected a managed delete, got {report:?}"
@@ -163,9 +167,13 @@ async fn stop_then_delete_treats_not_found_as_nothing_to_stop() {
     let stub = StopStub::new(axum::http::StatusCode::NOT_FOUND);
     let (url, handle) = serve_stub(stub.router()).await;
 
-    let report = stop_then_delete(&reqwest::Client::new(), &url, "sid-2", false)
-        .await
-        .expect("routing call must not error");
+    let report = stop_then_delete(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+        "sid-2",
+        false,
+    )
+    .await
+    .expect("routing call must not error");
     assert!(
         matches!(report, DeleteReport::Deleted { .. }),
         "a 404 stop must not block the delete, got {report:?}"
@@ -188,9 +196,13 @@ async fn stop_then_delete_never_deletes_after_a_failed_stop() {
         let stub = StopStub::new(status);
         let (url, handle) = serve_stub(stub.router()).await;
 
-        let report = stop_then_delete(&reqwest::Client::new(), &url, "sid-3", false)
-            .await
-            .expect("routing call must not error");
+        let report = stop_then_delete(
+            &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+            "sid-3",
+            false,
+        )
+        .await
+        .expect("routing call must not error");
         match report {
             DeleteReport::StopFailed(msg) => {
                 assert!(
@@ -325,9 +337,12 @@ async fn picker_delete_stops_an_errored_session_before_deleting_it() {
     let stub = LiveErroredStub::new(axum::http::StatusCode::OK);
     let (url, handle) = serve_stub(stub.router()).await;
 
-    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
-        .await
-        .expect("the delete driver must not error");
+    let deleted = delete_confirmed(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+        &row("errored"),
+    )
+    .await
+    .expect("the delete driver must not error");
     assert!(deleted, "the errored row must end up deleted, not refused");
     assert_eq!(stub.counts(), (1, 1), "one stop, then one delete");
     handle.abort();
@@ -341,9 +356,12 @@ async fn picker_delete_treats_a_not_found_stop_as_nothing_to_stop() {
     let stub = LiveErroredStub::new(axum::http::StatusCode::NOT_FOUND);
     let (url, handle) = serve_stub(stub.router()).await;
 
-    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
-        .await
-        .expect("the delete driver must not error");
+    let deleted = delete_confirmed(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+        &row("errored"),
+    )
+    .await
+    .expect("the delete driver must not error");
     assert!(deleted, "a 404 stop must not block the delete");
     assert_eq!(stub.counts(), (1, 1));
     handle.abort();
@@ -361,9 +379,12 @@ async fn picker_delete_never_deletes_after_a_failed_stop() {
         let stub = LiveErroredStub::new(status);
         let (url, handle) = serve_stub(stub.router()).await;
 
-        let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("errored"))
-            .await
-            .expect("the delete driver must not error");
+        let deleted = delete_confirmed(
+            &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+            &row("errored"),
+        )
+        .await
+        .expect("the delete driver must not error");
         assert!(!deleted, "a {status} stop must not report a deletion");
         assert_eq!(
             stub.counts(),
@@ -382,9 +403,12 @@ async fn picker_delete_issues_no_stop_for_a_non_errored_row() {
     let stub = StopStub::new(axum::http::StatusCode::OK);
     let (url, handle) = serve_stub(stub.router()).await;
 
-    let deleted = delete_confirmed(&reqwest::Client::new(), &url, &row("stopped"))
-        .await
-        .expect("the delete driver must not error");
+    let deleted = delete_confirmed(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
+        &row("stopped"),
+    )
+    .await
+    .expect("the delete driver must not error");
     assert!(deleted);
     assert_eq!(
         stub.counts(),
@@ -535,8 +559,7 @@ async fn verb_delete_stops_an_errored_session_before_deleting_it() {
     let (url, handle) = serve_stub(stub.router()).await;
 
     crate::commands::delete::session_delete(
-        &reqwest::Client::new(),
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
         "sid-verb".to_string(),
         false,
     )
@@ -563,8 +586,7 @@ async fn verb_delete_never_deletes_after_a_failed_stop() {
         let (url, handle) = serve_stub(stub.router()).await;
 
         let err = crate::commands::delete::session_delete(
-            &reqwest::Client::new(),
-            &url,
+            &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
             "sid-verb".to_string(),
             false,
         )
@@ -595,8 +617,7 @@ async fn verb_delete_issues_no_stop_when_the_id_is_not_a_managed_record() {
     // out; the stub's delete endpoint answers it (the local fallback beyond it
     // is covered by `local_delete_*` in `tests_behavior_d_tests.rs`).
     crate::commands::delete::session_delete(
-        &reqwest::Client::new(),
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &url),
         "sid-verb".to_string(),
         false,
     )
@@ -630,9 +651,12 @@ async fn picker_and_verb_route_each_state_identically() {
         // between the surfaces is the ROUTE, not the daemon's verdict.
         let picker_stub = VerbStub::new(Some(state), axum::http::StatusCode::OK, false);
         let (picker_url, picker_handle) = serve_stub(picker_stub.router()).await;
-        delete_confirmed(&reqwest::Client::new(), &picker_url, &row(state))
-            .await
-            .expect("the picker's delete driver must not error");
+        delete_confirmed(
+            &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &picker_url),
+            &row(state),
+        )
+        .await
+        .expect("the picker's delete driver must not error");
         picker_handle.abort();
 
         let verb_stub = VerbStub::new(Some(state), axum::http::StatusCode::OK, false);
@@ -642,8 +666,7 @@ async fn picker_and_verb_route_each_state_identically() {
         // pass the flag the state calls for and compare like with like.
         let force = crate::commands::picker_delete::delete_needs_force(state);
         crate::commands::delete::session_delete(
-            &reqwest::Client::new(),
-            &verb_url,
+            &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), &verb_url),
             "sid-verb".to_string(),
             force,
         )

@@ -215,9 +215,11 @@ pub(crate) async fn run_session_tui(
                 // the tmux hand-off, so `attach-session` gets the real terminal
                 // in cooked mode.
                 terminal::suspend(&mut terminal)?;
-                let outcome =
-                    super::guided_resume::resume_guided_session(client, url, &sessions[index])
-                        .await;
+                let outcome = super::guided_resume::resume_guided_session(
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                    &sessions[index],
+                )
+                .await;
                 match outcome {
                     // #2678: a `switch-client` hand-off (or a fail-closed skip)
                     // means this pane is no longer visible — stop rather than
@@ -240,15 +242,20 @@ pub(crate) async fn run_session_tui(
                 // is the CLI step the daemon's refusal used to send the operator
                 // out of this surface to run by hand. The numbered fallback
                 // picker shares this routing rather than re-deciding it.
-                let report = route_delete(client, url, &session.id, force, stop_first).await;
+                let report = route_delete(
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                    &session.id,
+                    force,
+                    stop_first,
+                )
+                .await;
                 let (text, severity) = delete_outcome(&session.name, report);
                 state.set_message(text, severity);
             }
             Action::Rename { index, name } => {
                 let session = &sessions[index];
                 match super::rename::do_rename_request(
-                    client,
-                    url,
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                     &session.name,
                     &session.id,
                     name,
@@ -265,7 +272,13 @@ pub(crate) async fn run_session_tui(
         // next frame is the daemon's answer, not this process's guess. A fetch
         // failure keeps the list already in hand and says so, rather than
         // dropping the operator back to a shell.
-        match fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await {
+        match fetch_live_sessions(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+            scope.source_id.as_deref(),
+            false,
+        )
+        .await
+        {
             Ok(fetched) => sessions = fetched,
             Err(e) => state.set_message(format!("refresh failed: {e}"), Severity::Error),
         }
