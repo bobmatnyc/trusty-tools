@@ -94,9 +94,11 @@
 //! text through `pm_guard_bash::split_heredoc_bodies`, the same framing
 //! `has_file_write_redirection` has used since #5356, and an interpreter's
 //! inline program is identified by position (see [`inline_program_indices`]).
-//! Both are then scanned as [`Scan::ProgramText`], which changes exactly one
-//! answer: an unresolvable brace shape is ordinary text rather than a secret.
-//! Every pattern and every family still applies, so `python -c 'open(".env")'`
+//! Both are then scanned as [`Scan::ProgramText`]. Since #8878 an unresolvable
+//! brace shape fails closed in both modes, including in program text (known
+//! false positives are pinned); only the regex-quantifier release differs. The
+//! code braces above still allow, because the orphan-brace drop resolves them
+//! before the expander runs. Every pattern and every family still applies, so `python -c 'open(".env")'`
 //! and a body carrying `.env` both deny, and a body whose operator line names
 //! a SHELL is left in place, because it is shell source whose own segments
 //! must still be classified. Program text is lexed before its words are
@@ -315,7 +317,8 @@
 //! `denies_a_quote_joined_name_in_a_heredoc_body`,
 //! `denies_a_quote_joined_name_in_an_inline_program`,
 //! `denies_a_name_split_by_a_backslash_newline_continuation`,
-//! `the_program_text_join_keeps_brace_leniency`,
+//! `the_program_text_join_keeps_code_braces_allowed`,
+//! `known_fp_program_text_unresolvable_brace_denies`,
 //! `allows_a_brace_literal_passed_as_an_argument_value`,
 //! `a_real_brace_alternation_in_argv_still_denies`,
 //! `drops_only_the_braces_the_cut_orphaned`,
@@ -392,11 +395,16 @@ use crate::commands::pm_guard_secret_consumers::{gh_api_lists_secret_names, key_
 /// `cat >> verb.rs <<'RSEOF'` carrying `struct VerbStub {` ("naming `{`"),
 /// `awk -F'[ ;]' '{p+=$4}'` ("naming `{p+`") and a `python3` here-document
 /// ("naming `{a`") — three commands that name no file at all.
-/// What: the only thing the two modes decide differently is an UNRESOLVABLE
-/// brace shape. Every pattern, every family and every path-shape test is
-/// shared, so a secret named in program text still denies: `python -c
-/// 'open(".env")'` and a here-document body carrying `.env` both do.
+/// What: an unresolvable brace shape fails closed in both modes (#8878),
+/// including in program text (known false positives are pinned); only the
+/// regex-quantifier release differs. The code braces above still allow: the
+/// orphan-brace drop removes them before the expander runs. Every pattern,
+/// every family and every path-shape test is shared, so a secret named in
+/// program text still denies: `python -c 'open(".env")'` and a here-document
+/// body carrying `.env` both do.
 /// Test: `allows_program_text_that_only_looks_like_a_brace_group`,
+/// `denies_program_text_with_an_unresolvable_brace_word`,
+/// `known_fp_program_text_unresolvable_brace_denies`,
 /// `denies_a_secret_named_inside_an_inline_program`,
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -504,12 +512,13 @@ fn is_ssh_public_key_name(basename: &str) -> bool {
 /// round 6).
 /// What: basename, then [`normalize_bracket_classes`], then
 /// [`is_ssh_public_key_name`] as an exemption, then [`is_secret_read_target`].
-/// Under [`Scan::ProgramText`] the same brace expander runs but an
-/// UNRESOLVABLE shape answers `false` instead of failing closed (#7266) — see
-/// [`Scan`].
+/// Under [`Scan::ProgramText`] a regex-quantifier word is released when its
+/// literal core names nothing; an UNRESOLVABLE brace shape fails closed there
+/// too (#8878).
 /// Test: `allows_reading_an_ssh_public_key`,
 /// `denies_a_glob_that_expands_onto_a_secret_file`,
-/// `allows_program_text_that_only_looks_like_a_brace_group`.
+/// `allows_program_text_that_only_looks_like_a_brace_group`,
+/// `denies_program_text_with_an_unresolvable_brace_word`.
 fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     // #8523: pm2's `save` file holds every managed process's environment.
     if names_a_process_manager_dump(path) {
@@ -533,8 +542,9 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
         {
             false
         }
+        // See #8878: an unresolvable word fails closed, as in `is_secret_read_target`.
         Scan::ProgramText => expand_brace_alternatives(&base)
-            .is_some_and(|candidates| candidates.iter().any(|c| names_a_secret(c))),
+            .is_none_or(|candidates| candidates.iter().any(|c| names_a_secret(c))),
     }
 }
 
@@ -789,9 +799,10 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
 /// never remove one, so a line the lexer reads differently from the byte scan
 /// cannot open a gap either way. A line `shlex` cannot read contributes its raw
 /// scan alone. Per line rather than per block, so one unlexable line does not
-/// cost the join for the rest. Brace leniency is untouched: the join runs
-/// BEFORE [`names_a_secret_file`], which still reads an unresolvable `{` as
-/// ordinary text under [`Scan::ProgramText`].
+/// cost the join for the rest. The join runs BEFORE [`names_a_secret_file`],
+/// where an unresolvable brace shape fails closed in both modes (#8878),
+/// including in program text (known false positives are pinned); only the
+/// regex-quantifier release differs.
 ///
 /// Round 11: a per-LINE pass cannot see a name a `\<newline>` CONTINUATION
 /// splits across two lines. The shell removes that pair before any word
@@ -875,7 +886,8 @@ pub(crate) fn inline_program_indices(argv: &[String]) -> Vec<usize> {
 /// read, so the scan reads bytes rather than tokens.
 /// What: cuts every [`scan_spellings`] reading of `text` at every non-path byte
 /// and keeps the words [`names_a_secret_file`] answers for, without repeats.
-/// `scan` decides only what an unresolvable brace shape means — see [`Scan`].
+/// `scan` decides only whether a regex-quantifier word is released — see
+/// [`Scan`]; an unresolvable brace shape fails closed in both modes (#8878).
 /// Test: `secret_files_named_in_finds_a_name_inside_a_program_string`,
 /// `allows_a_parameter_expansion_that_names_no_secret`,
 /// `allows_program_text_that_only_looks_like_a_brace_group`,
@@ -3245,6 +3257,44 @@ mod tests {
         }
     }
 
+    /// See #8878: program text holding a brace word the expander cannot
+    /// resolve (past its cap, or unbalanced) is denied, not waved through.
+    /// 13 groups are 8192 readings: past both caps, and cheap to expand even
+    /// if the expander's cap regresses. A nested group is not a row: the scan's
+    /// own brace readings resolve it before the expander runs.
+    #[test]
+    fn denies_program_text_with_an_unresolvable_brace_word() {
+        let over_cap = format!("python3 -c 'open(\"notes{}.md\")'", "{a,b}".repeat(13));
+        // A `{` behind `$` survives the orphan-brace drop, so it reaches the
+        // expander unbalanced.
+        let unbalanced = "python3 -c 'open(\"${notes.md\")'".to_string();
+        for command in [over_cap, unbalanced] {
+            assert!(eval(&command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// Known false positives of the #8878 fail-closed program-text scan:
+    /// benign code whose brace word the expander cannot resolve. Each row
+    /// denies today; released only by the sandbox cut plan; see #8878.
+    const KNOWN_FP_PROGRAM_TEXT_CORPUS: &[&str] = &[
+        // shlex splits a `${…}` holding a space, leaving an unbalanced `${a`.
+        "node -e 'console.log(`${a + b}`)'",
+        // The same split inside a here-document body line.
+        "cat > run.sh <<'EOF'\nfirst=${line%% *}\nEOF",
+        // One line past 64 brace readings falls back to raw text, whose lone
+        // code `{` reaches the expander unbalanced.
+        "python3 -c 'rows = [{\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}]'",
+    ];
+
+    /// Pins [`KNOWN_FP_PROGRAM_TEXT_CORPUS`] as DENY: released only by the
+    /// sandbox cut plan; see #8878.
+    #[test]
+    fn known_fp_program_text_unresolvable_brace_denies() {
+        for command in KNOWN_FP_PROGRAM_TEXT_CORPUS {
+            assert!(eval(command).is_some(), "known false positive: `{command}`");
+        }
+    }
+
     #[test]
     fn allows_a_heredoc_body_of_code_that_names_no_secret() {
         assert_eq!(eval(CODE_BRACE_CORPUS[0]), None);
@@ -3380,9 +3430,10 @@ mod tests {
     }
 
     #[test]
-    fn the_program_text_join_keeps_brace_leniency() {
-        // The join runs before the name test, so a `{` the expander cannot
-        // resolve is still ordinary text after it.
+    fn the_program_text_join_keeps_code_braces_allowed() {
+        // The join runs before the name test; the code braces here are
+        // resolved by the orphan-brace drop, so none reaches the expander
+        // unresolved (#8878 fails such a word closed).
         for command in CODE_BRACE_CORPUS {
             assert_eq!(eval(command), None, "`{command}`");
         }
