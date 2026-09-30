@@ -64,8 +64,9 @@ pub struct Supervisor<C: LlmClassifier> {
     /// the boot-time env / CLI value; the flag actually in force each sweep is
     /// [`Self::resolve_auto_resume`]'s result (#5208).
     cfg: SupervisorConfig,
-    /// Optional activity classifier for idle `active` sessions.
-    monitor: Option<ActivityMonitor<C>>,
+    /// Optional activity classifier for idle `active` sessions; shared so the
+    /// sweep can run on the blocking pool (#8335).
+    monitor: Option<Arc<ActivityMonitor<C>>>,
     /// Cumulative counters across every sweep this run.
     stats: SupervisorRunStats,
     /// #5208: the console-written desired-state file, re-read every sweep.
@@ -78,9 +79,24 @@ pub struct Supervisor<C: LlmClassifier> {
     /// #7275: when the post-merge cleanup sweep last ran, so its cadence is
     /// independent of the fleet sweep's.
     last_pr_cleanup: Option<std::time::Instant>,
+    /// #8335: the fleet sweep, run off the loop task under `tick_timeout`.
+    fleet_sweep: watchdog::DetachedSweep<TickReport>,
+    /// #8335: the post-merge cleanup sweep, likewise.
+    cleanup_sweep: watchdog::DetachedSweep<usize>,
+    /// #8335: what the cleanup sweep runs; a seam so a test can hand it a `gh`
+    /// that hangs.
+    cleanup: CleanupFn,
 }
 
-impl<C: LlmClassifier> Supervisor<C> {
+/// The post-merge cleanup sweep as the supervisor calls it (#8335).
+///
+/// The returned future is built and driven on a blocking-pool thread, so it
+/// need not be `Send`.
+type CleanupFn = Arc<
+    dyn Fn(Arc<SessionManager>) -> std::pin::Pin<Box<dyn Future<Output = usize>>> + Send + Sync,
+>;
+
+impl<C: LlmClassifier + 'static> Supervisor<C> {
     /// Construct a supervisor over a session manager and config.
     ///
     /// Why: callers wire the supervisor with whatever classifier they have (a real
@@ -96,7 +112,7 @@ impl<C: LlmClassifier> Supervisor<C> {
         Self {
             mgr,
             cfg,
-            monitor,
+            monitor: monitor.map(Arc::new),
             stats: SupervisorRunStats::default(),
             // #5208: default to the same `~/.trusty-mpm/auto_resume` the console
             // writes, so production wiring needs no extra call.
@@ -109,7 +125,24 @@ impl<C: LlmClassifier> Supervisor<C> {
             // than waiting a full cleanup interval to notice a merge that
             // landed while the daemon was down.
             last_pr_cleanup: None,
+            fleet_sweep: watchdog::DetachedSweep::new("fleet sweep"),
+            cleanup_sweep: watchdog::DetachedSweep::new("post-merge cleanup sweep"),
+            cleanup: Arc::new(|mgr| {
+                Box::pin(async move { pr_cleanup_tick::run_sweep(&mgr).await })
+            }),
         }
+    }
+
+    /// Replace what the post-merge cleanup sweep runs (#8335).
+    ///
+    /// Why: the production sweep spawns the real `gh`; a test needs one that
+    /// hangs, driven through the same bounded path.
+    /// Test: `a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_cleanup(mut self, cleanup: CleanupFn) -> Self {
+        self.cleanup = cleanup;
+        self
     }
 
     /// Point the supervisor at a specific auto-resume desired-state file.
@@ -218,12 +251,15 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// desired-state file (#5208 — [`Self::resolve_auto_resume`]), calls
     /// [`poller::run_tick`] with the resulting per-sweep config, increments
     /// `sweeps`, and adds the tick's resumed / failure / classified counts into
-    /// `self.stats`; returns the [`TickReport`] for the caller to inspect. A sweep
-    /// that outlives `cfg.tick_timeout` is abandoned and logged at `error`
-    /// (#8335); it returns an empty report and is not counted in `sweeps`.
+    /// `self.stats`; returns the [`TickReport`] for the caller to inspect. #8335:
+    /// the sweep runs on the blocking pool under `cfg.tick_timeout`
+    /// ([`watchdog::DetachedSweep`]); one that does not complete returns an
+    /// empty report, is not counted in `sweeps`, and bumps `sweeps_abandoned`
+    /// and `consecutive_sweeps_abandoned`.
     /// Test: `supervisor_tick_updates_stats`, `supervisor_fleet_resume_e2e`,
     /// `supervisor_honours_console_desired_state_without_restart`,
-    /// `a_wedged_sweep_times_out_and_the_loop_continues`.
+    /// `a_wedged_sweep_times_out_and_the_loop_continues`,
+    /// `abandoned_fleet_sweeps_are_counted_and_read_as_stale`.
     pub async fn tick(&mut self) -> TickReport {
         // #5208: the console toggle is re-read every sweep, so an operator's
         // change takes effect within one interval instead of never.
@@ -231,12 +267,16 @@ impl<C: LlmClassifier> Supervisor<C> {
             auto_resume: self.resolve_auto_resume(),
             ..self.cfg.clone()
         };
-        // #8335: an unbounded sweep wedged the loop for hours with no log line.
-        let sweep = run_tick(&self.mgr, &cfg, self.monitor.as_ref());
-        let Some(report) = watchdog::bounded(self.cfg.tick_timeout, "fleet sweep", sweep).await
-        else {
+        // #8335: a sweep blocked in a tmux call held this task, so no timeout
+        // around it could fire. It runs on the blocking pool instead.
+        let (mgr, monitor) = (Arc::clone(&self.mgr), self.monitor.clone());
+        let sweep = move || async move { run_tick(&mgr, &cfg, monitor.as_deref()).await };
+        let Some(report) = self.fleet_sweep.run(self.cfg.tick_timeout, sweep).await else {
+            self.stats.sweeps_abandoned += 1;
+            self.stats.consecutive_sweeps_abandoned += 1;
             return TickReport::default();
         };
+        self.stats.consecutive_sweeps_abandoned = 0;
         self.pr_cleanup_tick().await;
         self.stats.sweeps += 1;
         self.stats.auto_resumed += report.resumed.len() as u64;
@@ -266,11 +306,18 @@ impl<C: LlmClassifier> Supervisor<C> {
             return;
         }
         self.last_pr_cleanup = Some(now);
-        // #8335: the sweep spawns `gh`; a hung call must not stop the loop.
-        let sweep = pr_cleanup_tick::run_sweep(&self.mgr);
+        // #8335: `RealGh::run` and `RealGit::run` block their thread in
+        // `Command::output()`, so this sweep runs on the blocking pool. The loop
+        // stops waiting for it after `cfg.tick_timeout` (an await inside it is
+        // dropped at that bound), plus 500 ms for a blocked call. A call still
+        // blocked then is NOT killed: its thread and child process keep running
+        // until the call returns, and every later cleanup sweep is skipped and
+        // counted in `cleanup_sweeps_abandoned` until it does.
+        let (mgr, cleanup) = (Arc::clone(&self.mgr), Arc::clone(&self.cleanup));
+        let sweep = move || cleanup(mgr);
         let limit = self.cfg.tick_timeout;
-        let Some(cleaned) = watchdog::bounded(limit, "post-merge cleanup sweep", sweep).await
-        else {
+        let Some(cleaned) = self.cleanup_sweep.run(limit, sweep).await else {
+            self.stats.cleanup_sweeps_abandoned += 1;
             return;
         };
         if cleaned > 0 {
