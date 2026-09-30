@@ -197,7 +197,9 @@ pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry])
             ),
             None => (
                 CheckStatus::Fail,
-                format!("{who} is not allowlisted: only trusty-console may listen on TCP"),
+                format!(
+                    "{who} is not allowlisted: only trusty-console may listen on TCP (ADR-0032)"
+                ),
             ),
         };
         status = status.worst(verdict);
@@ -217,7 +219,7 @@ pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry])
     let message = if findings.is_empty() {
         "no trusty-* process listens on TCP (ADR-0032)".to_string()
     } else {
-        format!("{} (ADR-0032)", findings.join("; "))
+        findings.join("; ")
     };
     DoctorCheck::new(CHECK_NAME, status, message)
 }
