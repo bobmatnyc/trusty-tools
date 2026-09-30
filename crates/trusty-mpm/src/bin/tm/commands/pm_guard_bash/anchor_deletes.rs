@@ -7,18 +7,24 @@
 //! anchor; only the Architect's main thread may delete there.
 //! What: [`delete_verb_of`] names `rm`, `rmdir`, `unlink`, `trash`, `shred`,
 //! `truncate` and `find`; [`delete_writes`] turns one such segment's operands
-//! into [`AnchorWrite::Delete`] (the entry and all below it) or, for
-//! `truncate`, [`AnchorWrite::File`]. `rmdir -p` also removes each parent the
-//! operand spells. `find` deletes under its start points when it carries
-//! `-delete` or runs a delete verb, `mv` or a shell through `-exec`,
-//! `-execdir`, `-ok` or `-okdir`; with no start point it searches `.`.
+//! into [`AnchorWrite::Delete`]s with their [`Reach`]. `rmdir -p` also
+//! removes each parent the operand spells ([`Reach::Parent`]). `find` deletes
+//! under its start points ([`Reach::Tree`]) when it carries `-delete` or runs
+//! a delete verb, `mv` or a shell through `-exec`, `-execdir`, `-ok` or
+//! `-okdir`; with no start point it searches `.`. #8878 H2: the command each
+//! such action runs is read as a command of its own ([`anchor_writes`]).
 //! Residual: see `pm_guard_trust_anchor.rs`.
 //! Test: `pm_guard_trust_anchor_delete_tests.rs`
 //! (`each_delete_verb_on_each_anchor_is_denied`,
 //! `find_deletes_under_its_start_points`, `ordinary_deletes_stay_allowed`).
 
-use super::anchor_verbs::AnchorWrite;
+use super::anchor_verbs::{AnchorWrite, Reach, anchor_writes};
+use super::write_targets::UnplaceableWrite;
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
+
+/// A `find -exec`-family action whose command cannot be re-spelled (#8878 H2).
+const UNLEXABLE_FIND_ACTION: UnplaceableWrite =
+    "a `find -exec`/`-execdir`/`-ok`/`-okdir` command that does not lex";
 
 /// A verb that removes or empties what it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +43,8 @@ pub(super) enum DeleteVerb {
 
 /// The [`DeleteVerb`] a program word names, GNU `g`-prefixed spellings included.
 pub(super) fn delete_verb_of(word: &str) -> Option<DeleteVerb> {
-    let word = word.strip_prefix('\\').unwrap_or(word);
+    // #8878 round 2: zsh runs `=rm` as `rm`.
+    let word = word.strip_prefix(['\\', '=']).unwrap_or(word);
     match word.rsplit('/').next().unwrap_or(word) {
         "rm" | "grm" | "unlink" | "gunlink" | "trash" => Some(DeleteVerb::Remove),
         "rmdir" | "grmdir" => Some(DeleteVerb::Rmdir),
@@ -51,23 +58,27 @@ pub(super) fn delete_verb_of(word: &str) -> Option<DeleteVerb> {
 /// The anchor writes of one delete-verb segment; `args` has its redirects removed.
 ///
 /// What: see the module doc. Option words are dropped (`--` ends them);
-/// `shred -n/-s` and `truncate -s/-r` consume their value.
-/// Test: `each_delete_verb_on_each_anchor_is_denied`.
-pub(super) fn delete_writes(verb: DeleteVerb, args: &[String]) -> Vec<AnchorWrite> {
-    match verb {
-        DeleteVerb::Find => find_writes(args),
+/// `shred -n/-s` and `truncate -s/-r` consume their value. `Err` when a
+/// `find` action's command cannot be read.
+/// Test: `each_delete_verb_on_each_anchor_is_denied`,
+/// `a_find_exec_action_is_read_as_a_command`.
+pub(super) fn delete_writes(
+    verb: DeleteVerb,
+    args: &[String],
+) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
+    let entry = |word| AnchorWrite::Delete(word, Reach::Entry);
+    Ok(match verb {
+        DeleteVerb::Find => return find_writes(args),
+        // #8878 split: `truncate` is a delete-set verb, judged as one.
         DeleteVerb::Truncate => positional(args, &['s', 'r'])
             .into_iter()
-            .map(AnchorWrite::File)
+            .map(entry)
             .collect(),
         DeleteVerb::Shred => positional(args, &['n', 's'])
             .into_iter()
-            .map(AnchorWrite::Delete)
+            .map(entry)
             .collect(),
-        DeleteVerb::Remove => positional(args, &[])
-            .into_iter()
-            .map(AnchorWrite::Delete)
-            .collect(),
+        DeleteVerb::Remove => positional(args, &[]).into_iter().map(entry).collect(),
         DeleteVerb::Rmdir => {
             let parents = args
                 .iter()
@@ -77,7 +88,7 @@ pub(super) fn delete_writes(verb: DeleteVerb, args: &[String]) -> Vec<AnchorWrit
             for operand in positional(args, &[]) {
                 // #8878: `rmdir -p a/b` removes `a/b`, then `a`.
                 let mut path = operand.trim_end_matches('/').to_string();
-                out.push(AnchorWrite::Delete(operand));
+                out.push(entry(operand));
                 if !parents {
                     continue;
                 }
@@ -86,12 +97,12 @@ pub(super) fn delete_writes(verb: DeleteVerb, args: &[String]) -> Vec<AnchorWrit
                         break;
                     }
                     path = parent.to_string();
-                    out.push(AnchorWrite::Delete(path.clone()));
+                    out.push(AnchorWrite::Delete(path.clone(), Reach::Parent));
                 }
             }
             out
         }
-    }
+    })
 }
 
 /// Whether a short-option cluster (`-rf`) holds `flag`.
@@ -124,17 +135,63 @@ fn positional(args: &[String], valued: &[char]) -> Vec<String> {
     out
 }
 
-/// The anchor writes of a `find` segment: each start point, as a delete,
-/// when the expression deletes; nothing otherwise.
+/// The anchor writes of a `find` segment: each action's command's writes,
+/// and each start point, as a [`Reach::Tree`] delete, when the expression
+/// deletes.
 ///
 /// What: start points are the words before the first expression word (one
 /// starting with `-`, or `(`, `)`, `!`, `,`), after the leading `-H -L -P
 /// -E -X -d -s -x` flags; BSD `-f PATH` names one too. None means `.`.
-/// Test: `find_deletes_under_its_start_points`.
-fn find_writes(args: &[String]) -> Vec<AnchorWrite> {
-    if !find_deletes(args) {
-        return Vec::new();
+/// Test: `find_deletes_under_its_start_points`,
+/// `a_find_exec_action_is_read_as_a_command`.
+fn find_writes(args: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
+    let mut out = Vec::new();
+    if find_deletes(args) {
+        out.extend(find_starts(args));
     }
+    out.extend(find_action_writes(args)?);
+    Ok(out)
+}
+
+/// The writes of the command each `-exec`-family action runs (#8878 H2).
+///
+/// What: the action's words up to its `;` or `+`, each `{}` dropped, are
+/// re-spelled as one command and read by [`anchor_writes`], so a verb, a
+/// wrapper and a shell's `-c` string are read as at the top level. An
+/// `-execdir`/`-okdir` runs in each match's directory: a [`AnchorWrite::DirChange`].
+/// A command that cannot be re-spelled is `Err`.
+fn find_action_writes(args: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
+    let mut out = Vec::new();
+    for (at, word) in args.iter().enumerate() {
+        if !matches!(word.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            continue;
+        }
+        let tail = &args[at + 1..];
+        let end = tail
+            .iter()
+            .position(|w| w == ";" || w == "+")
+            .unwrap_or(tail.len());
+        let argv: Vec<&str> = tail[..end]
+            .iter()
+            .map(String::as_str)
+            .filter(|w| *w != "{}")
+            .collect();
+        if word.ends_with("dir") {
+            out.push(AnchorWrite::DirChange);
+        }
+        if argv.is_empty() {
+            continue;
+        }
+        // #8878 H2: an action that will not re-spell fails closed.
+        let command = shlex::try_join(argv).map_err(|_| UNLEXABLE_FIND_ACTION)?;
+        out.extend(anchor_writes(&command)?);
+    }
+    Ok(out)
+}
+
+/// A deleting `find`'s start points, as [`Reach::Tree`] deletes.
+fn find_starts(args: &[String]) -> Vec<AnchorWrite> {
+    let tree = |word| AnchorWrite::Delete(word, Reach::Tree);
     let mut starts = Vec::new();
     let mut words = args.iter().peekable();
     while let Some(word) = words.next_if(|w| w.starts_with('-') && w.len() > 1) {
@@ -143,7 +200,7 @@ fn find_writes(args: &[String]) -> Vec<AnchorWrite> {
             "--" => break,
             flags if flags[1..].chars().all(|c| "HLPEXdsx".contains(c)) => {}
             // #8878: the first expression word; no start point precedes it.
-            _ => return vec![AnchorWrite::Delete(".".to_string())],
+            _ => return vec![tree(".".to_string())],
         }
     }
     starts.extend(
@@ -154,12 +211,12 @@ fn find_writes(args: &[String]) -> Vec<AnchorWrite> {
     if starts.is_empty() {
         starts.push(".".to_string());
     }
-    starts.into_iter().map(AnchorWrite::Delete).collect()
+    starts.into_iter().map(tree).collect()
 }
 
 /// Whether a `find` expression deletes: `-delete`, or an `-exec`-family
 /// action whose program is a delete verb, `mv`, or a shell.
-fn find_deletes(args: &[String]) -> bool {
+pub(super) fn find_deletes(args: &[String]) -> bool {
     args.iter()
         .enumerate()
         .any(|(at, word)| match word.as_str() {
