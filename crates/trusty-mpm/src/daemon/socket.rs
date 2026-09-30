@@ -85,9 +85,11 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
 /// Per-connection budgets for this listener.
 ///
 /// The shared defaults: a 30-second bound on delivering a REQUEST frame, and
-/// the shared control-plane frame budget. Neither bounds a handler, and this
-/// slice has no handler to bound. A later slice that moves a bulk route across
-/// raises `max_frame_bytes` here and on the client together.
+/// the shared control-plane frame budget. Neither bounds a handler.
+/// `mpm.mcp.dispatch` and `mpm.sessions.chat` run unbounded server-side on the
+/// socket, where HTTP caps them at 175 s and 125 s (`request_deadline.rs`);
+/// steps 2b/2c of #6288 close that gap. A later slice that moves a bulk route
+/// across raises `max_frame_bytes` here and on the client together.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions::default()
 }

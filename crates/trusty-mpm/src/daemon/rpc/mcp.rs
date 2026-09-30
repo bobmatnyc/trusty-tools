@@ -8,7 +8,7 @@
 //! What: `mpm.mcp.dispatch` takes the whole MCP JSON-RPC envelope `/rpc` takes
 //! (`{jsonrpc, id, method, params}`) as its params, and answers with the whole
 //! MCP response envelope `/rpc` returns, as its result. Both transports call
-//! [`dispatch_op`], so the two cannot drift. A notification answers the same
+//! [`dispatch_op`](crate::daemon::rpc::mcp::dispatch_op), so the two cannot drift. A notification answers the same
 //! `{"jsonrpc":"2.0"}` body HTTP returns for a suppressed response.
 //!
 //! Auth: HTTP gates `/rpc` on a loopback peer address. The socket admits only
