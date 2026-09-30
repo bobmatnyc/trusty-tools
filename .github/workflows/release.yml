@@ -435,7 +435,7 @@ jobs:
             # together (owner ruling 2026-09-27).
             # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm,
             # plus shim binaries not shipped in the distribution (trusty-mpmd, trusty-mpm-tui,
-            # trusty-mpm-telegram) and Tauri GUI (trusty-mpm-gui, excluded — needs webview).
+            # trusty-mpm-telegram).
             # trusty-console was REMOVED from the install surface in #1318
             # (single-owner-per-binary); it now ships as its own release job.
             # The `cli` feature embeds daemon + tui + telegram as SUBCOMMANDS of tm/trusty-mpm;
@@ -541,7 +541,7 @@ jobs:
             echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-embedderd, trusty-progress,"
-            echo "  trusty-agents*, trusty-mpm-gui, tc-services,"
+            echo "  trusty-agents*, tc-services,"
             echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
             echo "above (see the 'TO ADD A NEW CRATE' note) — otherwise this skip is correct."

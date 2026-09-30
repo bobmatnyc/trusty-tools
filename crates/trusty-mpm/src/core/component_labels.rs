@@ -391,8 +391,8 @@ impl CrateOwnership {
     /// prefixes it. A path no member owns — `docs/`, `scripts/`, `.github/` —
     /// contributes nothing rather than a guess.
     /// The trailing slash each member key carries is what keeps a sibling whose
-    /// directory name extends another's — `crates/trusty-mpm-gui/` beside
-    /// `crates/trusty-mpm/` — from matching both (#7274 round 2).
+    /// directory name extends another's — `crates/trusty-code-gui/` beside
+    /// `crates/trusty-code/` — from matching both (#7274 round 2).
     /// Test: `ownership_prefers_the_longest_matching_member`,
     /// `ownership_ignores_a_path_no_crate_owns`,
     /// `ownership_deduplicates_multi_file_crates`,

@@ -11615,19 +11615,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-mpm-gui"
-version = "0.2.12"
-dependencies = [
- "anyhow",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "trusty-progress"
 version = "0.3.2"
 dependencies = [

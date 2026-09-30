@@ -762,8 +762,7 @@ single-source-of-truth table used by `trusty-search`/`trusty-mpm`, extended for
 with `codesign --deep --force --options runtime --timestamp --identifier
 com.trusty.assistant`.
 
-🟡 **`Trusty Agents.app` is signed differently from `trusty-mpm-gui`/
-`trusty-code-gui` — deliberately.** Those two hardcode
+🟡 **`Trusty Agents.app` is signed differently from `trusty-code-gui` — deliberately.** That crate hardcodes
 `bundle.macOS.signingIdentity` directly in their `tauri.conf.json` (see
 `docs/reference/common-pitfalls.md`), which makes `cargo tauri build`
 **hard-fail** on any machine without that exact certificate — acceptable only

@@ -135,9 +135,7 @@ Telegram, and Slack surfaces are **features compiled into `tm`**, reached as
 subcommands, not separate `[[bin]]` targets. There are no `trusty-mpm-daemon`,
 `trusty-mpm-mcp`, `trusty-mpm-tui`, or `trusty-mpm-telegram` binaries in this crate;
 those names exist on crates.io only as v0.0.0 placeholder reservations. The
-`publish = false` crate in this family is **`trusty-mpm-gui`** (a separate Tauri
-crate, installed separately per the Single-Install convention), which is what the
-old parenthetical was probably remembering.
+`trusty-mpm-gui` Tauri crate that the old parenthetical referred to was retired (#7964).
 
 **Removed row: `open-mpm`.** No such crate exists under `crates/`. It was stale.
 
@@ -146,5 +144,5 @@ they are not main-crate/sidecar bundles: `trusty-agents` (`tagent`),
 `trusty-channels` (`slack-mcp`, `telegram-mcp`), `trusty-common` (`tickets-mcp`,
 `candle_metal_bench`), `trusty-console`, `trusty-embedderd-py`, `trusty-gworkspace`,
 `trusty-kb`, `trusty-review`, `trusty-sld-lint`, and the `publish = false`
-`trusty-code-gui`, `trusty-mpm-gui`, `trusty-publish-guard`.
+`trusty-code-gui`, `trusty-publish-guard`.
 Add one here the moment it gains a second bundled binary.

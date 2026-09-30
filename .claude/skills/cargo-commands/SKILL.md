@@ -107,11 +107,11 @@ ONNX-backed embedder tests are marked `#[ignore]` so CI stays fast. They do not
 run under a plain `cargo test`. Use `--include-ignored` when you need local
 validation against the actual model — and expect it to be slow.
 
-## `trusty-mpm-gui` and `trusty-code-gui` Are Excluded by Default
+## `trusty-code-gui` Is Excluded by Default
 
-Both are omitted from the root `Cargo.toml`'s `default-members` (#2951), so a
-bare `cargo build` / `test` / `check` skips them. Name them explicitly
-(`cargo build -p trusty-mpm-gui`) or use `--workspace`, which always builds
+It is omitted from the root `Cargo.toml`'s `default-members`, so a bare
+`cargo build` / `test` / `check` skips it. Name it explicitly
+(`cargo build -p trusty-code-gui`) or use `--workspace`, which always builds
 everything regardless of `default-members`.
 
 ## Crate Names vs. Directory Names

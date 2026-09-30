@@ -337,7 +337,7 @@ parity.
 
 The **L-effort** parity items are explicitly **post-MVP**:
 
-- **Web dashboard / monitoring** (`trusty-console` / `trusty-mpm-gui` territory).
+- **Web dashboard / monitoring** (`trusty-console` territory).
 - **Slack integration.**
 
 These do not gate G0 — an autonomous runner is fully usable through the CLI + the

@@ -517,7 +517,6 @@ async fn main() -> anyhow::Result<()> {
             // #6483: multipane by default; `--single-pane` opts into the chat.
             trusty_mpm::tui::run_initial_view(resolved, interval_ms, None, single_pane).await
         }
-        Some(Command::Gui) => commands::gui::launch_gui(),
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {

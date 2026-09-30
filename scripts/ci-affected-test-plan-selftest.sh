@@ -77,12 +77,12 @@ if [ "$(field "$out" count)" = 0 ] && field "$out" reason | grep -q 'Tauri'; the
 else fail "Tauri-only selection: $out"; fi
 
 # 4. Tauri crates are dropped, everything else kept, one leg per crate.
-stub 0 alpha trusty-mpm-gui beta gamma
+stub 0 alpha trusty-agents-ui beta gamma
 out="$(plan -- --files x)"
 m="$(field "$out" matrix)"
 if [ "$(field "$out" count)" = 3 ] && [ "$(field "$out" crates)" = "alpha beta gamma" ] &&
   [ "$(printf '%s' "$m" | jq -r '.include[0].total')" = 3 ] &&
-  ! printf '%s' "$m" | grep -q trusty-mpm-gui; then
+  ! printf '%s' "$m" | grep -q trusty-agents-ui; then
   pass "mixed selection -> 3 crates, 3 legs, Tauri crate dropped"
 else fail "mixed selection: $out"; fi
 
@@ -172,7 +172,7 @@ else fail "live unreferenced script: $out"; fi
 out="$(plan -- --files crates/trusty-common/src/lib.rs)"
 crates=" $(field "$out" crates) "
 case "$crates" in
-  *" trusty-code-gui "* | *" trusty-mpm-gui "* | *" trusty-agents-ui "*)
+  *" trusty-code-gui "* | *" trusty-agents-ui "*)
     fail "live: trusty-common selection kept a Tauri crate: $out" ;;
   *" trusty-common "*)
     fail "live: trusty-common landed in a leg instead of its lanes job: $out" ;;

@@ -198,7 +198,6 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description |
 |---|---|
-| `trusty-mpm-gui` | Desktop GUI (Tauri) for `trusty-mpm` |
 | `trusty-code` | Coding harness (`tcode`) |
 | `trusty-code-gui` | Desktop shell for `tcode` |
 
