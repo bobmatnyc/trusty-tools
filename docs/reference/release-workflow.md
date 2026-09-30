@@ -15,6 +15,37 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > the canonical release's URLs and digests, because whichever CI run finished
 > last wrote the formula. Release tags are immutable (#6178).
 
+## Dev lane and release lane
+
+Work runs in one of two lanes. The lane decides what counts as evidence.
+
+**Dev lane** (changes being made, PR open):
+
+- Live checks run the build slot's debug `tm`.
+- Local gates are set by the change's test ladder rung. Targeted tests are
+  enough; there is no local `cargo doc` run.
+- CI's full suite is the backstop on every PR. Nothing in this lane removes a
+  CI check.
+
+**Release lane** (anything that publishes to crates.io or installs a tagged
+build):
+
+- The serial `cargo test --no-fail-fast` harness, a release-profile build and
+  `cargo install --locked` are the evidence.
+- Nextest-only runs, targeted-only runs and a debug binary are never proof.
+
+### Release scale: SMALL or LARGE
+
+The larger class wins whenever any condition matches. The scale changes the
+gate set only, not what a release must prove.
+
+| Release scale | Gate set |
+|---|---|
+| **SMALL**: a patch bump of ONE crate, where every change since its last tag is test ladder rung 1-4, and no other published crate changes version | Rung 4 on the crate: `fmt --check`, `check`, `clippy --all-targets -D warnings`, `test -p <crate> --no-fail-fast`, and `test --no-fail-fast` for each direct dependent. Green PR CI. The cargo-publish preflight (semver, dry run, parity). Post-publish `cargo install --locked`, then one live check against the installed binary. |
+| **LARGE**: a minor or major bump; a multi-crate wave; any rung-5/6 change since the last tag (security, process lifecycle, persistence, release tooling, MCP/HTTP/UI surface); or the trusty-mpm/tm binary itself | Everything in SMALL, plus: `--include-ignored` integration coverage for the crate, a bare `cargo test --workspace --no-fail-fast` publish gate, a code-critic round on the release diff, a pre-publish CI run on the exact tag SHA, and live checks for every rung-5/6 issue in the release before the tag is announced. |
+
+Owner ruling: item 47, 2026-09-30.
+
 ## Release Steps
 
 1. Bump the crate version in `crates/<name>/Cargo.toml`.

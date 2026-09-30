@@ -65,6 +65,10 @@ scope away" above is what constrains picking a lower rung.
 `<title>` and asset references; an `index.html` edit that misses them can pass
 every other UI gate green and still fail here (#7593).
 
+A rung chooses the local gates in the dev lane. Releases follow the
+SMALL/LARGE release-scale rule instead, in
+[release-workflow.md](release-workflow.md#dev-lane-and-release-lane).
+
 ### Every rung carries `--no-fail-fast`, and the reason is not politeness
 
 Cargo runs each test target as its own binary and, by default, stops issuing
