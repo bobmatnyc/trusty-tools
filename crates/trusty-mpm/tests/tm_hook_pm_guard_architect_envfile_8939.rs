@@ -20,6 +20,17 @@ fn fixture() -> (Fixture, std::path::PathBuf) {
     (fx, path)
 }
 
+/// The one-shot `tm env` grants the guard has minted under the scratch home.
+fn grants(fx: &Fixture) -> usize {
+    let dir = fx.home.join(".trusty-mpm/architect-launch/envfile-grants");
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "grant"))
+            .count()
+    })
+}
+
 #[test]
 fn the_architect_main_thread_lists_keys_and_its_subagent_does_not() {
     let (fx, path) = fixture();
@@ -29,10 +40,14 @@ fn the_architect_main_thread_lists_keys_and_its_subagent_does_not() {
         format!("tm env set {p} API_KEY"),
     ] {
         let main = bash_payload(&fx, &command);
+        let before = grants(&fx);
         assert_eq!(run_under_claude(&fx, &main, true).trim(), "", "{command}");
+        // #8939 fix round: the exemption mints the verb's one-shot grant.
+        assert_eq!(grants(&fx), before + 1, "no grant: {command}");
         let bypass = [("TRUSTY_MPM_PM_UNRESTRICTED", "1")];
         let out = run_under_claude_with(&fx, &main, true, &bypass);
         assert_eq!(out.trim(), "", "under a bypass: {command}");
+        assert_eq!(grants(&fx), before + 2, "no grant under a bypass");
         let mut sub: serde_json::Value = serde_json::from_str(&main).expect("json");
         sub["agent_id"] = serde_json::json!("agent-7");
         let out = run_under_claude(&fx, &sub.to_string(), true);
@@ -44,6 +59,7 @@ fn the_architect_main_thread_lists_keys_and_its_subagent_does_not() {
         // A PM in the same directory.
         let out = run(&fx, &main, &[], Some("pm"));
         assert!(out.contains("\"deny\""), "a PM: {out}");
+        assert_eq!(grants(&fx), before + 2, "a denied caller got a grant");
     }
 }
 

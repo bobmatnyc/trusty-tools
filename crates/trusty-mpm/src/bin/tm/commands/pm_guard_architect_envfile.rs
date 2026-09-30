@@ -13,7 +13,9 @@
 //! deny is lifted only when [`envfile_shape`] matches AND the call is the
 //! process-bound Architect's main thread. A shape match with a failed
 //! identity denies with the #8878 PR-I identity suffix. [`gate_secret_file_read`]
-//! and [`audit_envfile_allow`] write the `architect-envfile` audit line.
+//! and [`audit_envfile_allow`] write the `architect-envfile` audit line and
+//! mint the one-shot grant `tm env` requires (`env_file_grant`).
+//! [`envfile_policy`] is the path policy the guard and `tm env` share.
 //! Tools (`Read`, `Write`, `Edit`, `Grep`, …) are never exempt.
 //! Scope (Architect ruling Q2 addendum): `CLAUDE_PROJECT_DIR` plus the
 //! `[supervisor] projects` list of the user config `~/.trusty-mpm/config.toml`,
@@ -36,6 +38,7 @@ use serde_json::Value;
 use trusty_mpm::core::config::MpmConfig;
 
 use crate::commands::env_file::is_key_name;
+use crate::commands::env_file_grant;
 use crate::commands::pm_guard_architect_reason::with_identity;
 use crate::commands::pm_guard_bash::evaluate_credential_print_command;
 use crate::commands::pm_guard_deny_log::{AUDIT_POST_TIMEOUT, DenyContext};
@@ -56,7 +59,7 @@ fn is_shape_byte(c: char) -> bool {
     c.is_ascii_alphanumeric() || " _./-@:+,".contains(c)
 }
 
-/// One exempted `tm env` call: what the audit line records.
+/// One exempted `tm env` call: what the audit line and the grant record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EnvfileCall {
     /// `set` or `keys`.
@@ -65,6 +68,44 @@ pub(crate) struct EnvfileCall {
     pub(crate) path: PathBuf,
     /// The key `set` writes; empty for `keys`. Never a value.
     pub(crate) keys: Vec<String>,
+    /// The Keychain `(service, account)` `set` reads, by name; never a value.
+    pub(crate) keychain: Option<(String, String)>,
+}
+
+/// A dotenv file inside the project scope, as [`envfile_policy`] resolved it.
+///
+/// Why: #8939 fix round — the verb must touch only the path the policy
+/// checked, never its argv path. The field is private, so only the policy
+/// makes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopedEnvfile(PathBuf);
+
+impl ScopedEnvfile {
+    /// The canonical path the policy checked.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// The one env-file policy the guard and `tm env` share (#8939 fix round).
+///
+/// Why: the guard and the verb each checked a different half; the verb
+/// checked neither the dotenv name nor the scope.
+/// What: [`place_envfile`] (dotenv name, regular file or absent when
+/// `may_be_absent`, not a symlink, resolved) then [`in_scope`]. `None` means
+/// refuse.
+/// Test: `a_config_listed_root_is_in_scope_and_another_path_is_not`,
+/// `an_architect_bound_set_on_a_non_env_file_never_reads_the_keychain`,
+/// `an_out_of_scope_env_file_is_refused_by_the_verb`.
+pub(crate) fn envfile_policy(
+    word: &str,
+    cwd: &Path,
+    may_be_absent: bool,
+    env: &HookEnv,
+    config: impl FnOnce() -> MpmConfig,
+) -> Option<ScopedEnvfile> {
+    let path = place_envfile(word, cwd, may_be_absent)?;
+    in_scope(&path, env, config).then_some(ScopedEnvfile(path))
 }
 
 /// The secret-read decision for one tool call: `Some(reason)` denies.
@@ -130,12 +171,17 @@ pub(crate) async fn gate_secret_file_read(
     deny
 }
 
-/// POST the `architect-envfile` allow line when `gate` recorded an exemption.
+/// Mint the `tm env` grant, then POST the `architect-envfile` allow line,
+/// when `gate` recorded an exemption.
 ///
 /// Why: Architect ruling Q6 — each exempted call leaves an audit line with the
-/// path and key names only. Best effort, like every guard audit POST.
-/// Test: `an_exempted_call_is_audited_with_the_path_and_key_names_only`.
+/// path and key names only. Best effort, like every guard audit POST. The
+/// grant (#8939 fix round) is what lets the verb run at all; a failed mint
+/// leaves the verb refusing.
+/// Test: `an_exempted_call_is_audited_with_the_path_and_key_names_only`,
+/// `the_main_thread_grant_lets_the_verb_run_once`.
 pub(crate) async fn audit_envfile_allow(ctx: &DenyContext<'_>, gate: &ArchitectGate<'_>) {
+    mint_envfile_grant(gate);
     let Some(body) = allow_audit_body(ctx, gate) else {
         return;
     };
@@ -172,6 +218,19 @@ pub(crate) fn allow_audit_body(ctx: &DenyContext<'_>, gate: &ArchitectGate<'_>) 
     }))
 }
 
+/// Write the one-shot `tm env` grant for the exemption `gate` recorded.
+///
+/// What: nothing when no exemption was recorded or the home is unknown; a
+/// write error is logged and leaves no grant, so the verb refuses.
+pub(crate) fn mint_envfile_grant(gate: &ArchitectGate<'_>) {
+    let (Some(call), Some(home)) = (gate.envfile(), gate.env().home.as_deref()) else {
+        return;
+    };
+    if let Err(e) = env_file_grant::mint(home, call) {
+        tracing::warn!("tm env grant not written: {e}");
+    }
+}
+
 /// The exempt shape of `command`, or `None`.
 ///
 /// Why: #8939 design §2 with rulings Q1-Q4 — only `tm env keys <path>` and
@@ -196,28 +255,40 @@ pub(crate) fn envfile_shape(
         return None;
     }
     let words: Vec<&str> = command.split(' ').filter(|w| !w.is_empty()).collect();
-    let (verb, path, keys) = match words.as_slice() {
-        ["tm", "env", "keys", path] => ("keys", *path, Vec::new()),
-        ["tm", "env", "set", path, key, flags @ ..] if keychain_flags(flags) => {
+    let (verb, path, keys, keychain) = match words.as_slice() {
+        ["tm", "env", "keys", path] => ("keys", *path, Vec::new(), None),
+        ["tm", "env", "set", path, key, flags @ ..] => {
             is_key_name(key).then_some(())?;
-            ("set", *path, vec![(*key).to_owned()])
+            (
+                "set",
+                *path,
+                vec![(*key).to_owned()],
+                keychain_flags(flags)?,
+            )
         }
         _ => return None,
     };
-    let path = place_envfile(path, hook_cwd, verb == "set")?;
-    in_scope(&path, env, config).then_some(EnvfileCall { verb, path, keys })
+    let file = envfile_policy(path, hook_cwd, verb == "set", env, config)?;
+    Some(EnvfileCall {
+        verb,
+        path: file.0,
+        keys,
+        keychain,
+    })
 }
 
-/// Whether `flags` is empty, or `--from-keychain <service> --account
-/// <account>` in either order, with no value starting with `-`.
-fn keychain_flags(flags: &[&str]) -> bool {
+/// `Some(None)` for no flags; `Some(Some((service, account)))` for
+/// `--from-keychain <service> --account <account>` in either order, with no
+/// value starting with `-`; `None` for anything else.
+fn keychain_flags(flags: &[&str]) -> Option<Option<(String, String)>> {
     match flags {
-        [] => true,
-        [a, x, b, y] => {
-            let named = |f: &str| f == "--from-keychain" || f == "--account";
-            named(a) && named(b) && a != b && !x.starts_with('-') && !y.starts_with('-')
-        }
-        _ => false,
+        [] => Some(None),
+        [a, x, b, y] if a != b && !x.starts_with('-') && !y.starts_with('-') => match (*a, *b) {
+            ("--from-keychain", "--account") => Some(Some(((*x).to_owned(), (*y).to_owned()))),
+            ("--account", "--from-keychain") => Some(Some(((*y).to_owned(), (*x).to_owned()))),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

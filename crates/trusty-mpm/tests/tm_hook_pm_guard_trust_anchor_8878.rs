@@ -32,7 +32,7 @@ const BYPASSES: [Option<(&str, &str)>; 3] = [
 /// A scratch home with the anchor, and an Architect project allow-listed in it.
 pub(crate) struct Fixture {
     _dir: tempfile::TempDir,
-    home: PathBuf,
+    pub(crate) home: PathBuf,
     pub(crate) project: PathBuf,
 }
 

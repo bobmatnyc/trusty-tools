@@ -6,8 +6,13 @@
 //! argv (Q1); `keys` prints names only. Both check the Architect binding
 //! themselves (Q5), so a PM that reaches the verb through a script the
 //! lexical guard cannot read is still refused.
-//! What: [`run`] checks the binding as `tm fleet status` does, then
-//! [`list_keys`] or [`set_key`]. [`parse`] is the quote-aware dotenv reader
+//! What: [`run`] checks the binding as `tm fleet status` does, then the
+//! guard's own path policy (`envfile_policy`), then spends the pm-guard's
+//! one-shot grant for the exact call (`env_file_grant`), then [`list_keys`]
+//! or [`set_key`] on the canonical path through `env_file_fs`, which follows
+//! no symlink. The binding alone cannot tell the main thread from a Claude
+//! Code subagent (same `claude`, same environment); the grant can, because
+//! only the guard sees the payload. [`parse`] is the quote-aware dotenv reader
 //! both use: a file with any line that is not blank, a comment or a
 //! `[export ]KEY=value` assignment fails whole, naming only the line number.
 //! No error or success message carries a value or a line of the file.
@@ -16,19 +21,23 @@
 use std::fmt;
 use std::io::{IsTerminal, Read, Write};
 use std::ops::Range;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 use trusty_mpm::core::config::MpmConfig;
 
 use crate::cli::EnvAction;
+use crate::commands::env_file_fs::EnvDir;
+use crate::commands::env_file_grant;
 use crate::commands::fleet::resolve_dir;
 use crate::commands::fleet::status::{this_session_check, this_session_env};
+use crate::commands::pm_guard_architect_envfile::{EnvfileCall, ScopedEnvfile, envfile_policy};
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 
-/// The largest env file `keys` and `set` read.
-const MAX_FILE_BYTES: u64 = 1 << 20;
+/// Refusal for a call the pm-guard did not grant (#8939 fix round).
+const NO_GRANT: &str = "tm env: refused; this call is not proven to be the Architect's main \
+                        thread: the pm-guard grants `tm env` only to the main thread's own \
+                        direct `tm env keys|set` call, once, within a minute";
 
 /// The longest value `set` writes.
 const MAX_VALUE_BYTES: usize = 64 << 10;
@@ -104,28 +113,39 @@ pub(crate) fn run(action: EnvAction) -> anyhow::Result<()> {
 
 /// [`run`] over explicit inputs.
 ///
-/// Why: Architect ruling Q5 — the verb checks the binding itself.
+/// Why: Architect ruling Q5 — the verb checks the binding itself; the #8939
+/// fix round adds the path policy and the main-thread grant.
 /// What: `this_session_check` over `env` (a missing `CLAUDE_PROJECT_DIR`
-/// falls back to `architect_dir`, as for `tm fleet status`); a failure is
-/// refused before any file is touched. Then `keys` prints one name per line,
-/// and `set` prints `set KEY (added|replaced)`.
+/// falls back to `architect_dir`, as for `tm fleet status`), then
+/// [`authorize`]; either failing is refused before any env file is opened or
+/// the Keychain read. Then `keys` prints one name per line, and `set` prints
+/// `set KEY (added|replaced)`, both on the canonical path the policy checked.
 /// Test: `env_verbs_refuse_a_session_that_is_not_the_architect`,
-/// `env_set_reads_the_value_from_stdin_or_the_keychain`.
+/// `env_set_reads_the_value_from_stdin_or_the_keychain`,
+/// `an_architect_bound_set_on_a_non_env_file_never_reads_the_keychain`,
+/// `a_subagent_shaped_caller_without_a_grant_is_refused`.
 pub(crate) fn run_with(
     action: EnvAction,
     env: HookEnv,
-    config: impl FnOnce() -> MpmConfig,
+    config: impl Fn() -> MpmConfig,
     architect_dir: &Path,
     sources: Sources<'_>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let check = this_session_check(architect_dir, env, config);
+    let check = this_session_check(architect_dir, env.clone(), &config);
     if !check.ok {
         bail!("tm env: refused; {}", check.detail);
     }
+    let cwd = std::env::current_dir().context("tm env: the working directory is unknown")?;
+    let scope = Scope {
+        cwd: &cwd,
+        env: &env,
+        config: &config,
+    };
     match action {
         EnvAction::Keys { path } => {
-            for key in list_keys(&path)? {
+            let file = scope.authorize(&path, "keys", Vec::new(), None)?;
+            for key in list_keys(&file)? {
                 writeln!(out, "{key}")?;
             }
         }
@@ -137,17 +157,73 @@ pub(crate) fn run_with(
             extra,
         } => {
             check_key(&key, &extra)?;
-            let value = match (from_keychain, account) {
-                (Some(service), Some(account)) => sources.keychain.password(&service, &account)?,
-                (None, None) => read_value(sources.stdin, sources.stdin_is_tty)?,
+            let keychain = match (from_keychain, account) {
+                (Some(service), Some(account)) => Some((service, account)),
+                (None, None) => None,
                 _ => bail!("tm env set: --from-keychain and --account go together"),
             };
+            let file = scope.authorize(&path, "set", vec![key.clone()], keychain.clone())?;
+            let value = match keychain {
+                Some((service, account)) => sources.keychain.password(&service, &account)?,
+                None => read_value(sources.stdin, sources.stdin_is_tty)?,
+            };
             check_value(&value)?;
-            let outcome = set_key(&path, &key, &value)?;
+            let outcome = set_key(&file, &key, &value)?;
             writeln!(out, "set {key} ({outcome})")?;
         }
     }
     Ok(())
+}
+
+/// What [`Scope::authorize`] checks a call against.
+struct Scope<'a> {
+    cwd: &'a Path,
+    env: &'a HookEnv,
+    config: &'a dyn Fn() -> MpmConfig,
+}
+
+impl Scope<'_> {
+    /// The scoped env file for this exact call, or a refusal.
+    ///
+    /// Why: #8939 fix round — the verb checked only the binding, so it wrote
+    /// a Keychain value to any path; and a Claude Code subagent passes the
+    /// binding, since it shares the Architect's `claude` and environment.
+    /// What: [`envfile_policy`], the guard's own path policy, on `word`; then
+    /// spend the pm-guard's one-shot grant for the exact call
+    /// (`env_file_grant`), which the guard mints only for the main thread's
+    /// exempt shape. Touches no env file and no Keychain item.
+    fn authorize(
+        &self,
+        word: &Path,
+        verb: &'static str,
+        keys: Vec<String>,
+        keychain: Option<(String, String)>,
+    ) -> anyhow::Result<ScopedEnvfile> {
+        let refused = || {
+            anyhow!(
+                "tm env: refused; {} is not a `.env` or `.env.*` file inside the project scope",
+                word.display()
+            )
+        };
+        let text = word.to_str().ok_or_else(refused)?;
+        let file = envfile_policy(text, self.cwd, verb == "set", self.env, self.config)
+            .ok_or_else(refused)?;
+        let call = EnvfileCall {
+            verb,
+            path: file.path().to_path_buf(),
+            keys,
+            keychain,
+        };
+        let granted = self
+            .env
+            .home
+            .as_deref()
+            .is_some_and(|home| env_file_grant::consume(home, &call));
+        if !granted {
+            bail!(NO_GRANT);
+        }
+        Ok(file)
+    }
 }
 
 /// Refuse a `KEY=value` or extra argument, and a malformed key, echoing none.
@@ -209,13 +285,17 @@ fn check_value(value: &str) -> anyhow::Result<()> {
 ///
 /// Why: design §2 shape K — names only, and nothing at all from a file that
 /// is not wholly assignments (an unquoted PEM line would read as a key).
-/// What: [`read_regular`], then [`parse`].
+/// What: [`EnvDir::read`] on the canonical path (a missing file is an
+/// error), then [`parse`].
 /// Test: `env_keys_prints_names_only`,
 /// `env_keys_never_prints_a_line_inside_a_multiline_value`,
 /// `env_keys_refuses_a_non_assignment_line_and_prints_nothing`,
 /// `env_keys_refuses_a_symlink`.
-pub(crate) fn list_keys(path: &Path) -> anyhow::Result<Vec<String>> {
-    let text = read_regular(path)?;
+pub(crate) fn list_keys(file: &ScopedEnvfile) -> anyhow::Result<Vec<String>> {
+    let path = file.path();
+    let text = EnvDir::open(path)?
+        .read()?
+        .ok_or_else(|| anyhow!("tm env: {} does not exist", path.display()))?;
     let mut keys: Vec<String> = Vec::new();
     for assignment in parse(&text).map_err(|e| anyhow!("tm env: {}: {e}", path.display()))? {
         if !keys.contains(&assignment.key) {
@@ -228,21 +308,22 @@ pub(crate) fn list_keys(path: &Path) -> anyhow::Result<Vec<String>> {
 /// Set `key` to `value` in the env file at `path`; `"added"` or `"replaced"`.
 ///
 /// Why: design §2 shape S — the Architect's only write path (ruling Q4).
-/// What: a symlink or non-regular file is refused; a missing file is created.
-/// The first assignment of `key` is replaced in place (keeping `export`),
-/// later ones removed; otherwise one line is appended. The whole file is
-/// written to a mode-0600 temp file beside it and renamed over it.
+/// What: through one [`EnvDir`] on the canonical path: a symlink or
+/// non-regular file is refused; a missing file is created. The first
+/// assignment of `key` is replaced in place (keeping `export`), later ones
+/// removed; otherwise one line is appended. The whole file is written to a
+/// mode-0600 temp file beside it and renamed over it.
 /// Test: `env_set_replaces_in_place_and_creates_0600`,
-/// `env_set_never_echoes_the_value_on_success_or_error`.
-pub(crate) fn set_key(path: &Path, key: &str, value: &str) -> anyhow::Result<&'static str> {
-    let text = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            bail!("tm env: {} is a symbolic link; refused", path.display())
-        }
-        Ok(_) => read_regular(path)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => bail!("tm env: cannot stat {}: {e}", path.display()),
-    };
+/// `env_set_never_echoes_the_value_on_success_or_error`,
+/// `a_parent_swapped_for_a_symlink_after_the_check_is_refused`.
+pub(crate) fn set_key(
+    file: &ScopedEnvfile,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<&'static str> {
+    let path = file.path();
+    let dir = EnvDir::open(path)?;
+    let text = dir.read()?.unwrap_or_default();
     let parsed = parse(&text).map_err(|e| anyhow!("tm env: {}: {e}", path.display()))?;
     let line = |export: bool| {
         let prefix = if export { "export " } else { "" };
@@ -268,7 +349,7 @@ pub(crate) fn set_key(path: &Path, key: &str, value: &str) -> anyhow::Result<&'s
         out.push_str(&line(false));
         (out, "added")
     };
-    write_atomic(path, &new_text)?;
+    dir.replace(&new_text)?;
     Ok(outcome)
 }
 
@@ -293,72 +374,6 @@ fn quote_value(value: &str) -> String {
     }
     out.push('"');
     out
-}
-
-/// The text of the regular file at `path`, opened with `O_NOFOLLOW`.
-fn read_regular(path: &Path) -> anyhow::Result<String> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| match e.raw_os_error() {
-            Some(libc::ELOOP) => anyhow!("tm env: {} is a symbolic link; refused", path.display()),
-            _ => anyhow!("tm env: cannot open {}: {e}", path.display()),
-        })?;
-    let meta = file.metadata().context("tm env: cannot stat the file")?;
-    if !meta.is_file() {
-        bail!("tm env: {} is not a regular file; refused", path.display());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("tm env: cannot read {}", path.display()))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        bail!(
-            "tm env: {} is larger than {MAX_FILE_BYTES} bytes",
-            path.display()
-        );
-    }
-    String::from_utf8(bytes).map_err(|_| anyhow!("tm env: {} is not UTF-8 text", path.display()))
-}
-
-/// Write `text` to `path` through a mode-0600 temp file and a rename.
-fn write_atomic(path: &Path, text: &str) -> anyhow::Result<()> {
-    let name = path
-        .file_name()
-        .with_context(|| format!("tm env: {} names no file", path.display()))?;
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    let tmp_name = format!(
-        ".{}.tm-env-{}-{nanos}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    );
-    let tmp = dir.map_or_else(|| tmp_name.clone().into(), |d| d.join(&tmp_name));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)
-        .with_context(|| {
-            format!(
-                "tm env: cannot create a temp file beside {}",
-                path.display()
-            )
-        })?;
-    let written = file
-        .set_permissions(std::fs::Permissions::from_mode(0o600))
-        .and_then(|()| file.write_all(text.as_bytes()))
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        bail!("tm env: cannot write {}: {e}", path.display());
-    }
-    Ok(())
 }
 
 /// One `[export ]KEY=value` assignment and the byte range of its lines.

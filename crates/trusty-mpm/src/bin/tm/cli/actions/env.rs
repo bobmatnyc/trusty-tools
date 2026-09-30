@@ -18,7 +18,8 @@ pub(crate) enum EnvAction {
     /// The value is read from stdin (a pipe, not a terminal), or from the
     /// login Keychain with `--from-keychain <service> --account <account>`.
     /// A `KEY=value` argument is refused. Writes atomically with mode 0600
-    /// and refuses a symlink. Only the bound Architect may run it.
+    /// and follows no symlink. Only the bound Architect's main thread may run
+    /// it, as its own direct call, on a dotenv file in its scope.
     Set {
         /// The dotenv file.
         path: PathBuf,
@@ -38,7 +39,8 @@ pub(crate) enum EnvAction {
     ///
     /// Fails with no output when any line is not blank, a comment or a
     /// `KEY=value` assignment. Refuses a symlink or a non-regular file. Only
-    /// the bound Architect may run it.
+    /// the bound Architect's main thread may run it, as its own direct call,
+    /// on a dotenv file in its scope.
     Keys {
         /// The dotenv file.
         path: PathBuf,
