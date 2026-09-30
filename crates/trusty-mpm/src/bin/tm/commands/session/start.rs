@@ -94,15 +94,20 @@ pub(crate) async fn start_session(
     start_session_in_place(daemon, &path, &fw, dirs::home_dir().as_deref()).await
 }
 
-/// The `claude` line `tm session start` types into its in-place pane (#8405).
+/// The launch spec `tm session start` starts its in-place pane with (#8405,
+/// #8308).
 ///
 /// Why: the one seam where the in-place start turns the config into the
 /// renderer, split out so a test can drive it from a config root.
-/// What: [`trusty_mpm::core::model_inject::build_inplace_session_command_configured`]
-/// with [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
-/// Test: `inplace_session_line_follows_the_configured_renderer`.
-pub(crate) fn inplace_session_line(config_root: &std::path::Path) -> String {
-    trusty_mpm::core::model_inject::build_inplace_session_command_configured(
+/// What: [`trusty_mpm::runtime::cli_launch::inplace_spec`] rooted at `cwd`, with
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
+/// Test: `inplace_session_spec_follows_the_configured_renderer`.
+pub(crate) fn inplace_session_spec(
+    cwd: &std::path::Path,
+    config_root: &std::path::Path,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    trusty_mpm::runtime::cli_launch::inplace_spec(
+        cwd,
         trusty_mpm::core::alt_screen::configured_alternate_screen_at(config_root),
     )
 }
@@ -290,23 +295,18 @@ async fn start_session_in_place(
             // `transcript_saving` doctor check. It used to be hand-built here as
             // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
             // launch line that silently saved no transcript.
-            let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-                // #8405: the config under this launch's named root decides the renderer.
-                &inplace_session_line(&fw.crate_config_root()),
-            );
-            let send = trusty_mpm::core::tmux::send_line(
-                None,
-                &trusty_mpm::core::tmux::TmuxTarget::session(&body.name),
-                &claude_cmd,
-            )
-            .map(|output| output.status);
-            match send {
-                Ok(s) if s.success() => {
+            // #8308: the launch travels in a spec under this launch's named root.
+            let root = fw.crate_config_root();
+            // #8405: the config under this launch's named root decides the renderer.
+            let spec = inplace_session_spec(path, &root);
+            let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
+            match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
+                Ok(()) => {
                     println!("started session {} (tmux + claude)", body.name);
                 }
-                Ok(_) | Err(_) => {
+                Err(e) => {
                     eprintln!(
-                        "warning: tmux session {} created but failed to start claude",
+                        "warning: tmux session {} created but failed to start claude: {e}",
                         body.name
                     );
                     println!("started session {}", body.name);

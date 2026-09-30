@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use trusty_mpm::core::architect_session;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
-use trusty_mpm::core::tmux::{self, TmuxCommand, TmuxTarget};
+use trusty_mpm::core::tmux::{self, TmuxCommand};
 use trusty_mpm::core::twin_identity::ArmingRecord;
 
 /// The Architect's default tmux session; the P1 poller's `ARCHITECT_SESSION`
@@ -179,16 +179,17 @@ pub(crate) fn start(
         config_dir.as_deref(),
         Some(home),
     )?;
-    let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-        &crate::commands::launch::launch_claude_cmd(
-            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
-            &model,
-            Some(prompt.as_path()),
-            config_dir.as_deref(),
-            &cli.env,
-            scoped_mcp.as_deref(),
-        ),
+    // #8308: the launch travels in a spec under `home`; the pane types a short line.
+    let claude_spec = crate::commands::launch::launch_claude_spec(
+        dir,
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        &model,
+        Some(prompt.as_path()),
+        config_dir.as_deref(),
+        &cli.env,
+        scoped_mcp.as_deref(),
     );
+    let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
     let workdir = dir
         .to_str()
         .context("the Architect directory is not valid UTF-8")?;
@@ -200,7 +201,7 @@ pub(crate) fn start(
             String::from_utf8_lossy(&created.output.stderr).trim()
         );
     }
-    if let Err(err) = stamp_and_send(&cli.profile, &claude_cmd, session) {
+    if let Err(err) = stamp_and_send(&cli.profile, &claude_spec, &spec_dir, session) {
         let _ = tmux::run_tmux(&TmuxCommand::KillSession {
             name: session.to_owned(),
         });
@@ -241,10 +242,11 @@ fn record_process(dir: &Path, home: &Path, session: &str) -> Result<ArmingRecord
     }
 }
 
-/// Record the stamp on the session, then type the `claude` line into it.
+/// Record the stamp on the session, then start `claude` in it from its spec.
 fn stamp_and_send(
     profile: &session_profile::SessionProfile,
-    claude_cmd: &str,
+    claude_spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+    spec_dir: &Path,
     session: &str,
 ) -> anyhow::Result<()> {
     let (key, value) = session_profile::launch_env(*profile);
@@ -256,11 +258,10 @@ fn stamp_and_send(
     if !set.status.success() {
         bail!("failed to record the launch stamp on {session}");
     }
-    let sent = tmux::send_line(None, &TmuxTarget::session(session), claude_cmd)?;
-    if !sent.status.success() {
-        bail!("{session} was created but `claude` could not be started in it");
-    }
-    Ok(())
+    // #8308: one call types the short line naming the spec.
+    trusty_mpm::runtime::cli_launch::send_spec_launch(session, claude_spec, spec_dir).map_err(|e| {
+        anyhow::anyhow!("{session} was created but `claude` could not be started in it: {e}")
+    })
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.

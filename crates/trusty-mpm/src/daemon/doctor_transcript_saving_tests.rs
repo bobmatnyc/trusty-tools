@@ -39,6 +39,10 @@ fn launch_lines_covers_every_builder() {
         "core::model_inject::build_claude_command",
         "core::model_inject::build_inplace_session_command",
         "core::model_inject::build_client_session_command",
+        // #8308: the specs the CLI and fleet paths launch from.
+        "runtime::cli_launch::isolated_spec",
+        "runtime::cli_launch::inplace_spec",
+        "runtime::cli_launch::client_spec",
         "daemon::spawn_command::relaunch_command",
         "core::standalone::run::build_launch_command",
         "control::backend::stream_json::build_claude_command",

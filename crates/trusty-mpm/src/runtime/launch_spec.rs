@@ -362,8 +362,13 @@ impl LaunchSpec {
     /// What: creates `<spec dir>/<launch_id>.started`, empty. Best-effort: a
     /// launch must not be abandoned because a marker could not be written, but
     /// the failure is warned because it will read downstream as a stuck pane.
-    /// Test: `mark_started_writes_the_sentinel_beside_the_spec`.
+    /// Test: `mark_started_writes_the_sentinel_beside_the_spec`,
+    /// `a_cli_spec_writes_no_started_sentinel` (`cli_launch_tests.rs`).
     pub fn mark_started(spec_path: &Path, launch_id: &str) {
+        // #8308: a CLI launch carries no launch id and no checker waits on it.
+        if launch_id.is_empty() {
+            return;
+        }
         let dir = spec_path.parent().unwrap_or(Path::new("."));
         let marker = Self::started_marker_in(dir, launch_id);
         if let Err(err) = std::fs::write(&marker, b"") {
@@ -410,7 +415,8 @@ impl LaunchSpec {
     /// (#6495/#7160), and never replace an `env_set` pair (#8405).
     /// Test: `spec_command_carries_cwd_program_argv_and_env`,
     /// `spec_command_yields_the_alt_screen_default_to_the_pane`,
-    /// `every_launch_path_carries_the_configured_fullscreen_renderer`.
+    /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
+    /// `a_cli_spec_exports_no_managed_session_id` (`cli_launch_tests.rs`).
     pub fn to_command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(&self.program);
         cmd.args(&self.args).current_dir(&self.cwd);
@@ -420,10 +426,13 @@ impl LaunchSpec {
         for (name, value) in &self.env_set {
             cmd.env(name, value);
         }
-        cmd.env(
-            crate::core::harness_root::MANAGED_SESSION_ID_ENV,
-            &self.session_id,
-        );
+        // #8308: a CLI launch has no managed session; it exports nothing.
+        if !self.session_id.is_empty() {
+            cmd.env(
+                crate::core::harness_root::MANAGED_SESSION_ID_ENV,
+                &self.session_id,
+            );
+        }
         // #6495/#7160: the `${NAME-1}` shell operands became this call — same
         // table, same per-variable operator precedence, no shell needed.
         crate::core::alt_screen::apply_default_to_command(&mut cmd);

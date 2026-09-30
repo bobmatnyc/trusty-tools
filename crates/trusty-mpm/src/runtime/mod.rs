@@ -23,6 +23,8 @@
 //! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
 mod claude_code;
+// #8308: the CLI and fleet launches ride the same spec carrier.
+pub mod cli_launch;
 // #8233: the managed launch is carried to the pane as PARAMETERS, not as a
 // typed shell script. `launch_spec` is the carrier, `managed_launch` composes
 // it, `launch_report` is the on-exit hint the shim now prints.
