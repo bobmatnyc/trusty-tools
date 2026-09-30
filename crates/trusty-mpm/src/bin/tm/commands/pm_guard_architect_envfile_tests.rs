@@ -11,8 +11,9 @@ use crate::commands::pm_guard_architect_reason::tests::cases;
 use crate::commands::pm_guard_bash::LiveGit;
 use crate::commands::pm_guard_floor::tests::NoArchitect;
 use crate::commands::pm_guard_floor::{Probes, evaluate_floors};
+use crate::commands::pm_guard_trust_anchor::ANCHOR_ROOT;
 use crate::commands::pm_guard_trust_anchor::tests::{
-    Fixture, allowlist, architect_env, fixture, payload, pm_env,
+    Fixture, allowlist, architect_env, fixture, payload, pm_env, spoof_env,
 };
 
 /// Write `body` to `name` in the Architect's project directory.
@@ -52,7 +53,37 @@ fn architect(fx: &Fixture, command: &str) -> Option<String> {
     verdict(fx, &bash(fx, command), architect_env(fx), true).0
 }
 
-/// Register `roots` in the fixture home's local project-path registry.
+/// The Architect's verdict for a Bash `command`, the user config read from
+/// the fixture home by the production reader.
+fn architect_reading_config(fx: &Fixture, command: &str) -> Option<String> {
+    let call = bash(fx, command);
+    let read = || MpmConfig::load(&fx.home.join(ANCHOR_ROOT));
+    let gate = ArchitectGate::new(&call, architect_env(fx), read);
+    evaluate_secret_file_read_gated("Bash", call.get("tool_input"), &fx.project, &gate)
+}
+
+/// Write the fixture's user config with `roots` as `[supervisor] projects`.
+fn list_in_config(fx: &Fixture, roots: &[&std::path::Path]) {
+    let roots: Vec<_> = roots
+        .iter()
+        .map(|r| format!("\"{}\"", r.display()))
+        .collect();
+    let body = format!("[supervisor]\nprojects = [{}]\n", roots.join(", "));
+    std::fs::write(&fx.anchor, body).expect("write config");
+}
+
+/// A `.env.local` in `iris`, a directory beside the fixture home and outside
+/// the Architect's project; returns `(iris, env file)`.
+fn outside_envfile(fx: &Fixture) -> (PathBuf, PathBuf) {
+    let iris = fx.home.parent().expect("scratch").join("iris");
+    std::fs::create_dir_all(&iris).expect("mkdir iris");
+    let p = iris.join(".env.local");
+    std::fs::write(&p, "A=1\n").expect("write");
+    (iris, p)
+}
+
+/// Register `roots` in the fixture home's `project-paths.json`, which any PM
+/// launch writes and which grants no scope.
 fn register(fx: &Fixture, roots: &[&std::path::Path]) {
     let entries: Vec<_> = roots
         .iter()
@@ -112,22 +143,73 @@ fn the_architect_main_thread_may_set_an_env_key() {
     }
 }
 
-/// Architect ruling Q2: `CLAUDE_PROJECT_DIR` plus tm-registered roots only;
-/// `/` and the home directory's ancestors never count as a root.
+/// Architect ruling Q2 and its addendum: `CLAUDE_PROJECT_DIR` plus the
+/// `[supervisor] projects` roots only; `/` and the home directory's ancestors
+/// never count as a root.
 #[test]
-fn a_registered_project_root_is_in_scope_and_another_path_is_not() {
+fn a_config_listed_root_is_in_scope_and_another_path_is_not() {
     let fx = fixture();
+    let (iris, p) = outside_envfile(&fx);
     let scratch = fx.home.parent().expect("scratch").to_path_buf();
-    let iris = scratch.join("iris");
+    let command = format!("tm env keys {}", p.display());
+    list_in_config(&fx, &[&fx.project]);
+    assert!(
+        architect_reading_config(&fx, &command).is_some(),
+        "unlisted"
+    );
+    list_in_config(&fx, &[&fx.project, std::path::Path::new("/"), &scratch]);
+    let deny = architect_reading_config(&fx, &command);
+    assert!(deny.is_some(), "a degenerate root");
+    list_in_config(&fx, &[&fx.project, &iris]);
+    assert_eq!(architect_reading_config(&fx, &command), None, "listed");
+}
+
+/// Architect ruling Q2 addendum: `project-paths.json` is not a trust anchor.
+#[test]
+fn a_project_paths_json_entry_grants_no_scope() {
+    let fx = fixture();
+    let iris = fx.home.parent().expect("scratch").join("iris");
     std::fs::create_dir_all(&iris).expect("mkdir iris");
     let p = iris.join(".env.local");
     std::fs::write(&p, "A=1\n").expect("write");
-    let command = format!("tm env keys {}", p.display());
-    assert!(architect(&fx, &command).is_some(), "unregistered");
-    register(&fx, &[std::path::Path::new("/"), &scratch]);
-    assert!(architect(&fx, &command).is_some(), "a degenerate root");
     register(&fx, &[&iris]);
-    assert_eq!(architect(&fx, &command), None, "registered");
+    for command in exempt_commands(&p) {
+        assert!(architect(&fx, &command).is_some(), "allowed: {command}");
+    }
+}
+
+/// Fail closed: an unreadable or malformed user config lists no root, so only
+/// `CLAUDE_PROJECT_DIR` counts; with that unset too, nothing is in scope.
+#[test]
+fn an_unreadable_config_leaves_only_the_project_dir_in_scope() {
+    let fx = fixture();
+    let (iris, far) = outside_envfile(&fx);
+    let near = envfile(&fx, ".env.local", "A=1\n");
+    let read = || MpmConfig::load(&fx.home.join(ANCHOR_ROOT));
+    let scoped = |p: &std::path::Path, env: &HookEnv| {
+        let command = format!("tm env keys {}", p.display());
+        envfile_shape(&command, &fx.project, env, read).is_some()
+    };
+    let no_project = HookEnv {
+        project_dir: None,
+        ..spoof_env(&fx)
+    };
+    list_in_config(&fx, &[&fx.project, &iris]);
+    assert!(scoped(&far, &no_project), "a readable config lists iris");
+    let malformed = format!("[supervisor]\nprojects = [\"{}\"\n", iris.display());
+    std::fs::write(&fx.anchor, malformed).expect("write malformed config");
+    let unreadable = |fx: &Fixture| {
+        std::fs::remove_file(&fx.anchor).expect("remove config");
+        std::fs::create_dir(&fx.anchor).expect("a directory where the config is");
+    };
+    for broken in ["malformed", "unreadable"] {
+        if broken == "unreadable" {
+            unreadable(&fx);
+        }
+        assert!(!scoped(&far, &spoof_env(&fx)), "{broken}: iris in scope");
+        assert!(scoped(&near, &spoof_env(&fx)), "{broken}: the project dir");
+        assert!(!scoped(&near, &no_project), "{broken}: no project dir");
+    }
 }
 
 #[test]
@@ -192,9 +274,9 @@ fn a_pm_may_not_use_the_envfile_exemption() {
 #[test]
 fn every_identity_failure_denies_the_envfile_exemption() {
     for (fx, case) in cases() {
-        // Both candidate launch directories are registered, so the shape
-        // matches in every case and the deny must name the identity reason.
-        register(&fx, &[&fx.project, &fx.cwd]);
+        // The file is in the Architect's project, which is either
+        // `CLAUDE_PROJECT_DIR` or, when `granted`, listed in the config; so the
+        // shape matches in every case and the deny must name the identity reason.
         let p = envfile(&fx, ".env.local", "A=1\n");
         let mut call = case.call.clone();
         call["tool_name"] = json!("Bash");

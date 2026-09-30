@@ -15,10 +15,14 @@
 //! identity denies with the #8878 PR-I identity suffix. [`gate_secret_file_read`]
 //! and [`audit_envfile_allow`] write the `architect-envfile` audit line.
 //! Tools (`Read`, `Write`, `Edit`, `Grep`, …) are never exempt.
-//! FAIL-CLOSED: a path that does not resolve, lies outside
-//! `CLAUDE_PROJECT_DIR` and every tm-registered project root, or is not a
-//! regular file (a missing file too, for `set`) keeps the deny; so does any
-//! identity failure.
+//! Scope (Architect ruling Q2 addendum): `CLAUDE_PROJECT_DIR` plus the
+//! `[supervisor] projects` list of the user config `~/.trusty-mpm/config.toml`,
+//! read by the same reader as the #8878 identity check. It never comes from
+//! `~/.trusty-mpm/project-paths.json`, which any PM launch writes.
+//! FAIL-CLOSED: a path that does not resolve, lies outside that scope, or is
+//! not a regular file (a missing file too, for `set`) keeps the deny; so does
+//! any identity failure. An unreadable or malformed config lists no root, so
+//! only `CLAUDE_PROJECT_DIR` counts; with that unset too, nothing is in scope.
 //! Residual 1 (accepted, Architect ruling Q7): the main-thread/subagent split
 //! relies on the harness putting `agent_id` in every subagent payload; a
 //! subagent shares the Architect's `claude` PID. This applies equally to
@@ -29,7 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use trusty_mpm::core::project_aliases::ProjectAliasStore;
+use trusty_mpm::core::config::MpmConfig;
 
 use crate::commands::env_file::is_key_name;
 use crate::commands::pm_guard_architect_reason::with_identity;
@@ -39,7 +43,7 @@ use crate::commands::pm_guard_floor::ArchitectGate;
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
-use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
+use crate::commands::pm_guard_trust_anchor::HookEnv;
 use crate::commands::pm_guard_trust_anchor_paths::{Resolved, resolve};
 
 /// The rule name on the audit line an exempted call writes.
@@ -98,7 +102,8 @@ pub(crate) fn evaluate_secret_file_read_gated(
     // which step 1 has already cleared, so only the file rule can answer.
     let reason = evaluate_secret_file_read(tool_name, tool_input)?;
     // 3. The exemption: the shape first, then the identity.
-    let Some(call) = command.and_then(|c| envfile_shape(c, hook_cwd, gate.env())) else {
+    let shape = |c| envfile_shape(c, hook_cwd, gate.env(), || gate.config());
+    let Some(call) = command.and_then(shape) else {
         return Some(reason);
     };
     match gate.identity() {
@@ -177,10 +182,16 @@ pub(crate) fn allow_audit_body(ctx: &DenyContext<'_>, gate: &ArchitectGate<'_>) 
 /// starting with `-` bar the two flags, each once. The path is placed against
 /// `hook_cwd`, must be a regular file (or absent, for `set`) and not a
 /// symlink, and must resolve, lexical and resolved names both in the dotenv
-/// family, inside [`in_scope`].
+/// family, inside [`in_scope`]. `config` is the user config reader; it runs
+/// only once the path is placed.
 /// Test: `the_architect_main_thread_still_may_not_print_an_env_value`,
-/// `a_registered_project_root_is_in_scope_and_another_path_is_not`.
-pub(crate) fn envfile_shape(command: &str, hook_cwd: &Path, env: &HookEnv) -> Option<EnvfileCall> {
+/// `a_config_listed_root_is_in_scope_and_another_path_is_not`.
+pub(crate) fn envfile_shape(
+    command: &str,
+    hook_cwd: &Path,
+    env: &HookEnv,
+    config: impl FnOnce() -> MpmConfig,
+) -> Option<EnvfileCall> {
     if command.is_empty() || !command.chars().all(is_shape_byte) {
         return None;
     }
@@ -194,7 +205,7 @@ pub(crate) fn envfile_shape(command: &str, hook_cwd: &Path, env: &HookEnv) -> Op
         _ => return None,
     };
     let path = place_envfile(path, hook_cwd, verb == "set")?;
-    in_scope(&path, env).then_some(EnvfileCall { verb, path, keys })
+    in_scope(&path, env, config).then_some(EnvfileCall { verb, path, keys })
 }
 
 /// Whether `flags` is empty, or `--from-keychain <service> --account
@@ -257,31 +268,27 @@ fn place_envfile(word: &str, hook_cwd: &Path, may_be_absent: bool) -> Option<Pat
 }
 
 /// Whether the resolved `path` lies strictly inside `CLAUDE_PROJECT_DIR` or a
-/// tm-registered project root (Architect ruling Q2).
+/// `[supervisor] projects` root (Architect ruling Q2 and its addendum).
 ///
-/// What: the registered roots are the local path registry tm keeps,
-/// `~/.trusty-mpm/project-paths.json`; an unreadable registry adds none. Each
-/// root is canonicalized; a root that does not resolve, is `/`, or is the home
+/// What: the listed roots come from `config()` — the user config, never
+/// `project-paths.json` (see the module doc); an unreadable or malformed
+/// config loads as the default, which lists none. A relative listed entry is
+/// skipped, as `session_profile::path_is_listed` skips it. Each root is
+/// canonicalized; a root that does not resolve, is `/`, or is the home
 /// directory or one of its ancestors is skipped.
-fn in_scope(path: &Path, env: &HookEnv) -> bool {
+/// Test: `a_config_listed_root_is_in_scope_and_another_path_is_not`,
+/// `a_project_paths_json_entry_grants_no_scope`,
+/// `an_unreadable_config_leaves_only_the_project_dir_in_scope`.
+fn in_scope(path: &Path, env: &HookEnv, config: impl FnOnce() -> MpmConfig) -> bool {
     let home = env
         .home
         .as_deref()
         .and_then(|h| std::fs::canonicalize(h).ok());
     let project = env.project_dir.as_ref().map(PathBuf::from);
-    let registered = env
-        .home
-        .as_deref()
-        .and_then(|home| ProjectAliasStore::load(&home.join(ANCHOR_ROOT)).ok())
-        .map(|store| {
-            store
-                .list()
-                .iter()
-                .map(|e| e.path.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    project.into_iter().chain(registered).any(|root| {
+    // #8939 Q2 addendum: the trust anchor is the only source of listed roots.
+    let listed = config().supervisor.projects.into_iter();
+    let listed = listed.filter(|root| root.is_absolute());
+    project.into_iter().chain(listed).any(|root| {
         let Ok(root) = std::fs::canonicalize(&root) else {
             return false;
         };

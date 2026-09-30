@@ -96,6 +96,11 @@ impl<'a> ArchitectGate<'a> {
         &self.env
     }
 
+    /// The user config, from the reader the identity check uses (#8939 Q2).
+    pub(crate) fn config(&self) -> MpmConfig {
+        (self.config)()
+    }
+
     /// Record the env-file call the #8939 exemption let through.
     pub(crate) fn record_envfile(&self, call: EnvfileCall) {
         let _ = self.envfile.set(call);
