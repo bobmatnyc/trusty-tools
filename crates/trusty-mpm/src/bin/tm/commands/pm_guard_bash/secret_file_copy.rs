@@ -571,7 +571,13 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let prefix = &token[..start];
     let suffix = &after_open[end_rel + 1..];
     let suffix_candidates = expand_brace_alternatives(suffix)?;
-    let mut out = Vec::new();
+    // #8878: bound the comma branch too; 30 `{a,b}` groups would be 2^30
+    // readings and run the hook past its fail-open timeout.
+    let count = alternatives.split(',').count();
+    if suffix_candidates.len().saturating_mul(count) > BRACE_READING_CAP {
+        return None;
+    }
+    let mut out = Vec::with_capacity(suffix_candidates.len() * count);
     for alt in alternatives.split(',') {
         for tail in &suffix_candidates {
             out.push(format!("{prefix}{alt}{tail}"));
