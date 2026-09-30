@@ -135,8 +135,9 @@ fn is_workspace_manifest(path: &Path) -> bool {
 ///
 /// Why: owning the root alone let another user plant `.git` and `Cargo.toml`
 /// in a directory anyone can write to — `/tmp` qualifies for root (#8378
-/// review). Group write stays allowed: a user-private-group umask of 002 sets
-/// it on ordinary checkouts, and that group is the user's own.
+/// review). Group write stays allowed because the user granted it. On macOS
+/// that group is `staff`, shared by every local user, so a `g+w` checkout is
+/// only as private as the user's umask makes it.
 /// What: the root is `stat`ed through a symlink (a checkout may be reached by
 /// one) and refused when its mode has `o+w`; the root and both markers must be
 /// owned by `euid`, the markers read with `lstat` so a symlink is judged by

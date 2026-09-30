@@ -209,11 +209,13 @@ fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>, ContentError> {
 /// Why: a gzip bomb must fail before it is decompressed, and tar reads some
 /// bytes on its own — a pax `size=` override, pax and GNU long-name records —
 /// that a check on header fields never sees (#8378 review).
-/// What: three bounds. The decompressed stream is read through a
+/// What: two binding bounds. The decompressed stream is read through a
 /// [`CappedReader`] at [`Limits::stream_bytes`]; each entry's size as tar
 /// reads it ([`tar::Entry::size`], not the raw header field) is summed against
-/// `unpacked_bytes` before its data is read; and the data is read through a
-/// `take` of the room left under `unpacked_bytes`.
+/// `unpacked_bytes` before its data is read. The data is also read through a
+/// `take` of the room left under `unpacked_bytes`; for a regular entry that
+/// guard cannot trip, since tar yields at most `size` bytes and the sum check
+/// already bounded it. It stays as defence in depth.
 /// Test: `bundle_over_a_cap_is_too_large`,
 /// `a_pax_size_override_counts_against_the_unpacked_cap`,
 /// `an_oversized_extension_record_is_too_large`.
