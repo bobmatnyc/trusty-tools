@@ -137,7 +137,9 @@ pub fn tm_bin() -> &'static str {
 /// `CLAUDE_CODE_SESSION_ID` is what made a spawned child append a real row to
 /// the operator's savings ledger (#7514). `TRUSTY_MPM_URL`, `TMUX` and the
 /// managed-session ids make a child adopt the developer's live daemon, tmux
-/// server and session rather than the fixture's.
+/// server and session rather than the fixture's. #6288: `TRUSTY_MPM_SOCKET`,
+/// `TRUSTY_DATA_DIR_OVERRIDE` and `XDG_DATA_HOME` pick the daemon socket the
+/// socket-only commands dial, so each points a child at the developer's daemon.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
 /// environment, so the `#5544` hazard — a `set_var` visible to every test
@@ -146,7 +148,10 @@ pub fn tm_bin() -> &'static str {
 const CHILD_STATE_ENV: &[&str] = &[
     "TRUSTY_MPM_ROOT",
     "TRUSTY_MPM_URL",
+    "TRUSTY_MPM_SOCKET",
+    "TRUSTY_DATA_DIR_OVERRIDE",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     "CLAUDE_CONFIG_DIR",
     trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
     "CLAUDE_SESSION_ID",

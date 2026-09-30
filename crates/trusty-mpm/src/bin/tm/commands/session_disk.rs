@@ -141,7 +141,10 @@ impl Resolvable for DirectoryRow {
 ///
 /// [`DaemonClient`]: trusty_mpm::client::DaemonClient
 async fn session_directory(client: &reqwest::Client, url: &str) -> Vec<DirectoryRow> {
-    let executor = super::managed_route::executor(client, url);
+    let executor = super::managed_route::executor(&trusty_mpm::client::DaemonClient::with_client(
+        client.clone(),
+        url,
+    ));
     let managed = executor
         .client()
         .list_managed_sessions()

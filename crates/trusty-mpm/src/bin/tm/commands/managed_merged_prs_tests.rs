@@ -225,7 +225,15 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
         .expect("build a short-bounded test client");
 
     let (url, server) = slow_prune_server(SERVER_DELAY).await;
-    let overridden = session_prune_worktrees(&client, &url, true, false, true, None, None).await;
+    let overridden = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        true,
+        false,
+        true,
+        None,
+        None,
+    )
+    .await;
     server.await.expect("server task must not panic");
     assert!(
         overridden.is_ok(),
@@ -235,7 +243,15 @@ async fn merged_pr_request_outlives_the_default_client_timeout() {
 
     // CONTROL: without the opt-in the client default still bounds the call.
     let (url, server) = slow_prune_server(SERVER_DELAY).await;
-    let plain = session_prune_worktrees(&client, &url, true, false, false, None, None).await;
+    let plain = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        true,
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     server.await.expect("server task must not panic");
     assert!(
         plain.is_err(),
@@ -256,7 +272,15 @@ async fn prune_worktrees_reports_a_timeout_as_an_error() {
         .expect("build a short-bounded test client");
     // Answers long after the client's bound, so the call must time out.
     let (url, server) = slow_prune_server(Duration::from_secs(3)).await;
-    let outcome = session_prune_worktrees(&client, &url, false, false, false, None, None).await;
+    let outcome = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        false,
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     server.abort();
     let err = outcome.expect_err("a timed-out prune must be an error, never success");
     let msg = format!("{err}");
@@ -329,8 +353,7 @@ async fn prune_worktrees_sends_the_invoking_session() {
     let client = reqwest::Client::new();
     let (url, server) = capturing_prune_server().await;
     let sent = session_prune_worktrees(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         true,
         false,
         false,
@@ -350,7 +373,15 @@ async fn prune_worktrees_sends_the_invoking_session() {
     // borrowed id — an id the caller does not hold would discount a stranger's
     // claim.
     let (url, server) = capturing_prune_server().await;
-    let sent = session_prune_worktrees(&client, &url, true, false, false, None, None).await;
+    let sent = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        true,
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     let body = server.await.expect("server task must not panic");
     assert!(sent.is_ok(), "{sent:?}");
     assert!(

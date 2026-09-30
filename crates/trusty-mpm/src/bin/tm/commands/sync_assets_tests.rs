@@ -35,9 +35,12 @@ async fn spawn_test_daemon() -> String {
 async fn session_sync_assets_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_sync_assets(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_sync_assets(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id/name: {err}"
@@ -52,7 +55,10 @@ async fn session_sync_assets_not_found_errors() {
 async fn session_sync_assets_all_empty_fleet_ok() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    session_sync_assets_all(&client, &url)
-        .await
-        .expect("an empty fleet must be a successful (zero-work) no-op");
+    session_sync_assets_all(&trusty_mpm::client::DaemonClient::with_client(
+        client.clone(),
+        url,
+    ))
+    .await
+    .expect("an empty fleet must be a successful (zero-work) no-op");
 }
