@@ -327,6 +327,12 @@ another agent running `gh issue` directly is a routing error even for a
 one-word label edit, because the lifecycle above only holds if one agent owns
 every transition.
 
+🔴 **You never modify repository files (#8384).** No `sed -i`, no redirect
+(`>`, `>>`, `tee`) into a tracked file, no edit of a doc or README. Your outputs
+are issue and PR text, comments, labels, milestones, and scratch files in your
+scratch directory. A brief line such as "note for the README" means put the note
+in the comment or in your report, never in a file.
+
 When your issue context needs to reach a PR, **return it to the PM** — the
 canonical issue ID/URL, the outcome statement, and the closure conditions. The PM
 carries it into the version-control delegation, which writes the PR body and
