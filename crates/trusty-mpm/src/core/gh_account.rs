@@ -709,8 +709,11 @@ pub fn resolve_gh_account_env(
 /// `GET /user`, and a pinned project whose identity task panicked, are the
 /// exceptions to "empty" — see [`pinned_spawn_env`] and [`joined_spawn_vars`],
 /// which fail that session's `gh` closed instead. #8914: so are records that
-/// pin disagreeing identities and a registry that cannot be read.
+/// pin disagreeing identities and a registry that cannot be read. #8934: so is
+/// a git work tree with no `origin`, which gets
+/// [`crate::core::remote_mode::local_only_gh_vars`] — gh cannot run at all.
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`,
+/// `a_local_only_repo_spawns_with_gh_disabled`,
 /// `disagreeing_pins_spawn_with_the_nobody_token`,
 /// `an_unreadable_registry_spawns_with_the_nobody_token`
 /// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
@@ -719,26 +722,26 @@ pub async fn resolve_gh_account_env_for_registry(
     registry: &crate::project::ProjectRegistry,
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
+    use crate::core::remote_mode::{RemoteMode, remote_mode};
     let cwd_for_origin = cwd.to_path_buf();
-    let probe = tokio::task::spawn_blocking(move || {
-        crate::daemon::managed_routes::inproject::get_origin_url(&cwd_for_origin)
-    })
-    .await;
+    let probe = tokio::task::spawn_blocking(move || remote_mode(&cwd_for_origin)).await;
     // #4734: still fail-open (see the doc above), but a git failure is now
     // reported rather than being indistinguishable from "no origin remote".
     let origin = match probe {
-        Ok(Ok(origin)) => origin,
+        Ok(Ok(RemoteMode::Origin(origin))) => origin,
+        // #8934: no origin is an explicit "no gh" pin, never the active account.
+        Ok(Ok(RemoteMode::LocalOnly)) => {
+            tracing::info!(cwd = %cwd.display(), "{}; gh is disabled for this session", crate::core::remote_mode::LOCAL_ONLY_SKIP);
+            return crate::core::remote_mode::local_only_gh_vars();
+        }
         Ok(Err(e)) => {
             tracing::warn!(
                 cwd = %cwd.display(),
                 "cannot read git origin remote; spawning without a pinned gh_account: {e}"
             );
-            None
+            return Vec::new();
         }
-        Err(_) => None,
-    };
-    let Some(origin) = origin else {
-        return Vec::new();
+        Ok(Ok(RemoteMode::NotARepository)) | Err(_) => return Vec::new(),
     };
 
     // #8914 HIGH 2: a registry that cannot name one pin fails the session's gh

@@ -233,8 +233,34 @@ pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
     std::process::exit(code)
 }
 
+/// The notice every `tm pr` verb prints instead of running in a local-only
+/// repository (#8934).
+///
+/// Why: open, merge, queue-check and cleanup all act on a GitHub PR, which a
+/// repository with no `origin` cannot have — and its session's gh is disabled.
+/// Skipping with one line, exit 0, keeps a delivery flow that calls `tm pr`
+/// from failing on a step that has nothing to do.
+/// What: `Some(notice)` when `dir` is inside a local-only repository;
+/// `None` for a repository with an origin, a non-repository, or a git failure
+/// (which the verb then reports itself).
+/// Test: `pr_8934_a_local_only_repo_skips_every_verb`.
+pub(crate) fn local_only_skip(dir: &std::path::Path) -> Option<String> {
+    let mode = trusty_mpm::core::remote_mode::remote_mode(dir).ok()?;
+    mode.is_local_only().then(|| {
+        format!(
+            "tm pr: {}; merge locally with `git merge` instead",
+            trusty_mpm::core::remote_mode::LOCAL_ONLY_SKIP
+        )
+    })
+}
+
 /// The fallible body of [`run`], split out so every error leaves one way.
 async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::Result<i32> {
+    // #8934: a local-only repo has no remote to push to or open a PR on.
+    if let Some(notice) = local_only_skip(&std::env::current_dir()?) {
+        println!("{notice}");
+        return Ok(EXIT_OK);
+    }
     let gh = RealGhRunner::new()?;
     match cmd {
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),

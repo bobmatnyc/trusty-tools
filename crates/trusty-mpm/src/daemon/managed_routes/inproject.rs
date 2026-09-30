@@ -873,6 +873,13 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
         return;
     }
 
+    // #8934: a local-only repo has no `origin/<default>` to track.
+    if crate::core::remote_mode::remote_mode(base_path).is_ok_and(|m| m.is_local_only()) {
+        let skip = crate::core::remote_mode::LOCAL_ONLY_SKIP;
+        info!(worktree = %worktree_path.display(), "inproject: {skip}; no upstream set");
+        return;
+    }
+
     // Step 4: now that a bare `git push` provably cannot leave this branch,
     // set upstream so `git pull` (and `git fetch` + merge) works.
     let default_branch = super::inproject_hygiene::get_default_branch(base_path)

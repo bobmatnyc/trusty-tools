@@ -41,8 +41,9 @@ pub enum StartPoint {
     Fresh { git_ref: String },
     /// `origin/<default>` as of some earlier fetch — this call's fetch failed.
     Stale { git_ref: String, reason: String },
-    /// The repo has no `origin` remote: `HEAD` is the only correct start point
-    /// and this is not a degradation.
+    /// The repo has no `origin` remote: `HEAD` — the repository root's checked-out
+    /// branch, its local default branch — is the only correct start point and
+    /// this is not a degradation (#8934: local-only worktrees are cut here).
     LocalOnly,
     /// A remote exists but neither the fetch nor any remote-tracking ref could
     /// supply a start point, so `HEAD` is used and may be stale.
@@ -87,7 +88,10 @@ impl StartPoint {
 /// Test: see the module docs.
 pub fn resolve(base_path: &Path) -> StartPoint {
     let Some(branch) = default_remote_branch(base_path) else {
-        return if has_origin_remote(base_path) {
+        // #8934: the shared predicate; an unreadable remote is not local-only.
+        let local_only =
+            crate::core::remote_mode::remote_mode(base_path).is_ok_and(|mode| mode.is_local_only());
+        return if !local_only {
             StartPoint::UnverifiedHead {
                 reason: "could not resolve origin's default branch (origin/HEAD unset and no \
                          remote-tracking ref for the checked-out branch); branching from the \
@@ -149,10 +153,6 @@ fn fetch(base_path: &Path, refspec: &str) -> Result<(), String> {
         out.status,
         stderr.trim().replace('\n', "; ")
     ))
-}
-
-fn has_origin_remote(base_path: &Path) -> bool {
-    git_stdout(base_path, &["remote", "get-url", "origin"]).is_some()
 }
 
 fn ref_exists(base_path: &Path, full_ref: &str) -> bool {

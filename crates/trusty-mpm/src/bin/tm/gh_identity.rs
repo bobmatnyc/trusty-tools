@@ -129,18 +129,28 @@ pub(crate) fn load_gh_env() -> anyhow::Result<GhEnv> {
 /// environment, which the spawn had exported there by sourcing a temp file; the
 /// launch spec now delivers the environment to `claude` alone, so the pane shell
 /// no longer holds it and this path has to resolve it again from config.
-/// What: [`load_gh_env`]'s body, with `dir` in place of the process cwd.
+/// What: [`load_gh_env`]'s body, with `dir` in place of the process cwd. A
+/// local-only repository (#8934) gets [`GhEnv::local_only`] and no config read.
 /// Test: `resolve_project_aware_*` cover the resolution; the in-place
 /// application is covered by
-/// `inplace_exec_command_carries_the_pinned_gh_identity`.
+/// `inplace_exec_command_carries_the_pinned_gh_identity`;
+/// `load_gh_env_for_a_local_only_repo_disables_gh`.
 pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
-    let config = TrustyToolsConfig::load();
+    use trusty_mpm::core::remote_mode::{RemoteMode, remote_mode};
     // #4734: still best-effort, but a git failure is logged instead of passing
     // silently as "this directory has no origin remote".
-    let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)
+    let mode = remote_mode(dir)
         .inspect_err(|e| tracing::warn!("cannot read git origin remote for gh identity: {e}"))
-        .ok()
-        .flatten();
+        .ok();
+    // #8934: a local-only repo pins "no gh", never the global `github:` binding.
+    if mode.as_ref().is_some_and(RemoteMode::is_local_only) {
+        return Ok(GhEnv::local_only());
+    }
+    let config = TrustyToolsConfig::load();
+    let origin_url = match mode {
+        Some(RemoteMode::Origin(url)) => Some(url),
+        _ => None,
+    };
     let env = resolve_project_aware(&config, origin_url.as_deref())?;
     if !env.is_empty() {
         // Names only — never the resolved token VALUE (which `vars()` may hold).
@@ -410,6 +420,37 @@ mod tests {
         assert!(
             result.is_ok(),
             "no account paired with config_dir must skip enforcement entirely: {result:?}"
+        );
+    }
+
+    /// FAIL-OPEN CHECK (#8934): a `tm` gh call run from a repository with no
+    /// `origin` must not fall back to the global `github:` binding or the
+    /// machine's active account — it gets the local-only pin, which strips
+    /// every inherited token.
+    /// Test: itself.
+    #[test]
+    fn load_gh_env_for_a_local_only_repo_disables_gh() {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(repo.path())
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+        let env = load_gh_env_for(repo.path()).expect("local-only env");
+        let value = |k: &str| {
+            env.vars()
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            value("GH_CONFIG_DIR").as_deref(),
+            Some(trusty_mpm::core::remote_mode::LOCAL_ONLY_GH_CONFIG_DIR)
+        );
+        assert!(
+            env.unset_vars().iter().any(|k| k == "GITHUB_TOKEN"),
+            "{env:?}"
         );
     }
 }

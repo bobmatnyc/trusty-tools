@@ -1,0 +1,4 @@
+Added
+- `tm sessions new` now spawns a managed session in a git repository with no `origin` remote. Before, the daemon refused it with "managed sessions require a GitHub remote". The session runs on the repository itself, or, when a worktree is requested, on a `session/<name>` worktree cut from the repository's checked-out branch. There is nothing to fetch, and no upstream is set (#8934).
+- A session in a repository with no `origin` cannot run `gh` under any account. Its `GH_CONFIG_DIR` points under `/dev/null`, so gh cannot start, and inherited `GH_TOKEN`, `GITHUB_TOKEN` and enterprise tokens are replaced or removed. A `tm` command run in such a repository gets the same pin, instead of the global `github:` binding or the machine's active account (#8934).
+- In a repository with no `origin`, every `tm pr` verb prints `local-only repo: no remote; skipping push/PR` and exits 0, and a session pause skips its push-and-PR publish with the reason `local_only` (#8934).

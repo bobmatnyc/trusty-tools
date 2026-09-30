@@ -535,6 +535,33 @@ async fn resolve_gh_account_env_for_registry_no_origin_is_empty() {
     assert!(vars.is_empty(), "vars: {vars:?}");
 }
 
+/// 🔴 FAIL-OPEN CHECK (#8934, #8914 invariant): a git repository with NO
+/// `origin` has no GitHub identity to prove. Before #8934 it resolved to an
+/// EMPTY env — the session inherited `GH_TOKEN` and ran gh as the machine's
+/// active account. It must get the explicit "no remote, no gh" pin instead,
+/// under which gh cannot start, and the launch must strip inherited tokens.
+/// Test: itself.
+#[tokio::test]
+async fn a_local_only_repo_spawns_with_gh_disabled() {
+    use crate::core::remote_mode::{LOCAL_ONLY_GH_CONFIG_DIR, LOCAL_ONLY_GH_TOKEN};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(workspace.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    assert_eq!(value_of(&vars, GH_CONFIG_DIR), LOCAL_ONLY_GH_CONFIG_DIR);
+    assert_eq!(value_of(&vars, "GH_TOKEN"), LOCAL_ONLY_GH_TOKEN);
+    assert_eq!(value_of(&vars, "GH_ENTERPRISE_TOKEN"), LOCAL_ONLY_GH_TOKEN);
+    let unset = crate::core::gh_identity::inherited_identity_to_clear(&vars);
+    assert!(unset.iter().any(|k| k == "GITHUB_TOKEN"), "{unset:?}");
+}
+
 /// `git init` a workspace and point its `origin` at `origin_url`.
 fn workspace_with_origin(dir: &Path, origin_url: &str) {
     let init = std::process::Command::new("git")

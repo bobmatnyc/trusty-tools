@@ -3490,3 +3490,38 @@ fn pr_8431_a_label_created_concurrently_counts_as_seeded() {
     assert_eq!(creates.len(), 2, "{seen:?}");
     assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
 }
+
+/// #8934: every `tm pr` verb skips with one line in a repository with no
+/// `origin`, and a repository with an origin is left to the verb.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8934_a_local_only_repo_skips_every_verb() {
+    let init = |dir: &std::path::Path, origin: Option<&str>| {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        if let Some(url) = origin {
+            run(&["remote", "add", "origin", url]);
+        }
+    };
+    let local = tempfile::tempdir().expect("tempdir");
+    init(local.path(), None);
+    let notice = super::local_only_skip(local.path()).expect("local-only skips");
+    assert!(
+        notice.contains("local-only repo: no remote; skipping push/PR"),
+        "{notice}"
+    );
+
+    let remote = tempfile::tempdir().expect("tempdir");
+    init(remote.path(), Some("https://github.com/o/r.git"));
+    assert_eq!(super::local_only_skip(remote.path()), None);
+}

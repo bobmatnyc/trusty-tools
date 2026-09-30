@@ -296,6 +296,13 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 ```
 
+**Local-only repository — no `origin` remote (#8934).** Branch from the local
+default branch instead (`git worktree add -b <branch> .claude/worktrees/<dirname>
+main`), skip every fetch, pull, push and PR step, and merge locally: `git merge
+--no-ff <branch>` in the main checkout, then `git worktree remove` and `git
+branch -d`. `tm pr` prints `local-only repo: no remote; skipping push/PR` and
+exits 0. The session's `gh` is disabled, so no `gh` step can run.
+
 🟡 **This is for the PM or a human working directly. It is NOT the dispatch
 mechanism** — a subagent dispatch declares `isolation: "worktree"` instead, per
 "Worktree Discipline" below and `tm-delegation-patterns`.
