@@ -184,6 +184,13 @@ verify the build resolves clean.
   provisions the checkout only. Run install + workspace-build once
   (`pnpm install --frozen-lockfile`, `npx turbo run build --filter=<app>^...`)
   before the first gate, not every gate.
+- **Python editable installs across worktrees (#8386).** pip's wheel cache can
+  serve one worktree's editable build to another, so the `.pth` file points at
+  a sibling worktree's source and tests run foreign code. In each worktree use
+  its own venv, and install with
+  `pip install -e <path> --no-cache-dir --force-reinstall`. Or skip the install
+  and run with `PYTHONPATH=<worktree>/src`. Check where the package resolves
+  (`python -c "import <pkg>; print(<pkg>.__file__)"`) before the first test.
 - **Confirm the test runner loads a module before the first test.** Recipe:
   Read `{{TM_SKILLS}}/git-workflow/SKILL.md` (#7732).
 
