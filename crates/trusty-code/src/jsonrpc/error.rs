@@ -231,13 +231,16 @@ impl std::error::Error for RpcError {}
 /// codes it converts — keeps the socket transport from inventing a second
 /// mapping, and keeps the code the caller reads identical to the one the same
 /// method reports over STDIO or HTTP.
-/// What: widens `code` to `i64` and keeps `message` verbatim. `data` is
-/// dropped, because the transport's error has no field to carry it — the same
-/// loss `crate::serve::rest::respond` already accepts on the REST envelope.
+/// What: widens `code` to `i64` and keeps `message` verbatim. `data` is carried
+/// through with `with_data` when present (#6285).
 /// Test: `rpc_error_converts_onto_the_uds_transport_error`.
 impl From<RpcError> for trusty_common::uds::server::RpcError {
     fn from(err: RpcError) -> Self {
-        Self::new(i64::from(err.code), err.message)
+        let converted = Self::new(i64::from(err.code), err.message);
+        match err.data {
+            Some(data) => converted.with_data(data),
+            None => converted,
+        }
     }
 }
 
@@ -379,5 +382,16 @@ mod tests {
             i64::from(RpcError::session_not_found("sess-1").code)
         );
         assert!(converted.message.contains("sess-1"));
+        assert_eq!(
+            converted.data,
+            RpcError::session_not_found("sess-1").data,
+            "domain `error_type` data must survive the conversion"
+        );
+
+        // #6285: `data` must survive the conversion when present.
+        let with_data: trusty_common::uds::server::RpcError = RpcError::invalid_params("bad")
+            .with_data(json!({"field": "x"}))
+            .into();
+        assert_eq!(with_data.data, Some(json!({"field": "x"})));
     }
 }
