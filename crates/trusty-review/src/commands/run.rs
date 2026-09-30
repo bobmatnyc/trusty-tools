@@ -155,7 +155,8 @@ pub struct RunArgs {
 /// thrown away; only the env overrides survived.
 /// What: layers `--reviewer-model`/`--provider`/`--review-template` over the
 /// same `--config` file `main` loaded.
-/// Test: `run_config_honours_the_config_file_verification_settings`.
+/// Test: `run_config_honours_the_config_file_verification_settings`,
+/// `run_and_calibrate_rebuild_their_config_from_the_config_path` (main.rs).
 fn run_config(config_path: Option<&std::path::Path>, args: &RunArgs) -> ReviewConfig {
     let overrides = RoleCliOverrides {
         reviewer_model: args.reviewer_model.clone(),

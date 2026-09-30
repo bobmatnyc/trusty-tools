@@ -181,20 +181,26 @@ enum Commands {
 /// Level applied when `RUST_LOG` is unset or does not parse.
 const DEFAULT_LOG_DIRECTIVES: &str = "warn";
 
-/// Target prefixes held at `warn` unless `RUST_LOG` names them itself (#8948).
-/// A directive target matches by prefix, so `aws_sdk` covers every `aws_sdk_*`.
-const AWS_LOG_GUARDS: [&str; 2] = ["aws_config", "aws_sdk"];
+/// Target held at `warn` unless `RUST_LOG` names exactly it (#8948). A
+/// directive target matches by string prefix, so `aws` covers every AWS crate
+/// that can log a credential: `aws_config`, `aws_sigv4`, `aws_runtime`,
+/// `aws_credential_types`, `aws_types`, `aws_sdk_*` and `aws_smithy_*`.
+const AWS_LOG_GUARD: &str = "aws";
 
 /// Build the stderr tracing filter from `RUST_LOG`.
 ///
 /// Why: #8948 — the AWS credential provider logs the access key ID at INFO,
 /// and stderr lands in agent transcripts. A `RUST_LOG=info` meant for
 /// trusty-review's own events let that line through.
-/// What: `RUST_LOG` when it parses, else `warn`; then `aws_config=warn` and
-/// `aws_sdk=warn` unless `RUST_LOG` names that target explicitly. An
-/// unparsable `RUST_LOG` falls back to `warn` with both guards.
+/// What: `RUST_LOG` when it parses, else `warn`; then `aws=warn` unless
+/// `RUST_LOG` has a directive whose target is exactly `aws`. A more specific
+/// operator directive such as `aws_config=info` still wins over the guard, and
+/// covers only its own target. An unparsable `RUST_LOG` falls back to `warn`
+/// with the guard.
 /// Test: `aws_info_events_stay_off_stderr_at_the_default_level`,
 /// `aws_info_events_stay_off_stderr_under_rust_log_info`,
+/// `aws_sigv4_events_stay_off_stderr_under_rust_log_trace`,
+/// `an_aws_sub_target_directive_keeps_the_guard_on_its_siblings`,
 /// `an_unparsable_rust_log_falls_back_to_warn_with_the_aws_guards`,
 /// `an_explicit_aws_directive_is_honoured`.
 fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
@@ -203,14 +209,12 @@ fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
         .filter(|s| EnvFilter::try_new(s).is_ok())
         .unwrap_or(DEFAULT_LOG_DIRECTIVES);
     let mut directives = base.to_string();
-    for guard in AWS_LOG_GUARDS {
-        let named = base
-            .split(',')
-            .filter_map(|d| d.trim().split('=').next())
-            .any(|target| target.starts_with(guard));
-        if !named {
-            directives.push_str(&format!(",{guard}=warn"));
-        }
+    let named = base
+        .split(',')
+        .filter_map(|d| d.trim().split('=').next())
+        .any(|target| target == AWS_LOG_GUARD);
+    if !named {
+        directives.push_str(&format!(",{AWS_LOG_GUARD}=warn"));
     }
     // `EnvFilter::new` drops a directive it cannot parse rather than failing;
     // every piece here was validated above, so nothing is dropped.
@@ -286,6 +290,40 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    // ── --config reaches every config rebuild (#8947) ───────────────────────
+
+    /// The production text of a source file, before its test module.
+    fn production(src: &str) -> &str {
+        src.split("#[cfg(test)]").next().unwrap_or(src)
+    }
+
+    /// REGRESSION (#8947): `main` hands the `--config` path to `run` and
+    /// `calibrate`, and neither rebuilds its config from no file.
+    /// `run_config_honours_the_config_file_verification_settings` proves the
+    /// rebuild honours the path it is given.
+    #[test]
+    fn run_and_calibrate_rebuild_their_config_from_the_config_path() {
+        let main = production(include_str!("main.rs"));
+        assert!(main.contains("cmd_run(config, config_path.as_deref(), args)"));
+        assert!(main.contains("cmd_calibrate(config_path.as_deref(), args)"));
+        for (name, src) in [
+            ("run.rs", include_str!("commands/run.rs")),
+            ("calibrate.rs", include_str!("commands/calibrate.rs")),
+        ] {
+            let code = production(src);
+            assert!(
+                code.contains("ReviewConfig::from_env_and_file(config_path,"),
+                "{name} must rebuild its config from the --config path"
+            );
+            assert!(
+                !code.contains("from_env_and_file(None"),
+                "{name} rebuilds its config from no file"
+            );
+        }
+        let run = production(include_str!("commands/run.rs"));
+        assert!(run.contains("run_config(config_path, &args)"));
+    }
+
     // ── stderr log filter (#8948) ───────────────────────────────────────────
 
     /// In-memory stand-in for stderr.
@@ -340,6 +378,38 @@ mod tests {
     fn aws_info_events_stay_off_stderr_under_rust_log_info() {
         let out = emitted(Some("info"));
         assert!(out.contains("own-8948"), "own INFO event must show: {out}");
+        assert!(!out.contains("AKIA8948"), "credential line leaked: {out}");
+        assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
+    }
+
+    /// REGRESSION (#8948): `RUST_LOG=trace` must not open the SigV4 signer,
+    /// whose `params` and `canonical_request` events carry the key ID and the
+    /// session token.
+    #[test]
+    fn aws_sigv4_events_stay_off_stderr_under_rust_log_trace() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_env_filter(log_filter(Some("trace")))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "aws_sigv4::http_request::sign", "sigv4-8948");
+            tracing::trace!(target: "trusty_review::pipeline", "own-trace-8948");
+        });
+        let out = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+            .expect("utf8 log output");
+        assert!(
+            out.contains("own-trace-8948"),
+            "own TRACE event must show: {out}"
+        );
+        assert!(!out.contains("sigv4-8948"), "SigV4 event leaked: {out}");
+    }
+
+    /// REGRESSION (#8948): a directive for one `aws_config` module does not
+    /// lift the guard from the credential provider beside it.
+    #[test]
+    fn an_aws_sub_target_directive_keeps_the_guard_on_its_siblings() {
+        let out = emitted(Some("info,aws_config::imds=debug"));
         assert!(!out.contains("AKIA8948"), "credential line leaked: {out}");
         assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
     }
