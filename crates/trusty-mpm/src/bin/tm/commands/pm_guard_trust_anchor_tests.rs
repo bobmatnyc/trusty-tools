@@ -637,6 +637,11 @@ fn the_launch_record_dir_is_an_anchor() {
         "cp a.txt ~/.trusty-mpm/architect-launch",
         "cd /tmp && echo x > 100.architect",
         "cd /tmp && echo x > 100.ARCHITECT",
+        // #8878 R1 critic HIGH: the session-name sidecar, placed or not.
+        "echo x > ~/.trusty-mpm/architect-launch/100.architect-session",
+        "cd /tmp && echo x > 100.architect-session",
+        "echo x > $D/100.architect-session",
+        "cd /tmp && echo x > 100.Architect-SESSION",
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
@@ -652,5 +657,6 @@ fn the_launch_record_dir_is_an_anchor() {
     }
     // The distinct extension keeps other unplaceable writes open.
     assert_eq!(pm_bash(&fx, "cd /tmp && echo x > r.json"), None);
+    assert_eq!(pm_bash(&fx, "cd /tmp && echo x > r.session"), None);
     assert_eq!(pm_bash(&fx, "echo x > notes.md"), None);
 }

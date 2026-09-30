@@ -326,3 +326,29 @@ fn clear_is_constructed_in_one_place() {
         "only the variant declaration and its one construction name `Clear`"
     );
 }
+
+/// #8878 R1: the excepted entry is neither found nor descended, and a
+/// repository elsewhere, also one with the same name deeper down, is found.
+#[test]
+fn an_excepted_entry_is_skipped_and_its_siblings_are_still_found() {
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    let local = ws.join("local");
+    std::fs::create_dir_all(local.join(".git")).unwrap();
+    std::fs::create_dir_all(local.join("nested/.git")).unwrap();
+    assert_eq!(
+        scan_for_child_repo(&ws),
+        ChildRepoScan::Found(local.clone())
+    );
+    assert_eq!(
+        scan_for_child_repo_except(&ws, &local),
+        ChildRepoScan::Clear
+    );
+
+    let deeper = ws.join("sub/local");
+    std::fs::create_dir_all(deeper.join(".git")).unwrap();
+    assert_eq!(
+        scan_for_child_repo_except(&ws, &local),
+        ChildRepoScan::Found(deeper)
+    );
+}

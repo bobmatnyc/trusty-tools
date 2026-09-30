@@ -18,13 +18,18 @@ use std::process::Command;
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, scan_for_child_repo};
+use trusty_mpm::core::child_repo_scan::{
+    ChildRepoScan, scan_for_child_repo, scan_for_child_repo_except,
+};
 use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
 
 use super::user_config_path;
 
 /// The built-in projects root under the home directory (`~/trusty-mpm-projects`).
 const PROJECTS_ROOT_DIR: &str = "trusty-mpm-projects";
+
+/// The one child repository fleet init accepts, `<dir>/local` (#8878 R1).
+pub(crate) const PRIVATE_REPO_DIR: &str = "local";
 
 /// Git variables that point a git command at a repository other than `-C <dir>`.
 const GIT_REDIRECT_VARS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
@@ -117,15 +122,18 @@ impl std::error::Error for DirRefusal {}
 /// holding it; (6) a workspace parent, meaning any candidate projects root
 /// (`<home>/trusty-mpm-projects`, the configured root, the
 /// `TRUSTY_MPM_WORKSPACE_ROOT` value) or an ancestor of one, or a directory
-/// whose subtree holds a repository or cannot be scanned; (7) a path with a
-/// `.git` entry in any strict ancestor; (8) a repository whose `git remote`
+/// whose subtree holds a repository or cannot be scanned — except one private
+/// repository at `<dir>/local` (see [`check_private_repo`]); (7) a path with
+/// a `.git` entry in any strict ancestor; (8) a repository whose `git remote`
 /// lists a remote or fails. A trusty-mpm config that exists but will not
 /// load is a refusal; a missing one is the default. A fresh directory, and a
 /// repository fleet init created (a no-remote repo at the target), pass.
 /// Test: `the_home_directory_is_refused_however_it_is_spelled`,
 /// `a_malformed_tm_config_refuses`, `the_tm_config_directory_is_refused`,
 /// `a_repository_with_a_remote_is_refused`, `a_failing_remote_listing_refuses`,
-/// `the_default_and_a_fresh_directory_pass`, and the rest of `preflight_tests.rs`.
+/// `the_default_and_a_fresh_directory_pass`,
+/// `a_private_local_repository_without_a_remote_passes`, and the rest of
+/// `preflight_tests.rs`.
 pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
     let target = resolve(dir)?;
     if is_filesystem_root(&target)? {
@@ -264,7 +272,16 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
             )));
         }
     }
-    match scan_for_child_repo(target) {
+    // #8878 R1: a private `local/` repository is checked on its own, and the
+    // scan still looks at everything beside it.
+    let scan = match private_repo(target)? {
+        None => scan_for_child_repo(target),
+        Some(local) => {
+            check_private_repo(target, &local)?;
+            scan_for_child_repo_except(target, &local)
+        }
+    };
+    match scan {
         ChildRepoScan::Clear => Ok(()),
         ChildRepoScan::Found(repo) => Err(parent(format!(
             "it contains the repository {}",
@@ -275,6 +292,75 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
             reason: format!("the scan for repositories inside it did not finish: {why}"),
         }),
     }
+}
+
+/// `<target>/local` when it is a real directory whose `.git` is a real
+/// directory; `None` otherwise, which leaves it to the ordinary scan. A stat
+/// error other than not-found is [`DirRefusal::Unresolvable`].
+///
+/// Why: #8878 R1 — the supervisor keeps a private, remote-less repository in
+/// `local/`. A symlinked `local`, or a `.git` file or symlink (a worktree,
+/// submodule or redirect), gets no exception, so the scan refuses it.
+/// Test: `a_symlinked_local_repository_is_refused`,
+/// `a_private_local_repository_without_a_remote_passes`,
+/// `an_unstatable_private_repository_refuses`.
+fn private_repo(target: &Path) -> Result<Option<PathBuf>, DirRefusal> {
+    let local = target.join(PRIVATE_REPO_DIR);
+    for path in [local.clone(), local.join(".git")] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(unresolvable(&path, &e)),
+        }
+    }
+    Ok(Some(local))
+}
+
+/// Refuse the private repository `local` of `target` unless it has no remote
+/// and holds no repository of its own.
+///
+/// Why: #8878 R1 (owner ruling 2026-09-29 22:23Z) — `local/` is the one
+/// child repository the Architect may own; a remote would publish it, and a
+/// nested repository is a project the exception must not cover.
+/// What: [`DirRefusal::WorkspaceParent`] of `target` when a scan of `local`
+/// finds a repository or `git remote` lists one; an incomplete scan is
+/// [`DirRefusal::Unresolvable`] and a failing listing
+/// [`DirRefusal::GitProbeFailed`].
+/// Test: `a_private_local_repository_with_a_remote_is_refused`,
+/// `a_repository_nested_in_the_private_local_repository_is_refused`,
+/// `a_failing_remote_listing_on_the_private_repository_refuses`.
+fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
+    let parent = |reason: String| DirRefusal::WorkspaceParent {
+        path: target.to_path_buf(),
+        reason,
+    };
+    match scan_for_child_repo(local) {
+        ChildRepoScan::Clear => {}
+        ChildRepoScan::Found(repo) => {
+            return Err(parent(format!(
+                "it contains the repository {}, nested in its private repository {}",
+                repo.display(),
+                local.display()
+            )));
+        }
+        ChildRepoScan::Incomplete(why) => {
+            return Err(DirRefusal::Unresolvable {
+                path: local.to_path_buf(),
+                reason: format!("the scan for repositories inside it did not finish: {why}"),
+            });
+        }
+    }
+    let remotes = list_remotes(local)?;
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    Err(parent(format!(
+        "its private repository {} has remote(s) {}; only a `{PRIVATE_REPO_DIR}/` repository \
+         with no remote is accepted",
+        local.display(),
+        remotes.join(", ")
+    )))
 }
 
 /// Refuse a target with a `.git` entry in any strict ancestor.
@@ -302,13 +388,25 @@ fn refuse_remote(target: &Path) -> Result<(), DirRefusal> {
         Ok(true) => {}
         Err(e) => return Err(unresolvable(&target.join(".git"), &e)),
     }
-    let probe_failed = |detail: String| DirRefusal::GitProbeFailed {
+    let remotes = list_remotes(target)?;
+    if remotes.is_empty() {
+        return Ok(());
+    }
+    Err(DirRefusal::HasRemote {
         path: target.to_path_buf(),
+        remotes: remotes.join(", "),
+    })
+}
+
+/// The remotes `git remote` lists for the repository at `repo`.
+fn list_remotes(repo: &Path) -> Result<Vec<String>, DirRefusal> {
+    let probe_failed = |detail: String| DirRefusal::GitProbeFailed {
+        path: repo.to_path_buf(),
         detail,
     };
     let out = git()
         .arg("-C")
-        .arg(target)
+        .arg(repo)
         .arg("remote")
         .output()
         .map_err(|e| probe_failed(format!("cannot run git: {e}")))?;
@@ -317,15 +415,10 @@ fn refuse_remote(target: &Path) -> Result<(), DirRefusal> {
             String::from_utf8_lossy(&out.stderr).trim().to_owned(),
         ));
     }
-    let remotes = String::from_utf8_lossy(&out.stdout);
-    let remotes: Vec<&str> = remotes.split_whitespace().collect();
-    if remotes.is_empty() {
-        return Ok(());
-    }
-    Err(DirRefusal::HasRemote {
-        path: target.to_path_buf(),
-        remotes: remotes.join(", "),
-    })
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect())
 }
 
 /// A `git` command that ignores any inherited `GIT_DIR`-style redirect.

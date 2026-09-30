@@ -6,15 +6,19 @@
 //! `~/.trusty-mpm/architect-launch/` ([`live_architect_lineage`]), lists the
 //! panes of the server a tmux invocation selects, and marks a pane as the
 //! Architect's when its `#{pane_pid}` is in that lineage or its session is
-//! the launch session `tm-architect`. Read only when a deny-set tmux command
-//! is in the call.
-//! Test: `a_pane_listing_marks_the_architect_by_lineage_and_session`; end to
-//! end in `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
+//! `tm-architect`. When the lineage does not read, the sessions recorded in
+//! the `*.architect-session` sidecars (`tm fleet init --session`) are marked
+//! too; when those do not read either, the listing is `Err` and the command
+//! is denied. Read only when a deny-set tmux command is in the call.
+//! Test: `a_pane_listing_marks_the_architect_by_lineage_and_session`,
+//! `a_pane_listing_run_is_classified`; end to end in
+//! `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
 
 use std::cell::OnceCell;
 use std::path::PathBuf;
 
 use trusty_mpm::core::architect_launch::live_architect_lineage;
+use trusty_mpm::core::architect_session::recorded_session_names;
 
 use super::architect_pane::{Pane, PaneProbe};
 use crate::commands::fleet::launch::ARCHITECT_SESSION;
@@ -27,6 +31,44 @@ const PANE_FORMAT: &str =
 pub(crate) struct LivePanes {
     root: Option<PathBuf>,
     lineage: OnceCell<Result<Vec<u32>, String>>,
+    marks: OnceCell<Result<ArchitectMarks, String>>,
+}
+
+/// What marks a pane as the Architect's, beside the `tm-architect` name.
+#[derive(Debug, Default)]
+pub(super) struct ArchitectMarks {
+    /// The live Architect lineage, by PID.
+    pub(super) lineage: Vec<u32>,
+    /// Recorded Architect session names, read only when the lineage is not.
+    pub(super) sessions: Vec<String>,
+}
+
+/// The marks for one probe: the lineage when it reads, else every recorded
+/// session name.
+///
+/// Why: #8878 R1 round 2 — with the lineage unreadable, only `tm-architect`
+/// was marked, so a PM could drive an Architect run under `--session`.
+/// What: `Ok(lineage)` marks by PID, and `sidecars` is not called. `Err`
+/// marks the names `sidecars` gives; when it fails too, `Err`, which denies
+/// every deny-set command.
+/// Test: `a_pane_listing_run_is_classified`.
+pub(super) fn architect_marks(
+    lineage: &Result<Vec<u32>, String>,
+    sidecars: impl FnOnce() -> Result<Vec<String>, String>,
+) -> Result<ArchitectMarks, String> {
+    match lineage {
+        Ok(lineage) => Ok(ArchitectMarks {
+            lineage: lineage.clone(),
+            sessions: Vec::new(),
+        }),
+        // #8878: an unreadable lineage falls back to the recorded names.
+        Err(err) => sidecars()
+            .map(|sessions| ArchitectMarks {
+                lineage: Vec::new(),
+                sessions,
+            })
+            .map_err(|why| format!("the Architect launch records do not read ({err}; {why})")),
+    }
 }
 
 impl LivePanes {
@@ -37,6 +79,7 @@ impl LivePanes {
                 .filter(|home| home.is_absolute())
                 .map(|home| home.join(".trusty-mpm")),
             lineage: OnceCell::new(),
+            marks: OnceCell::new(),
         }
     }
 
@@ -44,6 +87,15 @@ impl LivePanes {
         self.lineage.get_or_init(|| match &self.root {
             Some(root) => live_architect_lineage(root),
             None => Err("no home directory".into()),
+        })
+    }
+
+    fn marks(&self) -> &Result<ArchitectMarks, String> {
+        self.marks.get_or_init(|| {
+            architect_marks(self.lineage(), || match &self.root {
+                Some(root) => recorded_session_names(root),
+                None => Err("no home directory".into()),
+            })
         })
     }
 }
@@ -76,7 +128,7 @@ impl PaneProbe for LivePanes {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Listed::NotFound,
             Err(err) => Listed::Failed(err.to_string()),
         };
-        classify_listing(listed, self.lineage())
+        classify_listing(listed, self.marks())
     }
 
     fn current_pane(&self) -> Option<String> {
@@ -103,12 +155,13 @@ pub(super) enum Listed<'a> {
 ///
 /// What: no tmux binary, and a failure naming no running server or a socket
 /// tmux cannot connect to, are an empty list: the command cannot reach that
-/// server either. Any other failure is `Err`. An unreadable `lineage` still
-/// marks the panes of the launch session.
+/// server either. Any other failure is `Err`, and so is a listing when
+/// `marks` is `Err` ([`architect_marks`]): no pane can be proved not the
+/// Architect's.
 /// Test: `a_pane_listing_run_is_classified`.
 pub(super) fn classify_listing(
     listed: Listed<'_>,
-    lineage: &Result<Vec<u32>, String>,
+    marks: &Result<ArchitectMarks, String>,
 ) -> Result<Vec<Pane>, String> {
     match listed {
         Listed::NotFound => Ok(Vec::new()),
@@ -127,14 +180,23 @@ pub(super) fn classify_listing(
         }
         Listed::Ran {
             ok: true, stdout, ..
-        } => parse_panes(stdout, lineage.as_deref().unwrap_or_default()),
+        } => {
+            // #8878: no marks means no pane is proved the Architect's or not.
+            let marks = marks.as_ref().map_err(Clone::clone)?;
+            parse_panes(stdout, &marks.lineage, &marks.sessions)
+        }
     }
 }
 
-/// Parse [`PANE_FORMAT`] lines, marking the Architect's panes.
+/// Parse [`PANE_FORMAT`] lines, marking a pane in `tm-architect` or in one of
+/// `sessions`, or whose pid is in `lineage`, as the Architect's.
 ///
 /// Test: `a_pane_listing_marks_the_architect_by_lineage_and_session`.
-pub(super) fn parse_panes(text: &str, lineage: &[u32]) -> Result<Vec<Pane>, String> {
+pub(super) fn parse_panes(
+    text: &str,
+    lineage: &[u32],
+    sessions: &[String],
+) -> Result<Vec<Pane>, String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -150,7 +212,9 @@ pub(super) fn parse_panes(text: &str, lineage: &[u32]) -> Result<Vec<Pane>, Stri
                 window: window.to_owned(),
                 session: session.to_owned(),
                 name: name.to_owned(),
-                architect: name == ARCHITECT_SESSION || lineage.contains(&pid),
+                architect: name == ARCHITECT_SESSION
+                    || sessions.iter().any(|s| s == name)
+                    || lineage.contains(&pid),
                 marked: marked == "1",
             })
         })

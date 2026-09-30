@@ -154,10 +154,27 @@ impl std::fmt::Display for ScanIncomplete {
 /// `a_skip_listed_directory_wider_than_its_check_cap_is_incomplete`,
 /// `clear_is_constructed_in_one_place`.
 pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
+    scan(dir, None)
+}
+
+/// [`scan_for_child_repo`], with one entry of the tree left out.
+///
+/// Why: #8878 R1 — `tm fleet init` accepts one private repository at
+/// `<dir>/local` and checks it on its own, but every other repository beneath
+/// `dir` must still be found, so the scan cannot stop at `local`.
+/// What: the entry whose path equals `except` is neither reported, probed,
+/// charged to [`WORKSPACE_SCAN_BUDGET`], nor descended. Everything else is as
+/// [`scan_for_child_repo`].
+/// Test: `an_excepted_entry_is_skipped_and_its_siblings_are_still_found`.
+pub fn scan_for_child_repo_except(dir: &Path, except: &Path) -> ChildRepoScan {
+    scan(dir, Some(except))
+}
+
+fn scan(dir: &Path, except: Option<&Path>) -> ChildRepoScan {
     let mut queue = VecDeque::from([dir.to_path_buf()]);
     let mut visited = 0usize;
     while let Some(current) = queue.pop_front() {
-        match scan_level(dir, &current, &mut visited, &mut queue) {
+        match scan_level(dir, &current, except, &mut visited, &mut queue) {
             Ok(None) => {}
             Ok(Some(found)) => return ChildRepoScan::Found(found),
             Err(stop) => return ChildRepoScan::Incomplete(stop),
@@ -174,6 +191,7 @@ pub fn scan_for_child_repo(dir: &Path) -> ChildRepoScan {
 fn scan_level(
     root: &Path,
     current: &Path,
+    except: Option<&Path>,
     visited: &mut usize,
     queue: &mut VecDeque<PathBuf>,
 ) -> Result<Option<PathBuf>, ScanIncomplete> {
@@ -188,6 +206,10 @@ fn scan_level(
     for entry in children {
         let entry = entry.map_err(|e| unreadable(current, e))?;
         let path = entry.path();
+        // #8878 R1: the caller checks the excepted entry itself.
+        if except == Some(path.as_path()) {
+            continue;
+        }
         // `DirEntry::file_type` does not follow symlinks.
         let kind = entry.file_type().map_err(|e| unreadable(&path, e))?;
         let skip_listed = kind.is_dir() && SCAN_SKIP_DIRS.iter().any(|s| entry.file_name() == *s);
