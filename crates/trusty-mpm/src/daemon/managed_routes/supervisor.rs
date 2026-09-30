@@ -7,9 +7,10 @@
 //! `mpm.managed.register_supervisor`. [`LaunchRecordBinding`] is the
 //! production [`BindingVerifier`]: the `claude` in the session must be the one
 //! `tm fleet init` recorded for the directory, under the daemon's framework
-//! root. Status: 200 with the [`RegistrationReport`]; 400 for a malformed
-//! request; 403 when the session is not the bound Architect; 500 when the
-//! store cannot be written.
+//! root. Status: 200 with the
+//! [`RegistrationReport`](crate::session_manager::RegistrationReport); 400
+//! for a malformed request; 403 when the session is not the bound Architect;
+//! 500 when the store cannot be written.
 //! Test: `the_route_refuses_an_unbound_session_with_403`,
 //! `the_route_refuses_a_missing_session_through_the_launch_record`,
 //! `the_route_rejects_a_relative_dir_with_400`.

@@ -242,8 +242,10 @@ async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
         &format!("exec '{}' 60", fake_claude.display()),
     );
     // Fixture precondition: the pane process has exec'd into `claude`.
+    // #8443: an exact `=name:` target, never the bare session name.
+    let target = crate::core::tmux::exact_window_target(pane.name());
     let named_claude = (0..50).any(|_| {
-        let pid = server.query(&["display-message", "-t", pane.name(), "-p", "#{pane_pid}"]);
+        let pid = server.query(&["display-message", "-t", &target, "-p", "#{pane_pid}"]);
         let named = pid
             .and_then(|p| p.parse().ok())
             .is_some_and(crate::core::process::process_name_is_claude);
