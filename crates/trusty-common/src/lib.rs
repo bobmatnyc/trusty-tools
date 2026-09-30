@@ -749,6 +749,26 @@ pub mod memory_pressure;
 #[cfg(feature = "machine-tier")]
 pub mod machine_tier;
 
+/// SHA-256 parse, hash and verify — the one integrity check (#8378).
+///
+/// Why: ADR-0064 decision 5 (i) rules that pinned-artifact verification has
+/// one implementation; trusty-installer's pinned downloads and the content
+/// resolver both call this module.
+/// What: [`integrity::Sha256Digest`] and [`integrity::IntegrityError`].
+/// Test: `cargo test -p trusty-common --features integrity -- integrity`.
+#[cfg(feature = "integrity")]
+pub mod integrity;
+
+/// Runtime resolver for instructional content (ADR-0064, #8378).
+///
+/// Why: agents, skills and instructions become runtime-only content, so every
+/// harness needs one place that picks the source and verifies the pin.
+/// What: [`content::resolve`] — a trusty-tools checkout override first, then
+/// the installed bundle pinned by `content-lock.toml` (tag + sha256).
+/// Test: `cargo test -p trusty-common --features content-resolver -- content`.
+#[cfg(feature = "content-resolver")]
+pub mod content;
+
 /// Upload trusty-* log files to object storage (#6533).
 ///
 /// Why: every trusty daemon writes logs to a local path that nothing prunes and

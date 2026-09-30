@@ -14,14 +14,11 @@
 //! Test: `tests` cover SHA-256 verify (match + tampered → error) and extraction
 //! (multi-binary archive). Real network calls are `#[ignore]`-tagged.
 
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use trusty_common::integrity::Sha256Digest;
 
 /// Why a prebuilt download did not yield a verified artifact.
 ///
@@ -163,23 +160,13 @@ pub async fn download_and_verify(
 /// Why: The `.sha256` files published by the release workflow follow the
 /// `shasum -a 256` / `sha256sum` format (`hex  filename`); we need just the hex.
 ///
-/// What: Trims whitespace, takes the first whitespace-delimited token, and
-/// validates it is a 64-character hex string.
+/// What: Delegates to trusty-common's
+/// `integrity::Sha256Digest::from_sidecar`, the one parse ADR-0064 decision 5
+/// (i) allows (#8378), and returns its lowercase hex.
 ///
 /// Test: `tests::parse_sha256_line_*`.
 pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
-    let hex = content
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty checksum file"))?
-        .to_lowercase();
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "invalid SHA-256 hex (expected 64 hex chars, got {:?})",
-            hex
-        ));
-    }
-    Ok(hex)
+    Ok(Sha256Digest::from_sidecar(content)?.as_hex().to_owned())
 }
 
 /// Compute the SHA-256 hex digest of a file synchronously.
@@ -188,27 +175,14 @@ pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
 /// enough for binaries < 100 MB) to do this synchronously rather than spawning
 /// an async reader.
 ///
-/// What: Opens the file, streams through a `sha2::Sha256` hasher, and returns
-/// the lowercase hex digest.
+/// What: Delegates to trusty-common's `integrity::Sha256Digest::of_file`
+/// (#8378) and returns the lowercase hex digest.
 ///
 /// Test: `tests::sha256_file_correct` exercises it directly;
 /// `tests::verify_sha256_tampered_is_detectable` exercises it through the
 /// comparison [`download_and_verify`] makes.
 pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("opening {} for hashing", path.display()))?;
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| "reading file for hash")?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(Sha256Digest::of_file(path)?.as_hex().to_owned())
 }
 
 /// Extract all regular files from a `.tar.gz` archive into `dest_dir`.

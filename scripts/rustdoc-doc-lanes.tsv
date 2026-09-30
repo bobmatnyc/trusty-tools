@@ -65,6 +65,7 @@ LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-
 LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/palace-resolve,trusty-common/redb-open,trusty-common/rpc,trusty-common/search-index,trusty-common/session-naming
 LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/symgraph-server,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
+LANE	features	trusty-common/content-resolver,trusty-common/integrity
 # #8616: `load-dynamic` joined this row once `ort_probe.rs` (mod-private,
 # `cfg(any(feature = "load-dynamic", feature = "cuda", test))`) gated a cfg
 # site on it, which rotted the prior NO-CFG row. `cargo doc` never runs the
