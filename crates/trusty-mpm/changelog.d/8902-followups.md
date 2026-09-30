@@ -10,3 +10,6 @@ Fixed
   (`${(P)n::=…}`, `${!n:=…}`, `export "$n=…"`, `unset "$n"`,
   `printf -v "$n"`, `eval "$x"`) as a `TMUX` change, so the tmux command
   denies while an Architect is live (#8902).
+- The floor reads a deeply nested `${a${a…}}` in linear time. It rescanned
+  each `${` to its end, so a 100,000-deep expansion held the hook for minutes,
+  past the hook timeout (#8902).

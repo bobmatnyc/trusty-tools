@@ -583,3 +583,21 @@ fn a_pane_listing_run_is_classified() {
         assert_eq!(marks(classify_listing(listed, &found)), want, "row {row}");
     }
 }
+
+/// #8902: a deeply nested `${a${a…}}` is read in linear time: a closed one
+/// with a readable name moves no server, an unclosed one does. At 7fe59459f3
+/// each `${` rescanned to its end, so the integration test at depth 100000
+/// ran for about nine minutes.
+#[test]
+fn a_deeply_nested_expansion_is_read_in_linear_time() {
+    let depth = 20_000;
+    let nested = format!("{}T{}", "${a".repeat(depth), "}".repeat(depth));
+    let closed = format!("echo {nested}; tmux kill-session -t =pm:");
+    let unclosed = format!("echo {}; tmux kill-session -t =pm:", "${a".repeat(depth));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        misjudged(&fake(), &[&unclosed], &[&closed]),
+        Vec::<String>::new()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}

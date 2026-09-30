@@ -72,29 +72,56 @@ fn starts_assigning(op: &str) -> bool {
 ///
 /// Why: #8902 follow-up — `n=TM; n+=UX; : ${(P)n::=…}` assigns `TMUX` with no
 /// `TMUX` in the text, so an unread name counts as `TMUX` (fail closed).
+/// What: one pass pairs every brace and counts `=` and `P`, so each `${` is
+/// judged in constant time.
 /// Test: `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
 fn assigns_unread_name(command: &str) -> bool {
+    if !command.contains("${") {
+        return false;
+    }
+    // #8902: a rescan per `${` made a deeply nested `${a${a…}}` quadratic, and
+    // a hook that times out lets the command run.
+    let bytes = command.as_bytes();
+    let n = bytes.len();
+    let mut close: Vec<Option<usize>> = vec![None; n];
+    let mut open = Vec::new();
+    let (mut eq, mut p) = (vec![0usize; n + 1], vec![0usize; n + 1]);
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'{' => open.push(i),
+            b'}' => {
+                if let Some(o) = open.pop() {
+                    close[o] = Some(i);
+                }
+            }
+            _ => {}
+        }
+        eq[i + 1] = eq[i] + usize::from(*b == b'=');
+        p[i + 1] = p[i] + usize::from(*b == b'P');
+    }
+    let mut next_paren = vec![n; n + 1];
+    for i in (0..n).rev() {
+        next_paren[i] = if bytes[i] == b')' {
+            i
+        } else {
+            next_paren[i + 1]
+        };
+    }
     command.match_indices("${").any(|(at, _)| {
-        let body = &command[at + 2..];
-        let mut depth = 1usize;
-        let end = body.char_indices().find_map(|(i, c)| {
-            depth = match c {
-                '{' => depth + 1,
-                '}' => depth - 1,
-                _ => depth,
-            };
-            (depth == 0).then_some(i)
-        });
-        let Some(end) = end else {
+        let Some(end) = close[at + 1] else {
             return true;
         };
-        let body = &body[..end];
-        let (flags, name) = match body.strip_prefix('(') {
-            Some(rest) => rest.split_once(')').unwrap_or((rest, "")),
-            None => ("", body),
+        let start = at + 2;
+        // `(flags)name`: the flags run to the first `)` in the body.
+        let (flags, name) = if bytes.get(start) == Some(&b'(') {
+            let shut = next_paren[start + 1].min(end);
+            (start + 1..shut, (shut + 1).min(end))
+        } else {
+            (start..start, start)
         };
-        let unread = flags.contains('P') || name.starts_with(['!', '$']);
-        unread && body.contains('=')
+        let unread =
+            p[flags.end] > p[flags.start] || (name < end && matches!(bytes[name], b'!' | b'$'));
+        unread && eq[end] > eq[start]
     })
 }
 
