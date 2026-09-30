@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use tokio::io::AsyncWriteExt;
-use trusty_common::integrity::Sha256Digest;
+use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
 /// Why a prebuilt download did not yield a verified artifact.
 ///
@@ -168,6 +168,23 @@ pub async fn download_and_verify(
 /// Test: `tests::parse_sha256_line_*`.
 pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<Sha256Digest> {
     Ok(Sha256Digest::from_sidecar(content)?)
+}
+
+/// The prefix GitHub's release-asset `digest` field puts on a SHA-256.
+const GITHUB_DIGEST_PREFIX: &str = "sha256:";
+
+/// Parse a caller-pinned digest: 64 hex digits, optionally `sha256:`-prefixed.
+///
+/// Why: compared as a raw string, a pin copied from GitHub's asset `digest`
+/// field (`sha256:<hex>`) could never match and was reported as a checksum
+/// mismatch (#8378 review).
+///
+/// What: strips one optional `sha256:` prefix, then
+/// `integrity::Sha256Digest::parse_hex` (case-insensitive).
+///
+/// Test: `tests::parse_pin_accepts_a_github_prefix`.
+pub(crate) fn parse_pin(pin: &str) -> Result<Sha256Digest, IntegrityError> {
+    Sha256Digest::parse_hex(pin.strip_prefix(GITHUB_DIGEST_PREFIX).unwrap_or(pin))
 }
 
 /// Compute the SHA-256 hex digest of a file synchronously.
@@ -372,6 +389,21 @@ mod tests {
     fn parse_sha256_line_rejects_non_hex() {
         let hex = format!("{}z", "a".repeat(63));
         assert!(parse_sha256_line(&hex).is_err());
+    }
+
+    /// Why: GitHub publishes asset digests as `sha256:<hex>`; a pin copied from
+    /// there must parse to the same digest as the bare hex (#8378).
+    /// What: Parses the bare, prefixed and uppercase forms; asserts one digest,
+    /// and that a short or doubly-prefixed pin is rejected.
+    /// Test: This is the test.
+    #[test]
+    fn parse_pin_accepts_a_github_prefix() {
+        let hex = "c".repeat(64);
+        let bare = parse_pin(&hex).unwrap();
+        assert_eq!(parse_pin(&format!("sha256:{hex}")).unwrap(), bare);
+        assert_eq!(parse_pin(&hex.to_uppercase()).unwrap(), bare);
+        assert!(parse_pin("sha256:abc").is_err());
+        assert!(parse_pin(&format!("sha256:sha256:{hex}")).is_err());
     }
 
     /// Why: A tampered tarball (wrong SHA-256) must be rejected before extraction.

@@ -486,23 +486,16 @@ pub(crate) async fn install_pinned_set_at(
     commit_set(pending)
 }
 
-/// The prefix GitHub's release-asset `digest` field puts on a SHA-256.
-const GITHUB_DIGEST_PREFIX: &str = "sha256:";
-
-/// Parses `tool.sha256` into a digest, accepting GitHub's `sha256:<hex>` form.
+/// Parses `tool.sha256` with [`fetch::parse_pin`]; `None` when nothing is
+/// pinned, [`PinnedError::InvalidPin`] when the pin is not a digest.
 ///
-/// Why: compared as a raw string, a pin in GitHub's own format could never
-/// match and was reported as a checksum mismatch (#8378 review).
-/// What: `None` when nothing is pinned; [`PinnedError::InvalidPin`] when the
-/// text, after an optional `sha256:` prefix, is not 64 hex digits.
 /// Test: `tests::a_github_prefixed_pin_installs`,
 /// `tests::a_malformed_pin_is_invalid_not_a_mismatch`.
 fn parse_pin(tool: &PinnedTool) -> Result<Option<Sha256Digest>, PinnedError> {
     let Some(pin) = tool.sha256.as_deref() else {
         return Ok(None);
     };
-    let hex = pin.strip_prefix(GITHUB_DIGEST_PREFIX).unwrap_or(pin);
-    Sha256Digest::parse_hex(hex)
+    fetch::parse_pin(pin)
         .map(Some)
         .map_err(|e| PinnedError::InvalidPin {
             crate_name: tool.crate_name.clone(),
