@@ -208,6 +208,17 @@ harness already notifies on completion. Past the box, send ONE corrective
 message with a specific instruction. A second overrun means stop and
 re-dispatch with a narrower brief, never another nudge.
 
+**Scratch directory, every brief (#7791).** Name the agent's own scratch
+directory: `<scratchpad>/<issue>-<round>/` or `<scratchpad>/<agent-id>/`. The
+agent writes scratch files only there (BASE-AGENT). Agents dispatched
+together get distinct directories; generic names at the scratchpad root
+collide.
+
+**A brief commissioning a prose document names no line or word cap (#8309).**
+The 500-SLOC cap is code only. A cap on a research report, spec or ADR forces
+rewrites and collides with mandatory citations. Ask for the Write Plainly style
+instead; it limits verbosity.
+
 A brief never asks for output that scales with build length ("raw output",
 "full log") — it asks for gate summary lines per the gate-output rule
 (BASE-AGENT, "Gate Output: Quote Results, Summarize Progress").
@@ -330,6 +341,11 @@ Enum changes and spelling fixes are rung 1–3. No critic.
 gate a session; it touches a trust boundary or an injection defense; it rewrites
 history or force-pushes; or the PR is already at review round 3+ — evidence
 something is being missed.
+
+**A code-critic brief states the PR and the gates (#8584).** It carries
+`PR: <n>|none`; with `none` the critic posts nothing and looks up no PR. It also
+says the gates are read-only for the critic: it cites the engineer's reported
+gate output and does not re-run one.
 
 **Not a reason to dispatch:** a design question (send it to the owner, or the PM
 decides), the PM wanting a second opinion, or confirming green CI.
