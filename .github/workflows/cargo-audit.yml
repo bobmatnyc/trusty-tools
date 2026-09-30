@@ -36,8 +36,8 @@
 #     (RUSTSEC-2026-0194/0195, DoS) into trusty-search's document-extraction
 #     path — RESOLVED by bumping pdf-extract/calamine/quick-xml off the
 #     vulnerable versions (see that issue for the reachability analysis).
-#   - #2437: nltk 3.9.4 path traversal, transitive via pipecat-ai in
-#     python/trusty-voice/uv.lock (GHSA-p4gq-832x-fm9v, high) — no patched
+#   - #2437: nltk 3.9.4 path traversal in an archived Python sub-project
+#     (removed 2026-09-30, owner ruling 167; GHSA-p4gq-832x-fm9v, high) — no patched
 #     version exists upstream yet. NOT covered by this workflow: `cargo audit`
 #     only scans Cargo.lock, not the Python uv.lock.
 #
