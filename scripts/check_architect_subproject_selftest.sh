@@ -61,7 +61,7 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     cargo-toml) printf '[package]\nname = "x"\n' >"$sub/Cargo.toml" ;;
     workspace-member)
       printf '[workspace]\nmembers = ["crates/*", "python/trusty-architect"]\n' >"$t/Cargo.toml" ;;
-    python-import) printf 'from trusty_voice import config\n' >"$sub/scripts/bad.py" ;;
+    python-import) printf 'from trusty_example import config\n' >"$sub/scripts/bad.py" ;;
     crates-path) printf 'P = "../crates/trusty-mpm/src"\n' >"$sub/scripts/bad.py" ;;
     climb-out) printf 'sys.path.insert(0, "../../lib")\n' >"$sub/scripts/bad.py" ;;
     users-path) printf 'ROOT = "/Users/someone/work"\n' >"$sub/scripts/bad.py" ;;
