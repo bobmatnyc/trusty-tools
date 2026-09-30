@@ -199,6 +199,10 @@ lanes = [
         # #8261: memory-pressure joins the machine-reading lane beside
         # load-average — both are builder-admission inputs.
         "memory-pressure",
+        # #8378: the content resolver (ADR-0064) and the sha256 check it
+        # shares with trusty-installer's pinned downloads.
+        "integrity",
+        "content-resolver",
         "update-check",
         "bug-capture",
         "session-naming",
@@ -469,6 +473,9 @@ bytes = { workspace = true, optional = true }
 aws-credential-types = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 globset = { workspace = true, optional = true }
+# Optional: enabled by the `content-resolver` feature (#8378). Unpacks a
+# verified content bundle in memory; already in the lockfile via trusty-installer.
+tar = { workspace = true, optional = true }
 
 # Optional: enabled by the `catchup` feature (DOC-28 cutover bridge, #1762).
 # rusqlite is used only by the `mpm_registry` submodule to read the
@@ -962,6 +969,17 @@ memory-pressure = ["dep:thiserror"]
 # the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
 # (which applies no cgroup clamp; see the module doc).
 machine-tier = []
+# #8378 (ADR-0064 decision 5 (i)): the `integrity` module — the one SHA-256
+# parse/hash/verify implementation, shared by trusty-installer's pinned
+# downloads and the content resolver. Turns on the optional `sha2` and
+# `thiserror` deps; adds no crate to the lockfile.
+integrity = ["dep:sha2", "dep:thiserror"]
+# #8378 (ADR-0064 PR-B): the `content` module — the runtime resolver for
+# instructional content: `content-lock.toml`, tag + sha256 verification of the
+# installed bundle, and the trusty-tools checkout override. `tar` is new to
+# this crate but already in the lockfile; `toml` and `flate2` are optional deps
+# other features already use.
+content-resolver = ["integrity", "dep:thiserror", "dep:toml", "dep:flate2", "dep:tar"]
 
 # Enables the `log_drain` module (#6533, epic phase 1+2): the `LogDestination`
 # trait, its `s3://` and `file://` adapters, the `DestinationUri` parser, the
