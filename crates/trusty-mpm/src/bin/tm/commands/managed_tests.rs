@@ -1457,6 +1457,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         slot,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 
@@ -1785,6 +1786,37 @@ fn ls_row_renders_the_startup_context_column() {
         unmeasured.chars().count(),
         "the START column keeps its width with and without a reading"
     );
+}
+
+/// #8942 design §4: `tm ls` lists the live Architect first and tags its rows
+/// by kind; a deleted Architect row is not pinned, an ordinary row untagged.
+#[test]
+fn session_table_pins_and_tags_the_architect_row() {
+    use crate::commands::managed_render::{kind_tag, pinned_first};
+    use trusty_mpm::session_manager::SessionKind;
+
+    let with = |name: &str, kind: Option<SessionKind>, deleted: bool| {
+        let mut s = ls_session(name, 1);
+        s.kind = kind;
+        s.deleted = deleted;
+        s
+    };
+    let rows = [
+        with("ordinary", None, false),
+        with("gone-arch", Some(SessionKind::Supervisor), true),
+        with("poller", Some(SessionKind::SupervisorAux), false),
+        with("arch", Some(SessionKind::Supervisor), false),
+    ];
+    let order: Vec<&str> = pinned_first(&rows)
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(order, ["arch", "poller", "ordinary", "gone-arch"]);
+    assert!(format_ls_row(&rows[3], false, 14, None).contains("active [architect]"));
+    assert!(format_ls_row(&rows[2], false, 14, None).contains("[architect-helper]"));
+    assert!(!format_ls_row(&rows[0], false, 14, None).contains('['));
+    assert_eq!(kind_tag(Some(SessionKind::Unknown)), Some("protected"));
+    assert_eq!(kind_tag(Some(SessionKind::Ordinary)), None);
 }
 
 /// Why: a recorded-and-tiny startup and an unrecorded one are different facts,

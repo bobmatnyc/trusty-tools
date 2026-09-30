@@ -135,6 +135,13 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
+    // #8942: the scratch HOME has no daemon socket, so the bound Architect is
+    // not registered — a warning, and init still exits 0.
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("NOT registered with the daemon"),
+        "{}",
+        text(&out)
+    );
     let root = env.home.path().join(".trusty-mpm");
     let records: Vec<_> = std::fs::read_dir(root.join("architect-launch"))
         .expect("the launch record directory")

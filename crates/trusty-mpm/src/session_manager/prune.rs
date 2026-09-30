@@ -268,6 +268,10 @@ impl SessionManager {
     /// is an outage, not a cleanup. `None` (the daemon's own sweeps, the MCP
     /// tool) excludes nothing, because those callers occupy no pane; the CLI
     /// fills it from `$TM_MANAGED_SESSION_ID`.
+    ///
+    /// #8942: a live record of a protected kind (the Architect and its
+    /// helpers) is left out of the target set on every filter, like the
+    /// invoker. Test: `prune_include_active_never_decommissions_a_supervisor_record`.
     pub async fn prune_managed(
         &self,
         filter: PruneFilter,
@@ -307,6 +311,10 @@ impl SessionManager {
             // #6118: the invoking session is never a target, on any filter.
             if invoker == Some(record.id) {
                 info!(id = %record.id, "prune: skipping the invoking session");
+                continue;
+            }
+            // #8942: a live Architect record is never a target, on any filter.
+            if super::supervisor::skip_protected(&record, "prune") {
                 continue;
             }
             if ignore_liveness || !is_running(&record, tmux)? {

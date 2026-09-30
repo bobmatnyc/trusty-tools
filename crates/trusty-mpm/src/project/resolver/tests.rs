@@ -76,6 +76,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -107,6 +108,7 @@ fn session_no_repo() -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
