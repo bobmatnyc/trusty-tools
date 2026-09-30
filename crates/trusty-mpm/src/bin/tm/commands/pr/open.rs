@@ -614,6 +614,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
                 eprintln!("\nrequired body skeleton — paste this and fill each section:\n");
                 eprintln!("{skeleton}");
             }
+            // #8467: name the full opt-out wherever the contract is what failed.
+            if let Some(hint) = minimal_hint(&failures, args.minimal) {
+                eprintln!("\n{hint}");
+            }
             return Ok(EXIT_CHECK_FAILED);
         }
     };
@@ -726,6 +730,24 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
         .iter()
         .any(|f| f.starts_with(body::MISSING_FIELD_PREFIX))
         .then(body::skeleton)
+}
+
+/// The `--minimal` opt-out, named when the nine-field contract failed (#8467).
+///
+/// Why: the agents in #8467's reports never passed `--minimal` — the refusal
+/// named each heading and printed the skeleton, but not the one flag that drops
+/// all nine. Each fell back to `gh pr create`, losing the footer, `Refs`/`Closes`
+/// and changelog checks this command exists to run.
+/// What: a hint when any failure line is a contract gap
+/// ([`body::is_contract_gap`]) and `--minimal` was not passed; else `None`.
+/// Test: `pr_8467_a_contract_gap_names_the_minimal_opt_out`.
+pub(crate) fn minimal_hint(failures: &[String], minimal: bool) -> Option<&'static str> {
+    (!minimal && failures.iter().any(|f| body::is_contract_gap(f))).then_some(
+        "a small docs PR, or a project whose CLAUDE.md names a different PR-body standard, \
+         may pass --minimal: it drops all nine headings, `## Gates not run` and \
+         `## Partial-red accounting` included. The attribution footer, the closing-keyword \
+         ban and the changelog gate still apply.",
+    )
 }
 
 /// The PR URL `gh pr create` printed, when its stdout carries a parsable one.
