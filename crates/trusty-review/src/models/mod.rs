@@ -460,6 +460,29 @@ pub struct Finding {
     /// the code the finding quotes or names; `None` when the cited line held it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation_correction: Option<CitationCorrection>,
+    /// #8949: set when the citation gate verified some of the code this finding
+    /// quotes but not all of it. The finding is advisory only: it cannot drive
+    /// the verdict and is posted in the review body, never inline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citation_partial: bool,
+}
+
+/// A finding the citation gate withheld, kept for the review record (#8949).
+///
+/// Why: a withheld finding left no trace outside a log line, so a drop could
+/// not be audited as a true or a false positive after the fact.
+/// What: the finding as the gate saw it, the reason it was dropped, and the
+/// quoted fragment that failed to match when that was the cause.
+/// Test: `a_dropped_finding_names_its_missing_snippet`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithheldFinding {
+    /// The finding the gate dropped.
+    pub finding: Finding,
+    /// Why the gate dropped it.
+    pub reason: String,
+    /// The quoted fragment that is not in the cited file, when that was the cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_fragment: Option<String>,
 }
 
 /// A line correction the citation gate applied to a finding (#8905).
@@ -512,6 +535,7 @@ impl Finding {
             verified: None,
             issue_eligible: false,
             citation_correction: None,
+            citation_partial: false,
         }
     }
 
@@ -637,6 +661,10 @@ pub struct ReviewResult {
     /// Test: `run_review_unjudged_finding_is_counted_as_withheld_unverified`.
     #[serde(default)]
     pub withheld_unverified_count: usize,
+    /// #8949: every finding the citation gate withheld, with its reason, so the
+    /// review record can be audited. Never posted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld_findings: Vec<WithheldFinding>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -805,6 +833,7 @@ impl ReviewResult {
             findings_count: 0,
             unverified_count: 0,
             withheld_unverified_count: 0,
+            withheld_findings: Vec::new(),
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
