@@ -641,8 +641,8 @@ def load_list(path):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             cols = line.split("\t")
-            if len(cols) != 4 or not all(c.strip() for c in cols):
-                errors.append(f"{path}:{n}: expected 4 tab-separated columns (crate, target, filter, reason)")
+            if len(cols) not in (4, 5) or not all(c.strip() for c in cols):
+                errors.append(f"{path}:{n}: expected 4 tab-separated columns (crate, target, filter, reason[, features])")
                 continue
             crate, target, filt = (c.strip() for c in cols[:3])
             if not re.fullmatch(r"lib|(bin|test):[\w-]+", target):
@@ -651,7 +651,7 @@ def load_list(path):
             if filt != "*" and not re.fullmatch(IDENT + r"(::" + IDENT + r")*", filt):
                 errors.append(f"{path}:{n}: filter must be `*` or a test path, got {filt!r}")
                 continue
-            rows.append((crate, target, filt, n))
+            rows.append((crate, target, filt, n, cols[4].strip() if len(cols) == 5 else ""))
     return rows, errors
 
 
@@ -663,14 +663,14 @@ def cmd_check(args):
     rows, errors = load_list(args.list)
     tree = Tree(args.root)
     symbols = Symbols(tree)
-    for crate, target, _, n in rows:
+    for crate, target, _, n, _ in rows:
         if (crate, target) not in tree.targets:
             errors.append(f"{args.list}:{n}: no tested target {target} in crate {crate}")
     if args.verbose:
         for name in sorted(symbols.homes):
             print(f"  {symbols.kinds[name]:6} {name}  homes={','.join(sorted(symbols.homes[name]))}")
     readers = find_readers(tree, symbols)
-    uncovered = [r for r in readers if not any(c == r[0] and t == r[1] and covers(f, r[2]) for c, t, f, _ in rows)]
+    uncovered = [r for r in readers if not any(c == r[0] and t == r[1] and covers(f, r[2]) for c, t, f, _, _ in rows)]
     if args.verbose:
         for r in readers:
             print(f"  read   {r[6]:6} {r[0]} {r[1]} {r[2] or '(crate root)'}  {r[3]}:{r[4]}  ({r[5]})")
@@ -692,14 +692,14 @@ def cmd_check(args):
 
 def plan(rows):
     groups = {}
-    for crate, target, filt, _ in rows:
+    feats = {(c, t): ["--features", ft] for c, t, _, _, ft in rows if ft}  # 5th column: `-p` build features (#8378)
+    for crate, target, filt, _, _ in rows:
         groups.setdefault((crate, target), []).append(filt)
     out = []
     for (crate, target), filters in groups.items():
         kind, _, name = target.partition(":")
         sel = ["--lib"] if kind == "lib" else [f"--{kind}", name]
-        tail = [] if "*" in filters else sorted(set(filters))
-        out.append(((crate, target), filters, ["cargo", "test", "-p", crate, *sel, "--locked", "--no-fail-fast", "--", *tail]))
+        out.append(((crate, target), filters, ["cargo", "test", "-p", crate, *sel, *feats.get((crate, target), []), "--locked", "--no-fail-fast", "--", *([] if "*" in filters else sorted(set(filters)))]))
     return out
 
 

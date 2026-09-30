@@ -11296,6 +11296,7 @@ dependencies = [
  "strsim",
  "syn 2.0.117",
  "sysinfo",
+ "tar",
  "tempfile",
  "thiserror 1.0.69",
  "tokenizers 0.21.4",

@@ -61,8 +61,6 @@ libc = { workspace = true }
 # daemon /health endpoints (#1341). Also used for prebuilt-binary downloads (Phase 2 / #1760).
 # Reuses the workspace reqwest (rustls-tls).
 reqwest = { workspace = true }
-# SHA-256 verification for prebuilt-binary tarballs (Phase 2 / #1760).
-sha2 = { workspace = true }
 # Gzip decompression for prebuilt-binary tarballs (Phase 2 / #1760).
 flate2 = { workspace = true }
 # Tar archive extraction for prebuilt-binary tarballs (Phase 2 / #1760).
@@ -88,7 +86,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `ensure`'s palace stage and its `--wait` readiness probe
 # dial trusty-memory through the shared client. ADR-0032 left no `http_addr` for
 # `resolve_base_url` to read, so both read a running daemon as absent without it.
-trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "uds-supervisor", "memory-rpc"] }  # uds-supervisor (#6350): tctl probes trusty-analyze by starting it on demand
+trusty-common = { workspace = true, features = ["update-check", "config-cli", "uds", "uds-supervisor", "memory-rpc", "integrity"] }  # uds-supervisor (#6350): tctl probes trusty-analyze by starting it on demand; integrity (#8378): the one sha256 check
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }
@@ -106,3 +104,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # `trusty_common::uds::server::RpcFallback`, which is an `#[async_trait]` trait
 # (#6286). Test-only: no production code in this crate implements it.
 async-trait = { workspace = true }
+# #8378: production hashing goes through `trusty_common::integrity`; the test
+# fixture computes expected digests with sha2 directly, as an independent oracle.
+sha2 = { workspace = true }
