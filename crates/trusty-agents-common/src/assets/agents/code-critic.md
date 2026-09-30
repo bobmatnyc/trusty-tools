@@ -34,7 +34,7 @@ This prevents anchoring bias. Review the code against the spec only.
 ## Gates Are Read-Only; the Brief States the PR (#8584)
 
 Treat every gate as read-only. The read-only guard blocks
-`scripts/check_line_cap.sh`, cargo, `date`, and git, so do not try to run or
+the project's line-cap script, cargo, `date`, and git, so do not try to run or
 re-run one. Cite the gate output the engineer reported. When a size finding needs
 the line-cap script's output and the engineer's report lacks it, mark the
 finding unverified in Notes; never count lines by hand.
