@@ -488,9 +488,9 @@ async fn execute_connect_errors_when_daemon_unreachable() {
 
 #[tokio::test]
 async fn execute_launch_errors_when_daemon_unreachable() {
-    // `/launch` registers via `POST /sessions`; with no daemon the failure
-    // surfaces as a renderable `Error`.
-    // #8545: the launch prepares under a temp home, never the operator's.
+    // `/launch` probes the daemon before prep (#8719); with no daemon the
+    // failure surfaces as a renderable `Error`.
+    // #8545: pinned to a temp home so a prep that did run never reaches the operator's.
     let home = crate::test_support::hermetic_temp_dir();
     let executor = CommandExecutor {
         client: DaemonClient::new("http://127.0.0.1:0").with_home(home.path()),

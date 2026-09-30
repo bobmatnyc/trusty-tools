@@ -321,8 +321,9 @@ impl CommandExecutor {
     /// Why: `tm launch` is the full entry point — it runs `prepare_session`
     /// to deploy instructions, agents, and skills before bringing the
     /// tmux-hosted session up.
-    /// What: calls [`DaemonClient::launch_session`], which runs the deployment
-    /// sequence and then registers + starts the tmux session.
+    /// What: calls [`DaemonClient::launch_session`], which probes the daemon,
+    /// runs the deployment sequence, then registers and starts the tmux
+    /// session (#8719).
     /// Test: `execute_launch_errors_when_daemon_unreachable`.
     pub(super) async fn launch(&self, project: &std::path::Path) -> CommandResult {
         let workdir = project.to_string_lossy().to_string();
