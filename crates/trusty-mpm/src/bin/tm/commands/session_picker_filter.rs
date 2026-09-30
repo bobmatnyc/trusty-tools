@@ -299,8 +299,7 @@ pub(crate) async fn run_f_command(
         term.as_deref(),
     ) {
         return super::managed::session_ls(
-            client,
-            url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
             json,
             sid.as_deref(),
             all,
@@ -314,8 +313,12 @@ pub(crate) async fn run_f_command(
         .await;
     }
 
-    let mut sessions =
-        super::session_picker::fetch_live_sessions(client, url, sid.as_deref(), false).await?;
+    let mut sessions = super::session_picker::fetch_live_sessions(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        sid.as_deref(),
+        false,
+    )
+    .await?;
     super::session_picker_order::sort_sessions(&mut sessions, SessionSortArg::Recent);
     if sessions.is_empty() {
         super::managed_render::render_session_table(&sessions, sid.as_deref());
@@ -333,7 +336,11 @@ pub(crate) async fn run_f_command(
     // picker; here Enter is always an explicit selection of a highlighted row.
     match super::session_picker::decide_for_index(&sessions, idx, false) {
         PickerDecision::Resume(i) => {
-            super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?;
+            super::guided_resume::resume_guided_session(
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                &sessions[i],
+            )
+            .await?;
         }
         PickerDecision::Unresumable(i) => {
             eprintln!(

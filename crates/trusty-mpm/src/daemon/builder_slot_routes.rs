@@ -31,16 +31,15 @@ pub fn router() -> Router<Arc<DaemonState>> {
         .merge(super::build_lease_routes::router())
 }
 
+/// What both retired routes answer, on either transport (#6288 step 1: the
+/// socket's `mpm.builder_slot.*` methods refuse with this same text).
+pub(crate) const RETIRED_MESSAGE: &str = "the dispatch-time builder-slot cap is retired (#8261): \
+     heavy builds take a slot at the build command with `tm build-lease`, and `tm doctor`'s \
+     builder_cap row reports the holders";
+
 /// `410 Gone`, naming what replaced the route.
 async fn gone() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::GONE,
-        Json(json!({
-            "error": "the dispatch-time builder-slot cap is retired (#8261): heavy builds take \
-                      a slot at the build command with `tm build-lease`, and `tm doctor`'s \
-                      builder_cap row reports the holders",
-        })),
-    )
+    (StatusCode::GONE, Json(json!({ "error": RETIRED_MESSAGE })))
 }
 
 #[cfg(test)]

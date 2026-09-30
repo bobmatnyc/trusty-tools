@@ -38,13 +38,14 @@ use commands::{
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
-    misc::{attach_cmd, coordinator, health, hook, optimizer, overseer, status, validate},
+    misc::{attach_cmd, coordinator, hook, optimizer, overseer, validate},
     project::project,
     projects::projects,
     services::services,
     slack::slack,
     telegram::telegram,
 };
+use trusty_mpm::client::DaemonClient;
 
 #[cfg(test)]
 #[path = "test_support.rs"]
@@ -253,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     // runs before any tracing, migration or gateway probe — its latency is paid
     // by every build on the machine.
     if let Some(Command::BuildLease(args)) = cli.command {
-        commands::build_lease::run(args, cli.url.as_deref()).await
+        commands::build_lease::run(args).await
     }
     // #8436: `tm fleet` is daemon-less — no gateway probe, no migration.
     if let Some(Command::Fleet { action }) = cli.command {
@@ -382,6 +383,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // #6288 step 1: the sandbox-reached commands run over the daemon's unix
+    // socket only, so they never reach the TCP gateway probe below.
+    if commands::socket_dispatch::takes(&cli.command) {
+        return commands::socket_dispatch::run(cli).await;
+    }
+
     // #2517: the top-level CLI client must carry the same bounded
     // connect/request timeouts `DaemonClient` uses (issue #2471/#2512) — a
     // bare `reqwest::Client::new()` here has NO timeout, so `tm status`
@@ -450,7 +457,14 @@ async fn main() -> anyhow::Result<()> {
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
     let result = match cli.command {
         None => commands::guided::run_guided_default(&client, &url, cli.url.as_deref()).await,
-        Some(Command::Status) => status(&client, &url).await,
+        // #6288 step 1: dispatched over the socket before URL resolution.
+        Some(
+            Command::Status
+            | Command::Health
+            | Command::Doctor { .. }
+            | Command::Ticket { .. }
+            | Command::Pr { .. },
+        ) => unreachable!("socket commands are dispatched before daemon-URL resolution"),
         Some(Command::Start) => start(&client, &url).await,
         Some(Command::Serve { stdio }) => {
             if stdio {
@@ -467,10 +481,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Project { action }) => project(&client, &url, action).await,
         // #2116: `sessions` (plural) is the canonical top-level command.
         // #8914: the global `--account` is applied, never dropped.
+        // #6288: only `tui` and `disk` still arrive here (step 2).
         Some(Command::Sessions { action }) => {
             let account = account.as_deref();
-            commands::session_account::session_as_account(&client, &url, action, account, token)
-                .await
+            let daemon = DaemonClient::with_client(client.clone(), url.clone());
+            commands::session_account::session_as_account(&daemon, action, account, token).await
         }
         Some(Command::Projects { action }) => projects(&client, &url, action).await,
         Some(Command::Manager { action }) => manager(&client, &url, action).await,
@@ -480,13 +495,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Session { action }) => {
             commands::session::emit_top_level_alias_notice();
             let account = account.as_deref();
-            commands::session_account::session_as_account(&client, &url, action, account, token)
-                .await
+            let daemon = DaemonClient::with_client(client.clone(), url.clone());
+            commands::session_account::session_as_account(&daemon, action, account, token).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        // #6336: standalone — the battery runs in-process, so an unreachable
-        // daemon costs one check row rather than the whole report.
-        Some(Command::Doctor { flags }) => commands::doctor_local::doctor(&url, &flags).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;
@@ -496,7 +508,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
-        Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,
             interval_ms,
@@ -552,7 +563,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Wait(args)) => commands::wait::run(args),
         // #8261: normally dispatched before daemon resolution above; kept so
         // the match stays exhaustive without a panic arm.
-        Some(Command::BuildLease(args)) => commands::build_lease::run(args, Some(&url)).await,
+        Some(Command::BuildLease(args)) => commands::build_lease::run(args).await,
         Some(Command::Daemon {
             addr,
             tailscale,
@@ -575,10 +586,9 @@ async fn main() -> anyhow::Result<()> {
             // #8914: `tm launch --account X` pins X on the checkout first.
             if let Some(login) = account.as_deref() {
                 let target = commands::project::resolve_dir(dir.clone())?;
-                commands::session_account::pin_account_for_dir(
-                    &client, &url, &target, login, token,
-                )
-                .await?;
+                let daemon = DaemonClient::with_client(client.clone(), url.clone());
+                commands::session_account::pin_account_for_dir(&daemon, &target, login, token)
+                    .await?;
             }
             let home = dirs::home_dir();
             launch(
@@ -631,15 +641,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
-        Some(Command::Ticket {
-            issue,
-            system,
-            notes,
-            runtime,
-        }) => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
-        // #6653: exits itself, like `tm wait` — the exit code IS the verb surface.
-        Some(Command::Pr { cmd }) => commands::pr::run(cmd, &client, &url).await,
         Some(Command::Watch { cmd }) => watch_dispatch::dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
         // The handler is async because `meta run` (#1049/#1051) launches a real
@@ -789,19 +791,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Top-level exit-code translation: a `tm session prune-idle` that found the
-    // Session Manager unavailable returns `PruneError::SmUnavailable`. That is a
-    // graceful no-op, not a failure, so exit with the distinct code 75 (the
-    // pause skill branches on it) instead of anyhow's default 1. Any other error
-    // propagates normally (exit 1); `Ok` returns cleanly.
-    if let Err(err) = &result
-        && matches!(
-            err.downcast_ref::<commands::prune::PruneError>(),
-            Some(commands::prune::PruneError::SmUnavailable)
-        )
-    {
-        std::process::exit(commands::prune::EXIT_SM_UNAVAILABLE);
-    }
+    // #6288: `tm session prune-idle`'s exit-75 translation moved with it to
+    // `commands::socket_dispatch::run`.
     // #1737: the bare `tm` guided default returns `DaemonUrlError::Unreachable`
     // when an EXPLICIT `--url`/`TRUSTY_MPM_URL` fails its reachability probe
     // (see `commands::guided::run_guided_default`'s guard, which already

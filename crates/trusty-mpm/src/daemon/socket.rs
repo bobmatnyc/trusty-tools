@@ -74,7 +74,9 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::managed::register(router, state);
     // #6288 slice 5: projects, deliverables/milestones, manager, bus, pairing,
     // delegation.
-    rpc::registry::register(router, state)
+    let router = rpc::registry::register(router, state);
+    // #6288 step 1: the routes the sandboxed `tm` CLI still reached over HTTP.
+    rpc::cli_socket::register(router, state)
 }
 
 /// Per-connection budgets for this listener.

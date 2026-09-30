@@ -8,14 +8,15 @@
 //! and appends this one row.
 //! What: [`probe_daemon`] issues one bounded `GET /health` against the URL the
 //! CLI already resolved through the gateway/lock-file discovery chain, and
-//! [`daemon_check`] folds the outcome into a [`DoctorCheck`]. The row's message
-//! names no port and no transport, so the probe can move to a Unix socket
-//! (#6288) without the operator-visible wording changing.
+//! [`daemon_check`] folds the outcome into a [`DoctorCheck`]. #6288 step 1:
+//! the probe runs over the daemon's unix socket, and the row names the
+//! transport it used (the brief's answer to the issue's open wording question);
+//! it still names no port.
 //! Test: `src/bin/tm/commands/doctor_daemon_row_tests.rs`.
 
 use std::time::Duration;
 
-use trusty_mpm::client::{DaemonClient, HealthSnapshot};
+use trusty_mpm::client::{DaemonCallError, DaemonClient, HealthSnapshot};
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
 /// Name of this check as it appears in `tm doctor` output.
@@ -37,48 +38,80 @@ pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// remedies — nothing is listening (start it), versus something is listening
 /// but not answering (it is wedged; restart it). Collapsing them loses the only
 /// part of the row an operator acts on.
-/// What: the three outcomes [`daemon_check`] renders.
+/// #6288: a dial the OS itself refused (a sandbox without the socket in its
+/// profile, a directory mode) is a third remedy — `tm start` cannot fix it.
+/// What: the four outcomes [`daemon_check`] renders.
 /// Test: `daemon_row_is_ok_when_reachable`, `daemon_row_warns_when_not_running`,
-/// `daemon_row_is_unknown_when_unresponsive`.
+/// `daemon_row_is_unknown_when_unresponsive`,
+/// `daemon_probe_names_the_errno_when_the_os_denies_the_dial`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonReachability {
     /// `/health` answered.
     Reachable,
     /// Nothing accepted the connection.
     NotRunning,
+    /// The OS refused the dial with permission denied; the errno when known.
+    Denied(Option<i32>),
     /// Something accepted the connection but did not answer the probe.
     Unresponsive,
 }
 
+/// `EPERM`/`EACCES` by name, else the raw errno.
+pub(crate) fn errno_name(errno: Option<i32>) -> String {
+    match errno {
+        Some(1) => "EPERM".to_string(),
+        Some(13) => "EACCES".to_string(),
+        Some(n) => format!("errno {n}"),
+        None => "permission denied".to_string(),
+    }
+}
+
 /// Render one [`DaemonReachability`] as the appended check row.
 ///
-/// Why: the message deliberately names neither a port nor a transport. The old
-/// wording — "port 7880 unreachable" — was wrong twice over: it hard-coded a
-/// port the discovery chain may never have used, and it will be wrong again the
-/// day the daemon moves to a Unix socket. Naming only the daemon keeps the row
-/// correct across that move (#6288).
+/// Why: the message never names a port — "port 7880 unreachable" hard-coded a
+/// port the discovery chain may never have used. #6288 step 1: it names the
+/// transport the probe used instead, so an operator sees which socket failed.
 /// What: `Reachable` is `Ok`; `NotRunning` is `Warn` (every local check still
-/// ran, but session management and the MCP surface are unavailable);
-/// `Unresponsive` is `Unknown`, because a socket that accepts and then says
-/// nothing has told us nothing (#4005 precedent).
+/// ran, but session management and the MCP surface are unavailable); `Denied`
+/// is `Warn` naming the errno, with no `tm start` advice; `Unresponsive` is
+/// `Unknown`, because a socket that accepts and then says nothing has told us
+/// nothing (#4005 precedent).
 /// Test: `daemon_row_is_ok_when_reachable`, `daemon_row_warns_when_not_running`,
-/// `daemon_row_is_unknown_when_unresponsive`, `daemon_row_never_names_a_port`.
-pub(crate) fn daemon_check(reachability: DaemonReachability) -> DoctorCheck {
+/// `daemon_row_is_unknown_when_unresponsive`,
+/// `daemon_row_names_its_transport_and_no_port`.
+pub(crate) fn daemon_check(reachability: DaemonReachability, transport: &str) -> DoctorCheck {
     match reachability {
-        DaemonReachability::Reachable => {
-            DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, "trusty-mpm daemon: reachable")
-        }
+        DaemonReachability::Reachable => DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            format!("trusty-mpm daemon: reachable (via {transport})"),
+        ),
         DaemonReachability::NotRunning => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
-            "trusty-mpm daemon: not running — every local check above still ran; \
-             start it with `tm start` when you need session management or the MCP surface",
+            format!(
+                "trusty-mpm daemon: not running (via {transport}) — every local check above \
+                 still ran; start it with `tm start` when you need session management or the \
+                 MCP surface"
+            ),
+        ),
+        DaemonReachability::Denied(errno) => DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!(
+                "trusty-mpm daemon: dial refused by the OS (via {transport}): {} — this \
+                 process may not reach the socket (a sandbox profile without it, or a \
+                 directory mode); the daemon's own state is unknown",
+                errno_name(errno)
+            ),
         ),
         DaemonReachability::Unresponsive => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Unknown,
-            "trusty-mpm daemon: unresponsive — it accepted the connection but did not \
-             answer the health probe in time; restart it and re-run `tm doctor`",
+            format!(
+                "trusty-mpm daemon: unresponsive (via {transport}) — it accepted the connection \
+                 but did not answer the health probe in time; restart it and re-run `tm doctor`"
+            ),
         ),
     }
 }
@@ -86,23 +119,38 @@ pub(crate) fn daemon_check(reachability: DaemonReachability) -> DoctorCheck {
 /// Probe the daemon once, bounded, and classify the outcome.
 ///
 /// Why: `tm doctor` must never start, restart, or require a daemon, so this is
-/// a read-only observation whose failure is a row rather than an abort. The URL
-/// is the one `main` already resolved via
-/// [`trusty_mpm::core::resolve_daemon_url_via_gateway`] — explicit
-/// `--url`/`TRUSTY_MPM_URL` first, then the trusty-console gateway, then the
-/// lock file — so no port is ever hard-coded here.
-/// What: one `GET /health` under [`PROBE_TIMEOUT`]. A transport error that
-/// never established a connection is `NotRunning`; any other failure (timeout,
-/// non-2xx, undecodable body) is `Unresponsive`. Returns the snapshot too,
+/// a read-only observation whose failure is a row rather than an abort. #6288:
+/// the caller's client decides the transport; `tm doctor` and `tm status` hand
+/// in a socket-only one.
+/// What: one `GET /health` under [`PROBE_TIMEOUT`]. A dial the OS refused with
+/// permission denied is `Denied`; any other failure that never established a
+/// connection is `NotRunning`; any other failure (timeout, non-2xx,
+/// undecodable body) is `Unresponsive`. Returns the snapshot too,
 /// because the #2332 staleness and #4230 orphan checks reason about that same
 /// single sample rather than probing again.
-/// Test: `daemon_probe_reports_not_running_when_nothing_listens`.
-pub(crate) async fn probe_daemon(url: &str) -> (DaemonReachability, Option<HealthSnapshot>) {
-    // See #6288 — when the trusty-mpm daemon moves off TCP, only this call
-    // swaps transport; the row `daemon_check` renders does not change.
-    let client = DaemonClient::new(url.to_string());
-    match client.health_snapshot_within(PROBE_TIMEOUT).await {
+/// Test: `daemon_probe_reports_not_running_when_nothing_listens`,
+/// `daemon_probe_over_an_absent_socket_is_not_running`,
+/// `daemon_probe_names_the_errno_when_the_os_denies_the_dial`.
+pub(crate) async fn probe_daemon(
+    client: &DaemonClient,
+) -> (DaemonReachability, Option<HealthSnapshot>) {
+    // #6288 step 1: the client's transport decides; `tm doctor`/`tm status`
+    // hand in a socket-only client, so an absent socket is `NotRunning`.
+    classify_probe(client.health_snapshot_within(PROBE_TIMEOUT).await)
+}
+
+/// The pure half of [`probe_daemon`]: one probe result to its outcome.
+///
+/// Test: `daemon_probe_names_the_errno_when_the_os_denies_the_dial`.
+pub(crate) fn classify_probe(
+    result: Result<HealthSnapshot, DaemonCallError>,
+) -> (DaemonReachability, Option<HealthSnapshot>) {
+    match result {
         Ok(snapshot) => (DaemonReachability::Reachable, Some(snapshot)),
+        Err(e) if e.denied_os_error().is_some() => (
+            DaemonReachability::Denied(e.denied_os_error().and_then(|io| io.raw_os_error())),
+            None,
+        ),
         Err(e) if e.is_connect() => (DaemonReachability::NotRunning, None),
         Err(_) => (DaemonReachability::Unresponsive, None),
     }

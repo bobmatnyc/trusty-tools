@@ -212,8 +212,10 @@ pub(crate) mod session_picker_view;
 pub(crate) mod session_tui;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;
+// #6288 step 1: the commands that reach the daemon over its socket only.
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
+pub(crate) mod socket_dispatch;
 pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe

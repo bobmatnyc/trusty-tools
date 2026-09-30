@@ -34,8 +34,8 @@ use anyhow::{Result, bail};
 
 /// See module docs.
 pub(in crate::client::http_client) async fn response_or_body_error(
-    resp: reqwest::Response,
-) -> Result<reqwest::Response> {
+    resp: super::DaemonResponse,
+) -> Result<super::DaemonResponse> {
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);

@@ -6,25 +6,28 @@
 //! exactly the moment an operator needs a diagnosis. The unit tests around the
 //! new row cannot catch a regression here, because the defect was never in a
 //! function: it was in which function the CLI called. Only the real binary,
-//! run against an address nothing listens on, proves the command completes.
-//! What: runs the built `tm` as `tm --url <dead> doctor` under a scratch HOME
-//! and cwd, then asserts the local checks printed, that daemon reachability is
-//! ONE row saying "not running", and that no output names a port.
+//! run with no daemon to answer, proves the command completes.
+//! What: runs the built `tm doctor` under a scratch HOME and cwd. #6288 step 1:
+//! doctor probes the daemon's unix socket only, and the scratch HOME's data
+//! directory holds none, so the dial is refused at once. It then asserts the
+//! local checks printed, that daemon reachability is ONE row saying "not
+//! running", and that no output names a port.
 //! Test: `cargo test -p trusty-mpm --test integration tm_doctor_standalone::`.
 
 use crate::common;
 
-/// Run `tm doctor` against an address nothing listens on.
+/// Run `tm doctor` with no daemon socket to dial.
 ///
-/// The scratch HOME keeps the run off the operator's real framework root —
-/// `common::tm_command_in` applies it along with the rest of the #7568 scrub —
-/// and port 1 on loopback is the same never-listening address the `tm hook`
-/// fail-open suite uses, so the connect is refused rather than timing out.
+/// The scratch HOME keeps the run off the operator's real framework root and
+/// off their daemon socket — `common::tm_command_in` applies it along with the
+/// rest of the #7568 scrub, which clears `TRUSTY_MPM_SOCKET` and the data-dir
+/// overrides — so the socket path resolves under the scratch HOME, where
+/// nothing is listening.
 fn run_doctor_with_no_daemon() -> (bool, String, String) {
     let home = tempfile::tempdir().expect("scratch home");
     let cwd = tempfile::tempdir().expect("scratch cwd");
     let output = common::tm_command_in(home.path())
-        .args(["--url", "http://127.0.0.1:1", "doctor"])
+        .arg("doctor")
         .current_dir(cwd.path())
         .output()
         .expect("failed to spawn `tm doctor`");

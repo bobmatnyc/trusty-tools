@@ -113,7 +113,7 @@ pub(crate) struct BuildLeaseArgs {
 /// Why: the verb's exit code IS its interface — the build's own code on
 /// success, [`EXIT_LEASE_TIMEOUT`] when no slot freed — so it never returns.
 /// Test: `tests/tm_build_lease.rs`.
-pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
+pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     if args.census {
         print_census()
     }
@@ -133,7 +133,11 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
     for warning in builders.deprecation_warnings() {
         eprintln!("tm build-lease: {warning}");
     }
-    let url = trusty_mpm::core::discovery::resolve_daemon_url(url);
+    // #6288 step 1: the decision log goes over the daemon socket only; a
+    // socket that cannot be resolved costs the log line, never the build.
+    let daemon = trusty_mpm::client::DaemonClient::from_resolved_socket()
+        .inspect_err(|e| eprintln!("tm build-lease: no daemon socket for the decision log: {e:#}"))
+        .ok();
     let home = dirs::home_dir();
     let home_or_root = home.clone().unwrap_or_else(|| PathBuf::from("/"));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -220,7 +224,14 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
                 Err(why) => {
                     // #8261 (owner ruling 2026-09-21): an unsafe target never admits.
                     drop(guard);
-                    post_decision(&url, "refused-target", &command_line, &decision, &[]).await;
+                    post_decision(
+                        daemon.as_ref(),
+                        "refused-target",
+                        &command_line,
+                        &decision,
+                        &[],
+                    )
+                    .await;
                     refuse(&format!("not running the build (#8261) — {why}"))
                 }
             };
@@ -229,7 +240,7 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
                 HolderRecord::new(guard.slot(), command_line.clone(), checkout.clone());
             record.target_dir.clone_from(&target);
             write_record(&mut guard, &record);
-            post_decision(&url, "admitted", &command_line, &decision, &[]).await;
+            post_decision(daemon.as_ref(), "admitted", &command_line, &decision, &[]).await;
             // #8736: cargo run/watch slot handling is tracked in #8692
             // #8261 round 6 (critic LOW): an explicit `--target-dir` in argv
             // outranks `CARGO_TARGET_DIR`, so it must carry the slot too.
@@ -266,11 +277,25 @@ pub(crate) async fn run(args: BuildLeaseArgs, url: Option<&str>) -> ! {
                 decision.ceiling.saturating_sub(decision.n_effective),
                 decision.ceiling
             );
-            post_decision(&url, "admitted-unleased", &command_line, &decision, &[]).await;
+            post_decision(
+                daemon.as_ref(),
+                "admitted-unleased",
+                &command_line,
+                &decision,
+                &[],
+            )
+            .await;
             exit_with(spawn_and_wait(&args.command, None, None).await)
         }
         Outcome::TimedOut { decision, holders } => {
-            post_decision(&url, "timed-out", &command_line, &decision, &holders).await;
+            post_decision(
+                daemon.as_ref(),
+                "timed-out",
+                &command_line,
+                &decision,
+                &holders,
+            )
+            .await;
             eprintln!(
                 "tm build-lease: no build slot freed within {}s (#8261) — {} Re-run the same \
                  command to wait again; `tm doctor` shows the holders.",
@@ -490,8 +515,12 @@ fn exit_with(status: std::io::Result<std::process::ExitStatus>) -> ! {
 /// Why: "the daemon logs every admission decision with its readings" (#8261).
 /// The decision itself is local; a daemon that is down costs only this line,
 /// and says so on stderr.
+/// What: #6288 step 1 — `mpm.build_lease.decision` over the daemon's unix
+/// socket, bounded at 800 ms. Best effort stays best effort, and there is no
+/// TCP fallback: a socket error is reported on stderr naming the socket.
+/// Test: `tm_build_lease_logs_its_decision_over_the_socket`.
 async fn post_decision(
-    url: &str,
+    daemon: Option<&trusty_mpm::client::DaemonClient>,
     verdict: &str,
     command: &str,
     decision: &Decision,
@@ -509,13 +538,14 @@ async fn post_decision(
         "held": decision.held,
         "holders": holders.iter().map(HolderRecord::render).collect::<Vec<_>>(),
     });
+    let Some(daemon) = daemon else {
+        return;
+    };
     let sent = async {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(300))
-            .timeout(Duration::from_millis(800))
-            .build()?
-            .post(format!("{url}/api/v1/build-lease/decisions"))
+        daemon
+            .post("/api/v1/build-lease/decisions")
             .json(&body)
+            .timeout(Duration::from_millis(800))
             .send()
             .await?
             .error_for_status()

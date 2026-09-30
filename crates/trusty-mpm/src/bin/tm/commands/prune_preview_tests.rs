@@ -347,8 +347,15 @@ async fn force_sends_only_the_previewed_paths() {
     ])
     .await;
     let client = reqwest::Client::new();
-    let outcome =
-        session_prune_worktrees(&client, &url, false, false, true, None, Some("/r/a".into())).await;
+    let outcome = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        false,
+        false,
+        true,
+        None,
+        Some("/r/a".into()),
+    )
+    .await;
     let bodies = server.await.expect("stub");
     assert!(outcome.is_ok(), "{outcome:?}");
     assert_eq!(bodies.len(), 2, "{bodies:?}");
@@ -376,8 +383,15 @@ async fn force_sends_nothing_after_a_preview_without_the_allowlist_keys() {
     echo.remove("only_discard_paths");
     let (url, server) = stub_daemon(vec![older.clone(), older]).await;
     let client = reqwest::Client::new();
-    let outcome =
-        session_prune_worktrees(&client, &url, false, false, true, None, Some("/r/a".into())).await;
+    let outcome = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        false,
+        false,
+        true,
+        None,
+        Some("/r/a".into()),
+    )
+    .await;
     let bodies = server.await.expect("stub");
     let err = outcome.expect_err("an echo without the allowlist keys was accepted");
     assert!(err.to_string().contains("only_orphan_paths"), "{err}");
@@ -391,8 +405,7 @@ async fn force_sends_nothing_after_a_reply_without_the_scope_echo() {
     let (url, server) = stub_daemon(vec![stale.clone(), stale]).await;
     let client = reqwest::Client::new();
     let outcome = session_prune_worktrees(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         false,
         false,
         false,
@@ -420,7 +433,15 @@ async fn force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_e
     let stale = json!({ "dry_run": true, "paths": ["/r/a/.worktrees/o"] });
     let (url, server) = stub_daemon(vec![stale.clone(), stale]).await;
     let client = reqwest::Client::new();
-    let outcome = session_prune_worktrees(&client, &url, false, false, false, None, None).await;
+    let outcome = session_prune_worktrees(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        false,
+        false,
+        false,
+        None,
+        None,
+    )
+    .await;
     let bodies = server.await.expect("stub");
     assert!(outcome.is_err(), "a stale daemon's reply was accepted");
     assert_eq!(
@@ -443,8 +464,7 @@ async fn prune_worktrees_outside_a_repository_posts_nothing() {
     // directory a checkout and mask the error arm.
     let outside = crate::test_support::hermetic_temp_dir();
     let outcome = prune_worktrees_from(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         outside.path(),
         true,
         false,

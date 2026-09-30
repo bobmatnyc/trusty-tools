@@ -494,8 +494,7 @@ pub(crate) fn panes_prove_session_dead(
 /// Returns the [`AttachOutcome`] from the terminal hand-off (#2678) so
 /// `run_tty_picker` knows whether it must stop reading stdin.
 pub(crate) async fn resume_guided_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<AttachOutcome> {
     // The picker is only ever reached after its own upstream TTY gate
@@ -503,7 +502,7 @@ pub(crate) async fn resume_guided_session(
     // attach here. `no_attach` gating lives in `resume_session`, used by the
     // explicit `tm session(s) resume <id>` verb, which has no such upstream
     // gate (#2649 review).
-    resume_session(client, url, session, false).await
+    resume_session(daemon, session, false).await
 }
 
 /// Same state machine as [`resume_guided_session`], but TTY-gated: skips the
@@ -547,8 +546,7 @@ pub(crate) async fn resume_guided_session(
 /// process and asserts no daemon-side mutation occurred; the restart I/O
 /// path is exercised by the e2e suite and manual smoke tests.
 pub(crate) async fn resume_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
     no_attach: bool,
 ) -> anyhow::Result<AttachOutcome> {
@@ -630,7 +628,7 @@ pub(crate) async fn resume_session(
                 session.name, persisted_state
             );
         }
-        reconcile_zombie_stop(client, url, session).await?;
+        reconcile_zombie_stop(daemon, session).await?;
     }
 
     // `resumed` reflects the daemon's authoritative post-restart record when a
@@ -662,7 +660,7 @@ pub(crate) async fn resume_session(
                 );
             }
         }
-        resumed = restart_via_daemon(client, url, session).await?;
+        resumed = restart_via_daemon(daemon, session).await?;
     }
 
     if no_attach {
@@ -700,13 +698,12 @@ pub(crate) async fn resume_session(
 /// Test: I/O path exercised by the e2e suite; the branch selection is the pure
 /// [`plan_resume`] seam.
 async fn reconcile_zombie_stop(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<()> {
-    let resp = match client
+    let resp = match daemon
         .post(format!(
-            "{url}/api/v1/sessions/managed/{}/runtime-stop",
+            "/api/v1/sessions/managed/{}/runtime-stop",
             session.id
         ))
         .timeout(std::time::Duration::from_secs(30))
@@ -768,16 +765,12 @@ async fn reconcile_zombie_stop(
 /// interactive caller uses it to attach.
 /// Test: I/O path exercised by the e2e suite; branch selection is [`plan_resume`].
 async fn restart_via_daemon(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<trusty_mpm::client::ManagedSessionSummary> {
     // POST with a 30-second timeout — a hung daemon must not freeze the CLI.
-    let resp = match client
-        .post(format!(
-            "{url}/api/v1/sessions/managed/{}/resume",
-            session.id
-        ))
+    let resp = match daemon
+        .post(format!("/api/v1/sessions/managed/{}/resume", session.id))
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -827,11 +820,7 @@ async fn restart_via_daemon(
         // fragile substring matching — the exact anti-pattern the daemon-side
         // typed `ResumeManagedError` was introduced to eliminate for 404/409.
         reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
-            let reason = resp
-                .headers()
-                .get("x-trusty-resume-reason")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let reason = resp.resume_reason().map(str::to_owned);
             let msg = resp.text().await.unwrap_or_default();
             let detail = truncate_for_display(msg.trim());
             eprintln!("tm: cannot restart session '{}': {}", session.name, detail);
