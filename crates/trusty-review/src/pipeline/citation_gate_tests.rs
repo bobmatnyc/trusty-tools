@@ -545,6 +545,28 @@ fn approve_star_survives_when_only_advisory_findings_are_dropped() {
     assert_eq!(result.error, None);
 }
 
+/// #8949 (Architect ruling 2026-09-30): a plain APPROVE keeps APPROVE when only
+/// advisory findings are dropped, the same as APPROVE*.
+#[test]
+fn plain_approve_survives_when_only_advisory_findings_are_dropped() {
+    let mut nit = finding(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        "`ledger.flush_all()` is slow.",
+    );
+    nit.confidence = 0.3;
+    nit.effort = Effort::Low;
+    let mut result = approve_star_result(nit);
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A-".to_string());
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert!(result.findings.is_empty());
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.grade.as_deref(), Some("A-"));
+    assert_eq!(result.error, None);
+}
+
 /// Error arm (#8949 ruling (b)): a dropped finding that could escalate on its
 /// own still withholds an APPROVE* review.
 #[test]

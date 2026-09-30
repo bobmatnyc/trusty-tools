@@ -12,6 +12,7 @@ Changed
 - Every finding the gate drops is kept in the review record as
   `withheld_findings`, with its reason and the quoted fragment that failed to
   match. The drop log line names that fragment.
-- An APPROVE* review stays APPROVE* when the gate drops only advisory findings,
-  instead of becoming UNKNOWN.
+- An APPROVE or APPROVE* review keeps its verdict when the gate drops only
+  advisory findings, instead of becoming UNKNOWN. A dropped finding that could
+  escalate the review on its own still makes it UNKNOWN.
 - New public type `models::WithheldFinding`.

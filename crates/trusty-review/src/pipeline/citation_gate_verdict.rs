@@ -31,8 +31,9 @@ static FENCED_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// What: neither → `None`, verdict untouched. Otherwise returns the summary
 /// line ("N findings withheld: citation unverifiable", then "N findings kept
 /// with a partly unverified citation (advisory)") and:
-///  - an APPROVE* review whose every dropped finding was advisory keeps
-///    APPROVE* (#8949, owner ruling (b));
+///  - an APPROVE or APPROVE* review whose every dropped finding was advisory
+///    keeps its verdict (#8949, owner ruling (b); Architect ruling 2026-09-30
+///    extends it to plain APPROVE);
 ///  - otherwise the verdict [`settle_withheld`] gives: no survivors →
 ///    `Unknown`; a BLOCK / REQUEST_CHANGES review → what the survivors alone
 ///    derive, or `Unknown` when that would approve. A partial finding is
@@ -43,6 +44,7 @@ static FENCED_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Test: `gate_posted_findings_withholds_when_it_drops_every_finding`,
 /// `gate_posted_findings_never_approves_a_blocking_review`,
 /// `approve_star_survives_when_only_advisory_findings_are_dropped`,
+/// `plain_approve_survives_when_only_advisory_findings_are_dropped`,
 /// `approve_star_is_withheld_when_a_dropped_finding_could_escalate`,
 /// `a_partial_finding_cannot_carry_a_blocking_verdict`.
 pub(super) fn withhold_verdict(
@@ -72,7 +74,11 @@ pub(super) fn withhold_verdict(
             .withheld_findings
             .iter()
             .all(|w| is_advisory(&w.finding));
-    if !(*verdict == Verdict::ApproveWithReservations && advisory_only) {
+    let approving = matches!(
+        *verdict,
+        Verdict::Approve | Verdict::ApproveWithReservations
+    );
+    if !(approving && advisory_only) {
         *verdict = settle_withheld(verdict.clone(), survivors);
     }
     Some(notes.join("; "))
