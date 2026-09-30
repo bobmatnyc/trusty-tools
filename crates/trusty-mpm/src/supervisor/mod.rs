@@ -26,6 +26,8 @@ pub mod poller;
 // #7275: the periodic post-merge cleanup sweep, on its own cadence.
 pub mod pr_cleanup_tick;
 pub mod publish;
+// #8335: step bounds, the heartbeat watchdog and the loop-exit report.
+mod watchdog;
 
 #[cfg(test)]
 mod tests;
@@ -216,9 +218,12 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// desired-state file (#5208 — [`Self::resolve_auto_resume`]), calls
     /// [`poller::run_tick`] with the resulting per-sweep config, increments
     /// `sweeps`, and adds the tick's resumed / failure / classified counts into
-    /// `self.stats`; returns the [`TickReport`] for the caller to inspect.
+    /// `self.stats`; returns the [`TickReport`] for the caller to inspect. A sweep
+    /// that outlives `cfg.tick_timeout` is abandoned and logged at `error`
+    /// (#8335); it returns an empty report and is not counted in `sweeps`.
     /// Test: `supervisor_tick_updates_stats`, `supervisor_fleet_resume_e2e`,
-    /// `supervisor_honours_console_desired_state_without_restart`.
+    /// `supervisor_honours_console_desired_state_without_restart`,
+    /// `a_wedged_sweep_times_out_and_the_loop_continues`.
     pub async fn tick(&mut self) -> TickReport {
         // #5208: the console toggle is re-read every sweep, so an operator's
         // change takes effect within one interval instead of never.
@@ -226,7 +231,12 @@ impl<C: LlmClassifier> Supervisor<C> {
             auto_resume: self.resolve_auto_resume(),
             ..self.cfg.clone()
         };
-        let report = run_tick(&self.mgr, &cfg, self.monitor.as_ref()).await;
+        // #8335: an unbounded sweep wedged the loop for hours with no log line.
+        let sweep = run_tick(&self.mgr, &cfg, self.monitor.as_ref());
+        let Some(report) = watchdog::bounded(self.cfg.tick_timeout, "fleet sweep", sweep).await
+        else {
+            return TickReport::default();
+        };
         self.pr_cleanup_tick().await;
         self.stats.sweeps += 1;
         self.stats.auto_resumed += report.resumed.len() as u64;
@@ -256,7 +266,13 @@ impl<C: LlmClassifier> Supervisor<C> {
             return;
         }
         self.last_pr_cleanup = Some(now);
-        let cleaned = pr_cleanup_tick::run_sweep(&self.mgr).await;
+        // #8335: the sweep spawns `gh`; a hung call must not stop the loop.
+        let sweep = pr_cleanup_tick::run_sweep(&self.mgr);
+        let limit = self.cfg.tick_timeout;
+        let Some(cleaned) = watchdog::bounded(limit, "post-merge cleanup sweep", sweep).await
+        else {
+            return;
+        };
         if cleaned > 0 {
             info!(cleaned, "supervisor: post-merge cleanup swept merged PRs");
         }
@@ -291,7 +307,14 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// visible in the console instead of being swallowed here.
     /// Test: `supervisor_publishes_run_stats_after_sweeps`.
     pub async fn publish_snapshot(&self) {
-        let snapshot = self.snapshot().await;
+        // #8335: `snapshot` reads the session store; a held lock must not wedge
+        // the loop. A skipped publish shows up as a stale heartbeat.
+        let read = self.snapshot();
+        let Some(snapshot) =
+            watchdog::bounded(self.cfg.tick_timeout, "metrics snapshot", read).await
+        else {
+            return;
+        };
         // #6288: the cadence travels with the snapshot so the reader can size its
         // staleness window against the interval this supervisor actually runs at,
         // rather than a fixed constant a slow overnight cadence would trip.
@@ -338,8 +361,11 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// `shutdown`. On a tick it runs [`Self::tick`] and republishes the snapshot
     /// via [`Self::publish_snapshot`]; once `shutdown` resolves it breaks the loop
     /// *after* any in-flight sweep completes, logs a final line, and returns
-    /// `Ok(())`.
-    /// Test: `supervisor_run_until_stops_cleanly`.
+    /// `Ok(())`. #8335: each step is bounded by `cfg.tick_timeout`, a watchdog
+    /// task logs at `error` when the published heartbeat goes stale, and any
+    /// exit other than `shutdown` (a drop or a panic) is logged at `error`.
+    /// Test: `supervisor_run_until_stops_cleanly`,
+    /// `a_wedged_sweep_times_out_and_the_loop_continues`.
     pub async fn run_until(mut self, shutdown: impl Future<Output = ()>) -> anyhow::Result<()> {
         // #5208: report the flag actually in force at boot, not just the env one —
         // the persisted console override outranks it and is consulted every sweep.
@@ -365,6 +391,11 @@ impl<C: LlmClassifier> Supervisor<C> {
         // console sees the supervisor immediately on startup rather than after
         // one full interval (during which it would read `unavailable`).
         self.publish_snapshot().await;
+        // #8335: the watchdog runs on its own task so a stuck loop cannot silence
+        // it; the guard logs at `error` if the loop ends any way but shutdown.
+        let watchdog =
+            watchdog::spawn_heartbeat_watchdog(self.metrics_path.clone(), self.cfg.interval);
+        let mut exit_guard = watchdog::LoopExitGuard::new(Some(watchdog));
         // Pin the shutdown future so it can be polled across loop iterations.
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
@@ -373,6 +404,7 @@ impl<C: LlmClassifier> Supervisor<C> {
                 // interval is never starved by the timer.
                 biased;
                 () = &mut shutdown => {
+                    exit_guard.disarm();
                     info!(
                         sweeps = self.stats.sweeps,
                         auto_resumed = self.stats.auto_resumed,

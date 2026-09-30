@@ -255,6 +255,11 @@ fn config_defaults() {
         "#7275: the post-merge cleanup sweep spawns `gh` and deletes branches, so it \
          follows auto_resume's precedent and is OFF in a hand-constructed config"
     );
+    // #8335: every sweep step is bounded.
+    assert_eq!(
+        c.tick_timeout.as_secs(),
+        super::config::DEFAULT_TICK_TIMEOUT_SECS
+    );
     // An empty injected env yields the same cadence and policy (no process env
     // touched). The cleanup sweep is the one field that deliberately differs —
     // `from_env` is the real daemon's path and turns it on; see above.
@@ -1287,6 +1292,7 @@ async fn supervisor_run_until_stops_cleanly() {
         classify_idle: false,
         // #7275: off, so this shutdown test never reaches a `gh` spawn.
         pr_cleanup_interval: None,
+        ..SupervisorConfig::default()
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
     let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
@@ -1314,6 +1320,138 @@ async fn supervisor_run_until_stops_cleanly() {
         .expect("read")
         .expect("the loop published before parking on the timer");
     assert_eq!(published.fleet.stopped, 2);
+}
+
+// ── #8335: a wedged sweep cannot stop the loop ───────────────────────────────
+
+/// A classifier whose FIRST call never completes; later calls answer at once.
+///
+/// Why: #8335's wedge was a sweep future that stopped being woken. A classify
+/// call that never returns reproduces that inside a real `run_tick`.
+/// Test: `a_wedged_sweep_times_out_and_the_loop_continues`.
+struct HangsOnceClassifier {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmClassifier for HangsOnceClassifier {
+    async fn classify(
+        &self,
+        pane_text: &str,
+    ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            std::future::pending::<()>().await;
+        }
+        StubClassifier::new().classify(pane_text).await
+    }
+}
+
+/// Why (#8335): a sweep that never finishes stopped the supervisor loop for
+/// hours. The loop must abandon it, keep ticking, and complete a later sweep.
+/// What: one active session, classification on, and a classifier that hangs
+/// on its first call. The run stops once the published snapshot shows a
+/// completed classification — which only a sweep AFTER the wedged one can
+/// produce. Without the step bound the first sweep never returns and the
+/// outer 10 s bound fails the test.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_wedged_sweep_times_out_and_the_loop_continues() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+
+    let cfg = SupervisorConfig {
+        interval: std::time::Duration::from_millis(20),
+        classify_idle: true,
+        tick_timeout: std::time::Duration::from_millis(200),
+        ..SupervisorConfig::default()
+    };
+    let classifier = HangsOnceClassifier {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let monitor = ActivityMonitor::new(classifier, "test-model");
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let sup = Supervisor::new(mgr, cfg, Some(monitor))
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+
+    let watched = metrics_file.clone();
+    let later_sweep_completed = async move {
+        loop {
+            let classified = publish::read_at(&watched)
+                .ok()
+                .flatten()
+                .map_or(0, |m| m.fleet.run_stats.classified);
+            if classified >= 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sup.run_until(later_sweep_completed),
+    )
+    .await
+    .expect("the loop must abandon the wedged sweep and complete a later one");
+    result.expect("clean shutdown returns Ok");
+}
+
+/// Why (#8335): the supervisor's log said nothing while its heartbeat froze.
+/// What: an old snapshot is judged stale (and logged once); a fresh one clears
+/// the verdict; an unreadable file keeps the previous verdict.
+/// Test: this is the test.
+#[test]
+fn heartbeat_watchdog_flags_a_stale_snapshot_once() {
+    use super::watchdog::check_heartbeat;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("supervisor-metrics.json");
+    let interval = std::time::Duration::from_secs(30);
+    let now = Utc::now();
+
+    assert!(
+        !check_heartbeat(&path, now, false),
+        "an absent file is not stale"
+    );
+    let old = now - chrono::Duration::seconds(3600);
+    publish::write_at(&path, &FleetMetrics::default(), interval, old).expect("write");
+    assert!(
+        check_heartbeat(&path, now, false),
+        "a frozen heartbeat is stale"
+    );
+    assert!(check_heartbeat(&path, now, true), "it stays stale");
+
+    publish::write_at(&path, &FleetMetrics::default(), interval, now).expect("write");
+    assert!(!check_heartbeat(&path, now, true), "a fresh write recovers");
+
+    std::fs::write(&path, "not json").expect("corrupt");
+    assert!(
+        check_heartbeat(&path, now, true),
+        "unreadable keeps the verdict"
+    );
+}
+
+/// Why (#8335): a dropped or panicked loop left no log line. The guard must
+/// stay armed until shutdown disarms it, and must stop the watchdog on drop.
+/// Test: this is the test.
+#[tokio::test]
+async fn loop_exit_is_reported_unless_shutdown_disarmed_it() {
+    use super::watchdog::LoopExitGuard;
+    let task = tokio::spawn(std::future::pending::<()>());
+    let abort = task.abort_handle();
+    let mut guard = LoopExitGuard::new(Some(task));
+    assert!(guard.is_armed(), "a live loop's exit is unexpected");
+    guard.disarm();
+    assert!(!guard.is_armed(), "shutdown marks the exit as clean");
+    drop(guard);
+    for _ in 0..100 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(abort.is_finished(), "dropping the guard stops the watchdog");
 }
 
 /// BEHAVIORAL BAR (#6288), the daemon half: after real sweeps, the exact
