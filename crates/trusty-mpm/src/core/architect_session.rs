@@ -2,10 +2,11 @@
 //!
 //! Why: owner ruling 2026-09-29 22:23Z (R1) lets `tm fleet init --session`
 //! keep a running supervisor's own tmux names (`tm-supervisor`) instead of
-//! the fixed `tm-architect`. Every reader of the name — `tm fleet status`, the
-//! poller probe, and the #8902 pane guard — must then agree on it, so the
-//! launch records it beside the process record, in the anchored
-//! `~/.trusty-mpm/architect-launch/` directory.
+//! the fixed `tm-architect`. `tm fleet init` and `tm fleet status` read the
+//! name back, so the launch records it beside the process record, in the
+//! anchored `~/.trusty-mpm/architect-launch/` directory. The #8902 pane guard
+//! does not read the name: it marks a pane by the live `<pid>.architect`
+//! lineage or the fixed `tm-architect` session name.
 //! What: [`validate_session_name`] is the one name rule. [`record_launch`]
 //! writes `<pid>.architect-session` and then the `<pid>.architect` launch
 //! record. [`architect_session_name`] reads the name back for a recorded PID, and
@@ -140,8 +141,10 @@ fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {
 
 /// The tmux session name recorded for the Architect `claude` at `pid`.
 ///
-/// Why: #8878 R1 — the #8902 pane guard and `tm fleet status` must name the
+/// Why: #8878 R1 — `tm fleet init` and `tm fleet status` must name the
 /// Architect's session from the launch record, not assume `tm-architect`.
+/// The #8902 pane guard does not call this; it matches the pane by launch
+/// lineage or by the `tm-architect` name.
 /// What: reads `<pid>.architect` under `root` (`~/.trusty-mpm`): none is
 /// [`LaunchRefusal::NoLaunchRecord`]; unreadable is
 /// [`LaunchRefusal::UnreadableRecord`]. Then `<pid>.architect-session`: absent
