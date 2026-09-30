@@ -59,7 +59,7 @@ flag** and **`default = []`**.
   (`tokio`, `serde`, `reqwest`, `tracing`, `sysinfo`, `dirs`, `colored`).
 - Each heavy subsystem is reachable **only** through its feature: `mcp`, `rpc`,
   `embedder` (+ ORT/candle variants), `embedder-client`, `bm25`, `bm25-client`,
-  `migrations`, `symgraph` / `symgraph-parser` / `symgraph-server`, `memory-core`
+  `migrations`, `symgraph` / `symgraph-parser`, `memory-core`
   (+ `-kuzu` / `usearch-migrate` / `sqlite-kg`), `tickets`, `cli-help`,
   `monitor-tui`, and `axum-server`.
 - The symbol-graph engine is split so the **pure-data contracts** (`EntityType`,

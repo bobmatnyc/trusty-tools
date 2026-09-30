@@ -256,7 +256,7 @@ parentheses.
 - *Gap:* `sqlite-kg` / `usearch-migrate` are 🟡 transitional and slated for
   removal once all production palaces are upgraded.
 
-### 4.9 Symbol graph (`symgraph` / `symgraph-parser` / `symgraph-server` — `src/symgraph/`)
+### 4.9 Symbol graph (`symgraph` / `symgraph-parser` — `src/symgraph/`)
 
 **FR-SYM-1 — Pure-data contracts surface** ✅
 - *Current:* `symgraph` exposes only `EntityType`/`RawEntity`/`EdgeKind`/
@@ -266,7 +266,7 @@ parentheses.
 **FR-SYM-2 — Full tree-sitter parser + emitter + editor** ✅
 - *Current:* `symgraph-parser` adds `SymbolGraph`/`SymbolRegistry`/parse → registry
   → emit + editor primitives, tree-sitter grammars for Rust/Python/JS/TS/Go/
-  Java/C/C++; `symgraph-server` adds the HTTP frontend (implies `axum-server`).
+  Java/C/C++.
 - *Constraint:* claims `links = "tree-sitter"` — enable in at most one crate per
   build graph (typically open-mpm).
 

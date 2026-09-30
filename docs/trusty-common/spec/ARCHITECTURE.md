@@ -91,7 +91,6 @@ ONNX deps sit behind `embedder`. See
 | `migrations` | `migrations` | *(pure serde/anyhow)* | — | (from trusty-search, #179) |
 | `symgraph` | `symgraph::contracts` | thiserror, sha2 | — | `trusty-symgraph` (contracts) |
 | `symgraph-parser` | `symgraph` parser/emitter/editor | tree-sitter + 8 grammars, syn, petgraph, indexmap, similar, walkdir, genco | `symgraph` | `trusty-symgraph` (full) |
-| `symgraph-server` | `symgraph::server` | (axum stack) | `symgraph-parser`, `axum-server` | — |
 | `memory-core` | `memory_core` | hnsw_rs, redb, postcard, git2, dashmap, chrono, regex, petgraph, sha2, hex | `embedder`, `embedder-bundled-ort` | `trusty-memory-core` (#5 phase 2d) |
 | `usearch-migrate` | `.usearch` drain | usearch (FFI) | `memory-core` | — (#51) |
 | `sqlite-kg` | legacy SQLite KG read | rusqlite, r2d2, r2d2_sqlite | `memory-core` | — (#47) |
@@ -146,8 +145,8 @@ over it, and the standalone `trusty-memory-core` crate is now a re-export shim
 
 These are enforced by the root `CLAUDE.md` and visible throughout the source:
 
-1. **No unconditional axum.** The HTTP server stack (`server.rs`,
-   `symgraph::server`) is reachable only through `axum-server`. A library
+1. **No unconditional axum.** The HTTP server stack (`server.rs`)
+   is reachable only through `axum-server`. A library
    consumer that does not serve HTTP must not transitively pull in axum + tower
    (cf. #226, #249 where downstream crates had to gate their own axum).
 

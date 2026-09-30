@@ -43,7 +43,6 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `embedder-client` | UDS JSON-RPC client for the `trusty-embedderd` sidecar (formerly `trusty-embedder-client`) |
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
-| `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
 | `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
 | `memory-core` | Memory Palace storage engine — HNSW (`hnsw_rs`), redb metadata + KG, dream cycle (formerly `trusty-memory-core`) |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |

@@ -245,7 +245,6 @@ surface separable from the parser (absorbed from `trusty-symgraph`, #5 phase 2c)
   registry → emit + editor primitives, tree-sitter grammars for Rust/Python/JS/
   TS/Go/Java/C/C++ (`parser.rs`, `registry.rs`, `graph.rs`, `emitter.rs`,
   `editor.rs`, `symbol.rs`, `strategy.rs`, `locality.rs`).
-- **Server (`symgraph-server`):** HTTP frontend (`server.rs`, implies `axum-server`).
 
 **Current state.** ✅ The contracts/parser split lets non-parser consumers
 (trusty-search, trusty-analyze) take `EntityType`/`RawEntity`/`EdgeKind` without
