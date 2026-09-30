@@ -38,15 +38,8 @@
 //!   Runtime is verified. TCC grant stability depends on `--identifier` + Team
 //!   ID, not on `--options runtime`, so this split does not reintroduce the
 //!   identifier drift above.
-//! - #2951: `trusty-mpm-gui` (the Tauri desktop shell) joined [`MPM_SET`] as a
-//!   third binary. It presented its own App-Data TCC prompt textually
-//!   identical to `trusty-mpm`'s (`productName: "trusty-mpm"` in
-//!   `tauri.conf.json`) and, because ad-hoc debug builds happen in every
-//!   worktree, churned a fresh random identity per rebuild — the same class of
-//!   bug this module already fixed for `trusty-mpm`/`tm`. The primary fix is
-//!   Tauri's own `bundle.macOS.signingIdentity` (so `cargo tauri build`
-//!   produces a Developer-ID-signed `.app` directly); this table entry covers
-//!   the fallback case of a bare `cargo install --path crates/trusty-mpm-gui`.
+//! - #2951 (retired, #7964): the `trusty-mpm-gui` Tauri shell once joined
+//!   [`MPM_SET`] as a third binary; the crate and its table row are gone.
 //!
 //! - #4277: `trusty-agents` joins as its own signable set ([`AGENTS_SET`]),
 //!   same cdhash-instability class as #2721/#873 — the `tagent` CLI binary
@@ -56,7 +49,7 @@
 //!   it is an entirely separate crate/binary with no dependency on trusty-mpm's
 //!   install path. The desktop shell, `Trusty Agents.app`
 //!   (`crates/trusty-agents/ui/src-tauri`), is DELIBERATELY handled
-//!   differently from the sibling `trusty-mpm-gui`/`trusty-code-gui` pattern:
+//!   differently from the sibling `trusty-code-gui` pattern:
 //!   rather than hardcoding `bundle.macOS.signingIdentity` in `tauri.conf.json`
 //!   (which hard-fails `cargo tauri build` on any machine without that exact
 //!   cert — see `docs/reference/common-pitfalls.md`), `tauri.conf.json` is left
@@ -145,7 +138,7 @@ pub const MPM_SET: &str = "trusty-mpm";
 /// `APPLE_SIGNING_IDENTITY` build-time env var (set by
 /// `scripts/install-trusty-agents-signed.sh`), not this module's flat-file
 /// `codesign` path — see the module doc's #4277 note for why that's a
-/// deliberate deviation from the `trusty-mpm-gui` precedent.
+/// deliberate deviation from the `trusty-code-gui` precedent.
 pub const AGENTS_SET: &str = "trusty-agents";
 
 /// The `trusty-memory` signable set: every binary `cargo install --path
@@ -218,20 +211,6 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // (#2721). Ordered after `trusty-mpm` so `binaries_for_set(MPM_SET).first()`
     // — the binary whose path the guidance/prompt names — stays `trusty-mpm`.
     ("tm", MPM_SET, "com.trusty.tm"),
-    // `trusty-mpm-gui` (#2951): the Tauri desktop shell. It is a separate
-    // binary/crate from `trusty-mpm`/`tm` and is normally not present under
-    // `install_dir` unless someone runs `cargo install --path
-    // crates/trusty-mpm-gui`, so `post_install_signed_set`'s existing
-    // "skip if the path doesn't exist" behavior makes this entry a no-op for
-    // everyone who never installs the GUI that way. Sharing `MPM_SET` (rather
-    // than a new set) means `tctl sign trusty-mpm` / the automatic
-    // `tctl install` post-install hook picks it up for free with no new set
-    // name to thread through `SignSetError`'s messages. Identifier matches the
-    // `bundle.macOS.signingIdentity`-driven identifier in
-    // `crates/trusty-mpm-gui/tauri.conf.json` so both signing paths (Tauri's
-    // own bundler and this fallback for a bare `cargo install`ed binary) agree
-    // on one designated requirement.
-    ("trusty-mpm-gui", MPM_SET, "com.trusty.trusty-mpm.gui"),
     // `tagent` (#4277): the trusty-agents CLI/daemon binary, installed via
     // `cargo install --path crates/trusty-agents`. Own set ([`AGENTS_SET`]) —
     // see that constant's doc for why it is not folded into `MPM_SET`.

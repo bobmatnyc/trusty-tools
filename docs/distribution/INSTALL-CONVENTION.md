@@ -15,7 +15,7 @@ This document defines the canonical installation convention that every distribut
 - `trusty-git-analytics` (tga) — developer productivity analytics
 - `trusty-code` — per-project Claude-Code orchestration harness
 
-**Out of scope**: library-only crates, internal binaries, `publish = false` crates (e.g. `trusty-mpm-gui`), and crates that have simply never been published (e.g. `trusty-agents` — no `publish` field, no `trusty-agents-v*` release tag, zero crates.io or GitHub releases; install it with `cargo install --path crates/trusty-agents --locked` from a source checkout instead).
+**Out of scope**: library-only crates, internal binaries, `publish = false` crates (e.g. `trusty-code-gui`), and crates that have simply never been published (e.g. `trusty-agents` — no `publish` field, no `trusty-agents-v*` release tag, zero crates.io or GitHub releases; install it with `cargo install --path crates/trusty-agents --locked` from a source checkout instead).
 
 ## Installation Channels
 

@@ -3,7 +3,7 @@
     "Fixture for the #8716 `published-*` cases in check_rustdoc_links_selftest.sh.",
     "`demo` is metadata-units.json's package unchanged (no `publish` key, so",
     "publishable, with a lib and a bin doc unit). The two extra packages are",
-    "names the gate excludes outright: `trusty-mpm-gui` is `publish = false`",
+    "names the gate excludes outright: `trusty-agents-ui` is `publish = false`",
     "(publish: []) and must pass; `trusty-code-gui` carries no `publish` key,",
     "so it is publishable yet never documented, and --require-published must",
     "name it."
@@ -35,15 +35,15 @@
       ]
     },
     {
-      "name": "trusty-mpm-gui",
-      "manifest_path": "crates/trusty-mpm-gui/Cargo.toml",
+      "name": "trusty-agents-ui",
+      "manifest_path": "crates/trusty-agents-ui/Cargo.toml",
       "publish": [],
       "features": {},
       "targets": [
         {
           "kind": ["lib"],
-          "name": "trusty_mpm_gui",
-          "src_path": "crates/trusty-mpm-gui/src/lib.rs",
+          "name": "trusty_agents_ui",
+          "src_path": "crates/trusty-agents-ui/src/lib.rs",
           "doc": true
         }
       ]

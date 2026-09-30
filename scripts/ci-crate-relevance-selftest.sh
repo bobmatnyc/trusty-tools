@@ -324,7 +324,7 @@ assert_eq "blank-only change set" \
 assert_eq "unresolvable base ref" \
   "true" "$(cd "${REPO_ROOT}" &&
     CRATE_RELEVANCE_BASE=refs/heads/definitely-not-a-ref \
-      bash "${SCRIPT}" trusty-mpm-gui </dev/null 2>/dev/null)"
+      bash "${SCRIPT}" trusty-code-gui </dev/null 2>/dev/null)"
 
 # cargo metadata failure. The same input answers `false` two cases above, so a
 # `true` here can only come from the fail-closed arm.
@@ -358,13 +358,13 @@ assert_eq "true verdict is written the same way" \
 # Tauri UI crate is expected to change them.
 # ---------------------------------------------------------------------------
 echo "live: the four #7063 acceptance pairs"
-assert_eq "trusty-mpm-gui  <- crates/trusty-embedderd/src/lib.rs" \
-  "false" "$(live_verdict trusty-mpm-gui crates/trusty-embedderd/src/lib.rs)"
+assert_eq "trusty-agents-ui <- crates/trusty-embedderd/src/lib.rs" \
+  "false" "$(live_verdict trusty-agents-ui crates/trusty-embedderd/src/lib.rs)"
 assert_eq "trusty-code-gui <- crates/trusty-embedderd/src/lib.rs" \
   "false" "$(live_verdict trusty-code-gui crates/trusty-embedderd/src/lib.rs)"
 assert_eq "trusty-code-gui  <- crates/trusty-common/src/lib.rs" \
   "true" "$(live_verdict trusty-code-gui crates/trusty-common/src/lib.rs)"
-for crate in trusty-agents-ui trusty-mpm-gui trusty-code-gui; do
+for crate in trusty-agents-ui trusty-code-gui; do
   assert_eq "${crate} <- Cargo.lock" "true" "$(live_verdict "${crate}" Cargo.lock)"
 done
 

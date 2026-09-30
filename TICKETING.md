@@ -35,7 +35,7 @@ Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
 `trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`, `trusty-kb`,
-`trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-mpm-gui`, `trusty-review`,
+`trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
 `trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-sld-lint`,
 `tc-services`, `tga`, `cto-assistant`.
 

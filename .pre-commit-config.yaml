@@ -91,7 +91,7 @@ repos:
 
   # build.rs canonical-block sync lint (issue #5528). Fails the commit when
   # the daemon family (trusty-memory, trusty-analyze, trusty-console,
-  # trusty-search) or the tauri-ui family (trusty-code-gui, trusty-mpm-gui,
+  # trusty-search) or the tauri-ui family (trusty-code-gui,
   # trusty-agents-ui) carry a build.rs whose canonical block has drifted from
   # its siblings. Runs against the whole tracked tree (pass_filenames: false),
   # matching the line-cap hook's holistic scan.

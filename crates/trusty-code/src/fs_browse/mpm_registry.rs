@@ -15,12 +15,12 @@
 //! **Consumption path (survey result, issue #3435 design question 1):** a
 //! loopback HTTP call to the mpm daemon's `GET /api/v1/projects`
 //! (`http://127.0.0.1:7880` by default, overridable via `TRUSTY_MPM_URL` —
-//! the same env var `trusty-mpm-gui`'s `GuiState` already uses, so operators
-//! have exactly one knob for "where is the mpm daemon" across both GUIs), NOT
+//! the same env var `tm` reads, so operators have exactly one knob for
+//! "where is the mpm daemon"), NOT
 //! a direct read of `projects.json`. Two reasons: (1) every existing
 //! cross-daemon consumer in this workspace goes over loopback HTTP —
-//! `trusty-mpm-gui/src/commands.rs`'s "1:1 proxy layer, never embed business
-//! logic" pattern is the precedent this module mirrors — and there is no
+//! the retired `trusty-mpm-gui`'s "1:1 proxy layer, never embed business
+//! logic" pattern (#7964) was the precedent this module mirrors — and there is no
 //! workspace precedent for one daemon reading a sibling daemon's on-disk
 //! store directly; (2) ADR-0018 (the loopback-only doctrine; ADR-0011 is
 //! amended by it) explicitly sanctions same-machine loopback HTTP between
@@ -99,10 +99,9 @@ pub const DEFAULT_MPM_DAEMON_URL: &str = "http://127.0.0.1:7880";
 
 /// Env var overriding the mpm daemon's base URL.
 ///
-/// Why: the SAME variable `trusty-mpm-gui::state::GuiState` already reads —
-/// reusing it (rather than inventing a `tcode`-specific name) means an
-/// operator who points one GUI at a non-default mpm daemon does not also
-/// have to remember a second env var for this one.
+/// Why: the SAME variable `tm` already reads — reusing it (rather than
+/// inventing a `tcode`-specific name) means an operator who points one client
+/// at a non-default mpm daemon does not also have to remember a second env var.
 const MPM_DAEMON_URL_ENV: &str = "TRUSTY_MPM_URL";
 
 /// Timeout budget for the registry call.

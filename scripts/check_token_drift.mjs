@@ -19,8 +19,7 @@
  * parser, but sufficient for these small, flat, hand-maintained files (no
  * nested `{}` inside a declaration block). Two comparison MODES exist:
  *
- *   - `rgb-triple` (Tailwind crates: trusty-agents, trusty-code-gui,
- *     trusty-mpm-gui): the crate hand-transcribes canonical hex into
+ *   - `rgb-triple` (Tailwind crates: trusty-agents, trusty-code-gui): the crate hand-transcribes canonical hex into
  *     Tailwind's `--color-*: R G B` space-separated triple convention. An
  *     explicit MAPPING per crate pins which `--color-*` var corresponds to
  *     which canonical `--trusty-*` token (derived from that crate's own
@@ -44,7 +43,7 @@
  *     per-entry (`:root[data-theme=...]`, `[data-theme=...]`, and
  *     `:root`+`[data-theme='dark']`).
  *
- * All 7 UI crates are now ENFORCED (epic #3486); the ALLOWLIST is empty. A
+ * All 6 UI crates are now ENFORCED (epic #3486); the ALLOWLIST is empty. A
  * runtime guard throws if any enforced crate performs zero comparisons, so a
  * mis-configured file path or selector can't silently pass.
  *
@@ -72,8 +71,8 @@ const TOKENS_CSS_PATH = path.join(
 // PR that migrates that crate onto canonical Foundry tokens. Do not add an
 // entry here without a tracking issue.
 //
-// EMPTY as of epic #3486: all 7 UI crates are now ENFORCED below (the last 5
-// — trusty-search/-memory/-mpm-gui/-console/-analyze, #3487-#3490 — landed
+// EMPTY as of epic #3486: all 6 UI crates are now ENFORCED below (the last 5
+// — trusty-search/-memory/-console/-analyze, #3487-#3490 — landed
 // and were flipped in refs #3486). New pre-Foundry crates would be tracked
 // here against a migration issue until they adopt the canonical tokens.
 // ---------------------------------------------------------------------------
@@ -160,32 +159,6 @@ const ENFORCED = [
       ["sidebar-muted", "trusty-sidebar-muted"],
       ["sidebar-border", "trusty-sidebar-border"],
       ["sidebar-active", "trusty-sidebar-active"],
-    ],
-    passthrough: [],
-  },
-  {
-    // Same Tailwind `--color-*: R G B` convention as trusty-code-gui (#3488).
-    name: "trusty-mpm-gui",
-    file: "crates/trusty-mpm-gui/ui/src/app.css",
-    mode: "rgb-triple",
-    lightSelector: /:root\s*\{([\s\S]*?)\n\}/,
-    darkSelector: /\[data-theme=(['"])dark\1\]\s*\{([\s\S]*?)\n\}/,
-    mappings: [
-      ["primary", "trusty-accent"],
-      ["primary-hover", "trusty-accent-hover"],
-      ["surface", "trusty-content-bg"],
-      ["card", "trusty-card-bg"],
-      ["raised", "trusty-surface-raised"],
-      ["border", "trusty-border"],
-      ["border-strong", "trusty-border-strong"],
-      ["text", "trusty-text-primary"],
-      ["text-secondary", "trusty-text-secondary"],
-      ["text-muted", "trusty-text-muted"],
-      ["text-inverse", "trusty-text-inverse"],
-      ["status-ok", "trusty-success"],
-      ["status-error", "trusty-danger"],
-      ["status-warn", "trusty-warning"],
-      ["status-neutral", "trusty-text-muted"],
     ],
     passthrough: [],
   },

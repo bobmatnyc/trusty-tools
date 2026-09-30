@@ -9,7 +9,7 @@ PRs, issues, or commit messages that reference the former repo names.
 | `bobmatnyc/trusty-search` | `crates/trusty-search` |
 | `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature — storage engine) + `crates/trusty-memory` (MCP frontend) |
 | `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
-| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
+| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate); its Tauri client `trusty-mpm-gui` was retired (#7964) |
 | `bobmatnyc/open-mpm` | `crates/trusty-agents` (renamed from `open-mpm` in #831) |
 
 ## Moved back out

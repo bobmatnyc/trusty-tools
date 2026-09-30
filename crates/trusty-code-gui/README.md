@@ -1,8 +1,6 @@
 # trusty-code-gui
 
-Desktop GUI shell for `trusty-code` (tcode), built with Tauri. Mirrors
-`crates/trusty-mpm-gui`'s structure and stack so the two desktop shells share
-one set of conventions.
+Desktop GUI shell for `trusty-code` (tcode), built with Tauri.
 
 **License**: MIT
 
@@ -57,11 +55,11 @@ cd crates/trusty-code-gui
 cargo tauri build
 ```
 
-**macOS signing (mirrors the `trusty-mpm-gui` #2951 pattern; restored here
-after being intentionally omitted at scaffold time):** `tauri.conf.json` pins
+**macOS signing (the #2951 pattern; restored here after being
+intentionally omitted at scaffold time):** `tauri.conf.json` pins
 `bundle.macOS.signingIdentity` to Bob's Developer ID
 cert (`Developer ID Application: Bob Matsuoka (4JH68XUHC5)`) — the same
-identity `trusty-mpm-gui` uses — so the `.app` bundle gets a stable TCC
+identity the retired `trusty-mpm-gui` used — so the `.app` bundle gets a stable TCC
 identity instead of a fresh ad-hoc one per rebuild. On a machine without that
 exact certificate in the login keychain, `cargo tauri build` will fail to
 sign — override it with the `APPLE_SIGNING_IDENTITY` environment variable,
@@ -76,7 +74,7 @@ APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" cargo taur
 ```
 
 `trusty-code-gui` is excluded from the workspace's `default-members` and from
-CI (`--exclude trusty-code-gui`), matching `trusty-mpm-gui`: it needs the
+CI (`--exclude trusty-code-gui`): it needs the
 pnpm/Svelte UI toolchain (and, for `cargo tauri build`, a platform WebView
 runtime) that CI's headless runner does not provide, so a bare
 `cargo build`/`check` (no `--workspace`, no `-p`) skips it automatically;

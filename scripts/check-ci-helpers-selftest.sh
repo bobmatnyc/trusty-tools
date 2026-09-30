@@ -976,7 +976,8 @@ assert_eq "no raw apt-get left in ci.yml" "0" \
 # 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
 # 13 -> 12: the `audit-ui` job left with trusty-audit-ui (owner ruling 2026-09-28).
 # 12 -> 13: the `trusty-common-lanes` job (owner ruling 2026-09-27).
-assert_eq "every apt step routes through the wrapper" "13" \
+# 13 -> 12: the `mpm-gui` job left with trusty-mpm-gui (#7964).
+assert_eq "every apt step routes through the wrapper" "12" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

@@ -4,9 +4,8 @@ Unified MPM platform — one crate (`crates/trusty-mpm`) with two identically-
 behaving `[[bin]]` targets, `tm` and `trusty-mpm`. There is no separate
 daemon binary: long-running daemon mode is the `tm daemon` / `trusty-mpm
 daemon` subcommand of that same binary, and the TUI (`tm tui`) and Telegram
-bot (`tm telegram`) are subcommands too, not standalone executables. The
-Tauri GUI lives in the sibling `trusty-mpm-gui` crate and is wrapped via the
-optional `gui` feature. Docs covering any surface live here.
+bot (`tm telegram`) are subcommands too, not standalone executables. There
+is no desktop GUI (the Tauri client was retired, #7964). Docs covering any surface live here.
 
 ## Historical product baseline
 

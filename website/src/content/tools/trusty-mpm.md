@@ -12,7 +12,6 @@ package to install and version-match.
 - `tm tui` — a terminal dashboard across every live session.
 - `tm telegram` and `tm slack` — remote control from a phone when you are not at
   the terminal.
-- `tm gui` — an optional desktop shell over the same daemon.
 - `tm wait` — poll a condition rather than sleep on it: `--for run` until a
   process exits, `--for file` until a sentinel appears (optionally containing a
   string), `--for check` until a pull request's checks settle. It exits 0 when

@@ -5,8 +5,8 @@
 /* Why: the Foundry v2 token layer for the public site (#5097, epic #5092).
  * docs/design/UI/design-system/tokens.css is the canonical hex source; this
  * file is this package's hand-transcription of it, following the convention
- * the three existing Tailwind consumers already use (trusty-agents #3387,
- * trusty-code-gui #3153/#3380, trusty-mpm-gui #3488) rather than a fourth.
+ * the existing Tailwind consumers already use (trusty-agents #3387,
+ * trusty-code-gui #3153/#3380) rather than a fourth.
  *
  * What: every custom property below is a SPACE-SEPARATED RGB TRIPLE
  * ("R G B", not "#rrggbb"), because tailwind.config.js consumes them as

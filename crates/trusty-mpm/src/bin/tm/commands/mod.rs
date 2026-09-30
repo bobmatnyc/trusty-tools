@@ -59,9 +59,6 @@ pub(crate) mod env_file_grant;
 // #8436: `tm fleet init|status` — the Architect's setup.
 pub(crate) mod fleet;
 pub(crate) mod generate;
-// #6483: `tm gui` — split out of main.rs when the TUI view routing pushed that
-// file past the 500-SLOC cap.
-pub(crate) mod gui;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
 pub(crate) mod guided_inplace;

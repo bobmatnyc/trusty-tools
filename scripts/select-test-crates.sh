@@ -284,7 +284,7 @@ CANARY_CRATES="trusty-common trusty-mpm"
 CODESIGN_CRATE="trusty-common"
 # The crates ci.yml's detect-ui step asks ci-crate-relevance.sh about. Same
 # list as that step's UI_CRATES and ci-affected-test-plan.sh's UI_CRATES.
-RELEVANCE_CRATES="trusty-agents-ui trusty-mpm-gui trusty-code-gui"
+RELEVANCE_CRATES="trusty-agents-ui trusty-code-gui"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # fallback_all_crates — last-resort crate-name scan needing neither cargo nor

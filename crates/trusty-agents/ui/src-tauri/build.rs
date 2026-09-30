@@ -24,8 +24,8 @@
 //! never embedded silently.
 //!
 //! NOTE: the block between the CANONICAL BLOCK markers is kept byte-identical
-//! across all three Tauri crates — this one, `crates/trusty-code-gui/build.rs`,
-//! and `crates/trusty-mpm-gui/build.rs`; `scripts/check_buildrs_sync.sh`
+//! across both Tauri crates — this one and `crates/trusty-code-gui/build.rs`;
+//! `scripts/check_buildrs_sync.sh`
 //! asserts it. THIS crate is edition 2021, which is why the block uses no
 //! let-chains. It is deliberately NOT the block the four UI-embedding daemon
 //! crates share (`trusty-memory`, `trusty-analyze`, `trusty-console`,

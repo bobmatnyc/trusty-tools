@@ -19,7 +19,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# Tauri is not in [workspace.dependencies]; pinned locally (matches trusty-mpm-gui).
+# Tauri is not in [workspace.dependencies]; pinned locally.
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }

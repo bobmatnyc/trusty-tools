@@ -291,7 +291,7 @@ delivered; this doc is *what it is*.
 The **L-effort** items remain explicitly **post-MVP** (consistent with DOC-17
 §4.3 / §5.3):
 
-- **Web dashboard / monitoring** (`trusty-console` / `trusty-mpm-gui` territory) —
+- **Web dashboard / monitoring** (`trusty-console` territory) —
   a graphical fleet console beyond the TUI.
 - **Slack integration depth** — the Slack control surface named in ONB-3 is a
   near-term *surface goal* but full Slack integration parity is an **L-effort,

@@ -319,7 +319,7 @@ alpha-ui" "${nested_out}"
 #                     up.sh and abs.sh through `./`, `{r}/`, `../` and `/abs/`
 #                     prefixes, mine.sh only as "myscripts/mine.sh", and
 #                     include_str!s h.sh (deleted / renamed in a --range copy)
-#   trusty-mpm-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
+#   trusty-code-gui    the one Tauri UI crate ci-crate-relevance.sh is asked about
 #   scripts/sign.sh   contains `codesign`; scripts/sub/sign.sh and
 #                     scripts/sign.txt do too but sit outside the scan's scope
 # ---------------------------------------------------------------------------
@@ -334,7 +334,7 @@ sr_crate() {
 }
 mkdir -p "${SR}/scripts" "${SR}/.github/workflows"
 printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >"${SR}/Cargo.toml"
-for c in trusty-common trusty-mpm trusty-search trusty-console search-consumer bystander trusty-mpm-gui; do
+for c in trusty-common trusty-mpm trusty-search trusty-console search-consumer bystander trusty-code-gui; do
   sr_crate "$c"
 done
 printf '\n[dependencies]\ntrusty-search = { path = "../trusty-search" }\n' >>"${SR}/crates/search-consumer/Cargo.toml"
@@ -391,9 +391,9 @@ echo 'echo "no signing here"' >"${SR}/scripts/nosign.sh"
 sr_run() { (cd "${SR}" && bash "${SCRIPT}" --files "$@" 2>/dev/null); }
 
 assert_eq "ci.yml-only diff -> canary + the one relevant UI crate" \
-  "trusty-common
-trusty-mpm
-trusty-mpm-gui" "$(sr_run .github/workflows/ci.yml)"
+  "trusty-code-gui
+trusty-common
+trusty-mpm" "$(sr_run .github/workflows/ci.yml)"
 assert_eq "select-test-crates.sh diff -> canary only (UI crate inert)" \
   "trusty-common
 trusty-mpm" "$(sr_run scripts/select-test-crates.sh)"
@@ -409,7 +409,7 @@ assert_eq "an unreferenced .github/** file -> nothing" \
 assert_eq "fixture-shaped literal with no file on disk -> nothing" \
   "" "$(sr_run scripts/ingest.sh)"
 assert_eq "crate change + fixture-shaped nonexistent path -> nothing extra" \
-  "trusty-mpm-gui" "$(sr_run crates/trusty-mpm-gui/src/lib.rs scripts/go.sh)"
+  "trusty-code-gui" "$(sr_run crates/trusty-code-gui/src/lib.rs scripts/go.sh)"
 
 # #7777 review round 2: a `/` before the path is a boundary; a name byte is not.
 assert_eq "path form \"./scripts/dot.sh\" -> bystander" \
@@ -439,9 +439,9 @@ cp -R "${SR}" "${SR_NOCOMMON}" && rm -rf "${SR_NOCOMMON}/crates/trusty-common"
 assert_eq "codesign: trusty-common not a workspace member -> all crates" \
   "bystander
 search-consumer
+trusty-code-gui
 trusty-console
 trusty-mpm
-trusty-mpm-gui
 trusty-search" "$(cd "${SR_NOCOMMON}" && bash "${SCRIPT}" --files scripts/sign.sh 2>/dev/null)"
 
 # A canary missing from the workspace fails open rather than testing less.
@@ -450,9 +450,9 @@ cp -R "${SR}" "${SR_NOCANARY}" && rm -rf "${SR_NOCANARY}/crates/trusty-mpm"
 assert_eq "canary crate not a workspace member -> all crates (fail open)" \
   "bystander
 search-consumer
+trusty-code-gui
 trusty-common
 trusty-console
-trusty-mpm-gui
 trusty-search" "$(cd "${SR_NOCANARY}" && bash "${SCRIPT}" --files .github/workflows/ci.yml 2>/dev/null)"
 
 # #7777 review round 2: a script deleted or renamed in the range is absent on
@@ -512,10 +512,10 @@ assert_eq "codesign: --range <sha>^! deleting scripts/sign.sh -> trusty-common" 
 assert_eq "--range <sha>^- (base is not one commit) -> all crates" \
   "bystander
 search-consumer
+trusty-code-gui
 trusty-common
 trusty-console
 trusty-mpm
-trusty-mpm-gui
 trusty-search" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^-" 2>/dev/null)"
 # #7777 review round 3: a merge commit's `^!` is a combined diff, which omits
 # a change one parent already carried. Evil merge: the first parent deletes
@@ -523,10 +523,10 @@ trusty-search" "$(cd "${SR_RANGE}" && bash "${SCRIPT}" --range "${SRR_SIGNDEL}^-
 # zz-evil.md. Both merges fail open.
 SR_ALL="bystander
 search-consumer
+trusty-code-gui
 trusty-common
 trusty-console
 trusty-mpm
-trusty-mpm-gui
 trusty-search"
 srr git checkout -q "${SRR_BASE}"
 srr git rm -q scripts/check_changelog_fragment.sh
@@ -554,10 +554,10 @@ cp -R "${SR}" "${SR_NOGIT}" && rm -rf "${SR_NOGIT}/.git"
 assert_eq "literal scan unavailable (no git repo) -> all crates" \
   "bystander
 search-consumer
+trusty-code-gui
 trusty-common
 trusty-console
 trusty-mpm
-trusty-mpm-gui
 trusty-search" "$(cd "${SR_NOGIT}" && bash "${SCRIPT}" --files scripts/check_changelog_fragment.sh 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
@@ -641,7 +641,7 @@ assert_eq "live: codesign install-trusty-mpm-signed.sh -> trusty-common" \
 # The job's helper scripts select the canary. The Tauri UI crates the
 # relevance union may add are that rule's business, not this assertion's.
 live_canary() {
-  live_run "$1" | grep -vxE 'trusty-(agents-ui|audit-ui|code-gui|mpm-gui)'
+  live_run "$1" | grep -vxE 'trusty-(agents-ui|audit-ui|code-gui)'
 }
 for helper in ci-create-local-main.sh ci-free-disk-space.sh ci-apt-install.sh; do
   assert_eq "live: helper ${helper} -> canary trusty-common + trusty-mpm" \

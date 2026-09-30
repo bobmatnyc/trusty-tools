@@ -46,12 +46,12 @@ const OTHER_CLAUDE_LAUNCHER_COMMANDS: &[&str] = &["claude", "claude-code", "clau
 /// `claude-mpm` may appear with extra invocation args) and [`OWN_BINARY_NAMES`]
 /// (EXACT equality, #4058 review round 1 MEDIUM finding 1) — `pane_current_command`
 /// is always a bare process name here, never a full command line, so a
-/// substring check on this crate's own names would also match a real sibling
-/// `[[bin]]` target, `trusty-mpm-gui` (`crates/trusty-mpm-gui/Cargo.toml`),
+/// substring check on this crate's own names would also match a sibling
+/// binary whose name extends ours (the retired `trusty-mpm-gui` was one),
 /// spuriously auto-adopting its pane. Exact match closes that window without
 /// reopening the original #4058 defect.
 /// Test: `is_claude_command_matches_known`, `is_claude_command_rejects_others`
-/// (covers `trusty-mpm-gui`), `is_claude_command_matches_trusty_mpm` (#4058).
+/// (covers `trusty-mpm-sibling`), `is_claude_command_matches_trusty_mpm` (#4058).
 pub fn is_claude_command(command: &str) -> bool {
     let lower = command.trim().to_lowercase();
     if lower.is_empty() {
@@ -535,16 +535,16 @@ mod tests {
 
     #[test]
     fn is_claude_command_rejects_others() {
-        // #4058 review round 1 MEDIUM finding 1: `trusty-mpm-gui` is a real
-        // sibling `[[bin]]` target (`crates/trusty-mpm-gui/Cargo.toml`) — a
-        // substring match on `OWN_BINARY_NAMES` would wrongly adopt it.
+        // #4058 review round 1 MEDIUM finding 1: a sibling binary whose name
+        // extends ours (`trusty-mpm-gui` was one) — a substring match on
+        // `OWN_BINARY_NAMES` would wrongly adopt it.
         for cmd in [
             "bash",
             "zsh",
             "vim",
             "tmux",
             "node",
-            "trusty-mpm-gui",
+            "trusty-mpm-sibling",
             "",
             "  ",
         ] {

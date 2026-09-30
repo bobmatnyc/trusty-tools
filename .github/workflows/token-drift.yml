@@ -2,7 +2,7 @@
 #
 # Foundry v2 design tokens (docs/design/UI/design-system/tokens.css) are the
 # canonical hex source. Adopted UIs consume it two ways: Tailwind crates
-# (trusty-agents, trusty-code-gui, trusty-mpm-gui) hand-transcribe the hex
+# (trusty-agents, trusty-code-gui) hand-transcribe the hex
 # into Tailwind's `--color-*: R G B` RGB-triple convention; plain-CSS crates
 # (trusty-console, trusty-analyze, trusty-search, trusty-memory) keep the
 # canonical `--trusty-*` names with `#hex` values verbatim. Nothing previously
@@ -10,7 +10,7 @@
 # enforced crate's expected values from the canonical source and fails with a
 # per-token diff on any mismatch.
 #
-# All 7 UI crates are enforced (epic #3486); the allowlist is empty. Both
+# All 6 UI crates are enforced (epic #3486); the allowlist is empty. Both
 # comparison modes ("rgb-triple" and "hex") live in scripts/check_token_drift.mjs.
 #
 # Pure Node script, zero dependencies — no pnpm install / lockfile needed, so
@@ -25,7 +25,7 @@
 name: Token drift
 
 # Optional and dependency-free: trigger only for the canonical tokens, the
-# seven enforced consumer stylesheets, or the checker/workflow itself.
+# six enforced consumer stylesheets, or the checker/workflow itself.
 on:
   push:
     branches: [main]
@@ -33,7 +33,6 @@ on:
       - "docs/design/UI/design-system/tokens.css"
       - "crates/trusty-agents/ui/src/app.css"
       - "crates/trusty-code-gui/ui/src/app.css"
-      - "crates/trusty-mpm-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-search/src/lib/styles/tokens.css"
@@ -53,7 +52,6 @@ on:
       - "docs/design/UI/design-system/tokens.css"
       - "crates/trusty-agents/ui/src/app.css"
       - "crates/trusty-code-gui/ui/src/app.css"
-      - "crates/trusty-mpm-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-search/src/lib/styles/tokens.css"
@@ -71,7 +69,7 @@ concurrency:
 
 jobs:
   token-drift:
-    name: Foundry token drift check (all 7 UI crates)
+    name: Foundry token drift check (all 6 UI crates)
     if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 5

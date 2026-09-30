@@ -22,9 +22,9 @@
 //! escape hatch. A stale or empty `dist/` is never embedded silently.
 //!
 //! NOTE: the block between the CANONICAL BLOCK markers is kept byte-identical
-//! across all three Tauri crates — this one, `crates/trusty-mpm-gui/build.rs`,
-//! and `crates/trusty-agents/ui/src-tauri/build.rs`;
-//! `scripts/check_buildrs_sync.sh` asserts it. One of those is edition 2021, so
+//! across both Tauri crates — this one and
+//! `crates/trusty-agents/ui/src-tauri/build.rs`;
+//! `scripts/check_buildrs_sync.sh` asserts it. The other is edition 2021, so
 //! the block uses no let-chains. It is deliberately NOT the block the four
 //! UI-embedding daemon crates share (`trusty-memory`, `trusty-analyze`,
 //! `trusty-console`, `trusty-search`): those degrade to a placeholder on any

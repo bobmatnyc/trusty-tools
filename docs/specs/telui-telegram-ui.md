@@ -243,7 +243,7 @@ TELUI-11 (hardening + tests) lands last, over TELUI-0…10.
   post-MVP deliverable; TELUI does not implement it.
 - **Re-implementing the engine.** Inference/summaries (DOC-14, #1275), lifecycle, and cost
   accounting live in the daemon — TELUI consumes them, never reproduces them.
-- **A graphical/web UI.** That is `trusty-console` / `trusty-mpm-gui`, not TELUI.
+- **A graphical/web UI.** That is `trusty-console`, not TELUI.
 
 ---
 

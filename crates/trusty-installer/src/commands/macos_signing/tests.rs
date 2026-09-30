@@ -4,9 +4,8 @@ use super::*;
 /// `trusty-mpm` set MUST include `tm` (#2721) — omitting it left the primary
 /// `tm` binary ad-hoc and the App-Data TCC prompt kept recurring. Order
 /// matters: `trusty-mpm` first so it stays the guidance/prompt "primary".
-/// `trusty-mpm-gui` (#2951) joined the set after `tm` for the same reason.
 /// What: Asserts `trusty-search` covers search+embedderd, `trusty-mpm` covers
-/// `trusty-mpm`, `tm`, and `trusty-mpm-gui` in that order.
+/// `trusty-mpm` then `tm`, in that order.
 /// Test: This is the test.
 #[test]
 fn binaries_for_set_covers_search_and_mpm() {
@@ -14,10 +13,7 @@ fn binaries_for_set_covers_search_and_mpm() {
         binaries_for_set(SEARCH_SET),
         vec!["trusty-search", "trusty-embedderd"]
     );
-    assert_eq!(
-        binaries_for_set(MPM_SET),
-        vec!["trusty-mpm", "tm", "trusty-mpm-gui"]
-    );
+    assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm", "tm"]);
 }
 
 /// Why (#4277): `trusty-agents` is its own signable set, distinct from
@@ -43,9 +39,8 @@ fn binaries_for_set_unknown_is_empty() {
 /// `com.trusty.trusty-<binary>` scheme used by `plist_label.rs` and the
 /// release-workflow docs (the pre-#2558 short-form identifiers were the
 /// drift this module fixes).
-/// What: Asserts all five target binaries map to the expected IDs,
-/// including the `tm` binary (`com.trusty.tm`, #2721) and `trusty-mpm-gui`
-/// (`com.trusty.trusty-mpm.gui`, #2951) that share the trusty-mpm set.
+/// What: Asserts all target binaries map to the expected IDs, including
+/// the `tm` binary (`com.trusty.tm`, #2721) that shares the trusty-mpm set.
 /// Test: This is the test.
 #[test]
 fn identifier_map_covers_all_signable_binaries() {
@@ -59,10 +54,6 @@ fn identifier_map_covers_all_signable_binaries() {
     );
     assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
     assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
-    assert_eq!(
-        codesign_identifier("trusty-mpm-gui"),
-        "com.trusty.trusty-mpm.gui"
-    );
     assert_eq!(codesign_identifier("tagent"), "com.trusty.tagent");
 }
 
@@ -134,7 +125,7 @@ fn every_declared_set_is_a_named_constant() {
 
 /// Why: This table decides which binaries get a stable macOS designated
 /// requirement and which stay ad-hoc, losing their TCC grant on every
-/// `cargo install`. Every prior gap in it (#2721 `tm`, #2951 the GUI, #4277
+/// `cargo install`. Every prior gap in it (#2721 `tm`, #4277
 /// `tagent`, and `trusty-memory`/`trusty-analyze` under the 2026-08-06 owner
 /// ruling) was a silent
 /// omission, never a wrong value — so the guard that matters is one that fails
@@ -157,7 +148,6 @@ fn signable_binaries_table_is_pinned() {
             ),
             ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
             ("tm", MPM_SET, "com.trusty.tm"),
-            ("trusty-mpm-gui", MPM_SET, "com.trusty.trusty-mpm.gui"),
             ("tagent", AGENTS_SET, "com.trusty.tagent"),
             ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
             (

@@ -459,9 +459,6 @@ pub(crate) enum Command {
         #[arg(long)]
         single_pane: bool,
     },
-    /// Launch the Tauri desktop GUI (or open the web build in the browser
-    /// when Tauri is unavailable).
-    Gui,
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {
         /// Telegram action to perform.

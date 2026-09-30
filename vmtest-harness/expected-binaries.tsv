@@ -22,6 +22,5 @@ trusty-common	trusty-common	tickets-mcp	src/bin/tickets_mcp.rs	tickets	no	-	-	-
 trusty-embedderd-py	trusty-embedderd-py	trusty-embedderd-py	src/main.rs	-	no	-	-	-
 trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworkspace-mcp.rs	-	no	-	-	-
 trusty-kb	trusty-kb	trusty-kb	src/main.rs	-	no	-	-	-
-trusty-mpm-gui	trusty-mpm-gui	trusty-mpm-gui	src/main.rs	-	no	-	-	-
 trusty-publish-guard	trusty-publish-guard	publish-guard	src/main.rs	-	no	-	-	-
 trusty-sld-lint	trusty-sld-lint	sld-lint	src/main.rs	-	no	-	-	-

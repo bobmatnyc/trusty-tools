@@ -2,8 +2,7 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 // Tauri build — index.html entry, output to ./dist which tauri.conf.json
-// references as `frontendDist`. Port 5174 (mpm-gui uses 5173) so both
-// desktop shells can run `pnpm dev` side by side.
+// references as `frontendDist`. Port 5174.
 export default defineConfig({
   plugins: [svelte()],
   clearScreen: false,

@@ -1,7 +1,7 @@
 # Foundry — Trusty Suite Design System (v1)
 
 Robot-themed, rust-colored design system for the trusty-* ecosystem
-(trusty-search, trusty-memory, trusty-analyze, trusty-mpm-gui, trusty-console).
+(trusty-search, trusty-memory, trusty-analyze, trusty-console).
 
 See [`icons/README.md`](icons/README.md) for the canonical icon set
 (`ActionIcon`, `RobotIcon`, `LogoMark`) — the single source of truth crate

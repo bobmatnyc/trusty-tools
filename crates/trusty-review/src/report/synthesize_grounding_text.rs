@@ -118,7 +118,7 @@ pub(super) fn subject_tokens(title: &str, component: &str) -> BTreeSet<String> {
 
 /// True when `haystack` contains `needle` bounded by non-identifier characters.
 ///
-/// Why: a bare `contains` would match `trusty-mpm` inside `trusty-mpm-gui` and
+/// Why: a bare `contains` would match `trusty-mpm` inside `trusty-mpm-ext` and
 /// blame the wrong crate.
 pub(super) fn contains_name(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {

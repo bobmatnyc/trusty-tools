@@ -2,7 +2,7 @@
 #
 # Cargo cannot share a build script as a library, so the daemon family
 # (trusty-memory, trusty-analyze, trusty-console, trusty-search — #987) and the
-# tauri-ui family (trusty-code-gui, trusty-mpm-gui, trusty-agents-ui — #4699)
+# tauri-ui family (trusty-code-gui, trusty-agents-ui — #4699)
 # each duplicate their canonical build.rs block by necessity. This gate fails
 # CI whenever a family's copies drift apart. See scripts/check_buildrs_sync.sh
 # for the two families' differing failure semantics.

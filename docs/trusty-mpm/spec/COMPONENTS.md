@@ -23,13 +23,13 @@ paths), **current state**, and **gaps**.
 - **Responsibility.** The primary unified entry point. One `Command` enum
   (`tm.rs:38-197`) covers daemon control (`start`/`stop`/`restart`/`status`/
   `daemon`), session ops, project ops, `launch`/`connect`/`attach`, optimizer/
-  overseer, coordinator, `services`, `install`, `hook`, and the `tui`/`telegram`/
-  `gui` subcommands (which call the in-crate library modules directly).
+  overseer, coordinator, `services`, `install`, `hook`, and the `tui`/`telegram`
+  subcommands (which call the in-crate library modules directly).
 - **Key types.** `Command` enum; `Launch` → `session_launch::prepare_session`;
   the daemon-boot + single-instance logic at `tm.rs:3139-3218`; the hook
   forwarder (`Hook` arm).
 - **Current state.** ✅ Full command surface; both `tm` and `trusty-mpm` map to
-  the same source. `tm tui`/`tm telegram`/`tm gui` are the canonical entry points;
+  the same source. `tm tui`/`tm telegram` are the canonical entry points;
   the standalone shim binaries are kept only for backward compatibility.
 - **Gaps.** 🟡 `tm.rs` is ~4,442 lines, far over the 500-line cap — split tracked
   by **#395**. 🟡 `tm install` overwrites the assembled system prompt with a
@@ -94,17 +94,6 @@ paths), **current state**, and **gaps**.
   formatting, push-alert loop. Token resolved from `--token` / `.env.local` /
   `.env` / `TELEGRAM_BOT_TOKEN`; `--check` validates without connecting.
 - **Gaps.** None known.
-
-### 6. GUI shim — `trusty-mpm-gui` / `tm gui` (`src/bin/trusty-mpm-gui.rs`, feature `gui`)
-
-- **Responsibility.** Wrap the Tauri desktop app (which lives in the separate
-  `trusty-mpm-gui` crate because Tauri requires its own `build.rs` +
-  `tauri.conf.json`) as a `[[bin]]` target of the unified crate.
-- **Key types.** A ~5-line shim calling `trusty_mpm_gui::run()`; suppresses the
-  console window on Windows release builds.
-- **Current state.** ✅ Out-of-crate; opt-in via the `gui` feature (optional
-  dependency). Requires Tauri prerequisites (`xcode-select`, `rustup`, `pnpm`).
-- **Gaps.** None in this crate; GUI logic is owned by `trusty-mpm-gui`.
 
 ---
 

@@ -111,7 +111,6 @@ Expected output: the semantic version of the installed binary (e.g., `tm 0.6.2`)
 | `mcp` | MCP server library module | — |
 | `tui` | TUI library module (`tm tui`) | ratatui, crossterm |
 | `telegram` | Telegram bot library module (`tm telegram`) | teloxide |
-| `gui` | `tm gui` subcommand (non-default; pulls in Tauri/WebKit) | trusty-mpm-gui (Tauri) |
 
 ## Binary
 
@@ -125,8 +124,8 @@ and hook commands written by older releases keep working.
 | `trusty-mpm` | `cli` | Compatibility alias: execs the sibling `tm` with the same arguments |
 
 All functionality previously in standalone shim binaries (`trusty-mpmd`, `trusty-mpm-tui`,
-`trusty-mpm-telegram`, `trusty-mpm-gui`) is now accessed through subcommands:
-`tm daemon`, `tm tui`, `tm telegram`, `tm gui`.
+`trusty-mpm-telegram`) is now accessed through subcommands:
+`tm daemon`, `tm tui`, `tm telegram`.
 
 ## Library Modules
 
@@ -182,15 +181,13 @@ beside it. Mechanism, per-technique basis, and how to read the ledger:
 
 ## GUI Note
 
-The Tauri desktop GUI lives in the separate `trusty-mpm-gui` crate (it owns
-`build.rs` + `tauri.conf.json` which require Tauri's build system). The `gui`
-feature of this crate wraps it as an optional dependency. Building the GUI
-requires the Tauri prerequisites: `xcode-select`, `rustup`, `pnpm`.
+There is no desktop GUI. The Tauri client (`trusty-mpm-gui`) and `tm gui` were
+retired (#7964); the fleet dashboard is hosted by trusty-console (#6924).
 
 ## Upgrading / Migration
 
-The standalone shim binaries `trusty-mpmd`, `trusty-mpm-tui`, `trusty-mpm-telegram`,
-and `trusty-mpm-gui` have been removed. Their functionality is now exposed through
+The standalone shim binaries `trusty-mpmd`, `trusty-mpm-tui`, and `trusty-mpm-telegram`
+have been removed. Their functionality is now exposed through
 subcommands of the single `tm` binary:
 
 | Old binary | New command |
@@ -198,7 +195,6 @@ subcommands of the single `tm` binary:
 | `trusty-mpmd [--addr <addr>]` | `tm daemon [--addr <addr>]` |
 | `trusty-mpm-tui` | `tm tui` |
 | `trusty-mpm-telegram` | `tm telegram` |
-| `trusty-mpm-gui` | `tm gui` (requires `--features gui`) |
 
 **Update any external references** (launchd LaunchAgent plists, systemd units,
 Docker `CMD`, shell aliases, CI scripts) that reference `trusty-mpmd` to use

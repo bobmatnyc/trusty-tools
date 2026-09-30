@@ -18,7 +18,7 @@ Status tags: ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ A
 
 trusty-mpm is **one Cargo crate** that compiles into **multiple feature-gated
 binaries** sharing a common set of library modules. A single resident daemon
-(`trusty-mpmd`) is the coordination hub; the CLI, TUI, Telegram bot, GUI, and the
+(`trusty-mpmd`) is the coordination hub; the CLI, TUI, Telegram bot, and the
 in-session MCP server are all **clients** of that daemon. Coordinated Claude Code
 session processes connect to the daemon over HTTP (the hook relay) and are
 launched as **stock `claude` processes** shaped by deployed framework artifacts —
@@ -87,20 +87,19 @@ the feature it needs (`crates/trusty-mpm/Cargo.toml`).
 
 | Binary | `[[bin]]` path | Required feature | Role | Status |
 |---|---|---|---|---|
-| `tm` | `src/bin/tm.rs` | `cli` | Primary unified CLI: daemon control, sessions, projects, launch/connect/attach, optimizer/overseer, coordinator, services, install, hook, plus `tui`/`telegram`/`gui` subcommands. | ✅ |
+| `tm` | `src/bin/tm.rs` | `cli` | Primary unified CLI: daemon control, sessions, projects, launch/connect/attach, optimizer/overseer, coordinator, services, install, hook, plus `tui`/`telegram` subcommands. | ✅ |
 | `trusty-mpm` | `src/bin/tm.rs` (same source) | `cli` | Long-name alias of `tm` — identical entry point. | ✅ |
 | `trusty-mpmd` | `src/bin/trusty-mpmd.rs` | `daemon` | Backward-compatible daemon shim → `daemon::run_http` / `run_mcp`. Prefer `tm daemon`. | ✅ |
 | `trusty-mpm-tui` | `src/bin/trusty-mpm-tui.rs` | `tui` | Backward-compatible TUI shim → `tui::run`. Prefer `tm tui`. | ✅ |
 | `trusty-mpm-telegram` | `src/bin/trusty-mpm-telegram.rs` | `telegram` | Backward-compatible Telegram shim → `telegram::run`. Prefer `tm telegram`. | ✅ |
-| `trusty-mpm-gui` | `src/bin/trusty-mpm-gui.rs` | `gui` | Thin shim → `trusty_mpm_gui::run()` (the Tauri app lives in the separate `trusty-mpm-gui` crate). Prefer `tm gui`. | ✅ (out-of-crate) |
 
 **Single-install convention.** `cargo install trusty-mpm` builds the
 `default = ["cli", "daemon"]` features, producing `tm`/`trusty-mpm` (which embeds
 the daemon, TUI, and Telegram logic via the `cli → daemon + tui + telegram`
-feature chain) plus the `trusty-mpmd` shim. The standalone `trusty-mpm-tui`,
-`trusty-mpm-telegram`, and `trusty-mpm-gui` binaries are kept only as
+feature chain) plus the `trusty-mpmd` shim. The standalone `trusty-mpm-tui` and
+`trusty-mpm-telegram` binaries are kept only as
 backward-compatible shims; the canonical entry points are `tm <subcommand>`. All
-binaries call the **same library functions**, so the five surfaces never drift.
+binaries call the **same library functions**, so the surfaces never drift.
 
 ### Feature graph
 
@@ -112,7 +111,6 @@ cli ── enables ──▶ daemon ── enables ──▶ mcp        (async-t
 daemon  pulls ── axum, tower, tower-http, tokio-stream, futures,
                  dashmap, parking_lot, notify, tracing-appender,
                  utoipa-swagger-ui
-gui     pulls ── trusty-mpm-gui (separate Tauri crate)   ← opt-in only
 ```
 
 Each optional binary is gated so a user pays the compile cost only for the

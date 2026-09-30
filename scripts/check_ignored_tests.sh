@@ -93,11 +93,10 @@ done
   exit 3
 }
 
-# The three Tauri desktop crates, excluded for the same reason every headless
+# The Tauri desktop crates, excluded for the same reason every headless
 # workspace job in ci.yml excludes them: they need WebKit2GTK, and nothing here
 # runs an ignored test of theirs.
 EXCLUDES=(
-  --exclude trusty-mpm-gui
   --exclude trusty-code-gui
   --exclude trusty-agents-ui
 )

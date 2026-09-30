@@ -22,10 +22,10 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
 
 - Every required job triggers unconditionally (no `paths:` filters) and
   short-circuits on the `docs_only` boolean from the `changes` job.
-- 🟡 **The four Tauri UI clippy jobs short-circuit on a second boolean (#7063).**
+- 🟡 **The Tauri UI clippy jobs short-circuit on a second boolean (#7063).**
   The `changes` job also emits `<crate>_relevant` per UI crate, computed by
   `scripts/ci-crate-relevance.sh` from the crate's transitive workspace
-  dependency closure, so a PR that cannot reach `trusty-mpm-gui` no longer pays
+  dependency closure, so a PR that cannot reach a UI crate no longer pays
   for its WebKit2GTK apt chain and cargo clippy. The jobs still run and report —
   they are required contexts (#5929, #5935) — and every failure arm of the
   detector answers `true`, so a broken classifier costs a full build.
@@ -332,8 +332,7 @@ rustup run stable cargo clippy --version
 
 # The CI job's own invocation, copied from ci.yml's clippy step.
 rustup run stable cargo clippy --workspace --all-targets \
-  --exclude trusty-mpm-gui --exclude trusty-code-gui \
-  --exclude trusty-agents-ui -- -D warnings
+  --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 ```
 
 Re-read the pin from `ci.yml` each time rather than trusting this snippet:
