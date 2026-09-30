@@ -65,6 +65,7 @@ pub(crate) mod guided_outside_git;
 pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
+pub(crate) mod hook_notify;
 pub(crate) mod hook_payload;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;

@@ -312,6 +312,10 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
     install_claude_hooks_at(
         &config_dir,
         trusty_mpm::core::standalone::hooks::resolve_current_exe(),
+        // #8392: the opt-in lives in the user-level config only.
+        trusty_mpm::core::config::MpmConfig::load_default()
+            .notification_hook
+            .enabled,
     )
 }
 
@@ -328,11 +332,16 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 /// [`trusty_mpm::core::standalone::hooks::resolve_current_exe`].
 /// What: calls [`trusty_mpm::core::standalone::hooks::write_project_hooks`]
 /// against `<config_dir>/settings.json` with `exe` as the pinned binary, and
-/// prints a status line.
-/// Test: see [`install_claude_hooks`]'s test list.
+/// prints a status line. #8392: then writes (`notify`) or removes tm's opt-in
+/// `Notification` entry through
+/// [`trusty_mpm::core::standalone::hooks::notification::apply_notification_hook`].
+/// Test: see [`install_claude_hooks`]'s test list, plus
+/// `opt_in_off_installs_exactly_the_six_lifecycle_events` and
+/// `opt_in_on_installs_one_notification_entry_idempotently`.
 fn install_claude_hooks_at(
     config_dir: &std::path::Path,
     exe: Option<std::path::PathBuf>,
+    notify: bool,
 ) -> anyhow::Result<usize> {
     use colored::Colorize;
 
@@ -342,7 +351,18 @@ fn install_claude_hooks_at(
         settings_path.display()
     );
 
-    match trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref()) {
+    // #8392: the lifecycle write first, so the opt-in step reads what it left.
+    let written =
+        trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref())
+            .and_then(|changed| {
+                trusty_mpm::core::standalone::hooks::notification::apply_notification_hook(
+                    &settings_path,
+                    exe.as_deref(),
+                    notify,
+                )
+                .map(|notified| changed || notified)
+            });
+    match written {
         Ok(true) => {
             println!("  {} {}", "✓".green(), settings_path.display());
             Ok(1)

@@ -193,9 +193,10 @@ fn inside_tmux_from_env(tmux: Option<String>, tmux_pane: Option<String>) -> bool
 /// attempts pane-targeted resolution is unit-testable independent of a live
 /// tmux server.
 /// What: `Some(value)` unchanged when it is an immutable `%N` pane id; `None`
-/// for an unset var, an empty-string export, or anything else (#8443).
+/// for an unset var, an empty-string export, or anything else (#8443). The
+/// `Notification` hook applies the same gate to its `$TMUX_PANE` (#8392).
 /// Test: `tmux_pane_env_gate_present_and_empty_matrix`.
-fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
+pub(crate) fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
     // #8443: only an immutable `%N` is acted on — the tmux-exact-targets
     // allowlist excuses the bare `-t pane_id` below on exactly that basis.
     value.filter(|s| s.starts_with('%') && trusty_mpm::core::tmux::is_immutable_id(s))
