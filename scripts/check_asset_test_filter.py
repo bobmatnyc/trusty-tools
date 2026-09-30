@@ -690,6 +690,11 @@ def cmd_check(args):
     return 0
 
 
+# Crates whose lib refuses to build under bare `-p` (empty default features): the feature
+# set that compiles the module an asset-content row names. #8378
+CRATE_FEATURES = {"trusty-common": "content-resolver"}
+
+
 def plan(rows):
     groups = {}
     for crate, target, filt, _ in rows:
@@ -699,7 +704,8 @@ def plan(rows):
         kind, _, name = target.partition(":")
         sel = ["--lib"] if kind == "lib" else [f"--{kind}", name]
         tail = [] if "*" in filters else sorted(set(filters))
-        out.append(((crate, target), filters, ["cargo", "test", "-p", crate, *sel, "--locked", "--no-fail-fast", "--", *tail]))
+        feats = ["--features", CRATE_FEATURES[crate]] if crate in CRATE_FEATURES else []
+        out.append(((crate, target), filters, ["cargo", "test", "-p", crate, *sel, *feats, "--locked", "--no-fail-fast", "--", *tail]))
     return out
 
 
