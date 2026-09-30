@@ -62,6 +62,11 @@ Content classes and where they are read from today:
 | `sm_instructions` | `crates/trusty-mpm/src/assets/sm_instructions/` |
 | `harness_understanding` | `crates/trusty-agents-common/src/assets/harness_understanding/` |
 
+Superseded 2026-09-30 (owner ruling, #8974, ADR-0064 amendment): the
+`output-styles` row above describes the seed packager only. The target IA has
+no `content/output-styles/`; output styles become a separate file inside
+`content/instructions/`.
+
 PHASE_1 (PR-D, [#8387](https://github.com/bobmatnyc/trusty-tools/issues/8387))
 moves these to `content/<class>/`. The packager then changes one line,
 `DEFAULT_SOURCE_ROOT="content"`, and the archive layout stays the same, so a
