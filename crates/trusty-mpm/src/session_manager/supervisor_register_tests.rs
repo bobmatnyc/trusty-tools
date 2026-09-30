@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::super::tests::{FakeTmuxDriver, seed_record};
 use super::{BindingVerifier, RegisterError, SupervisorRegistration};
 use crate::session_manager::{
-    KillVerdict, ManagedSessionId, ManagedSessionState, SessionKind, SessionManager,
-    SupervisorFloor,
+    KillVerdict, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionKind,
+    SessionManager, SupervisorFloor,
 };
 
 /// A verifier with a fixed answer that counts its calls.
@@ -70,10 +70,22 @@ async fn seed_named(
     state: ManagedSessionState,
     name: &str,
 ) -> ManagedSessionId {
+    seed_kind(mgr, root, state, SessionKind::Ordinary, name).await
+}
+
+/// Seed a record of `kind` in `state` that carries tmux name `name`.
+async fn seed_kind(
+    mgr: &SessionManager,
+    root: &tempfile::TempDir,
+    state: ManagedSessionState,
+    kind: SessionKind,
+    name: &str,
+) -> ManagedSessionId {
     let id = ManagedSessionId::new();
     seed_record(mgr, root, id, state, false).await;
     let mut record = mgr.get(&id).await.expect("seeded");
     record.tmux_name = name.to_owned();
+    record.kind = kind;
     mgr.store
         .write()
         .await
@@ -144,29 +156,127 @@ async fn relaunching_the_architect_replaces_its_record() {
     ));
 }
 
-/// #8942 critic LOW: `start-fleet-poll.sh` honours `ARCHITECT_POLL_SESSION`,
-/// so the poller is registered under the name it runs as, and the floor then
-/// protects that name although it is not `<session>-poll`.
+/// Fail-Open Check, #8942 critic HIGH: a helper name not derived from the
+/// Architect's (a PM's own session, say) is a 400 before the binding check,
+/// so one POST cannot make an arbitrary pane in the directory unkillable.
 #[tokio::test]
-async fn a_renamed_poller_registers_under_its_own_name() {
+async fn a_helper_not_named_after_the_architect_is_refused() {
     let (root, fake, mgr) = manager().await;
-    let reg = registration(&root, Some("custom-poller"));
+    *fake.pane_cwd_override.lock().unwrap() = Some(root.path().join("architect"));
+    let verifier = Verifier::bound();
+    let renamed_poller = registration(&root, Some("tm-pm-session"));
+    let mut foreign_collector = registration(&root, None);
+    foreign_collector.collector_session = Some("tm-pm-session-collector".into());
+    for reg in [renamed_poller, foreign_collector] {
+        let err = mgr
+            .register_supervisor(&reg, &verifier)
+            .await
+            .expect_err("a helper not named after the Architect is refused");
+        assert!(
+            matches!(&err, RegisterError::Invalid(why) if why.contains("tm-pm-session")),
+            "{err:?}"
+        );
+    }
+    assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
+    assert!(mgr.list().await.is_empty(), "nothing is written");
+    assert_eq!(
+        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("tm-pm-session"),
+        KillVerdict::Permit
+    );
+}
+
+/// Fail-Open Check, #8942 critic HIGH: a correctly named helper whose pane
+/// runs `claude` is a PM or an Architect, so it gets no protected record.
+#[tokio::test]
+async fn a_helper_whose_pane_runs_claude_is_not_registered() {
+    let (root, fake, mgr) = manager().await;
+    let reg = registration(&root, Some("tm-arch-poll"));
     *fake.pane_cwd_override.lock().unwrap() = Some(reg.dir.clone());
+    // The fake's `runtime_ready` is `session_exists`: this pane "runs claude".
+    fake.create_session("tm-arch-poll", &reg.dir.to_string_lossy())
+        .expect("fake session");
+
+    let report = mgr
+        .register_supervisor(&reg, &Verifier::bound())
+        .await
+        .expect("the Architect registers");
+
+    assert_eq!(report.registered.len(), 1, "{report:?}");
+    assert!(report.skipped[0].contains("claude"), "{report:?}");
+    let poll_id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
+    assert!(mgr.get(&poll_id).await.is_err(), "no helper record");
+}
+
+/// #8942 critic MEDIUM: one Architect per user, so a registration marks every
+/// other non-terminal Architect record deleted, record-only — a stopped or
+/// errored one included, so it stops pinning its name. Ordinary records and
+/// terminal ones are left as they are.
+#[tokio::test]
+async fn registration_deletes_every_stale_architect_record() {
+    let (root, fake, mgr) = manager().await;
+    let reg = registration(&root, None);
+    let stale = [
+        (
+            ManagedSessionState::Stopped,
+            SessionKind::Supervisor,
+            "old-arch",
+        ),
+        (
+            ManagedSessionState::Errored,
+            SessionKind::SupervisorAux,
+            "old-arch-poll",
+        ),
+        (
+            ManagedSessionState::Active,
+            SessionKind::Supervisor,
+            "other-arch",
+        ),
+    ];
+    let mut stale_ids = Vec::new();
+    for (state, kind, name) in stale {
+        stale_ids.push(seed_kind(&mgr, &root, state, kind, name).await);
+    }
+    let kept = [
+        (
+            ManagedSessionState::Deleted,
+            SessionKind::Supervisor,
+            "gone-arch",
+        ),
+        (
+            ManagedSessionState::Stopped,
+            SessionKind::Ordinary,
+            "tm-arch",
+        ),
+    ];
+    let mut kept_ids = Vec::new();
+    for (state, kind, name) in kept {
+        let id = seed_kind(&mgr, &root, state.clone(), kind, name).await;
+        kept_ids.push((id, state));
+    }
 
     let report = mgr
         .register_supervisor(&reg, &Verifier::bound())
         .await
         .expect("registers");
 
-    let id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
-    let aux = mgr.get(&id).await.expect("the poller's record");
-    assert_eq!(aux.kind, SessionKind::SupervisorAux);
-    assert_eq!(aux.tmux_name, "custom-poller");
-    assert_eq!(report.registered.len(), 2, "{report:?}");
-    assert!(matches!(
-        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("custom-poller"),
-        KillVerdict::Protected(_)
-    ));
+    let mut replaced = report.replaced.clone();
+    replaced.sort();
+    let mut expected: Vec<String> = stale_ids.iter().map(ToString::to_string).collect();
+    expected.sort();
+    assert_eq!(replaced, expected, "{report:?}");
+    for id in &stale_ids {
+        let state = mgr.get(id).await.expect("record").state;
+        assert_eq!(state, ManagedSessionState::Deleted, "{id}");
+    }
+    for (id, state) in &kept_ids {
+        assert_eq!(mgr.get(id).await.expect("record").state, *state, "{id}");
+    }
+    assert!(fake.kill_calls.lock().unwrap().is_empty(), "record-only");
+    assert_eq!(
+        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("old-arch"),
+        KillVerdict::Permit,
+        "a stale Architect record no longer pins its name"
+    );
 }
 
 /// Fail-Open Check: a helper is granted a protected record only when its

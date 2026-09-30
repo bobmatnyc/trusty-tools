@@ -4,8 +4,8 @@
 //! protected record that `tm ls` lists (design §2). Its launch sidecars keep
 //! its names protected from kill-by-name, so a crashed launch's sidecar must
 //! go, but only when that launch is proven gone (ruling 2).
-//! What: [`registration`] builds the request from the names init used — the
-//! poller's real session name included, never re-derived by the daemon.
+//! What: [`registration`] builds the request from the names init used; the
+//! daemon refuses a helper name not derived from the Architect's.
 //! [`register`] sends it over the daemon's unix socket and [`register_step`]
 //! maps the answer: no daemon is a `NOT registered` warning and init still
 //! succeeds; a refusal, a failed call, or an answer without the Architect's
@@ -20,7 +20,7 @@ use std::path::Path;
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::client::http_client::supervisor::RegisterCallError;
 use trusty_mpm::core::architect_sidecar_prune::{self as prune, SidecarProbes};
-use trusty_mpm::session_manager::supervisor_register::COLLECTOR_ROLE;
+use trusty_mpm::session_manager::supervisor_register::collector_session_name;
 use trusty_mpm::session_manager::{RegistrationReport, SessionKind, SupervisorRegistration};
 
 use super::launch::PaneState;
@@ -34,10 +34,9 @@ pub(crate) fn registration(dir: &Path, names: &SessionNames) -> SupervisorRegist
     SupervisorRegistration {
         dir: dir.to_path_buf(),
         session: names.architect().to_owned(),
-        // #8942 critic LOW: the poller's session is the one init started or
-        // found, sent as-is.
+        // #8942: `<session>-poll`, the only poller name the daemon accepts.
         poll_session: Some(names.poll().to_owned()),
-        collector_session: Some(format!("{}{COLLECTOR_ROLE}", names.architect())),
+        collector_session: Some(collector_session_name(names.architect())),
     }
 }
 

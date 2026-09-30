@@ -11,6 +11,7 @@
 //! request; 403 when the session is not the bound Architect; 500 when the
 //! store cannot be written.
 //! Test: `the_route_refuses_an_unbound_session_with_403`,
+//! `the_route_refuses_a_missing_session_through_the_launch_record`,
 //! `the_route_rejects_a_relative_dir_with_400`.
 
 use std::path::{Path, PathBuf};
@@ -65,6 +66,8 @@ pub(crate) async fn register_supervisor_core(
 }
 
 /// The production binding check: the launch record under `root` (#8942).
+///
+/// Test: `the_route_refuses_a_missing_session_through_the_launch_record`.
 pub struct LaunchRecordBinding {
     /// The daemon's framework root, `~/.trusty-mpm` in production.
     pub root: PathBuf,

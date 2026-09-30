@@ -11,8 +11,10 @@
 //! verifies the binding through a [`BindingVerifier`], then, in one store
 //! write, upserts the Architect's record under
 //! [`ManagedSessionId::for_supervisor`], a `supervisor_aux` record for each
-//! helper whose pane runs in the Architect directory, and marks every other
-//! LIVE record with one of those tmux names `deleted`, record-only.
+//! helper named after the Architect whose pane runs in the Architect
+//! directory without `claude`, and marks `deleted`, record-only, every other
+//! live record with one of those tmux names and every other non-terminal
+//! Architect record.
 //! Test: `supervisor_register_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -25,16 +27,21 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::session_kind::SessionKind;
 use super::supervisor_floor::SUPERVISOR_ROLE;
-use crate::core::architect_session::{POLL_SUFFIX, validate_session_name};
+use crate::core::architect_session::{POLL_SUFFIX, poll_session_name, validate_session_name};
 
 /// The `-collector` helper's id role.
 pub const COLLECTOR_ROLE: &str = "-collector";
 
+/// The collector's session for Architect session `name`.
+pub fn collector_session_name(name: &str) -> String {
+    format!("{name}{COLLECTOR_ROLE}")
+}
+
 /// `POST /api/v1/sessions/managed/supervisor` body (#8942).
 ///
-/// What: the Architect directory, its tmux session, and the tmux names its
-/// helpers actually run under (the poller's may be renamed, so it is sent,
-/// never derived from `session`).
+/// What: the Architect directory, its tmux session, and which helpers to
+/// register. A helper name must be the one derived from `session`
+/// ([`poll_session_name`], [`collector_session_name`]); any other is a 400.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorRegistration {
     /// The Architect project directory; absolute.
@@ -68,7 +75,8 @@ pub struct RegistrationReport {
     /// Helpers not registered, each with the reason.
     #[serde(default)]
     pub skipped: Vec<String>,
-    /// Ids of other live records with a registered name, now `deleted`.
+    /// Ids now `deleted`: other live records with a registered name, and
+    /// every other non-terminal Architect record.
     #[serde(default)]
     pub replaced: Vec<String>,
 }
@@ -103,14 +111,17 @@ impl SessionManager {
     /// Why: design §2/§4 — one live row per Architect, under a stable id, and
     /// only for a verified binding (fail closed: no record, no protection
     /// granted, on any doubt).
-    /// What: validates the request (absolute dir, valid names), runs
-    /// `verifier` (an `Err` is [`RegisterError::Unbound`] and writes nothing),
-    /// then builds the records and writes them and the replacements in one
-    /// `upsert_many`. A helper is registered only when the driver reports its
-    /// pane's cwd as `reg.dir`; otherwise it is listed in `skipped`.
+    /// What: validates the request (absolute dir, valid names, helper names
+    /// derived from the Architect's), runs `verifier` (an `Err` is
+    /// [`RegisterError::Unbound`] and writes nothing), then builds the records
+    /// and writes them and the replacements in one `upsert_many`. A helper is
+    /// registered only when the driver reports its pane's cwd as `reg.dir`
+    /// and no `claude` runs in it; otherwise it is listed in `skipped`.
     /// Test: `register_supervisor_refuses_an_unbound_session`,
     /// `relaunching_the_architect_replaces_its_record`,
-    /// `a_renamed_poller_registers_under_its_own_name`,
+    /// `a_helper_not_named_after_the_architect_is_refused`,
+    /// `a_helper_whose_pane_runs_claude_is_not_registered`,
+    /// `registration_deletes_every_stale_architect_record`,
     /// `a_helper_whose_pane_cannot_be_placed_is_not_registered`,
     /// `register_supervisor_refuses_a_relative_dir_or_a_bad_name`.
     pub async fn register_supervisor(
@@ -135,6 +146,14 @@ impl SessionManager {
         for (name, role) in helpers {
             let Some(name) = name else { continue };
             match self.tmux.get_pane_cwd(name) {
+                // #8942 critic HIGH: a pane running `claude` is a PM or an
+                // Architect, never a helper. On the real driver `runtime_ready`
+                // is the single-shot `find_claude_pid_in_tmux` probe.
+                Some(cwd) if same_dir(&cwd, &dir) && self.tmux.runtime_ready(name) => {
+                    report.skipped.push(format!(
+                        "{name}: a `claude` runs in its pane, so it is no helper"
+                    ));
+                }
                 Some(cwd) if same_dir(&cwd, &dir) => {
                     wanted.push((name.clone(), SessionKind::SupervisorAux, role));
                 }
@@ -171,14 +190,23 @@ impl SessionManager {
         }
         let ids: Vec<ManagedSessionId> = writes.iter().map(|r| r.id).collect();
         for other in &existing {
+            if other.state.is_terminal() || ids.contains(&other.id) {
+                continue;
+            }
             let live = matches!(
                 other.state,
                 ManagedSessionState::Active | ManagedSessionState::Provisioning
             );
-            if live && !ids.contains(&other.id) && wanted.iter().any(|w| w.0 == other.tmux_name) {
+            // #8942 critic MEDIUM: one Architect per user, so every other
+            // Architect record is stale, and a stopped one would pin its name.
+            let stale_architect = matches!(
+                other.kind,
+                SessionKind::Supervisor | SessionKind::SupervisorAux
+            );
+            if stale_architect || (live && wanted.iter().any(|w| w.0 == other.tmux_name)) {
                 let mut replaced = other.clone();
                 replaced.set_lifecycle_state(ManagedSessionState::Deleted, now);
-                warn!(id = %other.id, name = %other.tmux_name, "#8942: the Architect's registration replaced this live record (record only)");
+                warn!(id = %other.id, name = %other.tmux_name, "#8942: the Architect's registration marked this record deleted (record only)");
                 report.replaced.push(other.id.to_string());
                 writes.push(replaced);
             }
@@ -203,16 +231,18 @@ fn validated_dir(reg: &SupervisorRegistration) -> Result<PathBuf, RegisterError>
         )));
     }
     validate_session_name(&reg.session).map_err(RegisterError::Invalid)?;
-    // A helper is `<session><role>`, which may exceed the Architect name cap,
-    // so its base is what must pass; a renamed helper passes whole.
+    // #8942 critic HIGH: a helper name is derived from the Architect's by the
+    // rule `tm fleet init` uses; any other name could shield an unrelated pane.
     let helpers = [
-        (&reg.poll_session, POLL_SUFFIX),
-        (&reg.collector_session, COLLECTOR_ROLE),
+        (&reg.poll_session, poll_session_name(&reg.session)),
+        (&reg.collector_session, collector_session_name(&reg.session)),
     ];
-    for (name, role) in helpers {
-        if let Some(name) = name {
-            validate_session_name(name.strip_suffix(role).unwrap_or(name))
-                .map_err(RegisterError::Invalid)?;
+    for (sent, expected) in helpers {
+        if let Some(sent) = sent.as_ref().filter(|sent| **sent != expected) {
+            return Err(RegisterError::Invalid(format!(
+                "helper session {sent:?} is not {expected:?}, the name derived from {:?}",
+                reg.session
+            )));
         }
     }
     Ok(std::fs::canonicalize(&reg.dir).unwrap_or_else(|_| reg.dir.clone()))
