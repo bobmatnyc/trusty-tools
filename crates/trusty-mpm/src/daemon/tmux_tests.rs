@@ -420,7 +420,7 @@ fn ensure_server_up_issues_start_server_on_a_fresh_socket() {
         log = log.display()
     );
     let bin = write_fake_tmux(dir.path(), "fake-tmux-fresh-socket", &script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     driver
         .ensure_server_up()
@@ -445,7 +445,7 @@ fn ensure_server_up_fails_loudly_when_the_server_never_comes_up() {
     let dir = tempfile::tempdir().unwrap();
     let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-502/default (No such file or directory)' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-always-fails", script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     let err = driver
         .ensure_server_up()
@@ -516,7 +516,7 @@ fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
     let dir = tempfile::tempdir().unwrap();
     let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-501/default (No such file or directory)' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-no-server", script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     let err = driver
         .list_sessions()
@@ -533,9 +533,7 @@ fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
 /// the two cases are distinguishable.
 #[test]
 fn driver_send_command_line_refuses_an_oversized_line() {
-    let driver = TmuxDriver {
-        tmux_path: "/nonexistent/definitely-not-tmux".to_owned(),
-    };
+    let driver = TmuxDriver::with_tmux_path_for_test("/nonexistent/definitely-not-tmux");
     let target = crate::core::tmux::TmuxTarget::session("tm-sess");
 
     let too_long = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES + 1);

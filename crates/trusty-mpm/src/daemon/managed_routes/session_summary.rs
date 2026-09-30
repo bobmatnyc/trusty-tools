@@ -261,4 +261,7 @@ pub struct SessionSummary {
     /// `session_manager::resume_breaker_tests`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_resume_parked: Option<String>,
+    /// The record's fleet role (#8942), so a listing can pin and tag the
+    /// Architect; mirrors `SessionRecord::kind`.
+    pub kind: crate::session_manager::SessionKind,
 }

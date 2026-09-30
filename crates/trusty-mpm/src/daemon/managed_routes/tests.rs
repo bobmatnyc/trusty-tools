@@ -114,6 +114,7 @@ pub(super) fn make_record(source_id: Option<&str>) -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -510,6 +511,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         slot: 0,
         deleted: false,
         auto_resume_parked: None,
+        kind: Default::default(),
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -553,6 +555,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         slot: 0,
         deleted: false,
         auto_resume_parked: None,
+        kind: Default::default(),
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

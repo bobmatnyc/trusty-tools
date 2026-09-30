@@ -107,6 +107,8 @@ pub struct FakeTmuxDriver {
     /// to simulate the recorded pane having been closed while a sibling
     /// window keeps the tmux session alive.
     pub pane_exists_override: Mutex<Option<bool>>,
+    /// Controllable `pane_claude` answer (#8942); `Absent` when unset.
+    pub pane_claude_override: Mutex<Option<crate::core::process::PaneClaude>>,
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
     /// text)` (sibling-window hijack fix, follow-up to #2456).
     pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
@@ -163,6 +165,7 @@ impl FakeTmuxDriver {
             pane_cwd_override: Mutex::new(None),
             pane_id_override: Mutex::new(None),
             pane_exists_override: Mutex::new(None),
+            pane_claude_override: Mutex::new(None),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
@@ -309,6 +312,13 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// confirming (or disagreeing with) the pane's actual cwd.
     fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
         self.pane_cwd_override.lock().unwrap().clone()
+    }
+
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        self.pane_claude_override
+            .lock()
+            .unwrap()
+            .unwrap_or(crate::core::process::PaneClaude::Absent)
     }
 
     /// Report the controllable `pane_id_override` (sibling-window hijack fix,
@@ -1188,6 +1198,7 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -1318,6 +1329,7 @@ async fn manager_reconcile_skips_decommissioned() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -1380,6 +1392,7 @@ async fn manager_reconcile_skips_deleted() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -1452,6 +1465,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -2035,6 +2049,7 @@ pub(super) async fn seed_record(
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -2556,6 +2571,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -2647,6 +2663,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

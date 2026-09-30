@@ -62,7 +62,9 @@ impl SessionManager {
     /// A liveness probe that could not reach tmux at all is neither "running"
     /// nor "not running": its error surfaces as
     /// [`ManagedError::TmuxUnavailable`] and no record is touched (#5859).
-    /// Test: `delete_record_marks_deleted`,
+    /// #8942: a non-terminal record of a protected kind is refused with
+    /// [`ManagedError::InvalidState`], even with `force`.
+    /// Test: `delete_refuses_a_live_supervisor_record`, `delete_record_marks_deleted`,
     /// `delete_record_refuses_when_the_tmux_probe_fails` (#5859),
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,
@@ -78,6 +80,9 @@ impl SessionManager {
         force: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let record = self.get(id).await?;
+        // #8942 critic MEDIUM: a live Architect record is never tombstoned,
+        // `--force` or not; the kind is what keeps the floor protecting it.
+        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Delete)?;
         // #5859: `?` — a probe that could not reach tmux refuses the delete
         // instead of answering "not running" and dropping a live session.
         if !force && is_running(&record, self.tmux.as_ref())? {

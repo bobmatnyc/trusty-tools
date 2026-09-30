@@ -600,6 +600,12 @@ pub struct ManagedSessionSummary {
     /// `commands::managed_tests`.
     #[serde(default)]
     pub auto_resume_parked: Option<String>,
+    /// The record's fleet role (#8942), mirroring
+    /// `daemon::managed_routes::SessionSummary::kind`. `None` from a
+    /// pre-#8942 daemon, which never sends it.
+    /// Test: `managed_session_summary_carries_the_kind`.
+    #[serde(default)]
+    pub kind: Option<crate::session_manager::SessionKind>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

@@ -203,13 +203,21 @@ pub fn recorded_session_names(root: &Path) -> Result<Vec<String>, String> {
         if path.extension().and_then(|e| e.to_str()) != Some(SESSION_EXT) {
             continue;
         }
-        let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let sidecar: SessionRecord =
-            serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
-        validate_session_name(&sidecar.session).map_err(|e| format!("{}: {e}", path.display()))?;
-        names.push(sidecar.session);
+        names.push(read_sidecar(&path)?.2);
     }
     Ok(names)
+}
+
+/// One `*.architect-session` sidecar as `(pid, start_time, session)` (#8942).
+///
+/// What: reads, parses and validates the file; any failure is `Err` naming it.
+/// Test: `recorded_session_names_list_every_sidecar_and_fail_closed`.
+pub fn read_sidecar(path: &Path) -> Result<(u32, u64, String), String> {
+    let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let sidecar: SessionRecord =
+        serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+    validate_session_name(&sidecar.session).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((sidecar.pid, sidecar.start_time, sidecar.session))
 }
 
 /// Whether `path` is writable by group or others; an unreadable mode counts.

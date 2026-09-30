@@ -137,6 +137,7 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         // #6568: read straight off the record's `stop_cause`, so every listing
         // surface says the same thing about a parked session.
         auto_resume_parked: r.auto_resume_park_reason().map(str::to_string),
+        kind: r.kind, // #8942
     }
 }
 
@@ -305,6 +306,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         slot,
         deleted: true,
         auto_resume_parked: None,
+        kind: crate::session_manager::SessionKind::Ordinary,
     }
 }
 

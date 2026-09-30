@@ -738,6 +738,7 @@ fn a_failed_step_fails_the_report() {
             Step::Failed("poller start: boom".to_owned()),
         ],
         unbound: false,
+        registration: None,
     };
     assert!(report.failed());
     let text = report.render();
@@ -754,6 +755,7 @@ fn an_unbound_architect_is_named_in_the_summary() {
             "started tmux session tm-architect".to_owned(),
         )],
         unbound: true,
+        registration: None,
     };
     assert!(!report.failed());
     let text = report.render();

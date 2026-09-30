@@ -55,6 +55,7 @@ fn session(
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

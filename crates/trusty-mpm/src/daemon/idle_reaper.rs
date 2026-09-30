@@ -258,8 +258,10 @@ pub async fn idle_reaper_loop<P>(
 /// session calls the verdict provider, (4) calls `apply_verdict`, (5) fires the
 /// action if the decision warrants it — UNLESS `cfg.dry_run` is set, in which
 /// case it only logs the action it would take and leaves the session untouched.
+/// #8942: a live protected-kind record is skipped before the verdict.
 /// Test: `sweep_dry_run_does_not_stop`, `sweep_live_stops_idle_session`,
-/// `sweep_live_decommissions_done_session`; decision logic via `apply_verdict`.
+/// `sweep_live_decommissions_done_session`, `idle_reaper_never_stops_a_supervisor_record`;
+/// decision logic via `apply_verdict`.
 async fn run_one_sweep<P: IdleVerdictProvider>(
     manager: &Arc<SessionManager>,
     cfg: &IdleAutoStopConfig,
@@ -275,10 +277,11 @@ async fn run_one_sweep<P: IdleVerdictProvider>(
 
     state.prune_stale(&active_ids);
 
-    for record in sessions
-        .iter()
-        .filter(|r| matches!(r.state, ManagedSessionState::Active))
-    {
+    // #8942: the Architect's sessions are never idle-stopped or decommissioned.
+    for record in sessions.iter().filter(|r| {
+        matches!(r.state, ManagedSessionState::Active)
+            && !crate::session_manager::supervisor::skip_protected(r, "idle-reaper")
+    }) {
         let verdict_str = provider.verdict(&record.tmux_name).await;
         let counter = state.counter_mut(&record.id);
         let decision = apply_verdict(counter, verdict_str.as_deref(), cfg);
@@ -678,5 +681,42 @@ mod tests {
             ManagedSessionState::Decommissioned,
             "live sweep must decommission the done session"
         );
+    }
+
+    /// A provider that answers `self.0` and counts how often it was asked.
+    struct CountingProvider(&'static str, std::sync::atomic::AtomicUsize);
+    impl IdleVerdictProvider for CountingProvider {
+        async fn verdict(&self, _: &str) -> Option<String> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(self.0.to_string())
+        }
+    }
+
+    /// #8942: an idle, then done, Architect record is never classified,
+    /// stopped or decommissioned, however many sweeps cross the thresholds.
+    /// The stop refusal would hide a missing skip, so the test also asserts
+    /// the sweep never asks the classifier about the record.
+    #[tokio::test]
+    async fn idle_reaper_never_stops_a_supervisor_record() {
+        let dir = TempDir::new().unwrap();
+        let (mgr, id) = manager_with_active_session(&dir).await;
+        let mut record = mgr.get(&id).await.expect("record");
+        record.kind = crate::session_manager::SessionKind::Supervisor;
+        mgr.store.write().await.upsert(record).await.expect("seed");
+        let mut rs = IdleReaperState::new();
+        for verdict in ["idle", "done"] {
+            let provider = CountingProvider(verdict, Default::default());
+            run_one_sweep(&mgr, &cfg(1, 1), &provider, &mut rs).await;
+            assert_eq!(
+                state_of(&mgr, &id).await,
+                ManagedSessionState::Active,
+                "a `{verdict}` sweep reached the Architect's record"
+            );
+            assert_eq!(
+                provider.1.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the sweep classified the Architect's pane"
+            );
+        }
     }
 }

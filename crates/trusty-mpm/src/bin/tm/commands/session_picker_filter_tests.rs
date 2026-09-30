@@ -38,6 +38,7 @@ fn s(name: &str, task: Option<&str>, source_id: Option<&str>) -> ManagedSessionS
         slot: 1,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 

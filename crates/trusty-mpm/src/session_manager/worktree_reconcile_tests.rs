@@ -75,6 +75,7 @@ fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionR
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

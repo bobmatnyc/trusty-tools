@@ -312,6 +312,14 @@ pub(crate) async fn runtime_stop_core(state: &Arc<DaemonState>, id_str: &str) ->
     let mgr = state.session_manager().await;
     match mgr.stop(&id).await {
         Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
+        // #8942: a refused stop (the Architect's record, a terminal record,
+        // or a kill the floor refused) is a 409 that says why.
+        Err(e @ crate::session_manager::ManagedError::KillRefused(_)) => {
+            RouteOutcome::text(409, e.to_string())
+        }
+        Err(crate::session_manager::ManagedError::InvalidState(_, why)) => {
+            RouteOutcome::text(409, why)
+        }
         Err(_) => not_found(id_str),
     }
 }
@@ -505,6 +513,7 @@ mod cores_tests {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 

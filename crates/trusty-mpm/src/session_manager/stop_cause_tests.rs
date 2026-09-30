@@ -69,6 +69,7 @@ fn record_at(
         worktree_owner: None,
         terminal_at: None,
         stop_cause,
+        kind: Default::default(),
     }
 }
 

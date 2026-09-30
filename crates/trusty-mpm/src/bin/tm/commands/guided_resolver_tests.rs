@@ -52,6 +52,7 @@ fn make_session(
         slot: 0,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 

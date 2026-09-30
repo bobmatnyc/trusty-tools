@@ -93,6 +93,7 @@ fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

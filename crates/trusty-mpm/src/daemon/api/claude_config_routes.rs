@@ -702,6 +702,7 @@ mod restart_pane_selection_tests {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 

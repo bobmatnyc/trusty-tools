@@ -25,6 +25,7 @@ use crate::core::external_session::ExternalSession;
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
 use crate::core::{Error, Result};
+use crate::session_manager::SupervisorFloor;
 
 /// Find the end (one PAST the true closing `'`, byte offset into `s`) of a
 /// POSIX shell single-quoted value, given `s` is the text immediately AFTER
@@ -238,6 +239,8 @@ pub enum ExclusiveCreate {
 pub struct TmuxDriver {
     /// Absolute path to the `tmux` binary.
     tmux_path: String,
+    /// #8942: the protected-name check [`Self::kill_session`] asks first.
+    floor: SupervisorFloor,
 }
 
 impl TmuxDriver {
@@ -303,7 +306,11 @@ impl TmuxDriver {
             .to_str()
             .ok_or_else(|| Error::Protocol("resolved tmux path is not valid UTF-8".into()))?
             .to_string();
-        Ok(Self { tmux_path: path })
+        let floor = SupervisorFloor::host();
+        Ok(Self {
+            tmux_path: path,
+            floor,
+        })
     }
 
     /// A driver bound to `tmux_path` with no discovery — tests only, so a test
@@ -312,7 +319,19 @@ impl TmuxDriver {
     pub(crate) fn with_tmux_path_for_test(tmux_path: impl Into<String>) -> Self {
         Self {
             tmux_path: tmux_path.into(),
+            floor: SupervisorFloor::host(),
         }
+    }
+
+    /// This driver with its kill floor replaced — tests only (#8942).
+    #[cfg(test)]
+    pub(crate) fn with_floor(self, floor: SupervisorFloor) -> Self {
+        Self { floor, ..self }
+    }
+
+    /// The protected-name check this driver's kills ask (#8942).
+    pub fn supervisor_floor(&self) -> &SupervisorFloor {
+        &self.floor
     }
 
     /// True if a `tmux` binary is available on this host.
@@ -498,8 +517,23 @@ impl TmuxDriver {
         }
     }
 
-    /// Kill the tmux session named `name`.
+    /// Kill the tmux session named `name`, unless the #8942 floor refuses it.
+    ///
+    /// Why: every daemon kill-by-name funnels through here; a stale record
+    /// carrying the Architect's name must not reach its pane (#8935).
+    /// What: [`SupervisorFloor::refuse`] first — a protected or undeterminable
+    /// name is `Err` and no tmux process runs; otherwise `kill-session -t =name`.
+    /// Test: `kill_by_name_fails_closed_when_architect_sidecars_cannot_be_read`,
+    /// `a_record_with_an_unknown_kind_is_never_torn_down`.
+    #[track_caller]
     pub fn kill_session(&self, name: &str) -> Result<()> {
+        let caller = format!(
+            "TmuxDriver::kill_session from {}",
+            std::panic::Location::caller()
+        );
+        if let Some(why) = self.floor.refuse(name, &caller) {
+            return Err(Error::Protocol(why));
+        }
         self.run(&TmuxCommand::KillSession {
             name: name.to_string(),
         })?;

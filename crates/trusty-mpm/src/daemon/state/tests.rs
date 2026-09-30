@@ -1206,6 +1206,42 @@ async fn reap_leaves_a_whole_server_loss_auto_resumable() {
     }
 }
 
+/// #8942: when the Architect's name is missing from the live set, its record
+/// goes `Stopped`, and no teardown reaches a pane of that name.
+#[tokio::test]
+async fn the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let driver = MinFakeDriver::new();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), driver.clone())
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+    let id = active_session_in_state(&mgr, "architect", "/tmp/test-reap-architect").await;
+    let mut record = mgr.get(&id).await.expect("record");
+    record.kind = crate::session_manager::SessionKind::Supervisor;
+    let name = record.tmux_name.clone();
+    mgr.store.write().await.upsert(record).await.expect("seed");
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    let live: std::collections::HashSet<String> =
+        ["someone-elses-shell".to_string()].into_iter().collect();
+    state.reap_managed_against(&live).await;
+
+    let after = mgr.get(&id).await.expect("get after reap");
+    assert_eq!(
+        after.state,
+        crate::session_manager::ManagedSessionState::Stopped
+    );
+    assert_eq!(
+        after.stop_cause,
+        Some(crate::session_manager::StopCause::Deliberate)
+    );
+    assert!(
+        driver.sessions.lock().unwrap().contains(&name),
+        "the reaper killed a pane carrying the Architect's name"
+    );
+}
+
 /// #3822 hardening (code-critic review): `project_registry()`'s session-
 /// history seed must not depend on some OTHER call site having already
 /// warmed `managed_sessions` first — it must warm `session_manager()` itself.

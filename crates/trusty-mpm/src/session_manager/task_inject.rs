@@ -228,8 +228,10 @@ impl SessionManager {
     /// lost on any failure path — it remains on the record as metadata,
     /// exactly as before this fix, so a caller can still deliver it manually
     /// via `tm session send`.
+    /// #8942: a live protected-kind record returns `Ok(false)` untouched.
     /// Test: `inject_when_ready_sends_task_via_send_seam`,
     /// `inject_when_ready_skips_empty_task`,
+    /// `task_injection_never_types_into_a_supervisor_pane`,
     /// `inject_when_ready_marks_success_status`,
     /// `inject_when_ready_marks_failed_session_died_status`,
     /// `inject_when_ready_times_out_when_modal_never_clears`,
@@ -244,6 +246,10 @@ impl SessionManager {
             return Ok(false);
         }
         let initial = self.get(id).await?;
+        // #8942 ruling 4: nothing is ever typed into the Architect's pane.
+        if super::supervisor::skip_protected(&initial, "task injection") {
+            return Ok(false);
+        }
         let name = initial.tmux_name;
         let pane_id = initial.pane_id;
 

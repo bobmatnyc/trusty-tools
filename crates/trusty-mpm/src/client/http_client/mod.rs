@@ -27,6 +27,8 @@ pub mod manager;
 pub mod projects;
 mod session_connect;
 pub(crate) mod socket_routes;
+// #8942: `tm fleet init`'s Architect registration.
+pub mod supervisor;
 #[cfg(test)]
 mod tests;
 // #6288 step 1: the HTTP-or-unix-socket seam every method sends through.

@@ -57,6 +57,8 @@ mod doctor_tmux_priority;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
+// #8942: the shutdown legacy-registry reap's kill loop.
+mod legacy_reap;
 pub mod llm_overseer;
 pub mod lock;
 /// The cloud log-drain scheduler (#6535, Phase 3 of #6533).
@@ -432,7 +434,8 @@ pub async fn serve_with_shutdown(
 /// `kill_session` for every name in its own registry. It asks
 /// [`host_state_refusal`] first, and a refusal returns before a driver exists.
 /// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op);
-/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`.
+/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`;
+/// `reap_all_live_sessions_never_kills_a_sidecar_named_session` (#8942).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
     if let Some(reason) = host_state_refusal(&state) {
         tracing::warn!("graceful shutdown: legacy session reap skipped — {reason}");
@@ -450,19 +453,8 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
         .map(|s| s.tmux_name)
         .collect();
 
-    let mut reaped = 0usize;
-    for name in names {
-        match driver.kill_session(&name) {
-            Ok(()) => reaped += 1,
-            Err(e) => {
-                // Fail-open: a kill failing (already gone, or never had a host)
-                // must not stop us reaping the rest. stderr only via tracing.
-                tracing::warn!(
-                    "graceful shutdown: kill_session({name}) failed (may already be gone): {e}"
-                );
-            }
-        }
-    }
+    // #8942: the kill floor inside `kill_session` spares the Architect's names.
+    let reaped = legacy_reap::reap_legacy_names(&driver, names);
     info!("graceful shutdown: reaped {reaped} legacy session(s)");
 }
 

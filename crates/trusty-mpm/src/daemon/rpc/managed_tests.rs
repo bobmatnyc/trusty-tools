@@ -195,6 +195,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.prune_worktrees",
         "mpm.managed.reconcile_worktrees",
         "mpm.managed.fleet",
+        "mpm.managed.register_supervisor",
         "mpm.residency.active",
         "mpm.managed.get",
         "mpm.managed.stop",
