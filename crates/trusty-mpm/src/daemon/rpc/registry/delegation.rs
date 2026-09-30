@@ -1,23 +1,33 @@
-//! The two delegation-query verbs as RPC methods (#6288 slice 5).
+//! The delegation verbs as RPC methods (#6288 slice 5, step 2a).
 //!
-//! Why registration only: `delegation_routes` had SLOC headroom, so its two
+//! Why registration only: `delegation_routes` had SLOC headroom, so its
 //! `*_op` bodies stayed beside their handlers.
 //!
-//! What does NOT change: both routes answer and CLAIM in one critical section
-//! (`DaemonState::claim_shared_tree_dispatch` holds one mutex across both
-//! halves, #5324), and both re-derive eligibility from the payload rather than
-//! trusting the caller. Neither moved, so a socket caller cannot occupy a
+//! What does NOT change: both dispatch routes answer and CLAIM in one critical
+//! section (`DaemonState::claim_shared_tree_dispatch` holds one mutex across
+//! both halves, #5324), and both re-derive eligibility from the payload rather
+//! than trusting the caller. Neither moved, so a socket caller cannot occupy a
 //! directory an HTTP caller could not have.
 //!
-//! Test: the `parity_delegation_*` cases in `super::tests`.
+//! Step 2a adds the read-only listing and both repair verbs. The repair's
+//! caller session, which HTTP reads from the `x-tm-caller-session` header,
+//! arrives as the `caller_session` param and is parsed by
+//! `delegation_routes::caller_from_param` into the same `RepairCaller`, so the
+//! owner gate cannot tell the transports apart.
+//!
+//! Test: the `parity_delegation_*` and `rpc_delegation_*` cases in
+//! `super::tests`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
-use trusty_common::uds::server::RpcRouter;
+use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::daemon::delegation_routes as dg;
+use crate::daemon::services::delegation_records::DelegationListing;
+use crate::daemon::services::delegation_repair::RepairOutcome;
 use crate::daemon::state::DaemonState;
 
 /// Parameters for both delegation methods: the session id the HTTP route
@@ -30,7 +40,42 @@ pub struct DispatchParams {
     pub payload: Value,
 }
 
-/// Mount the two delegation methods.
+/// `mpm.delegation.list` parameters: the `?cwd=` query field.
+#[derive(Debug, Deserialize)]
+pub struct ListParams {
+    /// The directory whose records to list.
+    pub cwd: PathBuf,
+}
+
+/// `mpm.delegation.repair` parameters: the path's agent id, the body's `force`
+/// flag, and the caller session the HTTP route reads from its header.
+#[derive(Debug, Deserialize)]
+pub struct RepairParams {
+    /// The agent id from the URL path.
+    pub agent_id: String,
+    /// End the record even when the owning session is undeterminable.
+    #[serde(default)]
+    pub force: bool,
+    /// The calling harness session — see `dg::caller_from_param`.
+    #[serde(default)]
+    pub caller_session: Option<Value>,
+}
+
+/// `mpm.delegation.repair_by_id` parameters: [`RepairParams`] keyed by the
+/// delegation id instead of the agent id.
+#[derive(Debug, Deserialize)]
+pub struct RepairByIdParams {
+    /// The delegation id from the URL path.
+    pub delegation_id: String,
+    /// End the record even when the owning session is undeterminable.
+    #[serde(default)]
+    pub force: bool,
+    /// The calling harness session — see `dg::caller_from_param`.
+    #[serde(default)]
+    pub caller_session: Option<Value>,
+}
+
+/// Mount the delegation methods.
 ///
 /// Test: `rpc_router_registers_every_documented_method`.
 pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
@@ -51,7 +96,7 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     );
 
     let held = Arc::clone(state);
-    r.typed::<DispatchParams, dg::SharedTreeWritersResponse, _, _>(
+    let r = r.typed::<DispatchParams, dg::SharedTreeWritersResponse, _, _>(
         "mpm.delegation.granted_worktree",
         move |p| {
             let s = Arc::clone(&held);
@@ -64,5 +109,35 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
                 .map_err(Into::into)
             }
         },
-    )
+    );
+    register_step_2a(r, state)
+}
+
+/// Mount the listing and both repair verbs (#6288 step 2a).
+fn register_step_2a(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
+    let held = Arc::clone(state);
+    let r = router.typed::<ListParams, DelegationListing, _, _>("mpm.delegation.list", move |p| {
+        let s = Arc::clone(&held);
+        async move { Ok(dg::list_delegations_op(&s, p.cwd)) }
+    });
+
+    let held = Arc::clone(state);
+    let r = r.typed::<RepairParams, RepairOutcome, _, _>("mpm.delegation.repair", move |p| {
+        let s = Arc::clone(&held);
+        async move {
+            let caller = dg::caller_from_param(p.caller_session.as_ref());
+            Ok::<_, RpcError>(dg::repair_delegation_op(s, p.agent_id, p.force, caller).await)
+        }
+    });
+
+    let held = Arc::clone(state);
+    r.typed::<RepairByIdParams, RepairOutcome, _, _>("mpm.delegation.repair_by_id", move |p| {
+        let s = Arc::clone(&held);
+        async move {
+            let caller = dg::caller_from_param(p.caller_session.as_ref());
+            dg::repair_delegation_by_id_op(s, &p.delegation_id, p.force, caller)
+                .await
+                .map_err(Into::into)
+        }
+    })
 }

@@ -76,7 +76,16 @@ fn resolve_maps_routes_onto_methods() {
     assert_eq!(captures.get("project"), Some(&json!("p1")));
     assert_eq!(captures.get("id"), Some(&json!("d2")));
 
-    assert!(resolve(&Method::GET, "/api/v1/sessions/context").is_none());
+    // #6288 step 2a: `/events` is an SSE stream; the socket serves no unary
+    // method for it.
+    assert!(resolve(&Method::GET, "/events").is_none());
+    let (method, captures) =
+        resolve(&Method::POST, "/api/v1/delegations/by-id/d1/repair").expect("mapped");
+    assert_eq!(method, "mpm.delegation.repair_by_id");
+    assert_eq!(captures.get("delegation_id"), Some(&json!("d1")));
+    let (method, captures) = resolve(&Method::POST, "/rpc").expect("mapped");
+    assert_eq!(method, "mpm.mcp.dispatch");
+    assert!(captures.is_empty());
     assert!(resolve(&Method::POST, "/health").is_none(), "verb matters");
 }
 
@@ -165,11 +174,7 @@ async fn socket_call_to_an_absent_socket_is_unreachable_and_names_the_path() {
 async fn socket_call_refuses_an_unmapped_route() {
     let daemon = fake_daemon().await;
     let client = DaemonClient::over_socket(&daemon.socket);
-    let err = client
-        .get("/api/v1/sessions/context")
-        .send()
-        .await
-        .expect_err("unmapped");
+    let err = client.get("/events").send().await.expect_err("unmapped");
     assert!(!err.is_connect());
     assert!(
         err.to_string().contains("no method on the daemon socket"),
