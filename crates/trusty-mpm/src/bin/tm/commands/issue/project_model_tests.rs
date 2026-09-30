@@ -12,7 +12,10 @@
 
 use std::cell::RefCell;
 
-use super::config::StateModel;
+use super::config::{
+    DEFAULT_MODEL_YAML, ModelSource, STATUS_LIFECYCLE_YAML, StateModel, builtin_for_target,
+    describe_source,
+};
 use super::ops;
 use super::state::{CurrentState, StateMachine};
 use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
@@ -509,4 +512,81 @@ fn project_seed_labels_covers_the_whole_harness_label_set() {
         ]
     );
     assert!(!report.workstream_skipped);
+}
+
+// ---- #8609: the built-in model knows the `status:*` lifecycle --------------
+
+/// The loader's answer when no `issue-state.yaml` is found: the Unicorn
+/// Factory default, tagged as the embedded default.
+fn embedded_default() -> (StateModel, ModelSource) {
+    let model: StateModel = serde_yaml::from_str(DEFAULT_MODEL_YAML).expect("default parses");
+    let source = ModelSource::EmbeddedDefault {
+        searched_from: std::path::PathBuf::from("/repo"),
+    };
+    (model, source)
+}
+
+/// Why (#8609): the embedded lifecycle is a copy of the repo-root model, and a
+/// copy that drifts would give a repo without a model a different lifecycle
+/// from the one TICKETING.md documents.
+#[test]
+fn status_lifecycle_matches_the_repo_model_8609() {
+    let embedded: StateModel =
+        serde_yaml::from_str(STATUS_LIFECYCLE_YAML).expect("embedded lifecycle parses");
+    assert_eq!(embedded, project_model());
+}
+
+/// Why (#8609): apex-companion has no `issue-state.yaml`, and
+/// `tm issue transition 1019 status:in-progress` was rejected with the Unicorn
+/// Factory's state list. The built-in model must take that target, and the
+/// transition must then reach `gh` as the documented label add.
+#[test]
+fn builtin_for_target_selects_the_status_lifecycle_8609() {
+    let (model, source) =
+        builtin_for_target(embedded_default(), "status:in-progress").expect("lifecycle target");
+    assert!(
+        matches!(source, ModelSource::EmbeddedStatusLifecycle { .. }),
+        "{source:?}"
+    );
+    assert!(describe_source(&source).contains("`status:*` lifecycle"));
+
+    let gh = FakeGh::new(vec![ok_out(&issue_json(1019, &["bug"]))]);
+    let sys = GhTicketSystem::new(gh);
+    let report = ops::transition(&sys, &model, 1019, "status:in-progress", None)
+        .expect("open → status:in-progress is a lifecycle edge");
+    assert_eq!(report.from.as_deref(), Some("open"));
+    assert!(
+        sys.runner().calls().iter().any(|c| c
+            .windows(2)
+            .any(|w| w[0] == "--add-label" && w[1] == "status:in-progress")),
+        "{:?}",
+        sys.runner().calls()
+    );
+
+    // Closing still demands evidence under the built-in lifecycle.
+    let (model, _) = builtin_for_target(embedded_default(), "closed").expect("closed");
+    let gh = FakeGh::new(vec![ok_out(&issue_json(1019, &["status:tested"]))]);
+    let sys = GhTicketSystem::new(gh);
+    let err = ops::transition(&sys, &model, 1019, "closed", None)
+        .expect_err("no --note")
+        .to_string();
+    assert!(err.contains("requires evidence"), "{err}");
+}
+
+/// Why (#8609): the switch must not reach past its case — a model read from a
+/// file, a Unicorn Factory target, and a name neither model knows all keep the
+/// loader's answer, so the unknown-state error still names the default.
+#[test]
+fn builtin_for_target_keeps_a_file_model_and_unicorn_targets_8609() {
+    for to in ["approved", "no-such-state"] {
+        let (_, source) = builtin_for_target(embedded_default(), to).expect(to);
+        assert!(
+            matches!(source, ModelSource::EmbeddedDefault { .. }),
+            "{to}: {source:?}"
+        );
+    }
+    let file = ModelSource::File(std::path::PathBuf::from("/repo/issue-state.yaml"));
+    let (_, source) = builtin_for_target((embedded_default().0, file.clone()), "status:coded")
+        .expect("file model");
+    assert_eq!(source, file);
 }

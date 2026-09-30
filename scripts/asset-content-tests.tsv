@@ -39,6 +39,7 @@ trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and
 trusty-mpm	bin:tm	commands::pr::tests::body_headings_are_named_verbatim_in_the_assets	reads agent_assets::VERSION_CONTROL
 trusty-mpm	bin:tm	commands::pr::tests::metadata_multi_crate_diff	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'
 trusty-mpm	bin:tm	commands::pr::tests::open_applies_pr_metadata	reads literal 'crates/trusty-agents-common/src/assets/agents/version-control.md'
+trusty-mpm	bin:tm	generate::tests	4 reads: SKILLS_ASSET_REL, run_capabilities_in, resolve_skills_asset_dir (#7776)
 trusty-mpm	bin:tm	tests_behavior_2890_skills::code_critic_skills_land_in_deployed_dot_claude_skills	reads CONTRACT_DRIVEN_TESTING
 trusty-mpm	bin:tm	tests_behavior_2903_skills::skill_port_batch1_sample_lands_in_deployed_dot_claude_skills	reads SYSTEMATIC_DEBUGGING_ANTI_PATTERNS
 trusty-mpm	bin:tm	tests_behavior_2911_documentation_style::documentation_style_lands_in_deployed_dot_claude_skills	reads DOCUMENTATION_STYLE

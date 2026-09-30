@@ -42,7 +42,9 @@ use crate::commands::ticket::system::{
     GhTicketSystem, TicketSystem, TicketSystemKind, not_yet_supported,
 };
 
-use config::{ModelSource, StateModel, describe_source, load_model_with_source};
+use config::{
+    ModelSource, StateModel, builtin_for_target, describe_source, load_model_with_source,
+};
 use seed_ticketing::{
     TicketingSeedOutcome, seed_outcome_result, seed_ticketing_block, ticketing_config_path,
 };
@@ -141,7 +143,12 @@ fn dispatch<S: TicketSystem>(
         } => {
             // #7580: a rejected state name is the error this bug reads as, so
             // the model in force is named beside it.
-            let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;
+            // #8609: with no model file, a `status:*` target selects the
+            // built-in `status:*` lifecycle rather than failing the default.
+            let (model, source) = builtin_for_target(
+                load_model_with_source(config.as_deref(), lifecycle)?,
+                &to_state,
+            )?;
             // #8448: a phase issue's transition regenerates its tracker's
             // phases block, and a failed regeneration is THIS command's
             // failure — the hook composes the two so it cannot be swallowed.

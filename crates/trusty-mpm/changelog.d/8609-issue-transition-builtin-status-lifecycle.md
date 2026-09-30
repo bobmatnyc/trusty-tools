@@ -1,0 +1,2 @@
+Fixed
+- `tm issue transition` in a repo with no `issue-state.yaml` now accepts the `status:*` lifecycle that TICKETING.md documents: open → `status:in-progress` → `status:coded` → `status:merged` → `status:tested` → closed. When the target is not a state of the built-in Unicorn Factory model but is a state of that lifecycle, the transition runs against a built-in copy of it, and the model line names it. Closing still requires `--note`. A model read from a file is never replaced (#8609).

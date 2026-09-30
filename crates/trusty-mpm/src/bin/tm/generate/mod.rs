@@ -12,7 +12,8 @@
 //! exactly the same generation logic and can never disagree about what
 //! "up to date" means.
 //! What: [`generate`] builds the full [`GeneratedSet`] (7 files); [`write`](crate::generate::write)
-//! writes it to `crates/trusty-mpm/src/assets/skills/`; [`diff`] compares it
+//! writes it to `crates/trusty-mpm/src/assets/skills/` of the checkout the
+//! command runs in ([`resolve_skills_asset_dir`], #7776); [`diff`] compares it
 //! against the committed copies without writing; [`run_capabilities`] is the
 //! `tm generate capabilities[--check]` CLI entry point.
 //! Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`,
@@ -68,21 +69,47 @@ pub(crate) fn generate() -> GeneratedSet {
     set
 }
 
-/// The compile-time source asset root: `crates/trusty-mpm/src/assets/skills/`.
+/// The skills asset directory, relative to a trusty-tools checkout root.
+const SKILLS_ASSET_REL: &str = "crates/trusty-mpm/src/assets/skills";
+
+/// The skills asset directory of the checkout whose git root holds `start`.
 ///
-/// Why: `tm generate capabilities` is a dev-time-only subcommand — it always
-/// runs from a checkout of this repo, so anchoring on
-/// `CARGO_MANIFEST_DIR` (fixed at compile time to this package's root) is
-/// correct and avoids any dependency on the runtime working directory.
-fn skills_asset_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
+/// Why (#7776): an installed `tm` is usually built from a worktree, so the
+/// compile-time `CARGO_MANIFEST_DIR` names the BUILD checkout. `--check` run
+/// anywhere else diffed that tree and reported every file "(missing)" once it
+/// was reclaimed, and the write path dirtied it.
+/// What: the nearest ancestor of `start` holding a `.git` entry (a directory in
+/// a main checkout, a file in a worktree) is the git root; its
+/// `crates/trusty-mpm/src/assets/skills/` is returned. With no git root, or a
+/// git root without that directory, it errors naming the path it tried — a
+/// path-resolution error, never a drift report.
+/// Test: `resolves_the_cwd_git_root_not_the_build_checkout_7776`,
+/// `unresolvable_asset_root_is_a_path_error_7776`.
+pub(crate) fn resolve_skills_asset_dir(start: &Path) -> anyhow::Result<PathBuf> {
+    // #7776: resolve from the invocation's checkout, never env!("CARGO_MANIFEST_DIR").
+    let Some(root) = start.ancestors().find(|d| d.join(".git").exists()) else {
+        anyhow::bail!(
+            "tm-capabilities: cannot resolve the asset directory: no git root at or above {}. \
+             Run `tm generate capabilities` from inside a trusty-tools checkout or worktree.",
+            start.display()
+        );
+    };
+    let dir = root.join(SKILLS_ASSET_REL);
+    anyhow::ensure!(
+        dir.is_dir(),
+        "tm-capabilities: cannot resolve the asset directory: {} does not exist, so the git root \
+         {} is not a trusty-tools checkout.",
+        dir.display(),
+        root.display()
+    );
+    Ok(dir)
 }
 
 /// Write every generated file to disk under `root`.
 ///
 /// Why: the non-`--check` path — regenerating and committing the output is
 /// how a maintainer picks up a new CLI command, MCP tool, agent, or skill.
-/// `root` is injected (rather than hard-coding [`skills_asset_dir`]) so tests
+/// `root` is injected (rather than resolved here) so tests
 /// can point this at a temp directory instead of mutating the real committed
 /// assets on every `cargo test` run.
 /// What: creates parent directories as needed (the `references/` subtree
@@ -117,7 +144,8 @@ pub(crate) fn diff(set: &GeneratedSet, root: &Path) -> Vec<String> {
         match std::fs::read_to_string(&target) {
             Ok(existing) if &existing == content => {}
             Ok(_) => drifted.push(format!("{rel_path} (content differs)")),
-            Err(_) => drifted.push(format!("{rel_path} (missing)")),
+            // #7776: name the path read, so a wrong root is visible as one.
+            Err(_) => drifted.push(format!("{rel_path} (not found at {})", target.display())),
         }
     }
     drifted
@@ -128,14 +156,26 @@ pub(crate) fn diff(set: &GeneratedSet, root: &Path) -> Vec<String> {
 /// Why: `commands::generate::generate` (the thin CLI handler) delegates here
 /// so the generation engine stays independently unit-testable without
 /// clap/anyhow plumbing in every submodule.
-/// What: without `check`, writes the freshly generated set and reports the
-/// file count. With `check`, diffs instead of writing and returns an error
-/// (non-zero exit) listing every drifted file when the set is not clean.
+/// What: resolves the asset directory from the current directory's git root
+/// ([`resolve_skills_asset_dir`], #7776), then [`run_capabilities_in`].
 /// Test: exercised end-to-end by `scripts/check_capabilities.sh` against the
 /// committed output; unit coverage is per-submodule + [`diff`]/[`write`](crate::generate::write).
 pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("tm-capabilities: cannot read the current directory: {e}"))?;
+    run_capabilities_in(&cwd, check)
+}
+
+/// [`run_capabilities`] against an explicit starting directory.
+///
+/// What: without `check`, writes the freshly generated set under the checkout
+/// holding `start` and reports the file count. With `check`, diffs instead of
+/// writing and returns an error (non-zero exit) listing every drifted file when
+/// the set is not clean.
+/// Test: `check_reads_the_checkout_holding_the_cwd_7776`.
+pub(crate) fn run_capabilities_in(start: &Path, check: bool) -> anyhow::Result<()> {
     let set = generate();
-    let root = skills_asset_dir();
+    let root = resolve_skills_asset_dir(start)?;
     if check {
         let drifted = diff(&set, &root);
         if drifted.is_empty() {
@@ -160,8 +200,9 @@ pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
     } else {
         write(&set, &root)?;
         println!(
-            "tm-capabilities: wrote {} generated files under crates/trusty-mpm/src/assets/skills/tm-capabilities*",
-            set.len()
+            "tm-capabilities: wrote {} generated files under {}/tm-capabilities*",
+            set.len(),
+            root.display()
         );
         Ok(())
     }
@@ -208,7 +249,67 @@ mod tests {
         set.insert("tm-capabilities/whatever.md", "content".to_string());
         let drifted = diff(&set, tmp.path());
         assert_eq!(drifted.len(), 1);
-        assert!(drifted[0].contains("missing"), "{drifted:?}");
+        assert!(drifted[0].contains("not found at"), "{drifted:?}");
+    }
+
+    /// A checkout root under `root`: a `.git` entry — a directory, or the file
+    /// a worktree carries — plus the skills asset directory.
+    fn fake_checkout(root: &Path, git_is_file: bool) {
+        std::fs::create_dir_all(root.join(SKILLS_ASSET_REL)).expect("asset dir");
+        if git_is_file {
+            std::fs::write(root.join(".git"), "gitdir: /elsewhere\n").expect(".git file");
+        } else {
+            std::fs::create_dir_all(root.join(".git")).expect(".git dir");
+        }
+    }
+
+    /// Why (#7776): a worktree nested in a main checkout, entered from a
+    /// subdirectory, resolves to ITS OWN assets — not the enclosing checkout's
+    /// and not the build checkout baked in at compile time.
+    #[test]
+    fn resolves_the_cwd_git_root_not_the_build_checkout_7776() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main = tmp.path().join("trusty-tools");
+        let worktree = main.join(".claude/worktrees/agent-x");
+        fake_checkout(&main, false);
+        fake_checkout(&worktree, true);
+
+        let resolved =
+            resolve_skills_asset_dir(&worktree.join("crates/trusty-mpm/src")).expect("worktree");
+        assert_eq!(resolved, worktree.join(SKILLS_ASSET_REL));
+        assert_eq!(
+            resolve_skills_asset_dir(&main.join("crates")).expect("main checkout"),
+            main.join(SKILLS_ASSET_REL)
+        );
+    }
+
+    /// Why (#7776): `--check` must judge the checkout it runs in. An empty
+    /// asset directory there fails, naming that path — the build checkout's
+    /// clean files must not answer for it.
+    #[test]
+    fn check_reads_the_checkout_holding_the_cwd_7776() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("wt");
+        fake_checkout(&worktree, true);
+
+        let err = run_capabilities_in(&worktree, true).expect_err("nothing generated there yet");
+        assert!(err.to_string().contains("drift check failed"), "{err:#}");
+
+        run_capabilities_in(&worktree, false).expect("write into the worktree");
+        run_capabilities_in(&worktree, true).expect("a clean worktree passes --check");
+    }
+
+    /// Why (#7776): a directory the resolver cannot place is a path error that
+    /// says so, never seven "(missing)" drift lines.
+    #[test]
+    fn unresolvable_asset_root_is_a_path_error_7776() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("not-a-repo");
+        std::fs::create_dir_all(bare.join(".git")).expect(".git");
+        let err = resolve_skills_asset_dir(&bare).expect_err("no asset dir");
+        let msg = err.to_string();
+        assert!(msg.contains("cannot resolve the asset directory"), "{msg}");
+        assert!(msg.contains(SKILLS_ASSET_REL), "{msg}");
     }
 
     #[test]

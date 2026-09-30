@@ -1,0 +1,173 @@
+# status-lifecycle.yaml — the built-in `status:*` issue lifecycle (#8609).
+#
+# Why this file exists: a repo that documents the `status:*` lifecycle in its
+# TICKETING.md but ships no `issue-state.yaml` had `tm issue transition N
+# status:in-progress` rejected against the Unicorn Factory default. This copy of
+# the trusty-tools repo-root `issue-state.yaml` is compiled into `tm` and used
+# by `tm issue transition` when no model file is found and the target state is
+# one of these, not a Unicorn Factory state. See
+# crates/trusty-mpm/src/bin/tm/commands/issue/config.rs. The model below must
+# stay identical to the repo-root file; `status_lifecycle_matches_the_repo_model_8609`
+# fails when they drift.
+#
+# What it encodes: CLAUDE.md's "Issue lifecycle — open → in-progress → coded →
+# merged → tested → closed". The four `status:*` labels are MUTUALLY EXCLUSIVE:
+# `tm issue transition` performs the add+remove as ONE `gh issue edit`, so an
+# issue can never carry two of them.
+#
+# State names are the label names for the four labeled states, so
+# `tm issue transition 1234 status:merged` reads the same as the label it sets.
+# `open` and `closed` carry no label: `open` is the absence of every `status:*`
+# label, `closed` is GitHub's own closed state.
+
+version: 1
+
+# This repo has no ownership (`unicorn`) or blast-radius label family — only the
+# lifecycle prefix. The unused prefixes are empty rather than invented.
+label_config:
+  base: ""
+  approved: ""
+  blast_prefix: ""
+  status_prefix: "status:"
+
+states:
+
+  # No `status:*` label. A freshly-filed issue is here, and so is one whose
+  # claim was released.
+  - name: open
+    gh_state: open
+    order: 0
+
+  - name: "status:in-progress"
+    label:
+      name: "status:in-progress"
+      color: "1D76DB"
+      description: "A session/agent has claimed it and is actively working it"
+    order: 1
+
+  - name: "status:coded"
+    label:
+      name: "status:coded"
+      color: "5319E7"
+      description: "Implementation pushed on a branch; PR not yet merged"
+    order: 2
+
+  - name: "status:merged"
+    label:
+      name: "status:merged"
+      color: "0E8A16"
+      description: "PR merged to main; live verification pending"
+    order: 3
+
+  - name: "status:tested"
+    label:
+      name: "status:tested"
+      color: "C2E0C6"
+      description: "Verified live (installed binary / real run); eligible to close"
+    order: 4
+
+  # GitHub's closed state. Not terminal: a closed issue can be reopened.
+  - name: closed
+    gh_state: closed
+    order: 5
+
+transitions:
+
+  # --- forward: one rung at a time -----------------------------------------
+  - from: open
+    to: "status:in-progress"
+    trigger: executor_start
+    description: "Claimed at dispatch; comment naming the session and date"
+
+  - from: "status:in-progress"
+    to: "status:coded"
+    trigger: executor_complete
+    description: "Implementation pushed on a branch"
+
+  - from: "status:coded"
+    to: "status:merged"
+    trigger: executor_complete
+    description: "PR squash-merged to main"
+
+  - from: "status:merged"
+    to: "status:tested"
+    trigger: human_label
+    description: "Live verification passed"
+
+  - from: "status:tested"
+    to: closed
+    trigger: human_label
+    # CLAUDE.md: a rung 4-6 fix closes from status:tested, WITH live-verification
+    # evidence in the closing comment. `--note` is that evidence and is required.
+    requires_note: true
+    description: "Rung 4-6: closed with live-verification evidence (--note required)"
+
+  # --- closing early: evidence is still required ----------------------------
+  # #7647: only `status:tested -> closed` existed, so CLAUDE.md's rung 1-3
+  # close-at-merge rule and every administrative fold had to fall back to a bare
+  # `gh issue close`, which leaves no audit comment and no state label removal.
+  # Every edge below carries `requires_note: true`: closing early changes WHAT
+  # the evidence is, never WHETHER evidence is required.
+  - from: "status:coded"
+    to: closed
+    trigger: human_label
+    requires_note: true
+    description: "Rung 1-3: closed at merge, evidence is the PR and squash SHA (--note required)"
+
+  - from: "status:merged"
+    to: closed
+    trigger: human_label
+    requires_note: true
+    description: "Docs-only/rung 1-3: closed on merged-text evidence, no live run needed (--note required)"
+
+  - from: "status:in-progress"
+    to: closed
+    trigger: human_label
+    requires_note: true
+    description: "Abandoned mid-claim: closed with the reason the work stopped (--note required)"
+
+  - from: open
+    to: closed
+    trigger: human_label
+    requires_note: true
+    description: "Administrative fold: duplicate, obsolete, or won't-fix (--note required)"
+
+  # --- backward: a merged fix that did not hold ----------------------------
+  # Owner ruling 2026-09-07: live verification failed and a follow-up fix PR is
+  # open, so the issue is being coded again rather than sitting at `merged`.
+  - from: "status:merged"
+    to: "status:coded"
+    trigger: human_label
+    description: "Live verification failed; a follow-up fix PR is open"
+
+  # --- back to open: release a claim, or reopen ----------------------------
+  - from: "status:in-progress"
+    to: open
+    trigger: human_label
+    description: "Release a claim — the session is gone and nothing has moved"
+
+  - from: "status:coded"
+    to: open
+    trigger: human_label
+    description: "Reopened: the coded work was abandoned or reverted"
+
+  - from: "status:merged"
+    to: open
+    trigger: human_label
+    description: "Reopened: a merged fix that failed live verification stays open"
+
+  - from: "status:tested"
+    to: open
+    trigger: human_label
+    description: "Reopened: the live verification was later invalidated"
+
+  - from: closed
+    to: open
+    trigger: human_label
+    description: "Reopened: back to no status label"
+
+assignee_model:
+  # `tm issue` never touches assignees in this repo — the claim is recorded by
+  # the `status:in-progress` label plus the dispatch comment.
+  strategy: unchanged
+  per_state: {}

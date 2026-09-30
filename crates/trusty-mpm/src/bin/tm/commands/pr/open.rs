@@ -141,32 +141,7 @@ impl Preflight for RealPreflight {
     }
 
     fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict> {
-        let root = repo_root()?;
-        // #7747: the script takes `--base` and always diffs it against the
-        // checkout's HEAD — it has no `--head` of its own. A named head that
-        // resolves to a DIFFERENT commit therefore cannot be judged here, and
-        // saying `Pass` about the checkout instead would clear a source PR
-        // against a diff it does not contain (#7282 round 5).
-        if !head_is_checkout(&root, head) {
-            return Ok(ChangelogVerdict::HeadElsewhere);
-        }
-        let script = root.join("scripts/check_changelog_fragment.sh");
-        if !script.exists() {
-            return Ok(ChangelogVerdict::Skipped);
-        }
-        let out = std::process::Command::new("bash")
-            .arg(&script)
-            .arg("--base")
-            .arg(format!("origin/{base}"))
-            .current_dir(&root)
-            .output()
-            .with_context(|| format!("cannot run {}", script.display()))?;
-        if out.status.success() {
-            return Ok(ChangelogVerdict::Pass);
-        }
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        Ok(ChangelogVerdict::Fail(text.trim().to_string()))
+        changelog_gate_at(&repo_root()?, base, head)
     }
 
     fn base_freshness(
@@ -214,6 +189,52 @@ impl Preflight for RealPreflight {
     fn ownership(&self) -> CrateOwnership {
         CrateOwnership::resolve(std::env::current_dir().ok().as_deref())
     }
+}
+
+/// The changelog-fragment gate, run in the checkout at `root`.
+///
+/// Why: the verdict decides whether `tm pr open` may call `gh`, and a repo
+/// with no gate script has nothing to judge — neither the checkout's HEAD nor
+/// a `--head` standing elsewhere (#8145).
+/// What: [`ChangelogVerdict::Skipped`] when `root` has no
+/// `scripts/check_changelog_fragment.sh`; else `HeadElsewhere` when `head` is
+/// not the checkout's commit; else the script's own pass/fail over
+/// `origin/<base>`.
+/// Test: `pr_8145_a_repo_without_the_gate_script_skips_for_any_head`,
+/// `pr_8145_the_script_still_refuses_a_head_elsewhere`.
+pub(crate) fn changelog_gate_at(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> anyhow::Result<ChangelogVerdict> {
+    // #8145: the script's absence is asked FIRST. A repo without it skipped
+    // the gate only when `--head` was the checkout; any other head was refused
+    // with a message about a script the repo does not have.
+    let script = root.join("scripts/check_changelog_fragment.sh");
+    if !script.exists() {
+        return Ok(ChangelogVerdict::Skipped);
+    }
+    // #7747: the script takes `--base` and always diffs it against the
+    // checkout's HEAD — it has no `--head` of its own. A named head that
+    // resolves to a DIFFERENT commit therefore cannot be judged here, and
+    // saying `Pass` about the checkout instead would clear a source PR
+    // against a diff it does not contain (#7282 round 5).
+    if !head_is_checkout(root, head) {
+        return Ok(ChangelogVerdict::HeadElsewhere);
+    }
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--base")
+        .arg(format!("origin/{base}"))
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("cannot run {}", script.display()))?;
+    if out.status.success() {
+        return Ok(ChangelogVerdict::Pass);
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(ChangelogVerdict::Fail(text.trim().to_string()))
 }
 
 /// The `--head` branch, when the caller named a non-blank one.
@@ -593,6 +614,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
                 eprintln!("\nrequired body skeleton — paste this and fill each section:\n");
                 eprintln!("{skeleton}");
             }
+            // #8467: name the full opt-out wherever the contract is what failed.
+            if let Some(hint) = minimal_hint(&failures, args.minimal) {
+                eprintln!("\n{hint}");
+            }
             return Ok(EXIT_CHECK_FAILED);
         }
     };
@@ -705,6 +730,24 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
         .iter()
         .any(|f| f.starts_with(body::MISSING_FIELD_PREFIX))
         .then(body::skeleton)
+}
+
+/// The `--minimal` opt-out, named when the nine-field contract failed (#8467).
+///
+/// Why: the agents in #8467's reports never passed `--minimal` — the refusal
+/// named each heading and printed the skeleton, but not the one flag that drops
+/// all nine. Each fell back to `gh pr create`, losing the footer, `Refs`/`Closes`
+/// and changelog checks this command exists to run.
+/// What: a hint when any failure line is a contract gap
+/// ([`body::is_contract_gap`]) and `--minimal` was not passed; else `None`.
+/// Test: `pr_8467_a_contract_gap_names_the_minimal_opt_out`.
+pub(crate) fn minimal_hint(failures: &[String], minimal: bool) -> Option<&'static str> {
+    (!minimal && failures.iter().any(|f| body::is_contract_gap(f))).then_some(
+        "a small docs PR, or a project whose CLAUDE.md names a different PR-body standard, \
+         may pass --minimal: it drops all nine headings, `## Gates not run` and \
+         `## Partial-red accounting` included. The attribution footer, the closing-keyword \
+         ban and the changelog gate still apply.",
+    )
 }
 
 /// The PR URL `gh pr create` printed, when its stdout carries a parsable one.

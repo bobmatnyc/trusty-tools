@@ -30,6 +30,18 @@ use serde::{Deserialize, Serialize};
 pub(crate) const DEFAULT_MODEL_YAML: &str =
     include_str!("../../../../../examples/issue-state/unicorn-factory.yaml");
 
+/// The embedded `status:*` lifecycle — open → in-progress → coded → merged →
+/// tested → closed (#8609).
+///
+/// Why: a repo whose TICKETING.md documents this lifecycle but ships no
+/// `issue-state.yaml` had every `status:*` target rejected by the Unicorn
+/// Factory default. [`builtin_for_target`] selects this model instead.
+/// What: the contents of `examples/issue-state/status-lifecycle.yaml`, a copy
+/// of the trusty-tools repo-root `issue-state.yaml`.
+/// Test: `status_lifecycle_matches_the_repo_model_8609`.
+pub(crate) const STATUS_LIFECYCLE_YAML: &str =
+    include_str!("../../../../../examples/issue-state/status-lifecycle.yaml");
+
 /// The only schema version this build understands.
 ///
 /// Why: load-time version gating lets a future breaking schema change be
@@ -313,6 +325,12 @@ pub(crate) enum ModelSource {
         /// The directory [`discover_upward`] searched from.
         searched_from: PathBuf,
     },
+    /// No file was found or configured, and the transition target named a
+    /// state of the built-in `status:*` lifecycle (#8609).
+    EmbeddedStatusLifecycle {
+        /// The directory [`discover_upward`] searched from.
+        searched_from: PathBuf,
+    },
 }
 
 /// One line naming the model in force, for a verb's output or error (#7580).
@@ -333,7 +351,50 @@ pub(crate) fn describe_source(source: &ModelSource) -> String {
              `--config <repo-root>/{CONFIG_BASENAME}` (#7580)",
             searched_from.display()
         ),
+        ModelSource::EmbeddedStatusLifecycle { searched_from } => format!(
+            "state model: the BUILT-IN `status:*` lifecycle (open → status:in-progress → \
+             status:coded → status:merged → status:tested → closed) — no `{CONFIG_BASENAME}` was \
+             found from {} up to the git toplevel, and the target names one of its states (#8609)",
+            searched_from.display()
+        ),
     }
+}
+
+/// Pick the built-in model a transition's target belongs to (#8609).
+///
+/// Why: the Unicorn Factory default is the only built-in model every other
+/// verb uses, and its state names never overlap the `status:*` lifecycle's. A
+/// target the default does not know but the lifecycle does can therefore only
+/// mean the lifecycle — the one TICKETING.md documents.
+/// What: returns `loaded` unchanged unless its source is
+/// [`ModelSource::EmbeddedDefault`], the target is not one of its states, and
+/// the target IS a state of [`STATUS_LIFECYCLE_YAML`]; then returns that
+/// validated model as [`ModelSource::EmbeddedStatusLifecycle`]. A model read
+/// from a file is never replaced.
+/// Test: `builtin_for_target_selects_the_status_lifecycle_8609`,
+/// `builtin_for_target_keeps_a_file_model_and_unicorn_targets_8609`.
+pub(crate) fn builtin_for_target(
+    loaded: (StateModel, ModelSource),
+    to: &str,
+) -> anyhow::Result<(StateModel, ModelSource)> {
+    let (model, source) = loaded;
+    let ModelSource::EmbeddedDefault { searched_from } = &source else {
+        return Ok((model, source));
+    };
+    if model.states.iter().any(|s| s.name == to) {
+        return Ok((model, source));
+    }
+    let lifecycle: StateModel = serde_yaml::from_str(STATUS_LIFECYCLE_YAML)
+        .map_err(|e| anyhow::anyhow!("failed to parse the built-in status:* lifecycle: {e}"))?;
+    if !lifecycle.states.iter().any(|s| s.name == to) {
+        return Ok((model, source));
+    }
+    super::validate::validate_model(&lifecycle)?;
+    let searched_from = searched_from.clone();
+    Ok((
+        lifecycle,
+        ModelSource::EmbeddedStatusLifecycle { searched_from },
+    ))
 }
 
 /// Resolve which config path to load, by precedence (RFC §6).
