@@ -709,8 +709,14 @@ pub fn resolve_gh_account_env(
 /// `GET /user`, and a pinned project whose identity task panicked, are the
 /// exceptions to "empty" — see [`pinned_spawn_env`] and [`joined_spawn_vars`],
 /// which fail that session's `gh` closed instead. #8914: so are records that
-/// pin disagreeing identities and a registry that cannot be read.
+/// pin disagreeing identities and a registry that cannot be read. #8934: so is
+/// a git work tree with no `origin`, which gets
+/// [`crate::core::remote_mode::local_only_spawn_vars`] — gh cannot run at all
+/// unless the root is the allow-listed supervisor — and an origin git cannot
+/// read, which gets the nobody token.
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`,
+/// `a_local_only_repo_spawns_with_gh_disabled`,
+/// `an_unreadable_origin_spawns_with_the_nobody_token`,
 /// `disagreeing_pins_spawn_with_the_nobody_token`,
 /// `an_unreadable_registry_spawns_with_the_nobody_token`
 /// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
@@ -719,26 +725,27 @@ pub async fn resolve_gh_account_env_for_registry(
     registry: &crate::project::ProjectRegistry,
     cwd: &std::path::Path,
 ) -> Vec<(String, String)> {
+    use crate::core::remote_mode::{RemoteMode, remote_mode};
     let cwd_for_origin = cwd.to_path_buf();
-    let probe = tokio::task::spawn_blocking(move || {
-        crate::daemon::managed_routes::inproject::get_origin_url(&cwd_for_origin)
-    })
-    .await;
-    // #4734: still fail-open (see the doc above), but a git failure is now
-    // reported rather than being indistinguishable from "no origin remote".
+    let probe = tokio::task::spawn_blocking(move || remote_mode(&cwd_for_origin)).await;
+    // #4734: a git failure is reported, never read as "no origin remote".
     let origin = match probe {
-        Ok(Ok(origin)) => origin,
+        Ok(Ok(RemoteMode::Origin(origin))) => origin,
+        // #8934: no origin is an explicit "no gh" pin, never the active
+        // account — except for the allow-listed supervisor (07:47Z ruling).
+        Ok(Ok(RemoteMode::LocalOnly { root })) => {
+            let config = crate::core::config::MpmConfig::load_default();
+            return crate::core::remote_mode::local_only_spawn_vars(&root, &config);
+        }
+        // #8934: an unreadable remote proves no identity; gh fails closed.
         Ok(Err(e)) => {
             tracing::warn!(
                 cwd = %cwd.display(),
-                "cannot read git origin remote; spawning without a pinned gh_account: {e}"
+                "cannot read git origin remote; the session's gh authenticates as nobody: {e}"
             );
-            None
+            return crate::core::gh_account_proof::identity_token_vars(None);
         }
-        Err(_) => None,
-    };
-    let Some(origin) = origin else {
-        return Vec::new();
+        Ok(Ok(RemoteMode::NotARepository)) | Err(_) => return Vec::new(),
     };
 
     // #8914 HIGH 2: a registry that cannot name one pin fails the session's gh

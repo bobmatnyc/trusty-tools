@@ -342,6 +342,126 @@ fn fleet_status_names_why_this_session_is_not_bound() {
     assert!(!report.complete);
 }
 
+/// #8938: the status walk from `tm fleet status` (PID 100) over `rows`, in the
+/// shape of the hook's `anchor::table`: a PID's start time is `pid * 10`, and
+/// a PID absent from `rows` is a table read error.
+fn status_table(
+    rows: Vec<crate::commands::pm_guard_trust_anchor::tests::Row>,
+) -> crate::commands::pm_guard_trust_anchor::ClaudeLookup {
+    use trusty_mpm::core::twin_arming;
+    crate::commands::pm_guard_trust_anchor::ClaudeLookup::new(move || {
+        let find = |pid: u32| {
+            rows.iter()
+                .find(|row| row.0 == pid)
+                .copied()
+                .ok_or_else(|| format!("no pid {pid}"))
+        };
+        twin_arming::nearest_claude_for_status_in(
+            100,
+            |pid| {
+                find(pid).map(|row| twin_arming::ProcessFacts {
+                    parent: row.1,
+                    start_time: u64::from(pid) * 10,
+                })
+            },
+            |pid| find(pid).map(|row| row.2),
+        )
+    })
+}
+
+/// #8938: from the Architect's Bash tool, `tm launcher → claude → zsh → tm
+/// fleet status`, the bound Architect reads as bound. The hook's one-hop
+/// lookup over the same table does not reach it, which is the reported bug.
+#[test]
+fn this_session_reaches_claude_through_the_bash_shell() {
+    use crate::commands::pm_guard_architect_reason::NotArchitect;
+    use crate::commands::pm_guard_trust_anchor::HookEnv;
+    use crate::commands::pm_guard_trust_anchor::tests as anchor;
+    use trusty_mpm::core::architect_launch::LaunchRefusal;
+
+    let fx = anchor::fixture();
+    let granted = || anchor::allowlist(&fx);
+    // tm fleet status 100 → zsh 90 → Architect claude 60 → tm launcher 50.
+    let rows = vec![
+        (100, Some(90), false),
+        (90, Some(anchor::ARCHITECT.pid), false),
+        (anchor::ARCHITECT.pid, Some(50), true),
+        (50, Some(1), false),
+    ];
+    let from_bash = |claude| HookEnv {
+        project_dir: None,
+        claude,
+        ..anchor::architect_env(&fx)
+    };
+    let bound =
+        status::this_session_check(&fx.project, from_bash(status_table(rows.clone())), granted);
+    assert!(bound.ok, "{}", bound.detail);
+    let one_hop = status::this_session_check(&fx.project, from_bash(anchor::table(rows)), granted);
+    let why = NotArchitect::Launch(LaunchRefusal::NoClaudeAncestor).to_string();
+    assert!(!one_hop.ok);
+    assert!(one_hop.detail.ends_with(&why), "{}", one_hop.detail);
+}
+
+/// #8938: the status walk stops at the FIRST `claude`, gives up after three
+/// hops, and never steps past a process it cannot identify — so a session
+/// nested under the Architect is never read as the Architect.
+#[test]
+fn a_nested_claude_under_the_architect_is_not_this_session() {
+    use crate::commands::pm_guard_architect_reason::NotArchitect;
+    use crate::commands::pm_guard_trust_anchor::HookEnv;
+    use crate::commands::pm_guard_trust_anchor::tests as anchor;
+    use trusty_mpm::core::architect_launch::LaunchRefusal;
+
+    let fx = anchor::fixture();
+    let granted = || anchor::allowlist(&fx);
+    let architect = anchor::ARCHITECT.pid;
+    let check = |rows| {
+        let env = HookEnv {
+            project_dir: None,
+            claude: status_table(rows),
+            ..anchor::architect_env(&fx)
+        };
+        status::this_session_check(&fx.project, env, granted)
+    };
+    let cases = [
+        // 100 → zsh 95 → nested claude 80 → zsh 70 → Architect claude: the
+        // nested claude is found first, and tm launched no record for it.
+        (
+            vec![
+                (100, Some(95), false),
+                (95, Some(80), false),
+                (80, Some(70), true),
+                (70, Some(architect), false),
+                (architect, Some(1), true),
+            ],
+            LaunchRefusal::NoLaunchRecord,
+        ),
+        // A nested runtime not named claude: 100 → zsh 95 → node 80 → zsh 70
+        // → Architect claude is four hops up, past the limit.
+        (
+            vec![
+                (100, Some(95), false),
+                (95, Some(80), false),
+                (80, Some(70), false),
+                (70, Some(architect), false),
+                (architect, Some(1), true),
+            ],
+            LaunchRefusal::NoClaudeAncestor,
+        ),
+        // 100 → 90, which the table cannot identify → Architect claude.
+        (
+            vec![(100, Some(90), false), (architect, Some(1), true)],
+            LaunchRefusal::ProcessLookup,
+        ),
+    ];
+    for (rows, refusal) in cases {
+        let got = check(rows);
+        let why = NotArchitect::Launch(refusal).to_string();
+        assert!(!got.ok, "{}", got.detail);
+        assert!(got.detail.ends_with(&why), "{}", got.detail);
+    }
+}
+
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
 /// The two Architect-only skills, as shipped.

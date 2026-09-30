@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.36.2] — 2026-09-30
+## [0.37.0] — 2026-09-30
 
 ### Fixed
 
@@ -22,14 +22,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - With verification disabled by config, findings are still posted, and the body leads with "N findings not verified: verification is disabled". The verdict and grade are unchanged, and because disabling is an operator choice, these findings are not counted in `unverified_count` (#8904).
 - The line-citation gate now runs before the verifier, so a finding dropped for its citation costs no verifier call (#8904).
 - Findings are verified in batches, several per verifier request (`[verification] batch_size`, `TRUSTY_REVIEW_VERIFY_BATCH_SIZE`, default 4). Each review makes at most `[verification] max_calls` requests (`TRUSTY_REVIEW_VERIFY_MAX_CALLS`, default 8), and the highest-impact findings are verified first. On the map-reduce path each request carries only the diff sections of its findings' files (#8904).
-- A posted finding now cites a `file:line` that holds the code it describes. After the verifier and before posting, a deterministic gate checks each finding's line, and each `[code: path:line]` citation, against the code the finding quotes (every quoted snippet must be in the file) or, when it quotes none, the identifiers it names. Only new-side line numbers count; code on a removed line counts at the new-side position of the deletion. A citation whose code occurs exactly once elsewhere in the file moves there, recorded in the finding's `citation_correction` field. Any other finding is dropped: its code is not in the file, the code is ambiguous, the line is past the file's last diffed line, it quotes and names no code, or its file cannot be read. Every drop and move is logged and counted (#8905).
+- A posted finding now cites a `file:line` that holds the code it describes. Before the verifier runs, a deterministic gate checks each finding's line, and each `[code: path:line]` citation, against the code the finding quotes (every quoted snippet must be in the file) or, when it quotes none, the identifiers it names. Only new-side line numbers count; code on a removed line counts at the new-side position of the deletion. A citation whose code occurs exactly once elsewhere in the file moves there, recorded in the finding's `citation_correction` field. Any other finding is dropped: its code is not in the file, the code is ambiguous, the line is past the file's last diffed line, it quotes and names no code, or its file cannot be read. Every drop and move is logged and counted (#8905).
 - A review the citation gate empties, or a blocking review whose surviving findings alone would approve, is now UNKNOWN with no grade and leads with "N findings withheld: citation unverifiable", never APPROVE. A dropped finding's `file:line` is removed from the posted body, and the fenced findings JSON is stripped from it (#8905).
 - The reviewer prompt now asks every finding to quote, in backticks, the code at its cited line (#8905).
 
 ### Changed
 
 - Tests: the paused-clock warm-up timeout test runs by default; the live Bedrock test states its reason (refs #8787 audit).
-- `Finding` has a new public field, `citation_correction: Option<CitationCorrection>`. `Finding` is not `#[non_exhaustive]`, so this is a semver-breaking change for any caller that builds a `Finding` with a struct literal; build it with `Finding::new` instead. The JSON form only gains an optional key (#8905).
+- Breaking library API changes. This release is 0.37.0 because of them. None of the structs below is `#[non_exhaustive]`, so a new public field breaks any caller that builds one with a struct literal.
+  - `Finding` has a new public field, `citation_correction: Option<CitationCorrection>`. Build a `Finding` with `Finding::new` instead of a struct literal. The JSON form only gains an optional key (#8905).
+  - `config::constants::VERIFY_CANDIDATE_MIN_CONFIDENCE` is removed. Every finding is now a verification candidate, so there is no threshold to replace it; drop the reference (#8904).
+  - `pipeline::verify::select_candidates` (also re-exported as `pipeline::select_candidates`) no longer takes the `primary_verdict` parameter. Call `select_candidates(findings)` (#8904).
+  - `pipeline::verify::maybe_verify` (also re-exported as `pipeline::maybe_verify`) takes a new `per_file: bool` argument after `diff`, takes `findings: &mut Vec<Finding>` instead of `&mut [Finding]`, and returns `Option<VerifyReport>` instead of `Verdict`. `None` means no round ran. Read the settled verdict from the report, and pass `true` for `per_file` on the map-reduce path (#8904).
+  - `pipeline::verify::run_verification_round_with_policy` takes `findings: &mut Vec<Finding>` and returns `VerifyReport` instead of `Verdict`. Read the verdict from the report (#8904).
+  - New public fields: `ReviewResult::withheld_unverified_count: usize`; `VerificationConfig::max_calls: usize` and `batch_size: usize`; `VerificationFileConfig::max_calls: Option<usize>` and `batch_size: Option<usize>`; `VerifyPolicy::max_calls: usize`, `batch_size: usize` and `per_file: bool`. A caller that builds any of these with a struct literal must set the new fields; `config::verification::DEFAULT_VERIFY_MAX_CALLS` and `DEFAULT_VERIFY_BATCH_SIZE` give the defaults (#8904).
 
 ## [0.36.1] — 2026-09-26
 

@@ -12,6 +12,6 @@
 # Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
 crates/trusty-mpm/src/daemon/api.rs	1176
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	578
+crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	559
 crates/trusty-search/src/main.rs	617
 scripts/check_asset_test_filter.py	677
