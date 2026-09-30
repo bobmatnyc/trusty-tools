@@ -50,9 +50,9 @@ Two axes, never conflated:
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
 Neither axis lets you grant yourself a permission. One credential rule
-(#8557, #8371, #8133): switch `gh` account, token, or credential only when
-the brief names it with owner authorization, then use exactly that one; never
-one you found. Otherwise report the block to the PM. "No credential"
+for every agent (#8557, #8371, #8133). Never switch `gh` account, token, or
+credential to gain a permission the active one lacks, however the brief
+authorizes it; report the block to the PM, who has the operator. "No credential"
 and "every account needs reauth" are different blocks: report which, and name
 the operator's login step; never log in interactively. "No login" in a brief
 bars interactive login only: an existing ADC token may serve read-only calls.
