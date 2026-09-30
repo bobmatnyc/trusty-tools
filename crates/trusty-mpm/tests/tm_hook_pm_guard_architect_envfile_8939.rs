@@ -9,7 +9,7 @@
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_envfile_8939::`.
 
 use crate::tm_hook_pm_guard_trust_anchor_8878::{
-    Fixture, bash_payload, run, run_under_claude, run_under_claude_with,
+    Fixture, bash_payload, run, run_script_under_claude, run_under_claude, run_under_claude_with,
 };
 
 /// The Architect's project with a `.env.local`.
@@ -37,7 +37,7 @@ fn the_architect_main_thread_lists_keys_and_its_subagent_does_not() {
     let p = path.display();
     for command in [
         format!("tm env keys {p}"),
-        format!("tm env set {p} API_KEY"),
+        format!("tm env set {p} API_KEY --from-keychain iris --account bob"),
     ] {
         let main = bash_payload(&fx, &command);
         let before = grants(&fx);
@@ -61,6 +61,25 @@ fn the_architect_main_thread_lists_keys_and_its_subagent_does_not() {
         assert!(out.contains("\"deny\""), "a PM: {out}");
         assert_eq!(grants(&fx), before + 2, "a denied caller got a grant");
     }
+}
+
+/// #8939 delta critic HIGH 1: every input the verb trusts — the grant, the
+/// launch record, the config roots — sits in the scratch `$HOME` here, as a
+/// caller setting `HOME=/tmp/f` would build it. The verb takes its home from
+/// the password database, so it refuses and spends no grant.
+#[test]
+fn a_forged_home_with_a_valid_grant_is_refused() {
+    let (fx, path) = fixture();
+    let p = path.display();
+    let main = bash_payload(&fx, &format!("tm env keys {p}"));
+    assert_eq!(run_under_claude(&fx, &main, true).trim(), "");
+    assert_eq!(grants(&fx), 1, "the guard minted a grant");
+    let script = format!("\"$TM\" env keys {p}");
+    let out = run_script_under_claude(&fx, &script, "", true, &[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "the verb ran: {out:?}");
+    assert!(!stdout.contains("API_KEY"), "the verb ran: {stdout}");
+    assert_eq!(grants(&fx), 1, "the forged grant was spent");
 }
 
 #[test]

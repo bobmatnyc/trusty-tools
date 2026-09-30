@@ -37,10 +37,10 @@ use crate::commands::pm_guard_architect_envfile::EnvfileCall;
 use crate::commands::pm_guard_trust_anchor::ANCHOR_ROOT;
 
 /// The grant directory, under the launch-record anchor.
-const GRANT_DIR: &str = "envfile-grants";
+pub(crate) const GRANT_DIR: &str = "envfile-grants";
 
 /// A grant file's extension; a temp file never carries it.
-const GRANT_EXT: &str = "grant";
+pub(crate) const GRANT_EXT: &str = "grant";
 
 /// How long a grant stays valid after the guard mints it.
 pub(crate) const GRANT_TTL: Duration = Duration::from_secs(60);

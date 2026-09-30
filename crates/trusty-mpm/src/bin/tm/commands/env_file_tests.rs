@@ -21,38 +21,33 @@ use crate::commands::pm_guard_trust_anchor::tests::{
 /// A value no output or error may carry.
 const VALUE: &str = "s3cr3t-VALUE";
 
-/// A Keychain holding one item, `iris`/`bob`.
-struct FakeKeychain;
+/// A Keychain holding one item, `iris`/`bob`, whose password is `.0`.
+struct FakeKeychain<'a>(&'a str);
 
-impl Keychain for FakeKeychain {
+impl Keychain for FakeKeychain<'_> {
     fn password(&self, service: &str, account: &str) -> anyhow::Result<String> {
         if (service, account) == ("iris", "bob") {
-            return Ok("from-keychain".to_owned());
+            return Ok(self.0.to_owned());
         }
         bail!("tm env set: no login-Keychain item for service `{service}`, account `{account}`")
     }
 }
 
-/// [`run_with`] with `stdin` piped in: the result and stdout.
+/// [`run_with`] with the `iris`/`bob` item holding `value`: the result and
+/// stdout.
 fn run_as(
     fx: &Fixture,
     env: HookEnv,
     action: EnvAction,
-    stdin: &str,
+    value: &str,
 ) -> (anyhow::Result<()>, String) {
-    let mut input = stdin.as_bytes();
     let mut out = Vec::new();
-    let sources = Sources {
-        stdin: &mut input,
-        stdin_is_tty: false,
-        keychain: &FakeKeychain,
-    };
     let result = run_with(
         action,
         env,
         || allowlist(fx),
         &fx.project,
-        sources,
+        &FakeKeychain(value),
         &mut out,
     );
     (result, String::from_utf8(out).expect("utf-8"))
@@ -92,9 +87,9 @@ fn grant(fx: &Fixture, action: &EnvAction) -> bool {
 }
 
 /// [`run_as`] as the Architect's main thread: the guard grants first.
-fn run_granted(fx: &Fixture, action: EnvAction, stdin: &str) -> (anyhow::Result<()>, String) {
+fn run_granted(fx: &Fixture, action: EnvAction, value: &str) -> (anyhow::Result<()>, String) {
     grant(fx, &action);
-    run_as(fx, architect_env(fx), action, stdin)
+    run_as(fx, architect_env(fx), action, value)
 }
 
 /// `path` as the shared policy places it for the Architect.
@@ -112,7 +107,7 @@ fn keys(path: &Path) -> EnvAction {
 }
 
 fn set(path: &Path, key: &str) -> EnvAction {
-    set_with(path, key, None, Vec::new())
+    set_with(path, key, Some(("iris", "bob")), Vec::new())
 }
 
 /// `tm env set` with a Keychain `(service, account)` and extra arguments.
@@ -282,7 +277,7 @@ fn env_set_replaces_in_place_and_creates_0600() {
 fn env_set_never_echoes_the_value_on_success_or_error() {
     let fx = fixture();
     let path = fx.project.join(".env.local");
-    let (result, out) = run_granted(&fx, set(&path, "API_KEY"), &format!("{VALUE}\n"));
+    let (result, out) = run_granted(&fx, set(&path, "API_KEY"), VALUE);
     result.expect("set");
     assert_eq!(out, "set API_KEY (added)\n");
     let link = fx.project.join(".env.link");
@@ -329,47 +324,64 @@ fn env_set_refuses_the_value_in_argv() {
 }
 
 #[test]
-fn env_set_reads_the_value_from_stdin_or_the_keychain() {
+fn env_set_reads_the_value_from_the_keychain_only() {
     let fx = fixture();
     let path = fx.project.join(".env.local");
-    run_granted(&fx, set(&path, "K"), "v1\r\n")
-        .0
-        .expect("stdin");
-    assert_eq!(std::fs::read_to_string(&path).expect("read"), "K=v1\n");
     let keychain = |service: &str| set_with(&path, "K", Some((service, "bob")), Vec::new());
-    run_granted(&fx, keychain("iris"), "ignored\n")
+    run_granted(&fx, keychain("iris"), "from-keychain")
         .0
         .expect("keychain");
     assert_eq!(
         std::fs::read_to_string(&path).expect("read"),
         "K=from-keychain\n"
     );
-    assert!(run_granted(&fx, keychain("absent"), "").0.is_err());
-    assert!(
-        run_granted(&fx, set(&path, "K"), "").0.is_err(),
-        "empty stdin"
-    );
-    let mut input: &[u8] = b"v\n";
-    let tty = Sources {
-        stdin: &mut input,
-        stdin_is_tty: true,
-        keychain: &FakeKeychain,
-    };
-    let action = set(&path, "K");
-    assert!(grant(&fx, &action), "granted");
-    let result = run_with(
-        action,
-        architect_env(&fx),
-        || allowlist(&fx),
-        &fx.project,
-        tty,
-        &mut Vec::new(),
-    );
-    assert!(result.is_err(), "a terminal is refused");
+    assert!(run_granted(&fx, keychain("absent"), "v").0.is_err());
+    assert!(run_granted(&fx, set(&path, "K"), "").0.is_err(), "empty");
     assert_eq!(
         std::fs::read_to_string(&path).expect("read"),
         "K=from-keychain\n"
     );
+}
+
+/// #8939 delta critic MEDIUM: the stdin form gets no grant and is refused.
+#[test]
+fn a_stdin_form_set_gets_no_grant_and_is_refused() {
+    let fx = fixture();
+    let path = write(&fx, ".env.local", "A=1\n");
+    let stdin_form = set_with(&path, "K", None, Vec::new());
+    assert!(grant(&fx, &stdin_form), "the guard still lets the call run");
+    let dir = fx
+        .home
+        .join(ANCHOR_ROOT)
+        .join("architect-launch/envfile-grants");
+    let minted = std::fs::read_dir(&dir).map_or(0, |d| d.count());
+    assert_eq!(minted, 0, "a grant binding no value was minted");
+    let (result, out) = run_as(&fx, architect_env(&fx), stdin_form, VALUE);
+    assert_eq!(
+        format!("{}", result.expect_err("refused")),
+        KEYCHAIN_REQUIRED
+    );
+    assert_eq!(out, "");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "A=1\n");
+}
+
+/// #8939 delta critic HIGH 1: `$HOME` must be the account's home.
+#[test]
+fn the_verb_home_is_the_account_home_and_home_must_match() {
+    let fx = fixture();
+    let real = Some(fx.home.clone());
+    assert_eq!(
+        verb_home(real.clone(), real.clone()).expect("same"),
+        fx.home
+    );
+    let forged = Some(fx.cwd.clone());
+    for (ambient, account) in [
+        (forged, real.clone()),
+        (None, real),
+        (Some(fx.home.clone()), None),
+    ] {
+        assert!(verb_home(ambient, account).is_err());
+    }
 }
 
 /// Architect ruling Q5: the verb checks the binding itself, before any file.
@@ -480,19 +492,13 @@ fn run_counting(
     action: EnvAction,
     keychain: &CountingKeychain,
 ) -> (anyhow::Result<()>, String) {
-    let mut input: &[u8] = b"v\n";
     let mut out = Vec::new();
-    let sources = Sources {
-        stdin: &mut input,
-        stdin_is_tty: false,
-        keychain,
-    };
     let result = run_with(
         action,
         architect_env(fx),
         || allowlist(fx),
         &fx.project,
-        sources,
+        keychain,
         &mut out,
     );
     (result, String::from_utf8(out).expect("utf-8"))

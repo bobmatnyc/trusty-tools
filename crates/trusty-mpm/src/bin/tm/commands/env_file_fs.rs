@@ -23,6 +23,13 @@ use std::path::{Component, Path};
 
 use anyhow::{Context, anyhow, bail};
 
+/// How an ancestor directory is opened: search-only where the platform has
+/// `O_SEARCH`, so the walk needs no read permission on it.
+#[cfg(target_vendor = "apple")]
+const DIR_OPEN: i32 = libc::O_SEARCH;
+#[cfg(not(target_vendor = "apple"))]
+const DIR_OPEN: i32 = libc::O_RDONLY | libc::O_DIRECTORY;
+
 /// The largest env file read.
 const MAX_FILE_BYTES: u64 = 1 << 20;
 
@@ -65,12 +72,12 @@ impl<'a> EnvDir<'a> {
             ),
             _ => anyhow!("tm env: cannot open the directory of {shown}: {e}"),
         };
-        let mut dir = openat(None, c"/", libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(refused)?;
+        let mut dir = openat(None, c"/", DIR_OPEN, 0).map_err(refused)?;
         for component in parent.components() {
             match component {
                 Component::RootDir => {}
                 Component::Normal(part) => {
-                    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+                    let flags = DIR_OPEN | libc::O_NOFOLLOW;
                     dir = openat(Some(&dir), &cstring(part.as_bytes())?, flags, 0)
                         .map_err(refused)?;
                 }

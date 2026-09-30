@@ -220,12 +220,19 @@ pub(crate) fn allow_audit_body(ctx: &DenyContext<'_>, gate: &ArchitectGate<'_>) 
 
 /// Write the one-shot `tm env` grant for the exemption `gate` recorded.
 ///
-/// What: nothing when no exemption was recorded or the home is unknown; a
-/// write error is logged and leaves no grant, so the verb refuses.
+/// What: nothing when no exemption was recorded, the home is unknown, or the
+/// call is a `set` with no `--from-keychain` (a grant would bind no value,
+/// and `tm env` refuses that form); a write error is logged and leaves no
+/// grant, so the verb refuses.
+/// Test: `a_stdin_form_set_gets_no_grant_and_is_refused`.
 pub(crate) fn mint_envfile_grant(gate: &ArchitectGate<'_>) {
     let (Some(call), Some(home)) = (gate.envfile(), gate.env().home.as_deref()) else {
         return;
     };
+    // #8939 delta critic MEDIUM: only a Keychain-sourced `set` is granted.
+    if call.verb == "set" && call.keychain.is_none() {
+        return;
+    }
     if let Err(e) = env_file_grant::mint(home, call) {
         tracing::warn!("tm env grant not written: {e}");
     }

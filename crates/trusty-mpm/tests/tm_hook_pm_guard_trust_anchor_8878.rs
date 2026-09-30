@@ -102,16 +102,21 @@ fn guard_env(fx: &Fixture, cmd: &mut Command, env: &[(&str, &str)], stamp: Optio
 }
 
 /// Write `stdin` to the guard and return its stdout; it must exit 0.
-fn finish(mut child: Child, stdin: &str) -> String {
+fn finish(child: Child, stdin: &str) -> String {
+    let out = output(child, stdin);
+    assert!(out.status.success(), "the guard exits 0: {out:?}");
+    String::from_utf8(out.stdout).expect("utf-8 stdout")
+}
+
+/// Write `stdin` to `child` and wait for its output.
+fn output(mut child: Child, stdin: &str) -> std::process::Output {
     child
         .stdin
         .take()
         .expect("stdin")
         .write_all(stdin.as_bytes())
         .expect("write stdin");
-    let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success(), "the guard exits 0: {out:?}");
-    String::from_utf8(out.stdout).expect("utf-8 stdout")
+    child.wait_with_output().expect("wait")
 }
 
 /// Run the supervisor-stamped guard as the child of a fake `claude` (a
@@ -128,6 +133,21 @@ pub(crate) fn run_under_claude_with(
     recorded: bool,
     env: &[(&str, &str)],
 ) -> String {
+    let hook = "\"$TM\" --url http://127.0.0.1:1 hook --pm-guard";
+    let out = run_script_under_claude(fx, hook, stdin, recorded, env);
+    assert!(out.status.success(), "the guard exits 0: {out:?}");
+    String::from_utf8(out.stdout).expect("utf-8 stdout")
+}
+
+/// `script` (`$TM` is the `tm` binary) as the child of a fake `claude`,
+/// recorded as the Architect's launch when `recorded`; its output, any exit.
+pub(crate) fn run_script_under_claude(
+    fx: &Fixture,
+    script: &str,
+    stdin: &str,
+    recorded: bool,
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let scratch = fx.home.parent().expect("scratch root");
     let fake = scratch.join("claude");
     if !fake.exists() {
@@ -141,14 +161,11 @@ pub(crate) fn run_under_claude_with(
     let go = scratch.join(format!("go-{recorded}-{run}"));
     let mut cmd = Command::new(&fake);
     common::isolate_spawned_tm(&mut cmd, &fx.home);
-    // The shell waits for the record, then runs the guard as its own child.
-    cmd.args([
-        "-c",
-        "while [ ! -e \"$GO\" ]; do sleep 0.05; done; \"$TM\" --url http://127.0.0.1:1 hook \
-         --pm-guard; exit $?",
-    ])
-    .env("GO", &go)
-    .env("TM", common::tm_bin());
+    // The shell waits for the record, then runs `script` as its own child.
+    let wrapped = format!("while [ ! -e \"$GO\" ]; do sleep 0.05; done; {script}; exit $?");
+    cmd.args(["-c", &wrapped])
+        .env("GO", &go)
+        .env("TM", common::tm_bin());
     guard_env(fx, &mut cmd, env, Some("supervisor"));
     let child = cmd
         .stdin(Stdio::piped())
@@ -161,7 +178,7 @@ pub(crate) fn run_under_claude_with(
             .expect("record the fake claude");
     }
     std::fs::write(&go, "").expect("release the fake claude");
-    finish(child, stdin)
+    output(child, stdin)
 }
 
 /// A main-thread `Write` payload targeting `path`.

@@ -15,8 +15,8 @@ use clap::Subcommand;
 pub(crate) enum EnvAction {
     /// Set one key in a dotenv file, never printing its value.
     ///
-    /// The value is read from stdin (a pipe, not a terminal), or from the
-    /// login Keychain with `--from-keychain <service> --account <account>`.
+    /// The value is read only from the login Keychain, with
+    /// `--from-keychain <service> --account <account>`; stdin is refused.
     /// A `KEY=value` argument is refused. Writes atomically with mode 0600
     /// and follows no symlink. Only the bound Architect's main thread may run
     /// it, as its own direct call, on a dotenv file in its scope.

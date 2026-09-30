@@ -2,8 +2,8 @@
 //!
 //! Why: owner ruling item 44 lets the Architect manage a project's env files;
 //! the Architect rulings on the design keep every value out of the
-//! transcript. `set` takes the value from stdin or the login Keychain, never
-//! argv (Q1); `keys` prints names only. Both check the Architect binding
+//! transcript. `set` takes the value from the login Keychain only, never
+//! argv (Q1) or stdin (#8939 delta critic); `keys` prints names only. Both check the Architect binding
 //! themselves (Q5), so a PM that reaches the verb through a script the
 //! lexical guard cannot read is still refused.
 //! What: [`run`] checks the binding as `tm fleet status` does, then the
@@ -19,9 +19,9 @@
 //! Test: `env_file_tests.rs`.
 
 use std::fmt;
-use std::io::{IsTerminal, Read, Write};
+use std::io::Write;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
 use trusty_mpm::core::config::MpmConfig;
@@ -32,29 +32,26 @@ use crate::commands::env_file_grant;
 use crate::commands::fleet::resolve_dir;
 use crate::commands::fleet::status::{this_session_check, this_session_env};
 use crate::commands::pm_guard_architect_envfile::{EnvfileCall, ScopedEnvfile, envfile_policy};
-use crate::commands::pm_guard_trust_anchor::HookEnv;
+use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
 
 /// Refusal for a call the pm-guard did not grant (#8939 fix round).
-const NO_GRANT: &str = "tm env: refused; this call is not proven to be the Architect's main \
-                        thread: the pm-guard grants `tm env` only to the main thread's own \
-                        direct `tm env keys|set` call, once, within a minute";
+const NO_GRANT: &str = "tm env: refused; no pm-guard grant for this exact call. The pm-guard \
+                        grants `tm env` only to the Architect main thread's own direct \
+                        `tm env keys|set` call, once, within a minute; a subagent or indirect \
+                        call gets none, and a grant the guard failed to write, already spent \
+                        or expired also ends here";
 
 /// The longest value `set` writes.
 const MAX_VALUE_BYTES: usize = 64 << 10;
 
 /// Refusal for a value on the command line (Architect ruling Q1).
-const ARGV_REFUSED: &str = "tm env set: the value never goes on the command line; pipe it on \
-                            stdin, or use --from-keychain <service> --account <account>";
+const ARGV_REFUSED: &str = "tm env set: the value never goes on the command line; use \
+                            --from-keychain <service> --account <account>";
 
-/// Where `set` reads a value from.
-pub(crate) struct Sources<'a> {
-    /// The process's stdin.
-    pub(crate) stdin: &'a mut dyn Read,
-    /// Whether stdin is a terminal; a terminal is refused.
-    pub(crate) stdin_is_tty: bool,
-    /// The login Keychain.
-    pub(crate) keychain: &'a dyn Keychain,
-}
+/// Refusal for `set` with no Keychain source (#8939 delta critic MEDIUM):
+/// the guard-approved shape cannot pipe stdin, and a grant binds no value.
+const KEYCHAIN_REQUIRED: &str = "tm env set: the value comes only from the login Keychain; use \
+                                 --from-keychain <service> --account <account>";
 
 /// A generic-password lookup in the login Keychain.
 pub(crate) trait Keychain {
@@ -90,25 +87,51 @@ impl Keychain for LoginKeychain {
 
 /// `tm env set|keys`, for the calling process.
 pub(crate) fn run(action: EnvAction) -> anyhow::Result<()> {
-    let home = dirs::home_dir().context("tm env: the home directory is unknown")?;
-    let architect_dir = resolve_dir(None, &home)?;
-    let stdin = std::io::stdin();
-    let stdin_is_tty = stdin.is_terminal();
-    let sources = Sources {
-        stdin: &mut stdin.lock(),
-        stdin_is_tty,
-        keychain: &LoginKeychain,
+    let account = match nix::unistd::User::from_uid(nix::unistd::Uid::current()) {
+        Ok(Some(user)) if !user.dir.as_os_str().is_empty() => Some(user.dir),
+        _ => None,
     };
-    let env = this_session_env();
+    let home = verb_home(dirs::home_dir(), account)?;
+    let architect_dir = resolve_dir(None, &home)?;
+    let env = HookEnv {
+        home: Some(home.clone()),
+        ..this_session_env()
+    };
+    let root = home.join(ANCHOR_ROOT);
     let out = &mut std::io::stdout();
     run_with(
         action,
         env,
-        MpmConfig::load_default,
+        || MpmConfig::load(&root),
         &architect_dir,
-        sources,
+        &LoginKeychain,
         out,
     )
+}
+
+/// The home `tm env` trusts: the password database's, and `$HOME` must agree.
+///
+/// Why: #8939 delta critic HIGH 1 — the grants, the config roots and the
+/// binding all live under the home, and an indirect caller sets `$HOME`, so
+/// `HOME=/tmp/f tm env …` would read a forged tree built with plain writes.
+/// What: `account` is `getpwuid(getuid())`'s home. Both must be present and
+/// canonicalize to the same directory; any other case refuses.
+/// Test: `the_verb_home_is_the_account_home_and_home_must_match`, and end to
+/// end `a_forged_home_with_a_valid_grant_is_refused`.
+pub(crate) fn verb_home(
+    ambient: Option<PathBuf>,
+    account: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    let canonical = |p: Option<PathBuf>| p.and_then(|p| std::fs::canonicalize(p).ok());
+    let account = canonical(account)
+        .context("tm env: refused; the password database names no home for this user")?;
+    if canonical(ambient).as_ref() != Some(&account) {
+        bail!(
+            "tm env: refused; $HOME is not this user's home ({})",
+            account.display()
+        );
+    }
+    Ok(account)
 }
 
 /// [`run`] over explicit inputs.
@@ -121,7 +144,7 @@ pub(crate) fn run(action: EnvAction) -> anyhow::Result<()> {
 /// the Keychain read. Then `keys` prints one name per line, and `set` prints
 /// `set KEY (added|replaced)`, both on the canonical path the policy checked.
 /// Test: `env_verbs_refuse_a_session_that_is_not_the_architect`,
-/// `env_set_reads_the_value_from_stdin_or_the_keychain`,
+/// `env_set_reads_the_value_from_the_keychain_only`,
 /// `an_architect_bound_set_on_a_non_env_file_never_reads_the_keychain`,
 /// `a_subagent_shaped_caller_without_a_grant_is_refused`.
 pub(crate) fn run_with(
@@ -129,7 +152,7 @@ pub(crate) fn run_with(
     env: HookEnv,
     config: impl Fn() -> MpmConfig,
     architect_dir: &Path,
-    sources: Sources<'_>,
+    keychain: &dyn Keychain,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let check = this_session_check(architect_dir, env.clone(), &config);
@@ -137,9 +160,17 @@ pub(crate) fn run_with(
         bail!("tm env: refused; {}", check.detail);
     }
     let cwd = std::env::current_dir().context("tm env: the working directory is unknown")?;
+    // #8939 delta critic HIGH 1: the verb's `CLAUDE_PROJECT_DIR` is the
+    // caller's to set, so it grants no scope here; only the trust-anchor roots
+    // do. The grant binds the canonical path the guard checked with the
+    // hook's own `CLAUDE_PROJECT_DIR`.
+    let scope_env = HookEnv {
+        project_dir: None,
+        ..env.clone()
+    };
     let scope = Scope {
         cwd: &cwd,
-        env: &env,
+        env: &scope_env,
         config: &config,
     };
     match action {
@@ -157,16 +188,12 @@ pub(crate) fn run_with(
             extra,
         } => {
             check_key(&key, &extra)?;
-            let keychain = match (from_keychain, account) {
-                (Some(service), Some(account)) => Some((service, account)),
-                (None, None) => None,
-                _ => bail!("tm env set: --from-keychain and --account go together"),
+            let (Some(service), Some(account)) = (from_keychain, account) else {
+                bail!(KEYCHAIN_REQUIRED);
             };
-            let file = scope.authorize(&path, "set", vec![key.clone()], keychain.clone())?;
-            let value = match keychain {
-                Some((service, account)) => sources.keychain.password(&service, &account)?,
-                None => read_value(sources.stdin, sources.stdin_is_tty)?,
-            };
+            let source = Some((service.clone(), account.clone()));
+            let file = scope.authorize(&path, "set", vec![key.clone()], source)?;
+            let value = keychain.password(&service, &account)?;
             check_value(&value)?;
             let outcome = set_key(&file, &key, &value)?;
             writeln!(out, "set {key} ({outcome})")?;
@@ -246,31 +273,10 @@ pub(crate) fn is_key_name(key: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The value on stdin, one trailing newline removed; a terminal is refused.
-fn read_value(stdin: &mut dyn Read, is_tty: bool) -> anyhow::Result<String> {
-    if is_tty {
-        bail!("tm env set: stdin is a terminal; pipe the value in, or use --from-keychain");
-    }
-    let mut bytes = Vec::new();
-    stdin
-        .take(MAX_VALUE_BYTES as u64 + 2)
-        .read_to_end(&mut bytes)
-        .context("tm env set: cannot read stdin")?;
-    let mut value =
-        String::from_utf8(bytes).map_err(|_| anyhow!("tm env set: the value is not UTF-8 text"))?;
-    if value.ends_with('\n') {
-        value.pop();
-        if value.ends_with('\r') {
-            value.pop();
-        }
-    }
-    Ok(value)
-}
-
 /// Refuse an empty, multi-line or oversized value, naming no byte of it.
 fn check_value(value: &str) -> anyhow::Result<()> {
     if value.is_empty() {
-        bail!("tm env set: no value; pipe it on stdin, or use --from-keychain");
+        bail!("tm env set: the Keychain item is empty");
     }
     if value.contains(['\n', '\r', '\0']) {
         bail!("tm env set: the value must be one line of text");
