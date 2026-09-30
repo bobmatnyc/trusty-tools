@@ -28,6 +28,7 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::time::Duration;
 use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Total wall-clock budget for the daemon to become ready after we spawn it.
 ///
@@ -147,6 +148,57 @@ pub async fn ensure_daemon_running_with_device(base: &str, device: Option<&str>)
     spin_until_ready(&cfg).await
 }
 
+/// Ensure the daemon answers `search.health` on `client`'s socket, starting it
+/// when no daemon process is running (#6285).
+///
+/// Why: the socket twin of [`ensure_daemon_running`]. A subcommand that has
+/// moved onto the socket must also wait on the socket — a daemon can bind TCP
+/// before its socket, and the HTTP listener is being retired.
+/// What: fast path on one probe; otherwise spawn `trusty-search start` unless a
+/// daemon process already holds the lockfile, then probe every 500 ms for up to
+/// [`READY_TIMEOUT`]. It never dials TCP.
+///
+/// # Errors
+///
+/// When the spawn fails, or the socket still does not answer at the deadline —
+/// the error names the socket path.
+///
+/// Test: `ensure_daemon_up_names_the_socket_when_it_never_answers`.
+pub async fn ensure_daemon_up(client: &DaemonClient) -> Result<()> {
+    if client.is_up().await {
+        return Ok(());
+    }
+    if crate::service::running_daemon_pid().is_some() {
+        eprintln!(
+            "{} trusty-search daemon already running, waiting for its socket…",
+            "◉".cyan()
+        );
+    } else {
+        eprintln!("{} Starting trusty-search daemon…", "◉".cyan());
+        spawn_daemon_with_device(None)?;
+    }
+    wait_for_socket(client, READY_TIMEOUT).await
+}
+
+/// Probe `client`'s socket until it answers or `budget` elapses.
+async fn wait_for_socket(client: &DaemonClient, budget: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if client.is_up().await {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "trusty-search daemon did not answer on socket {} within {}s; \
+                 try `trusty-search start` manually to see the error",
+                client.socket().display(),
+                budget.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Convenience wrapper: returns a contextualized error on failure.
 ///
 /// Why: every caller of `ensure_daemon_running` would otherwise duplicate the
@@ -231,6 +283,21 @@ mod tests {
             "probe took too long: {:?}",
             started.elapsed()
         );
+    }
+
+    /// #6285: the socket wait fails closed on a scratch socket nothing serves,
+    /// names that socket, and never falls back to TCP.
+    #[tokio::test]
+    async fn ensure_daemon_up_names_the_socket_when_it_never_answers() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let client = DaemonClient::at(&socket);
+        let err = wait_for_socket(&client, Duration::from_millis(600))
+            .await
+            .expect_err("nothing answers the scratch socket");
+        let text = err.to_string();
+        assert!(text.contains(&socket.display().to_string()), "{text}");
+        assert!(!text.contains("http://"), "{text}");
     }
 
     /// Why: as of trusty-search 0.3.55 the indexing flow defaults to `auto`

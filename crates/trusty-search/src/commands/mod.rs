@@ -58,6 +58,9 @@ pub mod list;
 pub mod migrate;
 pub mod migrate_redb;
 pub mod migrate_storage;
+/// Scratch-socket daemon double for CLI tests (#6285).
+#[cfg(test)]
+pub(crate) mod mock_socket;
 pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;
