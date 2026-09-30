@@ -1764,12 +1764,49 @@ fn without_ids(mut outcome: Value, ids: &[String]) -> Value {
     outcome
 }
 
-/// The header the HTTP repair routes read the caller from.
+/// The header the HTTP repair routes read the caller from before #8531.
 fn caller_header(session: crate::core::session::SessionId) -> (&'static str, String) {
-    (
-        crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER,
-        session.0.to_string(),
+    ("x-tm-caller-session", session.0.to_string())
+}
+
+/// #8531, the issue's acceptance case: a request that carries the owner's
+/// session id but comes from a process outside the owner's process tree is
+/// refused — on HTTP, where the id rides the old header, and on the socket,
+/// where it rides the old `caller_session` param. Before #8531 both ended
+/// the owner's live record.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_asserted_owner_session_id_is_refused_on_both_transports_8531() {
+    let (state, _dir) = hermetic();
+    let owner = active_owner(&state);
+    live_record(&state, owner, "i-http");
+    live_record(&state, owner, "i-rpc");
+
+    let (status, body) = http_with_headers(
+        &state,
+        "POST",
+        "/api/v1/delegations/i-http/repair",
+        &[("x-tm-caller-session", owner.0.to_string())],
     )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["outcome"], json!("refused"), "HTTP: {body}");
+
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.delegation.repair",
+        json!({ "agent_id": "i-rpc", "caller_session": owner.0.to_string() }),
+    )
+    .await;
+    assert_eq!(result["outcome"], json!("refused"), "socket: {result}");
+
+    assert!(
+        state
+            .all_delegations()
+            .iter()
+            .all(|d| d.status == crate::core::agent::DelegationStatus::Running),
+        "an asserted owner id ends no record"
+    );
 }
 
 /// Why: the listing is read-only, so both transports can list the SAME record
@@ -1822,10 +1859,10 @@ async fn rpc_delegation_list_requires_a_cwd() {
     assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
 }
 
-/// Why: the owner gate reads the caller from a header on HTTP and from the
-/// `caller_session` param on the socket. The two must reach the same verdict
-/// for a stranger, an anonymous caller, and the owner, or one transport is a
-/// way around the #8257 owner ruling.
+/// Why: #8531 — neither the old header on HTTP nor the old `caller_session`
+/// param on the socket establishes anyone. The two must reach the same
+/// verdict for a stranger, an anonymous caller, and the owner's asserted id,
+/// or one transport is a way around the #8257 owner ruling.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_delegation_repair_agrees_across_transports() {
@@ -1854,15 +1891,11 @@ async fn parity_delegation_repair_agrees_across_transports() {
         }
         let result = rpc_ok(&router, "mpm.delegation.repair", params).await;
 
-        let expected = if caller == Some(owner) {
-            "ended"
-        } else {
-            "refused"
-        };
+        // #8531: an asserted id, the owner's included, establishes nobody.
         assert_eq!(
             body["outcome"],
-            json!(expected),
-            "caller {caller:?} must be {expected}: {body}"
+            json!("refused"),
+            "caller {caller:?} must be refused: {body}"
         );
         assert_same(
             "mpm.delegation.repair",
@@ -1882,6 +1915,7 @@ async fn parity_delegation_repair_by_id_agrees_across_transports() {
     let owner = active_owner(&state);
     let over_http = live_record(&state, owner, "b-http");
     let over_rpc = live_record(&state, owner, "b-rpc");
+    let ids = [over_http.id.0.to_string(), over_rpc.id.0.to_string()];
 
     let (status, body) = http_with_headers(
         &state,
@@ -1900,8 +1934,14 @@ async fn parity_delegation_repair_by_id_agrees_across_transports() {
         }),
     )
     .await;
-    assert_eq!(body["outcome"], json!("ended"), "{body}");
-    assert_same("mpm.delegation.repair_by_id", body, result, &[]);
+    // #8531: the owner's asserted id is refused on both transports.
+    assert_eq!(body["outcome"], json!("refused"), "{body}");
+    assert_same(
+        "mpm.delegation.repair_by_id",
+        without_ids(body, &ids),
+        without_ids(result, &ids),
+        &[],
+    );
 }
 
 /// Why: a malformed id is a 400 over HTTP; the socket must refuse with the

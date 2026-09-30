@@ -9,11 +9,11 @@
 //! than trusting the caller. Neither moved, so a socket caller cannot occupy a
 //! directory an HTTP caller could not have.
 //!
-//! Step 2a adds the read-only listing and both repair verbs. The repair's
-//! caller session, which HTTP reads from the `x-tm-caller-session` header,
-//! arrives as the `caller_session` param and is parsed by
-//! `delegation_routes::caller_from_param` into the same `RepairCaller`, so the
-//! owner gate cannot tell the transports apart.
+//! Step 2a adds the read-only listing and both repair verbs. #8531: the
+//! repair's caller is the kernel's peer pid for this connection
+//! (`trusty_common::uds::server::request_peer_pid`), walked to its session by
+//! `delegation_repair_caller::establish_caller`. No param names the caller; a
+//! `caller_session` an older client still sends is ignored.
 //!
 //! Test: the `parity_delegation_*` and `rpc_delegation_*` cases in
 //! `super::tests`.
@@ -23,11 +23,12 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
-use trusty_common::uds::server::{RpcError, RpcRouter};
+use trusty_common::uds::server::{RpcError, RpcRouter, request_peer_pid};
 
 use crate::daemon::delegation_routes as dg;
 use crate::daemon::services::delegation_records::DelegationListing;
 use crate::daemon::services::delegation_repair::RepairOutcome;
+use crate::daemon::services::delegation_repair_caller::RepairPeer;
 use crate::daemon::state::DaemonState;
 
 /// Parameters for both delegation methods: the session id the HTTP route
@@ -47,8 +48,8 @@ pub struct ListParams {
     pub cwd: PathBuf,
 }
 
-/// `mpm.delegation.repair` parameters: the path's agent id, the body's `force`
-/// flag, and the caller session the HTTP route reads from its header.
+/// `mpm.delegation.repair` parameters: the path's agent id and the body's
+/// `force` flag. #8531: no caller field — the caller is the kernel's peer.
 #[derive(Debug, Deserialize)]
 pub struct RepairParams {
     /// The agent id from the URL path.
@@ -56,9 +57,6 @@ pub struct RepairParams {
     /// End the record even when the owning session is undeterminable.
     #[serde(default)]
     pub force: bool,
-    /// The calling harness session — see `dg::caller_from_param`.
-    #[serde(default)]
-    pub caller_session: Option<Value>,
 }
 
 /// `mpm.delegation.repair_by_id` parameters: [`RepairParams`] keyed by the
@@ -70,9 +68,6 @@ pub struct RepairByIdParams {
     /// End the record even when the owning session is undeterminable.
     #[serde(default)]
     pub force: bool,
-    /// The calling harness session — see `dg::caller_from_param`.
-    #[serde(default)]
-    pub caller_session: Option<Value>,
 }
 
 /// Mount the delegation methods.
@@ -125,8 +120,9 @@ fn register_step_2a(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let r = r.typed::<RepairParams, RepairOutcome, _, _>("mpm.delegation.repair", move |p| {
         let s = Arc::clone(&held);
         async move {
-            let caller = dg::caller_from_param(p.caller_session.as_ref());
-            Ok::<_, RpcError>(dg::repair_delegation_op(s, p.agent_id, p.force, caller).await)
+            // #8531: read in the handler's own task, where the server set it.
+            let peer = RepairPeer::from_socket(request_peer_pid());
+            Ok::<_, RpcError>(dg::repair_delegation_op(s, p.agent_id, p.force, peer).await)
         }
     });
 
@@ -134,8 +130,9 @@ fn register_step_2a(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     r.typed::<RepairByIdParams, RepairOutcome, _, _>("mpm.delegation.repair_by_id", move |p| {
         let s = Arc::clone(&held);
         async move {
-            let caller = dg::caller_from_param(p.caller_session.as_ref());
-            dg::repair_delegation_by_id_op(s, &p.delegation_id, p.force, caller)
+            // #8531: read in the handler's own task, where the server set it.
+            let peer = RepairPeer::from_socket(request_peer_pid());
+            dg::repair_delegation_by_id_op(s, &p.delegation_id, p.force, peer)
                 .await
                 .map_err(Into::into)
         }

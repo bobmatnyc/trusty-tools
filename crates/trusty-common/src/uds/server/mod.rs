@@ -101,7 +101,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::uds::{
-    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_hardened, ensure_peer_is_self,
+    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_hardened, ensure_peer_is_self, peer_pid,
 };
 
 pub use idle::{IdleGuard, IdleTracker};
@@ -112,6 +112,31 @@ pub use wire::{
     CODE_PARSE_ERROR, CODE_STREAM_REQUIRED, CODE_STREAM_UNSUPPORTED, JSONRPC_VERSION, RpcError,
     RpcRequest, RpcResponse, RpcStreamFrame, StreamPhase,
 };
+
+tokio::task_local! {
+    /// The kernel-reported pid of the connection whose request is dispatching.
+    static REQUEST_PEER_PID: Option<u32>;
+}
+
+/// The pid of the process that sent the request now being handled (#8531).
+///
+/// Why: a handler that grants a privilege by caller identity must take that
+/// identity from the kernel, not from a parameter the caller writes. Handlers
+/// receive only their params, so the connection's peer pid travels beside the
+/// dispatch rather than through the [`RpcMethod`] signature every consumer
+/// implements.
+/// What: the [`peer_pid`] [`handle_connection`] read off the connection, for
+/// the handler future and anything it awaits in the same task. `None` when
+/// the kernel reported no pid, on a target without a peer-pid option, or
+/// outside a socket dispatch — a direct [`RpcRouter::dispatch`] call or a
+/// task the handler spawned. A caller that grants on it must treat `None` as
+/// "not established".
+/// Test: `a_handler_reads_the_peer_pid_of_its_own_connection_8531`,
+/// `request_peer_pid_is_none_outside_a_socket_dispatch_8531`.
+#[must_use]
+pub fn request_peer_pid() -> Option<u32> {
+    REQUEST_PEER_PID.try_with(|pid| *pid).ok().flatten()
+}
 
 /// Everything that can stop this server, or stop one of its connections.
 ///
@@ -381,7 +406,13 @@ pub async fn handle_connection(
     // #6621: classified BEFORE dispatch, off the frame the loop already read.
     let liveness = router.frame_is_liveness(&frame);
 
-    let errored = match router.dispatch_streaming(&frame).await {
+    // #8531: read at the connection, before dispatch, so a handler can bind a
+    // privilege to the kernel's word rather than to a caller-written param.
+    let peer = peer_pid(&stream);
+    let outcome = REQUEST_PEER_PID
+        .scope(peer, router.dispatch_streaming(&frame))
+        .await;
+    let errored = match outcome {
         RpcOutcome::Single(response) => {
             let errored = response.is_error();
             // One owned, already-newline-terminated buffer, so the response

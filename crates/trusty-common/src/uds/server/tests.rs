@@ -1809,3 +1809,46 @@ async fn a_handlers_error_data_reaches_the_client_verbatim() {
         "every structured field must reach the client unchanged"
     );
 }
+
+// ── #8531: the connection's peer pid, visible to its handler ────────────────
+
+/// A router whose one method answers the peer pid its handler can read.
+fn whoami_router() -> RpcRouter {
+    RpcRouter::new().typed("whoami", |_req: ()| async move {
+        Ok::<_, RpcError>(request_peer_pid())
+    })
+}
+
+/// #8531: a handler granting by caller identity reads the kernel's pid for
+/// its own connection — here this test process, which dialled the socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_handler_reads_the_peer_pid_of_its_own_connection_8531() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), whoami_router(), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let response = call(&socket, 1, "whoami", json!(null)).await;
+
+    assert_eq!(
+        response.result,
+        Some(json!(std::process::id())),
+        "the handler must see the dialling process's pid: {response:?}"
+    );
+}
+
+/// #8531: with no socket connection there is no kernel word, so the reading
+/// is `None` — never a default a handler could grant on.
+#[tokio::test]
+async fn request_peer_pid_is_none_outside_a_socket_dispatch_8531() {
+    assert_eq!(request_peer_pid(), None);
+    let response = whoami_router()
+        .dispatch(&frame(2, "whoami", json!(null)))
+        .await;
+    assert_eq!(
+        response.result,
+        Some(serde_json::Value::Null),
+        "{response:?}"
+    );
+}

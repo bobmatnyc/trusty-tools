@@ -54,6 +54,9 @@ pub const MAX_ANCESTOR_HOPS: usize = 1;
 /// is two hops up, not one; three leaves room for one more shell. The check
 /// is informational and never grants anything, so the wider walk opens no
 /// write the hook's one-hop walk refuses.
+// #8531: `tm repair delegation` runs from the same Bash tool, so the repair
+// owner check walks this far too. It grants only when the `claude` it stops
+// at IS the owning session's process, never on the walk alone.
 pub const STATUS_MAX_ANCESTOR_HOPS: usize = 3;
 
 /// The machine-backed [`TwinProbe`].
