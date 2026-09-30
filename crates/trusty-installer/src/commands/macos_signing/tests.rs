@@ -13,10 +13,7 @@ fn binaries_for_set_covers_search_and_mpm() {
         binaries_for_set(SEARCH_SET),
         vec!["trusty-search", "trusty-embedderd"]
     );
-    assert_eq!(
-        binaries_for_set(MPM_SET),
-        vec!["trusty-mpm", "tm"]
-    );
+    assert_eq!(binaries_for_set(MPM_SET), vec!["trusty-mpm", "tm"]);
 }
 
 /// Why (#4277): `trusty-agents` is its own signable set, distinct from
