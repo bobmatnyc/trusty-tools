@@ -72,8 +72,7 @@ use crate::stores::{StoresConfig, resolve_store_statuses};
 /// `GET /api/agents/:name/knowledge` — HTTP entry point.
 ///
 /// Why/What: see the module doc. The two daemons are discovered the same way
-/// as `agent_stores_route` — trusty-search by its `http_addr`, trusty-memory by
-/// its derived socket (#6286); the skill-source root mirrors the dispatch call
+/// as `agent_stores_route` — both by their derived sockets (#6285, #6286); the skill-source root mirrors the dispatch call
 /// sites (project CWD), matching `agent_skills_route`.
 /// Test: `super::tests::agent_knowledge::knowledge_route_reports_bound_store_and_granted_tool`.
 pub(super) async fn agent_knowledge_route(
@@ -85,7 +84,7 @@ pub(super) async fn agent_knowledge_route(
         &crate::agents::agents_dir_candidates(),
         &name,
         &project_root,
-        trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
+        trusty_common::search_rpc::search_socket().ok().as_deref(),
         trusty_common::memory_rpc::resolve_memory_socket()
             .ok()
             .as_deref(),
@@ -93,7 +92,7 @@ pub(super) async fn agent_knowledge_route(
     .await
 }
 
-/// Core knowledge-resolution logic against explicit dirs/roots/daemon URLs.
+/// Core knowledge-resolution logic against explicit dirs/roots/daemon sockets.
 ///
 /// Why: Same testability rationale as `agent_stores::stores_at` /
 /// `agent_skills::skills_at`.
@@ -108,7 +107,7 @@ pub(super) async fn knowledge_at(
     dirs: &[PathBuf],
     name: &str,
     project_root: &std::path::Path,
-    search_base: Option<&str>,
+    search_socket: Option<&std::path::Path>,
     memory_socket: Option<&std::path::Path>,
 ) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
@@ -140,7 +139,7 @@ pub(super) async fn knowledge_at(
     let (stores, tools, skills, config_error) = parse_knowledge_sections(&raw);
 
     // K-a: unchanged resolution logic from `/stores` (#3878/#3864).
-    let statuses = resolve_store_statuses(name, &stores, search_base, memory_socket).await;
+    let statuses = resolve_store_statuses(name, &stores, search_socket, memory_socket).await;
     let issues = stores.validate();
     // Tier-2 `[tools].search_indexes` attachments (#3232/#4009, epic #4007),
     // reported the SAME way `/stores` already reports them — as a bare id

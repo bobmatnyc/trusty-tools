@@ -49,9 +49,12 @@
 //!    existing index root: a binding whose index cannot serve its tree is a
 //!    configuration error, and it is now a LOUD one.
 //!
+//! The live feed is [`super::index_feed_rpc::RpcIndexFeed`], which speaks to the
+//! daemon's Unix socket (#6285); the HTTP feed that used to live here is gone.
+//!
 //! Test: `super::index_feed::tests` — a fake feed covers push/remove ordering,
-//! idempotency, failure retention and recovery; a mock HTTP server pins the
-//! real daemon route shape.
+//! idempotency, failure retention and recovery; `index_feed_rpc::tests` pins
+//! the real daemon method shape over a scratch socket.
 
 use std::time::Duration;
 
@@ -111,81 +114,6 @@ pub trait IndexFeed: Send + Sync {
 fn covers(root: &std::path::Path, tree: &std::path::Path) -> bool {
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     canon(tree).starts_with(canon(root))
-}
-
-/// The live feed: the trusty-search daemon's per-file HTTP surface.
-///
-/// Why/What: `POST /indexes/{id}/index-file` takes `{path, content}` and
-/// `POST /indexes/{id}/remove-file` takes `{path}` — the HTTP equivalents of
-/// the `index_file` / `remove_file` MCP tools. Content is supplied in the body,
-/// so an entity does NOT need to live under the index's own root: this is what
-/// lets remediation (a) leave the operator's configured index root untouched.
-/// Test: `http_feed_calls_the_daemon_routes`.
-pub struct HttpIndexFeed {
-    base: String,
-    client: reqwest::Client,
-}
-
-impl HttpIndexFeed {
-    /// Build a feed against a trusty-search base URL (`http://127.0.0.1:7878`).
-    pub fn new(base: impl Into<String>) -> anyhow::Result<Self> {
-        Ok(Self {
-            base: base.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::builder().timeout(PUSH_TIMEOUT).build()?,
-        })
-    }
-
-    /// POST one JSON body, mapping every non-2xx answer to an error.
-    async fn post(&self, url: String, body: serde_json::Value) -> anyhow::Result<()> {
-        let resp = self.client.post(&url).json(&body).send().await?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        // The daemon's error bodies are short; including one turns "500" into a
-        // diagnosable line in the tool result.
-        let detail = resp.text().await.unwrap_or_default();
-        let detail = detail.chars().take(200).collect::<String>();
-        anyhow::bail!("trusty-search returned HTTP {status} for {url}: {detail}")
-    }
-}
-
-#[async_trait]
-impl IndexFeed for HttpIndexFeed {
-    async fn index_file(&self, index: &str, path: &str, content: &str) -> anyhow::Result<()> {
-        self.post(
-            format!("{}/indexes/{index}/index-file", self.base),
-            serde_json::json!({ "path": path, "content": content }),
-        )
-        .await
-    }
-
-    async fn remove_file(&self, index: &str, path: &str) -> anyhow::Result<()> {
-        self.post(
-            format!("{}/indexes/{index}/remove-file", self.base),
-            serde_json::json!({ "path": path }),
-        )
-        .await
-    }
-
-    async fn index_root(&self, index: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
-        let url = format!("{}/indexes/{index}/status", self.base);
-        let resp = self.client.get(&url).send().await?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!("search index `{index}` is not registered on the trusty-search daemon");
-        }
-        if !resp.status().is_success() {
-            anyhow::bail!(
-                "trusty-search returned HTTP {} for index `{index}`",
-                resp.status()
-            );
-        }
-        let body: serde_json::Value = resp.json().await?;
-        Ok(body
-            .get("root_path")
-            .and_then(serde_json::Value::as_str)
-            .map(std::path::PathBuf::from))
-    }
 }
 
 /// What one feed pass did — the caller-facing summary.
