@@ -53,6 +53,9 @@
 //! | `mpm.pair.reset` | `POST /pair/reset` |
 //! | `mpm.delegation.shared_tree_dispatch` | `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` |
 //! | `mpm.delegation.granted_worktree` | `POST /api/v1/sessions/{id}/delegations/granted-worktree` |
+//! | `mpm.delegation.list` | `GET /api/v1/delegations?cwd=` (step 2a) |
+//! | `mpm.delegation.repair` | `POST /api/v1/delegations/{agent_id}/repair` (step 2a) |
+//! | `mpm.delegation.repair_by_id` | `POST /api/v1/delegations/by-id/{delegation_id}/repair` (step 2a) |
 //!
 //! **`mpm.manager.digest` reports failure in its RESULT, not an error frame.**
 //! Where HTTP answers `503` (no inference provider) or `502` (the provider call
@@ -120,6 +123,9 @@ pub const METHODS: &[&str] = &[
     // #6288: bus RPC retired — console hosts the only event bus (owner ruling
     // 2026-09-05).
     "mpm.delegation.granted_worktree",
+    "mpm.delegation.list",
+    "mpm.delegation.repair",
+    "mpm.delegation.repair_by_id",
     "mpm.delegation.shared_tree_dispatch",
     "mpm.deliverables.create",
     "mpm.deliverables.get",

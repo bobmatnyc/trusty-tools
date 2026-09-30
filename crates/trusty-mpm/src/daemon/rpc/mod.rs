@@ -43,3 +43,9 @@ pub mod registry;
 /// #6288 step 1: the build-lease decision log, the retired builder-slot routes,
 /// and adopt-worktree — the HTTP-only routes the sandboxed `tm` CLI reaches.
 pub mod cli_socket;
+
+/// #6288 step 2a: MCP dispatch, the socket form of `POST /rpc`.
+pub mod mcp;
+
+/// #6288 step 2a: the coordinator's context snapshot and chat turn.
+pub mod coordinator;

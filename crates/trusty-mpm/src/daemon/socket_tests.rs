@@ -340,3 +340,58 @@ fn every_route_names_a_served_method() {
         assert!(served.contains(method), "{method} is not registered");
     }
 }
+
+/// #6288 step 2a: the new methods answer over the REAL listener and the REAL
+/// `build_router`, not only through the in-process dispatcher.
+///
+/// Why: the parity tests prove each method agrees with its HTTP route; this
+/// proves `build_router` mounts them, so a dropped `register` line fails here.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_dispatch_is_registered_on_the_daemon_socket() {
+    let tmp = TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-mpm.sock");
+    let (stop, handle) = spawn_listener(&socket).await;
+
+    let exchange = dial_once(
+        &socket,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "mpm.mcp.dispatch",
+            "params": {"jsonrpc": "2.0", "id": 9, "method": "tools/list"},
+        }),
+    )
+    .await;
+    let mcp = &exchange.frame["result"];
+    assert_eq!(
+        mcp["id"], 9,
+        "the MCP envelope's own id: {}",
+        exchange.frame
+    );
+    assert!(
+        mcp["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
+        "tools/list over the socket lists tools: {}",
+        exchange.frame
+    );
+
+    for (method, params) in [
+        ("mpm.sessions.context", serde_json::json!({})),
+        (
+            "mpm.delegation.list",
+            serde_json::json!({ "cwd": tmp.path().display().to_string() }),
+        ),
+    ] {
+        let request =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": method, "params": params });
+        let exchange = dial_once(&socket, &request).await;
+        assert!(
+            exchange.frame.get("result").is_some(),
+            "{method} answers over the socket: {}",
+            exchange.frame
+        );
+    }
+
+    let _ = stop.send(());
+    handle.await.expect("the serve task must not panic");
+}

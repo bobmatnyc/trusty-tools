@@ -195,26 +195,49 @@ pub async fn coordinator_chat(
             "cross-origin request to the action-capable chat endpoint is not allowed".to_string(),
         ));
     }
+    // #6288: everything past the origin guard is shared with `mpm.sessions.chat`.
+    coordinator_chat_op(&state, body).await.map(Json)
+}
 
-    let context = build_coordinator_context(&state);
+/// [`coordinator_chat`]'s body past its origin guard, with no transport in it
+/// (#6288 step 2a).
+///
+/// Why: the socket answers `mpm.sessions.chat` from this same body, so a route
+/// and its method cannot drift. The origin guard stays in the HTTP handler: it
+/// is browser-CSRF defence, and the socket's peer-uid check is the stronger
+/// guard there (see `daemon::socket`).
+///
+/// # Errors
+///
+/// Every error [`coordinator_chat`] documents past its guard: an unknown
+/// routed session, `ServiceUnavailable` when no model is configured, and
+/// `Internal` for a failed model call.
+///
+/// Test: `parity_sessions_chat_agrees_across_transports`,
+/// `rpc_sessions_chat_without_a_model_is_unavailable_like_http`.
+pub async fn coordinator_chat_op(
+    state: &Arc<DaemonState>,
+    body: CoordinatorChatRequest,
+) -> Result<CoordinatorChatResponse, DaemonError> {
+    let context = build_coordinator_context(state);
 
     // A `@prefix:` message is a direct command — route it straight to the
     // session's tmux pane and return the captured output, no LLM involved. This
     // path is identical whether or not the SM is enabled (deterministic routing
     // is part of the SM's degraded surface too, §5.3).
     if let Some((session_name, command)) = parse_session_prefix(&body.message, &context.sessions) {
-        let session = SessionService::new(&state).command_target(&session_name)?;
+        let session = SessionService::new(state).command_target(&session_name)?;
         TmuxService::send_command(&session, &command);
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let output = TmuxService::capture(&session, 100);
-        return Ok(Json(CoordinatorChatResponse {
+        return Ok(CoordinatorChatResponse {
             reply: format!("Sent to {session_name}: {command}"),
             routed_to_session: Some(session_name),
             command_output: Some(output),
             cost: None,
             conv_id: None,
             actions_taken: None,
-        }));
+        });
     }
 
     // SM path (SM-7): when the Session Manager is enabled AND a provider is
@@ -232,7 +255,7 @@ pub async fn coordinator_chat(
         // over HTTP back to this daemon, so no loopback). Absent/`false` preserves
         // the exact text-only `sm.chat` path below.
         if body.actions == Some(true) {
-            return route_through_action_loop(&sm, &state, &body).await;
+            return route_through_action_loop(&sm, state, &body).await;
         }
         return route_through_session_manager(&sm, &body).await;
     }
@@ -258,14 +281,14 @@ pub async fn coordinator_chat(
         .await
         .map_err(|e| DaemonError::Internal(e.to_string()))?;
 
-    Ok(Json(CoordinatorChatResponse {
+    Ok(CoordinatorChatResponse {
         reply,
         routed_to_session: None,
         command_output: None,
         cost: None,
         conv_id: None,
         actions_taken: None,
-    }))
+    })
 }
 
 /// Whether the CSRF/origin guard applies to a chat request, given its `actions`
@@ -303,17 +326,17 @@ fn csrf_guard_applies(actions: Option<bool>) -> bool {
 async fn route_through_session_manager(
     sm: &crate::core::sm::SessionManagerAgent,
     body: &CoordinatorChatRequest,
-) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
+) -> Result<CoordinatorChatResponse, DaemonError> {
     use crate::core::sm::SmAgentError;
     match sm.chat(&body.message, body.conv_id.as_deref()).await {
-        Ok(outcome) => Ok(Json(CoordinatorChatResponse {
+        Ok(outcome) => Ok(CoordinatorChatResponse {
             reply: outcome.reply,
             routed_to_session: None,
             command_output: None,
             cost: Some(outcome.cost_usd),
             conv_id: Some(outcome.conv_id),
             actions_taken: None,
-        })),
+        }),
         Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
         Err(e) => Err(DaemonError::Internal(e.to_string())),
     }
@@ -354,7 +377,7 @@ async fn route_through_action_loop(
     sm: &crate::core::sm::SessionManagerAgent,
     state: &Arc<DaemonState>,
     body: &CoordinatorChatRequest,
-) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
+) -> Result<CoordinatorChatResponse, DaemonError> {
     use crate::core::sm::{SessionControl, SmAgentError};
     use crate::daemon::sm_stdio::DaemonSessionControl;
 
@@ -363,7 +386,7 @@ async fn route_through_action_loop(
         .chat_with_actions(&body.message, body.conv_id.as_deref(), &control)
         .await
     {
-        Ok(outcome) => Ok(Json(CoordinatorChatResponse {
+        Ok(outcome) => Ok(CoordinatorChatResponse {
             reply: outcome.reply,
             routed_to_session: None,
             command_output: None,
@@ -372,7 +395,7 @@ async fn route_through_action_loop(
             // Presence means "verbs ran": omit the field (None) when none ran so
             // `[]` is never serialized; `skip_serializing_if` then drops it.
             actions_taken: Some(outcome.actions_taken).filter(|v| !v.is_empty()),
-        })),
+        }),
         // Graceful degradation (#1524): inference is unavailable — surface a
         // clear operator-facing reply (200) rather than an opaque 503 so the
         // browser/Web adapter can show it as a chat message. The operator needs
@@ -380,7 +403,7 @@ async fn route_through_action_loop(
         // `conv_id` (None: no rolling context was committed on this turn). Only
         // the no-creds/unconfigured-inference `Degraded` variant takes this path;
         // every other error remains a 500.
-        Err(SmAgentError::Degraded(notice)) => Ok(Json(CoordinatorChatResponse {
+        Err(SmAgentError::Degraded(notice)) => Ok(CoordinatorChatResponse {
             reply: format!(
                 "inference is not configured; {notice}. \
                  Set OPENROUTER_API_KEY (or Anthropic/Bedrock credentials) and restart \
@@ -391,7 +414,7 @@ async fn route_through_action_loop(
             cost: None,
             conv_id: None,
             actions_taken: None,
-        })),
+        }),
         Err(e) => Err(DaemonError::Internal(e.to_string())),
     }
 }

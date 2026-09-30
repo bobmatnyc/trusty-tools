@@ -227,8 +227,9 @@ async fn rpc_router_registers_every_documented_method() {
     );
     assert_eq!(
         METHODS.len(),
-        29,
-        "slice 5 owns twenty-nine routes; a new one needs a row in registry.rs's table too"
+        32,
+        "slice 5's twenty-nine routes plus step 2a's three delegation verbs; a new one \
+         needs a row in registry.rs's table too"
     );
 }
 
@@ -1695,4 +1696,268 @@ fn rpc_error_codes_track_http_statuses_for_this_slice() {
             "the message must cross verbatim so a parity assertion means something"
         );
     }
+}
+
+// ── Step 2a: the delegation listing and both repair verbs (#6288) ────────────
+
+/// Drive one HTTP request carrying extra headers through the real router.
+///
+/// Why: the repair routes read their caller session from a header, so the
+/// parity cases need to send one; [`http`] sends none.
+async fn http_with_headers(
+    state: &Arc<DaemonState>,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, String)],
+) -> (StatusCode, Value) {
+    let mut request = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, value.as_str());
+    }
+    let request = request.body(Body::empty()).expect("build request");
+    let response = api::router(Arc::clone(state))
+        .oneshot(request)
+        .await
+        .expect("the router must answer");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read the response body");
+    let value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    (status, value)
+}
+
+/// One running `version-control` record owned by `owner`, keyed by `agent_id`.
+fn live_record(
+    state: &DaemonState,
+    owner: crate::core::session::SessionId,
+    agent_id: &str,
+) -> crate::core::agent::Delegation {
+    let mut d = crate::core::agent::Delegation::observed(
+        owner,
+        "version-control",
+        "task",
+        Some(format!("toolu-{agent_id}")),
+    );
+    d.agent_id = Some(agent_id.to_string());
+    state.upsert_delegation(d.clone());
+    d
+}
+
+/// An Active session record for `id`, so a record it owns reads as live.
+fn active_owner(state: &DaemonState) -> crate::core::session::SessionId {
+    use crate::core::session::{ControlModel, Session, SessionId};
+    let id = SessionId(uuid::Uuid::new_v4());
+    state.register_session(Session::new(id, "/repo", ControlModel::Tmux, None));
+    id
+}
+
+/// A repair outcome with the per-record ids blanked, so two records' answers
+/// compare on everything the transport could have changed.
+fn without_ids(mut outcome: Value, ids: &[String]) -> Value {
+    if let Some(Value::String(reason)) = outcome.get_mut("reason") {
+        for id in ids {
+            *reason = reason.replace(id.as_str(), "<id>");
+        }
+    }
+    outcome
+}
+
+/// The header the HTTP repair routes read the caller from.
+fn caller_header(session: crate::core::session::SessionId) -> (&'static str, String) {
+    (
+        crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER,
+        session.0.to_string(),
+    )
+}
+
+/// Why: the listing is read-only, so both transports can list the SAME record
+/// and must return the same view. `age_secs` is measured at each call, so it is
+/// the one field excused.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn parity_delegation_list_agrees_across_transports() {
+    let (state, _dir) = hermetic();
+    let owner = crate::core::session::SessionId(uuid::Uuid::new_v4());
+    let mut d = crate::core::agent::Delegation::observed(
+        owner,
+        "rust-engineer",
+        "task",
+        Some("toolu-list".into()),
+    );
+    d.cwd = Some(std::path::PathBuf::from("/repo"));
+    state.upsert_delegation(d.clone());
+
+    let (status, mut body) = http(&state, "GET", "/api/v1/delegations?cwd=/repo", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.delegation.list",
+        json!({ "cwd": "/repo" }),
+    )
+    .await;
+
+    for listing in [&mut body, &mut result] {
+        for record in listing["records"].as_array_mut().expect("records") {
+            record.as_object_mut().expect("record").remove("age_secs");
+        }
+    }
+    assert_eq!(
+        body["records"][0]["delegation_id"],
+        json!(d.id.0.to_string())
+    );
+    assert_same("mpm.delegation.list", body, result, &[]);
+}
+
+/// Why: HTTP refuses a listing with no `?cwd=` as a 400; the socket must
+/// refuse too rather than list some default directory.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_delegation_list_requires_a_cwd() {
+    let (state, _dir) = hermetic();
+    let (status, _) = http(&state, "GET", "/api/v1/delegations", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = rpc_err(&rpc_router(&state), "mpm.delegation.list", json!({})).await;
+    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
+}
+
+/// Why: the owner gate reads the caller from a header on HTTP and from the
+/// `caller_session` param on the socket. The two must reach the same verdict
+/// for a stranger, an anonymous caller, and the owner, or one transport is a
+/// way around the #8257 owner ruling.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn parity_delegation_repair_agrees_across_transports() {
+    let (state, _dir) = hermetic();
+    let owner = active_owner(&state);
+    let over_http = live_record(&state, owner, "a-http");
+    let over_rpc = live_record(&state, owner, "a-rpc");
+    let ids = [over_http.id.0.to_string(), over_rpc.id.0.to_string()];
+    let router = rpc_router(&state);
+    let stranger = crate::core::session::SessionId(uuid::Uuid::new_v4());
+
+    for caller in [Some(stranger), None, Some(owner)] {
+        let headers: Vec<_> = caller.map(caller_header).into_iter().collect();
+        let (status, body) = http_with_headers(
+            &state,
+            "POST",
+            "/api/v1/delegations/a-http/repair",
+            &headers,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let mut params = json!({ "agent_id": "a-rpc" });
+        if let Some(c) = caller {
+            params["caller_session"] = json!(c.0.to_string());
+        }
+        let result = rpc_ok(&router, "mpm.delegation.repair", params).await;
+
+        let expected = if caller == Some(owner) {
+            "ended"
+        } else {
+            "refused"
+        };
+        assert_eq!(
+            body["outcome"],
+            json!(expected),
+            "caller {caller:?} must be {expected}: {body}"
+        );
+        assert_same(
+            "mpm.delegation.repair",
+            without_ids(body, &ids),
+            without_ids(result, &ids),
+            &[],
+        );
+    }
+}
+
+/// Why: the by-id form is the only address a type-matched record has (#8257),
+/// and it parses the id before anything else — both answers must agree.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn parity_delegation_repair_by_id_agrees_across_transports() {
+    let (state, _dir) = hermetic();
+    let owner = active_owner(&state);
+    let over_http = live_record(&state, owner, "b-http");
+    let over_rpc = live_record(&state, owner, "b-rpc");
+
+    let (status, body) = http_with_headers(
+        &state,
+        "POST",
+        &format!("/api/v1/delegations/by-id/{}/repair", over_http.id.0),
+        &[caller_header(owner)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let result = rpc_ok(
+        &rpc_router(&state),
+        "mpm.delegation.repair_by_id",
+        json!({
+            "delegation_id": over_rpc.id.0.to_string(),
+            "caller_session": owner.0.to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(body["outcome"], json!("ended"), "{body}");
+    assert_same("mpm.delegation.repair_by_id", body, result, &[]);
+}
+
+/// Why: a malformed id is a 400 over HTTP; the socket must refuse with the
+/// matching code and the same message, never attempt a repair.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_delegation_repair_by_id_rejects_a_malformed_id() {
+    let (state, _dir) = hermetic();
+    let (status, body) = http(
+        &state,
+        "POST",
+        "/api/v1/delegations/by-id/not-a-uuid/repair",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let error = rpc_err(
+        &rpc_router(&state),
+        "mpm.delegation.repair_by_id",
+        json!({ "delegation_id": "not-a-uuid" }),
+    )
+    .await;
+    assert_eq!(error["code"], json!(CODE_INVALID_PARAMS), "{error}");
+    assert_eq!(
+        error["message"], body["error"],
+        "the message crosses verbatim"
+    );
+}
+
+/// Why (the Fail-Open Check): the socket has no header, so a caller param that
+/// is not text is the new failure branch. It must establish nobody — the live
+/// record stays, as it does for a header that is not text.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rpc_delegation_repair_caller_that_is_not_text_is_unestablished() {
+    let (state, _dir) = hermetic();
+    let owner = active_owner(&state);
+    live_record(&state, owner, "c-live");
+
+    for caller in [
+        json!(42),
+        json!({ "session": owner.0.to_string() }),
+        json!([owner.0.to_string()]),
+    ] {
+        let result = rpc_ok(
+            &rpc_router(&state),
+            "mpm.delegation.repair",
+            json!({ "agent_id": "c-live", "caller_session": caller }),
+        )
+        .await;
+        assert_eq!(result["outcome"], json!("refused"), "{caller}: {result}");
+    }
+    assert_eq!(
+        state.all_delegations()[0].status,
+        crate::core::agent::DelegationStatus::Running,
+        "a refused repair writes nothing"
+    );
 }
