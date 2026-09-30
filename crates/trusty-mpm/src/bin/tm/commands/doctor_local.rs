@@ -134,34 +134,6 @@ fn resolve_project_dir(dir: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
     Ok(Some(resolved))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_project_dir_canonicalizes_an_existing_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let got = resolve_project_dir(Some(tmp.path())).unwrap().unwrap();
-        assert_eq!(got, tmp.path().canonicalize().unwrap());
-    }
-
-    #[test]
-    fn resolve_project_dir_rejects_a_missing_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = resolve_project_dir(Some(&tmp.path().join("nope"))).unwrap_err();
-        assert!(err.to_string().contains("cannot resolve"), "{err}");
-    }
-
-    #[test]
-    fn resolve_project_dir_rejects_a_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = tmp.path().join("f");
-        std::fs::write(&file, "x").unwrap();
-        let err = resolve_project_dir(Some(&file)).unwrap_err();
-        assert!(err.to_string().contains("not a directory"), "{err}");
-    }
-}
-
 /// The rows that depend on a daemon answering, in the order they print.
 ///
 /// Why: exactly one row reports whether the daemon is there (#6336). The other
@@ -216,5 +188,33 @@ fn status_icon(status: CheckStatus) -> &'static str {
         // healthy at a glance.
         CheckStatus::Unknown => "\u{2754}",
         CheckStatus::Fail => "\u{274c}",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_project_dir_canonicalizes_an_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = resolve_project_dir(Some(tmp.path())).unwrap().unwrap();
+        assert_eq!(got, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_project_dir_rejects_a_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_project_dir(Some(&tmp.path().join("nope"))).unwrap_err();
+        assert!(err.to_string().contains("cannot resolve"), "{err}");
+    }
+
+    #[test]
+    fn resolve_project_dir_rejects_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        let err = resolve_project_dir(Some(&file)).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
     }
 }
