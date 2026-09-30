@@ -254,17 +254,6 @@ sm-memory = ["trusty-common/memory-core"]
 # `cargo test --features manager-memory` runs without the ONNX model.
 manager-memory = ["trusty-common/memory-core"]
 
-# `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
-# is ALWAYS available; this flag exists only so the subcommand can optionally
-# advertise itself. The Tauri GUI lives in the separate, publish=false
-# `trusty-mpm-gui` crate (it owns `build.rs` + `tauri.conf.json` which cannot be
-# published cleanly to crates.io). Rather than pull that unpublishable crate in
-# as an optional Cargo dependency — which blocks `cargo publish` for trusty-mpm,
-# because cargo requires even optional deps to resolve on crates.io — `tm gui`
-# shells out to a separately-installed `trusty-mpm-gui` binary (Single-Install
-# convention: `cargo install trusty-mpm-gui`). See src/bin/tm/main.rs.
-gui = []
-
 # ── Library ────────────────────────────────────────────────────────────────────
 [lib]
 name = "trusty_mpm"
@@ -490,12 +479,6 @@ tokio-util = { workspace = true, optional = true }
 # so no new Cargo.lock entries are introduced.
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
-
-# NOTE: trusty-mpm-gui is deliberately NOT a Cargo dependency. It is a
-# publish=false Tauri crate that cannot resolve on crates.io, so declaring it
-# (even as an optional dep) blocks `cargo publish` for trusty-mpm. The `tm gui`
-# subcommand shells out to a separately-installed `trusty-mpm-gui` binary
-# instead — see the `gui` feature comment above and src/bin/tm/main.rs.
 
 # ── Platform-specific always-on deps ─────────────────────────────────────────
 [target.'cfg(unix)'.dependencies]

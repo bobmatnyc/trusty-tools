@@ -41,7 +41,6 @@ versions, publishability, and targets.
 | `trusty-mcp` | [`crates/trusty-mcp/`](../../crates/trusty-mcp/) | library | [crate README](../../crates/trusty-mcp/README.md) |
 | `trusty-memory` | [`crates/trusty-memory/`](../../crates/trusty-memory/) | library, `trusty-memory`, compatibility bridge | [crate README](../../crates/trusty-memory/README.md), [extended docs](../trusty-memory/README.md) |
 | `trusty-mpm` | [`crates/trusty-mpm/`](../../crates/trusty-mpm/) | library, `tm`, `trusty-mpm` | [crate README](../../crates/trusty-mpm/README.md), [extended docs](../trusty-mpm/README.md) |
-| `trusty-mpm-gui` | [`crates/trusty-mpm-gui/`](../../crates/trusty-mpm-gui/) | library, `trusty-mpm-gui` | [crate README](../../crates/trusty-mpm-gui/README.md) |
 | `trusty-progress` | [`crates/trusty-progress/`](../../crates/trusty-progress/) | library | [crate README](../../crates/trusty-progress/README.md) |
 | `trusty-publish-guard` | [`crates/trusty-publish-guard/`](../../crates/trusty-publish-guard/) | library, `publish-guard` | [crate README](../../crates/trusty-publish-guard/README.md) |
 | `trusty-review` | [`crates/trusty-review/`](../../crates/trusty-review/) | library, `trusty-review` | [crate README](../../crates/trusty-review/README.md) |

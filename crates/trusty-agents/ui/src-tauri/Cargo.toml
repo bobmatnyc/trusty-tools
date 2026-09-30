@@ -3,8 +3,8 @@ name = "trusty-agents-ui"
 version = "0.16.1"
 edition = "2021"
 description = "Tauri 2 desktop chat interface for trusty-agents"
-# `publish = false` and an explicit licence, matching the two sibling Tauri
-# GUIs (trusty-mpm-gui, trusty-code-gui) which both declare them. This crate
+# `publish = false` and an explicit licence, matching the sibling Tauri
+# GUI (trusty-code-gui) which declares them. This crate
 # declared neither, which `cargo deny check licenses` reported as
 # `error[unlicensed]: trusty-agents-ui = 0.16.1 is unlicensed` — the only
 # licence error anywhere in a 1220-crate graph. Without `publish = false`
@@ -48,10 +48,10 @@ custom-protocol = ["tauri/custom-protocol"]
 # top-level crate directories, not this nested `ui/src-tauri` path). It no
 # longer declares its own empty `[workspace]` table. The original #364
 # rationale ("tauri/wry deps don't share the parent's edition/target-dir
-# layout") is now moot: the workspace already hosts two other Tauri GUIs
-# (trusty-mpm-gui, trusty-code-gui) that pin the same `tauri = "2"` and share
+# layout") is now moot: the workspace already hosts another Tauri GUI
+# (trusty-code-gui) that pins the same `tauri = "2"` and shares
 # the workspace target dir without issue. Keeping this crate in the workspace
 # gives it shared dependency resolution and lets a dedicated CI job build- and
 # lint-verify it (see .github/workflows/ci.yml `agents-ui` job). Like the
-# other two Tauri GUIs it is intentionally NOT in the root `default-members`
+# other Tauri GUI it is intentionally NOT in the root `default-members`
 # list, so a bare `cargo build` (no --workspace / -p) still skips it.

@@ -331,16 +331,16 @@ units_case units-diagnostic-counts-as-examined 1 UNBASELINED \
 # EVERY PUBLISHED CRATE (#8716). The census demands only DECLARED units, and an
 # excluded crate declares none, so a publishable crate in the excluded set
 # passed unseen. metadata-published.json adds two excluded packages to the
-# `demo` world: `trusty-code-gui` is publishable, `trusty-mpm-gui` is not.
+# `demo` world: `trusty-code-gui` is publishable, `trusty-agents-ui` is not.
 # ===========================================================================
 UNITS_METADATA="$FIXTURE_DIR/metadata-published.json" \
   units_case published-excluded-fails 3 \
   'PUBLISHED-NOT-DOCUMENTED	trusty-code-gui is publishable' \
   --require-published --json "$FIXTURE_DIR/units-both.json"
 # The publish = false package must not be named: a check that flags every
-# excluded crate would fail the real workspace, whose three are all unpublished.
-if grep -q 'PUBLISHED-NOT-DOCUMENTED	trusty-mpm-gui' "$WORK/out-published-excluded-fails.txt"; then
-  echo "FAIL  published-excluded-fails: named trusty-mpm-gui, which is publish = false"
+# excluded crate would fail the real workspace, whose entries are all unpublished.
+if grep -q 'PUBLISHED-NOT-DOCUMENTED	trusty-agents-ui' "$WORK/out-published-excluded-fails.txt"; then
+  echo "FAIL  published-excluded-fails: named trusty-agents-ui, which is publish = false"
   fail=1
 fi
 # Ordinary scope is unchanged: the same fixture without the flag passes.
