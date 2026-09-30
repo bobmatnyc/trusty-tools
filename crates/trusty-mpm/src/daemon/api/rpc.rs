@@ -34,7 +34,6 @@ use axum::{
 };
 use trusty_mcp::Request as McpRequest;
 
-use crate::daemon::mcp_backend::StateBackend;
 use crate::daemon::state::DaemonState;
 
 /// True when `addr`'s IP is a loopback address (IPv4 `127.0.0.0/8` or IPv6 `::1`).
@@ -59,7 +58,7 @@ pub fn is_loopback(addr: &SocketAddr) -> bool {
 /// is the #1221 hard requirement.
 /// What: (1) rejects any non-loopback peer with `403 Forbidden` and a short
 /// message — no body is parsed and no tool runs; (2) for a loopback peer, wraps
-/// the daemon state in a [`StateBackend`] and calls [`crate::mcp::dispatch`],
+/// the daemon state in a [`StateBackend`](crate::daemon::mcp_backend::StateBackend) and calls [`crate::mcp::dispatch`],
 /// returning the JSON-RPC [`trusty_mcp::Response`] as JSON (HTTP 200;
 /// JSON-RPC errors are carried in the envelope, matching `trusty-memory`).
 /// Test: `rpc_rejects_non_loopback_peer`, `rpc_dispatches_tools_list_for_loopback`.
@@ -80,8 +79,8 @@ pub async fn rpc_handler(
             .into_response();
     }
 
-    let backend = StateBackend::new(Arc::clone(&state));
-    let resp = crate::mcp::dispatch(&backend, req).await;
+    // #6288: the body is shared with `mpm.mcp.dispatch` on the socket.
+    let resp = crate::daemon::rpc::mcp::dispatch_op(&state, req).await;
     Json(resp).into_response()
 }
 
