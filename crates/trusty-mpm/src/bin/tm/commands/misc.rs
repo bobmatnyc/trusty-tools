@@ -88,18 +88,6 @@ pub(crate) const IDLE_PARK_DETECT_TIMEOUT: std::time::Duration =
 /// once so the retry branch and its tests name the same string.
 pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
 
-/// `status` subcommand — probe daemon health and list sessions.
-///
-/// Why: the first thing an operator runs to see if the daemon is alive. #8025
-/// moved the body to [`super::status_daemon`] so the verdict comes from the
-/// probe `tm doctor` already uses, and because this file sits three SLOC under
-/// the 500-line production cap.
-/// What: delegates to [`super::status_daemon::run`].
-/// Test: `src/bin/tm/commands/status_daemon_tests.rs`.
-pub(crate) async fn status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    super::status_daemon::run(client, url).await
-}
-
 /// `events` subcommand — print the recent hook-event feed.
 ///
 /// Why: gives operators a quick tail of daemon activity without the TUI. The
@@ -221,20 +209,26 @@ fn print_gaps(gaps: &[trusty_mpm::core::deploy_validate::DeploymentGap]) {
 /// of truth per the chat-core nucleus. The `resolved:` line tells operators
 /// whether traffic is flowing via the trusty-console gateway or direct to the
 /// daemon, making the resolution path transparent (#1849 Phase 2).
-/// What: runs `TrustyCommand::Health` through the executor and prints a compact,
-/// scriptable summary. A dead daemon prints `daemon: unreachable` and is NOT an
-/// error exit (the probe succeeded in determining the daemon is down). The
-/// `resolved:` line is printed only on success so unreachable output is unchanged.
-/// Test: `cli_parses_health` covers parsing; the executor's `execute_health_*`
-/// tests cover the live and dead-daemon report paths.
-pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
+/// What: #6288 step 1 — probes `/health` over the daemon socket first; a
+/// socket that is absent, refuses, or answers badly is an ERROR naming the
+/// socket path (exit 1), never a TCP retry and never a healthy line. Then runs
+/// `TrustyCommand::Health` through the executor and prints a compact,
+/// scriptable summary whose `resolved:` line names the transport.
+/// Test: `cli_parses_health` covers parsing;
+/// `tm_health_over_an_absent_socket_fails_and_never_dials_tcp` and
+/// `tm_health_status_and_doctor_work_over_the_socket_alone` cover both arms.
+pub(crate) async fn health(daemon: &trusty_mpm::client::DaemonClient) -> anyhow::Result<()> {
     use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand};
-    use trusty_mpm::core::GATEWAY_PATH;
 
-    let executor = CommandExecutor::new(url.to_string());
+    // #6288: a socket error is never downgraded to "unreachable" + exit 0.
+    daemon
+        .health_snapshot()
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon: unreachable — {e:#}"))?;
+    let executor = CommandExecutor::from_daemon_client(daemon.clone());
     match executor.execute(TrustyCommand::Health).await {
         CommandResult::Health(report) if !report.reachable => {
-            println!("daemon: unreachable ({})", report.url);
+            anyhow::bail!("daemon: unreachable ({})", daemon.transport_label());
         }
         CommandResult::Health(report) => {
             let catalog = if report.catalog_unknown {
@@ -244,23 +238,16 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
             } else {
                 "up to date"
             };
-            // Indicate the resolution path so operators can see whether traffic
-            // is flowing via the console gateway or direct to the daemon.
-            let resolved_via = if url.contains(GATEWAY_PATH) {
-                format!("via gateway {url}")
-            } else {
-                format!("direct {url}")
-            };
             println!("daemon: {} ({})", report.status, report.url);
-            println!("resolved: {resolved_via}");
+            println!("resolved: {}", daemon.transport_label());
             println!("catalog: {catalog}");
             println!(
                 "fleet: {} session(s), {} awaiting a decision",
                 report.managed_total, report.managed_pending_decisions
             );
         }
-        CommandResult::Error(msg) => eprintln!("health failed: {msg}"),
-        other => eprintln!("health: unexpected result {other:?}"),
+        CommandResult::Error(msg) => anyhow::bail!("health failed: {msg}"),
+        other => anyhow::bail!("health: unexpected result {other:?}"),
     }
     Ok(())
 }

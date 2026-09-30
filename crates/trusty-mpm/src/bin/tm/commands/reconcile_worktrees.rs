@@ -23,12 +23,11 @@
 /// Test: `cli_parses_session_reconcile_worktrees`,
 /// `cli_reconcile_worktrees_takes_no_destructive_flag`.
 pub(crate) async fn session_reconcile_worktrees(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     json: bool,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/reconcile-worktrees"))
+    let resp = daemon
+        .get("/api/v1/sessions/managed/reconcile-worktrees")
         .send()
         .await?;
     let body: serde_json::Value = resp.error_for_status()?.json().await?;

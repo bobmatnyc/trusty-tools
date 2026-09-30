@@ -90,13 +90,11 @@ fn confirm_rename_target_pane(
 /// `resolve_in_session_rename_target_refuses_when_record_not_found`
 /// (`rename_tests.rs`).
 async fn resolve_in_session_rename_target(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session_id: &str,
     current_pane_id: Option<&str>,
 ) -> Result<trusty_mpm::client::ManagedSessionSummary, String> {
-    let record =
-        crate::commands::managed_route::resolve_managed_summary(client, url, session_id).await;
+    let record = crate::commands::managed_route::resolve_managed_summary(daemon, session_id).await;
     let record_pane_id = record.as_ref().and_then(|r| r.pane_id.as_deref());
     confirm_rename_target_pane(session_id, current_pane_id, record_pane_id)?;
     // `confirm_rename_target_pane` only returns `Ok` when `record_pane_id` was
@@ -126,8 +124,7 @@ async fn resolve_in_session_rename_target(
 /// `cli_parses_sessions_rename_in_session`; HTTP path by `rename_route_*`;
 /// the pane cross-check by `rename_tests.rs`.
 pub(crate) async fn session_rename(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     arg1: String,
     arg2: Option<String>,
 ) -> anyhow::Result<()> {
@@ -135,10 +132,10 @@ pub(crate) async fn session_rename(
         Some(new_name) => {
             // Explicit target: no ambiguity from the env var, resolve normally.
             let target = arg1;
-            let id = crate::commands::managed_route::resolve_managed_match(client, url, &target)
+            let id = crate::commands::managed_route::resolve_managed_match(daemon, &target)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("managed session '{target}' not found"))?;
-            return finish_rename(client, url, &target, &id, new_name).await;
+            return finish_rename(daemon, &target, &id, new_name).await;
         }
         None => {
             // In-session form: resolve the current session from the env var the
@@ -152,13 +149,13 @@ pub(crate) async fn session_rename(
             })?;
             let current_pane_id = super::tmux_attach::current_tmux_pane_id();
             let record =
-                resolve_in_session_rename_target(client, url, &current, current_pane_id.as_deref())
+                resolve_in_session_rename_target(daemon, &current, current_pane_id.as_deref())
                     .await
                     .map_err(anyhow::Error::msg)?;
             (current, record.id)
         }
     };
-    finish_rename(client, url, &target, &id, arg1).await
+    finish_rename(daemon, &target, &id, arg1).await
 }
 
 /// Issue the PATCH and render the 404/409/400/success outcomes — shared by
@@ -166,13 +163,12 @@ pub(crate) async fn session_rename(
 /// pane-cross-checked form). Thin printing shell over [`do_rename_request`]
 /// (the testable part).
 async fn finish_rename(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     target: &str,
     id: &str,
     new_name: String,
 ) -> anyhow::Result<()> {
-    let msg = do_rename_request(client, url, target, id, new_name).await?;
+    let msg = do_rename_request(daemon, target, id, new_name).await?;
     println!("{msg}");
     Ok(())
 }
@@ -211,14 +207,13 @@ async fn finish_rename(
 /// #3692 auto-suffix-aware response handling rather than reimplementing any
 /// of it.
 pub(super) async fn do_rename_request(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     target: &str,
     id: &str,
     new_name: String,
 ) -> anyhow::Result<String> {
-    let resp = client
-        .patch(format!("{url}/api/v1/sessions/managed/{id}"))
+    let resp = daemon
+        .patch(format!("/api/v1/sessions/managed/{id}"))
         .json(&serde_json::json!({ "name": new_name }))
         .send()
         .await?;
