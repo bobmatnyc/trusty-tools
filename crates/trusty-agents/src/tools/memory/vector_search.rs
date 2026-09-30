@@ -15,8 +15,8 @@
 //!      `AgentConfig::stores` at registry-build time), else
 //!   3. no index → the pre-#3864 behaviour, unchanged.
 //! When an index id resolves, the query is routed to the shared trusty-search
-//! daemon (`POST /indexes/{id}/search`, the same endpoint the index-aware
-//! `grep`/`search` tools use). Every failure — daemon undiscoverable, index
+//! daemon over its Unix socket (`search.query`, the socket twin of
+//! `POST /indexes/{id}/search`; #6285). Every failure — daemon undiscoverable, index
 //! missing, transport error — degrades to the embedded index and then to the
 //! regex fallback, so the tool never hard-fails an agent turn.
 //! #3232/#4009 (epic #4007's two-tier knowledge model) add a SECOND tier of
@@ -71,6 +71,13 @@ use super::recall::{EMBED_DIM, HIT_MAX_CHARS};
 /// falls through to the local path instead of stalling the loop.
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// trusty-search's socket method for `POST /indexes/{id}/search` (#6285).
+///
+/// A second copy of `trusty_search::service::rpc::queries::METHOD_QUERY`;
+/// trusty-common's `search_rpc` names no query method and this crate does not
+/// depend on trusty-search. `vector_search_routes_to_daemon_index` pins it.
+const METHOD_QUERY: &str = "search.query";
+
 /// Tool: `vector_search` — semantic search over a named index or the
 /// embedded local code index.
 ///
@@ -94,9 +101,9 @@ pub struct VectorSearchTool {
     /// the allowlist informs the schema but gates nothing, byte-identically
     /// to pre-#4009 behaviour.
     enforce_index_allowlist: bool,
-    /// trusty-search daemon base URL override. `None` = discover at call time
-    /// via `trusty_common::resolve_daemon_base_url` (tests inject a mock).
-    search_base_url: Option<String>,
+    /// trusty-search socket override. `None` = resolve at call time via
+    /// `trusty_common::search_rpc::search_socket` (tests inject a scratch path).
+    search_socket: Option<PathBuf>,
     binding_error: Option<String>,
 }
 
@@ -116,7 +123,7 @@ impl VectorSearchTool {
             default_index_id: None,
             attached_index_ids: Vec::new(),
             enforce_index_allowlist: false,
-            search_base_url: None,
+            search_socket: None,
             binding_error: None,
         }
     }
@@ -214,10 +221,10 @@ impl VectorSearchTool {
         self
     }
 
-    /// Override the trusty-search daemon base URL (used by tests).
+    /// Override the trusty-search daemon socket (used by tests).
     #[allow(dead_code)]
-    pub fn with_search_base_url(mut self, base: Option<String>) -> Self {
-        self.search_base_url = base;
+    pub fn with_search_socket(mut self, socket: Option<PathBuf>) -> Self {
+        self.search_socket = socket;
         self
     }
 
@@ -484,10 +491,9 @@ impl ToolExecutor for VectorSearchTool {
 impl VectorSearchTool {
     /// Query a named index on the shared trusty-search daemon.
     ///
-    /// Why: This is the routing #3864 asked for. `POST /indexes/{id}/search`
-    /// with `{text, top_k}` is the daemon's own contract (see
-    /// `trusty_common::monitor::search_client::SearchClient::search`) — going
-    /// straight to it keeps this tool independent of whether the trusty-search
+    /// Why: This is the routing #3864 asked for. `search.query` with
+    /// `{index_id, body: {text, top_k}}` is the daemon's socket twin of
+    /// `POST /indexes/{id}/search` (#6285) — going straight to it keeps this tool independent of whether the trusty-search
     /// MCP plugin happens to be spawned.
     /// What: Returns normalized [`okg_fence::Hit`]s; the CALLER decides how to
     /// render them, because that decision now depends on which corpus answered
@@ -496,28 +502,25 @@ impl VectorSearchTool {
     /// rather than failing.
     /// Test: `vector_search_routes_to_daemon_index`,
     /// `vector_search_falls_back_when_daemon_index_missing`.
-    async fn daemon_query(
+    pub(super) async fn daemon_query(
         &self,
         index_id: &str,
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<okg_fence::Hit>> {
-        let base = match &self.search_base_url {
-            Some(b) => b.clone(),
-            None => trusty_common::resolve_daemon_base_url("trusty-search")
-                .ok_or_else(|| anyhow::anyhow!("trusty-search daemon not discoverable"))?,
+        // No TCP fallback (#6285): a missing or dead socket is an error the
+        // caller turns into the embedded-index / regex fallback.
+        let socket = match &self.search_socket {
+            Some(p) => p.clone(),
+            None => trusty_common::search_rpc::search_socket()?,
         };
-        let url = format!("{}/indexes/{}/search", base.trim_end_matches('/'), index_id);
-        let client = reqwest::Client::builder().timeout(DAEMON_TIMEOUT).build()?;
-        let resp = client
-            .post(&url)
-            .json(&json!({ "text": query, "top_k": limit }))
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("trusty-search returned HTTP {} for {url}", resp.status());
-        }
-        let body: Value = resp.json().await?;
+        let body = trusty_common::search_rpc::call_at(
+            &socket,
+            METHOD_QUERY,
+            json!({ "index_id": index_id, "body": { "text": query, "top_k": limit } }),
+            DAEMON_TIMEOUT,
+        )
+        .await?;
         Ok(okg_fence::normalize(&body, limit))
     }
 

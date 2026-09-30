@@ -5,7 +5,7 @@
 //! Stores pane previously rendered a hardcoded "not connected" placeholder
 //! precisely because nothing checked whether the named index existed; this
 //! module turns the claim into an observed status by asking trusty-search
-//! (`GET /indexes/{id}/status`) and trusty-memory (`GET
+//! (`search.index.status` over its socket, #6285) and trusty-memory (`GET
 //! /api/v1/palaces/{id}/drawers?limit=1`) directly. Every failure mode —
 //! daemon undiscoverable, connection refused, 404, malformed body, timeout —
 //! collapses to `connected: false` plus a human-readable `reason`, mirroring
@@ -13,8 +13,8 @@
 //! state" contract. A bound store that cannot be resolved must never stop an
 //! agent booting.
 //!
-//! **Issue #4115: HTTP reachability is not corpus health.** A 2xx response
-//! with a parseable body used to be treated as `connected: true`
+//! **Issue #4115: reachability is not corpus health.** A successful
+//! reply used to be treated as `connected: true`
 //! unconditionally — but trusty-search can warm-boot an index whose corpus
 //! failed to open (`chunk_count: 0`, every staged-pipeline lane `Failed`)
 //! while still answering the status probe successfully, which reported a
@@ -23,8 +23,9 @@
 //! object (see [`failed_stages`]) — the exact ground truth trusty-search's
 //! own `/health` handler already uses (`IndexStages::any_failed`,
 //! `core::registry.rs`) — not from HTTP status alone.
-//! **The two daemons no longer share a transport (#6286).** trusty-search is
-//! still loopback HTTP; ADR-0032 moved trusty-memory onto a Unix socket.
+//! **Both daemons are Unix sockets (#6285, #6286).** ADR-0032 moved
+//! trusty-memory first; the search half followed in #6285, so neither half
+//! touches TCP. For memory,
 //! `resolve_daemon_base_url("trusty-memory")` reads an `http_addr` file nothing
 //! writes any more, so `memory_base` was permanently `None` and EVERY
 //! memory-backed store reported `palace_connected: false` with "daemon not
@@ -43,9 +44,9 @@
 //!
 //! What: [`StoreStatus`] is the per-store report (serialized straight to the
 //! sidecar API and the GUI card). [`resolve_store_statuses`] resolves a whole
-//! [`StoresConfig`]; the search base URL and the memory socket are injected so
+//! [`StoresConfig`]; the search socket and the memory socket are injected so
 //! tests can point at a mock rather than the developer's live daemons.
-//! Test: `super::status::tests` — a mock trusty-search router and a mock memory
+//! Test: `super::status::tests` — a mock trusty-search socket and a mock memory
 //! socket cover connected, missing, and unreachable; config-validation
 //! short-circuiting is covered without any network at all.
 
@@ -294,9 +295,9 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
 /// Why: One entry point for both the sidecar API (`GET
 /// /api/agents/:name/stores`) and any boot-time reporting, so the GUI and the
 /// logs can never disagree about whether a store is connected.
-/// What: `search_base` is a full base URL (e.g. `http://127.0.0.1:7878`) and
-/// `memory_socket` is the path trusty-memory binds; `None` for either means
-/// that daemon was not discoverable and the halves it backs resolve to
+/// What: `search_socket` is the path trusty-search binds and `memory_socket`
+/// the one trusty-memory binds (both Unix sockets since #6285 / #6286); `None`
+/// for either means that daemon's socket path did not resolve and the halves it backs resolve to
 /// not-connected with that as the reason — both injected rather than resolved
 /// internally so tests can drive a mock. Returns one [`StoreStatus`] per
 /// binding, in declaration order. Never errors.
@@ -307,42 +308,21 @@ fn attach_tree_coverage(status: &mut StoreStatus) {
 pub async fn resolve_store_statuses(
     agent_name: &str,
     stores: &StoresConfig,
-    search_base: Option<&str>,
+    search_socket: Option<&std::path::Path>,
     memory_socket: Option<&std::path::Path>,
 ) -> Vec<StoreStatus> {
-    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-        Ok(c) => c,
-        Err(e) => {
-            // Building a client cannot normally fail; if it does, report it
-            // rather than panicking an agent's boot path.
-            return stores
-                .bindings
-                .iter()
-                .map(|b| {
-                    StoreStatus::disconnected(
-                        b,
-                        agent_name,
-                        format!("HTTP client unavailable: {e}"),
-                        StoreFault::DaemonUnreachable,
-                    )
-                })
-                .collect();
-        }
-    };
-
     let mut out = Vec::with_capacity(stores.bindings.len());
     for binding in &stores.bindings {
-        out.push(resolve_one(&client, agent_name, binding, search_base, memory_socket).await);
+        out.push(resolve_one(agent_name, binding, search_socket, memory_socket).await);
     }
     out
 }
 
 /// Resolve a single binding. See [`resolve_store_statuses`].
 async fn resolve_one(
-    client: &reqwest::Client,
     agent_name: &str,
     binding: &AgentStoreBinding,
-    search_base: Option<&str>,
+    search_socket: Option<&std::path::Path>,
     memory_socket: Option<&std::path::Path>,
 ) -> StoreStatus {
     // Config problems short-circuit before any network call — an unusable
@@ -352,122 +332,118 @@ async fn resolve_one(
     }
 
     let index = binding.resolved_index().to_string();
-    let Some(search_base) = search_base else {
+    let Some(search_socket) = search_socket else {
         return StoreStatus::disconnected(
             binding,
             agent_name,
-            "trusty-search daemon not discoverable (no address file; is it running?)".to_string(),
+            "trusty-search daemon not discoverable (socket path did not resolve; is the data directory usable?)".to_string(),
             StoreFault::DaemonUnreachable,
         );
     };
 
-    let url = format!(
-        "{}/indexes/{}/status",
-        search_base.trim_end_matches('/'),
-        index
-    );
-    let mut status = match client.get(&url).send().await {
-        Err(e) => {
-            return StoreStatus::disconnected(
-                binding,
-                agent_name,
-                format!("trusty-search unreachable at {search_base}: {e}"),
-                StoreFault::DaemonUnreachable,
-            );
-        }
-        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
-            // #7882: the daemon ANSWERED and said the id is unknown — a
-            // standing misconfiguration, not a transient outage. Log it on
-            // every probe (stderr, per the daemon-stdout rule) so a binding
-            // pointing at a never-created index cannot sit unnoticed the way
-            // cto-assistant's did (#7876).
-            tracing::warn!(
-                agent = agent_name,
-                store = %binding.name,
-                index = %index,
-                "bound store names a trusty-search index that does not exist"
-            );
-            return StoreStatus::disconnected(
-                binding,
-                agent_name,
-                format!("search index `{index}` is not registered on the trusty-search daemon"),
-                StoreFault::MissingIndex,
-            );
-        }
-        Ok(resp) if !resp.status().is_success() => {
-            let code = resp.status();
-            return StoreStatus::disconnected(
-                binding,
-                agent_name,
-                format!("trusty-search returned HTTP {code} for index `{index}`"),
-                StoreFault::IndexUnhealthy,
-            );
-        }
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Err(e) => {
+    let mut status = match trusty_common::search_rpc::call_at(
+        search_socket,
+        trusty_common::search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": index }),
+        PROBE_TIMEOUT,
+    )
+    .await
+    {
+        // #7882: the daemon ANSWERED and said the id is unknown — a
+        // standing misconfiguration, not a transient outage. Log it on
+        // every probe (stderr, per the daemon-stdout rule) so a binding
+        // pointing at a never-created index cannot sit unnoticed the way
+        // cto-assistant's did (#7876).
+        Err(e) => match e.downcast_ref::<trusty_common::search_rpc::SearchRpcError>() {
+            Some(rpc) if rpc.is_not_found() => {
+                tracing::warn!(
+                    agent = agent_name,
+                    store = %binding.name,
+                    index = %index,
+                    "bound store names a trusty-search index that does not exist"
+                );
                 return StoreStatus::disconnected(
                     binding,
                     agent_name,
-                    format!("trusty-search returned an unreadable status body: {e}"),
+                    format!("search index `{index}` is not registered on the trusty-search daemon"),
+                    StoreFault::MissingIndex,
+                );
+            }
+            Some(rpc) => {
+                return StoreStatus::disconnected(
+                    binding,
+                    agent_name,
+                    format!("trusty-search refused the status read for index `{index}`: {rpc}"),
                     StoreFault::IndexUnhealthy,
                 );
             }
-            Ok(body) => {
-                // Issue #4115: HTTP 2xx + parseable JSON only proves the
-                // daemon answered — it does NOT prove the corpus opened. A
-                // warm-boot `corpus_open_failed` marks every stage `Failed`
-                // (trusty-search's `derive_warm_boot_stages`) while `status`
-                // and `chunk_count: 0` still look plausible. `failed_stages`
-                // is the ground truth `/health` already uses
-                // (`IndexStages::any_failed`, `core/registry.rs`); a
-                // non-empty result forces `connected: false` regardless of
-                // what the top-level `status` string claims.
-                let failed_stages = failed_stages(&body);
-                let index_status = body
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-                let (connected, reason, fault) = if failed_stages.is_empty() {
-                    (true, None, None)
-                } else {
-                    (
-                        false,
-                        Some(format!(
-                            "index `{index}` is reachable but its corpus failed to open — \
-                             {} stage(s) report `failed` ({}); the index answers no results \
-                             regardless of what `status` claims",
-                            failed_stages.len(),
-                            failed_stages.join(", "),
-                        )),
-                        Some(StoreFault::IndexUnhealthy),
-                    )
-                };
-                StoreStatus {
-                    name: binding.name.clone(),
-                    tree: binding.resolved_tree(agent_name),
-                    index: index.clone(),
-                    palace: binding.palace.clone(),
-                    connected,
-                    reason,
-                    chunk_count: body.get("chunk_count").and_then(serde_json::Value::as_u64),
-                    root_path: body
-                        .get("root_path")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
-                    index_status,
-                    palace_connected: None,
-                    palace_reason: None,
-                    tree_path: None,
-                    pending_index: None,
-                    synced_index: None,
-                    failed_stages,
-                    fault,
-                    // #7882: a reachable index is never a standing
-                    // misconfiguration — a broken corpus is operational.
-                    error: None,
-                }
+            None => {
+                return StoreStatus::disconnected(
+                    binding,
+                    agent_name,
+                    format!(
+                        "trusty-search unreachable at {}: {e:#}",
+                        search_socket.display()
+                    ),
+                    StoreFault::DaemonUnreachable,
+                );
             }
         },
+        Ok(body) => {
+            // Issue #4115: a successful reply only proves the
+            // daemon answered — it does NOT prove the corpus opened. A
+            // warm-boot `corpus_open_failed` marks every stage `Failed`
+            // (trusty-search's `derive_warm_boot_stages`) while `status`
+            // and `chunk_count: 0` still look plausible. `failed_stages`
+            // is the ground truth `/health` already uses
+            // (`IndexStages::any_failed`, `core/registry.rs`); a
+            // non-empty result forces `connected: false` regardless of
+            // what the top-level `status` string claims.
+            let failed_stages = failed_stages(&body);
+            let index_status = body
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let (connected, reason, fault) = if failed_stages.is_empty() {
+                (true, None, None)
+            } else {
+                (
+                    false,
+                    Some(format!(
+                        "index `{index}` is reachable but its corpus failed to open — \
+                             {} stage(s) report `failed` ({}); the index answers no results \
+                             regardless of what `status` claims",
+                        failed_stages.len(),
+                        failed_stages.join(", "),
+                    )),
+                    Some(StoreFault::IndexUnhealthy),
+                )
+            };
+            StoreStatus {
+                name: binding.name.clone(),
+                tree: binding.resolved_tree(agent_name),
+                index: index.clone(),
+                palace: binding.palace.clone(),
+                connected,
+                reason,
+                chunk_count: body.get("chunk_count").and_then(serde_json::Value::as_u64),
+                root_path: body
+                    .get("root_path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                index_status,
+                palace_connected: None,
+                palace_reason: None,
+                tree_path: None,
+                pending_index: None,
+                synced_index: None,
+                failed_stages,
+                fault,
+                // #7882: a reachable index is never a standing
+                // misconfiguration — a broken corpus is operational.
+                error: None,
+            }
+        }
     };
 
     if let Some(palace) = &binding.palace {

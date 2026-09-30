@@ -8,14 +8,14 @@
 //! bounded by [`PROBE_TIMEOUT`] so a wedged daemon degrades to "down" instead
 //! of hanging the calling agent turn.
 //!
-//! **The four daemons no longer share a transport.** trusty-search and
-//! trusty-mpm still serve loopback HTTP and are still found through the
-//! `http_addr` file `write_daemon_addr` writes, so [`probe`] serves them.
+//! **The four daemons no longer share a transport.** trusty-mpm still serves
+//! loopback HTTP and is still found through the `http_addr` file
+//! `write_daemon_addr` writes, so [`probe`] serves it. trusty-search (#6285),
 //! trusty-memory (#6286, ADR-0032) and trusty-analyze (#6287) moved onto Unix
-//! sockets and stopped writing that file — `resolve_daemon_base_url` answers
-//! `None` for both on every machine, so both probes reported their daemon
-//! permanently down whether or not it was running. [`probe_uds`] serves those
-//! two, deriving the socket the same way each daemon binds it.
+//! sockets and stopped being dialled over TCP — `resolve_daemon_base_url`
+//! answers `None` for the latter two on every machine, so both probes reported
+//! their daemon permanently down whether or not it was running. [`probe_at`]
+//! serves all three, deriving the socket the same way each daemon binds it.
 //!
 //! What: [`DaemonStatus`], the two shared probe bodies, and one `probe_*`
 //! function per subsystem daemon. `system_status::gather` runs all four
@@ -147,7 +147,31 @@ async fn probe_uds(
     method: &'static str,
     parse: impl FnOnce(&serde_json::Value) -> (Option<String>, Option<String>),
 ) -> DaemonStatus {
-    let Ok(socket) = trusty_common::daemon_socket_path(app_name) else {
+    probe_at(
+        app_name,
+        trusty_common::daemon_socket_path(app_name),
+        method,
+        parse,
+    )
+    .await
+}
+
+/// [`probe_uds`] against an already-resolved socket.
+///
+/// Why: trusty-search's socket comes from `search_rpc::search_socket`, which
+/// honours `TRUSTY_SEARCH_SOCKET` — the override a test rig needs to point the
+/// probe at a scratch socket rather than the developer's live daemon (#6285).
+/// What: an `Err` path (the data directory is unusable) is `Down`, as is
+/// everything [`probe_uds`] documents. There is no TCP fallback.
+/// Test: `super::tests::uds_daemon_with_no_socket_reports_up_false`,
+/// `super::tests::search_probe_reads_health_over_a_scratch_socket`.
+async fn probe_at(
+    app_name: &'static str,
+    socket: anyhow::Result<std::path::PathBuf>,
+    method: &'static str,
+    parse: impl FnOnce(&serde_json::Value) -> (Option<String>, Option<String>),
+) -> DaemonStatus {
+    let Ok(socket) = socket else {
         return DaemonStatus::down(app_name);
     };
     let request = serde_json::json!({
@@ -184,7 +208,8 @@ async fn probe_uds(
     }
 }
 
-/// Probe the trusty-search daemon (issue #40's #34/#873 `/health` shape).
+/// Probe the trusty-search daemon over its socket (issue #40's #34/#873 health
+/// shape, #6285 transport).
 ///
 /// Why: prior work (issue #873) references the daemon's `indexes` count and
 /// `warmboot_summary.warm_boot_degraded` flag as the machine-readable
@@ -193,27 +218,36 @@ async fn probe_uds(
 /// already watch for without tailing logs.
 /// What: reads `version`, `indexes` (index count), and
 /// `warmboot_summary.warm_boot_degraded`, folding the last two into `detail`.
-/// Test: `super::tests::down_daemon_reports_up_false` (generic path); the
-/// daemon-specific parse is exercised live in the manual verification.
+/// Test: `super::tests::search_probe_reads_health_over_a_scratch_socket`,
+/// `super::tests::search_probe_reports_down_for_a_dead_socket`.
 pub async fn probe_search() -> DaemonStatus {
-    probe("trusty-search", |body| {
-        let version = version_field(body);
-        let indexes = body.get("indexes").and_then(|v| v.as_u64());
-        let degraded = body
-            .get("warmboot_summary")
-            .and_then(|w| w.get("warm_boot_degraded"))
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
-        let detail = indexes.map(|n| {
-            if degraded {
-                format!("{n} indexes (warm-boot degraded)")
-            } else {
-                format!("{n} indexes")
-            }
-        });
-        (version, detail)
-    })
+    probe_at(
+        "trusty-search",
+        trusty_common::search_rpc::search_socket(),
+        trusty_common::search_rpc::METHOD_HEALTH,
+        parse_search_health,
+    )
     .await
+}
+
+/// Pull `version` and the index-count / warm-boot detail out of a
+/// `search.health` result.
+fn parse_search_health(body: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let version = version_field(body);
+    let indexes = body.get("indexes").and_then(|v| v.as_u64());
+    let degraded = body
+        .get("warmboot_summary")
+        .and_then(|w| w.get("warm_boot_degraded"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let detail = indexes.map(|n| {
+        if degraded {
+            format!("{n} indexes (warm-boot degraded)")
+        } else {
+            format!("{n} indexes")
+        }
+    });
+    (version, detail)
 }
 
 /// Probe the trusty-memory daemon over its socket (#6286).
@@ -292,6 +326,83 @@ mod tests {
         assert_eq!(status.name, name);
         assert!(status.version.is_none());
         assert!(status.detail.is_none());
+    }
+
+    /// Why (#6285): the search probe must read `search.health` off the socket
+    /// and parse it exactly as the HTTP probe parsed `/health` — same version,
+    /// same index-count / warm-boot detail string.
+    /// What: serves a scratch-socket mock, points `probe_search` at it through
+    /// `TRUSTY_SEARCH_SOCKET` (under `ENV_LOCK`), and asserts the wire method,
+    /// `up`, `version` and `detail`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn search_probe_reads_health_over_a_scratch_socket() {
+        let _env_guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saved = seen.clone();
+        let daemon = crate::uds_mock::spawn(move |method, _params| {
+            saved.lock().unwrap().push(method.to_owned());
+            Box::pin(async {
+                Ok(serde_json::json!({
+                    "version": "9.9.9",
+                    "indexes": 3,
+                    "warmboot_summary": {"warm_boot_degraded": true},
+                }))
+            })
+        })
+        .await;
+        let prev = std::env::var_os(trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
+        // SAFETY: ENV_LOCK held for the whole body.
+        unsafe {
+            std::env::set_var(
+                trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+                daemon.socket(),
+            );
+        }
+        let status = probe_search().await;
+        // SAFETY: lock still held.
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV, v)
+                }
+                None => std::env::remove_var(trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV),
+            }
+        }
+        assert!(status.up);
+        assert_eq!(status.version.as_deref(), Some("9.9.9"));
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("3 indexes (warm-boot degraded)")
+        );
+        assert_eq!(*seen.lock().unwrap(), vec!["search.health".to_string()]);
+    }
+
+    /// Why (#6285 error arm): a search socket nothing serves — or a path that
+    /// will not resolve at all — is a clean `up: false`, never a TCP fallback,
+    /// hang or panic.
+    /// Test: itself.
+    #[tokio::test]
+    async fn search_probe_reports_down_for_a_dead_socket() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dead = probe_at(
+            "trusty-search",
+            Ok(tmp.path().join("absent.sock")),
+            trusty_common::search_rpc::METHOD_HEALTH,
+            parse_search_health,
+        )
+        .await;
+        assert!(!dead.up);
+        let unresolved = probe_at(
+            "trusty-search",
+            Err(anyhow::anyhow!("no data dir")),
+            trusty_common::search_rpc::METHOD_HEALTH,
+            parse_search_health,
+        )
+        .await;
+        assert!(!unresolved.up);
     }
 
     /// Why: a daemon whose recorded address accepts the TCP connection but
