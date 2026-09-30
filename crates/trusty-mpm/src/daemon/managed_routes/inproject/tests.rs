@@ -1567,7 +1567,7 @@ fn session_worktree_falls_back_to_remote_tracking_ref_when_fetch_fails() {
     let sha_c = commit(&fx.base, "C");
     std::fs::remove_dir_all(&fx.origin).expect("remove origin to break the fetch");
 
-    let resolved = super::super::inproject_start_point::resolve(&fx.base);
+    let resolved = super::super::inproject_start_point::resolve(&fx.base).expect("resolves");
     assert_eq!(
         resolved.git_ref(),
         Some("origin/main"),
@@ -1627,11 +1627,11 @@ fn session_worktree_without_a_remote_still_branches_from_head() {
     g(&repo, &["config", "user.name", "T"]);
     let sha = commit(&repo, "only");
 
-    let resolved = super::super::inproject_start_point::resolve(&repo);
+    let resolved = super::super::inproject_start_point::resolve(&repo).expect("resolves");
     assert_eq!(
         resolved.git_ref(),
-        None,
-        "a remote-less repo must let git use HEAD"
+        Some("refs/heads/main"),
+        "a remote-less repo branches from its local default branch"
     );
     assert_eq!(
         resolved.warning(),
@@ -1650,6 +1650,38 @@ fn session_worktree_without_a_remote_still_branches_from_head() {
         sha,
         "a remote-less repo's worktree must start at the local HEAD commit"
     );
+}
+
+/// 🔴 #8934 MEDIUM 6: a local-only worktree is cut from the local default
+/// branch even when the root has a feature branch checked out, and a repo
+/// with no default branch refuses rather than guessing.
+/// Test: this function IS the test.
+#[test]
+fn session_worktree_in_a_local_only_repo_branches_from_its_default_branch() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    g(&repo, &["init", "-q", "-b", "main"]);
+    g(&repo, &["config", "user.email", "t@example.com"]);
+    g(&repo, &["config", "user.name", "T"]);
+    let main_sha = commit(&repo, "on-main");
+    g(&repo, &["checkout", "-q", "-b", "feature-8934"]);
+    let feature_sha = commit(&repo, "on-feature");
+
+    let worktree = create_session_worktree_unchecked(
+        &repo,
+        "tm-local-8934",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("a local-only repo with a main branch gets a worktree");
+    let head = g_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(head, feature_sha, "cut from the checked-out feature branch");
+    assert_eq!(head, main_sha, "must start at the local default branch");
+
+    g(&repo, &["branch", "-q", "-m", "main", "zz-8934-other"]);
+    let err = super::super::inproject_start_point::resolve(&repo)
+        .expect_err("no default branch must refuse");
+    assert!(err.contains("no local default branch"), "{err}");
 }
 
 /// #4270: `clean -ffd` in the base clone must not delete session worktrees.

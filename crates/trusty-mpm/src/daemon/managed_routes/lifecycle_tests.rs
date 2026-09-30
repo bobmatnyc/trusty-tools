@@ -290,7 +290,7 @@ fn prepare_inproject_session_writes_statusline() {
         &fw,
         &session_id,
         worktree.path(),
-        "https://github.com/owner/repo",
+        Some("https://github.com/owner/repo"),
     )
     .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
 
@@ -355,7 +355,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
             &fw,
             &session_id,
             worktree.path(),
-            "https://github.com/owner/repo",
+            Some("https://github.com/owner/repo"),
         )
         .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
     })
@@ -791,8 +791,7 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
@@ -881,8 +880,7 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
@@ -969,8 +967,7 @@ async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");

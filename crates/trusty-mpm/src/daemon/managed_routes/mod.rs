@@ -47,6 +47,8 @@ mod launch_on_main;
 /// Post-send "did the relaunch actually take?" status check (#6766).
 mod launch_verify;
 mod lifecycle;
+// #8934: spawn in a repository with no `origin` remote (local-only worktrees).
+mod local_only_spawn;
 pub mod managed_checkout;
 mod mcp_spawn_gate;
 // #6288: `pub` so `rpc::registry::projects` can call the shared `*_op` bodies.

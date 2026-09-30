@@ -780,6 +780,14 @@ async fn publish_snapshot(
     let name = session_name.map(str::to_string);
     let timestamp = outcome.timestamp;
     let default_branch = configured_default_branch(project_path);
+    // #8934: a local-only repo has no remote to push the pause branch to.
+    if crate::core::remote_mode::remote_mode(project_path).is_ok_and(|m| m.is_local_only()) {
+        tracing::info!(
+            "session pause: {}",
+            crate::core::remote_mode::LOCAL_ONLY_SKIP
+        );
+        return Ok(SnapshotPublish::Skipped("local_only"));
+    }
     tokio::task::spawn_blocking(move || {
         let req = pause_pr::PublishRequest {
             repo: &repo,
@@ -839,7 +847,7 @@ async fn managed_session_name(state: &Arc<DaemonState>, session_id: &str) -> Opt
 enum SnapshotPublish {
     /// A branch was pushed and a PR opened.
     Opened(crate::core::session_pause_pr::PublishOutcome),
-    /// No PR: `unchanged`, `not_tracked`, or `not_a_git_repo`.
+    /// No PR: `unchanged`, `not_tracked`, `not_a_git_repo`, or `local_only` (#8934).
     Skipped(&'static str),
 }
 

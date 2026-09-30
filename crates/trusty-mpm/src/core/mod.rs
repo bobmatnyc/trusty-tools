@@ -285,6 +285,8 @@ pub mod install_freshness;
 // the remote's tip — the pre-push credential scan's base, fail-closed.
 pub mod base_ref_freshness;
 pub mod reinstall;
+// #8934: the one "has an origin remote / local-only" predicate and the no-gh pin.
+pub mod remote_mode;
 // #6958: the per-session token-savings ledger every producer appends to, and
 // the instruction/language-compression producer that writes the first row.
 pub mod savings;

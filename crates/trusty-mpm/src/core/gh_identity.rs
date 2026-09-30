@@ -208,6 +208,12 @@ impl GhEnv {
         Self { vars, unset }
     }
 
+    /// #8934: the "no remote, no gh" binding for a local-only repository.
+    /// Test: `local_only_gh_env_strips_every_inherited_token`.
+    pub fn local_only() -> Self {
+        Self::from_identity_vars(crate::core::remote_mode::local_only_gh_vars())
+    }
+
     /// Borrow the resolved `(name, value)` overrides.
     ///
     /// Why: callers iterate these to call `Command::env`; tests iterate them

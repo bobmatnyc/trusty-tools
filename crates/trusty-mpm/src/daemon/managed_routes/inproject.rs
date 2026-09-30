@@ -648,7 +648,9 @@ pub fn create_session_worktree_unchecked(
     // #4957: cut the session branch from the freshly-fetched remote default
     // branch. Omitting the start-point inherits the base checkout's local
     // HEAD, which is stale on any machine that has not pulled recently.
-    let start_point = super::inproject_start_point::resolve(base_path);
+    // #8934: a local-only repo with no default branch refuses here.
+    let start_point =
+        super::inproject_start_point::resolve(base_path).map_err(|e| format!("inproject: {e}"))?;
     if let Some(reason) = start_point.warning() {
         warn!(
             base = %base_path.display(),
@@ -870,6 +872,13 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
              session branch's upstream to the default branch (#2867). `git pull` in this \
              worktree needs an explicit `git pull origin <default-branch>`."
         );
+        return;
+    }
+
+    // #8934: a local-only repo has no `origin/<default>` to track.
+    if crate::core::remote_mode::remote_mode(base_path).is_ok_and(|m| m.is_local_only()) {
+        let skip = crate::core::remote_mode::LOCAL_ONLY_SKIP;
+        info!(worktree = %worktree_path.display(), "inproject: {skip}; no upstream set");
         return;
     }
 
