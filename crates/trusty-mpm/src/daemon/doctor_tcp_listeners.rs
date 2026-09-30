@@ -11,9 +11,10 @@
 //! or `netstat`), keeps those owned by a trusty-* executable, and grades each
 //! against the embedded `tcp_listener_allowlist.tsv`, the same file the lint
 //! reads. A listener no `permanent`/`temporary` row names is FAIL; a
-//! `temporary` row's listener is WARN naming its issue; the console is OK. A
-//! probe that fails, or a trusty-* process whose sockets could not be read, is
-//! UNKNOWN — never OK. Read-only.
+//! `temporary` row's listener is WARN naming its issue; the console is OK on
+//! loopback and WARN on any other address. A probe that fails, or a trusty-*
+//! or unnamed process whose sockets could not be read, is UNKNOWN — never OK.
+//! Read-only.
 //!
 //! Test: `doctor_tcp_listeners_tests.rs`.
 
@@ -54,7 +55,12 @@ pub(crate) struct ListenSocket {
     pub port: u16,
 }
 
-/// A trusty-* process whose sockets the probe could not read, and why.
+/// [`Uninspected::process`] for a live process the probe could not name. It may
+/// be trusty-*, so [`classify`] grades it UNKNOWN (#8926).
+pub(crate) const UNNAMED_PROCESS: &str = "<unnamed>";
+
+/// A trusty-* (or unnamed) process whose sockets the probe could not read, and
+/// why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Uninspected {
     /// Process id.
@@ -149,19 +155,31 @@ pub(crate) fn is_trusty_process(name: &str) -> bool {
     name.starts_with("trusty-") || TRUSTY_SHORT_NAMES.contains(&name)
 }
 
+/// Whether a listener's local address is loopback (`127.0.0.0/8`, `::1`, or
+/// an IPv4-mapped loopback). An address that does not parse is not.
+/// Test: `an_allowlisted_listener_off_loopback_warns`.
+fn is_loopback(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
 /// Grade one probe pass against the allowlist.
 ///
 /// Why: the probe is the one part that touches the host, so this pure fold is
 /// where every verdict is decided and tested.
 /// What: ignores non-trusty processes. A listener whose process a
 /// `permanent` row names is OK, a `temporary` row WARN (naming the issue), no
-/// such row FAIL — a `source-only` row never excuses a live listener. A probe
-/// error or an uninspected trusty-* process is UNKNOWN. The status is the worst
-/// finding; the message lists every finding.
+/// such row FAIL — a `source-only` row never excuses a live listener. A
+/// listener on a non-loopback address is at least WARN, whatever its row. A
+/// probe error, or an uninspected process that is trusty-* or
+/// [`UNNAMED_PROCESS`], is UNKNOWN. The status is the worst finding; the
+/// message lists every finding.
 /// Test: `only_the_console_listening_is_ok`,
 /// `a_temporary_listener_warns_naming_its_issue`,
 /// `a_listener_no_live_row_names_fails`, `a_failed_probe_is_unknown_never_ok`,
-/// `an_uninspected_trusty_process_is_unknown_never_ok`.
+/// `an_uninspected_trusty_process_is_unknown_never_ok`,
+/// `an_unnamed_uninspected_process_is_unknown_never_ok`,
+/// `an_allowlisted_listener_off_loopback_warns`.
 pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry]) -> DoctorCheck {
     let report = match probe {
         Ok(report) => report,
@@ -187,7 +205,7 @@ pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry])
         let row = allow
             .iter()
             .find(|r| r.kind != AllowKind::SourceOnly && r.processes.contains(&sock.process));
-        let (verdict, text) = match row {
+        let (mut verdict, mut text) = match row {
             Some(r) if r.kind == AllowKind::Permanent => {
                 (CheckStatus::Ok, format!("{who} allowed ({})", r.issue))
             }
@@ -202,13 +220,18 @@ pub(crate) fn classify(probe: Result<ProbeReport, String>, allow: &[AllowEntry])
                 ),
             ),
         };
+        // #8926: an allowlist row excuses the process, not an off-host bind.
+        if !is_loopback(&sock.addr) {
+            verdict = verdict.worst(CheckStatus::Warn);
+            text.push_str(", bound to a non-loopback address (reachable off-host)");
+        }
         status = status.worst(verdict);
         findings.push(text);
     }
     for gap in report
         .uninspected
         .iter()
-        .filter(|u| is_trusty_process(&u.process))
+        .filter(|u| u.process == UNNAMED_PROCESS || is_trusty_process(&u.process))
     {
         status = status.worst(CheckStatus::Unknown);
         findings.push(format!(

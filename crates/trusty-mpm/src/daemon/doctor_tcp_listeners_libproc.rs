@@ -12,6 +12,7 @@ use std::ffi::{c_int, c_void};
 use std::mem::{offset_of, size_of};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use super::super::UNNAMED_PROCESS;
 use super::{ListenSocket, ProbeReport, Uninspected};
 
 /// `PROC_PIDFDSOCKETINFO` flavor of `proc_pidfdinfo` (`<sys/proc_info.h>`).
@@ -90,19 +91,29 @@ struct FdInfoBuf([u8; 1024]);
 
 /// List LISTEN sockets of the processes `want` accepts.
 ///
-/// What: `Err` only when the pid list itself cannot be read. A process whose
-/// path cannot be read (exited, or another user's) is skipped; one `want`
-/// accepts whose descriptors cannot be read is [`Uninspected`].
+/// What: `Err` only when the pid list itself cannot be read. A process that
+/// has exited is skipped; a live one [`pid_name`] cannot name is
+/// [`Uninspected`] as [`UNNAMED_PROCESS`], since it may be trusty-*; one `want`
+/// accepts whose descriptors cannot be read is [`Uninspected`] by name.
 pub(super) fn listening_sockets(want: fn(&str) -> bool) -> Result<ProbeReport, String> {
     let mut report = ProbeReport::default();
     for pid in all_pids()? {
-        let Some(process) = pid_name(pid) else {
-            continue;
+        let pid_u32 = u32::try_from(pid).unwrap_or_default();
+        let process = match pid_name(pid) {
+            Ok(Some(name)) => name,
+            Ok(None) => continue,
+            Err(e) => {
+                report.uninspected.push(Uninspected {
+                    pid: pid_u32,
+                    process: UNNAMED_PROCESS.to_string(),
+                    error: format!("could not name it: {e}"),
+                });
+                continue;
+            }
         };
         if !want(&process) {
             continue;
         }
-        let pid_u32 = u32::try_from(pid).unwrap_or_default();
         match pid_listen_sockets(pid) {
             Ok(socks) => report
                 .listeners
@@ -148,16 +159,41 @@ fn all_pids() -> Result<Vec<c_int>, String> {
     Ok(pids)
 }
 
-/// A pid's executable basename, or `None` when its path cannot be read.
-fn pid_name(pid: c_int) -> Option<String> {
+/// A pid's executable basename.
+///
+/// Why: skipping every pid whose path could not be read hid a trusty-* daemon
+/// whose binary a reinstall replaced: its path read fails with ENOENT (#8926).
+/// What: the `proc_pidpath` basename, else `proc_name` (the kernel's process
+/// name, which outlives the file). `Ok(None)` only when the process has
+/// exited (ESRCH); `Err` when it is alive and neither call names it.
+/// Test: `libproc_pid_name_names_a_live_pid_and_skips_an_exited_one`.
+pub(crate) fn pid_name(pid: c_int) -> std::io::Result<Option<String>> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: the buffer is PROC_PIDPATHINFO_MAXSIZE bytes and outlives the call.
     let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast::<c_void>(), buf.len() as u32) };
-    if n <= 0 {
-        return None;
+    if n > 0 {
+        let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+        return Ok(path.rsplit('/').next().map(str::to_string));
     }
-    let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-    path.rsplit('/').next().map(str::to_string)
+    let path_err = std::io::Error::last_os_error();
+    if path_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(None);
+    }
+    let mut name = [0u8; 256];
+    // SAFETY: the buffer is 256 bytes and outlives the call.
+    let n = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast::<c_void>(), name.len() as u32) };
+    if n > 0 {
+        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        return Ok(Some(String::from_utf8_lossy(&name[..len]).into_owned()));
+    }
+    let name_err = std::io::Error::last_os_error();
+    if name_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(None);
+    }
+    Err(std::io::Error::new(
+        path_err.kind(),
+        format!("proc_pidpath: {path_err}; proc_name: {name_err}"),
+    ))
 }
 
 /// The (address, port) of each TCP LISTEN socket `pid` holds.

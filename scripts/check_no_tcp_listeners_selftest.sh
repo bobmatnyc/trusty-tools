@@ -9,11 +9,12 @@
 # What: one throwaway git repo per case, holding fixture crates and its own
 #   allowlist (passed through TCP_LISTENER_ALLOWLIST). Each case asserts the
 #   exit status and, for a failure, the message. The cases pin the defect (an
-#   injected non-allowlisted bind, a TcpSocket, a test binding a fixed port, a
-#   bind under `#[cfg(not(test))]` or after `#[cfg(test)] mod tests;`), the
+#   injected non-allowlisted bind, a TcpSocket, a bind_with_auto_port call, a
+#   test binding a fixed port, a bind under `#[cfg(not(test))]` or after
+#   `#[cfg(test)] mod tests;`), the
 #   accepted forms (an allowlisted bind, an ephemeral test bind, a bind a test
 #   asserts fails, a mention in a comment or string), and the fail-closed paths
-#   (stale row, malformed row, empty scan).
+#   (stale row, malformed row, empty scan, a tree below the default floor).
 #
 # Usage: bash scripts/check_no_tcp_listeners_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -49,11 +50,13 @@ new_fixture() {
 }
 
 # run_case <name> <expected-exit> <expected-message-or-empty> <dir>
+# The scan floor is 1 unless CASE_MIN_FILES says otherwise; an empty
+# CASE_MIN_FILES leaves the gate on its default floor.
 run_case() {
   local name="$1" want="$2" needle="$3" dir="$4" out status
   git -C "$dir" add -A
   set +e
-  out="$(cd "$dir" && TCP_LISTENER_ALLOWLIST=allow.tsv bash "$GATE" 2>&1)"
+  out="$(cd "$dir" && TCP_LISTENER_ALLOWLIST=allow.tsv TCP_LISTENER_MIN_FILES="${CASE_MIN_FILES-1}" bash "$GATE" 2>&1)"
   status=$?
   set -e
   if [ "$status" -ne "$want" ]; then
@@ -160,6 +163,20 @@ printf '# allowlist\n' > "$d/allow.tsv"
 printf 'readme\n' > "$d/README.md"
 git -C "$d" init -q
 run_case "empty scan fails" 1 "SCAN FLOOR" "$d"
+
+# 12. The default floor refuses a tree this small: a sensible minimum, not zero.
+d="$(new_fixture below-default-floor)"
+CASE_MIN_FILES="" run_case "tree below the default scan floor fails" 1 "SCAN FLOOR: 2 crates" "$d"
+
+# 13. bind_with_auto_port (trusty-common) returns a bound TcpListener: a call
+#     outside the allowlist is a site, in production and in a test alike.
+d="$(new_fixture auto-port)"
+printf 'pub async fn serve(a: std::net::SocketAddr) {\n    let _l = trusty_common::bind_with_auto_port(a, 8).await;\n}\n' \
+  > "$d/crates/app/src/lib.rs"
+printf '#[tokio::test]\nasync fn t() {\n    let _l = bind_with_auto_port(7878, 1).await;\n}\n' \
+  > "$d/crates/app/tests/it.rs"
+run_case "bind_with_auto_port call fails" 1 "crates/app/src/lib.rs:2: TCP listener site" "$d"
+run_case "bind_with_auto_port in a test fails" 1 "crates/app/tests/it.rs:3: test binds a non-ephemeral address" "$d"
 
 echo "check_no_tcp_listeners_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

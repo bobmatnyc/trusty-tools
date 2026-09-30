@@ -177,4 +177,4 @@ fn procfs_process_name(dir: &Path) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 #[path = "doctor_tcp_listeners_libproc.rs"]
-mod macos;
+pub(crate) mod macos;

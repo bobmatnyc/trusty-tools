@@ -14,6 +14,7 @@
 #   code line naming any of:
 #     TcpListener  TcpSocket  axum_server  warp::serve  HttpServer::new
 #     <Tcp*|Server|HttpServer>::bind / ::try_bind   .listen(
+#     bind_with_auto_port(   (trusty-common's helper; returns a bound TcpListener)
 #   `axum::serve` is not a site: it also serves a UnixListener, and the TCP
 #   bind that feeds it is. A `SocketAddr` in listen config is not a site for
 #   the same reason: it only listens through one of the calls above.
@@ -32,9 +33,14 @@
 #   A site is excused only by a `paths` entry of
 #   crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv, the same file
 #   `tm doctor`'s `tcp_listeners` row embeds. The file's header documents the
-#   columns. A path that excuses no site fails the gate.
+#   columns. An entry excuses a whole PATH, not a line: every site in that
+#   file, or under that directory when it ends in `/`, passes — including a
+#   bind added there later. Staleness is checked per path, not per row: each
+#   path must excuse at least one site, so a dead path fails even when its
+#   row's other paths still excuse sites.
 #
-#   Scan floor: zero `.rs` files enumerated is a failure, never a pass.
+#   Scan floor: fewer than TCP_LISTENER_MIN_FILES (default 1000; the tree has
+#   over 5000) `.rs` files enumerated is a failure, never a pass.
 #
 # Known limits — textual, not a parser: a bind reached through a macro or a
 #   re-exported alias that renames `TcpListener` is invisible; `#[cfg(test)]`
@@ -42,7 +48,8 @@
 #   token tree it cannot see through may misplace a test region.
 #
 # Usage: bash scripts/check_no_tcp_listeners.sh
-#   TCP_LISTENER_ALLOWLIST=<path> overrides the allowlist (the selftest uses it).
+#   TCP_LISTENER_ALLOWLIST=<path> overrides the allowlist, and
+#   TCP_LISTENER_MIN_FILES=<n> the scan floor (the selftest sets both).
 # Exit:  0 clean; 1 on a finding, a stale or malformed allowlist row, or a
 #        scan-floor breach.
 # Test:  scripts/check_no_tcp_listeners_selftest.sh.
@@ -66,7 +73,15 @@ FILE_LIST="$(mktemp)"
 trap 'rm -f "$FILE_LIST"' EXIT
 git ls-files -- 'crates/*.rs' > "$FILE_LIST"
 
-TCP_ALLOW="$ALLOW" TCP_FILES="$FILE_LIST" perl -e '
+MIN_FILES="${TCP_LISTENER_MIN_FILES:-1000}"
+case "$MIN_FILES" in
+  '' | *[!0-9]*)
+    echo "check_no_tcp_listeners: TCP_LISTENER_MIN_FILES=$MIN_FILES is not a count" >&2
+    exit 1
+    ;;
+esac
+
+TCP_ALLOW="$ALLOW" TCP_FILES="$FILE_LIST" TCP_MIN_FILES="$MIN_FILES" perl -e '
 use strict;
 use warnings;
 
@@ -108,8 +123,10 @@ while (my $row = <$af>) {
 }
 close $af;
 
-my $site = qr/\bTcpListener\b|\bTcpSocket\b|\baxum_server\b|\bwarp::serve\b|\bHttpServer::new\b|\b(?:Tcp\w*|Server|HttpServer)::(?:try_)?bind\b|\.listen\s*\(/;
-my $bind_call = qr/\bTcpListener::bind\b|\bTcpSocket::new_v[46]\b|\baxum_server::|\bwarp::serve\b|\bHttpServer::new\b|\b(?:Tcp\w*|Server|HttpServer)::(?:try_)?bind\b|\.listen\s*\(/;
+# #8926: bind_with_auto_port (trusty-common) returns a bound TcpListener, so
+# its call is a bind site in its own right.
+my $site = qr/\bTcpListener\b|\bTcpSocket\b|\baxum_server\b|\bwarp::serve\b|\bHttpServer::new\b|\b(?:Tcp\w*|Server|HttpServer)::(?:try_)?bind\b|\.listen\s*\(|\bbind_with_auto_port\s*\(/;
+my $bind_call = qr/\bTcpListener::bind\b|\bTcpSocket::new_v[46]\b|\baxum_server::|\bwarp::serve\b|\bHttpServer::new\b|\b(?:Tcp\w*|Server|HttpServer)::(?:try_)?bind\b|\.listen\s*\(|\bbind_with_auto_port\s*\(/;
 my $ephemeral = qr/"127\.0\.0\.1:0"|\(\s*"127\.0\.0\.1"\s*,\s*0\s*\)|\(\s*(?:std::net::)?Ipv4Addr::LOCALHOST\s*,\s*0\s*\)|\[\s*127\s*,\s*0\s*,\s*0\s*,\s*1\s*\]\s*,\s*0\b/;
 my $test_attr = qr/#\[\s*(?:cfg\s*\((?![^\]]*\bnot\s*\(\s*test\b)[^\]]*\btest\b|(?:tokio::)?test\b)/;
 
@@ -228,8 +245,9 @@ for my $path (@paths) {
 }
 
 my $status = 0;
-if (!$scanned) {
-    print STDERR "check_no_tcp_listeners: SCAN FLOOR: no crates/**/*.rs file was enumerated\n";
+my $floor = $ENV{TCP_MIN_FILES} > 1 ? $ENV{TCP_MIN_FILES} : 1;    # an empty scan never passes
+if ($scanned < $floor) {
+    print STDERR "check_no_tcp_listeners: SCAN FLOOR: $scanned crates/**/*.rs file(s) enumerated, want at least $floor; the enumeration is broken, not the tree\n";
     exit 1;
 }
 if (@errors) {

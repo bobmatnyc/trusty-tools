@@ -123,6 +123,53 @@ fn an_uninspected_trusty_process_is_unknown_never_ok() {
 }
 
 #[test]
+fn an_unnamed_uninspected_process_is_unknown_never_ok() {
+    // A live pid libproc could not name may be a trusty-* daemon.
+    let report = ProbeReport {
+        listeners: Vec::new(),
+        uninspected: vec![Uninspected {
+            pid: 14,
+            process: UNNAMED_PROCESS.into(),
+            error: "could not name it: Operation not permitted".into(),
+        }],
+    };
+    let row = classify(Ok(report), &allow());
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(
+        row.message
+            .contains("could not read the sockets of <unnamed> (pid 14)"),
+        "{}",
+        row.message
+    );
+}
+
+#[test]
+fn an_allowlisted_listener_off_loopback_warns() {
+    let at = |process: &str, addr: &str| ListenSocket {
+        addr: addr.to_string(),
+        ..sock(10, process, 7788)
+    };
+    for addr in ["0.0.0.0", "::", "192.168.1.5"] {
+        let row = classify(listening(vec![at("trusty-console", addr)]), &allow());
+        assert_eq!(row.status, CheckStatus::Warn, "{addr}: {}", row.message);
+        assert!(
+            row.message.contains(&format!(
+                "trusty-console (pid 10) {addr}:7788 allowed (ADR-0032), bound to a non-loopback address"
+            )),
+            "{}",
+            row.message
+        );
+        let temp = classify(listening(vec![at("tm", addr)]), &allow());
+        assert_eq!(temp.status, CheckStatus::Warn, "{addr}: {}", temp.message);
+        assert!(temp.message.contains("non-loopback"), "{}", temp.message);
+    }
+    for addr in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+        let row = classify(listening(vec![at("trusty-console", addr)]), &allow());
+        assert_eq!(row.status, CheckStatus::Ok, "{addr}: {}", row.message);
+    }
+}
+
+#[test]
 fn malformed_allowlist_rows_are_refused() {
     for (text, needle) in [
         (
@@ -227,6 +274,50 @@ fn procfs_probe_maps_listen_inodes_to_trusty_pids() {
     let report = procfs_listening_sockets(tmp.path(), is_trusty_process).expect("probe runs");
     assert_eq!(report.listeners, vec![sock(100, "tm", 7880)]);
     assert!(report.uninspected.is_empty());
+}
+
+/// An `fd/` dir the probe cannot read leaves the process uninspected, never
+/// silently clean.
+#[cfg(unix)]
+#[test]
+fn procfs_probe_reports_an_unreadable_fd_dir_as_uninspected() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("net")).unwrap();
+    std::fs::write(tmp.path().join("net/tcp"), TCP_TABLE).unwrap();
+    fake_proc(tmp.path(), 100, "tm", &[111]);
+    let fd_dir = tmp.path().join("100/fd");
+    std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // root reads a mode-000 dir anyway, so the fixture proves nothing there.
+    let as_root = std::fs::read_dir(&fd_dir).is_ok();
+
+    let report = procfs_listening_sockets(tmp.path(), is_trusty_process);
+    std::fs::set_permissions(&fd_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if as_root {
+        eprintln!("skipped: running as root, a mode-000 dir stays readable");
+        return;
+    }
+    let report = report.expect("probe runs");
+    assert!(report.listeners.is_empty(), "{:?}", report.listeners);
+    assert_eq!(report.uninspected.len(), 1, "{:?}", report.uninspected);
+    assert_eq!(report.uninspected[0].pid, 100);
+    assert_eq!(report.uninspected[0].process, "tm");
+}
+
+/// libproc names a live pid, and skips one that has exited (ESRCH).
+#[cfg(target_os = "macos")]
+#[test]
+fn libproc_pid_name_names_a_live_pid_and_skips_an_exited_one() {
+    use super::probe::macos::pid_name;
+    let me = i32::try_from(std::process::id()).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let want = exe.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(pid_name(me).unwrap(), Some(want));
+
+    let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let gone = i32::try_from(child.id()).unwrap();
+    child.wait().unwrap();
+    assert_eq!(pid_name(gone).unwrap(), None);
 }
 
 #[cfg(unix)]
