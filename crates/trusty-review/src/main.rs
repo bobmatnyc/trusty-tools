@@ -176,6 +176,51 @@ enum Commands {
     Mcp(McpArgs),
 }
 
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
+/// Level applied when `RUST_LOG` is unset or does not parse.
+const DEFAULT_LOG_DIRECTIVES: &str = "warn";
+
+/// Target held at `warn` unless `RUST_LOG` names exactly it (#8948). A
+/// directive target matches by string prefix, so `aws` covers every AWS crate
+/// that can log a credential: `aws_config`, `aws_sigv4`, `aws_runtime`,
+/// `aws_credential_types`, `aws_types`, `aws_sdk_*` and `aws_smithy_*`.
+const AWS_LOG_GUARD: &str = "aws";
+
+/// Build the stderr tracing filter from `RUST_LOG`.
+///
+/// Why: #8948 — the AWS credential provider logs the access key ID at INFO,
+/// and stderr lands in agent transcripts. A `RUST_LOG=info` meant for
+/// trusty-review's own events let that line through.
+/// What: `RUST_LOG` when it parses, else `warn`; then `aws=warn` unless
+/// `RUST_LOG` has a directive whose target is exactly `aws`. A more specific
+/// operator directive such as `aws_config=info` still wins over the guard, and
+/// covers only its own target. An unparsable `RUST_LOG` falls back to `warn`
+/// with the guard.
+/// Test: `aws_info_events_stay_off_stderr_at_the_default_level`,
+/// `aws_info_events_stay_off_stderr_under_rust_log_info`,
+/// `aws_sigv4_events_stay_off_stderr_under_rust_log_trace`,
+/// `an_aws_sub_target_directive_keeps_the_guard_on_its_siblings`,
+/// `an_unparsable_rust_log_falls_back_to_warn_with_the_aws_guards`,
+/// `an_explicit_aws_directive_is_honoured`.
+fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    let base = rust_log
+        .filter(|s| EnvFilter::try_new(s).is_ok())
+        .unwrap_or(DEFAULT_LOG_DIRECTIVES);
+    let mut directives = base.to_string();
+    let named = base
+        .split(',')
+        .filter_map(|d| d.trim().split('=').next())
+        .any(|target| target == AWS_LOG_GUARD);
+    if !named {
+        directives.push_str(&format!(",{AWS_LOG_GUARD}=warn"));
+    }
+    // `EnvFilter::new` drops a directive it cannot parse rather than failing;
+    // every piece here was validated above, so nothing is dropped.
+    EnvFilter::new(directives)
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -183,10 +228,7 @@ fn main() -> Result<()> {
     // and, in --stdio mode, for the MCP JSON-RPC transport).
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
+        .with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
 
     let cli = Cli::parse();
@@ -226,14 +268,14 @@ async fn async_main(cli: Cli) -> Result<()> {
     let config = ReviewConfig::from_env_and_file(config_path.as_deref(), None);
 
     match command {
-        Commands::Run(args) => cmd_run(config, args).await,
+        Commands::Run(args) => cmd_run(config, config_path.as_deref(), args).await,
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "mcp")]
         Commands::Mcp(args) => cmd_mcp_stdio(config, args).await,
         // `report` is dispatched above, before the config is built.
         #[cfg(feature = "report")]
         Commands::Report(_) => unreachable!("report dispatched before the config is built"),
-        Commands::Calibrate(args) => cmd_calibrate(config, args).await,
+        Commands::Calibrate(args) => cmd_calibrate(config_path.as_deref(), args).await,
         Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
         // #6913: dispatched in `main`, before the runtime and the config.
@@ -246,6 +288,152 @@ async fn async_main(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    // ── --config reaches every config rebuild (#8947) ───────────────────────
+
+    /// The production text of a source file, before its test module.
+    fn production(src: &str) -> &str {
+        src.split("#[cfg(test)]").next().unwrap_or(src)
+    }
+
+    /// REGRESSION (#8947): `main` hands the `--config` path to `run` and
+    /// `calibrate`, and neither rebuilds its config from no file.
+    /// `run_config_honours_the_config_file_verification_settings` proves the
+    /// rebuild honours the path it is given.
+    #[test]
+    fn run_and_calibrate_rebuild_their_config_from_the_config_path() {
+        let main = production(include_str!("main.rs"));
+        assert!(main.contains("cmd_run(config, config_path.as_deref(), args)"));
+        assert!(main.contains("cmd_calibrate(config_path.as_deref(), args)"));
+        for (name, src) in [
+            ("run.rs", include_str!("commands/run.rs")),
+            ("calibrate.rs", include_str!("commands/calibrate.rs")),
+        ] {
+            let code = production(src);
+            assert!(
+                code.contains("ReviewConfig::from_env_and_file(config_path,"),
+                "{name} must rebuild its config from the --config path"
+            );
+            assert!(
+                !code.contains("from_env_and_file(None"),
+                "{name} rebuilds its config from no file"
+            );
+        }
+        let run = production(include_str!("commands/run.rs"));
+        assert!(run.contains("run_config(config_path, &args)"));
+    }
+
+    // ── stderr log filter (#8948) ───────────────────────────────────────────
+
+    /// In-memory stand-in for stderr.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// What reaches "stderr" under `log_filter(rust_log)` for one INFO event
+    /// from the credential provider, the SDK, and trusty-review itself.
+    fn emitted(rust_log: Option<&str>) -> String {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_env_filter(log_filter(rust_log))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "aws_config::profile::credentials", "key AKIA8948");
+            tracing::info!(target: "aws_sdk_bedrockruntime::client", "sdk-8948");
+            tracing::info!(target: "trusty_review::pipeline", "own-8948");
+        });
+        let bytes = capture.0.lock().expect("capture lock").clone();
+        String::from_utf8(bytes).expect("utf8 log output")
+    }
+
+    /// REGRESSION (#8948): no AWS INFO line at the default level.
+    #[test]
+    fn aws_info_events_stay_off_stderr_at_the_default_level() {
+        let out = emitted(None);
+        assert!(!out.contains("AKIA8948"), "credential line leaked: {out}");
+        assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
+    }
+
+    /// REGRESSION (#8948): `RUST_LOG=info` opens trusty-review's own INFO
+    /// events, not the credential provider's.
+    #[test]
+    fn aws_info_events_stay_off_stderr_under_rust_log_info() {
+        let out = emitted(Some("info"));
+        assert!(out.contains("own-8948"), "own INFO event must show: {out}");
+        assert!(!out.contains("AKIA8948"), "credential line leaked: {out}");
+        assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
+    }
+
+    /// REGRESSION (#8948): `RUST_LOG=trace` must not open the SigV4 signer,
+    /// whose `params` and `canonical_request` events carry the key ID and the
+    /// session token.
+    #[test]
+    fn aws_sigv4_events_stay_off_stderr_under_rust_log_trace() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_env_filter(log_filter(Some("trace")))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "aws_sigv4::http_request::sign", "sigv4-8948");
+            tracing::trace!(target: "trusty_review::pipeline", "own-trace-8948");
+        });
+        let out = String::from_utf8(capture.0.lock().expect("capture lock").clone())
+            .expect("utf8 log output");
+        assert!(
+            out.contains("own-trace-8948"),
+            "own TRACE event must show: {out}"
+        );
+        assert!(!out.contains("sigv4-8948"), "SigV4 event leaked: {out}");
+    }
+
+    /// REGRESSION (#8948): a directive for one `aws_config` module does not
+    /// lift the guard from the credential provider beside it.
+    #[test]
+    fn an_aws_sub_target_directive_keeps_the_guard_on_its_siblings() {
+        let out = emitted(Some("info,aws_config::imds=debug"));
+        assert!(!out.contains("AKIA8948"), "credential line leaked: {out}");
+        assert!(!out.contains("sdk-8948"), "SDK INFO line leaked: {out}");
+    }
+
+    /// Error arm (#8948): an unparsable `RUST_LOG` keeps the guards.
+    #[test]
+    fn an_unparsable_rust_log_falls_back_to_warn_with_the_aws_guards() {
+        let out = emitted(Some("info,aws_config=notalevel"));
+        assert!(out.is_empty(), "fallback must be `warn` with guards: {out}");
+    }
+
+    /// An operator who names `aws_config` in `RUST_LOG` gets what they asked.
+    #[test]
+    fn an_explicit_aws_directive_is_honoured() {
+        let out = emitted(Some("warn,aws_config=info"));
+        assert!(
+            out.contains("AKIA8948"),
+            "explicit directive dropped: {out}"
+        );
+        assert!(
+            !out.contains("sdk-8948"),
+            "aws_sdk guard must still hold: {out}"
+        );
+    }
 
     /// REGRESSION (#6290): `serve` must keep parsing, and must land on `Mcp`.
     ///

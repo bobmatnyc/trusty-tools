@@ -142,13 +142,65 @@ fn a_finding_with_no_anchor_is_dropped() {
 
 // ─── Critic round (#8905 rows 1–3, 6, 7) ───────────────────────────────────────
 
-/// Row 1. Fail-open mutation: `found.iter().all(Vec::is_empty)` in place of
-/// `any` in `check_citation`'s snippet arm.
+/// #8949 ruling (a), replacing #8905 row 1's all-of rule: one quote on the
+/// cited line keeps the finding, marked partial and advisory only.
 #[test]
-fn every_quoted_snippet_must_be_present() {
+fn a_finding_with_one_real_and_one_illustrative_snippet_is_kept_marked() {
     let body = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
-    let kept = gate_one("src/billing.rs", Some(SUM_LINE), body, &billing_index());
-    assert!(kept.is_empty(), "{kept:?}");
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert_eq!((report.dropped, report.partial), (0, 1));
+    let f = &findings[0];
+    assert!(f.citation_partial, "{f:?}");
+    assert_eq!(f.line, Some(SUM_LINE));
+    assert!(f.effort != Effort::High && f.confidence <= 0.65, "{f:?}");
+    assert!(
+        f.description.contains("Citation partly unverified"),
+        "{f:?}"
+    );
+}
+
+/// #8949 fix 1: a drop names the fragment that failed and keeps the finding.
+#[test]
+fn a_dropped_finding_names_its_missing_snippet() {
+    let body = "`ledger.flush_all()` is never awaited, so the total is lost.";
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty());
+    let withheld = &report.withheld_findings[0];
+    assert_eq!(
+        withheld.missing_fragment.as_deref(),
+        Some("ledger.flush_all()")
+    );
+    assert_eq!(withheld.reason, SNIPPET_ABSENT);
+    assert_eq!(withheld.finding.description, body);
+}
+
+/// #8949 fix 3: a double-quoted English phrase is not required code.
+#[test]
+fn a_double_quoted_prose_phrase_is_not_a_required_snippet() {
+    for body in [
+        "`amounts.iter().sum::<u64>()` can overflow, so the invoice is \"silently truncated\".",
+        "`let total = amounts.iter().sum::<u64>();` never logs \"total overflowed\" here.",
+    ] {
+        let kept = gate_one("src/billing.rs", Some(SUM_LINE), body, &billing_index());
+        assert_eq!(kept.len(), 1, "{body}");
+        assert!(!kept[0].citation_partial, "{body}: {:?}", kept[0]);
+    }
+}
+
+/// Error arm (#8949): a partial finding whose present quote is ambiguous off
+/// the cited line still drops, naming the missing fragment.
+#[test]
+fn a_partial_finding_that_cannot_be_placed_is_dropped() {
+    let body = "`(input)` is unchecked before `ledger.flush_all()`.";
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(
+        report.withheld_findings[0].missing_fragment.as_deref(),
+        Some("ledger.flush_all()")
+    );
 }
 
 /// Row 1: the critic's input — a quote absent from the file, whose words are
@@ -449,4 +501,112 @@ fn gate_posted_findings_never_approves_a_blocking_review() {
 
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.verdict, Verdict::Unknown);
+}
+
+/// #8949 fix 1: the review record carries each withheld finding.
+#[test]
+fn gate_posted_findings_records_the_withheld_finding() {
+    let body = "`ledger.flush_all()` is never awaited, so the total is lost.";
+    let mut result = blocking_result(vec![finding("src/billing.rs", Some(SUM_LINE), body)]);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert_eq!(result.withheld_findings.len(), 1);
+    let json = serde_json::to_value(&result).expect("serialise review result");
+    assert_eq!(
+        json["withheld_findings"][0]["missing_fragment"],
+        "ledger.flush_all()"
+    );
+}
+
+/// An APPROVE* review whose one finding is advisory.
+fn approve_star_result(f: Finding) -> ReviewResult {
+    let mut result = blocking_result(vec![f]);
+    result.verdict = Verdict::ApproveWithReservations;
+    result.grade = Some("C+".to_string());
+    result
+}
+
+/// #8949 ruling (b): dropping only advisory findings keeps APPROVE*.
+#[test]
+fn approve_star_survives_when_only_advisory_findings_are_dropped() {
+    let mut nit = finding(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        "`ledger.flush_all()` is slow.",
+    );
+    nit.confidence = 0.3;
+    nit.effort = Effort::Low;
+    let mut result = approve_star_result(nit);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert!(result.findings.is_empty());
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
+    assert_eq!(result.grade.as_deref(), Some("C+"));
+    assert_eq!(result.error, None);
+}
+
+/// #8949 (Architect ruling 2026-09-30): a plain APPROVE keeps APPROVE when only
+/// advisory findings are dropped, the same as APPROVE*.
+#[test]
+fn plain_approve_survives_when_only_advisory_findings_are_dropped() {
+    let mut nit = finding(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        "`ledger.flush_all()` is slow.",
+    );
+    nit.confidence = 0.3;
+    nit.effort = Effort::Low;
+    let mut result = approve_star_result(nit);
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A-".to_string());
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert!(result.findings.is_empty());
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.grade.as_deref(), Some("A-"));
+    assert_eq!(result.error, None);
+}
+
+/// Error arm (#8949 ruling (b)): a dropped finding that could escalate on its
+/// own still withholds an APPROVE* review.
+#[test]
+fn approve_star_is_withheld_when_a_dropped_finding_could_escalate() {
+    let blocker = finding(
+        "src/billing.rs",
+        Some(SUM_LINE),
+        "`ledger.flush_all()` loses data.",
+    );
+    let mut result = approve_star_result(blocker);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
+}
+
+/// Error arm (#8949 ruling (a)): a partial finding is advisory, so it cannot
+/// hold a blocking verdict, and the review never relaxes to APPROVE on it.
+#[test]
+fn a_partial_finding_cannot_carry_a_blocking_verdict() {
+    let body = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
+    let mut result = blocking_result(vec![finding("src/billing.rs", Some(SUM_LINE), body)]);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+
+    assert_eq!(result.findings.len(), 1);
+    assert!(result.findings[0].citation_partial);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings kept with a partly unverified citation (advisory)"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// #8949: a log line carries at most 120 characters of a quoted fragment.
+#[test]
+fn log_excerpt_caps_a_long_fragment() {
+    let long = "x".repeat(300);
+    assert_eq!(verdict::log_excerpt(&long).chars().count(), 121);
+    assert_eq!(verdict::log_excerpt("short"), "short");
 }

@@ -109,4 +109,29 @@ mod tests {
             |(m, p)| m == "search.index.file.remove" && p["body"]["path"] == "/fixture/note.md"
         ));
     }
+
+    /// #6285 error arm: an absent socket is an error naming the socket, and an
+    /// unknown index (a daemon refusal) surfaces as the daemon's own message.
+    /// Neither path retries over TCP.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dead_socket_and_refusal_surface_as_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead = RpcIndexFeed::new(dir.path().join("absent.sock"));
+        let err = dead.index_root("bound").await.expect_err("no daemon");
+        assert!(format!("{err:#}").contains("absent.sock"), "{err:#}");
+
+        let daemon = crate::uds_mock::spawn(|_, _| {
+            Box::pin(async {
+                Err(crate::uds_mock::RpcError::new(
+                    trusty_common::search_rpc::CODE_NOT_FOUND,
+                    "no such index",
+                ))
+            })
+        })
+        .await;
+        let feed = RpcIndexFeed::new(daemon.socket().to_path_buf());
+        let err = feed.index_root("ghost").await.expect_err("unknown index");
+        assert!(err.to_string().contains("no such index"), "{err}");
+    }
 }

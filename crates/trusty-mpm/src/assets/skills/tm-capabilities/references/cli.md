@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-65 top-level commands.
+66 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -34,6 +34,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `divert` — Bulk-read diversion worker (issue #6887)
   - `bulk-read` — Read files on a cheap worker model and print only the answer
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
+- `env` — Edit a dotenv file without printing a value: `set` and `keys`
+  - `keys` — Print a dotenv file's key names, never a value
+  - `set` — Set one key in a dotenv file, never printing its value
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
