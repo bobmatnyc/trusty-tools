@@ -33,13 +33,14 @@ pub use command::TrustyCommand;
 pub use executor::CommandExecutor;
 pub use http_client::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
-    CoordinatorSession, DaemonClient, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,
-    FleetProjectGroupWire, HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse,
-    ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
-    ManagedAttachCmdResponse, ManagedDecommissionOutcome, ManagedListResponse,
-    ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest,
-    ManagedSpawnResponse, ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest,
-    PairStatus, SessionRow, TmuxSessionRow,
+    CoordinatorSession, DaemonCallError, DaemonClient, DaemonRequest, DaemonResponse,
+    DiscoveredProjectRow, EventRow, FleetByProjectWireResponse, FleetProjectGroupWire,
+    HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse, ManagedAdoptRequest,
+    ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
+    ManagedDecommissionOutcome, ManagedListResponse, ManagedSendInputRequest,
+    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
+    ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow,
+    TmuxSessionRow,
 };
 pub use proxy::{
     ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,

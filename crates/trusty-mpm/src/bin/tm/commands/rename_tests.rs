@@ -97,9 +97,13 @@ async fn resolve_in_session_rename_target_confirmed() {
     )
     .await;
     let client = reqwest::Client::new();
-    let record = resolve_in_session_rename_target(&client, &url, "sess-1", Some("%5"))
-        .await
-        .expect("matching pane id must resolve");
+    let record = resolve_in_session_rename_target(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        Some("%5"),
+    )
+    .await
+    .expect("matching pane id must resolve");
     assert_eq!(record.id, "sess-1");
 }
 
@@ -115,9 +119,13 @@ async fn resolve_in_session_rename_target_refuses_on_pane_mismatch() {
     )
     .await;
     let client = reqwest::Client::new();
-    let err = resolve_in_session_rename_target(&client, &url, "sess-1", Some("%9"))
-        .await
-        .expect_err("mismatched pane must refuse, not rename the wrong session");
+    let err = resolve_in_session_rename_target(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        Some("%9"),
+    )
+    .await
+    .expect_err("mismatched pane must refuse, not rename the wrong session");
     assert!(err.contains("sess-1"));
     assert!(err.contains("%9"));
     assert!(err.contains("%5"));
@@ -130,9 +138,13 @@ async fn resolve_in_session_rename_target_refuses_when_record_not_found() {
     // fall through to a bare rename attempt.
     let url = spawn_mock_managed_list_daemon("[]").await;
     let client = reqwest::Client::new();
-    let err = resolve_in_session_rename_target(&client, &url, "sess-1", Some("%5"))
-        .await
-        .expect_err("an unresolvable record must refuse");
+    let err = resolve_in_session_rename_target(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        Some("%5"),
+    )
+    .await
+    .expect_err("an unresolvable record must refuse");
     assert!(err.contains("sess-1"));
 }
 
@@ -206,9 +218,14 @@ async fn do_rename_request_reports_server_confirmed_suffixed_name() {
     )
     .await;
     let client = reqwest::Client::new();
-    let msg = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-new".to_string())
-        .await
-        .expect("rename succeeds");
+    let msg = do_rename_request(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        "sess-1",
+        "tm-new".to_string(),
+    )
+    .await
+    .expect("rename succeeds");
     assert!(
         msg.contains("tm-new-2"),
         "must report the daemon's applied name: {msg}"
@@ -228,9 +245,14 @@ async fn do_rename_request_reports_plain_success() {
     )
     .await;
     let client = reqwest::Client::new();
-    let msg = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-new".to_string())
-        .await
-        .expect("rename succeeds");
+    let msg = do_rename_request(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        "sess-1",
+        "tm-new".to_string(),
+    )
+    .await
+    .expect("rename succeeds");
     assert_eq!(msg, "renamed sess-1 -> tm-new");
 }
 
@@ -247,9 +269,14 @@ async fn do_rename_request_surfaces_daemon_500_body() {
                 trailing characters at line 3755 column 2";
     let url = spawn_mock_rename_daemon("500 Internal Server Error", body).await;
     let client = reqwest::Client::new();
-    let err = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-code".to_string())
-        .await
-        .expect_err("a 500 must fail");
+    let err = do_rename_request(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        "sess-1",
+        "tm-code".to_string(),
+    )
+    .await
+    .expect_err("a 500 must fail");
     let msg = err.to_string();
     // The load-bearing assertion: the DAEMON'S OWN text, not just "500".
     // `error_for_status()` can never satisfy this — it never reads the body.
@@ -270,9 +297,14 @@ async fn do_rename_request_reports_bare_status_when_500_body_is_empty() {
     // `detail.is_empty()` branch so a later refactor cannot silently drop it.
     let url = spawn_mock_rename_daemon("500 Internal Server Error", "").await;
     let client = reqwest::Client::new();
-    let err = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-code".to_string())
-        .await
-        .expect_err("a 500 must fail");
+    let err = do_rename_request(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        "sess-1",
+        "sess-1",
+        "tm-code".to_string(),
+    )
+    .await
+    .expect_err("a 500 must fail");
     let msg = err.to_string();
     assert!(msg.contains("500"), "must name the status: {msg}");
     assert!(

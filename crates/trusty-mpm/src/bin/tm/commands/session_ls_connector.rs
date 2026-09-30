@@ -187,8 +187,7 @@ pub(crate) async fn run_ls_connector(
     // a second formatting path.
     if prints_static_table(stdin_tty, stdout_tty, json, all, attached, plain, term) {
         return super::managed::session_ls(
-            client,
-            url,
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
             json,
             sid.as_deref(),
             all,
@@ -204,12 +203,17 @@ pub(crate) async fn run_ls_connector(
     // Interactive stream: fetch the live sessions once. On any fetch error
     // (daemon unreachable, HTTP failure) fall back to the static renderer so the
     // operator sees the same actionable error rather than a bare picker crash.
-    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
+    let sessions = match fetch_live_sessions(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        sid.as_deref(),
+        false,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(_) => {
             return super::managed::session_ls(
-                client,
-                url,
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                 false,
                 sid.as_deref(),
                 false,
@@ -373,5 +377,10 @@ pub(crate) async fn run_bare_tm_surface(
         )
         .await;
     }
-    super::session_picker::run_tty_picker(client, url, scope, sessions).await
+    super::session_picker::run_tty_picker(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        scope,
+        sessions,
+    )
+    .await
 }

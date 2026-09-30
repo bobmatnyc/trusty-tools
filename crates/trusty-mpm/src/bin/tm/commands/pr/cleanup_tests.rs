@@ -276,3 +276,38 @@ async fn daemon_claims_match_a_workspace_spelled_through_a_symlink() {
     server.abort();
     assert_eq!(holders, ["sess-8301-alias"]);
 }
+
+/// #6288 step 1: `tm pr cleanup` reads session claims from a daemon that serves
+/// only its unix socket.
+#[tokio::test]
+async fn daemon_claims_read_over_the_socket() {
+    use std::sync::Arc;
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::core::pr_cleanup::ClaimEnder as _;
+    use trusty_mpm::daemon::state::DaemonState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    let socket = dir.path().join("sock").join("trusty-mpm.sock");
+    let bound = trusty_mpm::daemon::socket::bind(&socket)
+        .await
+        .expect("bind");
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(trusty_mpm::daemon::socket::serve_until_shutdown(
+        bound,
+        state,
+        async {
+            let _ = shutdown.await;
+        },
+    ));
+
+    let claims = super::DaemonClaims {
+        client: trusty_mpm::client::DaemonClient::over_socket(&socket),
+    };
+    let found = claims.claims_on(dir.path()).await;
+    let _ = stop.send(());
+    assert_eq!(
+        found.expect("the socket answered the claim query"),
+        Vec::<String>::new()
+    );
+}

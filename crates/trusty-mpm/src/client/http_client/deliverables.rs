@@ -170,8 +170,8 @@ impl DaemonClient {
         project: &str,
         status: Option<DeliverableStatus>,
     ) -> anyhow::Result<Vec<Deliverable>> {
-        let url = format!("{}/api/v1/projects/{project}/deliverables", self.base);
-        let mut req = self.http.get(&url);
+        let url = format!("/api/v1/projects/{project}/deliverables");
+        let mut req = self.get(&url);
         if let Some(status) = status {
             req = req.query(&[("status", status.as_str())]);
         }
@@ -194,8 +194,8 @@ impl DaemonClient {
         project: &str,
         args: &CreateDeliverableArgs,
     ) -> anyhow::Result<Deliverable> {
-        let url = format!("{}/api/v1/projects/{project}/deliverables", self.base);
-        let resp = self.http.post(&url).json(args).send().await?;
+        let url = format!("/api/v1/projects/{project}/deliverables");
+        let resp = self.post(&url).json(args).send().await?;
         let created: Deliverable = response_or_body_error(resp)
             .await?
             .json()
@@ -210,8 +210,8 @@ impl DaemonClient {
     /// What: GETs the point-lookup, returns the [`Deliverable`].
     /// Test: live HTTP via `deliverable_routes`.
     pub async fn get_deliverable(&self, project: &str, id: &str) -> anyhow::Result<Deliverable> {
-        let url = format!("{}/api/v1/projects/{project}/deliverables/{id}", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/api/v1/projects/{project}/deliverables/{id}");
+        let resp = self.get(&url).send().await?;
         let d: Deliverable = response_or_body_error(resp)
             .await?
             .json()
@@ -236,9 +236,8 @@ impl DaemonClient {
         id: &str,
         status: DeliverableStatus,
     ) -> Result<Deliverable, SetStatusError> {
-        let url = format!("{}/api/v1/projects/{project}/deliverables/{id}", self.base);
+        let url = format!("/api/v1/projects/{project}/deliverables/{id}");
         let resp = self
-            .http
             .patch(&url)
             .json(&serde_json::json!({ "status": status }))
             .send()
@@ -246,10 +245,7 @@ impl DaemonClient {
             .map_err(|e| SetStatusError::Other(e.into()))?;
 
         if resp.status() == StatusCode::CONFLICT {
-            let body: TransitionRejectionBody = resp
-                .json()
-                .await
-                .map_err(|e| SetStatusError::Other(e.into()))?;
+            let body: TransitionRejectionBody = resp.json().await.map_err(SetStatusError::Other)?;
             return Err(SetStatusError::Rejected {
                 from: body.from,
                 to: body.to,
@@ -272,8 +268,8 @@ impl DaemonClient {
     /// What: GETs the collection, returns the `milestones` array.
     /// Test: `milestones_list_deserializes`; live HTTP via `deliverable_routes`.
     pub async fn list_milestones(&self, project: &str) -> anyhow::Result<Vec<Milestone>> {
-        let url = format!("{}/api/v1/projects/{project}/milestones", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/api/v1/projects/{project}/milestones");
+        let resp = self.get(&url).send().await?;
         let body: MilestonesListWire = response_or_body_error(resp)
             .await?
             .json()
@@ -292,8 +288,8 @@ impl DaemonClient {
         project: &str,
         args: &CreateMilestoneArgs,
     ) -> anyhow::Result<Milestone> {
-        let url = format!("{}/api/v1/projects/{project}/milestones", self.base);
-        let resp = self.http.post(&url).json(args).send().await?;
+        let url = format!("/api/v1/projects/{project}/milestones");
+        let resp = self.post(&url).json(args).send().await?;
         let created: Milestone = response_or_body_error(resp)
             .await?
             .json()
@@ -308,8 +304,8 @@ impl DaemonClient {
     /// What: GETs the point-lookup, returns the [`Milestone`].
     /// Test: live HTTP via `deliverable_routes`.
     pub async fn get_milestone(&self, project: &str, id: &str) -> anyhow::Result<Milestone> {
-        let url = format!("{}/api/v1/projects/{project}/milestones/{id}", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = format!("/api/v1/projects/{project}/milestones/{id}");
+        let resp = self.get(&url).send().await?;
         let m: Milestone = response_or_body_error(resp)
             .await?
             .json()

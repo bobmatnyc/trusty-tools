@@ -38,8 +38,7 @@ pub(crate) fn spawn_dir(action: &SessionAction) -> anyhow::Result<Option<PathBuf
 /// Test: `spawn_dir_is_none_for_a_verb_that_spawns_nothing` covers the
 /// decision; the pin is [`pin_account_for_dir`]'s.
 pub(crate) async fn session_as_account(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     action: SessionAction,
     account: Option<&str>,
     account_token: Option<&str>,
@@ -51,9 +50,9 @@ pub(crate) async fn session_as_account(
                  verb spawns no session. A resumed session keeps the account its project pins."
             );
         };
-        pin_account_for_dir(client, url, &dir, login, account_token).await?;
+        pin_account_for_dir(daemon, &dir, login, account_token).await?;
     }
-    super::session::session(client, url, action).await
+    super::session::session(daemon, action).await
 }
 
 /// Prove `login` for the checkout at `dir`, then pin it on the project (#8914).
@@ -74,8 +73,7 @@ pub(crate) async fn session_as_account(
 /// `pin_notice_names_the_account_it_replaces`,
 /// `transport_notice_says_when_git_uses_ssh`; the rest is HTTP and `gh`.
 pub(crate) async fn pin_account_for_dir(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dir: &Path,
     login: &str,
     account_token: Option<&str>,
@@ -102,19 +100,16 @@ pub(crate) async fn pin_account_for_dir(
     .await?
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let projects = trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string())
-        .registry_list_projects(None)
-        .await?;
+    let projects = daemon.registry_list_projects(None).await?;
     for (name, repo_url) in pin_targets(&projects, &origin)? {
         let previous = projects
             .iter()
             .find(|p| p.name == name)
             .and_then(|p| p.gh_account.as_deref());
         let notice = pin_notice(&name, previous, login);
-        let default_branch = current_default_branch(client, url, &name).await;
+        let default_branch = current_default_branch(daemon, &name).await;
         register(
-            client,
-            url,
+            daemon,
             RegisterInput {
                 default_branch,
                 gh_account: Some(login.to_string()),

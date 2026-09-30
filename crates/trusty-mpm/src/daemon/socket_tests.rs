@@ -320,3 +320,23 @@ fn socket_path_is_the_product_named_socket_under_the_data_dir() {
         path.display()
     );
 }
+
+/// #6288 step 1: every route the client transport maps onto the socket names a
+/// method this daemon's router actually serves, so a rename fails here rather
+/// than as a `method_not_found` in a sandboxed `tm` command.
+/// Test: this function IS the test.
+#[test]
+fn every_route_names_a_served_method() {
+    let state = DaemonState::shared();
+    let router = super::build_router(&state);
+    let served: Vec<&str> = router.method_names().collect();
+    for (verb, path, method) in crate::client::http_client::socket_routes::ROUTES {
+        assert!(
+            served.contains(method),
+            "`{verb} {path}` maps to `{method}`, which the daemon socket does not serve"
+        );
+    }
+    for method in crate::daemon::rpc::cli_socket::METHODS {
+        assert!(served.contains(method), "{method} is not registered");
+    }
+}

@@ -162,8 +162,7 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// integration tests; the message formatting by `spawn_progress_message_*` and
 /// `provisioning_message_*`.
 pub(crate) async fn launch_new_session_and_attach(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     repo_url: &str,
     name_hint: Option<&str>,
     isolation: LaunchIsolation,
@@ -206,8 +205,8 @@ pub(crate) async fn launch_new_session_and_attach(
         body["worktree"] = serde_json::Value::Bool(true);
     }
 
-    let send_result = client
-        .post(format!("{url}/api/v1/sessions/managed"))
+    let send_result = daemon
+        .post("/api/v1/sessions/managed")
         .json(&body)
         .send()
         .await;
@@ -249,7 +248,7 @@ pub(crate) async fn launch_new_session_and_attach(
     }
 
     // Async path: follow the background provision to completion.
-    let name = match poll_until_ready(client, url, &ack.id, &spinner).await {
+    let name = match poll_until_ready(daemon, &ack.id, &spinner).await {
         Ok(name) => name,
         Err(err) => {
             spinner.finish_and_clear();
@@ -278,12 +277,11 @@ pub(crate) async fn launch_new_session_and_attach(
 /// actionable error (the session may still be provisioning server-side).
 /// Test: covered by the `provision-status` integration tests.
 async fn poll_until_ready(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     spinner: &trusty_progress::ProgressHandle,
 ) -> anyhow::Result<String> {
-    let status_url = format!("{url}/api/v1/sessions/managed/{id}/provision-status");
+    let status_url = format!("/api/v1/sessions/managed/{id}/provision-status");
     let start = Instant::now();
 
     loop {
@@ -295,7 +293,7 @@ async fn poll_until_ready(
             );
         }
 
-        match client.get(&status_url).send().await {
+        match daemon.get(&status_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let status: ProvisionStatus = resp.json().await.unwrap_or_default();
                 match status.state.as_str() {

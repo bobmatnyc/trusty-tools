@@ -138,8 +138,7 @@ pub(crate) async fn projects(
             gh_config_dir,
         } => {
             registry::register(
-                client,
-                url,
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                 registry::RegisterInput {
                     name,
                     repo_url,

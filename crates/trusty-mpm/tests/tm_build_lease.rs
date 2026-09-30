@@ -1106,3 +1106,67 @@ fn a_sigkilled_holders_live_test_run_keeps_its_slot() {
         stderr(&next)
     );
 }
+
+/// #6288 step 1: the best-effort decision log goes to the daemon's unix socket
+/// (`mpm.build_lease.decision`) and never to TCP — `TRUSTY_MPM_URL` names a
+/// listener that must see no connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tm_build_lease_logs_its_decision_over_the_socket() {
+    use std::sync::{Arc, Mutex};
+    use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
+
+    let home = home_with_ceiling(2, "");
+    let canary = std::net::TcpListener::bind("127.0.0.1:0").expect("canary");
+    canary.set_nonblocking(true).expect("nonblocking");
+    let socket = home.path().join("App Support").join("trusty-mpm.sock");
+    std::fs::create_dir_all(socket.parent().expect("parent")).expect("socket dir");
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let record = Arc::clone(&seen);
+    let router = RpcRouter::new().typed::<serde_json::Value, serde_json::Value, _, _>(
+        "mpm.build_lease.decision",
+        move |params: serde_json::Value| {
+            let record = Arc::clone(&record);
+            async move {
+                record.lock().expect("lock").push(params);
+                Ok(serde_json::json!({}))
+            }
+        },
+    );
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        serve_until(
+            &listener,
+            Arc::new(router),
+            RpcServeOptions::default(),
+            async {
+                let _ = shutdown.await;
+            },
+        )
+        .await;
+    });
+
+    let mut cmd = build_lease(home.path());
+    cmd.env("TRUSTY_MPM_SOCKET", &socket)
+        .env(
+            "TRUSTY_MPM_URL",
+            format!("http://{}", canary.local_addr().expect("addr")),
+        )
+        .args(["--", "true"]);
+    let out = tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .expect("join")
+        .expect("run");
+    let _ = stop.send(());
+
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(!err.contains("did not log"), "{err}");
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0]["verdict"], "admitted");
+    assert!(
+        matches!(canary.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the decision log dialled TCP"
+    );
+}

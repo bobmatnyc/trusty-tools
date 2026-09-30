@@ -154,7 +154,10 @@ async fn status_reports_the_live_daemon_when_the_listing_fails() {
     );
 
     // ONE probe, the same one `tm doctor` issues.
-    let (reachability, snapshot) = crate::commands::doctor_daemon_row::probe_daemon(&url).await;
+    let (reachability, snapshot) = crate::commands::doctor_daemon_row::probe_daemon(
+        &trusty_mpm::client::DaemonClient::new(url.clone()),
+    )
+    .await;
     assert_eq!(reachability, DaemonReachability::Reachable);
     let snapshot = snapshot.expect("a reachable daemon returns its snapshot");
     assert_eq!(snapshot.pid, Some(LIVE_PID));
@@ -163,7 +166,7 @@ async fn status_reports_the_live_daemon_when_the_listing_fails() {
     let status = daemon_line(reachability, Some(&snapshot));
     assert!(status.contains("pid 424242"), "{status}");
     assert!(!status.contains("unreachable"), "{status}");
-    let doctor = crate::commands::doctor_daemon_row::daemon_check(reachability);
+    let doctor = crate::commands::doctor_daemon_row::daemon_check(reachability, "http");
     assert_eq!(
         doctor.status,
         trusty_mpm::core::doctor::CheckStatus::Ok,
@@ -184,7 +187,10 @@ async fn status_reports_the_live_daemon_when_the_listing_fails() {
     );
 
     // The failing listing is reported as a failing LISTING, never as a down daemon.
-    let listing = crate::commands::daemon::print_sessions(&client, &url).await;
+    let listing = crate::commands::daemon::print_sessions(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.clone()),
+    )
+    .await;
     let err = listing.expect_err("a 500 listing must surface as an error");
     let line = listing_unavailable_line(&err);
     assert!(line.contains("listing unavailable"), "{line}");

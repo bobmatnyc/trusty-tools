@@ -82,16 +82,14 @@ fn render_result(r: &SyncAssetsResult) {
 /// `/api/v1/sessions/managed/{id}/sync-assets`, and renders the result.
 /// Test: `cli_parses_sessions_sync_assets`.
 pub(crate) async fn session_sync_assets(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id_or_name: String,
 ) -> anyhow::Result<()> {
-    let Some(id) = super::managed_route::resolve_managed_match(client, url, &id_or_name).await
-    else {
+    let Some(id) = super::managed_route::resolve_managed_match(daemon, &id_or_name).await else {
         anyhow::bail!("managed session '{id_or_name}' not found");
     };
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/sync-assets"))
+    let resp = daemon
+        .post(format!("/api/v1/sessions/managed/{id}/sync-assets"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -114,11 +112,10 @@ pub(crate) async fn session_sync_assets(
 /// report).
 /// Test: `cli_parses_sessions_sync_assets_all`.
 pub(crate) async fn session_sync_assets_all(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/sync-assets"))
+    let resp = daemon
+        .post("/api/v1/sessions/managed/sync-assets")
         .send()
         .await?;
     let result: SyncAllAssetsResult = resp.error_for_status()?.json().await?;

@@ -280,7 +280,11 @@ pub(crate) async fn run_guided_default(
                     record.state,
                     nested_guard_notice(&record.name)
                 );
-                super::guided_resume::resume_guided_session(client, url, &record).await?;
+                super::guided_resume::resume_guided_session(
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                    &record,
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -393,9 +397,13 @@ async fn try_show_picker(
     // touches neither the filesystem nor the runtime (see #4728, which is what
     // made the second half of that true), so a scripted bare `tm` prunes exactly
     // like an interactive one instead of leaving dead records to accumulate.
-    let sessions = super::session_picker::fetch_live_sessions(client, url, Some(source_id), false)
-        .await
-        .ok()?;
+    let sessions = super::session_picker::fetch_live_sessions(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        Some(source_id),
+        false,
+    )
+    .await
+    .ok()?;
     if !tty_gate(
         std::io::stdin().is_terminal(),
         source_id,

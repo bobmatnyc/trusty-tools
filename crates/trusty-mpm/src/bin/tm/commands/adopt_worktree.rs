@@ -30,13 +30,12 @@ use serde_json::Value;
 /// exit status is non-zero; anything else surfaces as the HTTP error it is.
 /// Test: `cli_parses_session_adopt_worktree`, `adoption_outcome_fails_on_a_malformed_body`.
 pub(crate) async fn session_adopt_worktree(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     path: &Path,
     as_session: &str,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/adopt-worktree"))
+    let resp = daemon
+        .post("/api/v1/sessions/managed/adopt-worktree")
         .json(&serde_json::json!({ "path": path, "as_session": as_session }))
         .send()
         .await?;

@@ -121,10 +121,9 @@ fn repo_root() -> anyhow::Result<PathBuf> {
 /// Test: `cli_parses_pr_cleanup`; engine decisions in `core::pr_cleanup::tests`.
 pub(crate) async fn run(
     args: &PrCleanupArgs,
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
 ) -> anyhow::Result<i32> {
-    run_scoped(args, client, url, false).await
+    run_scoped(args, daemon, false).await
 }
 
 /// One engine pass with the production `git`, landing and dirt probes.
@@ -144,8 +143,7 @@ async fn run_engine(
 /// own head worktree and branch, and prints the plan before removing anything.
 async fn run_scoped(
     args: &PrCleanupArgs,
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     head_only: bool,
 ) -> anyhow::Result<i32> {
     let gh = RealGhRunner::new()?;
@@ -154,7 +152,7 @@ async fn run_scoped(
     // would clean up and still leave the entry pending for the daemon's sweep.
     let repo = repo_slug(&gh, args.repo.as_deref())?;
     let claims = DaemonClaims {
-        client: DaemonClient::with_client(client.clone(), url.to_string()),
+        client: daemon.clone(),
     };
     let req = CleanupRequest {
         pr: args.pr,
@@ -336,8 +334,7 @@ pub(crate) fn merge_with_recorded_scope<R: super::GhRunner>(
 pub(crate) async fn after_merge(
     args: &crate::cli::PrMergeArgs,
     repo: String,
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
 ) -> anyhow::Result<i32> {
     let cleanup = PrCleanupArgs {
         pr: args.pr,
@@ -346,7 +343,7 @@ pub(crate) async fn after_merge(
         dry_run: false,
     };
     // #8301: a merge names one PR, so its cleanup removes only that PR's tree.
-    run_scoped(&cleanup, client, url, true).await
+    run_scoped(&cleanup, daemon, true).await
 }
 
 #[cfg(test)]

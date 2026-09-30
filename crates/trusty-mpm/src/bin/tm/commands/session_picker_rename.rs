@@ -34,7 +34,7 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// the SAME menu redisplay rather than propagating an `Err` that would exit
 /// the whole picker. This mirrors that convention: the daemon round trip's
 /// `Result` is always resolved to a printed line, never bubbled up.
-/// What: calls `commands::rename::do_rename_request(client, url,
+/// What: calls `commands::rename::do_rename_request(daemon,
 /// &session.name, &session.id, new_name)`; prints its `Ok(message)` verbatim
 /// on success, or `"tm: rename failed: {err}"` on any failure (the daemon's
 /// own 400/409 body text is already included in `err`'s message via
@@ -43,13 +43,11 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// decision-parsing tests (the HTTP path itself is `do_rename_request`'s,
 /// already covered by `rename_tests.rs`).
 pub(crate) async fn rename_selected(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &ManagedSessionSummary,
     new_name: String,
 ) -> anyhow::Result<()> {
-    match super::rename::do_rename_request(client, url, &session.name, &session.id, new_name).await
-    {
+    match super::rename::do_rename_request(daemon, &session.name, &session.id, new_name).await {
         Ok(msg) => eprintln!("tm: {msg}"),
         Err(e) => eprintln!("tm: rename failed: {e}"),
     }

@@ -39,3 +39,7 @@ pub mod managed;
 /// deliverables/milestones, the L3 manager, the peer bus, pairing, and the
 /// delegation query (#6288 slice 5).
 pub mod registry;
+
+/// #6288 step 1: the build-lease decision log, the retired builder-slot routes,
+/// and adopt-worktree — the HTTP-only routes the sandboxed `tm` CLI reaches.
+pub mod cli_socket;

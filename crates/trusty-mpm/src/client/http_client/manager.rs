@@ -326,8 +326,8 @@ impl DaemonClient {
     /// Test: `portfolio_status_wire_parses_totals_and_projects`; live HTTP via
     /// `crates/trusty-mpm/tests/manager_cli_client.rs`.
     pub async fn manager_status(&self) -> anyhow::Result<PortfolioStatusWire> {
-        let url = format!("{}/api/v1/manager/status", self.base);
-        let resp = self.http.get(&url).send().await?;
+        let url = "/api/v1/manager/status".to_string();
+        let resp = self.get(&url).send().await?;
         let status: PortfolioStatusWire = response_or_body_error(resp)
             .await?
             .json()
@@ -355,8 +355,8 @@ impl DaemonClient {
     /// `manager_digest_client_surfaces_unknown_project_404_against_real_daemon`
     /// (available path) in `crates/trusty-mpm/tests/manager_cli_client.rs`.
     async fn manager_endpoint_available(&self, path: &str) -> bool {
-        let url = format!("{}/api/v1/manager/version", self.base);
-        let Ok(resp) = self.http.get(&url).send().await else {
+        let url = "/api/v1/manager/version".to_string();
+        let Ok(resp) = self.get(&url).send().await else {
             return false;
         };
         if !resp.status().is_success() {
@@ -398,13 +398,8 @@ impl DaemonClient {
         &self,
         scope: &str,
     ) -> anyhow::Result<Option<ManagerDigestOutcome>> {
-        let url = format!("{}/api/v1/manager/digest", self.base);
-        let resp = self
-            .http
-            .get(&url)
-            .query(&[("scope", scope)])
-            .send()
-            .await?;
+        let url = "/api/v1/manager/digest".to_string();
+        let resp = self.get(&url).query(&[("scope", scope)]).send().await?;
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
 
@@ -455,9 +450,8 @@ impl DaemonClient {
         conversation_key: &str,
         message: &str,
     ) -> anyhow::Result<Option<ManagerChatOutcome>> {
-        let url = format!("{}/api/v1/manager/chat", self.base);
+        let url = "/api/v1/manager/chat".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(&serde_json::json!({
                 "conversation_key": conversation_key,
@@ -509,9 +503,8 @@ impl DaemonClient {
     /// `route_task_outcome_reads_no_match`; live HTTP in
     /// `crates/trusty-mpm/tests/manager_routing.rs`.
     pub async fn manager_route_task(&self, text: &str) -> anyhow::Result<Option<RouteTaskOutcome>> {
-        let url = format!("{}/api/v1/manager/route-task", self.base);
+        let url = "/api/v1/manager/route-task".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(&serde_json::json!({ "text": text }))
             .timeout(super::config::CHAT_REQUEST_TIMEOUT)

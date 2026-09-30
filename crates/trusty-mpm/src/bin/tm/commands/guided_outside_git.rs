@@ -269,14 +269,14 @@ pub(crate) async fn try_outside_git(
         return None;
     };
 
+    let daemon = trusty_mpm::client::DaemonClient::with_client(client.clone(), url);
     Some(
         run_outside_git_menu(
             cwd,
             interactive,
             || {
                 super::managed::session_ls(
-                    client,
-                    url,
+                    &daemon,
                     false,
                     None,
                     false,
@@ -316,7 +316,11 @@ pub(crate) async fn dispatch_session_argv(
     let cli = crate::cli::Cli::try_parse_from(full)?;
     match cli.command {
         Some(crate::cli::Command::Sessions { action }) => {
-            crate::commands::session::session(client, url, action).await
+            crate::commands::session::session(
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                action,
+            )
+            .await
         }
         _ => anyhow::bail!("internal: the outside-git menu built a non-`sessions` command"),
     }

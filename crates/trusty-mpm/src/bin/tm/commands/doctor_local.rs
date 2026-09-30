@@ -48,7 +48,10 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// parsing; `tm_doctor_reports_every_local_check_with_no_daemon` covers the
 /// daemonless path end to end; the stale-daemon comparison logic is covered by
 /// `core::version_staleness`'s own unit tests.
-pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow::Result<()> {
+pub(crate) async fn doctor(
+    daemon: &trusty_mpm::client::DaemonClient,
+    flags: &crate::cli::DoctorFlags,
+) -> anyhow::Result<()> {
     let report = local_report().await?;
 
     println!("trusty-mpm doctor");
@@ -56,7 +59,7 @@ pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow
     for check in &report.checks {
         print_check(check);
     }
-    for check in daemon_rows(url).await {
+    for check in daemon_rows(daemon).await {
         overall = overall.worst(check.status);
         print_check(&check);
     }
@@ -121,9 +124,13 @@ async fn local_report() -> anyhow::Result<DoctorReport> {
 /// never straddle a restart and describe two different daemons (#4230 review).
 /// Test: `tm_doctor_reports_every_local_check_with_no_daemon` covers the
 /// skip; the two comparisons keep their own unit tests.
-async fn daemon_rows(url: &str) -> Vec<DoctorCheck> {
-    let (reachability, snapshot) = doctor_daemon_row::probe_daemon(url).await;
-    let mut rows = vec![doctor_daemon_row::daemon_check(reachability)];
+async fn daemon_rows(daemon: &trusty_mpm::client::DaemonClient) -> Vec<DoctorCheck> {
+    let (reachability, snapshot) = doctor_daemon_row::probe_daemon(daemon).await;
+    // #6288: the row names the transport the probe used.
+    let mut rows = vec![doctor_daemon_row::daemon_check(
+        reachability,
+        &daemon.transport_label(),
+    )];
     if let Some(snapshot) = snapshot.as_ref() {
         debug_assert_eq!(reachability, DaemonReachability::Reachable);
         // #4230: the restart hint is resolved from this host's launchd state,

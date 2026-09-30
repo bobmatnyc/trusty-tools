@@ -27,6 +27,16 @@ pub fn router() -> Router<Arc<DaemonState>> {
 ///
 /// Test: `a_decision_is_logged_and_acknowledged`.
 async fn log_decision(Json(body): Json<Value>) -> StatusCode {
+    log_decision_op(&body);
+    StatusCode::NO_CONTENT
+}
+
+/// The transport-neutral body of the decision log, shared by the HTTP route
+/// and the socket's `mpm.build_lease.decision` (#6288 step 1).
+///
+/// Test: `a_decision_is_logged_and_acknowledged`,
+/// `rpc_build_lease_decision_is_acknowledged`.
+pub(crate) fn log_decision_op(body: &Value) {
     let field = |key: &str| body.get(key).map(ToString::to_string).unwrap_or_default();
     let verdict = body
         .get("verdict")
@@ -61,7 +71,6 @@ async fn log_decision(Json(body): Json<Value>) -> StatusCode {
             "build-lease admission decision"
         );
     }
-    StatusCode::NO_CONTENT
 }
 
 #[cfg(test)]

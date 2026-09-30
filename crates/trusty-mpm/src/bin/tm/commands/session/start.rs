@@ -52,8 +52,7 @@ use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 /// `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
 /// in `start_tests.rs`.
 pub(crate) async fn start_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dir: Option<String>,
 ) -> anyhow::Result<()> {
     let path = resolve_dir(dir)?;
@@ -76,7 +75,7 @@ pub(crate) async fn start_session(
             // `session start` has no `--deliverable` surface of its own (#2379).
             deliverable: None,
         };
-        crate::commands::managed_route::run(client, url, &new_action).await?;
+        crate::commands::managed_route::run(daemon, &new_action).await?;
         return Ok(());
     }
 
@@ -92,7 +91,7 @@ pub(crate) async fn start_session(
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    start_session_in_place(client, url, &path, &fw, dirs::home_dir().as_deref()).await
+    start_session_in_place(daemon, &path, &fw, dirs::home_dir().as_deref()).await
 }
 
 /// The `claude` line `tm session start` types into its in-place pane (#8405).
@@ -159,8 +158,7 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
 /// this function inherited unchanged.
 async fn start_session_in_place(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     path: &std::path::Path,
     fw: &trusty_mpm::core::paths::FrameworkPaths,
     // #5544: the USER-GLOBAL home `prepare_session` seeds `~/.claude.json` and
@@ -249,8 +247,8 @@ async fn start_session_in_place(
         #[serde(default)]
         name: String,
     }
-    let body: Body = client
-        .post(format!("{url}/sessions"))
+    let body: Body = daemon
+        .post("/sessions")
         .json(&serde_json::json!({
             "project": path,
             "project_path": path,

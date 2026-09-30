@@ -85,9 +85,8 @@ impl DaemonClient {
             #[serde(default)]
             name: String,
         }
-        let url = format!("{}/sessions", self.base);
+        let url = "/sessions".to_string();
         let body: Body = self
-            .http
             .post(&url)
             .json(&serde_json::json!({
                 "project": workdir,
@@ -192,9 +191,8 @@ impl DaemonClient {
             #[serde(default)]
             name: String,
         }
-        let url = format!("{}/api/v1/sessions/connect", self.base);
+        let url = "/api/v1/sessions/connect".to_string();
         let body: Body = self
-            .http
             .post(&url)
             .json(&serde_json::json!({
                 "project": workdir,

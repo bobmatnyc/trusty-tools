@@ -116,8 +116,7 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 
     let client = reqwest::Client::new();
     let result = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(repo.to_string_lossy().to_string()),
     )
     .await;
@@ -172,8 +171,7 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     // passes the same tempdir `fw` is rooted at, which is what lets the test
     // stop repointing the process's `$HOME`.
     let result = start_session_in_place(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         target.path(),
         &fw,
         Some(tmp_home.path()),
@@ -220,8 +218,7 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     .expect("write config");
 
     let result = start_session_in_place(
-        &reqwest::Client::new(),
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
         target.path(),
         &fw,
         Some(tmp_home.path()),
@@ -376,7 +373,11 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
     let (captured, url) = spawn_capturing_managed_spawn_server().await;
 
     let client = reqwest::Client::new();
-    let result = start_session(&client, &url, Some(repo.to_string_lossy().to_string())).await;
+    let result = start_session(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        Some(repo.to_string_lossy().to_string()),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "expected Ok from a successful spawn, got {result:?}"
@@ -437,8 +438,7 @@ async fn session_start_refuses_a_non_git_directory() {
 
     let client = reqwest::Client::new();
     let err = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(plain.to_string_lossy().to_string()),
     )
     .await
@@ -515,8 +515,7 @@ async fn capture_guided_launch_body(
     .await;
     let client = reqwest::Client::new();
     let result = crate::commands::guided_launch::launch_new_session_and_attach(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         "https://example.invalid/owner/repo.git",
         name_hint,
         isolation,

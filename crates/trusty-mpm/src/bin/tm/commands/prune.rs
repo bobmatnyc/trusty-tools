@@ -290,8 +290,7 @@ fn short_id(id: &str) -> &str {
 /// `tests/session_manager_mvp.rs`. The HTTP round-trip reuses the `managed`
 /// handlers already covered there.
 pub(crate) async fn prune_idle(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dry_run: bool,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -301,7 +300,7 @@ pub(crate) async fn prune_idle(
     //    `SmUnavailable` error so `main` can exit with the distinct code without
     //    treating "SM off" as a hard failure; a reachable-but-erroring daemon
     //    (4xx/5xx) propagates as an ordinary `Err` (a real failure).
-    let sessions = match fetch_sessions(client, url).await {
+    let sessions = match fetch_sessions(daemon).await {
         Ok(sessions) => sessions,
         Err(FetchSessionsError::Unreachable) => {
             if json {
@@ -319,7 +318,7 @@ pub(crate) async fn prune_idle(
     //    result is re-sorted into the daemon's original list order so the plan
     //    (and its rendered output) stays deterministic regardless of completion
     //    order.
-    let rows = fetch_verdicts(client, url, sessions).await;
+    let rows = fetch_verdicts(daemon, sessions).await;
 
     // 3) Build the plan (pure) and render it.
     let plan = build_plan(&rows);
@@ -340,7 +339,7 @@ pub(crate) async fn prune_idle(
     //    REST of the sweep (#2521 review). `execute_plan` catches each row's
     //    error instead of `?`-propagating it, so every actionable row is
     //    attempted regardless of earlier failures.
-    let executed = execute_plan(client, url, &plan).await;
+    let executed = execute_plan(daemon, &plan).await;
     if json {
         println!("{}", render_execution_summary_json(&executed)?);
     } else {
@@ -405,28 +404,25 @@ struct ExecutedRow {
 /// `Skipped` without an HTTP call.
 /// Test: `execute_plan_is_best_effort_and_reports_accurately`.
 async fn execute_plan(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     plan: &[PlannedAction],
 ) -> Vec<ExecutedRow> {
     let mut results = Vec::with_capacity(plan.len());
     for p in plan {
         let outcome = match &p.action {
-            PruneAction::Stop => {
-                match super::managed::session_stop(client, url, p.id.clone()).await {
-                    Ok(()) => ExecOutcome::Succeeded,
-                    Err(e) => {
-                        eprintln!(
-                            "prune: failed to stop session {} ({}): {e}",
-                            p.name,
-                            short_id(&p.id)
-                        );
-                        ExecOutcome::Failed(e.to_string())
-                    }
+            PruneAction::Stop => match super::managed::session_stop(daemon, p.id.clone()).await {
+                Ok(()) => ExecOutcome::Succeeded,
+                Err(e) => {
+                    eprintln!(
+                        "prune: failed to stop session {} ({}): {e}",
+                        p.name,
+                        short_id(&p.id)
+                    );
+                    ExecOutcome::Failed(e.to_string())
                 }
-            }
+            },
             PruneAction::Decommission => {
-                match super::managed::session_decommission(client, url, p.id.clone()).await {
+                match super::managed::session_decommission(daemon, p.id.clone()).await {
                     Ok(()) => ExecOutcome::Succeeded,
                     Err(e) => {
                         eprintln!(
@@ -612,16 +608,15 @@ enum FetchSessionsError {
 /// Test: covered via the integration daemon path; the unreachable branch by
 /// `cli_prune_idle_unreachable_exit_code`.
 async fn fetch_sessions(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
 ) -> Result<Vec<SessionRef>, FetchSessionsError> {
     #[derive(Deserialize)]
     struct ListResp {
         sessions: Vec<SessionRef>,
     }
     // A send error is a transport failure → SM unavailable (graceful no-op).
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed"))
+    let resp = daemon
+        .get("/api/v1/sessions/managed")
         .send()
         .await
         .map_err(|_| FetchSessionsError::Unreachable)?;
@@ -632,10 +627,7 @@ async fn fetch_sessions(
             "session manager returned HTTP {status} listing managed sessions"
         )));
     }
-    let body: ListResp = resp
-        .json()
-        .await
-        .map_err(|e| FetchSessionsError::Http(e.into()))?;
+    let body: ListResp = resp.json().await.map_err(FetchSessionsError::Http)?;
     Ok(body.sessions)
 }
 
@@ -653,15 +645,13 @@ async fn fetch_sessions(
 /// (via [`reorder_by_index`]); the verdict→action mapping in
 /// `core::sm::prune::tests`.
 async fn fetch_verdicts(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<SessionRef>,
 ) -> Vec<SessionVerdict> {
     let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_VERDICTS));
     let mut join_set: JoinSet<(usize, SessionVerdict)> = JoinSet::new();
     for (idx, s) in sessions.into_iter().enumerate() {
-        let client = client.clone();
-        let url = url.to_string();
+        let daemon = daemon.clone();
         let semaphore = Arc::clone(&semaphore);
         join_set.spawn(async move {
             // The semaphore is never closed, so acquire cannot fail; the permit
@@ -670,7 +660,7 @@ async fn fetch_verdicts(
                 .acquire()
                 .await
                 .expect("prune verdict semaphore is never closed");
-            let verdict = fetch_verdict(&client, &url, &s.id).await;
+            let verdict = fetch_verdict(&daemon, &s.id).await;
             (
                 idx,
                 SessionVerdict {
@@ -717,7 +707,7 @@ fn reorder_by_index(mut indexed: Vec<(usize, SessionVerdict)>) -> Vec<SessionVer
 /// classifier ran (no key) — and the policy treats that absence as a skip.
 /// Test: the verdict→action mapping is covered in `core::sm::prune::tests`;
 /// the HTTP shape matches the `managed::session_activity` response.
-async fn fetch_verdict(client: &reqwest::Client, url: &str, id: &str) -> Option<String> {
+async fn fetch_verdict(daemon: &trusty_mpm::client::DaemonClient, id: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct ActivityResp {
         #[serde(default)]
@@ -725,8 +715,8 @@ async fn fetch_verdict(client: &reqwest::Client, url: &str, id: &str) -> Option<
         #[serde(default)]
         classification: Option<String>,
     }
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}/activity"))
+    let resp = daemon
+        .get(format!("/api/v1/sessions/managed/{id}/activity"))
         .send()
         .await
         .ok()?;

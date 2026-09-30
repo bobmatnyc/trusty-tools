@@ -90,7 +90,11 @@ pub(crate) fn group_by_git_root<'a>(
 /// daemon; Telegram token resolution is tested in `trusty-mpm-telegram`.
 pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     println!("daemon: ok");
-    print_sessions(client, url).await
+    print_sessions(&trusty_mpm::client::DaemonClient::with_client(
+        client.clone(),
+        url,
+    ))
+    .await
 }
 
 /// Print the session listing and Telegram-bot note, with no health line.
@@ -105,13 +109,15 @@ pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow:
 /// an unavailable LISTING rather than as an unreachable daemon.
 /// Test: `status_reports_the_live_daemon_when_the_listing_fails` in
 /// `status_daemon_tests.rs` drives the failing-listing half.
-pub(crate) async fn print_sessions(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+pub(crate) async fn print_sessions(
+    daemon: &trusty_mpm::client::DaemonClient,
+) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct Body {
         sessions: Vec<SessionRow>,
     }
-    let body: Body = client
-        .get(format!("{url}/sessions"))
+    let body: Body = daemon
+        .get("/sessions")
         .send()
         .await?
         .error_for_status()?

@@ -224,12 +224,10 @@ impl PickerScope {
 /// is active, and returns the response body as a `String` after status checks.
 /// Test: HTTP round-trip covered by `tests/session_manager_mvp.rs`.
 pub(crate) async fn fetch_managed_raw(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     source_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let endpoint = format!("{url}/api/v1/sessions/managed");
-    let mut req = client.get(&endpoint);
+    let mut req = daemon.get("/api/v1/sessions/managed");
     if let Some(sid) = source_id {
         req = req.query(&[("source_id", sid)]);
     }
@@ -552,16 +550,15 @@ impl SessionFilter {
 /// unit-tested via `scope_for_display`; the auto-prune seam by
 /// `auto_prune_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn fetch_live_sessions(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     source_id: Option<&str>,
     all: bool,
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
-    let raw = fetch_managed_raw(client, url, source_id).await?;
+    let raw = fetch_managed_raw(daemon, source_id).await?;
     let fetched = parse_managed_sessions(&raw)?;
     // `!all` is exactly whether this call will drop the dead rows, which is what
     // decides the banner's "hidden" suffix (#4994).
-    let listing = super::session_picker_prune::prune_and_report(client, url, fetched, !all).await;
+    let listing = super::session_picker_prune::prune_and_report(daemon, fetched, !all).await;
     Ok(scope_for_display(listing.sessions, all, &listing.dead_ids))
 }
 
@@ -988,8 +985,7 @@ pub(crate) fn parse_picker_choice(
 /// in `tmux_attach.rs`; the full I/O path is exercised by manual smoke tests
 /// and the e2e suite.
 pub(crate) async fn run_tty_picker(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     scope: &mut PickerScope,
     mut sessions: Vec<ManagedSessionSummary>,
 ) -> anyhow::Result<()> {
@@ -1124,7 +1120,7 @@ pub(crate) async fn run_tty_picker(
             // to `stdin`.
             PickerDecision::Resume(i) => {
                 let outcome =
-                    super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?;
+                    super::guided_resume::resume_guided_session(daemon, &sessions[i]).await?;
                 if outcome.ends_interactive_loop() {
                     break;
                 }
@@ -1157,8 +1153,7 @@ pub(crate) async fn run_tty_picker(
                         eprintln!("{note}");
                     }
                     let outcome = super::guided_launch::launch_new_session_and_attach(
-                        client,
-                        url,
+                        daemon,
                         repo,
                         req.name_hint.as_deref(),
                         req.isolation,
@@ -1226,7 +1221,7 @@ pub(crate) async fn run_tty_picker(
             // arm just runs it, then falls through to the re-fetch so the menu
             // reflects the removal. A cancel/refusal is a no-op re-fetch.
             PickerDecision::Delete(i) => {
-                super::picker_delete::confirm_and_delete(client, url, &sessions[i]).await?;
+                super::picker_delete::confirm_and_delete(daemon, &sessions[i]).await?;
             }
             // #5539: bulk delete by name glob. The preview, the count-confirm
             // prompt, and the running-session guard live in
@@ -1235,8 +1230,7 @@ pub(crate) async fn run_tty_picker(
             // non-destructive outcome (no match, nothing deletable, dry run,
             // bad pattern, cancel) returns 0 and falls through to the re-fetch.
             PickerDecision::DeleteGlob(ref req) => {
-                super::picker_delete_glob::confirm_and_delete_glob(client, url, &sessions, req)
-                    .await?;
+                super::picker_delete_glob::confirm_and_delete_glob(daemon, &sessions, req).await?;
             }
             // #3724: rename the selected session through the existing
             // hardened `commands::rename::do_rename_request` path (the same
@@ -1245,7 +1239,7 @@ pub(crate) async fn run_tty_picker(
             // error, then falls through to the re-fetch so the menu reflects
             // the (possibly auto-suffixed, #3692) new name.
             PickerDecision::Rename(i, new_name) => {
-                super::session_picker_rename::rename_selected(client, url, &sessions[i], new_name)
+                super::session_picker_rename::rename_selected(daemon, &sessions[i], new_name)
                     .await?;
             }
             // #3863: `ls`/`list` re-print the current list in place — no
@@ -1297,7 +1291,7 @@ pub(crate) async fn run_tty_picker(
         // of the loop does it for this fresh vec exactly as it did for the
         // caller's. Normalizing in one place is what makes the first menu and
         // every later one the same order rather than two orders to keep in step.
-        sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
+        sessions = fetch_live_sessions(daemon, scope.source_id.as_deref(), false).await?;
     }
     Ok(())
 }

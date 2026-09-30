@@ -312,7 +312,11 @@ async fn execute_plan_is_best_effort_and_reports_accurately() {
         },
     ];
 
-    let executed = execute_plan(&client, &url, &plan).await;
+    let executed = execute_plan(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        &plan,
+    )
+    .await;
 
     // All three rows were attempted — the middle failure did not abort the
     // sweep and skip the row after it.
