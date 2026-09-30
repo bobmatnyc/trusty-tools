@@ -9,7 +9,8 @@
 //! remote), writes the profile request and the allowlist entry — each an
 //! atomic write that keeps the rest of the file — seeds the fleet files
 //! ([`seed`]), and starts the Architect's tmux session and its poller
-//! ([`poller`]). [`status()`] reads the four session facts back and exits 1
+//! ([`poller`]); [`run`] then registers a bound Architect with the daemon
+//! ([`register`], #8942). [`status()`] reads the four session facts back and exits 1
 //! when any is missing. The session is
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). Twin mode (#8878) is out of scope (ruling
@@ -22,6 +23,8 @@ mod config;
 pub(crate) mod launch;
 mod poller;
 mod preflight;
+// #8942: daemon registration and the ruling-2 sidecar prune.
+mod register;
 mod seed;
 mod session_name;
 mod status;
@@ -60,7 +63,11 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             // #8878 R1: a bad name refuses before anything is read or written.
             let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            let mut report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            // #8942: after the poller step, so its pane can be placed.
+            if let Some(reg) = report.registration.take() {
+                report.steps.push(register::register(&reg).await);
+            }
             print!("{}", report.render());
             if report.failed() {
                 bail!("tm fleet init failed; see the FAILED step above");
@@ -146,6 +153,9 @@ pub(crate) struct InitReport {
     /// (#8878 ruling A), or found its session running unbound (#8878 R1); a
     /// warning, never a failure.
     pub(crate) unbound: bool,
+    /// The daemon registration to send, set only when the Architect's
+    /// session runs bound (#8942); [`run`] sends it.
+    pub(crate) registration: Option<trusty_mpm::session_manager::SupervisorRegistration>,
 }
 
 impl InitReport {
@@ -300,7 +310,13 @@ pub(crate) fn init_with_session(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir)?);
+    // #8942 ruling 2: before the launch writes this run's sidecar.
+    report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;
+    // #8942: a running, bound Architect is registered; a skipped launch is not.
+    if !unbound && !matches!(step, Step::Skipped(_)) {
+        report.registration = Some(register::registration(dir, &names));
+    }
     report.steps.push(step);
     report.unbound = unbound;
     report.steps.push(poller::step(dir, launch, probe, &names));

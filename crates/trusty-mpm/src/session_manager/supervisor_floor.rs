@@ -18,7 +18,7 @@ use super::session_kind::SessionKind;
 use super::store_integrity;
 
 /// The suffixes of the Architect's helper sessions (`<name>-poll`, …).
-const AUX_SUFFIXES: [&str; 2] = [POLL_SUFFIX, "-collector"];
+const AUX_SUFFIXES: [&str; 2] = [POLL_SUFFIX, super::supervisor_register::COLLECTOR_ROLE];
 
 /// The role string [`SidecarRole`] gives the Architect's own session.
 pub const SUPERVISOR_ROLE: &str = "supervisor";

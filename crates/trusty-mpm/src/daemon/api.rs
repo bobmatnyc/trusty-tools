@@ -321,6 +321,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // a pair by `managed_routes::reconcile`. Both are literal segments, so
         // they are matched ahead of the `/{id}` param route below.
         .merge(super::managed_routes::reconcile::worktree_routes())
+        // #8942: literal `/supervisor`, the Architect's registration.
+        .merge(super::managed_routes::supervisor::supervisor_routes())
         // #1586: fleet-by-project view. Literal `/fleet` registered BEFORE the
         // `/{id}` param route so it is never captured as an id (axum prefers
         // literal matches, but ordering makes the intent explicit).
