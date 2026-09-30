@@ -197,10 +197,9 @@ impl RpcError {
     /// fault — it is "still cancelling", the one answer a client can act on by
     /// staying in a cancelling state instead of reporting a daemon bug. The
     /// `-32603 internal` this replaces made the two indistinguishable. The
-    /// numeric code carries the distinction on its own because
-    /// [`trusty_common::uds::server::RpcError`] has no field for `data`, so the
-    /// `error_type` tag never reaches the TUI over the socket — a client
-    /// matching on `data.error_type` alone would see nothing.
+    /// numeric code carries the distinction on its own, and the `error_type`
+    /// tag also reaches socket clients: the `From` conversion onto
+    /// [`trusty_common::uds::server::RpcError`] carries `data` across.
     /// What: `data.error_type = "cancel_unconfirmed"`. `-32010` is the next
     /// free slot after [`Self::already_exists`]'s `-32009`.
     ///
@@ -362,8 +361,8 @@ mod tests {
         assert_eq!(e.data, Some(json!({"error_type": "cancel_unconfirmed"})));
     }
 
-    /// #8207: the code — not the `data` tag — is what a socket client reads,
-    /// because the transport error has no field to carry `data`.
+    /// #8207: the `-32010` code survives the UDS conversion, so a socket
+    /// client can match on it without reading `data` (which is also carried).
     #[test]
     fn cancel_unconfirmed_stays_distinguishable_across_the_uds_transport() {
         let converted: trusty_common::uds::server::RpcError =
