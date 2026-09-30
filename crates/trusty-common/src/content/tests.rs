@@ -73,15 +73,22 @@ struct Raw<'a> {
     kind: tar::EntryType,
     data: &'a [u8],
     link: Option<&'a str>,
+    /// The header's size field; `None` writes `data.len()`.
+    size: Option<u64>,
 }
 
 impl<'a> Raw<'a> {
     fn file(name: &'a str, data: &'a [u8]) -> Self {
+        Self::of(tar::EntryType::Regular, name, data)
+    }
+
+    fn of(kind: tar::EntryType, name: &'a str, data: &'a [u8]) -> Self {
         Self {
             name,
-            kind: tar::EntryType::Regular,
+            kind,
             data,
             link: None,
+            size: None,
         }
     }
 }
@@ -104,7 +111,7 @@ fn raw_bundle(entries: &[Raw<'_>]) -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
         let name = raw.name.as_bytes();
         header.as_gnu_mut().expect("gnu").name[..name.len()].copy_from_slice(name);
-        header.set_size(raw.data.len() as u64);
+        header.set_size(raw.size.unwrap_or(raw.data.len() as u64));
         header.set_mode(0o644);
         header.set_entry_type(raw.kind);
         if let Some(link) = raw.link {
@@ -313,10 +320,8 @@ fn resolve_refuses_a_bundle_with_an_absolute_entry() {
 #[test]
 fn resolve_refuses_a_bundle_with_a_symlink_entry() {
     let bytes = raw_bundle(&[Raw {
-        name: "skills/link.md",
-        kind: tar::EntryType::Symlink,
-        data: b"",
         link: Some("/etc/passwd"),
+        ..Raw::of(tar::EntryType::Symlink, "skills/link.md", b"")
     }]);
     assert_corrupt(&bytes, "not a regular file");
 }
@@ -324,22 +329,15 @@ fn resolve_refuses_a_bundle_with_a_symlink_entry() {
 #[test]
 fn resolve_refuses_a_bundle_with_a_hardlink_entry() {
     let bytes = raw_bundle(&[Raw {
-        name: "skills/link.md",
-        kind: tar::EntryType::Link,
-        data: b"",
         link: Some(bundle::MANIFEST_ENTRY),
+        ..Raw::of(tar::EntryType::Link, "skills/link.md", b"")
     }]);
     assert_corrupt(&bytes, "not a regular file");
 }
 
 #[test]
 fn resolve_refuses_a_bundle_with_a_device_entry() {
-    let bytes = raw_bundle(&[Raw {
-        name: "skills/dev.md",
-        kind: tar::EntryType::Char,
-        data: b"",
-        link: None,
-    }]);
+    let bytes = raw_bundle(&[Raw::of(tar::EntryType::Char, "skills/dev.md", b"")]);
     assert_corrupt(&bytes, "not a regular file");
 }
 
@@ -412,6 +410,61 @@ fn bundle_over_a_cap_is_too_large() {
             other => panic!("expected BundleTooLarge for {limits:?}, got {other:?}"),
         }
     }
+}
+
+/// Installs `bytes` pinned to their own digest, loads them under `limits`,
+/// and returns the reason they were refused as `BundleTooLarge`.
+fn too_large_reason(bytes: &[u8], limits: bundle::Limits) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install(dir.path(), bytes, &Sha256Digest::of_bytes(bytes));
+    let lock = ContentLock::load(&dir.path().join(LOCK_FILE_NAME)).expect("lock");
+    match bundle::load_verified_with(dir.path(), &lock, limits) {
+        Err(ContentError::BundleTooLarge { reason, .. }) => reason,
+        Ok(files) => panic!("expected BundleTooLarge, unpacked {} files", files.len()),
+        Err(other) => panic!("expected BundleTooLarge, got {other:?}"),
+    }
+}
+
+/// #8378 review: a pax `size=` record replaces the header's size field, so the
+/// cap must count the size tar reads, not the header's zero.
+#[test]
+fn a_pax_size_override_counts_against_the_unpacked_cap() {
+    let data = vec![b'a'; 4096];
+    let bytes = raw_bundle(&[
+        Raw::of(tar::EntryType::XHeader, "pax", b"13 size=4096\n"),
+        Raw {
+            size: Some(0),
+            ..Raw::file("skills/big.md", &data)
+        },
+    ]);
+    let limits = bundle::Limits {
+        unpacked_bytes: 1024,
+        ..bundle::Limits::DEFAULT
+    };
+    let reason = too_large_reason(&bytes, limits);
+    assert!(reason.contains("declare more than 1024 bytes"), "{reason}");
+}
+
+/// #8378 review: tar reads a GNU long-name record whole before `unpack` sees
+/// the entry it names, so only a cap on the decompressed stream bounds it.
+#[test]
+fn an_oversized_extension_record_is_too_large() {
+    let long_name = format!("skills/{}.md", "a".repeat(64 * 1024));
+    let bytes = raw_bundle(&[
+        Raw::of(
+            tar::EntryType::GNULongName,
+            "././@LongLink",
+            long_name.as_bytes(),
+        ),
+        Raw::file("skills/short.md", b"x"),
+    ]);
+    let limits = bundle::Limits {
+        unpacked_bytes: 1024,
+        entries: 4,
+        ..bundle::Limits::DEFAULT
+    };
+    let reason = too_large_reason(&bytes, limits);
+    assert!(reason.contains("decompressed"), "{reason}");
 }
 
 #[cfg(unix)]
@@ -543,6 +596,21 @@ fn dev_checkout_is_found_from_a_nested_directory() {
     assert_eq!(find_dev_checkout(&nested), Some(dir.path().to_path_buf()));
 }
 
+/// A linked worktree's `.git` is a file (`gitdir: …`), not a directory.
+#[test]
+fn dev_checkout_is_found_from_a_nested_directory_of_a_linked_worktree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    std::fs::remove_dir(dir.path().join(".git")).expect("rm .git");
+    std::fs::write(
+        dir.path().join(".git"),
+        "gitdir: /elsewhere/.git/worktrees/x\n",
+    )
+    .expect(".git file");
+    let nested = dir.path().join("crates/trusty-mpm/src/assets/skills/tm");
+    assert_eq!(find_dev_checkout(&nested), Some(dir.path().to_path_buf()));
+}
+
 /// The real trusty-tools tree is detected as a checkout and serves agents.
 #[test]
 fn dev_checkout_detects_this_repository() {
@@ -634,6 +702,66 @@ fn dev_checkout_refuses_a_root_owned_by_another_user() {
     }
 }
 
+/// #8378 review: owning the root is not enough when another user could have
+/// planted `.git` or `Cargo.toml` in it. A fake uid provider stands in for a
+/// `chown`, which needs root.
+#[cfg(unix)]
+#[test]
+fn dev_checkout_refuses_a_marker_owned_by_another_user() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let me = dev::current_euid().expect("unix euid");
+    assert!(dev::check_checkout_with(dir.path(), Some(me), &dev::file_owner).is_ok());
+    for marker in [".git", "Cargo.toml"] {
+        let owner = move |path: &Path, meta: &std::fs::Metadata| {
+            if path.ends_with(marker) {
+                Some(me.wrapping_add(1))
+            } else {
+                dev::file_owner(path, meta)
+            }
+        };
+        match dev::check_checkout_with(dir.path(), Some(me), &owner) {
+            Err(ContentError::UntrustedCheckout { reason, .. }) => {
+                assert!(
+                    reason.contains(marker) && reason.contains("owned by uid"),
+                    "{reason}"
+                );
+            }
+            other => panic!("{marker}: expected UntrustedCheckout, got {other:?}"),
+        }
+    }
+}
+
+/// #8378 review: a root every user can write to is refused even when the
+/// current user owns it — the `/tmp` shape, sticky bit or not. Group write is
+/// allowed: a user-private-group umask of 002 sets it on ordinary checkouts.
+#[cfg(unix)]
+#[test]
+fn dev_checkout_refuses_a_world_writable_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let chmod = |mode| {
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).expect("chmod")
+    };
+    chmod(0o775);
+    assert_eq!(
+        find_dev_checkout(dir.path()),
+        Some(dir.path().to_path_buf())
+    );
+    for mode in [0o777, 0o1777] {
+        chmod(mode);
+        assert_eq!(find_dev_checkout(dir.path()), None, "{mode:o}");
+        match dev::check_checkout(dir.path(), dev::current_euid()) {
+            Err(ContentError::UntrustedCheckout { reason, .. }) => {
+                assert!(reason.contains("writable by every user"), "{reason}");
+            }
+            other => panic!("{mode:o}: expected UntrustedCheckout, got {other:?}"),
+        }
+    }
+    chmod(0o700);
+}
+
 /// Fail-closed check: a named tree with every class but no `.git` is an
 /// error, not a fall-through to the installed bundle.
 #[test]
@@ -651,7 +779,7 @@ fn explicit_dev_root_without_a_git_marker_is_untrusted() {
 }
 
 /// Dev mode serves what a bundle could hold: a regular file reached through
-/// real directories. A symlink or a directory is `NotFound`.
+/// real directories. A symlink, a directory or a dot-file is `NotFound`.
 #[cfg(unix)]
 #[test]
 fn dev_read_serves_only_regular_files() {
@@ -661,13 +789,22 @@ fn dev_read_serves_only_regular_files() {
     std::os::unix::fs::symlink(dir.path().join("Cargo.toml"), skills.join("link.md"))
         .expect("file symlink");
     std::os::unix::fs::symlink(skills.join("tm"), skills.join("linked-dir")).expect("dir symlink");
+    std::fs::create_dir_all(skills.join(".cache")).expect("dot-dir");
+    std::fs::write(skills.join(".cache/a.md"), b"x").expect("file in dot-dir");
     let content = resolve(&options(
         &dir.path().join("no-cache"),
         DevOverride::At(dir.path().to_path_buf()),
     ))
     .expect("resolve");
     assert!(content.read("skills/tm/SKILL.md").is_ok());
-    for bad in ["skills/link.md", "skills/linked-dir/SKILL.md", "skills/tm"] {
+    // #8378 review: dot-files never reach a bundle, so dev mode hides them too.
+    for bad in [
+        "skills/link.md",
+        "skills/linked-dir/SKILL.md",
+        "skills/tm",
+        "skills/tm/.hidden",
+        "skills/.cache/a.md",
+    ] {
         assert!(
             matches!(content.read(bad), Err(ContentError::NotFound { .. })),
             "{bad:?} must be NotFound"

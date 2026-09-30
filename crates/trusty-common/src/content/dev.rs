@@ -49,13 +49,16 @@ const WORKSPACE_MANIFEST: &str = "Cargo.toml";
 /// repository boundary — and never past it. That one directory is the only
 /// candidate, and it must pass every check [`DevOverride::At`] applies: all
 /// class directories, a `Cargo.toml` with a `[workspace]` table, and (on unix)
-/// ownership by the current effective uid.
+/// a root, `.git` and `Cargo.toml` owned by the current effective uid in a root
+/// no other user can write to.
 /// Test: `dev_checkout_is_found_from_a_nested_directory`,
+/// `dev_checkout_is_found_from_a_nested_directory_of_a_linked_worktree`,
 /// `dev_checkout_is_not_found_outside_a_checkout`,
 /// `dev_checkout_stops_at_the_repository_boundary`,
 /// `dev_checkout_requires_a_git_marker`,
 /// `dev_checkout_requires_a_workspace_manifest`,
-/// `dev_checkout_refuses_a_root_owned_by_another_user`.
+/// `dev_checkout_refuses_a_root_owned_by_another_user`,
+/// `dev_checkout_refuses_a_world_writable_root`.
 ///
 /// [`DevOverride::At`]: super::DevOverride::At
 pub fn find_dev_checkout(start: &Path) -> Option<PathBuf> {
@@ -76,11 +79,27 @@ pub(super) fn require_checkout(root: &Path) -> Result<(), ContentError> {
     check_checkout(root, current_euid())
 }
 
-/// Every class directory present (else `NotACheckout`), then the `.git`
-/// marker, the owner and the workspace manifest (else `UntrustedCheckout`).
-/// The owner is checked before `Cargo.toml` is read, so a file in a foreign
-/// tree is never parsed.
+/// Reads the owning uid from a path's metadata; `None` when the platform has
+/// no uid. A test substitutes one to fake a file another user owns.
+pub(super) type OwnerFn = dyn Fn(&Path, &std::fs::Metadata) -> Option<u32>;
+
+/// [`check_checkout_with`] reading real owners.
 pub(super) fn check_checkout(root: &Path, euid: Option<u32>) -> Result<(), ContentError> {
+    check_checkout_with(root, euid, &file_owner)
+}
+
+/// Every class directory present (else `NotACheckout`), then the `.git`
+/// marker, the ownership and mode rules and the workspace manifest (else
+/// `UntrustedCheckout`). Ownership is checked before `Cargo.toml` is read, so a
+/// file in a foreign tree is never parsed.
+///
+/// Test: `dev_checkout_refuses_a_marker_owned_by_another_user`,
+/// `dev_checkout_refuses_a_world_writable_root`.
+pub(super) fn check_checkout_with(
+    root: &Path,
+    euid: Option<u32>,
+    owner: &OwnerFn,
+) -> Result<(), ContentError> {
     if let Some(missing) = first_missing_class(root) {
         return Err(ContentError::NotACheckout {
             root: root.to_path_buf(),
@@ -94,7 +113,7 @@ pub(super) fn check_checkout(root: &Path, euid: Option<u32>) -> Result<(), Conte
     if !root.join(GIT_MARKER).exists() {
         return Err(untrusted(format!("it has no {GIT_MARKER}")));
     }
-    check_owner(root, euid).map_err(untrusted)?;
+    check_owner(root, euid, owner).map_err(untrusted)?;
     if !is_workspace_manifest(&root.join(WORKSPACE_MANIFEST)) {
         return Err(untrusted(format!(
             "its {WORKSPACE_MANIFEST} has no [workspace] table"
@@ -111,28 +130,70 @@ fn is_workspace_manifest(path: &Path) -> bool {
         .is_some_and(|table| table.get("workspace").is_some_and(toml::Value::is_table))
 }
 
-/// Refuses a root not owned by `euid`; a no-op when `euid` is `None`.
-fn check_owner(root: &Path, euid: Option<u32>) -> Result<(), String> {
+/// Refuses a root that every user can write to, or whose root, `.git` or
+/// `Cargo.toml` is not owned by `euid`; a no-op when `euid` is `None`.
+///
+/// Why: owning the root alone let another user plant `.git` and `Cargo.toml`
+/// in a directory anyone can write to — `/tmp` qualifies for root (#8378
+/// review). Group write stays allowed: a user-private-group umask of 002 sets
+/// it on ordinary checkouts, and that group is the user's own.
+/// What: the root is `stat`ed through a symlink (a checkout may be reached by
+/// one) and refused when its mode has `o+w`; the root and both markers must be
+/// owned by `euid`, the markers read with `lstat` so a symlink is judged by
+/// who planted it.
+fn check_owner(root: &Path, euid: Option<u32>, owner: &OwnerFn) -> Result<(), String> {
     let Some(euid) = euid else { return Ok(()) };
-    let owner = owner_uid(root).map_err(|e| format!("its owner cannot be read: {e}"))?;
-    if owner == euid {
-        Ok(())
-    } else {
-        Err(format!(
-            "it is owned by uid {owner}, not the current user (uid {euid})"
-        ))
+    let unreadable = |path: &Path, e: std::io::Error| {
+        format!("the owner of {} cannot be read: {e}", path.display())
+    };
+    let root_meta = std::fs::metadata(root).map_err(|e| unreadable(root, e))?;
+    if world_writable(&root_meta) {
+        return Err("it is writable by every user".to_owned());
     }
+    let git = root.join(GIT_MARKER);
+    let manifest = root.join(WORKSPACE_MANIFEST);
+    let git_meta = std::fs::symlink_metadata(&git).map_err(|e| unreadable(&git, e))?;
+    let manifest_meta =
+        std::fs::symlink_metadata(&manifest).map_err(|e| unreadable(&manifest, e))?;
+    for (label, path, meta) in [
+        ("it", root, &root_meta),
+        (GIT_MARKER, git.as_path(), &git_meta),
+        (WORKSPACE_MANIFEST, manifest.as_path(), &manifest_meta),
+    ] {
+        let uid = owner(path, meta).ok_or_else(|| format!("the owner of {label} is unknown"))?;
+        if uid != euid {
+            return Err(format!(
+                "{label} is owned by uid {uid}, not the current user (uid {euid})"
+            ));
+        }
+    }
+    Ok(())
 }
 
+/// The owning uid in `meta`.
 #[cfg(unix)]
-fn owner_uid(root: &Path) -> std::io::Result<u32> {
+pub(super) fn file_owner(_path: &Path, meta: &std::fs::Metadata) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(root).map(|meta| meta.uid())
+    Some(meta.uid())
 }
 
+/// No uid on this platform.
 #[cfg(not(unix))]
-fn owner_uid(_root: &Path) -> std::io::Result<u32> {
-    Err(std::io::Error::other("no uid ownership on this platform"))
+pub(super) fn file_owner(_path: &Path, _meta: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+/// Whether every user may write to the file `meta` describes.
+#[cfg(unix)]
+fn world_writable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o002 != 0
+}
+
+/// No mode bits on this platform.
+#[cfg(not(unix))]
+fn world_writable(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// The process's effective uid on unix; `None` elsewhere.
@@ -162,7 +223,9 @@ fn first_missing_class(root: &Path) -> Option<PathBuf> {
 /// disk (#8378 review).
 /// What: every component of `<rest>` is checked with `symlink_metadata`: each
 /// directory must be a real directory and the last a regular file. `Ok(None)`
-/// when the path is absent, is a symlink, a directory or anything else.
+/// when the path is absent, is a symlink, a directory or anything else, or
+/// when any component starts with `.` — the packager skips those, as
+/// [`list_class`] does.
 /// Test: `dev_read_serves_only_regular_files`.
 pub(super) fn read_regular(root: &Path, key: &str) -> Result<Option<Vec<u8>>, ContentError> {
     let Some((class, rest)) = key.split_once('/') else {
@@ -173,6 +236,10 @@ pub(super) fn read_regular(root: &Path, key: &str) -> Result<Option<Vec<u8>>, Co
     };
     let mut parts = rest.split('/').peekable();
     while let Some(part) = parts.next() {
+        // #8378 review: a bundle never holds a dot-file, so dev mode must not.
+        if part.starts_with('.') {
+            return Ok(None);
+        }
         path.push(part);
         let kind = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta.file_type(),

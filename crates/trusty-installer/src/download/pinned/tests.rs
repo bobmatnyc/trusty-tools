@@ -316,20 +316,23 @@ async fn a_github_prefixed_pin_installs() {
 
 /// Why: A pin that is not a digest can never match, so it must be named as a
 /// bad pin rather than as bytes that failed a checksum (#8378).
-/// What: Pins malformed text; asserts `InvalidPin` and an empty install dir.
+/// What: The malformed pin is on the SECOND tool of a set, and the endpoints
+/// refuse every connection. `InvalidPin` therefore proves every pin is parsed
+/// before the first tool's release lookup; a parse that ran any later would
+/// report `ReleaseLookupFailed` instead. Asserts an empty install dir too.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_malformed_pin_is_invalid_not_a_mismatch() {
-    let Some(target) = tier1() else { return };
-    let base = Fixture::new(target)
-        .publish("demo-tool", "1.2.3", Flaw::None)
-        .start()
-        .await;
+    // The crate's existing guaranteed-to-refuse loopback address.
+    let base = format!("http://{}", crate::commands::test_support::dead_addr());
     let dir = tempfile::tempdir().unwrap();
 
     let err = run(
         &base,
-        &[PinnedTool::new("demo-tool", "1.2.3").with_sha256("sha256:abc")],
+        &[
+            PinnedTool::new("other-tool", "1.0.0"),
+            PinnedTool::new("demo-tool", "1.2.3").with_sha256("sha256:abc"),
+        ],
         dir.path(),
     )
     .await
