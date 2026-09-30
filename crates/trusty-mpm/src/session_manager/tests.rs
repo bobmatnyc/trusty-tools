@@ -107,6 +107,8 @@ pub struct FakeTmuxDriver {
     /// to simulate the recorded pane having been closed while a sibling
     /// window keeps the tmux session alive.
     pub pane_exists_override: Mutex<Option<bool>>,
+    /// Controllable `pane_claude` answer (#8942); `Absent` when unset.
+    pub pane_claude_override: Mutex<Option<crate::core::process::PaneClaude>>,
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
     /// text)` (sibling-window hijack fix, follow-up to #2456).
     pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
@@ -163,6 +165,7 @@ impl FakeTmuxDriver {
             pane_cwd_override: Mutex::new(None),
             pane_id_override: Mutex::new(None),
             pane_exists_override: Mutex::new(None),
+            pane_claude_override: Mutex::new(None),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
@@ -309,6 +312,13 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// confirming (or disagreeing with) the pane's actual cwd.
     fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
         self.pane_cwd_override.lock().unwrap().clone()
+    }
+
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        self.pane_claude_override
+            .lock()
+            .unwrap()
+            .unwrap_or(crate::core::process::PaneClaude::Absent)
     }
 
     /// Report the controllable `pane_id_override` (sibling-window hijack fix,

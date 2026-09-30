@@ -5,7 +5,8 @@ Added
   and tagged `[architect]`. Its poller (`<session>-poll`) and collector
   (`<session>-collector`) are registered as `supervisor_aux` records, tagged
   `[architect-helper]`, when their pane runs in the Architect directory and
-  no `claude` runs in it. A registration replaces the Architect's record,
+  no `claude` runs in it, the pane's own process included. When that cannot
+  be read, the helper is not registered. A registration replaces the Architect's record,
   and marks deleted, record-only, any other live record with the same tmux
   name and every other Architect record that is not already deleted or
   decommissioned, stopped and errored ones included, so a stale one no

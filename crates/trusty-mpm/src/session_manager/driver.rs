@@ -505,6 +505,16 @@ pub trait ManagedTmuxDriver: Send + Sync {
         self.session_exists(name)
     }
 
+    /// Whether a `claude` runs in session `name`'s pane (#8942).
+    ///
+    /// What: the default is `Unknown`, so a driver that cannot inspect the
+    /// pane never passes for a claude-free one. The real driver asks
+    /// [`crate::core::process::pane_claude`].
+    /// Test: `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        crate::core::process::PaneClaude::Unknown
+    }
+
     /// Durably publish `key=value` into the named session's tmux environment
     /// (#2157 item 1) — belt-and-suspenders alongside the pane-shell `export …;`
     /// prefix `runtime::claude_code`/`runtime::tcode` already send.

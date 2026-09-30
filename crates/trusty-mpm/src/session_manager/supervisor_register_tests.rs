@@ -1,17 +1,21 @@
 //! Tests for the #8942 Architect registration. Hermetic: a scratch manager,
 //! the recording `FakeTmuxDriver`, and a fake [`BindingVerifier`]; nothing
-//! reaches tmux, the process table, the daemon or `~/.trusty-mpm`.
+//! reaches the daemon or `~/.trusty-mpm`. Only the two pane-probe tests run
+//! real tmux, on a private `-L` server, never the host's.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::super::real_tmux::RealTmuxDriver;
 use super::super::tests::{FakeTmuxDriver, seed_record};
 use super::{BindingVerifier, RegisterError, SupervisorRegistration};
+use crate::core::process::PaneClaude;
 use crate::session_manager::{
-    KillVerdict, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionKind,
-    SessionManager, SupervisorFloor,
+    KillVerdict, ManagedSessionId, ManagedSessionState, SessionKind, SessionManager,
+    SupervisorFloor,
 };
+use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
 
 /// A verifier with a fixed answer that counts its calls.
 struct Verifier {
@@ -191,20 +195,145 @@ async fn a_helper_not_named_after_the_architect_is_refused() {
 async fn a_helper_whose_pane_runs_claude_is_not_registered() {
     let (root, fake, mgr) = manager().await;
     let reg = registration(&root, Some("tm-arch-poll"));
+    let poll_id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
     *fake.pane_cwd_override.lock().unwrap() = Some(reg.dir.clone());
-    // The fake's `runtime_ready` is `session_exists`: this pane "runs claude".
-    fake.create_session("tm-arch-poll", &reg.dir.to_string_lossy())
-        .expect("fake session");
+    for (answer, registered) in [
+        (PaneClaude::Present, false),
+        (PaneClaude::Unknown, false),
+        (PaneClaude::Absent, true),
+    ] {
+        *fake.pane_claude_override.lock().unwrap() = Some(answer);
+        let report = mgr
+            .register_supervisor(&reg, &Verifier::bound())
+            .await
+            .expect("the Architect registers");
+        assert_eq!(
+            report.registered.len() == 2,
+            registered,
+            "{answer:?}: {report:?}"
+        );
+        let live = mgr
+            .get(&poll_id)
+            .await
+            .is_ok_and(|r| !r.state.is_terminal());
+        assert_eq!(live, registered, "{answer:?}");
+    }
+}
 
-    let report = mgr
-        .register_supervisor(&reg, &Verifier::bound())
-        .await
-        .expect("the Architect registers");
+/// Fail-Open Check, #8942 delta critic MEDIUM: a helper pane whose own
+/// process is `claude` (`tmux new -s x claude`) is not registered. Real tmux
+/// on a private `-L` server; the fake `claude` is `sleep` under that name.
+#[tokio::test]
+async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
+    let Some((server, root, mgr)) = real_tmux_manager("claude").await else {
+        return;
+    };
+    let reg = tmux_registration(&root);
+    let fake_claude = root.path().join("claude");
+    // macOS names a process after the symlink it ran through and kills a
+    // copied system binary; Linux names it after the file, so copy there.
+    #[cfg(target_os = "macos")]
+    std::os::unix::fs::symlink("/bin/sleep", &fake_claude).expect("fake claude");
+    #[cfg(not(target_os = "macos"))]
+    std::fs::copy("/bin/sleep", &fake_claude).expect("fake claude");
+    let pane = helper_pane(
+        &server,
+        &reg,
+        &format!("exec '{}' 60", fake_claude.display()),
+    );
+    // Fixture precondition: the pane process has exec'd into `claude`.
+    let named_claude = (0..50).any(|_| {
+        let pid = server.query(&["display-message", "-t", pane.name(), "-p", "#{pane_pid}"]);
+        let named = pid
+            .and_then(|p| p.parse().ok())
+            .is_some_and(crate::core::process::process_name_is_claude);
+        named || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            false
+        }
+    });
+    assert!(named_claude, "the pane process never became `claude`");
+
+    let report = crate::core::tmux::with_tmux_binary(
+        server.shim_bin().into(),
+        mgr.register_supervisor(&reg, &Verifier::bound()),
+    )
+    .await
+    .expect("the Architect registers");
 
     assert_eq!(report.registered.len(), 1, "{report:?}");
-    assert!(report.skipped[0].contains("claude"), "{report:?}");
-    let poll_id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
-    assert!(mgr.get(&poll_id).await.is_err(), "no helper record");
+    assert!(report.skipped[0].contains("a `claude` runs"), "{report:?}");
+}
+
+/// Fail-Open Check, #8942 delta critic MEDIUM: when the pane's pid cannot be
+/// read, whether `claude` runs there is unknown, so the helper is not
+/// registered. The pane's cwd reads through the driver's private-server shim;
+/// the process probe's tmux is a binary that always fails.
+#[tokio::test]
+async fn a_helper_whose_pane_pid_cannot_be_read_is_not_registered() {
+    let Some((server, root, mgr)) = real_tmux_manager("nopid").await else {
+        return;
+    };
+    let reg = tmux_registration(&root);
+    let _pane = helper_pane(&server, &reg, "exec /bin/sleep 60");
+    let failing = root.path().join("tmux-fails");
+    std::fs::write(&failing, "#!/bin/sh\nexit 1\n").expect("failing tmux");
+    std::fs::set_permissions(
+        &failing,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod failing tmux");
+
+    let report = crate::core::tmux::with_tmux_binary(
+        failing,
+        mgr.register_supervisor(&reg, &Verifier::bound()),
+    )
+    .await
+    .expect("the Architect registers");
+
+    assert_eq!(report.registered.len(), 1, "{report:?}");
+    assert!(
+        report.skipped[0].contains("whether a `claude`"),
+        "{report:?}"
+    );
+}
+
+/// A manager over the real driver whose tmux is private server `tag`; `None`
+/// (skip) when tmux is not installed.
+async fn real_tmux_manager(
+    tag: &str,
+) -> Option<(PrivateTmuxServer, tempfile::TempDir, SessionManager)> {
+    if !ScratchTmuxSession::tmux_available("tmux") {
+        eprintln!("tmux not available; skipping");
+        return None;
+    }
+    let server = PrivateTmuxServer::new("tmux", &format!("reg8942-{tag}"));
+    let root = crate::test_support::hermetic_temp_dir();
+    let driver = crate::daemon::tmux::TmuxDriver::with_tmux_path_for_test(server.shim_bin());
+    let driver = Arc::new(RealTmuxDriver::from_driver_for_test(driver));
+    let mgr = SessionManager::new(root.path(), driver)
+        .await
+        .expect("manager");
+    Some((server, root, mgr))
+}
+
+/// A registration under the reserved test prefix, so a leaked pane is never
+/// adopted.
+fn tmux_registration(root: &tempfile::TempDir) -> SupervisorRegistration {
+    let mut reg = registration(root, None);
+    reg.session = "tm-xtest-arch8942".into();
+    reg.poll_session = Some("tm-xtest-arch8942-poll".into());
+    reg
+}
+
+/// The poller's pane on `server`, in the Architect directory, running `cmd`.
+fn helper_pane(
+    server: &PrivateTmuxServer,
+    reg: &SupervisorRegistration,
+    cmd: &str,
+) -> ScratchTmuxSession {
+    let name = reg.poll_session.as_deref().expect("a poller");
+    ScratchTmuxSession::spawn_in_on_socket("tmux", Some(server.name()), name, Some(&reg.dir), cmd)
 }
 
 /// #8942 critic MEDIUM: one Architect per user, so a registration marks every

@@ -280,6 +280,11 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         crate::core::process::find_claude_pid_in_tmux(name, 1, std::time::Duration::ZERO).is_some()
     }
 
+    /// #8942: the tri-state probe, pane process included.
+    fn pane_claude(&self, name: &str) -> crate::core::process::PaneClaude {
+        crate::core::process::pane_claude(name)
+    }
+
     /// Overrides the no-op trait default so the production path actually calls
     /// `tmux set-environment` (#2157 item 1).
     fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {

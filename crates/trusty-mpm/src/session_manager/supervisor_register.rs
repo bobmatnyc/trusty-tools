@@ -12,7 +12,7 @@
 //! write, upserts the Architect's record under
 //! [`ManagedSessionId::for_supervisor`], a `supervisor_aux` record for each
 //! helper named after the Architect whose pane runs in the Architect
-//! directory without `claude`, and marks `deleted`, record-only, every other
+//! directory provably without `claude`, and marks `deleted`, record-only, every other
 //! live record with one of those tmux names and every other non-terminal
 //! Architect record.
 //! Test: `supervisor_register_tests.rs`.
@@ -28,6 +28,7 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::session_kind::SessionKind;
 use super::supervisor_floor::SUPERVISOR_ROLE;
 use crate::core::architect_session::{POLL_SUFFIX, poll_session_name, validate_session_name};
+use crate::core::process::PaneClaude;
 
 /// The `-collector` helper's id role.
 pub const COLLECTOR_ROLE: &str = "-collector";
@@ -116,11 +117,15 @@ impl SessionManager {
     /// [`RegisterError::Unbound`] and writes nothing), then builds the records
     /// and writes them and the replacements in one `upsert_many`. A helper is
     /// registered only when the driver reports its pane's cwd as `reg.dir`
-    /// and no `claude` runs in it; otherwise it is listed in `skipped`.
+    /// and `pane_claude` proves no `claude` runs in the pane, the pane's own
+    /// process included; `Present`, `Unknown` or another cwd lists it in
+    /// `skipped`.
     /// Test: `register_supervisor_refuses_an_unbound_session`,
     /// `relaunching_the_architect_replaces_its_record`,
     /// `a_helper_not_named_after_the_architect_is_refused`,
     /// `a_helper_whose_pane_runs_claude_is_not_registered`,
+    /// `a_helper_whose_pane_process_is_claude_is_not_registered`,
+    /// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`,
     /// `registration_deletes_every_stale_architect_record`,
     /// `a_helper_whose_pane_cannot_be_placed_is_not_registered`,
     /// `register_supervisor_refuses_a_relative_dir_or_a_bad_name`.
@@ -147,16 +152,18 @@ impl SessionManager {
             let Some(name) = name else { continue };
             match self.tmux.get_pane_cwd(name) {
                 // #8942 critic HIGH: a pane running `claude` is a PM or an
-                // Architect, never a helper. On the real driver `runtime_ready`
-                // is the single-shot `find_claude_pid_in_tmux` probe.
-                Some(cwd) if same_dir(&cwd, &dir) && self.tmux.runtime_ready(name) => {
-                    report.skipped.push(format!(
+                // Architect, never a helper; "cannot tell" skips it too.
+                Some(cwd) if same_dir(&cwd, &dir) => match self.tmux.pane_claude(name) {
+                    PaneClaude::Absent => {
+                        wanted.push((name.clone(), SessionKind::SupervisorAux, role));
+                    }
+                    PaneClaude::Present => report.skipped.push(format!(
                         "{name}: a `claude` runs in its pane, so it is no helper"
-                    ));
-                }
-                Some(cwd) if same_dir(&cwd, &dir) => {
-                    wanted.push((name.clone(), SessionKind::SupervisorAux, role));
-                }
+                    )),
+                    PaneClaude::Unknown => report.skipped.push(format!(
+                        "{name}: whether a `claude` runs in its pane cannot be read"
+                    )),
+                },
                 Some(cwd) => report.skipped.push(format!(
                     "{name}: its pane runs in {}, not in {}",
                     cwd.display(),
