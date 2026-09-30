@@ -40,13 +40,45 @@ pub(crate) fn takes(command: &Option<Command>) -> bool {
     }
 }
 
+/// What an explicit `--url` / `TRUSTY_MPM_URL` means for a socket command.
+///
+/// Why (#6288 critic HIGH 2): these commands reach only the LOCAL daemon. A
+/// URL naming another host (a `--tailscale` bind) used to target that host;
+/// dropping it silently would let `tm sessions delete` act on the local daemon
+/// instead. So a non-loopback URL is refused, and a loopback one — the same
+/// daemon the socket reaches — is ignored with one stderr line.
+/// What: `Ok(Some(notice))` for a loopback URL, `Ok(None)` for no URL, and an
+/// error naming the socket-only rule for anything else, including a URL that
+/// does not parse.
+/// Test: `an_explicit_url_is_refused_unless_it_is_loopback`,
+/// `a_remote_url_is_refused_and_a_loopback_url_is_ignored`.
+pub(crate) fn explicit_url_notice(url: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(url) = url.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        super::managed_merged_prs::is_loopback_url(url),
+        "--url/TRUSTY_MPM_URL {url} names a daemon on another host, but this command reaches \
+         only the local daemon, over its unix socket (#6288, owner ruling 2026-09-14). Refusing \
+         rather than acting on the local daemon; unset --url/TRUSTY_MPM_URL to act locally."
+    );
+    Ok(Some(format!(
+        "tm: ignoring --url/TRUSTY_MPM_URL {url}: this command reaches the local daemon over \
+         its unix socket only (#6288)"
+    )))
+}
+
 /// Run one socket command to completion.
 ///
 /// # Errors
 ///
-/// When the socket path cannot be resolved, or the command fails; a daemon
-/// that is not listening is an error naming the socket, never a TCP retry.
+/// When the socket path cannot be resolved, the explicit URL names another
+/// host, or the command fails; a daemon that is not listening is an error
+/// naming the socket, never a TCP retry.
 pub(crate) async fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Some(notice) = explicit_url_notice(cli.url.as_deref())? {
+        eprintln!("{notice}");
+    }
     let daemon = DaemonClient::from_resolved_socket()?;
     let result = match cli.command {
         Some(Command::Health) => super::misc::health(&daemon).await,
@@ -135,6 +167,34 @@ mod tests {
             &["events"],
         ] {
             assert!(!parse(argv), "{argv:?} stays on main's resolution");
+        }
+    }
+
+    /// #6288 critic HIGH 2: a remote URL is refused, a loopback one ignored.
+    #[test]
+    fn an_explicit_url_is_refused_unless_it_is_loopback() {
+        use super::explicit_url_notice;
+        assert!(explicit_url_notice(None).expect("no url").is_none());
+        for url in [
+            "http://127.0.0.1:7880",
+            "http://localhost:7880",
+            "http://[::1]:7880",
+        ] {
+            let notice = explicit_url_notice(Some(url))
+                .expect(url)
+                .expect("a notice");
+            assert!(notice.contains("ignoring"), "{notice}");
+        }
+        for url in [
+            "http://100.64.0.1:7880",
+            "http://mac.tailnet.ts.net:7880",
+            "not a url",
+        ] {
+            let err = explicit_url_notice(Some(url)).expect_err(url).to_string();
+            assert!(
+                err.contains("#6288") && err.contains("unix socket"),
+                "{err}"
+            );
         }
     }
 }

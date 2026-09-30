@@ -56,6 +56,7 @@ fn daemon_row_names_its_transport_and_no_port() {
     for reachability in [
         DaemonReachability::Reachable,
         DaemonReachability::NotRunning,
+        DaemonReachability::Denied(Some(1)),
         DaemonReachability::Unresponsive,
     ] {
         let message = daemon_check(reachability, SOCKET).message;
@@ -89,4 +90,33 @@ async fn daemon_probe_over_an_absent_socket_is_not_running() {
     let (reachability, snapshot) = probe_daemon(&client).await;
     assert_eq!(reachability, DaemonReachability::NotRunning);
     assert!(snapshot.is_none());
+}
+
+/// #6288 critic LOW: a dial the OS refuses (EPERM under a sandbox) names the
+/// errno and gives no `tm start` advice, since starting a daemon cannot fix it.
+/// The error is built as the socket transport builds it: the kernel refuses
+/// `connect(2)` itself, which no filesystem fixture reproduces, because the
+/// hardened dial refuses a wrong-mode socket before it connects.
+#[test]
+fn daemon_probe_names_the_errno_when_the_os_denies_the_dial() {
+    use trusty_common::uds::{UdsRpcError, UdsSecurityError};
+
+    let path = std::path::PathBuf::from("/tmp/t/trusty-mpm.sock");
+    let dial = UdsRpcError::Dial {
+        path: path.clone(),
+        source: UdsSecurityError::Connect {
+            path,
+            source: std::io::Error::from_raw_os_error(1),
+        },
+    };
+    let err = trusty_mpm::client::DaemonCallError::Unreachable {
+        target: SOCKET.to_string(),
+        source: dial.into(),
+    };
+    let (reachability, snapshot) = classify_probe(Err(err));
+    assert_eq!(reachability, DaemonReachability::Denied(Some(1)));
+    assert!(snapshot.is_none());
+    let row = daemon_check(reachability, SOCKET);
+    assert!(row.message.contains("EPERM"), "{}", row.message);
+    assert!(!row.message.contains("tm start"), "{}", row.message);
 }

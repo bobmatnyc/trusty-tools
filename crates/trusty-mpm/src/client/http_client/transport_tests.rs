@@ -112,10 +112,14 @@ async fn socket_call_round_trips_a_mapped_route() {
     let daemon = fake_daemon().await;
     let client = DaemonClient::over_socket(&daemon.socket);
 
+    // The shape `tm sessions output --summarize` sends: two `.query` calls,
+    // one typed, plus a typed bool and a JSON body field.
     let resp = client
         .get("/sessions/a%20b/output")
         .query(&[("lines", 5u32)])
-        .json(&json!({ "compress": "summarise" }))
+        .query(&[("compress", "summarise")])
+        .query(&[("force", true)])
+        .json(&json!({ "note": "n" }))
         .send()
         .await
         .expect("the socket answers");
@@ -123,7 +127,7 @@ async fn socket_call_round_trips_a_mapped_route() {
     let echoed: Value = resp.json().await.expect("json");
     assert_eq!(
         echoed,
-        json!({ "id": "a b", "lines": 5, "compress": "summarise" })
+        json!({ "id": "a b", "lines": 5, "compress": "summarise", "force": true, "note": "n" })
     );
 
     let refused = client.get("/sessions/x").send().await.expect("answered");
@@ -169,6 +173,25 @@ async fn socket_call_refuses_an_unmapped_route() {
     assert!(!err.is_connect());
     assert!(
         err.to_string().contains("no method on the daemon socket"),
+        "{err}"
+    );
+}
+
+/// #6288 critic LOW: a query entry that is not a (string key, value) pair is
+/// an error, never a field dropped on the way to the daemon.
+#[tokio::test]
+async fn a_query_pair_with_a_non_string_key_is_refused() {
+    let daemon = fake_daemon().await;
+    let client = DaemonClient::over_socket(&daemon.socket);
+    let err = client
+        .get("/sessions/a/output")
+        .query(&[(5u32, 1u32)])
+        .send()
+        .await
+        .expect_err("a numeric key");
+    assert!(
+        err.to_string()
+            .contains("is not a (string key, value) pair"),
         "{err}"
     );
 }

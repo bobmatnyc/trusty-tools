@@ -365,15 +365,14 @@ pub(crate) async fn session(
             lines,
             summarize,
         } => {
-            let mut query: Vec<(&str, String)> = vec![("lines", lines.to_string())];
-            if summarize {
-                query.push(("compress", "summarise".to_string()));
-            }
-            let resp = daemon
+            // #6288: `lines` typed, so the socket's params struct decodes it.
+            let mut req = daemon
                 .get(format!("/sessions/{id_or_name}/output"))
-                .query(&query)
-                .send()
-                .await?;
+                .query(&[("lines", lines)]);
+            if summarize {
+                req = req.query(&[("compress", "summarise")]);
+            }
+            let resp = req.send().await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("session '{id_or_name}' not found");
             }

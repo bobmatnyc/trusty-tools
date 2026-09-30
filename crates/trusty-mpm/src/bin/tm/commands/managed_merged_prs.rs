@@ -213,7 +213,8 @@ pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
 }
 
 /// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
-fn is_loopback_url(url: &str) -> bool {
+/// #6288: also `socket_dispatch`'s test for an explicit `--url`.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };

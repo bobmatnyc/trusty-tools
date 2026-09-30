@@ -70,6 +70,11 @@ pub(crate) fn daemon_line(
             format!("daemon: reachable (pid {pid}, version {version})")
         }
         DaemonReachability::NotRunning => "daemon: unreachable".to_string(),
+        // #6288: the OS refused the dial; the daemon's own state is unknown.
+        DaemonReachability::Denied(errno) => format!(
+            "daemon: unreachable — the OS refused the dial ({})",
+            super::doctor_daemon_row::errno_name(errno)
+        ),
         DaemonReachability::Unresponsive => "daemon: unresponsive — it accepted the connection \
              but did not answer the health probe in time; restart it and re-run `tm doctor`"
             .to_string(),

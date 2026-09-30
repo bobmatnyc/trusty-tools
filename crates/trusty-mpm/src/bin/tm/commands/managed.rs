@@ -675,7 +675,8 @@ pub(crate) async fn session_decommission_ephemeral(
 ) -> anyhow::Result<()> {
     let resp = daemon
         .post("/api/v1/sessions/managed/decommission-ephemeral")
-        .query(&[("dry_run", if dry_run { "true" } else { "false" })])
+        // #6288: typed, so the socket's params struct decodes it.
+        .query(&[("dry_run", dry_run)])
         .send()
         .await?;
     let body: serde_json::Value = resp.error_for_status()?.json().await?;

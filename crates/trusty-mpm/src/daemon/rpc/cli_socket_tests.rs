@@ -123,3 +123,28 @@ async fn rpc_adopt_worktree_refuses_like_http() {
         assert_eq!(resp.status().as_u16(), direct.status);
     }
 }
+
+/// #6288 critic HIGH 1: `decommission --force` and the record-only decommission
+/// (`tm pr cleanup`, the ls auto-prune) send their flags typed, so the socket
+/// decodes them and answers about the id — here, that it does not exist.
+#[tokio::test]
+async fn decommission_flags_decode_over_the_socket() {
+    let daemon = socket_daemon().await;
+    let id = "00000000-0000-4000-8000-000000000000";
+    for err in [
+        daemon
+            .client
+            .decommission_managed_session_with(id, true)
+            .await
+            .expect_err("no such session"),
+        daemon
+            .client
+            .decommission_managed_session_record_only(id)
+            .await
+            .expect_err("no such session"),
+    ] {
+        let err = format!("{err:#}");
+        assert!(!err.contains("params do not decode"), "{err}");
+        assert!(err.contains("not found"), "{err}");
+    }
+}

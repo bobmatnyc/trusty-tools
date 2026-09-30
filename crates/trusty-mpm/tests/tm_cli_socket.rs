@@ -79,10 +79,16 @@ impl Scratch {
 
     /// Run `tm args…` with every TCP source aimed at the canary.
     async fn tm(&self, args: &[&str]) -> Output {
+        self.tm_with_url(args, &format!("http://{}", self.canary.addr()))
+            .await
+    }
+
+    /// Run `tm args…` with `TRUSTY_MPM_URL` set to `url`.
+    async fn tm_with_url(&self, args: &[&str], url: &str) -> Output {
         let mut cmd = common::tm_command_in(&self.dir.path().join("home"));
         cmd.current_dir(self.dir.path())
             .env("TRUSTY_MPM_SOCKET", self.socket())
-            .env("TRUSTY_MPM_URL", format!("http://{}", self.canary.addr()))
+            .env("TRUSTY_MPM_URL", url)
             .env("TRUSTY_DATA_DIR_OVERRIDE", self.dir.path().join("data"))
             .args(args);
         tokio::task::spawn_blocking(move || cmd.output())
@@ -155,12 +161,15 @@ async fn tm_health_status_and_doctor_work_over_the_socket_alone() {
         "{out}"
     );
 
+    // Not `reconcile-worktrees`: this in-process daemon resolves the workspace
+    // root from the test process's own `$HOME`, so it would scan the operator's
+    // real worktrees and outlive the 10 s bound on a loaded host. Its route is
+    // pinned by `every_route_names_a_served_method`.
     for args in [
         &["sessions", "list"][..],
         &["sessions", "breakers"],
         &["sessions", "clean"],
         &["sessions", "ls", "--json"],
-        &["sessions", "reconcile-worktrees", "--json"],
     ] {
         let run = scratch.tm(args).await;
         assert!(run.status.success(), "{args:?}: {}", text(&run.stderr));
@@ -198,4 +207,85 @@ async fn tm_health_over_an_absent_socket_fails_and_never_dials_tcp() {
         assert!(!out.contains("reachable ("), "{verb}: {out}");
     }
     assert_eq!(scratch.canary.connections(), 0, "fell back to TCP");
+}
+
+/// #6288 critic HIGH 1: a verb whose route takes a typed query field (`lines`,
+/// `force`, `dry_run`, `record_only`) sends it typed, so the socket's params
+/// struct decodes it. A stringified value answers `invalid_params` (400), which
+/// is what every one of these verbs hit before the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_query_verbs_decode_over_the_socket() {
+    let scratch = Scratch::new();
+    let _stop = serve_socket_only(&scratch.dir.path().join("fw"), &scratch.socket()).await;
+
+    let ephemeral = scratch
+        .tm(&["sessions", "decommission-ephemeral", "--dry-run"])
+        .await;
+    assert!(
+        ephemeral.status.success(),
+        "decommission-ephemeral --dry-run: {}",
+        text(&ephemeral.stderr)
+    );
+    // A well-formed id nothing holds, so each verb reaches its typed query.
+    let id = "00000000-0000-4000-8000-000000000000";
+    for args in [
+        &["sessions", "output", id][..],
+        &["sessions", "delete", id],
+        &["sessions", "decommission", id, "--force"],
+    ] {
+        let run = scratch.tm(args).await;
+        let (out, err) = (text(&run.stdout), text(&run.stderr));
+        assert!(
+            !err.contains("params do not decode"),
+            "{args:?} sent a param the socket could not decode: {err}"
+        );
+        // The daemon read the typed field and answered about the id itself.
+        assert!(
+            format!("{out}{err}").contains("not found"),
+            "{args:?}: {out}{err}"
+        );
+    }
+    assert_eq!(
+        scratch.canary.connections(),
+        0,
+        "a socket command dialled TCP"
+    );
+}
+
+/// #6288 critic HIGH 2: an explicit URL naming another host is refused before
+/// anything runs — a destructive verb must not act on the LOCAL daemon in its
+/// place — and a loopback URL is ignored with one stderr line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_url_is_refused_and_a_loopback_url_is_ignored() {
+    let scratch = Scratch::new();
+    let _stop = serve_socket_only(&scratch.dir.path().join("fw"), &scratch.socket()).await;
+
+    let remote = scratch
+        .tm_with_url(
+            &["sessions", "delete", "00000000-0000-4000-8000-000000000000"],
+            "http://100.64.0.1:7880",
+        )
+        .await;
+    let err = text(&remote.stderr);
+    assert!(
+        !remote.status.success(),
+        "a remote --url ran against the local daemon"
+    );
+    assert!(
+        err.contains("another host") && err.contains("#6288"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("not found"),
+        "the verb ran before the refusal: {err}"
+    );
+
+    let local = scratch.tm(&["status"]).await;
+    assert!(local.status.success(), "{}", text(&local.stderr));
+    assert!(text(&local.stderr).contains("ignoring --url/TRUSTY_MPM_URL"));
+    assert_eq!(
+        scratch.canary.connections(),
+        0,
+        "a socket command dialled TCP"
+    );
 }

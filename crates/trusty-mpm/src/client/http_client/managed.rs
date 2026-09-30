@@ -328,7 +328,8 @@ impl DaemonClient {
         let url = format!("/api/v1/sessions/managed/{id}/decommission");
         let mut req = self.post(&url);
         if force {
-            req = req.query(&[("force", "true")]);
+            // #6288: typed, so the socket's params struct decodes it.
+            req = req.query(&[("force", true)]);
         }
         let resp = req.send().await?;
         // #5913: name the 404 here, once. `prune.rs`'s sweep records the resulting
@@ -384,7 +385,7 @@ impl DaemonClient {
         let url = format!("/api/v1/sessions/managed/{id}/decommission");
         let resp = self
             .post(&url)
-            .query(&[("record_only", "true")])
+            .query(&[("record_only", true)])
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {

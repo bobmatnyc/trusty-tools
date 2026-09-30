@@ -387,7 +387,7 @@ pub(crate) async fn delete_managed_then_local(
 ) -> anyhow::Result<DeleteReport> {
     let resp = daemon
         .post(format!("/api/v1/sessions/managed/{id}/delete"))
-        .query(&[("force", force.to_string())])
+        .query(&[("force", force)])
         .send()
         .await?;
     match classify_managed_delete(resp.status()) {

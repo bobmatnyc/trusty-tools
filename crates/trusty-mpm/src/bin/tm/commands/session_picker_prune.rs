@@ -1137,7 +1137,8 @@ async fn decommission_dead_record(
 ) -> DecommissionOutcome {
     let resp = match daemon
         .post(format!("/api/v1/sessions/managed/{id}/decommission"))
-        .query(&[("record_only", "true")])
+        // #6288: typed, so the socket's params struct decodes it.
+        .query(&[("record_only", true)])
         .send()
         .await
     {

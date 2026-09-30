@@ -426,7 +426,7 @@ impl DaemonClient {
         let url = format!("/sessions/{id}/output");
         let body: serde_json::Value = self
             .get(&url)
-            .query(&[("lines", lines.to_string())])
+            .query(&[("lines", lines)])
             .send()
             .await?
             .error_for_status()?

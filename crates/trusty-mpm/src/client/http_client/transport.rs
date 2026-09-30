@@ -77,6 +77,17 @@ impl DaemonCallError {
         matches!(self, Self::Unreachable { .. })
     }
 
+    /// The OS error when the dial itself was refused with permission denied
+    /// (`EPERM`/`EACCES`) — a sandbox profile or a directory mode, not a
+    /// stopped daemon (#6288).
+    pub fn denied_os_error(&self) -> Option<&std::io::Error> {
+        let (Self::Unreachable { source, .. } | Self::Failed { source, .. }) = self;
+        source
+            .chain()
+            .filter_map(|e| e.downcast_ref::<std::io::Error>())
+            .find(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    }
+
     /// True when the exchange outlived its timeout, on either transport.
     pub fn is_timeout(&self) -> bool {
         let Self::Failed { source, .. } = self else {
@@ -216,10 +227,20 @@ impl SocketCall {
             // `&[("k", v), …]` serializes as an array of two-element arrays.
             Ok(Value::Array(pairs)) => {
                 for pair in pairs {
-                    if let Value::Array(kv) = pair
-                        && let [Value::String(k), v] = kv.as_slice()
-                    {
-                        self.params.insert(k.clone(), v.clone());
+                    match pair {
+                        Value::Array(kv) if matches!(kv.as_slice(), [Value::String(_), _]) => {
+                            if let [Value::String(k), v] = kv.as_slice() {
+                                self.params.insert(k.clone(), v.clone());
+                            }
+                        }
+                        // #6288: never drop a field silently — the daemon would
+                        // run the route as if it had not been sent.
+                        other => {
+                            self.error = Some(anyhow::anyhow!(
+                                "{what} entry {other} is not a (string key, value) pair"
+                            ));
+                            return;
+                        }
                     }
                 }
             }
