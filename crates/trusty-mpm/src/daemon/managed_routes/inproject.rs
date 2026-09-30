@@ -648,7 +648,9 @@ pub fn create_session_worktree_unchecked(
     // #4957: cut the session branch from the freshly-fetched remote default
     // branch. Omitting the start-point inherits the base checkout's local
     // HEAD, which is stale on any machine that has not pulled recently.
-    let start_point = super::inproject_start_point::resolve(base_path);
+    // #8934: a local-only repo with no default branch refuses here.
+    let start_point =
+        super::inproject_start_point::resolve(base_path).map_err(|e| format!("inproject: {e}"))?;
     if let Some(reason) = start_point.warning() {
         warn!(
             base = %base_path.display(),

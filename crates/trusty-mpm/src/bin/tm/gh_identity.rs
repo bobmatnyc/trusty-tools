@@ -130,7 +130,8 @@ pub(crate) fn load_gh_env() -> anyhow::Result<GhEnv> {
 /// launch spec now delivers the environment to `claude` alone, so the pane shell
 /// no longer holds it and this path has to resolve it again from config.
 /// What: [`load_gh_env`]'s body, with `dir` in place of the process cwd. A
-/// local-only repository (#8934) gets [`GhEnv::local_only`] and no config read.
+/// local-only pin (#8934, see [`local_only_pin`]) returns before any config
+/// read.
 /// Test: `resolve_project_aware_*` cover the resolution; the in-place
 /// application is covered by
 /// `inplace_exec_command_carries_the_pinned_gh_identity`;
@@ -142,9 +143,10 @@ pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
     let mode = remote_mode(dir)
         .inspect_err(|e| tracing::warn!("cannot read git origin remote for gh identity: {e}"))
         .ok();
-    // #8934: a local-only repo pins "no gh", never the global `github:` binding.
-    if mode.as_ref().is_some_and(RemoteMode::is_local_only) {
-        return Ok(GhEnv::local_only());
+    let inherited = std::env::var("GH_CONFIG_DIR").ok();
+    let mpm = trusty_mpm::core::config::MpmConfig::load_default();
+    if let Some(pinned) = local_only_pin(mode.as_ref(), &mpm, inherited.as_deref()) {
+        return Ok(pinned);
     }
     let config = TrustyToolsConfig::load();
     let origin_url = match mode {
@@ -158,6 +160,38 @@ pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
         tracing::debug!(overrides = ?names, "applying per-project GitHub identity binding to gh calls");
     }
     Ok(env)
+}
+
+/// The #8934 "no remote, no gh" binding a `tm` gh call gets, if any.
+///
+/// Why: a `tm` gh call from a local-only repository must not fall back to the
+/// global `github:` binding or the machine's active account, and one run from
+/// ANOTHER directory inside a pinned local-only session (`cd /tmp && tm issue`)
+/// must keep the session's pin rather than resolve a fresh identity whose
+/// `inherited_identity_to_clear` would strip the pin's dummy tokens. The
+/// allow-listed supervisor keeps gh (07:47Z ruling).
+/// What: `Some(GhEnv::local_only())` when the inherited `GH_CONFIG_DIR` is the
+/// local-only pin, or when `mode` is local-only and
+/// [`trusty_mpm::core::remote_mode::gh_disabled_for`] its root under `mpm`;
+/// otherwise `None`.
+/// Test: `load_gh_env_for_a_local_only_repo_disables_gh`,
+/// `an_allow_listed_supervisor_dir_keeps_gh_in_the_cli`,
+/// `a_pinned_session_keeps_its_pin_outside_the_repo`.
+pub(crate) fn local_only_pin(
+    mode: Option<&trusty_mpm::core::remote_mode::RemoteMode>,
+    mpm: &trusty_mpm::core::config::MpmConfig,
+    inherited_config_dir: Option<&str>,
+) -> Option<GhEnv> {
+    use trusty_mpm::core::remote_mode::{LOCAL_ONLY_GH_CONFIG_DIR, RemoteMode, gh_disabled_for};
+    if inherited_config_dir == Some(LOCAL_ONLY_GH_CONFIG_DIR) {
+        return Some(GhEnv::local_only());
+    }
+    match mode {
+        Some(RemoteMode::LocalOnly { root }) if gh_disabled_for(root, mpm) => {
+            Some(GhEnv::local_only())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -452,5 +486,54 @@ mod tests {
             env.unset_vars().iter().any(|k| k == "GITHUB_TOKEN"),
             "{env:?}"
         );
+    }
+
+    /// A no-origin repo whose `.trusty-mpm.toml` asks for `profile`.
+    fn local_only_repo(profile: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let repo = tempfile::TempDir::new().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(repo.path())
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+        let toml = format!("profile = \"{profile}\"\n");
+        std::fs::write(repo.path().join(".trusty-mpm.toml"), toml).expect("toml");
+        let root = std::fs::canonicalize(repo.path()).expect("canonical");
+        (repo, root)
+    }
+
+    fn allowing(dir: &std::path::Path) -> trusty_mpm::core::config::MpmConfig {
+        let mut config = trusty_mpm::core::config::MpmConfig::default();
+        config.supervisor.projects = vec![dir.to_path_buf()];
+        config
+    }
+
+    /// 🔴 #8934 HIGH 1 (07:47Z ruling): the Architect's directory has no origin
+    /// by design; an ALLOW-LISTED supervisor there keeps the machine's gh for
+    /// `tm issue`/`tm ticket`/`tm pr` and the in-place relaunch.
+    /// Test: itself.
+    #[test]
+    fn an_allow_listed_supervisor_dir_keeps_gh_in_the_cli() {
+        use trusty_mpm::core::remote_mode::remote_mode;
+        let (_repo, root) = local_only_repo("supervisor");
+        let mode = remote_mode(&root).expect("mode");
+        assert!(local_only_pin(Some(&mode), &allowing(&root), None).is_none());
+        // #8453: the project's own switch alone does not exempt it.
+        let unlisted = trusty_mpm::core::config::MpmConfig::default();
+        assert!(local_only_pin(Some(&mode), &unlisted, None).is_some());
+    }
+
+    /// 🔴 #8934 MEDIUM 5: inside a pinned local-only session, a `tm` gh call
+    /// run from another directory keeps the session's pin.
+    /// Test: itself.
+    #[test]
+    fn a_pinned_session_keeps_its_pin_outside_the_repo() {
+        use trusty_mpm::core::remote_mode::{LOCAL_ONLY_GH_CONFIG_DIR, RemoteMode};
+        let origin = RemoteMode::Origin("https://github.com/o/r.git".into());
+        let mpm = trusty_mpm::core::config::MpmConfig::default();
+        let pinned = local_only_pin(Some(&origin), &mpm, Some(LOCAL_ONLY_GH_CONFIG_DIR));
+        assert!(pinned.is_some(), "the inherited pin must survive `cd`");
+        assert!(local_only_pin(Some(&origin), &mpm, None).is_none());
     }
 }

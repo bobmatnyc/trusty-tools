@@ -128,7 +128,7 @@ async fn a_local_only_repo_spawns_on_its_main_checkout_with_gh_disabled() {
 }
 
 /// #8934 closure 2: an explicit worktree request cuts `session/<name>` from
-/// the repository root's `HEAD` (the local default branch), keeps
+/// the local default branch (`main` here, also the root's `HEAD`), keeps
 /// `.worktrees/` out of `git status`, and arms no upstream.
 /// Test: itself.
 #[tokio::test]

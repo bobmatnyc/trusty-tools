@@ -306,7 +306,8 @@ fn a_non_root_directory_without_an_origin_is_refused() {
         .expect("git init");
     assert!(init.status.success(), "git init failed");
 
-    assert_eq!(remote_mode(dir), Ok(RemoteMode::LocalOnly));
+    let root = std::fs::canonicalize(dir).expect("canonical");
+    assert_eq!(remote_mode(dir), Ok(RemoteMode::LocalOnly { root }));
     assert_eq!(
         is_local_only_root(dir),
         Ok(true),

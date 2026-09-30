@@ -11,8 +11,9 @@
 //! a GitHub checkout and a local-only repository alike.
 //! [`spawn_managed_local_only`] routes a local-only repository root: on the
 //! main checkout itself by default, or on a per-session worktree at
-//! `<repo>/.worktrees/<name>` cut from the repository root's `HEAD` (the local
-//! default branch — there is no `origin/<default>` to fetch) when the launch
+//! `<repo>/.worktrees/<name>` cut from the local default branch
+//! ([`crate::core::remote_mode::local_default_branch`] — there is no
+//! `origin/<default>` to fetch, and a spawn with none refuses) when the launch
 //! asked for one. The record carries no `repo_url` and no `source_id`, so no
 //! downstream step reads a GitHub identity into it, and the session's gh is
 //! disabled by `core::gh_account::resolve_gh_account_env_for_registry`.
@@ -86,7 +87,8 @@ impl SessionSource {
 /// [`super::launch_on_main::spawn_managed_on_main`] in `local_path` itself;
 /// with a worktree requested, keeps `.worktrees/` out of `git status`,
 /// reserves the worktree through the same `reserve_inproject_worktree` a
-/// GitHub checkout uses (base = `local_path`, start point = its `HEAD`), and
+/// GitHub checkout uses (base = `local_path`, start point = its local
+/// default branch, not its checked-out branch), and
 /// runs `spawn_managed_inproject` there. A reservation failure is an error:
 /// an explicit worktree request is never quietly placed elsewhere (ADR-0037).
 /// Test: see the module docs.

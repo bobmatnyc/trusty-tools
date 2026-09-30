@@ -18,7 +18,8 @@
 //! rather than report a clean success.
 //! Test: `inproject::tests::session_worktree_branches_from_fetched_origin_not_stale_local_main`,
 //! `inproject::tests::session_worktree_falls_back_to_remote_tracking_ref_when_fetch_fails`,
-//! `inproject::tests::session_worktree_without_a_remote_still_branches_from_head`.
+//! `inproject::tests::session_worktree_without_a_remote_still_branches_from_head`,
+//! `inproject::tests::session_worktree_in_a_local_only_repo_branches_from_its_default_branch`.
 
 use std::path::Path;
 use std::process::Command;
@@ -28,8 +29,8 @@ use std::process::Command;
 /// Why: the caller must distinguish three materially different situations that
 /// all still produce a worktree — a fresh remote tip (the intended path), a
 /// last-known remote tip after a failed fetch (degraded, must warn), and no
-/// remote at all (a purely local repo, where `HEAD` is simply correct and a
-/// warning would be noise). Collapsing them into `Option<String>` is what let
+/// remote at all (a purely local repo, where its local default branch is
+/// simply correct and a warning would be noise). Collapsing them into `Option<String>` is what let
 /// #4957 read as success.
 /// What: a start-point ref for `git worktree add` (`None` means "omit the
 /// argument and let git use `HEAD`"), plus an optional operator-facing
@@ -41,10 +42,11 @@ pub enum StartPoint {
     Fresh { git_ref: String },
     /// `origin/<default>` as of some earlier fetch — this call's fetch failed.
     Stale { git_ref: String, reason: String },
-    /// The repo has no `origin` remote: `HEAD` — the repository root's checked-out
-    /// branch, its local default branch — is the only correct start point and
-    /// this is not a degradation (#8934: local-only worktrees are cut here).
-    LocalOnly,
+    /// The repo has no `origin` remote: its local default branch
+    /// ([`crate::core::remote_mode::local_default_branch`], never the root's
+    /// checked-out branch) is the only correct start point, and this is not a
+    /// degradation (#8934: local-only worktrees are cut here).
+    LocalOnly { git_ref: String },
     /// A remote exists but neither the fetch nor any remote-tracking ref could
     /// supply a start point, so `HEAD` is used and may be stale.
     UnverifiedHead { reason: String },
@@ -54,8 +56,10 @@ impl StartPoint {
     /// The ref to pass to `git worktree add`, or `None` to let git use `HEAD`.
     pub fn git_ref(&self) -> Option<&str> {
         match self {
-            StartPoint::Fresh { git_ref } | StartPoint::Stale { git_ref, .. } => Some(git_ref),
-            StartPoint::LocalOnly | StartPoint::UnverifiedHead { .. } => None,
+            StartPoint::Fresh { git_ref }
+            | StartPoint::Stale { git_ref, .. }
+            | StartPoint::LocalOnly { git_ref } => Some(git_ref),
+            StartPoint::UnverifiedHead { .. } => None,
         }
     }
 
@@ -66,7 +70,7 @@ impl StartPoint {
             StartPoint::Stale { reason, .. } | StartPoint::UnverifiedHead { reason } => {
                 Some(reason)
             }
-            StartPoint::Fresh { .. } | StartPoint::LocalOnly => None,
+            StartPoint::Fresh { .. } | StartPoint::LocalOnly { .. } => None,
         }
     }
 }
@@ -84,30 +88,34 @@ impl StartPoint {
 /// `+refs/heads/<branch>:refs/remotes/origin/<branch>` so the remote-tracking
 /// ref is updated deterministically rather than relying on `FETCH_HEAD`; and
 /// maps the outcome onto [`StartPoint`]. `GIT_TERMINAL_PROMPT=0` keeps a
-/// credential prompt from hanging the daemon on a private remote.
-/// Test: see the module docs.
-pub fn resolve(base_path: &Path) -> StartPoint {
+/// credential prompt from hanging the daemon on a private remote. #8934: a
+/// local-only repo starts from `refs/heads/<local default branch>`; `Err` when
+/// it has none, so no worktree is cut from an arbitrary checked-out branch.
+/// Test: see the module docs;
+/// `session_worktree_in_a_local_only_repo_branches_from_its_default_branch`.
+pub fn resolve(base_path: &Path) -> Result<StartPoint, String> {
     let Some(branch) = default_remote_branch(base_path) else {
         // #8934: the shared predicate; an unreadable remote is not local-only.
         let local_only =
             crate::core::remote_mode::remote_mode(base_path).is_ok_and(|mode| mode.is_local_only());
-        return if !local_only {
-            StartPoint::UnverifiedHead {
-                reason: "could not resolve origin's default branch (origin/HEAD unset and no \
-                         remote-tracking ref for the checked-out branch); branching from the \
-                         base checkout's local HEAD, which may be behind the remote"
-                    .to_string(),
-            }
-        } else {
-            StartPoint::LocalOnly
-        };
+        if local_only {
+            let branch = crate::core::remote_mode::local_default_branch(base_path)?;
+            let git_ref = format!("refs/heads/{branch}");
+            return Ok(StartPoint::LocalOnly { git_ref });
+        }
+        return Ok(StartPoint::UnverifiedHead {
+            reason: "could not resolve origin's default branch (origin/HEAD unset and no \
+                     remote-tracking ref for the checked-out branch); branching from the \
+                     base checkout's local HEAD, which may be behind the remote"
+                .to_string(),
+        });
     };
 
     let tracking_ref = format!("refs/remotes/origin/{branch}");
     let git_ref = format!("origin/{branch}");
     let refspec = format!("+refs/heads/{branch}:{tracking_ref}");
 
-    match fetch(base_path, &refspec) {
+    Ok(match fetch(base_path, &refspec) {
         Ok(()) => StartPoint::Fresh { git_ref },
         Err(err) if ref_exists(base_path, &tracking_ref) => StartPoint::Stale {
             reason: format!(
@@ -124,7 +132,7 @@ pub fn resolve(base_path: &Path) -> StartPoint {
                  HEAD, which may be behind the remote"
             ),
         },
-    }
+    })
 }
 
 /// Resolve the branch name `origin` considers default, without hardcoding it.

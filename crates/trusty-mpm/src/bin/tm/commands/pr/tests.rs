@@ -3513,9 +3513,10 @@ fn pr_8934_a_local_only_repo_skips_every_verb() {
             run(&["remote", "add", "origin", url]);
         }
     };
+    let mpm = trusty_mpm::core::config::MpmConfig::default();
     let local = tempfile::tempdir().expect("tempdir");
     init(local.path(), None);
-    let notice = super::local_only_skip(local.path()).expect("local-only skips");
+    let notice = super::local_only_skip(local.path(), None, &mpm).expect("local-only skips");
     assert!(
         notice.contains("local-only repo: no remote; skipping push/PR"),
         "{notice}"
@@ -3523,5 +3524,45 @@ fn pr_8934_a_local_only_repo_skips_every_verb() {
 
     let remote = tempfile::tempdir().expect("tempdir");
     init(remote.path(), Some("https://github.com/o/r.git"));
-    assert_eq!(super::local_only_skip(remote.path()), None);
+    assert_eq!(super::local_only_skip(remote.path(), None, &mpm), None);
+}
+
+/// 🔴 #8934 HIGH 3 FAIL-OPEN CHECK: `tm pr merge 123 --repo o/r` from a
+/// local-only directory used to print the skip and exit 0 WITHOUT merging,
+/// which a delivery chain reads as merged. With `--repo` the verb runs; the
+/// allow-listed supervisor's verbs run too.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8934_an_explicit_repo_never_skips() {
+    let local = tempfile::tempdir().expect("tempdir");
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(local.path())
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git init");
+    let mpm = trusty_mpm::core::config::MpmConfig::default();
+    assert_eq!(
+        super::local_only_skip(local.path(), Some("o/r"), &mpm),
+        None
+    );
+    let cmd = crate::cli::PrCmd::Merge(PrMergeArgs {
+        repo: Some("o/r".into()),
+        ..merge_args()
+    });
+    assert_eq!(super::repo_arg(&cmd), Some("o/r"));
+
+    std::fs::write(
+        local.path().join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .expect("toml");
+    let mut supervisor = trusty_mpm::core::config::MpmConfig::default();
+    supervisor.supervisor.projects = vec![std::fs::canonicalize(local.path()).expect("canon")];
+    assert_eq!(
+        super::local_only_skip(local.path(), None, &supervisor),
+        None
+    );
 }
