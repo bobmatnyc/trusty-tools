@@ -125,6 +125,11 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/api/v1/sessions/managed/fleet", "mpm.managed.fleet"),
     (
         "POST",
+        "/api/v1/sessions/managed/supervisor",
+        "mpm.managed.register_supervisor",
+    ),
+    (
+        "POST",
         "/api/v1/sessions/managed/sync-assets",
         "mpm.managed.sync_assets_all",
     ),

@@ -309,6 +309,7 @@ fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionReco
         worktree_owner: Some(id),
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

@@ -106,6 +106,7 @@ fn base_record(id: ManagedSessionId, state: ManagedSessionState, cwd: PathBuf) -
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

@@ -29,6 +29,7 @@
 //! `short_timestamp_*`, and the color/alignment cases in `managed_tests.rs`.
 
 use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::session_manager::SessionKind;
 
 use super::session_picker_render::{DEAD_COLOR, StateColor, colorize, session_color};
 
@@ -152,7 +153,7 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     let root = super::managed_root::resolve_managed_paths(None)
         .ok()
         .map(|paths| paths.root);
-    for s in sessions {
+    for s in pinned_first(sessions) {
         if s.deleted {
             // #3034: the slot stays reserved — never silently reused by a
             // later session — so the operator sees exactly which number is
@@ -235,7 +236,7 @@ fn row_state(s: &ManagedSessionSummary) -> String {
     } else {
         s.state.as_str()
     };
-    format_state_column(
+    let cell = format_state_column(
         base_state,
         s.unresumable,
         s.stale_assets,
@@ -243,7 +244,43 @@ fn row_state(s: &ManagedSessionSummary) -> String {
         // #6568: the daemon sends the whole reason; the row shows only that
         // there is one.
         s.auto_resume_parked.is_some(),
-    )
+    );
+    match kind_tag(s.kind) {
+        Some(tag) => format!("{cell} [{tag}]"),
+        None => cell,
+    }
+}
+
+/// The STATE-cell tag of a protected record kind (#8942).
+///
+/// What: `architect` for the Architect, `architect-helper` for its poller or
+/// collector, `protected` for a kind this build does not know; none for an
+/// ordinary session or an older daemon that sends no kind.
+/// Test: `session_table_pins_and_tags_the_architect_row`.
+pub(crate) fn kind_tag(kind: Option<SessionKind>) -> Option<&'static str> {
+    match kind? {
+        SessionKind::Ordinary => None,
+        SessionKind::Supervisor => Some("architect"),
+        SessionKind::SupervisorAux => Some("architect-helper"),
+        SessionKind::Unknown => Some("protected"),
+    }
+}
+
+/// `sessions` with the live Architect rows first (#8942 design §4).
+///
+/// What: a stable reorder — the Architect, then its helpers and any other
+/// protected kind, then everything else in its original order. A deleted row
+/// is never pinned.
+/// Test: `session_table_pins_and_tags_the_architect_row`.
+pub(crate) fn pinned_first(sessions: &[ManagedSessionSummary]) -> Vec<&ManagedSessionSummary> {
+    let rank = |s: &ManagedSessionSummary| match (s.deleted, s.kind) {
+        (false, Some(SessionKind::Supervisor)) => 0,
+        (false, Some(k)) if k.is_protected() => 1,
+        _ => 2,
+    };
+    let mut ordered: Vec<&ManagedSessionSummary> = sessions.iter().collect();
+    ordered.sort_by_key(|s| rank(s));
+    ordered
 }
 
 /// Format one live `tm ls` row.

@@ -48,9 +48,15 @@ pub(crate) mod resume_workdir;
 pub mod retention;
 pub mod search_gc;
 pub mod session_guard;
+pub mod session_kind;
 pub mod setters;
 pub mod slots;
 pub mod snapshot;
+// #8942: the lifecycle paths' refusals for the Architect's sessions.
+pub mod supervisor;
+pub mod supervisor_floor;
+// #8942: `tm fleet init`'s registration of the Architect's sessions.
+pub mod supervisor_register;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
 pub mod stop;
 pub mod store;
@@ -292,9 +298,14 @@ pub use retention::{
     retention_verdict,
 };
 pub use session_guard::TmuxSessionGuard;
+pub use session_kind::SessionKind;
 pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreDegradation, StoreError};
 pub use submit_probe::{SubmitState, classify_submit};
+pub use supervisor_floor::{KillVerdict, SidecarRole, SupervisorFloor};
+pub use supervisor_register::{
+    BindingVerifier, RegisterError, RegisteredSession, RegistrationReport, SupervisorRegistration,
+};
 pub use task_inject::should_inject_task;
 pub use worktree_claude_registry::host_claude_config_roots;
 pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};

@@ -42,7 +42,7 @@ pub mod status;
 
 pub use binding::{BoundIndex, bound_index_for_tree, okg_tree_path};
 pub use config::{AgentStoreBinding, StoresConfig};
-pub use index_feed::{HttpIndexFeed, IndexFeed, IndexFeedReport, feed_source};
+pub use index_feed::{IndexFeed, IndexFeedReport, feed_source};
 pub use okg_graph::{OkgDefinition, OkgGraph, OkgSubjectCount, OkgTriple, read_graph};
 pub use status::{StoreFault, StoreStatus, resolve_store_statuses};
 
