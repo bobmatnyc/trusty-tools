@@ -292,7 +292,11 @@ fn resolve_account_gh_config_dir(
 /// mirroring [`register`]'s own `previous_gh_account` fetch.
 /// Test: exercised via `run_target`/`main.rs`'s call sites; the decision
 /// itself is [`default_branch_to_preserve`], tested directly below.
-async fn current_default_branch(client: &reqwest::Client, url: &str, name: &str) -> Option<String> {
+pub(crate) async fn current_default_branch(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+) -> Option<String> {
     let existing = daemon(client, url).registry_get_project(name).await.ok();
     default_branch_to_preserve(existing.as_ref())
 }
