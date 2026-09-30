@@ -392,11 +392,16 @@ use crate::commands::pm_guard_secret_consumers::{gh_api_lists_secret_names, key_
 /// `cat >> verb.rs <<'RSEOF'` carrying `struct VerbStub {` ("naming `{`"),
 /// `awk -F'[ ;]' '{p+=$4}'` ("naming `{p+`") and a `python3` here-document
 /// ("naming `{a`") — three commands that name no file at all.
-/// What: the only thing the two modes decide differently is an UNRESOLVABLE
-/// brace shape. Every pattern, every family and every path-shape test is
-/// shared, so a secret named in program text still denies: `python -c
-/// 'open(".env")'` and a here-document body carrying `.env` both do.
+/// What: the only thing the two modes decide differently is a regex-quantifier
+/// word whose literal core names nothing. Since #8878 an UNRESOLVABLE brace
+/// shape fails closed in both; the code braces above reach the expander
+/// resolved, because the orphan-brace drop removes them first (not when the
+/// text also holds a brace product past the scan's bound). Every pattern,
+/// every family and every path-shape test is shared, so a secret named in
+/// program text still denies: `python -c 'open(".env")'` and a here-document
+/// body carrying `.env` both do.
 /// Test: `allows_program_text_that_only_looks_like_a_brace_group`,
+/// `denies_program_text_with_an_unresolvable_brace_word`,
 /// `denies_a_secret_named_inside_an_inline_program`,
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -504,12 +509,13 @@ fn is_ssh_public_key_name(basename: &str) -> bool {
 /// round 6).
 /// What: basename, then [`normalize_bracket_classes`], then
 /// [`is_ssh_public_key_name`] as an exemption, then [`is_secret_read_target`].
-/// Under [`Scan::ProgramText`] the same brace expander runs but an
-/// UNRESOLVABLE shape answers `false` instead of failing closed (#7266) — see
-/// [`Scan`].
+/// Under [`Scan::ProgramText`] a regex-quantifier word is released when its
+/// literal core names nothing; an UNRESOLVABLE brace shape fails closed there
+/// too (#8878).
 /// Test: `allows_reading_an_ssh_public_key`,
 /// `denies_a_glob_that_expands_onto_a_secret_file`,
-/// `allows_program_text_that_only_looks_like_a_brace_group`.
+/// `allows_program_text_that_only_looks_like_a_brace_group`,
+/// `denies_program_text_with_an_unresolvable_brace_word`.
 fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     // #8523: pm2's `save` file holds every managed process's environment.
     if names_a_process_manager_dump(path) {
@@ -533,8 +539,9 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
         {
             false
         }
+        // See #8878: an unresolvable word fails closed, as in `is_secret_read_target`.
         Scan::ProgramText => expand_brace_alternatives(&base)
-            .is_some_and(|candidates| candidates.iter().any(|c| names_a_secret(c))),
+            .is_none_or(|candidates| candidates.iter().any(|c| names_a_secret(c))),
     }
 }
 
@@ -3243,6 +3250,18 @@ mod tests {
                 "code braces are syntax, not a brace alternation: `{command}`"
             );
         }
+    }
+
+    /// See #8878: program text holding a brace word the expander cannot
+    /// resolve (past its cap, or unbalanced) is denied, not waved through.
+    #[test]
+    fn denies_program_text_with_an_unresolvable_brace_word() {
+        let bomb = format!("python3 -c 'open(\"notes{}.md\")'", "{a,b}".repeat(30));
+        assert!(eval(&bomb).is_some(), "cap-exceeding comma word: {bomb}");
+        // A `{` behind `$` survives the orphan-brace drop, so it reaches the
+        // expander unbalanced.
+        let unbalanced = "python3 -c 'open(\"${notes.md\")'";
+        assert!(eval(unbalanced).is_some(), "unbalanced word: {unbalanced}");
     }
 
     #[test]
