@@ -55,6 +55,169 @@ fn send_command_line_refuses_an_oversized_line() {
     assert!(err.to_string().contains("#8233"), "{err}");
 }
 
+// ── #8308: the CLI/client launch lines go through the same guard ──
+
+/// A fake `tmux` that appends each invocation's argv to `<dir>/argv.log`.
+fn argv_logging_tmux(dir: &std::path::Path, exit: u8) -> (String, std::path::PathBuf) {
+    let log = dir.join("argv.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> '{}'\necho 'fake failure' >&2\nexit {exit}\n",
+        log.display()
+    );
+    (write_fake_tmux(dir, "fake-tmux-argv", &script), log)
+}
+
+#[serial_test::serial]
+#[test]
+fn launch_line_over_the_limit_is_refused_before_tmux_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, log) = argv_logging_tmux(dir.path(), 0);
+    let line = "x".repeat(MAX_PANE_COMMAND_BYTES + 1);
+    let err = send_launch_line(Some(&bin), "tm-sess", &line)
+        .expect_err("an over-length launch line must be refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+    assert!(!log.exists(), "tmux must not run for a refused line");
+}
+
+#[serial_test::serial]
+#[test]
+fn launch_line_within_the_limit_reaches_tmux() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, log) = argv_logging_tmux(dir.path(), 0);
+    send_launch_line(Some(&bin), "tm-sess", "echo short-line").expect("a short line is typed");
+    let argv = std::fs::read_to_string(&log).unwrap();
+    assert!(argv.contains("-l echo short-line"), "{argv}");
+    assert!(argv.contains("Enter"), "{argv}");
+
+    // A non-zero `send-keys` exit is an error that carries tmux's stderr.
+    let failing = tempfile::tempdir().unwrap();
+    let (bin, _) = argv_logging_tmux(failing.path(), 1);
+    let err = send_launch_line(Some(&bin), "tm-sess", "echo").expect_err("exit 1 is a failure");
+    assert!(err.to_string().contains("fake failure"), "{err}");
+}
+
+/// #8308: no launch site types its `claude` line through the unguarded free
+/// [`send_line`]; each goes through `cli_launch::send_spec_launch`, which types
+/// through [`send_launch_line`].
+///
+/// Why: the sites take no tmux seam, so the wiring is pinned on their source.
+/// A fixed file list missed the Architect launch in `fleet/launch.rs`, so the
+/// check sweeps every tree instead.
+/// What: walks every `.rs` under `src/` (`bin/`, `client/` and the rest) except
+/// `core/tmux.rs`, which defines the function, and this file. It fails on a
+/// call of the free `send_line(` and on a `use` of `core::tmux` that names it;
+/// a `.send_line(` driver method and a `fn send_line(` definition are other
+/// functions. The per-file counts stop a moved call from passing vacuously.
+#[test]
+fn cli_launch_paths_type_through_the_guard() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for entry in walkdir::WalkDir::new(root.join("src")) {
+        let entry = entry.unwrap();
+        let rel = entry.path().strip_prefix(root).unwrap().to_string_lossy();
+        if !rel.ends_with(".rs") || rel == "src/core/tmux.rs" || rel == "src/core/tmux_tests.rs" {
+            continue;
+        }
+        let src = std::fs::read_to_string(entry.path()).unwrap();
+        offenders.extend(
+            unguarded_send_lines(&src)
+                .iter()
+                .map(|n| format!("{rel}:{n}")),
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "launch line typed through the unguarded core::tmux::send_line: {offenders:?}"
+    );
+    // #8308: the six sites start `claude` through the launch-spec helper, and
+    // the helper is the one caller of the guarded send.
+    let spec_send = "cli_launch::send_spec_launch(";
+    for (file, needle, sites) in [
+        ("src/bin/tm/commands/launch.rs", spec_send, 2),
+        ("src/bin/tm/commands/session/start.rs", spec_send, 1),
+        ("src/client/http_client/session_connect.rs", spec_send, 1),
+        ("src/bin/tm/commands/fleet/launch.rs", spec_send, 1),
+        ("src/runtime/cli_launch.rs", "tmux::send_launch_line(", 1),
+    ] {
+        let src = std::fs::read_to_string(root.join(file)).unwrap();
+        assert_eq!(
+            src.matches(needle).count(),
+            sites,
+            "{file}: expected {sites} `{needle}` site(s)"
+        );
+    }
+}
+
+/// The sweep's matcher flags a qualified or imported call and the import, and
+/// nothing that is a different function (#8308).
+#[test]
+fn unguarded_send_lines_flags_calls_and_imports_only() {
+    for (src, want) in [
+        ("let s = tmux::send_line(None, &t, &cmd)?;", vec![1]),
+        (
+            "use trusty_mpm::core::tmux::{self, send_line};\nsend_line(None, &t, c);",
+            vec![1, 2],
+        ),
+        (
+            "use crate::core::tmux::{\n    TmuxTarget,\n    send_line,\n};",
+            vec![1],
+        ),
+        (
+            "driver.send_line(&t, x)?;\n    .send_line(&t, x)\nfn send_line(&self) {}",
+            vec![],
+        ),
+        (
+            "tmux::send_launch_line(None, s, c)?;\nx.send_line_to_pane(n, p, t);",
+            vec![],
+        ),
+        (
+            "// tmux::send_line(None, &t, c)\nuse crate::core::tmux::TmuxTarget;",
+            vec![],
+        ),
+    ] {
+        assert_eq!(unguarded_send_lines(src), want, "{src}");
+    }
+}
+
+/// 1-based lines in `src` that call, or import, the free `core::tmux::send_line`.
+fn unguarded_send_lines(src: &str) -> Vec<usize> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut hits = Vec::new();
+    let mut open_use: Option<(usize, String)> = None;
+    for (i, line) in src.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        for (at, _) in code.match_indices("send_line(") {
+            let before = &code[..at];
+            // A driver method, a definition, or a longer identifier.
+            let other =
+                before.ends_with('.') || before.ends_with("fn ") || before.ends_with(is_ident);
+            if !other {
+                hits.push(i + 1);
+            }
+        }
+        let bare = code
+            .strip_prefix("pub(crate) ")
+            .or_else(|| code.strip_prefix("pub "));
+        if open_use.is_none() && bare.unwrap_or(code).starts_with("use ") {
+            open_use = Some((i + 1, String::new()));
+        }
+        let Some((start, stmt)) = open_use.as_mut() else {
+            continue;
+        };
+        stmt.push_str(code);
+        if code.contains(';') {
+            if stmt.contains("tmux") && stmt.split(|c| !is_ident(c)).any(|w| w == "send_line") {
+                hits.push(*start);
+            }
+            open_use = None;
+        }
+    }
+    hits
+}
+
 // ── #2414: untyped-argv builders for display-message / show-environment ──
 
 #[test]

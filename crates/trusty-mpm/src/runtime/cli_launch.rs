@@ -231,11 +231,13 @@ pub fn send_spec_launch(
 /// [`send_spec_launch`] with the tmux binary and the wrapper named (test seam).
 ///
 /// What: writes the spec (mode 0600), reads it back ([`LaunchSpec::verify`]),
-/// then types the line via [`crate::core::tmux::send_line`]. On any failure
-/// after the write it removes the spec, since it carries credentials and no
-/// shim will consume it.
+/// then types the line via [`crate::core::tmux::send_launch_line`], which
+/// refuses a line over `MAX_PANE_COMMAND_BYTES` before tmux runs (#8308). On
+/// any failure after the write it removes the spec, since it carries
+/// credentials and no shim will consume it.
 /// Test: `send_spec_launch_types_a_short_line_naming_a_readable_spec`,
-/// `send_spec_launch_removes_the_spec_when_tmux_fails`.
+/// `send_spec_launch_removes_the_spec_when_tmux_fails`,
+/// `cli_launch_paths_type_through_the_guard`.
 pub(crate) fn send_spec_launch_with(
     tmux_bin: Option<&str>,
     wrapper: &str,
@@ -247,17 +249,8 @@ pub(crate) fn send_spec_launch_with(
     let result = LaunchSpec::verify(&path)
         .map_err(CliLaunchError::from)
         .and_then(|_| {
-            let target = crate::core::tmux::TmuxTarget::session(session);
-            let out = crate::core::tmux::send_line(tmux_bin, &target, &pane_line(wrapper, &path))
-                .map_err(CliLaunchError::Send)?;
-            if out.status.success() {
-                return Ok(());
-            }
-            Err(CliLaunchError::Send(std::io::Error::other(format!(
-                "tmux send-keys exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))))
+            crate::core::tmux::send_launch_line(tmux_bin, session, &pane_line(wrapper, &path))
+                .map_err(CliLaunchError::Send)
         });
     if result.is_err() {
         let _ = std::fs::remove_file(&path);

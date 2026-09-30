@@ -436,7 +436,9 @@ pub(crate) async fn launch(
     let sent =
         trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
     if let Err(e) = sent {
-        anyhow::bail!("tmux session {tmux_name} created but failed to start claude: {e}");
+        anyhow::bail!(
+            "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+        );
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
@@ -675,7 +677,9 @@ pub(crate) async fn connect(
         let sent =
             trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
         if let Err(e) = sent {
-            anyhow::bail!("tmux session {tmux_name} created but failed to start claude: {e}");
+            anyhow::bail!(
+                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+            );
         }
     }
 
