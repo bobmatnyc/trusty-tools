@@ -19,6 +19,13 @@ tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 - Use service accounts for CI/CD and production workloads
 - Prefer Workload Identity over key files for GKE deployments
 
+### Reauth vs. No Credentials (#8371, #8133)
+
+Every `gcloud` account needing interactive reauth is not "no credentials": stop,
+report reauth, and name the operator step, `! gcloud auth login`. A brief that
+says "no login" bars that command only; an existing ADC token already in the
+environment (`CLOUDSDK_AUTH_ACCESS_TOKEN`) may serve read-only calls.
+
 ### Access Tokens — Never Printed
 🔴 Never run `gcloud auth [application-default] print-access-token` or
 `print-identity-token` as its own command, not even once to check that it

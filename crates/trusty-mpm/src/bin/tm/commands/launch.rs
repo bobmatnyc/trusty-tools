@@ -503,7 +503,7 @@ pub(crate) async fn launch(
 /// [`trusty_mpm::core::session_launch::cli_launch`]
 /// and writes it to a temp file, creates the tmux host idempotently
 /// (`tmux new-session -A`), and — only when the session is freshly created —
-/// starts `claude` via [`connect_claude_cmd`] (`--append-system-prompt-file`
+/// starts `claude` from the launch spec [`connect_claude_spec`] builds (`--append-system-prompt-file`
 /// plus the shared `--setting-sources project,local` /
 /// `--dangerously-skip-permissions` isolation flags), then `attach`es to it.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.

@@ -2,15 +2,17 @@
 //! or names, used to find the code it describes.
 //!
 //! Why: split from `citation_gate.rs` to keep it under the 500-SLOC cap.
-//! What: [`finding_anchors`] collects quoted code (backtick snippets, long
-//! double-quoted spans, `[code: …]` excerpts for the finding's own file) and
-//! identifiers (bare backtick identifiers, identifier-shaped prose tokens).
+//! What: [`finding_anchors`] collects quoted code (backtick snippets and
+//! `[code: …]` excerpts for the finding's own file), optional prose quotes
+//! (long double-quoted spans outside backticks, #8949), and identifiers (bare
+//! backtick identifiers, identifier-shaped prose tokens).
 //! Test: `citation_gate_tests.rs`.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::GateError;
 use crate::models::Finding;
 use crate::pipeline::citation_check::{
     BRACKET_CITATION_RE, CODE_CITATION_RE, MIN_SPAN_LEN, basename, collect_delimited,
@@ -82,10 +84,14 @@ const STOP_WORDS: &[&str] = &[
 /// What the finding quotes or names, used to find the code it describes.
 #[derive(Default)]
 pub(super) struct Anchors {
-    /// Quoted code: non-identifier backtick spans, long double-quoted spans,
-    /// and `[code: …]` excerpts that pass [`is_specific`]. Matched as
-    /// whitespace-normalized substrings. When any exist, all must be present.
+    /// Quoted code: non-identifier backtick spans and `[code: …]` excerpts that
+    /// pass [`is_specific`]. Matched as whitespace-normalized substrings. At
+    /// least one must be present; a missing one marks the finding partial (#8949).
     pub(super) snippets: Vec<String>,
+    /// #8949: long double-quoted spans in the prose outside backticks. They
+    /// anchor a citation when present in the file and are never required,
+    /// because prose quotes English as often as it quotes code.
+    pub(super) prose_quotes: Vec<String>,
     /// Identifiers: bare backtick identifiers and identifier-shaped prose
     /// words. Used only when the finding quotes no snippet (#8905 row 1).
     pub(super) idents: Vec<String>,
@@ -93,7 +99,7 @@ pub(super) struct Anchors {
 
 impl Anchors {
     pub(super) fn is_empty(&self) -> bool {
-        self.snippets.is_empty() && self.idents.is_empty()
+        self.snippets.is_empty() && self.prose_quotes.is_empty() && self.idents.is_empty()
     }
 
     fn add_ident(&mut self, ident: &str) {
@@ -182,12 +188,16 @@ pub(super) fn finding_anchors(f: &Finding) -> Anchors {
         let mut spans = Vec::new();
         collect_delimited(&prose, '`', &mut spans);
         spans.into_iter().for_each(|s| anchors.add_code_span(s));
-        let mut quoted = Vec::new();
-        collect_delimited(&prose, '"', &mut quoted);
-        for q in quoted.into_iter().filter(|q| q.len() >= MIN_SPAN_LEN) {
-            anchors.add_snippet(q);
-        }
         let outside_backticks: String = prose.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+        // #8949 fix 3: pair quotes outside backticks only, so a string literal
+        // inside a code span never opens a prose quote.
+        let mut quoted = Vec::new();
+        collect_delimited(&outside_backticks, '"', &mut quoted);
+        for q in quoted.into_iter().filter(|q| q.len() >= MIN_SPAN_LEN) {
+            if is_specific(&q) && !anchors.prose_quotes.contains(&q) {
+                anchors.prose_quotes.push(q);
+            }
+        }
         add_prose_idents(&outside_backticks, &mut anchors);
     }
     add_prose_idents(&f.kind, &mut anchors);
@@ -221,4 +231,24 @@ pub(super) fn bracket_anchors(rest: &str) -> Anchors {
     let mut anchors = Anchors::default();
     out.into_iter().for_each(|e| anchors.add_snippet(e));
     anchors
+}
+
+/// Split a `[code: …]` locator into its path and optional inclusive line span.
+pub(super) fn parse_locator(locator: &str) -> Result<(String, Option<(u32, u32)>), GateError> {
+    let Some((path, suffix)) = locator.rsplit_once(':') else {
+        return Ok((locator.trim().to_string(), None));
+    };
+    let suffix = suffix.trim().trim_start_matches(['L', 'l']);
+    if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
+        return Ok((locator.trim().to_string(), None));
+    }
+    let bad = || GateError::BadLocator(locator.to_string());
+    let (a, b) = suffix.split_once('-').unwrap_or((suffix, suffix));
+    let start = a.trim().parse::<u32>().map_err(|_| bad())?;
+    let end = b
+        .trim()
+        .trim_start_matches(['L', 'l'])
+        .parse::<u32>()
+        .map_err(|_| bad())?;
+    Ok((path.trim().to_string(), Some((start, end.max(start)))))
 }

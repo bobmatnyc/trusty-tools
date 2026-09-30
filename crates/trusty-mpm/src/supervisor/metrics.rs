@@ -54,6 +54,18 @@ pub struct SupervisorRunStats {
     pub resume_failures: u64,
     /// Number of idle `active` sessions classified across all sweeps.
     pub classified: u64,
+    /// #8335: fleet sweeps that did not complete — abandoned at `tick_timeout`,
+    /// or skipped because an abandoned one was still running. Not in `sweeps`.
+    #[serde(default)]
+    pub sweeps_abandoned: u64,
+    /// #8335: fleet sweeps abandoned in a row since the last completed one; a
+    /// completed sweep resets it. Non-zero makes the reader report `stale`.
+    #[serde(default)]
+    pub consecutive_sweeps_abandoned: u64,
+    /// #8335: post-merge cleanup sweeps abandoned at `tick_timeout`, or
+    /// skipped because an abandoned one was still running.
+    #[serde(default)]
+    pub cleanup_sweeps_abandoned: u64,
 }
 
 /// A serializable snapshot of fleet state for the `/metrics` endpoint.

@@ -180,8 +180,8 @@ fn cli_parses_connect_with_dir() {
 /// Assert `connect`'s composed `claude` invocation carries both the injected
 /// PM system prompt and the shared session-isolation flag (issue #2230).
 ///
-/// Why: `crate::commands::launch::connect_claude_cmd` is the exact function
-/// `connect()` calls to build the command sent to `tmux send-keys`; asserting
+/// Why: `crate::commands::launch::connect_claude_spec` is the exact function
+/// `connect()` calls to build the launch spec sent to the pane; asserting
 /// on it directly proves the wiring without needing a live daemon/tmux to
 /// drive the full async `connect()` end-to-end.
 fn assert_connect_claude_cmd_carries_persona_flags() {

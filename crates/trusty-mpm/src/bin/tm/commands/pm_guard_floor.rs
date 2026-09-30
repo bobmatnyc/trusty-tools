@@ -13,7 +13,9 @@
 //! of a root-class target or an unresolvable one, and a secret-file read or
 //! printed credential — evaluated here only under a bypass, because the
 //! guarded path reaches the same rules at their own sites, in their original
-//! order. Architect-exempt, on every path: the D4 remainder
+//! order. The secret read goes through the same gated function on both paths
+//! (#8939, `pm_guard_architect_envfile`), whose `tm env` exemption is audited
+//! here. Architect-exempt, on every path: the D4 remainder
 //! (`pm_guard_bash::evaluate_d4_floor`) and, since #8902, any tmux verb aimed
 //! at the Architect's pane (`pm_guard_bash::evaluate_architect_pane`).
 //! [`ArchitectGate`] is the one
@@ -33,6 +35,9 @@ use std::path::Path;
 use serde_json::Value;
 use trusty_mpm::core::config::MpmConfig;
 
+use crate::commands::pm_guard_architect_envfile::{
+    EnvfileCall, audit_envfile_allow, evaluate_secret_file_read_gated,
+};
 use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
 };
@@ -42,8 +47,6 @@ use crate::commands::pm_guard_bash::{
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
-use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
-use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
 
 /// The rule name recorded with a D4-remainder deny.
@@ -55,7 +58,8 @@ pub(crate) const D4_FLOOR_RULE: &str = "d4-floor";
 /// identity walks the process table, so it is resolved lazily and cached.
 /// What: [`Self::identity`] runs [`architect_main_thread`] over the payload,
 /// the hook environment and the user config on first use, and caches the
-/// verdict with its reason.
+/// verdict with its reason. It also carries the #8939 env-file exemption the
+/// secret-read rule granted, for the audit line.
 /// Test: `the_architect_is_exempt_from_the_d4_remainder`,
 /// `every_identity_failure_denies_the_d4_remainder`.
 pub(crate) struct ArchitectGate<'a> {
@@ -63,6 +67,7 @@ pub(crate) struct ArchitectGate<'a> {
     env: HookEnv,
     config: Box<dyn Fn() -> MpmConfig + 'a>,
     verdict: OnceCell<Result<(), NotArchitect>>,
+    envfile: OnceCell<EnvfileCall>,
 }
 
 impl<'a> ArchitectGate<'a> {
@@ -82,7 +87,28 @@ impl<'a> ArchitectGate<'a> {
             env,
             config: Box::new(config),
             verdict: OnceCell::new(),
+            envfile: OnceCell::new(),
         }
+    }
+
+    /// The hook environment the identity is read from.
+    pub(crate) fn env(&self) -> &HookEnv {
+        &self.env
+    }
+
+    /// The user config, from the reader the identity check uses (#8939 Q2).
+    pub(crate) fn config(&self) -> MpmConfig {
+        (self.config)()
+    }
+
+    /// Record the env-file call the #8939 exemption let through.
+    pub(crate) fn record_envfile(&self, call: EnvfileCall) {
+        let _ = self.envfile.set(call);
+    }
+
+    /// The env-file call the #8939 exemption let through, if any.
+    pub(crate) fn envfile(&self) -> Option<&EnvfileCall> {
+        self.envfile.get()
     }
 
     /// Whether the call is the Architect's main thread (#8878, ruling A).
@@ -123,6 +149,8 @@ pub(crate) async fn deny_floors(
         panes: &LivePanes::ambient(),
     };
     let Some(deny) = evaluate_floors(payload, hook_cwd, gate, &probes, bypassed) else {
+        // #8939: an env-file exemption granted under a bypass is audited here.
+        audit_envfile_allow(&DenyContext::from_payload(url, payload), gate).await;
         return false;
     };
     audit_denied_tool(
@@ -215,10 +243,9 @@ fn universal_floor(
     {
         return deny("destructive-delete", class.reason().to_string());
     }
-    // No secret value reaches the transcript.
-    if let Some(reason) = evaluate_secret_file_read(tool_name, tool_input)
-        .or_else(|| evaluate_env_plist_read(tool_name, tool_input, hook_cwd))
-    {
+    // No secret value reaches the transcript; #8939: the same gated decision
+    // as the guarded path, so the Architect's `tm env` exemption holds here.
+    if let Some(reason) = evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate) {
         return deny("secret-file-read", reason);
     }
     None
