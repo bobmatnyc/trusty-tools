@@ -1965,6 +1965,38 @@ fn resolve_managed_target_empty_list_is_none() {
     );
 }
 
+/// #8378 PR-C: the three `tm content` verbs and their flags.
+#[test]
+fn cli_parses_content_install_update_and_status() {
+    use crate::cli::ContentAction;
+    let parse = |args: &[&str]| {
+        let mut argv = vec!["trusty-mpm", "content"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Content { action } => action,
+            other => panic!("expected content, got {other:?}"),
+        }
+    };
+    match parse(&["install", "--from", "/b/content-v0.1.0.tar.gz"]) {
+        ContentAction::Install { from } => {
+            assert_eq!(from, std::path::Path::new("/b/content-v0.1.0.tar.gz"));
+        }
+        other => panic!("expected install, got {other:?}"),
+    }
+    assert!(matches!(
+        parse(&["update"]),
+        ContentAction::Update { content_ref: None }
+    ));
+    match parse(&["update", "--content-ref", "content-v0.2.0"]) {
+        ContentAction::Update { content_ref } => {
+            assert_eq!(content_ref.as_deref(), Some("content-v0.2.0"));
+        }
+        other => panic!("expected update, got {other:?}"),
+    }
+    assert!(matches!(parse(&["status"]), ContentAction::Status));
+    assert!(Cli::try_parse_from(["trusty-mpm", "content", "install"]).is_err());
+}
+
 #[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();

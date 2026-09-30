@@ -1,0 +1,56 @@
+//! `tm doctor` row `content`: the instructional-content source and the
+//! installed pin's health (ADR-0064, #8378 PR-C).
+//!
+//! Why: #8389 — doctor shows the content version and the binary version as two
+//! facts that may differ without either being an error.
+//! What: [`check_content`] grades [`content_status`]: a dev checkout or a
+//! verified bundle is OK; no bundle installed is WARN, naming `tm content
+//! update` and the offline `tm content install --from`; a lock or bundle that
+//! fails verification is FAIL. The message carries the source (`dev`/`bundle`/
+//! `none`), the tag, the sha256 and the binary version. Read-only.
+//! Test: `doctor_content_tests.rs`.
+
+use std::path::Path;
+
+use crate::content::status::content_status;
+use crate::core::doctor::{CheckStatus, DoctorCheck};
+
+/// The `tm doctor` row name.
+pub(crate) const CHECK_NAME: &str = "content";
+
+/// Grades the content cache at `cache_dir`, and the checkout above
+/// `project_dir`. `cache_dir` is `None` when no home directory resolves.
+///
+/// Test: `content_row_is_ok_for_a_verified_bundle`,
+/// `content_row_warns_when_nothing_is_installed`,
+/// `content_row_fails_on_a_tampered_bundle`.
+pub(crate) fn check_content(project_dir: Option<&Path>, cache_dir: Option<&Path>) -> DoctorCheck {
+    let Some(cache_dir) = cache_dir else {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            "no home directory resolves, so the content cache cannot be located",
+        );
+    };
+    let status = content_status(cache_dir, project_dir);
+    let grade = if status.installed.is_ok() {
+        CheckStatus::Ok
+    } else if status.not_installed() {
+        // A dev checkout serves; nothing installed is still worth a note
+        // only when nothing else serves.
+        if status.serves() {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        }
+    } else if status.serves() {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Fail
+    };
+    DoctorCheck::new(CHECK_NAME, grade, status.lines().join("; "))
+}
+
+#[cfg(test)]
+#[path = "doctor_content_tests.rs"]
+mod tests;

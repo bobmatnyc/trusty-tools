@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_sixty_three_checks() {
+async fn run_doctor_produces_sixty_four_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -468,7 +468,8 @@ async fn run_doctor_produces_sixty_three_checks() {
     // (fifty-eight → fifty-nine), then `tmux_priority` (fifty-nine → sixty);
     // issue #8482 adds `bundled_asset_lag` (sixty → sixty-one); issue #8453
     // adds `session_profile` (sixty-one → sixty-two); issue #8926 adds
-    // `tcp_listeners` (sixty-two → sixty-three).
+    // `tcp_listeners` (sixty-two → sixty-three); issue #8378 adds `content`
+    // (sixty-three → sixty-four).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -555,6 +556,8 @@ async fn run_doctor_produces_sixty_three_checks() {
         // #8482: the binary's own embedded skill assets against `origin/main` —
         // the row above reads a registry ledger, never the source tree.
         "bundled_asset_lag",
+        // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
+        "content",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool

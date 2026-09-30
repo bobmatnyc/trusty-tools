@@ -85,9 +85,16 @@ impl<R: Read> Read for CappedReader<'_, R> {
     }
 }
 
+/// The newest bundle `schema_major` this resolver reads (ADR-0064 PHASE_3
+/// (iv)). `scripts/package_content.sh` writes `schema_major = 1`.
+pub const SUPPORTED_SCHEMA_MAJOR: u32 = 1;
+
 #[derive(Deserialize)]
 struct BundleManifest {
     tag: String,
+    /// `None` when the key is absent, which is refused: a reader cannot tell
+    /// what layout such a bundle uses.
+    schema_major: Option<u32>,
 }
 
 /// Why [`unpack`] refused an archive.
@@ -108,10 +115,13 @@ enum UnpackError {
 /// What: missing -> `BundleMissing`; unreadable -> `BundleUnreadable`; over a
 /// size, unpacked-size or entry-count cap -> `BundleTooLarge`; digest differs
 /// -> `ChecksumMismatch`; not a gzip tar, an unsafe entry path, a link or
-/// device entry, a duplicate entry or no manifest -> `BundleCorrupt`; manifest
-/// tag differs from the lock -> `TagMismatch`.
+/// device entry, a duplicate entry, no manifest or no `schema_major` ->
+/// `BundleCorrupt`; manifest tag differs from the lock -> `TagMismatch`;
+/// `schema_major` above [`SUPPORTED_SCHEMA_MAJOR`] -> `UnsupportedSchema`.
 /// Test: `resolve_refuses_a_bundle_whose_sha256_does_not_match`,
 /// `resolve_refuses_a_bundle_whose_manifest_names_another_tag`,
+/// `resolve_refuses_a_newer_schema_major`,
+/// `resolve_refuses_a_manifest_without_a_schema_major`,
 /// `resolve_refuses_a_bundle_with_a_climbing_entry`,
 /// `resolve_refuses_a_bundle_with_a_duplicate_entry`,
 /// `bundle_over_a_cap_is_too_large`,
@@ -162,6 +172,17 @@ pub(super) fn load_verified_with(
         return Err(ContentError::TagMismatch {
             lock_tag: lock.tag().to_owned(),
             bundle_tag: manifest.tag,
+        });
+    }
+    // #8378 PR-C: ADR-0064 PHASE_3 (iv) — refuse a layout newer than this reader.
+    let schema_major = manifest
+        .schema_major
+        .ok_or_else(|| corrupt(format!("{MANIFEST_ENTRY} has no schema_major")))?;
+    if schema_major > SUPPORTED_SCHEMA_MAJOR {
+        return Err(ContentError::UnsupportedSchema {
+            path,
+            bundle: schema_major,
+            supported: SUPPORTED_SCHEMA_MAJOR,
         });
     }
     Ok(entries)

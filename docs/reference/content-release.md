@@ -42,6 +42,28 @@ version (`X.Y.Z-pre`) is published with `--prerelease`.
 still uses up the version: this workflow refuses a tag that already exists,
 so no release can be cut for it. Pick the next version.
 
+## Installing a release (`tm content`)
+
+`tm` pins one release in `~/.trusty-mpm/content/content-lock.toml` (tag and
+sha256) and keeps the bundle beside it as `<tag>.tar.gz`. Nothing is compiled
+in (#8974), so a host with no cache and no network must install a bundle by
+hand.
+
+| Command | What it does |
+|---|---|
+| `tm content update` | Nothing installed: pins the newest non-prerelease `content-v*` release. Already pinned: keeps the pin, fetches its bundle again if it is missing, and reports a newer release without applying it. |
+| `tm content update --content-ref content-vX.Y.Z` | Pins exactly that release. |
+| `tm content install --from content-vX.Y.Z.tar.gz` | Offline. The `.sha256` sidecar must sit beside the bundle. |
+| `tm content status` | Prints the source (`dev`, `bundle` or `none`), the pinned tag and sha256, and the binary version. Exits non-zero when nothing serves. |
+
+Every write fails closed. A bundle is pinned only after it matches its
+sidecar and passes the checks `content::resolve` applies at run time. It is
+stored before `content-lock.toml` names it, and every write holds an exclusive
+lock on `.update.lock`. A sha256 mismatch, a tag missing upstream, a tag
+republished with other bytes, a newer `schema_major` or an unreachable host
+leaves the previous pin in force. `tm doctor`'s `content` row reports the same
+facts as `tm content status`.
+
 ## What the bundle holds
 
 `scripts/package_content.sh --version X.Y.Z` writes two files:
