@@ -580,3 +580,11 @@ fn a_partial_finding_cannot_carry_a_blocking_verdict() {
         result.review_body
     );
 }
+
+/// #8949: a log line carries at most 120 characters of a quoted fragment.
+#[test]
+fn log_excerpt_caps_a_long_fragment() {
+    let long = "x".repeat(300);
+    assert_eq!(verdict::log_excerpt(&long).chars().count(), 121);
+    assert_eq!(verdict::log_excerpt("short"), "short");
+}

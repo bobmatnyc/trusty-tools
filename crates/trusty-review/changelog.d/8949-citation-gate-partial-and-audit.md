@@ -14,7 +14,4 @@ Changed
   match. The drop log line names that fragment.
 - An APPROVE* review stays APPROVE* when the gate drops only advisory findings,
   instead of becoming UNKNOWN.
-- Public API: new fields `Finding::citation_partial`,
-  `ReviewResult::withheld_findings`, `GateReport::partial` and
-  `GateReport::withheld_findings`; new type `models::WithheldFinding`;
-  `GateReport` no longer derives `PartialEq`/`Eq`.
+- New public type `models::WithheldFinding`.

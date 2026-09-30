@@ -66,10 +66,12 @@ pub(super) fn withhold_verdict(
             report.partial
         ));
     }
-    let advisory_only = report
-        .withheld_findings
-        .iter()
-        .all(|w| is_advisory(&w.finding));
+    // Fail closed: a drop with no recorded finding is never read as advisory.
+    let advisory_only = report.withheld_findings.len() == report.dropped
+        && report
+            .withheld_findings
+            .iter()
+            .all(|w| is_advisory(&w.finding));
     if !(*verdict == Verdict::ApproveWithReservations && advisory_only) {
         *verdict = settle_withheld(verdict.clone(), survivors);
     }
@@ -152,5 +154,19 @@ pub(super) fn mark_partial(f: &mut Finding, missing: &[String]) {
         f.citation_partial = true;
         f.description = format!("{}\n\n{PARTIAL_NOTE}", f.description.trim_end());
     }
+    let missing: Vec<String> = missing.iter().map(|m| log_excerpt(m)).collect();
     warn!(file = %f.file, line = ?f.line, kind = %f.kind, ?missing, "citation-gate: keeping finding with a partly unverified citation (#8949)");
+}
+
+/// Longest quoted fragment a gate log line carries, in characters.
+const LOG_EXCERPT_CHARS: usize = 120;
+
+/// A quoted fragment cut to [`LOG_EXCERPT_CHARS`] for a log line (#8949). The
+/// full text stays in `ReviewResult::withheld_findings`.
+/// Test: `log_excerpt_caps_a_long_fragment`.
+pub(super) fn log_excerpt(fragment: &str) -> String {
+    match fragment.char_indices().nth(LOG_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", &fragment[..cut]),
+        None => fragment.to_string(),
+    }
 }

@@ -595,7 +595,8 @@ pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) ->
             kept.push(f);
             continue;
         };
-        warn!(file = %f.file, line = ?f.line, kind = %f.kind, %reason, ?fragment, "citation-gate: dropping finding (#8905)");
+        let excerpt = fragment.as_deref().map(verdict::log_excerpt);
+        warn!(file = %f.file, line = ?f.line, kind = %f.kind, %reason, fragment = ?excerpt, "citation-gate: dropping finding (#8905)");
         report.dropped += 1;
         if let Some(line) = f.line {
             report.withheld.push(format!("{}:{line}", f.file));
