@@ -11,13 +11,17 @@
 //! number; a removed line is recorded at the new-side position of its deletion.
 //! [`enforce_line_citations`] checks the finding's `file`/`line` and every
 //! `[code: `path:line`]` bracket citation against the anchors the finding
-//! carries — every quoted snippet, or, when it quotes none, named identifiers:
+//! carries — its quoted snippets and present prose quotes, or, when none is in
+//! the file, named identifiers:
 //!  - the cited line holds an anchor: the finding is kept unchanged;
 //!  - an anchor occurs exactly once elsewhere in the file, or only on a removed
 //!    line: the citation moves there, recorded in `Finding::citation_correction`;
-//!  - otherwise (no anchor, a snippet absent, an ambiguous anchor, no file, a
-//!    line past the file's last diffed line, or any error reading the file or a
-//!    locator) the finding is dropped, counted, and logged.
+//!  - a quoted snippet is absent but another places the citation: the finding
+//!    is kept as advisory, `Finding::citation_partial` (#8949);
+//!  - otherwise (no anchor, every snippet absent, an ambiguous anchor, no file,
+//!    a line past the file's last diffed line, or any error reading the file or
+//!    a locator) the finding is dropped, counted, logged with the fragment that
+//!    failed, and kept in `ReviewResult::withheld_findings` (#8949).
 //!
 //! It makes no LLM call. It runs once per review, BEFORE the verifier (#8904)
 //! and before inline comments are attached and `finalize_review` posts, via
@@ -29,7 +33,9 @@ use std::collections::HashMap;
 
 use tracing::{info, warn};
 
-use crate::models::{CitationCorrection, Finding, ReviewResult, UNKNOWN_FILE_PLACEHOLDER, Verdict};
+use crate::models::{
+    CitationCorrection, Finding, ReviewResult, UNKNOWN_FILE_PLACEHOLDER, Verdict, WithheldFinding,
+};
 use crate::pipeline::citation_check::{
     CODE_CITATION_RE, hunk_max_line, normalize, normalize_path, resolve_path_key,
 };
@@ -37,7 +43,7 @@ use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff, Filt
 
 #[path = "citation_gate_anchors.rs"]
 mod anchors;
-use anchors::{Anchors, bracket_anchors, finding_anchors, same_file};
+use anchors::{Anchors, bracket_anchors, finding_anchors, parse_locator, same_file};
 
 #[path = "citation_gate_verdict.rs"]
 pub(crate) mod verdict;
@@ -277,127 +283,178 @@ pub enum GateError {
     BadLocator(String),
 }
 
+/// Why a finding was dropped: a fixed reason, plus the quoted fragment that
+/// failed to match when that was the cause (#8949 fix 1).
+#[derive(Debug)]
+struct DropCause {
+    reason: &'static str,
+    fragment: Option<String>,
+}
+
+impl DropCause {
+    fn new(reason: &'static str) -> Self {
+        Self {
+            reason,
+            fragment: None,
+        }
+    }
+}
+
 /// The result of checking one citation against its file.
 enum Check {
     Holds,
     Move { to: u32, removed: bool },
-    Drop(&'static str),
+    Drop(DropCause),
 }
 
+impl Check {
+    fn drop(reason: &'static str) -> Self {
+        Self::Drop(DropCause::new(reason))
+    }
+}
+
+/// Reason for a finding none of whose quoted snippets is in the cited file.
+const SNIPPET_ABSENT: &str = "a snippet the finding quotes is not in the cited file";
+
 /// Check one `path` + optional inclusive line `span` against `anchors`.
+///
+/// Returns the placement and the quoted snippets that are not in the file.
+/// #8949 (owner ruling 2026-09-30): a missing snippet no longer drops the
+/// finding while another quoted snippet places it; the caller marks it partial.
 fn check_citation(
     index: &LineIndex,
     path: &str,
     span: Option<(u32, u32)>,
     anchors: &Anchors,
-) -> Result<Check, GateError> {
+) -> Result<(Check, Vec<String>), GateError> {
     let (runs, max_line) = index.lines_for(path)?;
     // #8905 keeps #4999/#5023: a line past the file's last diffed line drops.
     if let (Some((start, _)), Some(max)) = (span, max_line)
         && start > max
     {
-        return Ok(Check::Drop(
-            "cited line is beyond the file's last diffed line",
+        return Ok((
+            Check::drop("cited line is beyond the file's last diffed line"),
+            Vec::new(),
         ));
     }
     if anchors.is_empty() {
-        return Ok(Check::Drop(
-            "the finding quotes and names no code, so its line cannot be verified",
+        return Ok((
+            Check::drop("the finding quotes and names no code, so its line cannot be verified"),
+            Vec::new(),
         ));
     }
-    // #8905 row 1: identifiers are a fallback ONLY when nothing is quoted.
-    let snippets = !anchors.snippets.is_empty();
-    let needles = if snippets {
-        &anchors.snippets
-    } else {
-        &anchors.idents
-    };
-    let found: Vec<Vec<Occ>> = needles
-        .iter()
-        .map(|n| LineIndex::find(runs, n, !snippets))
-        .collect();
-    if snippets && found.iter().any(Vec::is_empty) {
-        return Ok(Check::Drop(
-            "a snippet the finding quotes is not in the cited file",
+    let (mut found, mut missing) = (Vec::new(), Vec::new());
+    for snippet in &anchors.snippets {
+        match LineIndex::find(runs, snippet, false) {
+            occ if occ.is_empty() => missing.push(snippet.clone()),
+            occ => found.push(occ),
+        }
+    }
+    // #8905 row 1: a finding with no quoted snippet in the file drops, so a
+    // fabricated quote never verifies through the identifiers inside it.
+    if found.is_empty() && !missing.is_empty() {
+        let fragment = missing.first().cloned();
+        return Ok((
+            Check::Drop(DropCause {
+                reason: SNIPPET_ABSENT,
+                fragment,
+            }),
+            Vec::new(),
         ));
     }
-    if found.iter().all(Vec::is_empty) {
-        return Ok(Check::Drop(
-            "no identifier the finding names is in the cited file",
-        ));
+    // #8949 fix 3: a prose quote anchors only where it is present.
+    found.extend(
+        anchors
+            .prose_quotes
+            .iter()
+            .map(|q| LineIndex::find(runs, q, false))
+            .filter(|occ| !occ.is_empty()),
+    );
+    // #8905 row 1: identifiers are a fallback ONLY when nothing quoted is found.
+    if found.is_empty() {
+        found = anchors
+            .idents
+            .iter()
+            .map(|n| LineIndex::find(runs, n, true))
+            .collect();
+        if found.iter().all(Vec::is_empty) {
+            return Ok((
+                Check::drop("no identifier the finding names is in the cited file"),
+                Vec::new(),
+            ));
+        }
     }
+    Ok((place(&found, span, missing.first()), missing))
+}
+
+/// Place a citation on the occurrences of its anchors (#8905 rows 2-3).
+fn place(found: &[Vec<Occ>], span: Option<(u32, u32)>, missing: Option<&String>) -> Check {
     if let Some((lo, hi)) = span {
         let mut all = found.iter().flatten();
         if all
             .clone()
             .any(|o| !o.removed && o.start <= hi && o.end >= lo)
         {
-            return Ok(Check::Holds);
+            return Check::Holds;
         }
         // #8905 row 2: removed code counts only at its deletion's position.
         if let Some(o) = all.find(|o| o.removed && (lo..=hi).contains(&o.start)) {
-            return Ok(Check::Move {
+            return Check::Move {
                 to: o.start,
                 removed: true,
-            });
+            };
         }
     }
     // #8905 row 3: move only to an anchor that occurs exactly once.
-    Ok(found.iter().find(|o| o.len() == 1).map_or(
-        Check::Drop("the cited code occurs more than once in the file, not on the cited line"),
+    found.iter().find(|o| o.len() == 1).map_or_else(
+        || {
+            Check::Drop(DropCause {
+                reason: "the cited code occurs more than once in the file, not on the cited line",
+                fragment: missing.cloned(),
+            })
+        },
         |o| Check::Move {
             to: o[0].start,
             removed: o[0].removed,
         },
-    ))
+    )
 }
 
-/// Whether every snippet in `anchors` occurs in `path` (#8905 row 6).
-fn all_present(index: &LineIndex, path: &str, anchors: &Anchors) -> Result<bool, GateError> {
+/// The first snippet in `anchors` that does not occur in `path` (#8905 row 6).
+fn first_missing(
+    index: &LineIndex,
+    path: &str,
+    anchors: &Anchors,
+) -> Result<Option<String>, GateError> {
     let (runs, _) = index.lines_for(path)?;
     Ok(anchors
         .snippets
         .iter()
-        .all(|s| !LineIndex::find(runs, s, false).is_empty()))
-}
-
-/// Split a `[code: …]` locator into its path and optional inclusive line span.
-fn parse_locator(locator: &str) -> Result<(String, Option<(u32, u32)>), GateError> {
-    let Some((path, suffix)) = locator.rsplit_once(':') else {
-        return Ok((locator.trim().to_string(), None));
-    };
-    let suffix = suffix.trim().trim_start_matches(['L', 'l']);
-    if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
-        return Ok((locator.trim().to_string(), None));
-    }
-    let bad = || GateError::BadLocator(locator.to_string());
-    let (a, b) = suffix.split_once('-').unwrap_or((suffix, suffix));
-    let start = a.trim().parse::<u32>().map_err(|_| bad())?;
-    let end = b
-        .trim()
-        .trim_start_matches(['L', 'l'])
-        .parse::<u32>()
-        .map_err(|_| bad())?;
-    Ok((path.trim().to_string(), Some((start, end.max(start)))))
+        .find(|s| LineIndex::find(runs, s, false).is_empty())
+        .cloned())
 }
 
 /// The gate's decision for one finding.
 enum Outcome {
     Keep,
     Reanchored,
-    Drop(&'static str),
+    Drop(DropCause),
 }
 
 /// Gate one finding: its `file`/`line`, then each `[code: …]` bracket citation.
+///
+/// #8949: a citation some of whose quoted snippets are missing, but which
+/// another snippet places, keeps the finding; [`mark_partial`] demotes it.
 fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError> {
     if f.file.trim().is_empty() || f.file == UNKNOWN_FILE_PLACEHOLDER {
-        return Ok(Outcome::Drop("the finding cites no file"));
+        return Ok(Outcome::Drop(DropCause::new("the finding cites no file")));
     }
     let anchors = finding_anchors(f);
     let mut moved = false;
-    match check_citation(index, &f.file, f.line.map(|l| (l, l)), &anchors)? {
+    let (check, mut missing) = check_citation(index, &f.file, f.line.map(|l| (l, l)), &anchors)?;
+    match check {
         Check::Holds => {}
-        Check::Drop(reason) => return Ok(Outcome::Drop(reason)),
+        Check::Drop(cause) => return Ok(Outcome::Drop(cause)),
         Check::Move { to, removed } => {
             f.citation_correction = Some(CitationCorrection {
                 from_line: f.line,
@@ -422,10 +479,11 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
             let own = bracket_anchors(caps.get(2).map_or("", |m| m.as_str()));
             let Some((lo, hi)) = span else {
                 // #8905 row 6: a lineless locator is checked in its own file only.
-                if !own.is_empty() && !all_present(index, &path, &own)? {
-                    return Ok(Outcome::Drop(
-                        "a [code: …] excerpt is not in the file its locator names",
-                    ));
+                if let Some(fragment) = first_missing(index, &path, &own)? {
+                    return Ok(Outcome::Drop(DropCause {
+                        reason: "a [code: …] excerpt is not in the file its locator names",
+                        fragment: Some(fragment),
+                    }));
                 }
                 continue;
             };
@@ -434,9 +492,15 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
             } else {
                 &own
             };
-            match check_citation(index, &path, Some((lo, hi)), used)? {
+            let (check, absent) = check_citation(index, &path, Some((lo, hi)), used)?;
+            for a in absent {
+                if !missing.contains(&a) {
+                    missing.push(a);
+                }
+            }
+            match check {
                 Check::Holds => {}
-                Check::Drop(reason) => return Ok(Outcome::Drop(reason)),
+                Check::Drop(cause) => return Ok(Outcome::Drop(cause)),
                 Check::Move { to, .. } => {
                     let span = if hi > lo {
                         format!("{to}-{}", to + (hi - lo))
@@ -460,6 +524,9 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
         };
         text.replace_range(range, &replacement);
     }
+    if !missing.is_empty() {
+        verdict::mark_partial(f, &missing);
+    }
     Ok(if moved || rewrote {
         Outcome::Reanchored
     } else {
@@ -468,15 +535,20 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
 }
 
 /// Counts from one gate pass.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct GateReport {
     /// Findings removed because a citation could not be verified.
     pub dropped: usize,
     /// Findings kept after at least one citation moved to the verified line.
     pub reanchored: usize,
+    /// #8949: findings kept as advisory because only part of the code they
+    /// quote is in the diff.
+    pub partial: usize,
     /// `file:line` of every dropped finding that cited a line, so the review
     /// body can be scrubbed of it (#8905 row 5).
     pub withheld: Vec<String>,
+    /// #8949: every dropped finding with its reason and failed fragment.
+    pub withheld_findings: Vec<WithheldFinding>,
 }
 
 /// Verify every finding's citations against the diff, re-anchoring or
@@ -486,49 +558,60 @@ pub struct GateReport {
 /// `file:line` that holds the code it describes, or it is not posted. Earlier
 /// gates prove the file and the quote exist, not that the line holds them.
 /// What: for each finding, [`gate_finding`] checks the `file`/`line` citation
-/// and every `[code: …]` bracket citation. Every quoted snippet must be in the
-/// file; with none quoted, a named identifier must be. A citation whose new-side
-/// line holds an anchor is kept; one whose anchor occurs exactly once elsewhere,
-/// or only on a removed line, moves there; any other case drops the finding. A
-/// finding with no anchor is dropped: the prompt asks every finding to quote
-/// the code at its line. Any [`GateError`] drops the finding (fail closed).
-/// Every drop and move is logged; counts are returned.
+/// and every `[code: …]` bracket citation. At least one quoted snippet must be
+/// in the file; with none quoted, a present prose quote or a named identifier
+/// must be. A citation whose new-side line holds an anchor is kept; one whose
+/// anchor occurs exactly once elsewhere, or only on a removed line, moves there;
+/// any other case drops the finding. A finding with some quoted snippets
+/// missing is kept as advisory and counted in `partial` (#8949). A finding
+/// with no anchor is dropped: the prompt asks every finding to quote the code
+/// at its line. Any [`GateError`] drops the finding (fail closed). Every drop
+/// and move is logged, a drop with the fragment that failed; each dropped
+/// finding is kept in `withheld_findings`.
 /// Test: `a_finding_cited_twelve_lines_off_is_reanchored`,
 /// `a_finding_whose_quoted_code_is_absent_is_dropped`,
 /// `a_finding_cited_beyond_eof_is_dropped`,
 /// `a_finding_with_no_anchor_is_dropped`,
-/// `a_file_with_a_malformed_hunk_header_fails_closed`.
+/// `a_file_with_a_malformed_hunk_header_fails_closed`,
+/// `a_dropped_finding_names_its_missing_snippet`,
+/// `a_finding_with_one_real_and_one_illustrative_snippet_is_kept_marked`.
 pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) -> GateReport {
     let mut report = GateReport::default();
     let mut kept = Vec::with_capacity(findings.len());
     for mut f in std::mem::take(findings) {
-        let reason = match gate_finding(&mut f, index) {
+        let cause = match gate_finding(&mut f, index) {
             Ok(Outcome::Keep) => None,
             Ok(Outcome::Reanchored) => {
                 info!(file = %f.file, correction = ?f.citation_correction, "citation-gate: re-anchored finding (#8905)");
                 report.reanchored += 1;
                 None
             }
-            Ok(Outcome::Drop(reason)) => Some(reason.to_string()),
+            Ok(Outcome::Drop(cause)) => Some((cause.reason.to_string(), cause.fragment)),
             // #8905: fail closed — a citation the gate cannot read is never posted.
-            Err(error) => Some(error.to_string()),
+            Err(error) => Some((error.to_string(), None)),
         };
-        match reason {
-            None => kept.push(f),
-            Some(reason) => {
-                warn!(file = %f.file, line = ?f.line, kind = %f.kind, %reason, "citation-gate: dropping finding (#8905)");
-                report.dropped += 1;
-                if let Some(line) = f.line {
-                    report.withheld.push(format!("{}:{line}", f.file));
-                }
-            }
+        let Some((reason, fragment)) = cause else {
+            report.partial += usize::from(f.citation_partial);
+            kept.push(f);
+            continue;
+        };
+        warn!(file = %f.file, line = ?f.line, kind = %f.kind, %reason, ?fragment, "citation-gate: dropping finding (#8905)");
+        report.dropped += 1;
+        if let Some(line) = f.line {
+            report.withheld.push(format!("{}:{line}", f.file));
         }
+        report.withheld_findings.push(WithheldFinding {
+            finding: f,
+            reason,
+            missing_fragment: fragment,
+        });
     }
     *findings = kept;
-    if report.dropped + report.reanchored > 0 {
+    if report.dropped + report.reanchored + report.partial > 0 {
         warn!(
             dropped = report.dropped,
             reanchored = report.reanchored,
+            partial = report.partial,
             "citation-gate: pass complete (#8905)"
         );
     }
@@ -541,18 +624,22 @@ pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) ->
 /// Why: this is the last point every review path passes before posting, so the
 /// acceptance rule holds for whatever the reviewer, synthesis, and verifier
 /// produced.
-/// What: runs [`enforce_line_citations`] on `result.findings`; strips the
-/// findings array from a fenced JSON block in the body and every dropped
-/// `file:line` from its prose (row 5); and when findings were dropped, applies
-/// the withhold policy (row 4): an emptied list, or a blocking review whose
-/// survivors alone would approve, becomes `Unknown` with no grade. The body
-/// then leads with "N findings withheld: citation unverifiable".
+/// What: runs [`enforce_line_citations`] on `result.findings`; records every
+/// withheld finding in `result.withheld_findings` (#8949); strips the findings
+/// array from a fenced JSON block in the body and every dropped `file:line`
+/// from its prose (row 5); and when findings were dropped or kept partial,
+/// applies the withhold policy (row 4, `verdict::withhold_verdict`). On
+/// `Unknown` the grade is cleared and the note becomes the error.
 /// Test: `gate_posted_findings_withholds_when_it_drops_every_finding`,
 /// `gate_posted_findings_never_approves_a_blocking_review`,
+/// `gate_posted_findings_records_the_withheld_finding`,
 /// `run_review_posts_the_reanchored_line`,
 /// `run_review_body_carries_no_dropped_citation`.
 pub fn gate_posted_findings(result: &mut ReviewResult, filtered: &FilteredDiff) -> GateReport {
     let report = enforce_line_citations(&mut result.findings, &LineIndex::from_filtered(filtered));
+    result
+        .withheld_findings
+        .extend(report.withheld_findings.iter().cloned());
     result.review_body = verdict::scrub_body(&result.review_body, &report.withheld);
     if let Some(note) = verdict::withhold_verdict(&mut result.verdict, &report, &result.findings) {
         result.review_body = format!("{note}\n\n{}", result.review_body);

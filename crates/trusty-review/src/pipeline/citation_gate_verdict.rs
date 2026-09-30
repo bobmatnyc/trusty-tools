@@ -5,16 +5,19 @@
 //! read as "nothing wrong": the verdict cannot relax to APPROVE on its absence,
 //! and its citation must not reach the posted body by another route.
 //! What: [`withhold_verdict`] sets the verdict after a gate pass;
-//! [`scrub_body`] removes withheld findings from the review body.
+//! [`scrub_body`] removes withheld findings from the review body;
+//! [`mark_partial`] keeps a partly verified finding as advisory (#8949).
 //! Test: `citation_gate_tests.rs`, `runner_citation_gate_tests.rs`.
 
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 use serde_json::Value;
+use tracing::warn;
 
 use super::GateReport;
 use crate::models::{Finding, Verdict};
+use crate::pipeline::evidence_admission::demote_to_unverifiable_advisory;
 use crate::pipeline::grade::derive_verdict;
 
 /// A fenced ```json block, capturing its body.
@@ -22,33 +25,66 @@ static FENCED_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)```json[ \t]*\n(.*?)\n?```").expect("fenced-json regex is a valid literal")
 });
 
-/// Set the verdict after the gate dropped `report.dropped` findings (#8905 row 4).
+/// Set the verdict after the gate dropped `report.dropped` findings or kept
+/// `report.partial` findings as advisory (#8905 row 4, #8949).
 ///
-/// What: no drops → `None`, verdict untouched. Otherwise returns the summary
-/// line "N findings withheld: citation unverifiable" and:
-///  - no survivors → `Unknown` (never APPROVE on unverified evidence);
-///  - a BLOCK / REQUEST_CHANGES review with survivors → the verdict the
-///    survivors alone derive, or `Unknown` when that would be an approval;
-///  - any other verdict is left as it is.
+/// What: neither → `None`, verdict untouched. Otherwise returns the summary
+/// line ("N findings withheld: citation unverifiable", then "N findings kept
+/// with a partly unverified citation (advisory)") and:
+///  - an APPROVE* review whose every dropped finding was advisory keeps
+///    APPROVE* (#8949, owner ruling (b));
+///  - otherwise the verdict [`settle_withheld`] gives: no survivors →
+///    `Unknown`; a BLOCK / REQUEST_CHANGES review → what the survivors alone
+///    derive, or `Unknown` when that would approve. A partial finding is
+///    already demoted, so it cannot carry a blocking verdict on its own.
 ///
 /// Refutation-based relaxation (`relax_verdict_if_evidence_wiped`) is separate
 /// and unchanged.
 /// Test: `gate_posted_findings_withholds_when_it_drops_every_finding`,
-/// `gate_posted_findings_never_approves_a_blocking_review`.
+/// `gate_posted_findings_never_approves_a_blocking_review`,
+/// `approve_star_survives_when_only_advisory_findings_are_dropped`,
+/// `approve_star_is_withheld_when_a_dropped_finding_could_escalate`,
+/// `a_partial_finding_cannot_carry_a_blocking_verdict`.
 pub(super) fn withhold_verdict(
     verdict: &mut Verdict,
     report: &GateReport,
     survivors: &[Finding],
 ) -> Option<String> {
-    if report.dropped == 0 {
+    if report.dropped == 0 && report.partial == 0 {
         return None;
     }
-    let note = format!(
-        "{} findings withheld: citation unverifiable",
-        report.dropped
-    );
-    *verdict = settle_withheld(verdict.clone(), survivors);
-    Some(note)
+    let mut notes = Vec::with_capacity(2);
+    if report.dropped > 0 {
+        notes.push(format!(
+            "{} findings withheld: citation unverifiable",
+            report.dropped
+        ));
+    }
+    if report.partial > 0 {
+        notes.push(format!(
+            "{} findings kept with a partly unverified citation (advisory)",
+            report.partial
+        ));
+    }
+    let advisory_only = report
+        .withheld_findings
+        .iter()
+        .all(|w| is_advisory(&w.finding));
+    if !(*verdict == Verdict::ApproveWithReservations && advisory_only) {
+        *verdict = settle_withheld(verdict.clone(), survivors);
+    }
+    Some(notes.join("; "))
+}
+
+/// Whether a finding, on its own, cannot move a review past APPROVE* (#8949).
+///
+/// What: asks the verdict engine itself: a model APPROVE with only this
+/// finding derives APPROVE or APPROVE*.
+fn is_advisory(f: &Finding) -> bool {
+    matches!(
+        derive_verdict(Verdict::Approve, std::slice::from_ref(f)),
+        Verdict::Approve | Verdict::ApproveWithReservations
+    )
 }
 
 /// The verdict a review keeps after at least one finding was withheld.
@@ -96,4 +132,25 @@ pub(crate) fn scrub_body(body: &str, withheld: &[String]) -> String {
         out = out.replace(cite.as_str(), "(withheld citation)");
     }
     out
+}
+
+/// Body note on a finding whose citation the gate verified only in part (#8949).
+/// It quotes no code, so a second gate pass reads nothing new from it.
+const PARTIAL_NOTE: &str = "_Citation partly unverified: code this finding quotes is not in \
+     the reviewed diff. Advisory only._";
+
+/// Keep a partly verified finding as advisory only (#8949, owner ruling (a)).
+///
+/// What: sets `citation_partial`, strips every signal that lets the finding
+/// escalate a verdict (`demote_to_unverifiable_advisory`), appends
+/// [`PARTIAL_NOTE`] once, and logs the fragments that failed to match. A
+/// partial finding is posted in the body, never inline
+/// (`inline::build_inline_plan`).
+pub(super) fn mark_partial(f: &mut Finding, missing: &[String]) {
+    demote_to_unverifiable_advisory(f);
+    if !f.citation_partial {
+        f.citation_partial = true;
+        f.description = format!("{}\n\n{PARTIAL_NOTE}", f.description.trim_end());
+    }
+    warn!(file = %f.file, line = ?f.line, kind = %f.kind, ?missing, "citation-gate: keeping finding with a partly unverified citation (#8949)");
 }
