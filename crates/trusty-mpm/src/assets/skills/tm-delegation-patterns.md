@@ -214,6 +214,11 @@ agent writes scratch files only there (BASE-AGENT). Agents dispatched
 together get distinct directories; generic names at the scratchpad root
 collide.
 
+**A brief commissioning a prose document names no line or word cap (#8309).**
+The 500-SLOC cap is code only. A cap on a research report, spec or ADR forces
+rewrites and collides with mandatory citations. Ask for the Write Plainly style
+instead; it limits verbosity.
+
 A brief never asks for output that scales with build length ("raw output",
 "full log") — it asks for gate summary lines per the gate-output rule
 (BASE-AGENT, "Gate Output: Quote Results, Summarize Progress").
