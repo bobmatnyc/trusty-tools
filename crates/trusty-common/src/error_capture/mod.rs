@@ -53,12 +53,15 @@
 //! [`bug_capture_layer`]: crate::error_capture::bug_capture_layer
 //! [`TRUSTY_NO_BUG_CAPTURE_ENV`]: crate::error_capture::TRUSTY_NO_BUG_CAPTURE_ENV
 
+#[cfg(test)]
+mod compaction_tests;
 pub mod fingerprint;
 pub mod layer;
 pub mod rotation;
 pub mod store;
 #[cfg(test)]
 mod store_tests;
+mod test_hook;
 pub mod types;
 
 pub use layer::BugCaptureLayer;
