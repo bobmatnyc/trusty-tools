@@ -1788,6 +1788,18 @@ pub struct DoctorFlags {
     /// What: promotes `DriftedFrozen` findings into the repair set.
     #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+
+    /// Scope the report to this project directory instead of the current one.
+    ///
+    /// Why (#7757): every project-scoped row (`session_scope`, `instructions`,
+    /// `agents`, `skills`, ...) is read from the cwd, so an operator could not
+    /// ask what a session in ANOTHER project would load without `cd`-ing there.
+    /// What: the path is canonicalized and must be an existing directory; a
+    /// missing or non-directory path is an error, never a silent fall back to
+    /// the cwd. Report-only: it conflicts with every write flag, because the
+    /// repairs act on the cwd and a scoped report beside them would mislead.
+    #[arg(long, value_name = "DIR", conflicts_with = "writes")]
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// Flags for [`Command::Reinstall`].

@@ -308,6 +308,15 @@ no remote; skipping push/PR` and exits 0; with `--repo` it runs and fails. The
 session's `gh` is disabled, so no `gh` step can run — except in the
 allow-listed supervisor (Architect) directory, which keeps the machine's gh.
 
+**Python editable installs across worktrees (#8386).** pip's wheel cache can
+serve one worktree's editable build to another, so the `.pth` file points at a
+sibling worktree's source and tests run foreign code. In a Python project, give
+each worktree its own venv and install with
+`pip install -e <path> --no-cache-dir --force-reinstall`, or skip the install
+and run with `PYTHONPATH=<worktree>/src`. Check where the package resolves
+(`python -c "import <pkg>; print(<pkg>.__file__)"`) before the first test. Put
+this in the brief of any Python dispatch.
+
 🟡 **This is for the PM or a human working directly. It is NOT the dispatch
 mechanism** — a subagent dispatch declares `isolation: "worktree"` instead, per
 "Worktree Discipline" below and `tm-delegation-patterns`.
