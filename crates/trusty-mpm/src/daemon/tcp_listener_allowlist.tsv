@@ -27,5 +27,4 @@ temporary	trusty-search	trusty-search	crates/trusty-search/src/service/daemon.rs
 source-only	trusty-agents	-	crates/trusty-agents/src/api/server/routes.rs	#6433	opt-in `tagent --api` / `--serve` HTTP server (serve_with_config)
 source-only	trusty-code	-	crates/trusty-code/src/serve/http.rs	#6637	opt-in `tcode serve --http` listener
 source-only	trusty-code-gui	-	crates/trusty-code-gui/src/bridge/serve.rs	#6637	webview bridge on 127.0.0.1:0; replacing it is #6637's GUI-transport design round
-source-only	trusty-common	-	crates/trusty-common/src/symgraph/server.rs	#8926	symgraph::server::serve binds 0.0.0.0 and has no caller in the workspace; needs an owner ruling
 source-only	trusty-installer	-	crates/trusty-installer/src/commands/port_guard.rs	#6284	port_is_bindable test-binds a fixed port and drops it; retires with the fixed ports

@@ -223,7 +223,7 @@ lanes = [
         "daemon-token",
     ] },
     { name = "symgraph", features = [
-        "symgraph-server",
+        "symgraph-parser",
     ] },
 ]
 exempt = [
@@ -747,9 +747,6 @@ symgraph-parser = [
     "dep:quote",
     "dep:genco",
 ]
-# Enables the symgraph HTTP server module (axum + tokio). Implies the
-# full parser stack.
-symgraph-server = ["symgraph-parser", "axum-server"]
 # Enables the `memory_core` module: Memory Palace storage engine
 # (formerly the `trusty-memory-core` crate). Pulls in usearch (HNSW
 # vector index), redb + postcard (knowledge graph + payload/chat stores),

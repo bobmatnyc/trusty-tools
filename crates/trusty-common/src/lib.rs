@@ -569,7 +569,6 @@ pub mod migrations;
 /// surface (`EntityType`, `RawEntity`, `EdgeKind`, `fact_hash_str`, tables)
 /// — no tree-sitter, no `links` conflict. `symgraph-parser` additionally
 /// pulls in tree-sitter and the full parse → registry → emit stack.
-/// `symgraph-server` enables the HTTP server frontend.
 /// Test: `cargo test -p trusty-common --features symgraph` exercises the
 /// contracts surface; `cargo test -p trusty-symgraph` covers the parser
 /// path through the thin re-export shim.
