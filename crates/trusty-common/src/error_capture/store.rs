@@ -24,9 +24,9 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::io::Write as _;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::error_capture::rotation::{self, RotationPolicy};
 use crate::error_capture::types::CapturedError;
@@ -132,45 +132,60 @@ impl ErrorStore {
         }
     }
 
+    /// The store mutex; a poisoned lock is recovered, never propagated.
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Append a captured error to the ring buffer and persist it to disk.
     ///
     /// Why: called by `BugCaptureLayer::on_event` on every ERROR event; must
     ///      be non-blocking (no async, short lock hold) and must never panic.
     ///      The file is shared by several processes and must stay bounded
     ///      (#8028).
-    /// What: acquires the mutex, rotates the file if it has reached the cap,
-    ///      appends the record as one full-line `O_APPEND` write, then pushes
+    /// What: reads the path and policy under the mutex and releases it, then
+    ///      rotates the file if it has reached the cap and appends the record
+    ///      as one full-line `O_APPEND` write, then re-takes the mutex to push
     ///      to the ring (evicting oldest when at capacity). When a due rotation
     ///      fails, the disk write is refused and counted
     ///      ([`ErrorStore::refused_disk_writes`]) so the file cannot grow past
     ///      the cap; the record still enters the ring and the next append
     ///      retries the rotation. IO errors go to stderr, never to the caller.
     /// Test: `store_tests::concurrent_writers_produce_only_well_formed_lines`,
-    ///      `store_tests::a_rotation_failure_refuses_the_disk_write_and_counts_it`.
+    ///      `store_tests::a_rotation_failure_refuses_the_disk_write_and_counts_it`,
+    ///      `store_lock_tests::append_releases_the_store_lock_before_touching_disk`.
     pub fn append(&self, record: CapturedError) {
-        let mut guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        let (file_path, policy) = {
+            let guard = self.lock();
+            (guard.file_path.clone(), guard.policy)
         };
 
+        // #8028: the rotation lock wait and the disk write run with the store
+        // mutex released, so a wedged rotation-lock holder cannot stall
+        // readers or other threads' appends behind this one.
+        super::test_hook::fire(super::test_hook::Point::BeforeDiskWrite);
         // Append JSON line to disk before touching the ring so a crash after
         // write but before ring update at worst leaves the file one record
         // ahead of the ring — acceptable for our best-effort guarantees.
-        if let Some(path) = guard.file_path.clone() {
+        let mut refused = false;
+        if let Some(path) = file_path.as_deref() {
             // #8028: fail closed on disk growth, never on logging — a failed
             // rotation refuses this write instead of appending past the cap.
-            if let Err(e) = rotation::rotate_if_due(&path, guard.policy) {
-                guard.refused_disk_writes += 1;
+            if let Err(e) = rotation::rotate_if_due(path, policy) {
+                refused = true;
                 eprintln!(
-                    "[bug-capture] rotating {} failed ({e}); record kept in memory only, {} disk writes refused",
-                    path.display(),
-                    guard.refused_disk_writes
+                    "[bug-capture] rotating {} failed ({e}); record kept in memory only",
+                    path.display()
                 );
-            } else if let Err(e) = serialise_and_append(&path, &record) {
+            } else if let Err(e) = serialise_and_append(path, &record) {
                 eprintln!("[bug-capture] write to {}: {e}", path.display());
             }
         }
 
+        let mut guard = self.lock();
+        if refused {
+            guard.refused_disk_writes += 1;
+        }
         guard.ring.push_back(record);
         while guard.ring.len() > self.capacity {
             guard.ring.pop_front();
@@ -305,9 +320,13 @@ impl ErrorStore {
 ///      the front until it holds `capacity` records (oldest first, newest
 ///      last). Lines are split on raw `\n` bytes and parsed one at a time, so
 ///      a malformed line — bad JSON or invalid UTF-8 — is skipped and counted
-///      and never fails the rest of the file. Returns the ring and the count.
+///      and never fails the rest of the file. A rotation that runs between
+///      two file reads moves an already-read file to the next slot, so a
+///      file whose identity was already read is skipped (#8028). Returns the
+///      ring and the count.
 /// Test: `store_round_trip_write_read`, `store_corrupt_line_skipped`,
-///      `store_tests::malformed_line_does_not_break_reading`.
+///      `store_tests::malformed_line_does_not_break_reading`,
+///      `compaction_tests::a_read_overlapping_a_rotation_counts_each_record_once`.
 fn load_ring_from_disk(
     path: &Path,
     capacity: usize,
@@ -315,12 +334,20 @@ fn load_ring_from_disk(
 ) -> (VecDeque<CapturedError>, u64) {
     let mut ring: VecDeque<CapturedError> = VecDeque::with_capacity(capacity);
     let mut skipped_total = 0u64;
-    for file in rotation::files_newest_first(path, policy) {
+    let mut seen = Vec::new();
+    for (i, file) in rotation::files_newest_first(path, policy)
+        .iter()
+        .enumerate()
+    {
         if ring.len() >= capacity {
             break;
         }
-        let bytes = match rotation::read_tail(&file, policy.read_limit()) {
-            Ok(b) => b,
+        if i > 0 {
+            super::test_hook::fire(super::test_hook::Point::BetweenStoreFiles);
+        }
+        let bytes = match read_unseen(file, policy.read_limit(), &mut seen) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 eprintln!("[bug-capture] cannot read {}: {e}", file.display());
@@ -355,6 +382,32 @@ fn load_ring_from_disk(
     (ring, skipped_total)
 }
 
+/// Read the tail of `file` unless a file with the same identity was already
+/// read; `Ok(None)` means it was. Identity is `(dev, inode)` on Unix. Other
+/// platforms have no stable identity through `std`, so there every file reads.
+fn read_unseen(
+    file: &Path,
+    limit: u64,
+    seen: &mut Vec<(u64, u64)>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut handle = std::fs::File::open(file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = handle.metadata()?;
+        let id = (meta.dev(), meta.ino());
+        // #8028: the open handle pins this inode, so a later rename cannot
+        // make the same records reappear under the next slot's name.
+        if seen.contains(&id) {
+            return Ok(None);
+        }
+        seen.push(id);
+    }
+    #[cfg(not(unix))]
+    let _ = &seen;
+    rotation::read_tail_from(&mut handle, limit).map(|(buf, _)| Some(buf))
+}
+
 /// Serialise one record as a JSON line and append it to the given path.
 ///
 /// Why: several processes append to one file with no shared mutex. Writing
@@ -365,18 +418,32 @@ fn load_ring_from_disk(
 /// What: builds the JSON bytes plus `\n` in one buffer and writes it with a
 ///      single `O_APPEND` `write_all`, so each record lands whole at the end of
 ///      the file. Returns `Err` on any IO failure; the caller logs to stderr.
-/// Test: `store_tests::concurrent_writers_produce_only_well_formed_lines`.
+/// Test: `store_tests::concurrent_writers_produce_only_well_formed_lines`,
+///      `store_tests::a_record_reaches_the_file_in_one_write_call`.
 fn serialise_and_append(path: &Path, record: &CapturedError) -> std::io::Result<()> {
-    let mut line = serde_json::to_vec(record)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    line.push(b'\n');
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    // #8028: one write per record — a split write interleaves across processes.
-    file.write_all(&line)
+    write_record_line(&mut file, record)
 }
+
+/// Serialise `record` plus `\n` and hand it to `out` as one buffer.
+pub(super) fn write_record_line(
+    out: &mut impl Write,
+    record: &CapturedError,
+) -> std::io::Result<()> {
+    let mut line = serde_json::to_vec(record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push(b'\n');
+    // #8028: one write per record — a split write interleaves across processes.
+    out.write_all(&line)
+}
+
+// #8028: a child module, so its tests can observe the private store mutex.
+#[cfg(test)]
+#[path = "store_lock_tests.rs"]
+mod store_lock_tests;
 
 #[cfg(test)]
 mod tests {

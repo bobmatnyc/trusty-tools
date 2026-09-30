@@ -235,3 +235,35 @@ fn a_rotation_failure_refuses_the_disk_write_and_counts_it() {
     let live = raw_lines(&path);
     assert_eq!(live.len(), 1, "disk writes resumed on a fresh live file");
 }
+
+/// Records each buffer handed to `write`, accepting it whole.
+#[derive(Default)]
+struct CallRecorder {
+    calls: Vec<Vec<u8>>,
+}
+
+impl std::io::Write for CallRecorder {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.calls.extend([buf.to_vec()]);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// #8028 MED 4: the concurrent-writer test above only catches a split write
+/// when the scheduler interleaves it. This checks the cause directly: one
+/// record is one `write` call carrying the whole line, newline included, so an
+/// `O_APPEND` file cannot receive another writer's bytes inside it.
+#[test]
+fn a_record_reaches_the_file_in_one_write_call() {
+    let mut out = CallRecorder::default();
+    crate::error_capture::store::write_record_line(&mut out, &record("one call")).expect("write");
+    assert_eq!(out.calls.len(), 1, "record split across write calls");
+    let line = &out.calls[0];
+    assert_eq!(line.last(), Some(&b'\n'));
+    let rec: CapturedError = serde_json::from_slice(&line[..line.len() - 1]).expect("json");
+    assert_eq!(rec.message, "one call");
+}
