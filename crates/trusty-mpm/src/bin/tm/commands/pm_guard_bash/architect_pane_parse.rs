@@ -10,12 +10,13 @@
 //! also read as a shell command, as a tmux command string, and as the start of
 //! a tmux argv — the forms `run-shell`, `if-shell`, `bind-key`, `new-window`
 //! and typed keys carry. An omitted target there is read in its [`Context`],
-//! and a nested `tmux` with no `-L`/`-S` reaches that context's server.
+//! and a nested `tmux` with no `-L`/`-S` reaches that context's server — in
+//! typed keys, also the default one.
 //! FAIL-CLOSED: see [`Hit::opaque`].
 //! Test: `architect_pane_tests.rs`.
 
 use super::architect_pane_env::{
-    ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, moves_server_env, resets_env,
+    ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, assigns_dynamic_name, moves_server_env, resets_env,
 };
 use super::architect_pane_verbs::{DENY_VERBS, Resolved, Verb, resolve};
 use super::floor_d4::{program_positions, segments};
@@ -48,6 +49,9 @@ pub(super) enum Target {
     Marked,
     /// Every session on the server (`kill-server`, `kill-session -a`).
     Server,
+    /// An omitted `-t` of a `tmux` in typed keys that reaches a server other
+    /// than the one the keys go to: a pane that server picks (#8902).
+    Picked,
 }
 
 /// One tmux command in the deny set, or one this guard cannot read.
@@ -96,7 +100,8 @@ enum Context {
 
 impl Context {
     /// The server a nested `tmux` with no `-L`/`-S` reaches: its `TMUX` names
-    /// the server that runs it (#8902). The caller's shell inherits none.
+    /// the server that runs it (#8902). The caller's shell inherits none; in
+    /// typed keys `options_then_commands` also judges the default server.
     fn server(&self) -> &[String] {
         match self {
             Self::Caller => &[],
@@ -110,6 +115,8 @@ struct Scan {
     hits: Vec<Hit>,
     /// A `rename-session` or `new-session` runs somewhere in the command.
     retargets: bool,
+    /// An assignment builtin runs on a name the shell expands (#8902).
+    dynamic_env: bool,
     context: Context,
 }
 
@@ -123,15 +130,18 @@ struct Scan {
 /// `a_tmux_command_reached_through_a_wrapper_or_argument_is_found`,
 /// `a_server_the_command_selects_differently_denies`,
 /// `a_target_the_same_command_retargets_denies`,
-/// `a_nested_invocation_inherits_the_outer_server`.
+/// `a_nested_invocation_inherits_the_outer_server`,
+/// `a_nested_tmux_in_typed_keys_is_judged_on_the_default_server_too`,
+/// `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
 pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
     let mut scan = Scan {
         hits: Vec::new(),
         retargets: false,
+        dynamic_env: false,
         context: Context::Caller,
     };
     shell(command, 0, &mut scan);
-    let moved = moves_server_env(command);
+    let moved = scan.dynamic_env || moves_server_env(command);
     for hit in &mut scan.hits {
         if moved {
             hit.opaque.get_or_insert(SERVER_ENV);
@@ -199,6 +209,7 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
         let words = with_dynamics(&seg.text, argv);
         let texts: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         for (pos, base) in program_positions(&texts) {
+            out.dynamic_env |= assigns_dynamic_name(&texts[pos..]);
             if base == "tmux" {
                 let reset = resets_env(&texts[..pos]);
                 invocation(&words[pos + 1..], depth, reset, out);
@@ -343,6 +354,11 @@ fn options_then_commands(words: &[Word], depth: usize, out: &mut Scan) -> Option
         i += 1;
     }
     commands(&words[i..], &server, depth, false, out);
+    // #8902 follow-up: the pane typed into may run a process with no `TMUX`,
+    // whose `tmux` reaches the default server, so judge it there too.
+    if !own_server && !server.is_empty() && matches!(out.context, Context::Keys(..)) {
+        commands(&words[i..], &[], depth, false, out);
+    }
     unknown
 }
 
@@ -409,7 +425,7 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
         )),
         Resolved::Deny(verb) => {
             let found = deny_targets(verb, args)
-                .and_then(|t| t.map(|t| in_context(t, &out.context)).transpose());
+                .and_then(|t| t.map(|t| in_context(t, &out.context, server)).transpose());
             match found {
                 Ok(Some(targets)) => {
                     if verb.name == "send-keys" {
@@ -473,8 +489,13 @@ fn retargets(head: &str, args: &[Word], context: &Context) -> bool {
 /// `targets` with an omitted target read in `context`.
 ///
 /// What: the caller's pane in the caller's shell; the `send-keys` targets in
-/// typed keys; `Err` in a command tmux runs later or in a pane it picks.
-fn in_context(targets: Vec<Target>, context: &Context) -> Result<Vec<Target>, &'static str> {
+/// typed keys on their own `server`, else [`Target::Picked`]; `Err` in a
+/// command tmux runs later or in a pane it picks.
+fn in_context(
+    targets: Vec<Target>,
+    context: &Context,
+    server: &[String],
+) -> Result<Vec<Target>, &'static str> {
     let defaulted = |t: &Target| matches!(t, Target::Current | Target::Marked);
     match context {
         Context::Caller => Ok(targets),
@@ -482,9 +503,12 @@ fn in_context(targets: Vec<Target>, context: &Context) -> Result<Vec<Target>, &'
             Err("a nested command with no target acts on a pane tmux picks when it runs")
         }
         Context::Deferred(_) => Ok(targets),
-        Context::Keys(typed_into, _) => Ok(targets
+        // #8902 follow-up LOW: the pane typed into is not on this server.
+        Context::Keys(typed_into, keys) => Ok(targets
             .into_iter()
             .flat_map(|t| match t {
+                // #8902 follow-up LOW: the pane typed into is not on this server.
+                Target::Current if keys.as_slice() != server => vec![Target::Picked],
                 Target::Current => typed_into.clone(),
                 t => vec![t],
             })

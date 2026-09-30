@@ -337,6 +337,97 @@ fn a_nested_invocation_inherits_the_outer_server() {
     }
 }
 
+/// #8902 follow-up MEDIUM-1: a pane's process may lack `TMUX`, so a nested
+/// `tmux` with no `-L`/`-S` in typed keys is judged on the outer server and on
+/// the default one. LOW: an omitted target there, on a server other than the
+/// one the keys go to, is a pane tmux picks — unresolvable, so it denies.
+#[test]
+fn a_nested_tmux_in_typed_keys_is_judged_on_the_default_server_too() {
+    // The default server holds the Architect; `-L other` does not.
+    let probe = fake();
+    let deny = [
+        "tmux -L other send-keys -t %9 'tmux kill-session -t =tm-architect' Enter",
+        "tmux -L other send-keys -t %9 'tmux kill-server' Enter",
+        "tmux -L other send-keys -t %9 'tmux kill-pane' Enter",
+        "tmux send-keys -t =pm 'tmux -L arch kill-pane' Enter",
+        "tmux -L arch send-keys -t =pm 'tmux kill-pane' Enter",
+    ];
+    let pass = [
+        "tmux -L other send-keys -t %9 'tmux kill-session -t =pm' Enter",
+        "tmux -L other send-keys -t %9 'tmux -L other kill-server' Enter",
+        "tmux -L other run-shell 'tmux kill-session -t =tm-architect'",
+        "tmux send-keys -t =pm 'tmux kill-pane' Enter",
+        "tmux send-keys -t =pm 'tmux -L other kill-pane' Enter",
+    ];
+    assert_eq!(misjudged(&probe, &deny, &pass), Vec::<String>::new());
+    let reason = evaluate_architect_pane(deny[3], &probe);
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|r| r.contains("another server")),
+        "{reason:?}"
+    );
+}
+
+/// #8902 follow-up error arms: a `${` with no closing brace cannot be read, so
+/// it counts as a `TMUX` change; a builtin's expanded value is not a name.
+#[test]
+fn an_unreadable_expansion_or_dynamic_name_counts_as_a_server_move() {
+    use super::super::architect_pane_env::{assigns_dynamic_name, moves_server_env};
+    assert!(moves_server_env(": ${n"));
+    assert!(moves_server_env(": ${(P)n::=x}"));
+    assert!(!moves_server_env(": ${n} ${(P)n} ${!n}"));
+    let argv = |s: &str| -> Vec<String> { s.split(' ').map(str::to_owned).collect() };
+    assert!(assigns_dynamic_name(&argv("export ${n}UX=x")));
+    assert!(assigns_dynamic_name(&argv("eval $cmd")));
+    assert!(!assigns_dynamic_name(&argv("export PATH=$PATH:/x")));
+    assert!(!assigns_dynamic_name(&argv("printf %s $x")));
+    assert!(!assigns_dynamic_name(&[]));
+}
+
+/// Every `deny` command the floor lets through and every `pass` command it
+/// denies, so a failing run names each misjudged case.
+fn misjudged(probe: &Fake, deny: &[&str], pass: &[&str]) -> Vec<String> {
+    let wrong_deny = deny.iter().filter(|c| !denied(probe, c));
+    let wrong_pass = pass
+        .iter()
+        .filter(|c| evaluate_architect_pane(c, probe).is_some());
+    wrong_deny
+        .map(|c| format!("allowed: {c}"))
+        .chain(wrong_pass.map(|c| format!("denied: {c}")))
+        .collect()
+}
+
+/// #8902 follow-up MEDIUM-2: zsh's `${NAME::=…}` assigns inside a word, as a
+/// quoted name does in an assignment builtin. A name the guard cannot read —
+/// zsh `(P)` indirection, bash `!`, a nested or expanded name — counts as
+/// `TMUX` (fail closed). `=pm:` needs no current pane, so only the server rule
+/// can deny these.
+#[test]
+fn a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies() {
+    let deny = [
+        ": ${TMUX::=/tmp/x/default,1,0}; tmux kill-session -t =pm:",
+        ": \"${TMUX_TMPDIR::=/tmp/x}\"; tmux kill-session -t =pm:",
+        "export TM''UX=/tmp/x/default,1,0; tmux kill-session -t =pm:",
+        "export \"TM\"UX=/tmp/x/default,1,0; tmux kill-session -t =pm:",
+        "n=TM; n+=UX; : ${(P)n::=/tmp/x/d,1,0}; tmux kill-session -t =pm:",
+        "n=TM; : ${(P)${n}UX:=/tmp/x/d,1,0}; tmux kill-session -t =pm:",
+        "n=TM; n+=UX; : ${!n:=/tmp/x/d,1,0}; tmux kill-session -t =pm:",
+        "n=TM; export \"${n}UX=/tmp/x/d,1,0\"; tmux kill-session -t =pm:",
+        "n=TM; typeset $n'UX'=/tmp/x/d,1,0; tmux kill-session -t =pm:",
+        "n=TM; unset \"${n}UX\"; tmux kill-session -t =pm:",
+        "n=TM; printf -v \"${n}UX\" x; tmux kill-session -t =pm:",
+    ];
+    let pass = [
+        "echo \"${TMUX:-none}\"; tmux send-keys -t =pm: x",
+        ": ${(P)n}; tmux send-keys -t =pm: x",
+        ": ${HOME::=/tmp}; tmux send-keys -t =pm: x",
+        "export PATH=\"$PATH:/x\"; tmux send-keys -t =pm: x",
+        "printf '%s' \"$MSG\"; tmux send-keys -t =pm: x",
+    ];
+    assert_eq!(misjudged(&fake(), &deny, &pass), Vec::<String>::new());
+}
+
 /// #8902 LOW-1: a session renamed or created in the same command denies a hit
 /// only on a server that holds an Architect pane.
 #[test]
@@ -491,4 +582,27 @@ fn a_pane_listing_run_is_classified() {
         let found = architect_marks(lineage, || sidecars.clone());
         assert_eq!(marks(classify_listing(listed, &found)), want, "row {row}");
     }
+}
+
+/// #8902: a deeply nested `${a${a…}}` is read in linear time: a closed one
+/// with a readable name moves no server, an unclosed one does. At 0fdd9f7e85
+/// each `${` rescanned to its end, so the integration test at depth 100000
+/// ran for about nine minutes. At this depth the rescan takes about a minute
+/// in a debug build and the linear read well under a second.
+#[test]
+fn a_deeply_nested_expansion_is_read_in_linear_time() {
+    let depth = 50_000;
+    let nested = format!("{}T{}", "${a".repeat(depth), "}".repeat(depth));
+    let closed = format!("echo {nested}; tmux kill-session -t =pm:");
+    let unclosed = format!("echo {}; tmux kill-session -t =pm:", "${a".repeat(depth));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        misjudged(&fake(), &[&unclosed], &[&closed]),
+        Vec::<String>::new()
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?}"
+    );
 }
