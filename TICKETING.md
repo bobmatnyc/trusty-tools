@@ -50,9 +50,9 @@ makes the absence legitimate; `tm issue audit` reads it and prints
 `component label  SKIP  <reason>` instead of FAIL.
 
 **Priority — optional:** `P0` (drop everything), `P1` (high), `P2` (medium),
-`P3` (low). Applied **only** when the issue text itself asserts severity — an
-explicit "P1", or language like data loss, unrecoverable, silent corruption. A
-guessed priority is noise someone else re-triages.
+`P3` (low). Applied when the issue text asserts severity, or when the triager
+assesses significant user or operator impact. Owner ruling, 2026-09-30
+(Bob, ruling 188).
 
 **Workstream — one:** `ws/<session-name>`, the filing session's. Always a
 label, never a milestone.
