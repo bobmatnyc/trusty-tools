@@ -532,7 +532,8 @@ pub(crate) fn strip_process_substitution(token: &str) -> &str {
 /// secret-shaped rather than guessing.
 /// Test: `denies_brace_expanded_source_copy_into_a_worktree`,
 /// `allows_brace_expanded_source_with_no_secret_alternative`,
-/// `denies_source_with_an_unresolved_brace_group`.
+/// `denies_source_with_an_unresolved_brace_group`,
+/// `denies_a_comma_brace_bomb_past_the_reading_cap`.
 // #7266 round 3: `pub(crate)` so the read guard expands a caller's brace group
 // with THIS expander before screening each alternative — `*.{rs,ts}` must be
 // judged as `*.rs` and `*.ts`, not as one literal whose extension is `{rs,ts}`.
@@ -571,7 +572,13 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let prefix = &token[..start];
     let suffix = &after_open[end_rel + 1..];
     let suffix_candidates = expand_brace_alternatives(suffix)?;
-    let mut out = Vec::new();
+    // See #8878: the comma branch obeys the same cap; thirty `{a,b}` groups
+    // are 2^30 readings, and `None` makes every caller fail closed.
+    let count = alternatives.split(',').count();
+    if suffix_candidates.len().saturating_mul(count) > BRACE_READING_CAP {
+        return None;
+    }
+    let mut out = Vec::with_capacity(suffix_candidates.len() * count);
     for alt in alternatives.split(',') {
         for tail in &suffix_candidates {
             out.push(format!("{prefix}{alt}{tail}"));
@@ -587,7 +594,8 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
 /// a `PreToolUse` hook must not be turned into a fork bomb by an argument. A
 /// command spelling more than this many brace readings is pathological, and
 /// failing closed on it is this module's standing bias.
-/// Test: `an_ordinary_sequence_group_is_allowed`.
+/// Test: `an_ordinary_sequence_group_is_allowed`,
+/// `denies_a_comma_brace_bomb_past_the_reading_cap`.
 const BRACE_READING_CAP: usize = 4096;
 
 /// The most elements one `{x..y}` sequence may expand to (#7499 review round).
@@ -1235,6 +1243,20 @@ mod tests {
         assert!(eval("cp 'notes.{md,txt' .claude/worktrees/agent-x/").is_some());
         // Nested group: also `None`, also denied.
         assert!(eval("cp 'notes.{md,{txt,csv}}' .claude/worktrees/agent-x/").is_some());
+    }
+
+    /// See #8878: comma groups past `BRACE_READING_CAP` return `None`, which
+    /// denies, and thirty of them finish fast instead of expanding 2^30 words.
+    #[test]
+    fn denies_a_comma_brace_bomb_past_the_reading_cap() {
+        // 2^13 = 8192 readings: past the cap, yet cheap to expand pre-fix.
+        assert!(expand_brace_alternatives(&"{a,b}".repeat(13)).is_none());
+        let started = std::time::Instant::now();
+        let bomb = format!("notes{}.md", "{a,b}".repeat(30));
+        assert!(expand_brace_alternatives(&bomb).is_none());
+        assert!(eval(&format!("cp {bomb} .claude/worktrees/agent-x/")).is_some());
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
     }
 
     // --- #7122 fix round: unresolved destination variable (critic HIGH) ---
