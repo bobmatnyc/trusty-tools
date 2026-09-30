@@ -29,13 +29,26 @@
 //! established are each a deny. An arming directory that does not resolve
 //! fences the `twin/` tree only, not every write. The caller reads stdin before
 //! the bypass variables, so an unreadable payload denies.
+//! Deletes (#8878 Q2 delete ruling, Architect on PR #8919): `rm`, `unlink`,
+//! `trash`, `rmdir` (with `-p`, each parent too), `shred`, `truncate` and a
+//! `find` that deletes (`-delete`, or `-exec`/`-execdir`/`-ok`/`-okdir` running
+//! a delete verb, `mv` or a shell) are anchor writes, as is `mv` OUT of an
+//! anchor (its source). A delete is judged where the entry sits and where it
+//! leads, so `rm -r` of a directory above an anchor denies; a glob in the last
+//! component judges its directory. Wrappers resolve through the #8735
+//! program-word resolver (`command`, `env`, `sudo`, `nice`, …), and a delete
+//! run by `xargs` is unplaceable, so it denies.
 //! Limit: after a `cd`, a relative path cannot be placed, so `cd X && cp Y .`
 //! is denied for every session but the Architect's main thread: `.` could be
 //! `~/.trusty-mpm`, and the guard does not evaluate the `cd`. Spell the
 //! destination as an absolute path instead.
-//! Residual: writers outside Q2 (`dd`, `rsync`, interpreters, `find -exec`)
-//! and a write from an executed script file (#8879) are not seen.
-//! Test: `pm_guard_trust_anchor_tests.rs`; end to end in
+//! Residual: writers and deleters outside the verb set — `dd`, `rsync`
+//! (including `--remove-source-files`), `git rm`/`git clean`, `srm`,
+//! interpreters (`python -c`, `perl -e`, `node -e`), a `find -exec` whose
+//! program is none of the above (an interpreter or `env -S` string), and a
+//! write or delete from an executed script file (#8879) — are not seen.
+//! Test: `pm_guard_trust_anchor_tests.rs` and, for deletes,
+//! `pm_guard_trust_anchor_delete_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_trust_anchor_8878.rs`.
 
 use std::ffi::OsString;
@@ -439,8 +452,47 @@ impl Anchors {
                 dest_too,
             } => self.judge_into(dest, names, *dest_too, base, home),
             AnchorWrite::IntoUnnamed(dir) => self.judge_unnamed(dir, base, home),
+            AnchorWrite::Delete(word) => self.judge_delete(word, base, home),
             AnchorWrite::DirChange => None,
         }
+    }
+
+    /// [`Self::judge`] for a delete (#8878 Q2 delete ruling).
+    ///
+    /// What: the entry where it sits (its parent resolved, the leaf not
+    /// followed: `rm` removes a link, not its target) and where it leads are
+    /// each judged; a parent that does not resolve denies. A glob confined to
+    /// the last component ([`glob_dir`]) could remove any entry of its
+    /// directory, so the directory is judged: an anchor, or above one, denies.
+    /// Any other unplaced word denies when [`Self::could_be`] says so.
+    /// Test: `each_delete_verb_on_each_anchor_is_denied`,
+    /// `an_unplaceable_delete_is_denied`, `ordinary_deletes_stay_allowed`.
+    fn judge_delete(&self, word: &str, base: Option<&Path>, home: &Path) -> Option<String> {
+        let path = match place(word, base, home, true) {
+            Placed::At(path) => path,
+            Placed::Unknown => {
+                let Some(dir) = glob_dir(word) else {
+                    return self.could_be(word).then(|| unknown_reason(word));
+                };
+                return match place(dir, base, home, true) {
+                    Placed::At(dir) => match resolve(&dir) {
+                        Resolved::Path(dir) => self.is_anchor(&dir).then(|| anchor_reason(word)),
+                        Resolved::Unresolvable => Some(unresolvable_reason(word)),
+                    },
+                    Placed::Unknown => self.could_be(dir).then(|| unknown_reason(word)),
+                };
+            }
+        };
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            match resolve(parent) {
+                Resolved::Path(parent) if self.is_anchor(&parent.join(name)) => {
+                    return Some(anchor_reason(word));
+                }
+                Resolved::Path(_) => {}
+                Resolved::Unresolvable => return Some(unresolvable_reason(word)),
+            }
+        }
+        self.judge_placed(word, Placed::At(path))
     }
 
     /// [`Self::judge`] for a placed single path.
@@ -565,11 +617,24 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
     live.then_some(ArmedAnchors { dir, ids })
 }
 
+/// The directory a glob in `word`'s last component lists, or `None` when the
+/// last component has no glob, or carries a `$`, backtick or brace, whose
+/// expansion could hold a `/` (#8878 Q2 delete ruling).
+fn glob_dir(word: &str) -> Option<&str> {
+    let word = word.trim_end_matches('/');
+    let (dir, name) = match word.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some(split) => split,
+        None => (".", word),
+    };
+    (name.contains(['*', '?', '[']) && !name.contains(['$', '`', '{'])).then_some(dir)
+}
+
 /// The closing sentence every deny carries.
 const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/architect-launch/` and, while any exist, \
-     `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
-     — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
+     `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write or \
+     delete them — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session.";
 
 /// The deny for a write, link or rename that resolves to an anchor.
