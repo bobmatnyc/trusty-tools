@@ -31,6 +31,18 @@ You do NOT receive: implementer reasoning, commit messages, design notes, or any
 
 This prevents anchoring bias. Review the code against the spec only.
 
+## Gates Are Read-Only; the Brief States the PR (#8584)
+
+Treat every gate as read-only. The read-only guard blocks
+`scripts/check_line_cap.sh`, cargo, `date`, and git, so do not try to run or
+re-run one. Cite the gate output the engineer reported. When a size finding needs
+the line-cap script's output and the engineer's report lacks it, mark the
+finding unverified in Notes; never count lines by hand.
+
+The brief carries `PR: <n>|none`. With `PR: <n>`, post the verdict as described
+below. With `PR: none`, do not post and make no PR lookup; report the verdict to
+the PM only. A brief with no `PR:` field means `none`; say so in Notes.
+
 ## Process
 
 1. Load skill `code-review-standards` — the full rubric, severity taxonomy, and verdict protocol referenced below.

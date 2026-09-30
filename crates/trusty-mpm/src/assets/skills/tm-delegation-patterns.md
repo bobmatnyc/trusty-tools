@@ -337,6 +337,11 @@ gate a session; it touches a trust boundary or an injection defense; it rewrites
 history or force-pushes; or the PR is already at review round 3+ — evidence
 something is being missed.
 
+**A code-critic brief states the PR and the gates (#8584).** It carries
+`PR: <n>|none`; with `none` the critic posts nothing and looks up no PR. It also
+says the gates are read-only for the critic: it cites the engineer's reported
+gate output and does not re-run one.
+
 **Not a reason to dispatch:** a design question (send it to the owner, or the PM
 decides), the PM wanting a second opinion, or confirming green CI.
 
