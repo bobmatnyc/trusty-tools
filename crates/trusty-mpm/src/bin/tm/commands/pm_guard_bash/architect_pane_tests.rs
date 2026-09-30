@@ -467,17 +467,18 @@ fn a_pane_listing_run_is_classified() {
             &stale_pm,
             Ok(vec![true, false]),
         ),
-        (
-            ran(true, custom, ""),
-            &unreadable,
-            &supervisor,
-            Ok(vec![true, false]),
-        ),
+        // #8878: a custom-session Architect, lineage and sidecars unreadable.
         (
             ran(true, custom, ""),
             &unreadable,
             &no_sidecars,
             Err(neither.into()),
+        ),
+        (
+            ran(true, custom, ""),
+            &unreadable,
+            &supervisor,
+            Ok(vec![true, false]),
         ),
         (
             ran(true, text, ""),
@@ -486,8 +487,8 @@ fn a_pane_listing_run_is_classified() {
             Err(neither.into()),
         ),
     ];
-    for (listed, lineage, sidecars, want) in cases {
+    for (row, (listed, lineage, sidecars, want)) in cases.into_iter().enumerate() {
         let found = architect_marks(lineage, || sidecars.clone());
-        assert_eq!(marks(classify_listing(listed, &found)), want);
+        assert_eq!(marks(classify_listing(listed, &found)), want, "row {row}");
     }
 }
