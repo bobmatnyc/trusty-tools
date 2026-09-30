@@ -128,8 +128,13 @@ fn tm_doctor_reports_the_absent_daemon_as_exactly_one_row() {
 fn tm_doctor_output_never_names_a_daemon_port() {
     let (ok, stdout, stderr) = run_doctor_with_no_daemon();
     assert!(ok, "`tm doctor` exited non-zero.\nstderr:\n{stderr}");
+    // #8926: the `tcp_listeners` row reports live TCP listeners by port on
+    // purpose; on a host running the tm daemon it names 7880 until #6288.
     assert!(
-        !stdout.contains("7880"),
+        !stdout
+            .lines()
+            .filter(|line| !line.contains("tcp_listeners"))
+            .any(|line| line.contains("7880")),
         "doctor output names port 7880.\nstdout:\n{stdout}"
     );
 }

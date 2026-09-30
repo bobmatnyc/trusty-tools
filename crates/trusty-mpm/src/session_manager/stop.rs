@@ -68,7 +68,12 @@ impl SessionManager {
     /// [`StopCause::Deliberate`]. Unlike the boot reconciler's `get_or_insert`,
     /// this ASSIGNS: a session that was running until this call has no earlier
     /// cause worth preserving.
+    /// #8942: a live record of a protected kind is refused with
+    /// [`ManagedError::InvalidState`] before any tmux call, and a kill-floor
+    /// refusal ([`ManagedError::KillRefused`]) returns before the record moves.
     /// Test: `stop_records_deliberate_cause` in `stop_cause_tests`;
+    /// `stop_refuses_a_supervisor_record_and_never_signals_it`,
+    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`;
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,
     /// `reap_dead_managed_sessions_marks_stopped` in
@@ -89,11 +94,14 @@ impl SessionManager {
                 ),
             ));
         }
+        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Stop)?;
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
         // Graceful teardown (#1975): give the claude process a SIGTERM + grace
         // window to checkpoint before its tmux pane is reclaimed, instead of an
         // abrupt `kill_session`. The snapshot above already preserved the pane.
-        self.graceful_terminate_runtime(&record.tmux_name).await;
+        // #8942: a kill-floor refusal aborts here, before the record moves.
+        self.graceful_terminate_runtime(&record.tmux_name, "SessionManager::stop")
+            .await?;
         record.state = ManagedSessionState::Stopped;
         // #6194: the caller names the cause; `stop` supplies Deliberate for
         // every "end this session" request, and an automatic resume must not

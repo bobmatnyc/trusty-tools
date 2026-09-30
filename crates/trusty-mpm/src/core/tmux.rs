@@ -949,6 +949,33 @@ pub fn send_command_line(
     send_line(tmux_bin, target, text)
 }
 
+/// Type a composed `claude` launch line at a fresh session's shell (#8308).
+///
+/// Why: `tm launch`, `tm connect`, the in-place `tm session start`,
+/// `DaemonClient::launch_session`/`connect_session` and the Architect launch in
+/// `tm fleet` each typed their line through the unguarded [`send_line`], so a
+/// line past [`MAX_PANE_COMMAND_BYTES`] lost its tail in the tty with no error
+/// — the #8233 class, which that fix closed only for the managed path. The six
+/// now start `claude` through `runtime::cli_launch::send_spec_launch`, whose
+/// short line this types, so a line that grew is refused, never truncated.
+/// What: [`send_command_line`] against `TmuxTarget::session(session)`. `Err`
+/// carries the refusal (`InvalidInput`, nothing typed), a spawn failure, or a
+/// non-zero `send-keys` exit with tmux's stderr.
+/// Test: `launch_line_over_the_limit_is_refused_before_tmux_runs`,
+/// `launch_line_within_the_limit_reaches_tmux`,
+/// `cli_launch_paths_type_through_the_guard`.
+pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> std::io::Result<()> {
+    let output = send_command_line(tmux_bin, &TmuxTarget::session(session), line)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "tmux send-keys exited {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
 /// Type `text` into a tmux pane, then press Enter (#2398 consolidation).
 ///
 /// Why: every call site that starts `claude` in a freshly-created pane needs

@@ -1204,7 +1204,11 @@ impl DaemonState {
     /// guard's own comment in the body for why a missing `tmux_name` proves
     /// nothing while a resume is recreating that very session.
     ///
-    /// Test: `reap_dead_managed_sessions_marks_stopped`,
+    /// #8942 — a protected-kind record goes `Stopped` record-only
+    /// ([`crate::session_manager::SessionManager::mark_stopped_record_only`]).
+    ///
+    /// Test: `the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown`,
+    /// `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,
     /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
@@ -1238,7 +1242,14 @@ impl DaemonState {
                     );
                     continue;
                 }
-                match mgr.stop_with_cause(&r.id, cause).await {
+                // #8942: the Architect's pane is gone, so its record says so,
+                // but no teardown runs for it.
+                let stopped = if r.kind.is_protected() {
+                    mgr.mark_stopped_record_only(&r.id, cause).await
+                } else {
+                    mgr.stop_with_cause(&r.id, cause).await
+                };
+                match stopped {
                     Ok(_) => tracing::info!(
                         id = %r.id,
                         name = %r.tmux_name,

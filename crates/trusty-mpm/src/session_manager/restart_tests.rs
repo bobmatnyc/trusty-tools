@@ -40,7 +40,9 @@ async fn graceful_terminate_runtime_signals_then_kills() {
         .unwrap()
         .push("tm-drain-1".to_string());
 
-    mgr.graceful_terminate_runtime("tm-drain-1").await;
+    mgr.graceful_terminate_runtime("tm-drain-1", "test")
+        .await
+        .expect("drain");
 
     assert_eq!(
         *fake.interrupt_calls.lock().unwrap(),
@@ -69,7 +71,9 @@ async fn graceful_terminate_runtime_noop_when_session_gone() {
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     // Do NOT seed "tm-already-gone" — the session_exists guard must short-circuit.
-    mgr.graceful_terminate_runtime("tm-already-gone").await;
+    mgr.graceful_terminate_runtime("tm-already-gone", "test")
+        .await
+        .expect("no-op");
 
     assert!(
         fake.interrupt_calls.lock().unwrap().is_empty(),

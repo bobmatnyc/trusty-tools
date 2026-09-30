@@ -13,10 +13,9 @@
 //! router wiring.
 //! Test: This module IS the test.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::{Json, Router, extract::Path, http::StatusCode as AxumStatus, routing::get};
-use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use crate::api::server::agent_stores::stores_at;
@@ -53,35 +52,32 @@ description = "test"
 name = "ghost-kb"
 "#;
 
-/// Mock daemon serving both the trusty-search status route and the
-/// trusty-memory drawers route. `bob-kb` / `owner-profile` exist; everything
-/// else 404s.
-async fn mock_daemon() -> String {
-    let app = Router::new().route(
-        "/indexes/{id}/status",
-        get(|Path(id): Path<String>| async move {
-            if id == "bob-kb" {
-                (
-                    AxumStatus::OK,
-                    Json(serde_json::json!({
-                        "index_id": "bob-kb",
-                        "chunk_count": 552,
-                        // Inert: nothing in this file asserts on `root_path`.
-                        // A neutral path keeps a developer's home directory out
-                        // of the fixture (#6286 review, finding 8).
-                        "root_path": "/tmp/trusty-agents/bob-kb",
-                        "status": "ready",
-                    })),
-                )
+/// Mock trusty-search answering `search.index.status` on a scratch socket
+/// (#6285). `bob-kb` exists; everything else is refused not-found.
+async fn mock_daemon() -> crate::uds_mock::MockMemoryDaemon {
+    crate::uds_mock::spawn(|method: &str, params: serde_json::Value| {
+        let method = method.to_string();
+        Box::pin(async move {
+            assert_eq!(method, "search.index.status", "unexpected method");
+            if params["index_id"] == "bob-kb" {
+                Ok(serde_json::json!({
+                    "index_id": "bob-kb",
+                    "chunk_count": 552,
+                    // Inert: nothing in this file asserts on `root_path`.
+                    // A neutral path keeps a developer's home directory out
+                    // of the fixture (#6286 review, finding 8).
+                    "root_path": "/tmp/trusty-agents/bob-kb",
+                    "status": "ready",
+                }))
             } else {
-                (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
+                Err(crate::uds_mock::RpcError::new(
+                    trusty_common::search_rpc::CODE_NOT_FOUND,
+                    "no such index",
+                ))
             }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
+        })
+    })
+    .await
 }
 
 /// A stub trusty-memory answering the palace-existence probe (#6286).
@@ -140,7 +136,7 @@ async fn stores_route_reports_connected_binding_with_stats() {
     let resp = stores_at(
         &[dir.path().to_path_buf()],
         "izzie",
-        Some(&base),
+        Some(base.socket()),
         Some(memory.socket()),
     )
     .await;
@@ -166,7 +162,7 @@ async fn stores_route_reports_missing_index_with_reason() {
     let resp = stores_at(
         &[dir.path().to_path_buf()],
         "ghosty",
-        Some(&base),
+        Some(base.socket()),
         Some(memory.socket()),
     )
     .await;

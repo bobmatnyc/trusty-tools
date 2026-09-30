@@ -5,8 +5,9 @@
 //! the daemon detect a stopped session and mark it as such rather than reporting
 //! a hollow tmux window as still active.
 //! What: [`find_claude_pid_in_tmux`] resolves the `claude` PID under a tmux
-//! pane's shell, and [`is_process_alive`] checks whether a recorded PID still
-//! refers to a live process.
+//! pane's shell, [`pane_claude`] answers whether a `claude` runs in a pane
+//! without reading "cannot tell" as "no", and [`is_process_alive`] checks
+//! whether a recorded PID still refers to a live process.
 //! Test: `cargo test -p trusty-mpm-core process` covers liveness for the
 //! current process, a guaranteed-dead PID, and a bogus tmux session name.
 
@@ -117,6 +118,65 @@ fn claude_child_of(shell_pid: u32) -> Option<u32> {
         })
 }
 
+/// Whether a `claude` runs in a tmux pane, as far as can be proven (#8942).
+///
+/// Why: a check that grants protection must fail closed, and a `bool` probe
+/// reads every "cannot tell" as "no claude".
+/// What: `Present`; `Absent` when every lookup answered and none names
+/// `claude`; `Unknown` when a lookup failed.
+/// Test: `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneClaude {
+    /// A process in the pane is named `claude`.
+    Present,
+    /// Proven: no process in the pane is named `claude`.
+    Absent,
+    /// The pane pid, a child list or a process name could not be read.
+    Unknown,
+}
+
+/// Whether a `claude` runs in tmux session `session_name`'s pane (#8942).
+///
+/// Why: [`find_claude_pid_in_tmux`] answers `None` for an unreadable pane, a
+/// process-table miss and a pane whose own process is `claude`, so it cannot
+/// prove that no `claude` runs there.
+/// What: one probe of the pane process itself, its children, and the
+/// children of a #2997 disclaim wrapper among them. `Present` on the first
+/// `claude` name; `Unknown` when the pane pid, a child list or a name cannot
+/// be read; else `Absent`.
+/// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
+/// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+pub fn pane_claude(session_name: &str) -> PaneClaude {
+    let Some(pane_pid) = tmux_pane_pid(session_name) else {
+        return PaneClaude::Unknown;
+    };
+    let mut level = vec![pane_pid];
+    let mut unknown = false;
+    // Depth 0: the pane process; 1: its children; 2: a wrapper's children.
+    for depth in 0..3 {
+        let mut next = Vec::new();
+        for pid in level {
+            match process_name_checked(pid) {
+                Some(true) => return PaneClaude::Present,
+                Some(false) => {}
+                None => unknown = true,
+            }
+            if depth == 0 || (depth == 1 && is_disclaim_wrapper(pid)) {
+                match child_pids(pid) {
+                    Ok(children) => next.extend(children),
+                    Err(_) => unknown = true,
+                }
+            }
+        }
+        level = next;
+    }
+    if unknown {
+        PaneClaude::Unknown
+    } else {
+        PaneClaude::Absent
+    }
+}
+
 /// The direct children of `pid`, read from the process table (#8938).
 ///
 /// Why: every `claude` lookup resolves through [`find_claude_pid_in_tmux`] —
@@ -204,20 +264,28 @@ fn process_args(pid: u32) -> Option<String> {
 /// substring match accepts both `claude` and `claude-code`.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn process_name_contains_claude(pid: u32) -> bool {
+    process_name_checked(pid).unwrap_or(false)
+}
+
+/// [`process_name_contains_claude`], with `None` when the name cannot be read
+/// (#8942: [`pane_claude`] must tell a failed lookup from "not claude").
+fn process_name_checked(pid: u32) -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            return comm.to_ascii_lowercase().contains("claude");
+            return Some(comm.to_ascii_lowercase().contains("claude"));
         }
     }
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output();
     match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .to_ascii_lowercase()
-            .contains("claude"),
-        _ => false,
+        Ok(out) if out.status.success() => Some(
+            String::from_utf8_lossy(&out.stdout)
+                .to_ascii_lowercase()
+                .contains("claude"),
+        ),
+        _ => None,
     }
 }
 

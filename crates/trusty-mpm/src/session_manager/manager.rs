@@ -78,6 +78,15 @@ pub enum ManagedError {
     #[error("invalid state transition for session {0}: {1}")]
     InvalidState(String, String),
 
+    /// The #8942 kill floor refused to signal or kill a tmux session by name.
+    ///
+    /// Why: typed, so a teardown aborts before it touches the workspace or
+    /// the record instead of reading the refusal as "already gone".
+    /// What: carries the floor's refusal text, which names the requester.
+    /// Test: `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    #[error("kill refused: {0}")]
+    KillRefused(String),
+
     /// Another path is already resuming this session (#8233 item 4).
     ///
     /// Why: distinct from [`InvalidState`](Self::InvalidState), which says the
@@ -981,6 +990,8 @@ impl SessionManager {
                 ));
             }
         }
+        // #8942: the Architect is relaunched by `tm fleet init`, never here.
+        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Resume)?;
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
         // below (`session_exists_checked`'s `list-sessions` probe), so a cold
@@ -1025,7 +1036,9 @@ impl SessionManager {
             );
         } else {
             // Best-effort guard: clear any stale entry the driver may still report
-            // before creating the replacement session.
+            // before creating the replacement session. #8942: a name the floor
+            // cannot clear refuses the whole resume, never only the kill.
+            self.kill_gate(&record.tmux_name, "SessionManager::resume")?;
             if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
                 warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
             }

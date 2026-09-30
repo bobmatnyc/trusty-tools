@@ -11,18 +11,20 @@
 //! What: always fetches the report-only dry run FIRST and prints it — index id,
 //! root, chunk count, vector count, current and target precision, on-disk
 //! bytes — then stops (`--dry-run`), or asks for confirmation (unless `--yes`)
-//! before issuing the real `POST /indexes/:id/quantize`.
+//! before issuing the real `search.index.quantize` call. Both go over the
+//! daemon's Unix socket (#6285); a missing socket fails closed, naming its path.
 //!
 //! Test: `tests::render_report_names_the_index_and_chunk_count`,
 //! `tests::render_report_marks_unknown_counts`.
 
-use super::daemon_utils::daemon_base_url;
 use super::explicit_target::{flag_only_index, IndexIdSource};
 use super::format::format_with_commas;
 use super::index_resolve::{print_index_header, resolve_index};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 use colored::Colorize;
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
+use trusty_search::service::rpc::writes::METHOD_INDEX_QUANTIZE;
 
 /// Flags for `trusty-search quantize`.
 ///
@@ -69,15 +71,14 @@ pub async fn handle_quantize(
     let (index_id, warned) = resolve_index(&explicit)?;
     print_index_header(&index_id, warned);
 
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
-    let client = trusty_common::server::daemon_http_client()?;
-    let url = format!("{}/indexes/{}/quantize", base, index_id);
+    // #6285: the socket, never the retiring HTTP listener.
+    let client = DaemonClient::resolve()?;
+    crate::commands::daemon_guard::ensure_daemon_up(&client).await?;
 
     // Always look before touching anything: the dry run is both the operator's
     // confirmation text and the pre-flight check that the index can be
     // converted at all.
-    let preview = post_quantize(&client, &url, to, true).await?;
+    let preview = post_quantize(&client, &index_id, to, true).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&preview)?);
     } else {
@@ -109,7 +110,7 @@ pub async fn handle_quantize(
         return Ok(());
     }
 
-    let applied = post_quantize(&client, &url, to, false).await?;
+    let applied = post_quantize(&client, &index_id, to, false).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&applied)?);
     } else {
@@ -119,37 +120,35 @@ pub async fn handle_quantize(
     Ok(())
 }
 
-/// Issue one `POST /indexes/:id/quantize` and return its JSON body.
+/// Issue one `search.index.quantize` call and return its JSON result.
 ///
 /// Why: the dry run and the applied run differ only by one field, so they share
 /// one request builder — a second copy is how the two drift apart.
-/// What: posts `{quant, dry_run}`; a non-2xx status is surfaced with the
-/// daemon's own `error` string rather than a bare status code, because every
+/// What: sends `{index_id, body: {quant, dry_run}}`. A refusal is surfaced with
+/// the daemon's own class and message rather than a bare code, because every
 /// refusal this route emits (unknown index, reindex in flight, no vector store)
 /// is actionable only if the operator can read which one fired.
-/// Test: covered through `handle_quantize` against a live daemon.
+/// Test: `post_quantize_sends_the_socket_params_and_returns_the_result`,
+/// `post_quantize_reports_the_daemons_refusal`.
 async fn post_quantize(
-    client: &reqwest::Client,
-    url: &str,
+    client: &DaemonClient,
+    index_id: &str,
     to: &str,
     dry_run: bool,
 ) -> Result<serde_json::Value> {
-    let resp = client
-        .post(url)
-        .json(&serde_json::json!({ "quant": to, "dry_run": dry_run }))
-        .send()
+    let params = serde_json::json!({
+        "index_id": index_id,
+        "body": { "quant": to, "dry_run": dry_run },
+    });
+    // A whole-arena re-encode can outrun the default call budget.
+    let budget = std::time::Duration::from_secs(30 * 60);
+    client
+        .call_with_timeout(METHOD_INDEX_QUANTIZE, params, budget)
         .await
-        .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
-    if !status.is_success() {
-        let msg = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("no error message");
-        anyhow::bail!("quantize refused (HTTP {status}): {msg}");
-    }
-    Ok(body)
+        .map_err(|e: DaemonCallError| match e.message() {
+            Some(_) => anyhow::anyhow!("quantize {e}"),
+            None => anyhow::Error::new(e),
+        })
 }
 
 /// The label `RequantizeReport::current` carries for an operator-supplied value.
@@ -255,6 +254,57 @@ mod tests {
         let out = render_report(&body);
         assert!(out.contains("chunks:   ?"), "{out}");
         assert!(out.contains("(2 unmapped, skipped)"), "{out}");
+    }
+
+    /// #6285: the CLI sends `search.index.quantize` over the socket with the
+    /// params the daemon decodes, and returns the daemon's result unchanged.
+    #[tokio::test]
+    async fn post_quantize_sends_the_socket_params_and_returns_the_result() {
+        let daemon = crate::commands::mock_socket::mock_daemon(|method, params| {
+            assert_eq!(method, METHOD_INDEX_QUANTIZE);
+            Ok(serde_json::json!({ "echo": params }))
+        })
+        .await;
+        let got = post_quantize(&daemon.client, "idx", "f16", true)
+            .await
+            .expect("the mock answers");
+        assert_eq!(got["echo"]["index_id"], "idx");
+        assert_eq!(got["echo"]["body"]["quant"], "f16");
+        assert_eq!(got["echo"]["body"]["dry_run"], true);
+    }
+
+    /// #6285: a refusal reaches the operator with the daemon's class and its
+    /// own message, the same information the `HTTP 409: <error>` line carried.
+    #[tokio::test]
+    async fn post_quantize_reports_the_daemons_refusal() {
+        let daemon = crate::commands::mock_socket::mock_daemon(|_, _| {
+            Err(trusty_common::uds::server::RpcError::new(
+                trusty_search::service::rpc::error::CODE_CONFLICT,
+                "a reindex is in progress for this index",
+            ))
+        })
+        .await;
+        let err = post_quantize(&daemon.client, "idx", "f16", false)
+            .await
+            .expect_err("the mock refuses")
+            .to_string();
+        assert!(
+            err.contains("conflict") && err.contains("a reindex is in progress"),
+            "{err}"
+        );
+    }
+
+    /// #6285: with no daemon on the socket the call fails closed and names the
+    /// socket; it never retries over TCP.
+    #[tokio::test]
+    async fn post_quantize_fails_closed_on_a_missing_socket() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("none.sock");
+        let err = post_quantize(&DaemonClient::at(&socket), "idx", "f16", true)
+            .await
+            .expect_err("nothing is listening")
+            .to_string();
+        assert!(err.contains(&socket.display().to_string()), "{err}");
     }
 
     /// `--to f32` and the report's `"f32 (none)"` name one precision; the

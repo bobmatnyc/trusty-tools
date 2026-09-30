@@ -168,6 +168,7 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store
         .write()
@@ -1063,6 +1064,7 @@ async fn reap_aged_ephemeral_spares_a_worktree_holding_unsaved_work() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
