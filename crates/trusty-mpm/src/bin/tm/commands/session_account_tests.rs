@@ -120,3 +120,78 @@ fn pin_targets_names_a_new_record_from_the_origin() {
     let expected = trusty_mpm::project::derive_name_from_url(origin).expect("a name");
     assert_eq!(targets, vec![(expected, origin.to_string())]);
 }
+
+/// 🔴 #8914 MEDIUM: the project-wide re-pin is printed with the account it
+/// replaces.
+#[test]
+fn pin_notice_names_the_account_it_replaces() {
+    assert_eq!(
+        pin_notice("itinerary", Some("bob-duetto"), "bobmatnyc"),
+        "tm: every session of project 'itinerary' now runs as gh account 'bobmatnyc' \
+         (was 'bob-duetto')"
+    );
+    assert!(pin_notice("itinerary", None, "bobmatnyc").ends_with("(was unpinned)"));
+    assert!(pin_notice("itinerary", Some(" "), "bobmatnyc").ends_with("(was unpinned)"));
+}
+
+/// 🔴 #8914 MEDIUM: an SSH origin is named as outside the pin; HTTPS is not.
+#[test]
+fn transport_notice_says_when_git_uses_ssh() {
+    for origin in [
+        "git@github.com:acme/itinerary.git",
+        "ssh://git@github.com/acme/itinerary.git",
+    ] {
+        let notice = transport_notice(origin, "bobmatnyc");
+        assert!(
+            notice.contains("uses SSH") && notice.contains("does not pin"),
+            "{notice}"
+        );
+    }
+    let https = transport_notice("https://github.com/acme/itinerary", "bobmatnyc");
+    assert!(https.contains("HTTPS git as 'bobmatnyc'"), "{https}");
+}
+
+/// The stdin token is one trimmed token.
+#[test]
+fn read_stdin_token_trims_one_token() {
+    let token = read_stdin_token("  ghp_abc123\n".as_bytes()).expect("one token");
+    assert_eq!(token, "ghp_abc123");
+}
+
+/// FAIL-OPEN CHECK: empty stdin, or two words, is refused rather than stored.
+#[test]
+fn read_stdin_token_refuses_empty_or_spaced_input() {
+    for input in ["", " \n", "ghp_a ghp_b\n"] {
+        let err = read_stdin_token(input.as_bytes()).expect_err("must be refused");
+        assert!(err.to_string().contains("exactly one token"), "{err}");
+    }
+}
+
+/// `--account-token-stdin` needs `--account`: a token for no account is
+/// refused at parse time.
+#[test]
+fn cli_account_token_stdin_requires_an_account() {
+    let bare = Cli::try_parse_from([
+        "tm",
+        "sessions",
+        "new",
+        "/w",
+        "--task",
+        "t",
+        "--account-token-stdin",
+    ]);
+    assert!(bare.is_err(), "a token for no account must not parse");
+    let cli = Cli::try_parse_from([
+        "tm",
+        "--account",
+        "bobmatnyc",
+        "--account-token-stdin",
+        "sessions",
+        "new",
+        "/w",
+        "--task",
+        "t",
+    ])
+    .expect("parses");
+    assert!(cli.account_token_stdin);
+}
