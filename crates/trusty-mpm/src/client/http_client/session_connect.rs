@@ -37,7 +37,7 @@ impl DaemonClient {
     /// `launch_session_writes_nothing_when_daemon_unreachable`,
     /// `launch_session_prepares_under_the_pinned_home_before_tmux`.
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: the operator's config decides the renderer (see `client_claude_cmd`).
+        // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
         // #8719: probe first, so an unreachable daemon fails the launch before
         // prep writes anything to the project or the home.
@@ -100,7 +100,7 @@ impl DaemonClient {
         // explicit cleanup is performed.
         let prompt =
             crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
-        let claude_cmd = {
+        let claude_spec = {
             let path = std::env::temp_dir().join(format!(
                 "trusty-mpm-system-prompt-{}.txt",
                 uuid::Uuid::new_v4()
@@ -110,10 +110,14 @@ impl DaemonClient {
             // check can read it. Hand-building it here is what left this launch
             // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => client_claude_cmd(config_root.as_deref(), Some(&path)),
+                Ok(()) => client_claude_spec(
+                    std::path::Path::new(workdir),
+                    config_root.as_deref(),
+                    Some(&path),
+                ),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    client_claude_cmd(config_root.as_deref(), None)
+                    client_claude_spec(std::path::Path::new(workdir), config_root.as_deref(), None)
                 }
             }
         };
@@ -151,18 +155,8 @@ impl DaemonClient {
                 // `tracing::error!` `warn_if_options_unverified` emits is the
                 // channel every one of them can observe.
                 crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
-                let send = crate::core::tmux::send_line(
-                    None,
-                    &crate::core::tmux::TmuxTarget::session(&body.name),
-                    &claude_cmd,
-                )
-                .map(|output| output.status);
-                if !matches!(send, Ok(s) if s.success()) {
-                    return Err(anyhow::anyhow!(
-                        "tmux session {} created but failed to start claude",
-                        body.name
-                    ));
-                }
+                // #8308: the launch travels in a spec; the pane types a short line.
+                self.send_client_spec(&body.name, &claude_spec)?;
             }
             Ok(_) | Err(_) => {
                 return Err(anyhow::anyhow!(
@@ -194,7 +188,7 @@ impl DaemonClient {
     /// not artifact deployment. Returns the daemon-assigned tmux session name.
     /// Test: `connect_session_errors_when_daemon_unreachable`.
     pub async fn connect_session(&self, workdir: &str) -> anyhow::Result<String> {
-        // #8405: the operator's config decides the renderer (see `client_claude_cmd`).
+        // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
         #[derive(Deserialize)]
         struct Body {
@@ -222,7 +216,7 @@ impl DaemonClient {
         // skips the latter (`prepare_session`).
         let prompt =
             crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
-        let claude_cmd = {
+        let claude_spec = {
             let path = std::env::temp_dir().join(format!(
                 "trusty-mpm-system-prompt-{}.txt",
                 uuid::Uuid::new_v4()
@@ -232,10 +226,14 @@ impl DaemonClient {
             // check can read it. Hand-building it here is what left this launch
             // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => client_claude_cmd(config_root.as_deref(), Some(&path)),
+                Ok(()) => client_claude_spec(
+                    std::path::Path::new(workdir),
+                    config_root.as_deref(),
+                    Some(&path),
+                ),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    client_claude_cmd(config_root.as_deref(), None)
+                    client_claude_spec(std::path::Path::new(workdir), config_root.as_deref(), None)
                 }
             }
         };
@@ -262,18 +260,8 @@ impl DaemonClient {
                 // #3386 review: see `launch_session`'s identical notice above.
                 crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
                 if !already_running {
-                    let send = crate::core::tmux::send_line(
-                        None,
-                        &crate::core::tmux::TmuxTarget::session(&body.name),
-                        &claude_cmd,
-                    )
-                    .map(|output| output.status);
-                    if !matches!(send, Ok(s) if s.success()) {
-                        return Err(anyhow::anyhow!(
-                            "tmux session {} created but failed to start claude",
-                            body.name
-                        ));
-                    }
+                    // #8308: same spec carrier as `launch_session`.
+                    self.send_client_spec(&body.name, &claude_spec)?;
                 }
             }
             Ok(_) | Err(_) => {
@@ -286,23 +274,44 @@ impl DaemonClient {
         }
         Ok(body.name)
     }
+
+    /// Write `spec` under this client's home and start `claude` in `session`
+    /// from it (#8308).
+    ///
+    /// What: [`crate::runtime::cli_launch::send_spec_launch`] into the spec
+    /// directory under the pinned home (#8545) or the process home; the error
+    /// names the session and the step that failed.
+    fn send_client_spec(
+        &self,
+        session: &str,
+        spec: &crate::runtime::launch_spec::LaunchSpec,
+    ) -> anyhow::Result<()> {
+        let home = self.home.clone().or_else(dirs::home_dir);
+        let spec_dir = crate::runtime::cli_launch::spec_dir(home.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("tmux session {session} created but no home holds its launch spec")
+        })?;
+        crate::runtime::cli_launch::send_spec_launch(session, spec, &spec_dir).map_err(|e| {
+            anyhow::anyhow!("tmux session {session} created but failed to start claude: {e}")
+        })
+    }
 }
 
-/// The `claude` line the daemon client types into a fresh pane (#8405).
+/// The launch spec the daemon client starts a fresh pane with (#8405, #8308).
 ///
 /// Why: the one seam where `DaemonClient::launch_session` / `connect_session`
 /// turn the operator's config into the renderer, split out so a test can drive
 /// it from a config root.
-/// What: [`crate::core::model_inject::build_client_session_command_configured`]
-/// with the renderer
-/// [`crate::core::alt_screen::configured_alternate_screen_in`] reads from
-/// `config_root`.
-/// Test: `client_claude_cmd_follows_the_configured_renderer`.
-fn client_claude_cmd(
+/// What: [`crate::runtime::cli_launch::client_spec`] rooted at `cwd`, with the
+/// renderer [`crate::core::alt_screen::configured_alternate_screen_in`] reads
+/// from `config_root`.
+/// Test: `client_claude_spec_follows_the_configured_renderer`.
+fn client_claude_spec(
+    cwd: &std::path::Path,
     config_root: Option<&std::path::Path>,
     prompt_file: Option<&std::path::Path>,
-) -> String {
-    crate::core::model_inject::build_client_session_command_configured(
+) -> crate::runtime::launch_spec::LaunchSpec {
+    crate::runtime::cli_launch::client_spec(
+        cwd,
         prompt_file,
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     )
@@ -313,11 +322,13 @@ mod renderer_tests {
     /// #8405: both `DaemonClient` launch paths build their line here, so this
     /// pins the seam in both directions. Fails if it ignores the config.
     #[test]
-    fn client_claude_cmd_follows_the_configured_renderer() {
-        for (alternate_screen, want) in [
-            (true, "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "),
-            (false, "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "),
-        ] {
+    fn client_claude_spec_follows_the_configured_renderer() {
+        let cwd = std::path::Path::new("/w");
+        for (alternate_screen, value) in [(true, "0"), (false, "1")] {
+            let want = (
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+                value.to_owned(),
+            );
             let root = tempfile::tempdir().expect("tempdir");
             std::fs::write(
                 root.path().join("config.yaml"),
@@ -325,8 +336,8 @@ mod renderer_tests {
             )
             .expect("write config");
             for prompt in [None, Some(std::path::Path::new("/tmp/p.txt"))] {
-                let line = super::client_claude_cmd(Some(root.path()), prompt);
-                assert!(line.contains(want), "want {want:?} in: {line}");
+                let spec = super::client_claude_spec(cwd, Some(root.path()), prompt);
+                assert!(spec.env_set.contains(&want), "want {want:?} in: {spec:?}");
             }
         }
     }
@@ -336,13 +347,14 @@ mod renderer_tests {
     /// supervisor session carries its `TRUSTY_MPM_SESSION_PROFILE`. The line
     /// must unset it; both launch paths share it.
     #[test]
-    fn client_claude_cmd_never_passes_on_the_profile_stamp() {
+    fn client_claude_spec_never_passes_on_the_profile_stamp() {
         for prompt in [None, Some(std::path::Path::new("/tmp/p.txt"))] {
-            let line = super::client_claude_cmd(None, prompt);
-            let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&line);
+            let spec = super::client_claude_spec(std::path::Path::new("/w"), None, prompt);
             assert!(
-                unset.contains(&"TRUSTY_MPM_SESSION_PROFILE"),
-                "the daemon-client line must unset the profile stamp: {line}"
+                spec.env_unset
+                    .iter()
+                    .any(|n| n == "TRUSTY_MPM_SESSION_PROFILE"),
+                "the daemon-client launch must unset the profile stamp: {spec:?}"
             );
         }
     }
