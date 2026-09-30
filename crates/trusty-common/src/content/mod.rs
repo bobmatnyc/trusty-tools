@@ -7,7 +7,8 @@
 //! What: [`resolve`](crate::content::resolve) picks one source, in this precedence:
 //!
 //! 1. the dev override — a trusty-tools checkout, named explicitly or found
-//!    by walking up from a start directory
+//!    at the enclosing repository root, and trusted only when it carries
+//!    `.git`, a `[workspace]` `Cargo.toml` and the current user's ownership
 //!    ([`DevOverride`](crate::content::DevOverride));
 //! 2. the installed bundle — `content-lock.toml` in the cache directory pins a
 //!    tag and a sha256; the bundle is hashed and refused on any mismatch.
@@ -30,6 +31,7 @@ mod lock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_ENTRIES, MAX_UNPACKED_BYTES};
 pub use dev::{DEV_CLASS_SOURCES, find_dev_checkout};
 pub use error::ContentError;
 pub use lock::{ContentLock, TAG_PREFIX};
@@ -53,13 +55,16 @@ pub fn default_cache_dir() -> Option<PathBuf> {
 /// anywhere else must never read a stray tree.
 /// What: `Off` skips the override; `DetectFrom` walks up from a directory
 /// (normally the cwd) with [`find_dev_checkout`] and falls through to the
-/// installed bundle when no checkout is found; `At` names a checkout that must
-/// be complete, and fails with [`ContentError::NotACheckout`] rather than
-/// falling through when it is not.
+/// installed bundle when no trusted checkout is found; `At` names a checkout
+/// that must pass the same checks, and fails with
+/// [`ContentError::NotACheckout`] or [`ContentError::UntrustedCheckout`]
+/// rather than falling through when it does not.
 /// Test: `dev_override_wins_over_a_valid_installed_bundle`,
 /// `explicit_dev_root_that_is_not_a_checkout_fails_closed`,
+/// `explicit_dev_root_without_a_git_marker_is_untrusted`,
 /// `detect_outside_a_checkout_uses_the_installed_bundle`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DevOverride {
     /// Never read a checkout.
     Off,
@@ -69,8 +74,10 @@ pub enum DevOverride {
     At(PathBuf),
 }
 
-/// Inputs to [`resolve`].
+/// Inputs to [`resolve`]; `#[non_exhaustive]`, so build it with
+/// [`ResolveOptions::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolveOptions {
     /// Directory holding `content-lock.toml` and the pinned `<tag>.tar.gz`.
     pub cache_dir: PathBuf,
@@ -78,8 +85,19 @@ pub struct ResolveOptions {
     pub dev: DevOverride,
 }
 
+impl ResolveOptions {
+    /// Options reading the lock and bundle from `cache_dir` under `dev`.
+    pub fn new(cache_dir: impl Into<PathBuf>, dev: DevOverride) -> Self {
+        Self {
+            cache_dir: cache_dir.into(),
+            dev,
+        }
+    }
+}
+
 /// Where resolved content comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContentSource {
     /// A trusty-tools checkout, read from its working tree.
     DevCheckout {
@@ -162,9 +180,11 @@ impl ResolvedContent {
         &self.source
     }
 
-    /// Reads one file by bundle path.
+    /// Reads one file by bundle path. In both modes only a regular file is
+    /// served; anything else is [`ContentError::NotFound`].
     ///
-    /// Test: `read_rejects_a_climbing_path`, `read_of_an_absent_path_is_not_found`.
+    /// Test: `read_rejects_a_climbing_path`, `read_of_an_absent_path_is_not_found`,
+    /// `dev_read_serves_only_regular_files`.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, ContentError> {
         let key =
             bundle::relative_key(Path::new(path)).ok_or_else(|| ContentError::InvalidPath {
@@ -175,14 +195,7 @@ impl ResolvedContent {
         };
         match &self.backing {
             Backing::Memory(files) => files.get(&key).cloned().ok_or_else(not_found),
-            Backing::Checkout(root) => {
-                let file = dev::file_for(root, &key).ok_or_else(not_found)?;
-                match std::fs::read(&file) {
-                    Ok(bytes) => Ok(bytes),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
-                    Err(source) => Err(ContentError::Io { path: file, source }),
-                }
-            }
+            Backing::Checkout(root) => dev::read_regular(root, &key)?.ok_or_else(not_found),
         }
     }
 

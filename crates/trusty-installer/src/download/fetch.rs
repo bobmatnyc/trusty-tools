@@ -137,20 +137,21 @@ pub async fn download_and_verify(
     // Read and parse the expected hex digest (strip the optional filename suffix).
     let sha_content = std::fs::read_to_string(&sha_path)
         .with_context(|| format!("reading checksum file {}", sha_path.display()))?;
-    let expected_hex = parse_sha256_line(&sha_content)?;
+    let expected = parse_sha256_line(&sha_content)?;
 
     // Compute the actual digest.
-    let actual_hex = sha256_file(&tar_path)?;
+    let actual = sha256_file(&tar_path)?;
 
     // #5518: a typed variant, not a string — the caller must be able to tell a
     // tamper signal from a routine "no asset for this platform".
-    if actual_hex != expected_hex {
-        return Err(DownloadError::ChecksumMismatch {
+    // #8378: compared as validated digests, never as raw strings.
+    actual
+        .verify(&expected)
+        .map_err(|_| DownloadError::ChecksumMismatch {
             archive: archive_name.to_owned(),
-            expected: expected_hex,
-            actual: actual_hex,
-        });
-    }
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        })?;
 
     Ok(tar_path)
 }
@@ -162,11 +163,11 @@ pub async fn download_and_verify(
 ///
 /// What: Delegates to trusty-common's
 /// `integrity::Sha256Digest::from_sidecar`, the one parse ADR-0064 decision 5
-/// (i) allows (#8378), and returns its lowercase hex.
+/// (i) allows (#8378).
 ///
 /// Test: `tests::parse_sha256_line_*`.
-pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
-    Ok(Sha256Digest::from_sidecar(content)?.as_hex().to_owned())
+pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<Sha256Digest> {
+    Ok(Sha256Digest::from_sidecar(content)?)
 }
 
 /// Compute the SHA-256 hex digest of a file synchronously.
@@ -176,13 +177,13 @@ pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
 /// an async reader.
 ///
 /// What: Delegates to trusty-common's `integrity::Sha256Digest::of_file`
-/// (#8378) and returns the lowercase hex digest.
+/// (#8378).
 ///
 /// Test: `tests::sha256_file_correct` exercises it directly;
 /// `tests::verify_sha256_tampered_is_detectable` exercises it through the
 /// comparison [`download_and_verify`] makes.
-pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    Ok(Sha256Digest::of_file(path)?.as_hex().to_owned())
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<Sha256Digest> {
+    Ok(Sha256Digest::of_file(path)?)
 }
 
 /// Extract all regular files from a `.tar.gz` archive into `dest_dir`.
@@ -329,8 +330,8 @@ mod tests {
         std::fs::write(&path, b"hello trusty").unwrap();
         // Computed independently: echo -n "hello trusty" | sha256sum
         let expected = sha256_file(&path).unwrap();
-        assert_eq!(expected.len(), 64);
-        assert!(expected.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(expected.as_hex().len(), 64);
+        assert!(expected.as_hex().chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     /// Why: The SHA-256 parse must accept both bare hex and `hex  filename` format.
@@ -340,7 +341,7 @@ mod tests {
     fn parse_sha256_line_bare_hex() {
         let hex = "a".repeat(64);
         let parsed = parse_sha256_line(&hex).unwrap();
-        assert_eq!(parsed, hex);
+        assert_eq!(parsed.as_hex(), hex);
     }
 
     /// Why: The `sha256sum` / `shasum` format embeds the filename after two spaces.
@@ -351,7 +352,7 @@ mod tests {
         let hex = "b".repeat(64);
         let content = format!("{hex}  some-archive.tar.gz");
         let parsed = parse_sha256_line(&content).unwrap();
-        assert_eq!(parsed, hex);
+        assert_eq!(parsed.as_hex(), hex);
     }
 
     /// Why: A 63-char hex string must be rejected (would silently accept a truncated

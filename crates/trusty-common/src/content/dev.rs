@@ -32,30 +32,120 @@ pub const DEV_CLASS_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Returns the nearest ancestor of `start` (itself included) that holds every
-/// directory in [`DEV_CLASS_SOURCES`], or `None` outside any checkout.
+/// The repository marker; a file in a linked worktree, a directory otherwise.
+const GIT_MARKER: &str = ".git";
+
+/// The workspace manifest a checkout root carries.
+const WORKSPACE_MANIFEST: &str = "Cargo.toml";
+
+/// Returns the enclosing repository root of `start` when it is a trusted
+/// trusty-tools checkout, or `None`.
 ///
-/// Why: "inside the trusty-tools checkout" has to be decided from the tree
-/// itself; requiring every class directory means a partial tree, or an
-/// unrelated repository, is never mistaken for one.
+/// Why: content read from a checkout becomes PM instructions, so a stray tree
+/// must never qualify. Trusting any ancestor that merely held the class
+/// directories let a world-writable ancestor such as `/tmp` plant them (the
+/// git CVE-2022-24765 class; #8378 review).
+/// What: climbs from `start` to the FIRST ancestor holding `.git` — the
+/// repository boundary — and never past it. That one directory is the only
+/// candidate, and it must pass every check [`DevOverride::At`] applies: all
+/// class directories, a `Cargo.toml` with a `[workspace]` table, and (on unix)
+/// ownership by the current effective uid.
 /// Test: `dev_checkout_is_found_from_a_nested_directory`,
-/// `dev_checkout_is_not_found_outside_a_checkout`.
+/// `dev_checkout_is_not_found_outside_a_checkout`,
+/// `dev_checkout_stops_at_the_repository_boundary`,
+/// `dev_checkout_requires_a_git_marker`,
+/// `dev_checkout_requires_a_workspace_manifest`,
+/// `dev_checkout_refuses_a_root_owned_by_another_user`.
+///
+/// [`DevOverride::At`]: super::DevOverride::At
 pub fn find_dev_checkout(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|dir| first_missing_class(dir).is_none())
-        .map(Path::to_path_buf)
+    find_dev_checkout_as(start, current_euid())
 }
 
-/// Checks that `root` holds every class directory, naming the first missing one.
+/// [`find_dev_checkout`] for an explicit effective uid (`None`: no ownership
+/// model, i.e. not unix).
+pub(super) fn find_dev_checkout_as(start: &Path, euid: Option<u32>) -> Option<PathBuf> {
+    let root = start
+        .ancestors()
+        .find(|dir| dir.join(GIT_MARKER).exists())?;
+    check_checkout(root, euid).ok().map(|()| root.to_path_buf())
+}
+
+/// Checks that `root` is a trusted checkout, as the current user.
 pub(super) fn require_checkout(root: &Path) -> Result<(), ContentError> {
-    match first_missing_class(root) {
-        None => Ok(()),
-        Some(missing) => Err(ContentError::NotACheckout {
+    check_checkout(root, current_euid())
+}
+
+/// Every class directory present (else `NotACheckout`), then the `.git`
+/// marker, the owner and the workspace manifest (else `UntrustedCheckout`).
+/// The owner is checked before `Cargo.toml` is read, so a file in a foreign
+/// tree is never parsed.
+pub(super) fn check_checkout(root: &Path, euid: Option<u32>) -> Result<(), ContentError> {
+    if let Some(missing) = first_missing_class(root) {
+        return Err(ContentError::NotACheckout {
             root: root.to_path_buf(),
             missing,
-        }),
+        });
     }
+    let untrusted = |reason: String| ContentError::UntrustedCheckout {
+        root: root.to_path_buf(),
+        reason,
+    };
+    if !root.join(GIT_MARKER).exists() {
+        return Err(untrusted(format!("it has no {GIT_MARKER}")));
+    }
+    check_owner(root, euid).map_err(untrusted)?;
+    if !is_workspace_manifest(&root.join(WORKSPACE_MANIFEST)) {
+        return Err(untrusted(format!(
+            "its {WORKSPACE_MANIFEST} has no [workspace] table"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `path` parses as TOML with a `[workspace]` table.
+fn is_workspace_manifest(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| table.get("workspace").is_some_and(toml::Value::is_table))
+}
+
+/// Refuses a root not owned by `euid`; a no-op when `euid` is `None`.
+fn check_owner(root: &Path, euid: Option<u32>) -> Result<(), String> {
+    let Some(euid) = euid else { return Ok(()) };
+    let owner = owner_uid(root).map_err(|e| format!("its owner cannot be read: {e}"))?;
+    if owner == euid {
+        Ok(())
+    } else {
+        Err(format!(
+            "it is owned by uid {owner}, not the current user (uid {euid})"
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn owner_uid(root: &Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(root).map(|meta| meta.uid())
+}
+
+#[cfg(not(unix))]
+fn owner_uid(_root: &Path) -> std::io::Result<u32> {
+    Err(std::io::Error::other("no uid ownership on this platform"))
+}
+
+/// The process's effective uid on unix; `None` elsewhere.
+#[cfg(unix)]
+pub(super) fn current_euid() -> Option<u32> {
+    // SAFETY: geteuid(2) takes no arguments, touches no memory and cannot fail.
+    Some(unsafe { libc::geteuid() })
+}
+
+/// The process's effective uid on unix; `None` elsewhere.
+#[cfg(not(unix))]
+pub(super) fn current_euid() -> Option<u32> {
+    None
 }
 
 fn first_missing_class(root: &Path) -> Option<PathBuf> {
@@ -65,10 +155,44 @@ fn first_missing_class(root: &Path) -> Option<PathBuf> {
         .find(|dir| !dir.is_dir())
 }
 
-/// Maps a validated bundle path (`<class>/<rest>`) to its checkout file.
-pub(super) fn file_for(root: &Path, key: &str) -> Option<PathBuf> {
-    let (class, rest) = key.split_once('/')?;
-    class_dir(root, class).map(|dir| dir.join(rest))
+/// Reads the checkout file behind a validated bundle path (`<class>/<rest>`).
+///
+/// Why: a bundle holds only regular files, so dev mode serves only what a
+/// bundle could hold — a symlink could otherwise point a skill anywhere on
+/// disk (#8378 review).
+/// What: every component of `<rest>` is checked with `symlink_metadata`: each
+/// directory must be a real directory and the last a regular file. `Ok(None)`
+/// when the path is absent, is a symlink, a directory or anything else.
+/// Test: `dev_read_serves_only_regular_files`.
+pub(super) fn read_regular(root: &Path, key: &str) -> Result<Option<Vec<u8>>, ContentError> {
+    let Some((class, rest)) = key.split_once('/') else {
+        return Ok(None);
+    };
+    let Some(mut path) = class_dir(root, class) else {
+        return Ok(None);
+    };
+    let mut parts = rest.split('/').peekable();
+    while let Some(part) = parts.next() {
+        path.push(part);
+        let kind = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta.file_type(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(ContentError::Io { path, source }),
+        };
+        let expected = if parts.peek().is_some() {
+            kind.is_dir()
+        } else {
+            kind.is_file()
+        };
+        if !expected {
+            return Ok(None);
+        }
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ContentError::Io { path, source }),
+    }
 }
 
 /// The checkout directory holding `class`, if the class is known.

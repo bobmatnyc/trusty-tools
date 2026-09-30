@@ -90,6 +90,14 @@ pub enum ContentError {
         /// What is wrong with it.
         reason: String,
     },
+    /// The bundle, its unpacked contents or its entry count exceed a cap.
+    #[error("refusing to load the content bundle {}: {reason}", path.display())]
+    BundleTooLarge {
+        /// The bundle file.
+        path: PathBuf,
+        /// Which cap was exceeded, and by what.
+        reason: String,
+    },
     /// The bundle's own manifest names a different tag than the lock.
     #[error("the lock pins {lock_tag}, but the bundle's manifest says {bundle_tag}")]
     TagMismatch {
@@ -105,6 +113,15 @@ pub enum ContentError {
         root: PathBuf,
         /// The first class directory that does not exist.
         missing: PathBuf,
+    },
+    /// A tree with every class directory is not trusted as a checkout: no
+    /// `.git`, no `[workspace]` `Cargo.toml`, or another user owns it.
+    #[error("refusing to read content from {}: {reason}", root.display())]
+    UntrustedCheckout {
+        /// The candidate checkout root.
+        root: PathBuf,
+        /// Which check failed.
+        reason: String,
     },
     /// A requested content path is absolute, empty, or climbs with `..`.
     #[error("{path:?} is not a relative content path")]

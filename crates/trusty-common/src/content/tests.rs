@@ -44,11 +44,18 @@ fn install_valid(cache: &Path) {
     install(cache, &bytes, &Sha256Digest::of_bytes(&bytes));
 }
 
-/// Creates a checkout holding every class directory, plus one skill file.
+/// Creates a trusted checkout: every class directory, a `.git` marker, a
+/// `[workspace]` `Cargo.toml`, plus one skill file.
 fn make_checkout(root: &Path) {
     for (_, rel) in DEV_CLASS_SOURCES {
         std::fs::create_dir_all(root.join(rel)).expect("class dir");
     }
+    std::fs::create_dir_all(root.join(".git")).expect(".git");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .expect("Cargo.toml");
     let skill = root.join("crates/trusty-mpm/src/assets/skills/tm");
     std::fs::create_dir_all(&skill).expect("skill dir");
     std::fs::write(skill.join("SKILL.md"), b"working-tree skill").expect("skill");
@@ -56,9 +63,73 @@ fn make_checkout(root: &Path) {
 }
 
 fn options(cache: &Path, dev: DevOverride) -> ResolveOptions {
-    ResolveOptions {
-        cache_dir: cache.to_path_buf(),
-        dev,
+    ResolveOptions::new(cache, dev)
+}
+
+/// One tar entry written straight into its header, bypassing the checks
+/// `tar::Builder` applies to names and link targets.
+struct Raw<'a> {
+    name: &'a str,
+    kind: tar::EntryType,
+    data: &'a [u8],
+    link: Option<&'a str>,
+}
+
+impl<'a> Raw<'a> {
+    fn file(name: &'a str, data: &'a [u8]) -> Self {
+        Self {
+            name,
+            kind: tar::EntryType::Regular,
+            data,
+            link: None,
+        }
+    }
+}
+
+/// A gzip tar holding a valid manifest for [`TAG`], then `entries` verbatim.
+fn raw_bundle(entries: &[Raw<'_>]) -> Vec<u8> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    let manifest = format!("tag = \"{TAG}\"\n");
+    let mut manifest_header = tar::Header::new_gnu();
+    manifest_header.set_size(manifest.len() as u64);
+    manifest_header.set_mode(0o644);
+    tar.append_data(
+        &mut manifest_header,
+        bundle::MANIFEST_ENTRY,
+        manifest.as_bytes(),
+    )
+    .expect("manifest");
+    for raw in entries {
+        let mut header = tar::Header::new_gnu();
+        let name = raw.name.as_bytes();
+        header.as_gnu_mut().expect("gnu").name[..name.len()].copy_from_slice(name);
+        header.set_size(raw.data.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(raw.kind);
+        if let Some(link) = raw.link {
+            let link = link.as_bytes();
+            header.as_gnu_mut().expect("gnu").linkname[..link.len()].copy_from_slice(link);
+        }
+        header.set_cksum();
+        tar.append(&header, raw.data).expect("append");
+    }
+    tar.into_inner().expect("tar").finish().expect("gzip")
+}
+
+/// Installs `bytes` pinned to their own digest and asserts `resolve` refuses
+/// them as `BundleCorrupt` for a reason containing `needle`.
+fn assert_corrupt(bytes: &[u8], needle: &str) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install(dir.path(), bytes, &Sha256Digest::of_bytes(bytes));
+    match resolve_err(&options(dir.path(), DevOverride::Off)) {
+        ContentError::BundleCorrupt { reason, .. } => {
+            assert!(
+                reason.contains(needle),
+                "reason {reason:?} lacks {needle:?}"
+            );
+        }
+        other => panic!("expected BundleCorrupt, got {other:?}"),
     }
 }
 
@@ -229,36 +300,145 @@ fn resolve_refuses_a_bundle_that_is_not_an_archive() {
 
 #[test]
 fn resolve_refuses_a_bundle_with_a_climbing_entry() {
-    // `tar::Builder::append_data` refuses `..`, so write the raw header name.
+    let bytes = raw_bundle(&[Raw::file("../escape.md", b"escaped")]);
+    assert_corrupt(&bytes, "not a relative path");
+}
+
+#[test]
+fn resolve_refuses_a_bundle_with_an_absolute_entry() {
+    let bytes = raw_bundle(&[Raw::file("/etc/escape.md", b"escaped")]);
+    assert_corrupt(&bytes, "not a relative path");
+}
+
+#[test]
+fn resolve_refuses_a_bundle_with_a_symlink_entry() {
+    let bytes = raw_bundle(&[Raw {
+        name: "skills/link.md",
+        kind: tar::EntryType::Symlink,
+        data: b"",
+        link: Some("/etc/passwd"),
+    }]);
+    assert_corrupt(&bytes, "not a regular file");
+}
+
+#[test]
+fn resolve_refuses_a_bundle_with_a_hardlink_entry() {
+    let bytes = raw_bundle(&[Raw {
+        name: "skills/link.md",
+        kind: tar::EntryType::Link,
+        data: b"",
+        link: Some(bundle::MANIFEST_ENTRY),
+    }]);
+    assert_corrupt(&bytes, "not a regular file");
+}
+
+#[test]
+fn resolve_refuses_a_bundle_with_a_device_entry() {
+    let bytes = raw_bundle(&[Raw {
+        name: "skills/dev.md",
+        kind: tar::EntryType::Char,
+        data: b"",
+        link: None,
+    }]);
+    assert_corrupt(&bytes, "not a regular file");
+}
+
+/// `./a` and `a` name one file; the second entry must not replace the first.
+#[test]
+fn resolve_refuses_a_bundle_with_a_duplicate_entry() {
+    for second in ["skills/a.md", "./skills/a.md"] {
+        let bytes = raw_bundle(&[
+            Raw::file("skills/a.md", b"first"),
+            Raw::file(second, b"second"),
+        ]);
+        assert_corrupt(&bytes, "appears twice");
+    }
+}
+
+#[test]
+fn resolve_refuses_a_bundle_without_a_manifest() {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
-    // A valid manifest, so the climbing entry is the only defect.
-    let manifest = format!("tag = \"{TAG}\"\n");
-    let mut manifest_header = tar::Header::new_gnu();
-    manifest_header.set_size(manifest.len() as u64);
-    manifest_header.set_mode(0o644);
-    tar.append_data(
-        &mut manifest_header,
-        bundle::MANIFEST_ENTRY,
-        manifest.as_bytes(),
-    )
-    .expect("manifest");
-    let data = b"escaped";
     let mut header = tar::Header::new_gnu();
-    let name = b"../escape.md";
-    header.as_gnu_mut().expect("gnu").name[..name.len()].copy_from_slice(name);
-    header.set_size(data.len() as u64);
+    header.set_size(1);
     header.set_mode(0o644);
-    header.set_entry_type(tar::EntryType::Regular);
-    header.set_cksum();
-    tar.append(&header, &data[..]).expect("append");
+    tar.append_data(&mut header, "skills/a.md", &b"a"[..])
+        .expect("append");
     let bytes = tar.into_inner().expect("tar").finish().expect("gzip");
+    assert_corrupt(&bytes, "no bundle-manifest.toml entry");
+}
 
+/// Each cap refuses a bundle the production caps accept.
+#[test]
+fn bundle_over_a_cap_is_too_large() {
     let dir = tempfile::tempdir().expect("tempdir");
+    install_valid(dir.path());
+    let lock = ContentLock::load(&dir.path().join(LOCK_FILE_NAME)).expect("lock");
+    let size = std::fs::metadata(dir.path().join(lock.bundle_file_name()))
+        .expect("bundle")
+        .len();
+    let default = bundle::Limits::DEFAULT;
+    assert!(bundle::load_verified_with(dir.path(), &lock, default).is_ok());
+    for (limits, needle) in [
+        (
+            bundle::Limits {
+                bundle_bytes: size - 1,
+                ..default
+            },
+            "over the",
+        ),
+        (
+            bundle::Limits {
+                unpacked_bytes: 10,
+                ..default
+            },
+            "declare more than 10 bytes",
+        ),
+        (
+            bundle::Limits {
+                entries: 1,
+                ..default
+            },
+            "more than 1 entries",
+        ),
+    ] {
+        match bundle::load_verified_with(dir.path(), &lock, limits) {
+            Err(ContentError::BundleTooLarge { reason, .. }) => {
+                assert!(
+                    reason.contains(needle),
+                    "reason {reason:?} lacks {needle:?}"
+                );
+            }
+            other => panic!("expected BundleTooLarge for {limits:?}, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn lock_store_onto_a_symlink_is_a_lock_write_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("elsewhere.toml");
+    std::fs::write(&target, b"untouched").expect("target");
+    let path = dir.path().join(LOCK_FILE_NAME);
+    std::os::unix::fs::symlink(&target, &path).expect("symlink");
+    let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(b"x")).expect("lock");
+    match lock.store(&path) {
+        Err(ContentError::LockWrite { path: failed, .. }) => assert_eq!(failed, path),
+        other => panic!("expected LockWrite, got {other:?}"),
+    }
+    assert_eq!(std::fs::read(&target).expect("target"), b"untouched");
+}
+
+#[test]
+fn read_to_string_of_invalid_utf8_is_io() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bytes = bundle(TAG, &[("skills/bin.md", &[0xff, 0xfe][..])]);
     install(dir.path(), &bytes, &Sha256Digest::of_bytes(&bytes));
+    let content = resolve(&options(dir.path(), DevOverride::Off)).expect("resolve");
     assert!(matches!(
-        resolve_err(&options(dir.path(), DevOverride::Off)),
-        ContentError::BundleCorrupt { .. }
+        content.read_to_string("skills/bin.md"),
+        Err(ContentError::Io { .. })
     ));
 }
 
@@ -388,6 +568,111 @@ fn dev_checkout_is_not_found_outside_a_checkout() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(DEV_CLASS_SOURCES[0].1)).expect("one class");
     assert_eq!(find_dev_checkout(dir.path()), None);
+}
+
+/// A nested repository is its own boundary: the walk never climbs past its
+/// `.git` to a checkout further up.
+#[test]
+fn dev_checkout_stops_at_the_repository_boundary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let inner = dir.path().join("vendor/other-repo");
+    std::fs::create_dir_all(inner.join(".git")).expect("inner .git");
+    std::fs::create_dir_all(inner.join("src")).expect("inner src");
+    assert_eq!(find_dev_checkout(&inner.join("src")), None);
+}
+
+/// Planted class directories without `.git` (e.g. under `/tmp`) are not a
+/// checkout, whether detected or named.
+#[test]
+fn dev_checkout_requires_a_git_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    std::fs::remove_dir(dir.path().join(".git")).expect("rm .git");
+    assert_eq!(find_dev_checkout(dir.path()), None);
+    match dev::check_checkout(dir.path(), dev::current_euid()) {
+        Err(ContentError::UntrustedCheckout { reason, .. }) => {
+            assert!(reason.contains(".git"), "{reason}");
+        }
+        other => panic!("expected UntrustedCheckout, got {other:?}"),
+    }
+}
+
+#[test]
+fn dev_checkout_requires_a_workspace_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let manifest = dir.path().join("Cargo.toml");
+    for body in [Some("[package]\nname = \"x\"\n"), None] {
+        match body {
+            Some(body) => std::fs::write(&manifest, body).expect("Cargo.toml"),
+            None => std::fs::remove_file(&manifest).expect("rm Cargo.toml"),
+        }
+        assert_eq!(find_dev_checkout(dir.path()), None, "{body:?}");
+    }
+}
+
+/// A checkout another user owns is refused (git's `safe.directory` rule).
+/// The owner is faked by asking as a different effective uid.
+#[cfg(unix)]
+#[test]
+fn dev_checkout_refuses_a_root_owned_by_another_user() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let me = dev::current_euid().expect("unix euid");
+    assert_eq!(
+        dev::find_dev_checkout_as(dir.path(), Some(me)),
+        Some(dir.path().to_path_buf())
+    );
+    let other = me.wrapping_add(1);
+    assert_eq!(dev::find_dev_checkout_as(dir.path(), Some(other)), None);
+    match dev::check_checkout(dir.path(), Some(other)) {
+        Err(ContentError::UntrustedCheckout { reason, .. }) => {
+            assert!(reason.contains("owned by uid"), "{reason}");
+        }
+        other => panic!("expected UntrustedCheckout, got {other:?}"),
+    }
+}
+
+/// Fail-closed check: a named tree with every class but no `.git` is an
+/// error, not a fall-through to the installed bundle.
+#[test]
+fn explicit_dev_root_without_a_git_marker_is_untrusted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = dir.path().join("cache");
+    install_valid(&cache);
+    let root = dir.path().join("planted");
+    make_checkout(&root);
+    std::fs::remove_dir(root.join(".git")).expect("rm .git");
+    match resolve_err(&options(&cache, DevOverride::At(root.clone()))) {
+        ContentError::UntrustedCheckout { root: refused, .. } => assert_eq!(refused, root),
+        other => panic!("expected UntrustedCheckout, got {other:?}"),
+    }
+}
+
+/// Dev mode serves what a bundle could hold: a regular file reached through
+/// real directories. A symlink or a directory is `NotFound`.
+#[cfg(unix)]
+#[test]
+fn dev_read_serves_only_regular_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let skills = dir.path().join("crates/trusty-mpm/src/assets/skills");
+    std::os::unix::fs::symlink(dir.path().join("Cargo.toml"), skills.join("link.md"))
+        .expect("file symlink");
+    std::os::unix::fs::symlink(skills.join("tm"), skills.join("linked-dir")).expect("dir symlink");
+    let content = resolve(&options(
+        &dir.path().join("no-cache"),
+        DevOverride::At(dir.path().to_path_buf()),
+    ))
+    .expect("resolve");
+    assert!(content.read("skills/tm/SKILL.md").is_ok());
+    for bad in ["skills/link.md", "skills/linked-dir/SKILL.md", "skills/tm"] {
+        assert!(
+            matches!(content.read(bad), Err(ContentError::NotFound { .. })),
+            "{bad:?} must be NotFound"
+        );
+    }
 }
 
 #[test]

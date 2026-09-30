@@ -291,6 +291,57 @@ async fn a_matching_caller_pinned_digest_installs() {
     assert_eq!(installed[0].version, "1.2.3");
 }
 
+/// Why: GitHub's release API publishes an asset digest as `sha256:<hex>`; a
+/// pin copied from it must match, not be misreported as a mismatch (#8378).
+/// What: Pins the artifact's real digest in GitHub's form; asserts it installs.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_github_prefixed_pin_installs() {
+    let Some(target) = tier1() else { return };
+    let fixture = Fixture::new(target).publish("demo-tool", "1.2.3", Flaw::None);
+    let digest = fixture.digest_of("demo-tool", "1.2.3");
+    let base = fixture.start().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let installed = run(
+        &base,
+        &[PinnedTool::new("demo-tool", "1.2.3").with_sha256(format!("sha256:{digest}"))],
+        dir.path(),
+    )
+    .await
+    .expect("a sha256:-prefixed pin of the real digest must install");
+
+    assert_eq!(installed[0].version, "1.2.3");
+}
+
+/// Why: A pin that is not a digest can never match, so it must be named as a
+/// bad pin rather than as bytes that failed a checksum (#8378).
+/// What: Pins malformed text; asserts `InvalidPin` and an empty install dir.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_malformed_pin_is_invalid_not_a_mismatch() {
+    let Some(target) = tier1() else { return };
+    let base = Fixture::new(target)
+        .publish("demo-tool", "1.2.3", Flaw::None)
+        .start()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let err = run(
+        &base,
+        &[PinnedTool::new("demo-tool", "1.2.3").with_sha256("sha256:abc")],
+        dir.path(),
+    )
+    .await
+    .expect_err("a malformed pin must fail closed");
+
+    match &err {
+        PinnedError::InvalidPin { pin, .. } => assert_eq!(pin, "sha256:abc"),
+        other => panic!("expected InvalidPin, got {other:?}"),
+    }
+    assert_nothing_installed(dir.path());
+}
+
 /// Why: A published tag whose asset is missing (a release leg that failed, or
 /// a platform never built) must be terminal — this is precisely where
 /// `try_install_prebuilt` 404s and silently builds from source instead.
