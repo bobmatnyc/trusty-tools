@@ -1416,6 +1416,8 @@ async fn doctor_endpoint_returns_report() {
         "launchd_process_type",
         // #8415: the observed priority of the running tmux server.
         "tmux_priority",
+        // #8926: trusty-* TCP listeners against the ADR-0032 allowlist.
+        "tcp_listeners",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",
