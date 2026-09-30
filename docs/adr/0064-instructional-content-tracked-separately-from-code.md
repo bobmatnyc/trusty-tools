@@ -22,6 +22,11 @@
   into `content/**` and removes that crate's embeds in the same PR, so no
   published crate ever references a file outside its own package. See
   "Sequencing" under Decision item 5.
+- **Amended:** 2026-09-30 (owner ruling, [#8974](https://github.com/bobmatnyc/trusty-tools/issues/8974)) —
+  output styles are a separate file inside `content/instructions/`; there is
+  no `content/output-styles/` class. The runtime-only fallback is confirmed
+  and supersedes the 2026-09-22 compile-time embed fallback. See
+  "Amendment 2026-09-30" below.
 - **Date:** 2026-09-22
 - **Scope:** Workspace-wide — bundled agents
   (`crates/trusty-agents-common/src/assets/agents/`), skills
@@ -104,11 +109,14 @@ instruction sections, output styles, and the generated `tm-capabilities`
 catalog — out of every crate's `src/` tree into a workspace-root `content/`
 tree, versioned and changelogged independently of any crate:
 
-1. **Location.** `content/{agents,skills,instructions,output-styles,
-   product-prompts}/` at the workspace root — five content classes (owner
-   ruling 2026-09-27 adds `product-prompts`, covering a role-specific
+1. **Location.** ~~`content/{agents,skills,instructions,output-styles,
+   product-prompts}/`~~ (superseded 2026-09-30: no `output-styles/`; see
+   "Amendment 2026-09-30") `content/{agents,skills,instructions,
+   product-prompts}/` at the workspace root — four content classes, with
+   output styles held as a separate file inside `instructions/` (owner
+   ruling 2026-09-27 added `product-prompts`, covering a role-specific
    reviewer system prompt such as trusty-review's, which fits none of the
-   original four). A JSON workflow definition that a bundled agent depends
+   original set). A JSON workflow definition that a bundled agent depends
    on, such as trusty-agents' pipeline defs, is not a class of its own; it
    lives beside the agent files that use it, under `agents/`. No crate's
    `Cargo.toml` version, and none of the crate-scoped CI gates
@@ -154,6 +162,11 @@ tree, versioned and changelogged independently of any crate:
    `cargo install` copies binaries only — Cargo has no install model for
    data files — and a published crate cannot `include_str!` files outside
    its own directory.
+
+   **Confirmed 2026-09-30 (owner ruling, #8974):** the runtime-only
+   fallback stands. It supersedes the 2026-09-22 compile-time embed fallback
+   struck through above. Offline installs use
+   `tm content install --from <bundle.tar.gz>`.
 
    **Sequencing (amended 2026-09-27, owner and supervisor ruling; split per
    crate 2026-09-27, owner ruling).** PHASE_3 (the runtime resolver) ships
@@ -256,6 +269,22 @@ trusty-agents-common, then trusty-mpm, then trusty-code and trusty-agents,
 then trusty-review. Each PR moves that crate's content into `content/**`
 and removes that crate's embeds in the same PR, so no published crate ever
 references a file outside its own package.
+
+## Amendment 2026-09-30 (owner ruling, #8974)
+
+Bob ruled on [#8974](https://github.com/bobmatnyc/trusty-tools/issues/8974),
+under epic [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378):
+
+1. **Runtime-only fallback, confirmed.** Nothing is compiled in. The
+   2026-09-27 amendment to Decision item 5 stands, and this ruling
+   supersedes the embed-fallback part of the 2026-09-22 owner ruling.
+   Offline installs use `tm content install --from <tar>`.
+2. **Information architecture.** Output styles are a separate file inside
+   `content/instructions/`. There is no `content/output-styles/`. The IA is
+   `content/instructions/`, `content/agents/`, `content/skills/`, plus
+   `content/product-prompts/` from the 2026-09-27 ruling. This supersedes
+   the `output-styles` entry in Decision item 1. The earlier text stays
+   above, struck through, as history.
 
 ## Related Decisions
 
