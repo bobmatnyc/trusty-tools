@@ -711,6 +711,8 @@ pub(crate) async fn run_doctor_with_claims(
         ),
     );
     checks.push(super::doctor_tmux_priority::check_tmux_priority());
+    // #8926: only trusty-console may listen on TCP (ADR-0032). Read-only.
+    checks.push(super::doctor_tcp_listeners::check_tcp_listeners());
     // #6529: every tmux pane holds a pseudo-terminal and macOS caps the total,
     // so a session leak becomes a bare ENXIO on the next spawn with nothing
     // naming the cause. Read-only — it counts device nodes and reaps nothing.
