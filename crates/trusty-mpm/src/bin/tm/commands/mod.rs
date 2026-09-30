@@ -51,6 +51,11 @@ pub(crate) mod doctor_orphan;
 pub(crate) mod doctor_repair;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
+// #8939: `tm env set|keys` — dotenv edits that print no value.
+pub(crate) mod env_file;
+// #8939 fix round: `tm env`'s no-follow file access and its guard grant.
+pub(crate) mod env_file_fs;
+pub(crate) mod env_file_grant;
 // #8436: `tm fleet init|status` — the Architect's setup.
 pub(crate) mod fleet;
 pub(crate) mod generate;
@@ -115,6 +120,8 @@ pub(crate) mod prompt_feedback_hook;
 pub(crate) mod program_word;
 
 pub(crate) mod pm_guard;
+// #8939: the Architect's `tm env set|keys` exemption from the #7266 rule.
+pub(crate) mod pm_guard_architect_envfile;
 pub(crate) mod pm_guard_architect_reason;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
