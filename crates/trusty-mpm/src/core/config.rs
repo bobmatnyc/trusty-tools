@@ -469,6 +469,12 @@ pub struct MpmConfig {
     /// Absent section → no project may. See
     /// [`crate::core::session_profile::SupervisorConfig`].
     pub supervisor: crate::core::session_profile::SupervisorConfig,
+
+    /// `[notification_hook]` — opt-in `Notification` hook and push target (#8392).
+    ///
+    /// Absent section → off, no target. See
+    /// [`crate::core::standalone::hooks::notification::NotificationHookConfig`].
+    pub notification_hook: crate::core::standalone::hooks::notification::NotificationHookConfig,
 }
 
 // ──────────────────────────────────────────────

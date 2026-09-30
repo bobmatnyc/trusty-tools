@@ -42,6 +42,8 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+// #8392: the opt-in `Notification` entry and its push target.
+pub mod notification;
 pub mod repoint;
 
 pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};

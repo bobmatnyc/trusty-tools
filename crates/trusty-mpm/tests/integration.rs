@@ -55,6 +55,7 @@ mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
 mod tm_hook_idle_parking;
+mod tm_hook_notification_8392;
 mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_architect_pane_8902;
 mod tm_hook_pm_guard_build_lease;
