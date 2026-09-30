@@ -1070,6 +1070,38 @@ fn head_rev_candidates_try_the_remote_ref() {
     );
 }
 
+// ── #8145: no gate script means no gate, whatever the --head ─────────────
+
+/// Why (#8145): adaptive-crm has no `scripts/check_changelog_fragment.sh`, and
+/// `tm pr open --head <branch>` still refused, naming that script — the
+/// `--head` check ran before the script-existence check. The agent passed
+/// `--docs-only` on an infra PR to get past it.
+/// Test target: [`open::changelog_gate_at`] in a directory with no script and
+/// a head that is not the checkout's commit.
+#[test]
+fn pr_8145_a_repo_without_the_gate_script_skips_for_any_head() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("no script is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::Skipped);
+}
+
+/// Why (#8145): the reorder must not loosen the gate where it exists. With the
+/// script present, a head this checkout cannot resolve is still refused.
+#[test]
+fn pr_8145_the_script_still_refuses_a_head_elsewhere() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(
+        dir.path().join("scripts/check_changelog_fragment.sh"),
+        "exit 0\n",
+    )
+    .expect("script");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("a head elsewhere is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::HeadElsewhere);
+}
+
 // ── #7615: --minimal opts out of the nine-heading contract ──────────────
 
 /// Why (#7615): on trusty-things#261 the PM authorized that project's own
