@@ -7,22 +7,24 @@
 //! same refusal.
 //!
 //! What: [`rpc_error_from_http`] derives the code from the status and carries
-//! the body's own wording as the message.
+//! the body's own wording as the message. An index-unavailable 503 also carries
+//! its whole body as the error's `data` member.
 //!
-//! **Why `retryable` becomes a code.** trusty-search's index-scoped error
+//! **Why `retryable` is also a code.** trusty-search's index-scoped error
 //! contract (`crates/trusty-search/CLAUDE.md`) makes `retryable` a field a
-//! consumer branches on and states it is never absent, and
-//! [`RpcError`] carries only `code` and `message` — a body field has nowhere to
-//! go. So the discriminant becomes the code, which is what trusty-mpm's
-//! `CODE_WORKSPACE_GONE` / `CODE_PANE_GONE` pair did for the two HTTP 422
-//! classes its `x-trusty-resume-reason` header used to separate (#6288 slice 4):
-//! a 503 that will clear answers [`CODE_UNAVAILABLE`] and one that never will
-//! answers [`CODE_UNAVAILABLE_PERMANENT`].
+//! consumer branches on and states it is never absent. The discriminant is the
+//! code too, which is what trusty-mpm's `CODE_WORKSPACE_GONE` / `CODE_PANE_GONE`
+//! pair did for the two HTTP 422 classes its `x-trusty-resume-reason` header
+//! used to separate (#6288 slice 4): a 503 that will clear answers
+//! [`CODE_UNAVAILABLE`] and one that never will answers
+//! [`CODE_UNAVAILABLE_PERMANENT`]. A client that reads only the code still
+//! branches correctly.
 //!
-//! `restore_via` does NOT survive, and deliberately: it names
-//! `POST /indexes/{id}/search`, a route that does not exist on this transport.
-//! The retire slice replaces it with the method name that reloads a cold-parked
-//! index.
+//! **The 503 body rides in `data` verbatim (#6285).** The MCP bridge's
+//! `INDEX_UNAVAILABLE` contract relays `index_id`, `retryable`, `restore_via`,
+//! `reason`, `transient` and `stages` unchanged, so the socket carries them the
+//! same way. `restore_via` still names the HTTP route until the retire slice
+//! replaces its value with the method that reloads a cold-parked index.
 //!
 //! Test: `error_tests.rs`.
 //!
@@ -177,8 +179,14 @@ pub fn refusal_is_permanent(body: &serde_json::Value) -> bool {
 /// `unknown index: <id>`) and `message` carries the operator-facing detail, so
 /// both are joined when both are present rather than picking one and losing the
 /// other. A body with neither is rendered whole, which is never nothing.
+///
+/// A 503 whose body is a JSON object with a string `error` — the shape every
+/// availability verdict in `service/server/degraded.rs` emits, and the one the
+/// MCP bridge's `classify_unavailable` accepts — also carries that body
+/// verbatim as the error's `data` (#6285). Every other refusal carries none.
 /// Test: `refusal_message_joins_error_and_message`,
-/// `refusal_without_an_error_field_renders_the_whole_body`.
+/// `refusal_without_an_error_field_renders_the_whole_body`,
+/// `an_index_unavailable_refusal_carries_its_body_as_data`.
 pub fn rpc_error_from_http(status: axum::http::StatusCode, body: &serde_json::Value) -> RpcError {
     let code = code_for(status.as_u16(), refusal_is_permanent(body));
 
@@ -190,5 +198,11 @@ pub fn rpc_error_from_http(status: axum::http::StatusCode, body: &serde_json::Va
         (None, Some(m)) => m.to_string(),
         (None, None) => body.to_string(),
     };
-    RpcError::new(code, message)
+    let rpc_error = RpcError::new(code, message);
+    // #6285: the INDEX_UNAVAILABLE fields must survive the move off HTTP. A
+    // string `error` implies an object body — `get` on anything else is `None`.
+    if status == axum::http::StatusCode::SERVICE_UNAVAILABLE && error.is_some() {
+        return rpc_error.with_data(body.clone());
+    }
+    rpc_error
 }

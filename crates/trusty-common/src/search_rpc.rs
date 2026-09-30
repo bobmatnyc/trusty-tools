@@ -136,6 +136,14 @@ pub struct SearchRpcError {
     pub code: i64,
     /// The daemon's own message.
     pub message: String,
+    /// The JSON-RPC error's `data` member, when the daemon sent one (#6285).
+    ///
+    /// Why: an index-unavailable refusal carries `index_id`, `retryable`,
+    /// `restore_via` and the rest of its HTTP body here; dropping it would
+    /// leave a caller only the code.
+    /// What: the daemon's `data` verbatim, `None` from a daemon that sent none.
+    /// Test: `call_at_carries_the_daemons_error_data`.
+    pub data: Option<Value>,
 }
 
 impl SearchRpcError {
@@ -208,6 +216,7 @@ pub async fn call_at(
             method: method.to_string(),
             code: e.code,
             message: e.message,
+            data: e.data,
         })),
         // The daemon's own contract is that exactly one of the two is present.
         (None, None) => Err(anyhow!(

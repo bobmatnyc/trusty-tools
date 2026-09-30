@@ -519,6 +519,7 @@ mod tests {
             method: search_rpc::METHOD_INDEX_CREATE.to_string(),
             code: search_rpc::CODE_CONFLICT,
             message,
+            data: None,
         })
     }
 
@@ -571,6 +572,7 @@ mod tests {
             method: search_rpc::METHOD_INDEX_CREATE.to_string(),
             code: -32603,
             message: "internal error".to_string(),
+            data: None,
         });
 
         let (outcome, lines) =

@@ -122,6 +122,9 @@ pub enum DaemonCallError {
         code: i64,
         /// The daemon's own message.
         message: String,
+        /// The JSON-RPC error's `data` member, when the daemon sent one —
+        /// an index-unavailable refusal's whole body (#6285).
+        data: Option<Value>,
     },
     /// The daemon answered a frame carrying neither a result nor an error.
     #[error("{method} over socket {} answered with neither a result nor an error", socket.display())]
@@ -146,6 +149,21 @@ impl DaemonCallError {
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Refused { message, .. } => Some(message),
+            _ => None,
+        }
+    }
+
+    /// The daemon's structured refusal detail, when it sent one (#6285).
+    ///
+    /// Why: the MCP bridge's `INDEX_UNAVAILABLE` contract relays the daemon's
+    /// 503 body — `index_id`, `retryable`, `restore_via`, `reason`,
+    /// `transient`, `stages` — and over the socket that body arrives here.
+    /// What: the refusal's `data` member verbatim; `None` for every other
+    /// failure kind and for a refusal that carried none.
+    /// Test: `a_refusal_carries_the_daemons_error_data`.
+    pub fn data(&self) -> Option<&Value> {
+        match self {
+            Self::Refused { data, .. } => data.as_ref(),
             _ => None,
         }
     }
@@ -287,6 +305,7 @@ impl DaemonClient {
                 method: method.to_string(),
                 code: e.code,
                 message: e.message,
+                data: e.data,
             }),
             (None, None) => Err(DaemonCallError::Malformed {
                 method: method.to_string(),
