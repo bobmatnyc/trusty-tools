@@ -5,11 +5,12 @@
 //! the fixed `tm-architect`. `tm fleet init` and `tm fleet status` read the
 //! name back, so the launch records it beside the process record, in the
 //! anchored `~/.trusty-mpm/architect-launch/` directory. The #8902 pane guard
-//! does not read the name: it marks a pane by the live `<pid>.architect`
-//! lineage or the fixed `tm-architect` session name.
+//! marks a pane by the live `<pid>.architect` lineage or the `tm-architect`
+//! session name, and, when the lineage does not read, by every recorded name.
 //! What: [`validate_session_name`] is the one name rule. [`record_launch`]
 //! writes `<pid>.architect-session` and then the `<pid>.architect` launch
-//! record. [`architect_session_name`] reads the name back for a recorded PID, and
+//! record. [`architect_session_name`] reads the name back for a recorded PID;
+//! [`recorded_session_names`] lists every recorded name.
 //! [`check_session_binding`] says whether the `claude` in a named session is
 //! the launched Architect of a project. The `.architect` record keeps its
 //! shape (`ArmingRecord`, `deny_unknown_fields`, shared with the twin), so the
@@ -143,8 +144,7 @@ fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {
 ///
 /// Why: #8878 R1 — `tm fleet init` and `tm fleet status` must name the
 /// Architect's session from the launch record, not assume `tm-architect`.
-/// The #8902 pane guard does not call this; it matches the pane by launch
-/// lineage or by the `tm-architect` name.
+/// The #8902 pane guard reads [`recorded_session_names`] instead.
 /// What: reads `<pid>.architect` under `root` (`~/.trusty-mpm`): none is
 /// [`LaunchRefusal::NoLaunchRecord`]; unreadable is
 /// [`LaunchRefusal::UnreadableRecord`]. Then `<pid>.architect-session`: absent
@@ -177,6 +177,39 @@ pub fn architect_session_name(root: &Path, pid: u32) -> Result<String, LaunchRef
     }
     validate_session_name(&sidecar.session).map_err(|_| LaunchRefusal::UnreadableRecord)?;
     Ok(sidecar.session)
+}
+
+/// Every tmux session name an `*.architect-session` sidecar under `root`
+/// records.
+///
+/// Why: #8878 R1 round 2 — when the pane guard cannot read the live launch
+/// lineage, a pane in a custom Architect session must still be marked.
+/// What: reads `root/architect-launch/`; no directory is `Ok(vec![])`. Each
+/// sidecar's name counts whether or not its launch is live, and whatever its
+/// mode: an extra name can only add a deny. An unreadable directory or entry,
+/// or a sidecar that does not read, parse or pass [`validate_session_name`],
+/// is `Err`.
+/// Test: `recorded_session_names_list_every_sidecar_and_fail_closed`.
+pub fn recorded_session_names(root: &Path) -> Result<Vec<String>, String> {
+    let dir = root.join(ARCHITECT_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(entries) => entries,
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(SESSION_EXT) {
+            continue;
+        }
+        let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let sidecar: SessionRecord =
+            serde_json::from_slice(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+        validate_session_name(&sidecar.session).map_err(|e| format!("{}: {e}", path.display()))?;
+        names.push(sidecar.session);
+    }
+    Ok(names)
 }
 
 /// Whether `path` is writable by group or others; an unreadable mode counts.

@@ -204,3 +204,45 @@ fn a_session_binding_needs_the_record_and_the_same_name() {
     .to_string();
     assert!(text.contains("names tmux session tm-supervisor"), "{text}");
 }
+
+/// #8878 R1 round 2, Fail-Open Check: the pane guard's fallback lists every
+/// sidecar's name, live or stale; a sidecar or directory that does not read
+/// is an error, never a shorter list.
+#[test]
+fn recorded_session_names_list_every_sidecar_and_fail_closed() {
+    let s = Scratch::new();
+    assert_eq!(
+        recorded_session_names(&s.root()),
+        Ok(vec![]),
+        "no directory"
+    );
+    let me = std::process::id();
+    record_launch(&s.root(), me, &s.project(), "tm-supervisor").expect("record");
+    let stale = dead_pid();
+    let body = format!(r#"{{"pid":{stale},"start_time":1,"session":"old-arch"}}"#);
+    write_mode(&s.sidecar(stale), &body, 0o666);
+    let mut names = recorded_session_names(&s.root()).expect("names");
+    names.sort();
+    assert_eq!(names, ["old-arch", "tm-supervisor"]);
+    for (case, body) in [
+        ("garbage", "not json".to_owned()),
+        (
+            "invalid name",
+            format!(r#"{{"pid":{stale},"start_time":1,"session":"tm:x"}}"#),
+        ),
+    ] {
+        write_mode(&s.sidecar(stale), &body, 0o600);
+        assert!(recorded_session_names(&s.root()).is_err(), "{case}");
+    }
+    std::fs::remove_file(s.sidecar(stale)).expect("remove sidecar");
+    std::fs::create_dir(s.sidecar(stale)).expect("a sidecar that is a directory");
+    assert!(
+        recorded_session_names(&s.root()).is_err(),
+        "unreadable sidecar"
+    );
+    std::fs::remove_dir(s.sidecar(stale)).expect("remove dir");
+    let dir = s.root().join(ARCHITECT_DIR);
+    std::fs::remove_dir_all(&dir).expect("remove records");
+    std::fs::write(&dir, "").expect("a record directory that is a file");
+    assert!(recorded_session_names(&s.root()).is_err(), "unreadable dir");
+}
