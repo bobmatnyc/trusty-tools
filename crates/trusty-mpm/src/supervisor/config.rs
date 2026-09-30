@@ -93,6 +93,26 @@ pub const ENV_PR_CLEANUP_SECS: &str = "TRUSTY_MPM_PR_CLEANUP_INTERVAL";
 /// `gh` traffic to a rate GitHub's API budget never notices.
 pub const DEFAULT_PR_CLEANUP_SECS: u64 = 300;
 
+/// Upper bound on one whole sweep before the loop abandons it (#8335).
+///
+/// Why: a sweep awaiting a future that never wakes (an LLM reply that never
+/// comes, a lock nobody releases), or blocked in a `gh`, `git` or tmux call,
+/// stopped the loop for hours with no log line. Ten minutes is far past any
+/// healthy sweep and past the default 300 s staleness window, so the heartbeat
+/// watchdog reports the wedge first.
+/// What: the `tick_timeout` default in [`SupervisorConfig::default`].
+/// Test: `config_defaults`.
+pub const DEFAULT_TICK_TIMEOUT_SECS: u64 = 600;
+
+/// Upper bound on one per-session step of a fleet sweep (#8335).
+///
+/// Why: one session's hung resume or classification must not use up the whole
+/// sweep's bound and starve every session after it. Two minutes covers a slow
+/// LLM reply and a pane rebuild.
+/// What: the `step_timeout` default in [`SupervisorConfig::default`].
+/// Test: `config_defaults`.
+pub const DEFAULT_STEP_TIMEOUT_SECS: u64 = 120;
+
 /// Immutable configuration for one supervisor run.
 ///
 /// Why: the loop reads its policy from one value per tick; bundling the knobs in
@@ -112,6 +132,12 @@ pub struct SupervisorConfig {
     /// How long to wait between post-merge cleanup sweeps; `None` disables them
     /// (#7275).
     pub pr_cleanup_interval: Option<Duration>,
+    /// #8335: how long one fleet sweep, cleanup sweep or publish may run before
+    /// the loop abandons it and logs at `error`.
+    pub tick_timeout: Duration,
+    /// #8335: how long one session's `resume_auto` or classification may await
+    /// before the sweep abandons that step and moves to the next session.
+    pub step_timeout: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -123,7 +149,8 @@ impl Default for SupervisorConfig {
     /// acquire that by omission. [`SupervisorConfig::from_env_with`] turns it on
     /// at [`DEFAULT_PR_CLEANUP_SECS`] for the real daemon.
     /// What: 30s interval, `auto_resume = false`, `classify_idle = true`,
-    /// `pr_cleanup_interval = None`.
+    /// `pr_cleanup_interval = None`, `tick_timeout` = [`DEFAULT_TICK_TIMEOUT_SECS`],
+    /// `step_timeout` = [`DEFAULT_STEP_TIMEOUT_SECS`].
     /// Test: `config_defaults`, `pr_cleanup_interval_env_parsing`.
     fn default() -> Self {
         Self {
@@ -131,6 +158,8 @@ impl Default for SupervisorConfig {
             auto_resume: false,
             classify_idle: true,
             pr_cleanup_interval: None,
+            tick_timeout: Duration::from_secs(DEFAULT_TICK_TIMEOUT_SECS),
+            step_timeout: Duration::from_secs(DEFAULT_STEP_TIMEOUT_SECS),
         }
     }
 }
@@ -188,6 +217,8 @@ impl SupervisorConfig {
             auto_resume,
             classify_idle,
             pr_cleanup_interval,
+            tick_timeout: defaults.tick_timeout,
+            step_timeout: defaults.step_timeout,
         }
     }
 }
