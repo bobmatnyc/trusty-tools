@@ -50,7 +50,8 @@ fn a_sidecar_is_pruned_only_when_all_three_checks_prove_the_launch_gone() {
 /// keeps the sidecar; an unreadable sidecar is kept too.
 #[test]
 fn a_sidecar_is_kept_when_any_check_is_live_or_undeterminable() {
-    let cases: [(Option<bool>, Result<Option<u64>, String>, Option<bool>); 6] = [
+    type Case = (Option<bool>, Result<Option<u64>, String>, Option<bool>);
+    let cases: [Case; 6] = [
         (Some(true), Ok(None), Some(false)),
         (None, Ok(None), Some(false)),
         (Some(false), Ok(Some(100)), Some(false)),
