@@ -14,11 +14,14 @@
 //! and `com.trusty.mpm.supervisor` plists — the two tm jobs that start tmux
 //! servers — and [`build_process_type_check`] folds the readings into one row.
 //! `Background` fails; any other value short of `Interactive`, including an
-//! absent key (launchd's throttled `Standard` default), warns. Read-only.
+//! absent key (launchd's throttled `Standard` default), warns. #8562: an
+//! `Interactive` plist changed since this boot warns "written; pending reload",
+//! because the row never reads the loaded class through `launchctl`. Read-only.
 //!
 //! Test: `doctor_launchd_process_type_tests.rs`.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use trusty_common::launchd_labels::{MPM, MPM_SUPERVISOR};
 
@@ -63,6 +66,48 @@ pub(crate) struct PlistReading {
     pub path: PathBuf,
     /// What the plist declares.
     pub reading: ProcessTypeReading,
+    /// #8562: when the plist file last changed, if it could be read.
+    pub modified: Option<SystemTime>,
+}
+
+impl PlistReading {
+    /// Whether launchd has provably loaded this plist's current content.
+    ///
+    /// Why (#8562): the row does not read the class launchd loaded, because
+    /// `launchctl print` prints the job's `EnvironmentVariables`, which may hold
+    /// credentials (#8236). A plist unchanged since `boot` was read by every load
+    /// of the label since then, including the one at login.
+    /// What: `true` only when both times are known and the file predates boot.
+    /// Test: `an_interactive_plist_written_since_boot_is_pending_reload`.
+    fn loaded_since(&self, boot: Option<SystemTime>) -> bool {
+        matches!((self.modified, boot), (Some(m), Some(b)) if m < b)
+    }
+}
+
+/// When the host last booted, read with `sysctl -n kern.boottime` (#8562).
+///
+/// What: parses the `sec = N` field; `None` on any failure, which leaves every
+/// `Interactive` plist pending rather than passing.
+/// Test: `boot_time_parses_the_sysctl_seconds_field`.
+fn boot_time() -> Option<SystemTime> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "kern.boottime"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_boot_time(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `{ sec = 1759190000, usec = 0 } Mon Sep 29 …` into a time.
+fn parse_boot_time(text: &str) -> Option<SystemTime> {
+    let digits: String = text
+        .split_once("sec = ")?
+        .1
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let secs = digits.parse::<u64>().ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
 }
 
 /// Extract `ProcessType`'s string value from XML plist text.
@@ -138,50 +183,93 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
+/// When a rewritten `ProcessType` takes effect for `label` (#8562).
+///
+/// Why: launchd reads a plist only when it LOADS the label — at login, or on
+/// `launchctl bootout` then `bootstrap`. A `launchctl kickstart`, which is how
+/// the daemon is restarted, and a crash respawn reuse the loaded job. The
+/// supervisor is its own job, so restarting the daemon never reloads it.
+/// Test: `every_step_says_when_launchd_loads_the_new_class`.
+pub(crate) fn load_note(label: &str, path: &Path) -> String {
+    let p = shell_quote(path);
+    let not_reloaded = if label == MPM_SUPERVISOR {
+        format!(
+            "a `launchctl kickstart`, a crash respawn or a tm daemon restart does not reload `{label}`"
+        )
+    } else {
+        format!(
+            "a daemon restart (`launchctl kickstart -k`) or a crash respawn does not re-read \
+             the plist of `{label}`"
+        )
+    };
+    format!(
+        "launchd applies it when it next loads `{label}`: at login, or now with \
+         `launchctl bootout gui/$(id -u) {p}` then `launchctl bootstrap gui/$(id -u) {p}`; \
+         {not_reloaded}"
+    )
+}
+
 /// The remedy for one stale plist, with its real path quoted for the shell.
 ///
-/// What: #8562 — the supported `tm doctor --fix --yes` first, which rewrites
-/// the file for the next restart; then the manual commands, which also reload
-/// the job now.
+/// What: #8562 — `tm doctor --fix --yes` or `plutil` rewrites the file; then
+/// [`load_note`] says when launchd applies it for this label.
 /// Test: `remedy_quotes_a_path_with_a_space`,
 /// `background_supervisor_plist_fails`.
-fn remedy(path: &Path) -> String {
+fn remedy(label: &str, path: &Path) -> String {
     let p = shell_quote(path);
     format!(
-        "`tm doctor --fix --yes` (applies at the next daemon restart), or by hand \
-         `plutil -replace ProcessType -string {EXPECTED_PROCESS_TYPE} {p}`, then \
-         `launchctl bootout gui/$(id -u) {p}` and `launchctl bootstrap gui/$(id -u) {p}`"
+        "`tm doctor --fix --yes` rewrites the plist (or by hand \
+         `plutil -replace ProcessType -string {EXPECTED_PROCESS_TYPE} {p}`); {}",
+        load_note(label, path)
     )
 }
 
 /// Fold the readings into one row.
 ///
 /// What: `Fail` when any plist declares `Background`; else `Warn` when any
-/// declares another value or none (launchd's `Standard` default); else
-/// `Unknown` when any could not be read; else `Ok`. A tmux server already
-/// running keeps the class it started with, so every non-Ok message says so.
+/// declares another value or none (launchd's `Standard` default), or declares
+/// `Interactive` in a file changed since `boot` (#8562: "written; pending
+/// reload" — the loaded class is not read); else `Unknown` when any could not
+/// be read; else `Ok`. A tmux server already running keeps the class it
+/// started with, so every non-Ok message says so.
 /// Test: `background_supervisor_plist_fails`,
 /// `keyless_daemon_plist_warns_standard_default`,
-/// `interactive_plists_pass`, `no_plists_pass`, `binary_plist_is_unknown`.
-pub(crate) fn build_process_type_check(readings: &[PlistReading]) -> DoctorCheck {
+/// `interactive_plists_pass`, `no_plists_pass`, `binary_plist_is_unknown`,
+/// `an_interactive_plist_written_since_boot_is_pending_reload`.
+pub(crate) fn build_process_type_check(
+    readings: &[PlistReading],
+    boot: Option<SystemTime>,
+) -> DoctorCheck {
     let mut fails = Vec::new();
     let mut warns = Vec::new();
     let mut unknown = Vec::new();
     for r in readings {
         match &r.reading {
             ProcessTypeReading::NotInstalled => {}
-            ProcessTypeReading::Declared(Some(v)) if v == EXPECTED_PROCESS_TYPE => {}
+            ProcessTypeReading::Declared(Some(v))
+                if v == EXPECTED_PROCESS_TYPE && r.loaded_since(boot) => {}
+            // #8562: never green before launchd has reloaded the job.
+            ProcessTypeReading::Declared(Some(v)) if v == EXPECTED_PROCESS_TYPE => {
+                warns.push(format!(
+                    "`{}` declares ProcessType={EXPECTED_PROCESS_TYPE}: written; pending reload. \
+                     The plist changed after this boot, and this row does not read the class \
+                     launchd loaded (`launchctl print` would print the job's \
+                     EnvironmentVariables); it passes after the next boot. {}",
+                    r.label,
+                    load_note(r.label, &r.path)
+                ))
+            }
             ProcessTypeReading::Declared(Some(v)) if v == BACKGROUND => fails.push(format!(
                 "`{}` declares ProcessType={BACKGROUND}, which clamps tmux and every \
                  session it hosts to background QoS (#8415); fix: {}",
                 r.label,
-                remedy(&r.path)
+                remedy(r.label, &r.path)
             )),
             ProcessTypeReading::Declared(v) => warns.push(format!(
                 "`{}` declares ProcessType={}, which launchd throttles; fix: {}",
                 r.label,
                 v.as_deref().unwrap_or("<absent, Standard>"),
-                remedy(&r.path)
+                remedy(r.label, &r.path)
             )),
             ProcessTypeReading::Unjudged(why) => {
                 unknown.push(format!("`{}` ({}): {why}", r.label, r.path.display()))
@@ -295,25 +383,45 @@ pub(crate) fn launch_agents_dir_from(
     AgentsDir { path, from_env }
 }
 
-/// Read the tmux-hosting tm plists under `home` and build the row.
+/// Read the tmux-hosting tm plists under `home` and build the row, as if the
+/// host booted after the fixtures were written.
 ///
 /// Test: `check_reads_plists_under_the_given_home`.
 #[cfg(test)]
 pub(crate) fn check_launchd_process_type(home: &Path) -> DoctorCheck {
-    check_launchd_process_type_in(&AgentsDir {
-        path: home.join("Library").join("LaunchAgents"),
-        from_env: false,
-    })
+    let rebooted = SystemTime::now() + std::time::Duration::from_secs(86_400);
+    check_launchd_process_type_at(
+        &AgentsDir {
+            path: home.join("Library").join("LaunchAgents"),
+            from_env: false,
+        },
+        Some(rebooted),
+    )
 }
 
 /// Read `<agents>/<label>.plist` for the daemon and supervisor labels and
-/// build the row with [`build_process_type_check`].
+/// build the row with [`build_process_type_check`] against the host's boot
+/// time, read only when a plist declares `Interactive`.
 ///
-/// What: when the override chose the directory, the message names it, so an
-/// Ok row never passes for the real `~/Library/LaunchAgents` unread.
 /// Test: `check_reads_plists_under_the_given_home`,
 /// `launch_agents_dir_honours_the_env_override`.
 pub(crate) fn check_launchd_process_type_in(dir: &AgentsDir) -> DoctorCheck {
+    let interactive = [MPM, MPM_SUPERVISOR].into_iter().any(|label| {
+        read_plist(&dir.path.join(format!("{label}.plist")))
+            == ProcessTypeReading::Declared(Some(EXPECTED_PROCESS_TYPE.to_owned()))
+    });
+    check_launchd_process_type_at(dir, interactive.then(boot_time).flatten())
+}
+
+/// [`check_launchd_process_type_in`] with the boot time passed in.
+///
+/// What: when the override chose the directory, the message names it, so an
+/// Ok row never passes for the real `~/Library/LaunchAgents` unread.
+/// Test: `an_interactive_plist_written_since_boot_is_pending_reload`.
+pub(crate) fn check_launchd_process_type_at(
+    dir: &AgentsDir,
+    boot: Option<SystemTime>,
+) -> DoctorCheck {
     let agents = &dir.path;
     let readings: Vec<PlistReading> = [MPM, MPM_SUPERVISOR]
         .into_iter()
@@ -322,11 +430,12 @@ pub(crate) fn check_launchd_process_type_in(dir: &AgentsDir) -> DoctorCheck {
             PlistReading {
                 label,
                 reading: read_plist(&path),
+                modified: std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
                 path,
             }
         })
         .collect();
-    let mut row = build_process_type_check(&readings);
+    let mut row = build_process_type_check(&readings, boot);
     if dir.from_env {
         row.message = format!(
             "{} — read `{}` (from `{LAUNCH_AGENTS_DIR_ENV}`)",

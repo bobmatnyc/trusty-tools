@@ -72,9 +72,10 @@ fn dry_run_plans_without_writing() {
 }
 
 /// REGRESSION (#8562): the daemon plist had no supported write path. After the
-/// repair it declares `Interactive`, the row passes, and the rest survives.
+/// repair it declares `Interactive` and the rest survives. The row reports
+/// "written; pending reload" until a boot after the write, then passes.
 #[test]
-fn apply_adds_the_key_and_the_row_passes() {
+fn apply_adds_the_key_and_the_row_reports_pending_reload() {
     let dir = agents_with(&[(MPM, KEYLESS_DAEMON.as_bytes())]);
     assert_eq!(row_for(&dir).status, CheckStatus::Warn);
 
@@ -94,6 +95,18 @@ fn apply_adds_the_key_and_the_row_passes() {
         "the comment is left alone: {after}"
     );
     let row = row_for(&dir);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message.contains("written; pending reload"),
+        "{}",
+        row.message
+    );
+    let rebooted = std::time::SystemTime::now() + std::time::Duration::from_secs(86_400);
+    let dir = AgentsDir {
+        path: dir.path().to_path_buf(),
+        from_env: false,
+    };
+    let row = check_launchd_process_type_at(&dir, Some(rebooted));
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
 }
 
@@ -162,19 +175,46 @@ fn an_unexpected_layout_is_refused() {
     assert!(err.is_err(), "{err:?}");
 }
 
-/// Owner ruling 2026-09-28 (#8562): the repair never restarts the daemon, so
-/// every step and the row's remedy say when the change applies.
+/// Owner ruling 2026-09-28 (#8562): the repair never reloads launchd, so every
+/// step and the row's remedy say when launchd applies the class for that label:
+/// when it next LOADS it, never on a kickstart or crash respawn, and — for the
+/// supervisor — not on a daemon restart.
 #[test]
-fn every_step_says_it_takes_effect_at_the_next_restart() {
-    let dir = agents_with(&[(MPM, KEYLESS_DAEMON.as_bytes())]);
+fn every_step_says_when_launchd_loads_the_new_class() {
+    let dir = agents_with(&[
+        (MPM, KEYLESS_DAEMON.as_bytes()),
+        (MPM_SUPERVISOR, BACKGROUND_SUPERVISOR.as_bytes()),
+    ]);
     for mode in [RepairMode::DryRun, RepairMode::Apply] {
         let steps = repair_process_type_in(dir.path(), mode);
-        assert!(
-            steps
-                .iter()
-                .all(|s| s.what.contains("next daemon restart") && s.what.contains("not reloaded")),
-            "{steps:?}"
-        );
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        for s in &steps {
+            let label = if s.path.ends_with(format!("{MPM}.plist")) {
+                MPM
+            } else {
+                MPM_SUPERVISOR
+            };
+            assert!(s.what.contains("not reloaded"), "{}", s.what);
+            assert!(
+                s.what
+                    .contains(&format!("applies it when it next loads `{label}`")),
+                "{}",
+                s.what
+            );
+            assert!(
+                s.what.contains("launchctl bootout") && s.what.contains("launchctl bootstrap"),
+                "{}",
+                s.what
+            );
+            assert!(s.what.contains("crash respawn"), "{}", s.what);
+            assert!(!s.what.contains("next daemon restart"), "{}", s.what);
+            assert_eq!(
+                s.what.contains("tm daemon restart does not reload"),
+                label == MPM_SUPERVISOR,
+                "{}",
+                s.what
+            );
+        }
     }
     let stale = agents_with(&[(MPM_SUPERVISOR, BACKGROUND_SUPERVISOR.as_bytes())]);
     let row = row_for(&stale);
@@ -182,5 +222,33 @@ fn every_step_says_it_takes_effect_at_the_next_restart() {
         row.message.contains("tm doctor --fix --yes"),
         "{}",
         row.message
+    );
+    assert!(
+        row.message.contains("tm daemon restart does not reload"),
+        "{}",
+        row.message
+    );
+}
+
+/// #8562: a write that fails is reported as `Failed`, and the plist is left
+/// byte-identical.
+#[cfg(unix)]
+#[test]
+fn a_write_failure_is_reported_and_leaves_the_plist_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = agents_with(&[(MPM_SUPERVISOR, BACKGROUND_SUPERVISOR.as_bytes())]);
+    let set_mode = |mode| {
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    set_mode(0o555);
+    let steps = repair_process_type_in(dir.path(), RepairMode::Apply);
+    set_mode(0o755);
+    assert!(
+        matches!(&steps[..], [s] if matches!(s.status, StepStatus::Failed(_))),
+        "{steps:?}"
+    );
+    assert_eq!(
+        std::fs::read(plist(&dir, MPM_SUPERVISOR)).expect("read"),
+        BACKGROUND_SUPERVISOR.as_bytes()
     );
 }

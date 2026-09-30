@@ -9,7 +9,10 @@
 //! `Interactive` — replacing the value of the key launchd loads, or adding the
 //! key to the top-level dict — with an atomic write. It ONLY rewrites the file:
 //! it never runs `launchctl`, never unloads, reloads or signals the running
-//! job. Every step says the change takes effect at the next daemon restart.
+//! job. Every step says when launchd applies it for that label: when it next
+//! LOADS the label (login, or `launchctl bootout` then `bootstrap`), never on a
+//! kickstart or crash respawn; the supervisor is not reloaded by a daemon
+//! restart. Until then the row reports "written; pending reload".
 //! No backup is taken: a plist may carry `EnvironmentVariables` credentials
 //! (#8236), and a backup would be a second readable copy. The atomic write
 //! leaves the original byte-identical until the rename.
@@ -22,8 +25,8 @@ use trusty_common::atomic_file::write_atomic;
 use trusty_common::launchd_labels::{MPM, MPM_SUPERVISOR};
 
 use super::{
-    CHECK_NAME, EXPECTED_PROCESS_TYPE, ProcessTypeReading, launch_agents_dir, process_type_of,
-    read_plist,
+    CHECK_NAME, EXPECTED_PROCESS_TYPE, ProcessTypeReading, launch_agents_dir, load_note,
+    process_type_of, read_plist,
 };
 use crate::core::doctor_repair::{RepairMode, RepairStep, StepStatus};
 
@@ -45,11 +48,12 @@ pub fn repair_launchd_process_type(home: &Path, mode: RepairMode) -> Vec<RepairS
 /// for a plist this repair cannot judge or edit safely (binary, symlinked, an
 /// unexpected layout); [`StepStatus::Failed`] when the write fails.
 /// Test: `dry_run_plans_without_writing`,
-/// `apply_adds_the_key_and_the_row_passes`,
+/// `apply_adds_the_key_and_the_row_reports_pending_reload`,
 /// `apply_replaces_a_background_value_and_keeps_the_rest`,
 /// `repair_is_silent_when_already_interactive_or_absent`,
 /// `repair_refuses_a_binary_plist`, `repair_refuses_a_symlinked_plist`,
-/// `every_step_says_it_takes_effect_at_the_next_restart`.
+/// `every_step_says_when_launchd_loads_the_new_class`,
+/// `a_write_failure_is_reported_and_leaves_the_plist_unchanged`.
 pub(crate) fn repair_process_type_in(agents: &Path, mode: RepairMode) -> Vec<RepairStep> {
     [MPM, MPM_SUPERVISOR]
         .into_iter()
@@ -62,7 +66,7 @@ fn repair_one(path: &Path, label: &str, mode: RepairMode) -> Option<RepairStep> 
     let step = |status| RepairStep {
         check: CHECK_NAME,
         path: path.to_path_buf(),
-        what: describe(label),
+        what: describe(label, path),
         status,
     };
     let refused = |why: String| Some(step(StepStatus::Refused(format!("{why}; set it by hand"))));
@@ -96,12 +100,13 @@ fn repair_one(path: &Path, label: &str, mode: RepairMode) -> Option<RepairStep> 
 /// The step text, the same in both modes.
 ///
 /// Why (#8562 owner ruling 2026-09-28): the repair must not restart the daemon,
-/// so the operator has to be told when the new class applies.
-fn describe(label: &str) -> String {
+/// so the operator has to be told when the new class applies — which differs
+/// per label ([`load_note`]).
+fn describe(label: &str, path: &Path) -> String {
     format!(
         "set ProcessType={EXPECTED_PROCESS_TYPE} in `{label}`; the plist file only — launchd is \
-         not reloaded, so it takes effect at the next daemon restart, and a tmux server already \
-         running keeps its class until it exits"
+         not reloaded. {}; a tmux server already running keeps its class until it exits",
+        load_note(label, path)
     )
 }
 
@@ -134,7 +139,7 @@ fn outside_comments(xml: &str, needle: &str) -> Vec<usize> {
 /// Postcondition: on `Ok(out)`, `process_type_of(out)` is
 /// `Ok(Some("Interactive"))`; the function checks this before returning.
 ///
-/// Test: `apply_adds_the_key_and_the_row_passes`,
+/// Test: `apply_adds_the_key_and_the_row_reports_pending_reload`,
 /// `apply_replaces_a_background_value_and_keeps_the_rest`,
 /// `an_unexpected_layout_is_refused`.
 pub(crate) fn set_process_type_interactive(xml: &str) -> Result<String, String> {
