@@ -12,6 +12,7 @@
 //! and the `FakeTmuxDriver` test double in `tests.rs`.
 
 use super::manager::ManagedError;
+use super::supervisor_floor::SupervisorFloor;
 
 /// Trait seam over tmux operations used by the session manager.
 ///
@@ -548,6 +549,16 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// and calling this if a grace window is desired.
     /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
     /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
+    /// The protected-name floor [`Self::signal_terminate`] asks (#8942).
+    ///
+    /// Why: the signal half of a teardown reaches the pane by name too.
+    /// What: the host floor; [`super::real_tmux::RealTmuxDriver`] returns
+    /// the one its `TmuxDriver` kills under.
+    /// Test: `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
+    fn supervisor_floor(&self) -> SupervisorFloor {
+        SupervisorFloor::host()
+    }
+
     fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
         self.signal_terminate(name, claude_pid);
         self.kill_session(name)
@@ -567,10 +578,20 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// when the pid is unknown, falls back to a single `send_interrupt` (Ctrl-C).
     /// Signal errors are logged and swallowed — the process may already be gone —
     /// so this method is infallible (the fallible reclaim lives in `kill_session`).
+    /// #8942: a name the [`Self::supervisor_floor`] refuses gets no signal
+    /// at all — neither the SIGTERM nor the Ctrl-C.
     /// Test: `fake_driver_graceful_stop_with_pid` / `_without_pid` cover the
     /// composed `graceful_stop`; the CLI drain is covered by
-    /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`.
+    /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`; the
+    /// floor by `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
     fn signal_terminate(&self, name: &str, claude_pid: Option<u32>) {
+        let floor = self.supervisor_floor();
+        if floor
+            .refuse(name, "ManagedTmuxDriver::signal_terminate")
+            .is_some()
+        {
+            return;
+        }
         if let Some(pid) = claude_pid {
             #[cfg(unix)]
             {

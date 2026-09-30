@@ -87,6 +87,7 @@ async fn reconcile_backfills_source_id_from_workspace_git_remote() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
@@ -178,6 +179,7 @@ async fn reconcile_backfills_source_id_for_stopped_record() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 

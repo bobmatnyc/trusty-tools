@@ -310,6 +310,7 @@ fn row(state: &str) -> trusty_mpm::client::ManagedSessionSummary {
         slot: 1,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 

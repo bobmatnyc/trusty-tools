@@ -216,6 +216,7 @@ async fn seed_sessions(
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -433,6 +434,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -557,6 +559,37 @@ async fn tick_never_resumes_a_deliberately_stopped_session() {
         "no tmux session may be created for a deliberately stopped record"
     );
     assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
+}
+
+/// #8942: the sweep never relaunches the Architect or its helpers, whatever
+/// the stop cause — only `tm fleet init` launches them.
+#[tokio::test]
+async fn tick_never_resumes_a_supervisor_record() {
+    use crate::session_manager::SessionKind;
+    for kind in [
+        SessionKind::Supervisor,
+        SessionKind::SupervisorAux,
+        SessionKind::Unknown,
+    ] {
+        let dir = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let tmux = FakeTmux::new();
+        let mgr = make_manager(&dir, tmux.clone()).await;
+        let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+        set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+        {
+            let mut store = mgr.store.write().await;
+            let mut record = store.cached_get(&ids[0]).expect("seeded record");
+            record.kind = kind;
+            store.upsert(record).await.expect("stamp kind");
+        }
+
+        let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+        assert!(report.resumed.is_empty(), "{kind:?}: {:?}", report.resumed);
+        assert_eq!(*tmux.create_calls.lock().unwrap(), 0, "{kind:?}");
+        assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
+    }
 }
 
 /// A sweep still relaunches a session whose runtime exited on its own (#6194).

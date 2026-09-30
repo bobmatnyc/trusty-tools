@@ -445,6 +445,7 @@ impl SessionManager {
                 worktree_owner: None,
                 terminal_at: None,
                 stop_cause: None,
+                kind: super::SessionKind::Ordinary,
             };
             newly_resolved.push((id, resolved_cwd));
             guard.upsert(external).await?;

@@ -166,6 +166,7 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         mgr.store
             .write()
@@ -635,6 +636,27 @@ fn decommission_outcome_keeps_unmodelled_daemon_fields() {
 
 /// #2595: `unresumable` must round-trip when present, and default `false`
 /// (never spuriously flag a session dead) when an older daemon omits it.
+#[test]
+fn managed_session_summary_carries_the_kind() {
+    use crate::session_manager::SessionKind;
+    // #8942: the daemon's summary serializes the record kind, and the client
+    // reads it back; a pre-#8942 daemon omits it.
+    let record: crate::session_manager::SessionRecord = serde_json::from_value(serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000001", "task": "t", "tmux_name": "tm-arch",
+        "cwd": "/tmp", "state": "active", "created_at": "2026-09-30T00:00:00Z",
+        "kind": "supervisor",
+    }))
+    .unwrap();
+    let summary = crate::daemon::managed_routes::summary::record_to_summary(&record);
+    let wire = serde_json::to_value(summary).unwrap();
+    let s: ManagedSessionSummary = serde_json::from_value(wire).unwrap();
+    assert_eq!(s.kind, Some(SessionKind::Supervisor));
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert_eq!(s.kind, None);
+}
+
 #[test]
 fn managed_session_summary_deserializes_unresumable_flag() {
     let with_flag = serde_json::json!({

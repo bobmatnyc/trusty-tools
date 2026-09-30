@@ -59,6 +59,7 @@ fn record_serde_round_trip() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -98,6 +99,7 @@ fn stopped_state_survives_serde() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -135,6 +137,7 @@ fn decommissioned_state_survives_serde() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -197,6 +200,7 @@ fn record_round_trips_tcode_runtime() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     record.runtime = crate::runtime::RuntimeKind::Tcode;
     let json = serde_json::to_string(&record).expect("serialize");
@@ -263,6 +267,7 @@ fn record_round_trips_ephemeral_true() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -359,6 +364,7 @@ fn record_round_trips_scrollback_fields() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -400,6 +406,7 @@ fn record_round_trips_workspace_owned_true() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -469,6 +476,7 @@ fn record_round_trips_deliverable_id() {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -535,6 +543,7 @@ fn record_round_trips_worktree_owner() {
         worktree_owner: Some(owner),
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -675,6 +684,7 @@ fn terminal_fixture() -> SessionRecord {
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

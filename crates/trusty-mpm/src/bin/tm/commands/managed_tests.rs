@@ -1391,6 +1391,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         slot,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 

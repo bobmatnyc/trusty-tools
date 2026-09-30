@@ -72,6 +72,7 @@ async fn seed_live(
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.tmux
         .create_session(tmux_name, "/tmp")

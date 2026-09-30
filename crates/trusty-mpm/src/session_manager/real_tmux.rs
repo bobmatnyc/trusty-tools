@@ -20,6 +20,7 @@ use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::{ExclusiveCreate, TmuxDriver};
 
 use super::manager::{ManagedError, ManagedTmuxDriver};
+use super::supervisor_floor::SupervisorFloor;
 
 /// Adapter exposing the daemon's [`TmuxDriver`] as a [`ManagedTmuxDriver`].
 ///
@@ -46,9 +47,20 @@ impl RealTmuxDriver {
             TmuxDriver::discover().map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         Ok(Self { driver })
     }
+
+    /// Wrap an already-built driver — tests only, for a scripted fake tmux.
+    #[cfg(test)]
+    pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
+        Self { driver }
+    }
 }
 
 impl ManagedTmuxDriver for RealTmuxDriver {
+    /// #8942: signal under the same floor the wrapped driver kills under.
+    fn supervisor_floor(&self) -> SupervisorFloor {
+        self.driver.supervisor_floor().clone()
+    }
+
     /// Overrides the trait's no-op default so the production path actually
     /// starts the tmux server when it is not yet running (#3823).
     fn ensure_server_up(&self) -> Result<(), ManagedError> {

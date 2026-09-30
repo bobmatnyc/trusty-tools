@@ -327,6 +327,7 @@ impl SessionManager {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: super::SessionKind::Ordinary,
         };
 
         // ── Guard 1: collision check (+ the no-collision persist) — the
@@ -546,6 +547,7 @@ mod tests {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 
@@ -577,6 +579,7 @@ mod tests {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 
