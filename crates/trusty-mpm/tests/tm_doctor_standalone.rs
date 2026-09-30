@@ -133,3 +133,59 @@ fn tm_doctor_output_never_names_a_daemon_port() {
         "doctor output names port 7880.\nstdout:\n{stdout}"
     );
 }
+
+/// #7757: `--dir` points the project-scoped rows at another project.
+///
+/// The cwd is a scratch directory that is NOT the target, so the target's path
+/// in the `session_scope` row can only come from `--dir`. Before the flag the
+/// arg was rejected outright.
+#[test]
+fn tm_doctor_dir_scopes_the_session_scope_row_to_that_project() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let target = tempfile::tempdir().expect("scratch target");
+    let canonical = target.path().canonicalize().expect("canonical target");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--dir"])
+        .arg(target.path())
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --dir`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("session_scope"))
+        .unwrap_or_else(|| panic!("no session_scope row.\nstdout:\n{stdout}"));
+    assert!(
+        row.contains(&canonical.display().to_string()),
+        "row is not scoped to --dir: {row}"
+    );
+}
+
+/// #7757: a nonexistent `--dir` fails closed: non-zero, an error naming the
+/// path, and no report on the cwd in its place.
+#[test]
+fn tm_doctor_dir_that_does_not_exist_fails_closed() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let missing = cwd.path().join("absent-project");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--dir"])
+        .arg(&missing)
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --dir`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "exited 0.\nstdout:\n{stdout}");
+    assert!(
+        stderr.contains("--dir") && stderr.contains("absent-project"),
+        "error does not name the bad path.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("session_scope"),
+        "a report was printed anyway.\nstdout:\n{stdout}"
+    );
+}

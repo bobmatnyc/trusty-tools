@@ -20,12 +20,12 @@ use trusty_mpm::daemon::bug_report::{DeniedCall, denial_record};
 
 /// One identity case: the call, its environment, and whether the allowlist
 /// grants the Architect directory.
-struct Case {
-    name: &'static str,
-    call: Value,
-    env: HookEnv,
-    granted: bool,
-    want: Result<(), NotArchitect>,
+pub(crate) struct Case {
+    pub(crate) name: &'static str,
+    pub(crate) call: Value,
+    pub(crate) env: HookEnv,
+    pub(crate) granted: bool,
+    pub(crate) want: Result<(), NotArchitect>,
 }
 
 /// The user config a case runs under.
@@ -51,8 +51,9 @@ fn rename_record(fx: &Fixture, from: u32, to: u32) {
 }
 
 /// Every identity outcome, each in its own fixture. The fixture is returned
-/// so its temp directory outlives the case.
-fn cases() -> Vec<(Fixture, Case)> {
+/// so its temp directory outlives the case. #8939 reuses it for the env-file
+/// exemption.
+pub(crate) fn cases() -> Vec<(Fixture, Case)> {
     use LaunchRefusal as L;
     use NotArchitect as N;
     let mut out = Vec::new();

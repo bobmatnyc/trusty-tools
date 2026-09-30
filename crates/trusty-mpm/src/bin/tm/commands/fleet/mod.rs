@@ -27,7 +27,8 @@ mod preflight;
 mod register;
 mod seed;
 mod session_name;
-mod status;
+// #8939: `tm env` checks the same binding `tm fleet status` reports.
+pub(crate) mod status;
 
 use std::path::{Path, PathBuf};
 

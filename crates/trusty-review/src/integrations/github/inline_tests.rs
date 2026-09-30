@@ -118,6 +118,20 @@ fn build_inline_plan_off_diff_falls_back() {
     assert_eq!(plan.summary_findings.len(), 1, "off-diff finding → summary");
 }
 
+/// REGRESSION (#8949): a partly verified citation never posts inline.
+#[test]
+fn build_inline_plan_posts_a_partial_citation_in_the_body() {
+    let c = CommentableLines::from_unified_diff(sample_diff());
+    let mut partial = finding_at("src/db.rs", Some(11));
+    partial.citation_partial = true;
+    let plan = build_inline_plan(&[partial], &c);
+    assert!(
+        plan.comments.is_empty(),
+        "a partial citation must not post inline"
+    );
+    assert_eq!(plan.summary_findings.len(), 1);
+}
+
 #[test]
 fn build_inline_plan_no_line_falls_back() {
     let c = CommentableLines::from_unified_diff(sample_diff());
