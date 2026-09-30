@@ -305,6 +305,8 @@ pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+// #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
+pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 pub(crate) use reindex_handlers::reindex_report;
 pub(crate) use search::{delete_index_report, DeleteIndexParams};
 

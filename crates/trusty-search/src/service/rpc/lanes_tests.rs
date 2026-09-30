@@ -200,6 +200,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
                 "body": { "producer": "lanes", "nodes": [], "edges": [] },
             }),
         ),
+        // #6285 consumer move: the quantize backfill is `bulk_limited` on HTTP.
+        (
+            writes::METHOD_INDEX_QUANTIZE,
+            Lane::Bulk,
+            serde_json::json!({ "index_id": INDEX, "body": { "dry_run": true } }),
+        ),
         // Slice 5's streams: both HTTP routes are in `free`.
         (
             streams::METHOD_STATUS_STREAM,

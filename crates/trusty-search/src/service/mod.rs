@@ -9,6 +9,7 @@ pub mod config;
 pub mod constants;
 pub mod context_inference;
 pub mod daemon;
+pub mod daemon_client;
 pub(crate) mod data_dir;
 pub mod embed_pool;
 pub mod embedder_supervisor;
