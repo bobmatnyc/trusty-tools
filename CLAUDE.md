@@ -69,6 +69,8 @@ text-only edit recompiles dependents and can go red. Run the named bundle test,
 not the crate suite — which test reads which asset:
 [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 
+🟡 Dev lane vs release lane: live-check the debug tm while building; releases use the SMALL/LARGE gate rule — [release-workflow.md](docs/reference/release-workflow.md#dev-lane-and-release-lane).
+
 Per-rung commands, CI gates, baseline-red triage:
 [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md),
 [ci-gates.md](docs/reference/ci-gates.md).
