@@ -95,10 +95,6 @@ const IDENTITY_LIMIT: usize = 8;
 /// drawer must not dominate the context window.
 const MAX_DRAWER_CHARS: usize = 800;
 
-/// Connect timeout for daemon reads — kept short so a down daemon costs a
-/// handshake, not a turn (mirrors `api::server::workstreams`).
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
-
 /// Per-call timeout for daemon reads/writes.
 const CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -177,16 +173,6 @@ pub(crate) fn session_id_for(agent_name: &str) -> String {
     format!("persona-{agent_name}")
 }
 
-/// Shared HTTP client for daemon reads. `None` when the client cannot be
-/// built, which callers treat as "daemon unavailable" rather than an error.
-fn build_http_client() -> Option<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(CALL_TIMEOUT)
-        .build()
-        .ok()
-}
-
 /// One drawer as the prompt renders it: its text, plus the palace it came
 /// from (#7428).
 ///
@@ -239,24 +225,23 @@ fn truncate_drawer(s: &str) -> String {
 /// Kept separate from `crate::stores::resolve_store_statuses` (which probes
 /// the palace too, duplicating the reads this module already performs) so a
 /// turn makes exactly one search-daemon call.
-async fn probe_index(
-    client: &reqwest::Client,
-    search_base: Option<&str>,
-    index: &str,
-) -> (bool, Option<u64>) {
-    let Some(base) = search_base else {
+async fn probe_index(search_socket: Option<&Path>, index: &str) -> (bool, Option<u64>) {
+    let Some(socket) = search_socket else {
         return (false, None);
     };
-    let url = format!("{}/indexes/{index}/status", base.trim_end_matches('/'));
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(v) => (
-                true,
-                v.get("chunk_count").and_then(serde_json::Value::as_u64),
-            ),
-            Err(_) => (true, None),
-        },
-        _ => (false, None),
+    match trusty_common::search_rpc::call_at(
+        socket,
+        trusty_common::search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": index }),
+        CALL_TIMEOUT,
+    )
+    .await
+    {
+        Ok(v) => (
+            true,
+            v.get("chunk_count").and_then(serde_json::Value::as_u64),
+        ),
+        Err(_) => (false, None),
     }
 }
 
@@ -276,11 +261,11 @@ pub(crate) async fn build_persona_memory(
     stores: &StoresConfig,
     agent_name: &str,
     memory_socket: Option<&Path>,
-    search_base: Option<&str>,
+    search_socket: Option<&Path>,
     query: &str,
 ) -> PersonaMemory {
     let plan = crate::assistants::resolve_palace_plan(agent_name, stores.primary());
-    build_persona_memory_with_plan(stores, &plan, memory_socket, search_base, query).await
+    build_persona_memory_with_plan(stores, &plan, memory_socket, search_socket, query).await
 }
 
 /// [`build_persona_memory`] against an explicit [`PalacePlan`].
@@ -302,18 +287,14 @@ async fn build_persona_memory_with_plan(
     stores: &StoresConfig,
     plan: &PalacePlan,
     memory_socket: Option<&Path>,
-    search_base: Option<&str>,
+    search_socket: Option<&Path>,
     query: &str,
 ) -> PersonaMemory {
     let Some(binding) = stores.primary() else {
         return PersonaMemory::unbound();
     };
-    let Some(client) = build_http_client() else {
-        return PersonaMemory::unbound();
-    };
-
     let index = binding.resolved_index().to_string();
-    let (index_connected, index_chunk_count) = probe_index(&client, search_base, &index).await;
+    let (index_connected, index_chunk_count) = probe_index(search_socket, &index).await;
     let facts = BindingFacts {
         palace: plan.own.clone(),
         fan_out: plan.fan_out.clone(),

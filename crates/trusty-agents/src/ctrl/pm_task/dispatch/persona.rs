@@ -167,7 +167,7 @@ pub async fn run_pm_task_with_persona(
         &crate::tools::assistant_memory::recall_stores(&persona_cfg),
         persona_name,
         Some(&workstreams_socket),
-        trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
+        trusty_common::search_rpc::search_socket().ok().as_deref(),
         user_input,
     )
     .await;

@@ -9,7 +9,7 @@
 //! exists, so the card can say CONNECTED with a chunk count or NOT CONNECTED
 //! with a reason instead of asserting the same thing for every agent.
 //! What: [`agent_stores_route`] is the axum shim; [`stores_at`] is the
-//! testable core taking the agents-dir list and both daemon base URLs
+//! testable core taking the agents-dir list and both daemon sockets
 //! explicitly (same injected-dependency convention as `agent_patch::*_at` and
 //! `workstreams::list_workstreams_at`). Response shape:
 //! `{"stores": [StoreStatus, …], "issues": […], "search_indexes": […],
@@ -44,9 +44,8 @@ use crate::stores::{StoresConfig, resolve_store_statuses};
 
 /// `GET /api/agents/:name/stores` — HTTP entry point.
 ///
-/// Why/What: see the module doc. trusty-search's base URL comes from the
-/// `http_addr` convention it still writes; trusty-memory's socket is derived by
-/// the same `daemon_socket_path` call the daemon makes (#6286). Both are
+/// Why/What: see the module doc. Both daemon sockets are derived by the same
+/// `daemon_socket_path` call each daemon makes (#6285, #6286), and are
 /// threaded into [`stores_at`] so tests can substitute a mock.
 /// Test: `super::tests::agent_stores::stores_route_reports_connected_binding_with_stats`.
 pub(super) async fn agent_stores_route(
@@ -56,7 +55,7 @@ pub(super) async fn agent_stores_route(
     stores_at(
         &crate::agents::agents_dir_candidates(),
         &name,
-        trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
+        trusty_common::search_rpc::search_socket().ok().as_deref(),
         trusty_common::memory_rpc::resolve_memory_socket()
             .ok()
             .as_deref(),
@@ -93,7 +92,7 @@ pub(super) fn is_valid_agent_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Core store-resolution logic against explicit agents dirs + daemon URLs.
+/// Core store-resolution logic against explicit agents dirs + daemon sockets.
 ///
 /// Why: Same testability rationale as `agent_patch::patch_agent_at`.
 /// What: `400` for an invalid name, `404` for an unknown agent, `500` only
@@ -108,7 +107,7 @@ pub(super) fn is_valid_agent_name(name: &str) -> bool {
 pub(super) async fn stores_at(
     dirs: &[PathBuf],
     name: &str,
-    search_base: Option<&str>,
+    search_socket: Option<&std::path::Path>,
     memory_socket: Option<&std::path::Path>,
 ) -> Response {
     if !is_valid_agent_name(name) {
@@ -138,7 +137,7 @@ pub(super) async fn stores_at(
     };
 
     let (stores, tools, config_error) = parse_stores(&raw);
-    let statuses = resolve_store_statuses(name, &stores, search_base, memory_socket).await;
+    let statuses = resolve_store_statuses(name, &stores, search_socket, memory_socket).await;
     let mut body = serde_json::json!({
         "stores": statuses,
         "issues": stores.validate(),

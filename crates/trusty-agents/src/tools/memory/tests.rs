@@ -105,35 +105,40 @@ fn vector_search_blank_index_ids_are_treated_as_absent() {
 /// trusty-search daemon and returns the normalized hit envelope.
 #[tokio::test]
 async fn vector_search_routes_to_daemon_index() {
-    use axum::{Json, Router, extract::Path, http::StatusCode, routing::post};
-    use tokio::net::TcpListener;
-
-    let app = Router::new().route(
-        "/indexes/{id}/search",
-        post(|Path(id): Path<String>| async move {
-            if id == "bob-kb" {
-                (
-                    StatusCode::OK,
-                    Json(json!({"results": [
-                        {"path": "notes/travel.md", "score": 0.87, "content": "flight to NYC"}
-                    ]})),
-                )
+    // Records the wire call so the method name and body shape are pinned (#6285).
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let saved = seen.clone();
+    let daemon = crate::uds_mock::spawn(move |method, params| {
+        saved
+            .lock()
+            .unwrap()
+            .push((method.to_owned(), params.clone()));
+        Box::pin(async move {
+            if params["index_id"] == "bob-kb" {
+                Ok(json!({"results": [
+                    {"path": "notes/travel.md", "score": 0.87, "content": "flight to NYC"}
+                ]}))
             } else {
-                (StatusCode::NOT_FOUND, Json(json!({"error": "no index"})))
+                Err(crate::uds_mock::RpcError::new(-32004, "no index"))
             }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        })
+    })
+    .await;
 
     let tmp = tempdir().unwrap();
     let tool = VectorSearchTool::new()
         .with_code_dir(tmp.path().join("no-index"))
         .with_default_index(Some("bob-kb".to_string()))
-        .with_search_base_url(Some(format!("http://{addr}")));
+        .with_search_socket(Some(daemon.socket().to_path_buf()));
 
     let out = tool.execute(json!({"query": "travel"})).await;
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "exactly one socket call: {calls:?}");
+    assert_eq!(calls[0].0, "search.query");
+    assert_eq!(
+        calls[0].1,
+        json!({"index_id": "bob-kb", "body": {"text": "travel", "top_k": 5}})
+    );
     assert!(!out.is_error());
     let body = out.content();
     assert!(body.contains("notes/travel.md"), "body was: {body}");
@@ -394,7 +399,7 @@ async fn vector_search_execute_rejects_undeclared_index_when_enforced() {
         .with_attached_indexes(vec!["apex".to_string()])
         .with_index_enforcement(true)
         // Deliberately unreachable: enforcement must reject before any I/O.
-        .with_search_base_url(Some("http://127.0.0.1:1".to_string()));
+        .with_search_socket(Some(tmp.path().join("absent.sock")));
 
     let out = tool
         .execute(json!({"query": "q", "index_id": "bob-kb"}))
@@ -412,22 +417,38 @@ async fn vector_search_execute_rejects_undeclared_index_when_enforced() {
 /// erroring the agent turn.
 #[tokio::test]
 async fn vector_search_falls_back_when_daemon_index_missing() {
-    use axum::{Router, http::StatusCode, routing::post};
-    use tokio::net::TcpListener;
-
-    let app = Router::new().route(
-        "/indexes/{id}/search",
-        post(|| async { (StatusCode::NOT_FOUND, "no such index") }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let daemon = crate::uds_mock::spawn(|_, _| {
+        Box::pin(async { Err(crate::uds_mock::RpcError::new(-32004, "no such index")) })
+    })
+    .await;
 
     let tmp = tempdir().unwrap();
     let tool = VectorSearchTool::new()
         .with_code_dir(tmp.path().join("no-index"))
         .with_default_index(Some("ghost".to_string()))
-        .with_search_base_url(Some(format!("http://{addr}")));
+        .with_search_socket(Some(daemon.socket().to_path_buf()));
+
+    let out = tool.execute(json!({"query": "anything"})).await;
+    assert!(!out.is_error(), "must degrade, not error");
+    assert!(out.content().contains("grep_fallback"));
+}
+
+/// #6285: a socket nobody is listening on degrades to the local path with the
+/// same "must not error the turn" behaviour, and never falls back to TCP.
+/// Test: itself.
+#[tokio::test]
+async fn vector_search_falls_back_when_socket_is_absent() {
+    let tmp = tempdir().unwrap();
+    let tool = VectorSearchTool::new()
+        .with_code_dir(tmp.path().join("no-index"))
+        .with_default_index(Some("bob-kb".to_string()))
+        .with_search_socket(Some(tmp.path().join("absent.sock")));
+
+    let err = tool
+        .daemon_query("bob-kb", "anything", 5)
+        .await
+        .expect_err("a dead socket must be an error, not a TCP retry");
+    assert!(format!("{err:#}").contains("absent.sock"), "{err:#}");
 
     let out = tool.execute(json!({"query": "anything"})).await;
     assert!(!out.is_error(), "must degrade, not error");
@@ -446,16 +467,13 @@ async fn vector_search_falls_back_when_daemon_index_missing() {
 use crate::untrusted::{KNOWLEDGE_FENCE, MEMORY_FENCE};
 use trusty_kb::okg::trust::TrustLabel;
 
-/// Stand up a mock trusty-search daemon answering `/indexes/{id}/search` with
-/// one hit per `(absolute_file, snippet)` pair.
+/// Stand up a mock trusty-search daemon on a scratch socket, answering
+/// `search.query` with one hit per `(absolute_file, snippet)` pair (#6285).
 ///
 /// The absolute path is what makes these tests real: the fence resolves each
 /// hit's trust label by reading that file's frontmatter, exactly as it does
 /// against the live daemon.
-async fn mock_search_daemon(hits: Vec<(String, String)>) -> String {
-    use axum::{Json, Router, http::StatusCode, routing::post};
-    use tokio::net::TcpListener;
-
+async fn mock_search_daemon(hits: Vec<(String, String)>) -> crate::uds_mock::MockMemoryDaemon {
     let body = json!({
         "results": hits
             .into_iter()
@@ -466,17 +484,7 @@ async fn mock_search_daemon(hits: Vec<(String, String)>) -> String {
             }))
             .collect::<Vec<_>>()
     });
-    let app = Router::new().route(
-        "/indexes/{id}/search",
-        post(move || {
-            let body = body.clone();
-            async move { (StatusCode::OK, Json(body)) }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
+    crate::uds_mock::spawn(crate::uds_mock::always(body)).await
 }
 
 /// Write an OKG entity carrying `trust: <label>` (or none when `label` is
@@ -491,11 +499,11 @@ fn okg_entity(dir: &std::path::Path, name: &str, label: Option<&str>, body: &str
     path.to_string_lossy().to_string()
 }
 
-fn okg_tool(base: &str, tmp: &std::path::Path) -> VectorSearchTool {
+fn okg_tool(daemon: &crate::uds_mock::MockMemoryDaemon, tmp: &std::path::Path) -> VectorSearchTool {
     VectorSearchTool::new()
         .with_code_dir(tmp.join("no-index"))
         .with_default_index(Some("bob-kb".to_string()))
-        .with_search_base_url(Some(base.to_string()))
+        .with_search_socket(Some(daemon.socket().to_path_buf()))
 }
 
 /// THE end-to-end proof for DOC-63 `S-4.5`. An entity labelled
@@ -700,7 +708,7 @@ async fn non_okg_index_output_is_unchanged() {
         .with_code_dir(tmp.path().join("no-index"))
         .with_default_index(Some("bob-kb".to_string()))
         .with_attached_indexes(vec!["apex".to_string()])
-        .with_search_base_url(Some(base));
+        .with_search_socket(Some(base.socket().to_path_buf()));
 
     let body = tool
         .execute(json!({"query": "q", "index_id": "apex"}))
@@ -738,24 +746,13 @@ async fn explicit_query_of_the_bound_store_is_still_fenced() {
 /// resolved, and must therefore be fenced.
 #[tokio::test]
 async fn hit_without_a_file_path_is_fenced() {
-    use axum::{Json, Router, http::StatusCode, routing::post};
-    use tokio::net::TcpListener;
-
-    let app = Router::new().route(
-        "/indexes/{id}/search",
-        post(|| async {
-            (
-                StatusCode::OK,
-                Json(json!({"results": [{"path": "rel/only.md", "content": "text"}]})),
-            )
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let daemon = crate::uds_mock::spawn(crate::uds_mock::always(
+        json!({"results": [{"path": "rel/only.md", "content": "text"}]}),
+    ))
+    .await;
 
     let tmp = tempdir().unwrap();
-    let body = okg_tool(&format!("http://{addr}"), tmp.path())
+    let body = okg_tool(&daemon, tmp.path())
         .execute(json!({"query": "q"}))
         .await
         .content()

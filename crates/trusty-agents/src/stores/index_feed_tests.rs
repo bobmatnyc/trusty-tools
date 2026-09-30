@@ -7,8 +7,8 @@
 //! failed push staying pending and healing on a later run, replace-before-push
 //! on an edit, and withdrawal on a tombstone.
 //! What: a recording fake with an arm-able failure, driven over a real temp KB
-//! tree and a real doc-store ingest; plus one mock-HTTP test pinning the live
-//! daemon's route and body shape.
+//! tree and a real doc-store ingest; the live socket method shape is pinned in
+//! `index_feed_rpc::tests`.
 //! Test: `cargo test -p trusty-agents stores::index_feed`.
 
 use std::sync::Mutex;
@@ -361,103 +361,4 @@ async fn refuses_an_index_rooted_away_from_the_tree() {
         .await
         .unwrap();
     assert_eq!((fed.indexed, fed.pending), (1, 0), "{:?}", fed.errors);
-}
-
-/// Why: the live route shape is the one thing a fake cannot prove, and a wrong
-/// path or body key would fail only against the real daemon.
-/// What: stands up a mock exposing trusty-search's actual `index-file` /
-/// `remove-file` routes, drives [`HttpIndexFeed`], and asserts the URL, the JSON
-/// keys, and that a non-2xx answer surfaces as an error.
-/// Test: self-contained.
-#[tokio::test]
-async fn http_feed_calls_the_daemon_routes() {
-    use axum::{Json, Router, extract::Path, http::StatusCode, routing::post};
-    use std::sync::Arc;
-    use tokio::net::TcpListener;
-
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let index_seen = seen.clone();
-    let remove_seen = seen.clone();
-    let app = Router::new()
-        .route(
-            "/indexes/{id}/index-file",
-            post(
-                move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| {
-                    let seen = index_seen.clone();
-                    async move {
-                        seen.lock().unwrap().push(format!(
-                            "index {id} {} {}",
-                            body["path"].as_str().unwrap_or_default(),
-                            body["content"].as_str().unwrap_or_default()
-                        ));
-                        (StatusCode::OK, Json(serde_json::json!({"indexed": true})))
-                    }
-                },
-            ),
-        )
-        .route(
-            "/indexes/{id}/remove-file",
-            post(
-                move |Path(id): Path<String>, Json(body): Json<serde_json::Value>| {
-                    let seen = remove_seen.clone();
-                    async move {
-                        // Mirror the daemon: an unregistered index is a 404.
-                        if id == "ghost" {
-                            return (
-                                StatusCode::NOT_FOUND,
-                                Json(serde_json::json!({"error": "no such index"})),
-                            );
-                        }
-                        seen.lock().unwrap().push(format!(
-                            "remove {id} {}",
-                            body["path"].as_str().unwrap_or_default()
-                        ));
-                        (
-                            StatusCode::OK,
-                            Json(serde_json::json!({"removed_chunks": 3})),
-                        )
-                    }
-                },
-            ),
-        )
-        .route(
-            "/indexes/{id}/status",
-            axum::routing::get(|Path(id): Path<String>| async move {
-                if id == "ghost" {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "no such index"})),
-                    );
-                }
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"index_id": id, "root_path": "/Users/masa/kb"})),
-                )
-            }),
-        );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let feed = HttpIndexFeed::new(format!("http://{addr}/")).unwrap();
-    assert_eq!(
-        feed.index_root("kb").await.unwrap(),
-        Some(std::path::PathBuf::from("/Users/masa/kb")),
-        "the preflight must read root_path off the status route"
-    );
-    feed.index_file("kb", "/tmp/a.md", "hello").await.unwrap();
-    feed.remove_file("kb", "/tmp/a.md").await.unwrap();
-    assert_eq!(
-        *seen.lock().unwrap(),
-        vec!["index kb /tmp/a.md hello", "remove kb /tmp/a.md"]
-    );
-
-    // A 404 (unregistered index) must surface as an error, not a silent success.
-    let err = feed
-        .remove_file("ghost", "/tmp/a.md")
-        .await
-        .expect_err("an unknown index must fail loudly");
-    assert!(err.to_string().contains("404"), "error was: {err}");
 }

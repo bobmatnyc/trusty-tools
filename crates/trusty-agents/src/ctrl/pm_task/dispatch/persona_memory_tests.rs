@@ -13,11 +13,8 @@ use super::*;
 use crate::assistants::PalaceSource;
 use crate::stores::AgentStoreBinding;
 
-/// Well-formed but unreachable — nothing listens on port 1, so a read against
-/// it exercises the degradation path without waiting on a real timeout.
-const DEAD_URL: &str = "http://127.0.0.1:1";
-
-/// A socket path nothing can be serving, for the memory half (#6286).
+/// A socket path nothing can be serving, for either daemon (#6285, #6286): a
+/// read against it exercises the degradation path without waiting on a timeout.
 fn dead_socket() -> &'static std::path::Path {
     std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock")
 }
@@ -498,15 +495,14 @@ async fn build_persona_memory_returns_unbound_without_stores() {
 
 #[tokio::test]
 async fn build_persona_memory_injects_recall_and_identity() {
-    let (addr, memory, _state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, _state) = mock_daemon::spawn().await;
     let socket = memory.socket();
 
     let mem = build_persona_memory_with_plan(
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &[]),
         Some(socket),
-        Some(&search_base),
+        Some(search.socket()),
         "where does Masa live",
     )
     .await;
@@ -534,15 +530,14 @@ async fn build_persona_memory_injects_recall_and_identity() {
 async fn build_persona_memory_dedupes_identity_out_of_recall() {
     // The identity drawer also scores on a "who are you" query; printing it
     // in both sections would waste context and read as duplicated memory.
-    let (addr, memory, _state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, _state) = mock_daemon::spawn().await;
     let socket = memory.socket();
 
     let mem = build_persona_memory_with_plan(
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &[]),
         Some(socket),
-        Some(&search_base),
+        Some(search.socket()),
         "who are you",
     )
     .await;
@@ -563,7 +558,7 @@ async fn build_persona_memory_degrades_when_palace_unreachable() {
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &[]),
         Some(dead_socket()),
-        Some(DEAD_URL),
+        Some(dead_socket()),
         "what do you remember",
     )
     .await;
@@ -572,6 +567,10 @@ async fn build_persona_memory_degrades_when_palace_unreachable() {
         MemoryHealth::Unavailable(reason) => assert!(reason.contains("unreachable")),
         other => panic!("expected Unavailable, got {other:?}"),
     }
+    // #6285: a dead search socket is "not connected", never a TCP retry.
+    let facts = mem.binding.as_ref().expect("binding facts");
+    assert!(!facts.index_connected);
+    assert_eq!(facts.index_chunk_count, None);
     // Crucially: still renders, still carries the binding, still forbids the
     // stateless self-description.
     let block = render_memory_block(&mem).expect("binding survives an outage");
@@ -588,15 +587,14 @@ async fn build_persona_memory_degrades_when_palace_unreachable() {
 /// fails on the health assertion.
 #[tokio::test]
 async fn build_persona_memory_uses_the_instance_id_palace_without_a_binding() {
-    let (addr, memory, state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, state) = mock_daemon::spawn().await;
     let socket = memory.socket();
 
     let mem = build_persona_memory_with_plan(
         &binding(None),
         &derived_plan("izzie", &[]),
         Some(socket),
-        Some(&search_base),
+        Some(search.socket()),
         "hi",
     )
     .await;
@@ -630,7 +628,7 @@ async fn build_persona_memory_uses_the_instance_id_palace_without_a_binding() {
 /// that cut this test fails on the create count.
 #[tokio::test]
 async fn ensure_palace_does_not_recreate_an_existing_palace() {
-    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let (_search, memory, state) = mock_daemon::spawn().await;
     state.palace_exists("izzie");
 
     persona_palace::ensure_palace(memory.socket(), "izzie")
@@ -671,15 +669,14 @@ async fn ensure_palace_does_not_recreate_an_existing_palace() {
 /// this test does not compile, because no create path existed.
 #[tokio::test]
 async fn build_persona_memory_reports_unavailable_when_palace_create_fails() {
-    let (addr, memory, state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, state) = mock_daemon::spawn().await;
     state.fail_palace_create();
 
     let mem = build_persona_memory_with_plan(
         &binding(None),
         &derived_plan("izzie", &["cto"]),
         Some(memory.socket()),
-        Some(&search_base),
+        Some(search.socket()),
         "hi",
     )
     .await;
@@ -709,14 +706,13 @@ async fn build_persona_memory_reports_unavailable_when_palace_create_fails() {
 /// assertion compiles — `recalled` was a `Vec<String>` with no palace on it.
 #[tokio::test]
 async fn build_persona_memory_recalls_across_fan_out_palaces() {
-    let (addr, memory, state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, state) = mock_daemon::spawn().await;
 
     let mem = build_persona_memory_with_plan(
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &["cto"]),
         Some(memory.socket()),
-        Some(&search_base),
+        Some(search.socket()),
         "what do you know",
     )
     .await;
@@ -741,14 +737,13 @@ async fn build_persona_memory_recalls_across_fan_out_palaces() {
 
 #[tokio::test]
 async fn recall_without_fan_out_makes_exactly_one_recall_call() {
-    let (addr, memory, state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, state) = mock_daemon::spawn().await;
 
     let mem = build_persona_memory_with_plan(
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &[]),
         Some(memory.socket()),
-        Some(&search_base),
+        Some(search.socket()),
         "what do you know",
     )
     .await;
@@ -771,14 +766,13 @@ async fn recall_without_fan_out_makes_exactly_one_recall_call() {
 /// memory wins an exact score tie.
 #[tokio::test]
 async fn recall_ranks_across_palaces_with_own_winning_ties() {
-    let (addr, memory, _state) = mock_daemon::spawn().await;
-    let search_base = format!("http://{addr}");
+    let (search, memory, _state) = mock_daemon::spawn().await;
 
     let mem = build_persona_memory_with_plan(
         &binding(Some("owner-profile")),
         &plan(Some("owner-profile"), &["cto"]),
         Some(memory.socket()),
-        Some(&search_base),
+        Some(search.socket()),
         "tie",
     )
     .await;
@@ -830,7 +824,7 @@ fn render_tags_every_drawer_with_its_source_palace() {
 
 #[tokio::test]
 async fn persist_turn_creates_session_then_appends() {
-    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let (_search, memory, state) = mock_daemon::spawn().await;
     let socket = memory.socket();
 
     persist_turn(
@@ -866,7 +860,7 @@ async fn persist_turn_creates_session_then_appends() {
 async fn persist_turn_surfaces_rpc_envelope_errors() {
     // The daemon answers a frame even on failure — the envelope's `error` member is
     // the only signal, so a status-only check would silently lose turns.
-    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let (_search, memory, state) = mock_daemon::spawn().await;
     state.fail_rpc();
     let socket = memory.socket();
 
@@ -897,7 +891,7 @@ async fn spawn_persist_turn_is_noop_without_a_socket() {
 /// untested and nothing would have caught a later fan-out-aware write path.
 #[tokio::test]
 async fn persist_turn_writes_only_to_the_own_palace() {
-    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let (_search, memory, state) = mock_daemon::spawn().await;
     let fan_out = plan(Some("owner-profile"), &["cto", "scout"]);
 
     persist_turn(
@@ -932,11 +926,6 @@ async fn persist_turn_writes_only_to_the_own_palace() {
 
 mod mock_daemon {
     use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
-    use axum::Json;
-    use axum::Router;
-    use axum::extract::Path as AxumPath;
-    use axum::routing::get;
-    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[derive(Default)]
@@ -982,10 +971,12 @@ mod mock_daemon {
         }
     }
 
-    /// GET `/indexes/{index}/status` — trusty-search's index probe, which is
-    /// still HTTP: ADR-0032 has not migrated that daemon.
-    async fn index_status(AxumPath(_index): AxumPath<String>) -> Json<serde_json::Value> {
-        Json(serde_json::json!({"chunk_count": 552, "status": "ready"}))
+    /// trusty-search's index probe, on its own socket (#6285).
+    async fn spawn_search() -> MockMemoryDaemon {
+        uds_mock::spawn(uds_mock::always(
+            serde_json::json!({"chunk_count": 552, "status": "ready"}),
+        ))
+        .await
     }
 
     /// The trusty-memory half, on a Unix socket (#6286).
@@ -1092,24 +1083,16 @@ mod mock_daemon {
         .await
     }
 
-    pub(super) async fn spawn() -> (SocketAddr, MockMemoryDaemon, Arc<MockState>) {
+    pub(super) async fn spawn() -> (MockMemoryDaemon, MockMemoryDaemon, Arc<MockState>) {
         let state = Arc::new(MockState::default());
         let memory = spawn_memory(Arc::clone(&state)).await;
-
-        let app = Router::new().route("/indexes/{index}/status", get(index_status));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        (addr, memory, state)
+        (spawn_search().await, memory, state)
     }
 }
 
 #[tokio::test]
 async fn tool_activity_persistence_keeps_explicit_event_origin_and_order() {
-    let (_addr, memory, state) = mock_daemon::spawn().await;
+    let (_search, memory, state) = mock_daemon::spawn().await;
     let event =
         r#"{"kind":"trusty.listener-event","version":1,"listener":"mail","event_type":"received"}"#;
     let activities = vec![

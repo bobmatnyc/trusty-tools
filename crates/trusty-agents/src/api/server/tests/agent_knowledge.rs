@@ -11,10 +11,9 @@
 //! `$HOME/.trusty-agents/config.toml`).
 //! Test: This module IS the test.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::{Json, Router, extract::Path, http::StatusCode as AxumStatus, routing::get};
-use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use crate::api::server::agent_knowledge::knowledge_at;
@@ -77,28 +76,24 @@ search_indexes = ["cto-duetto"]
 enforce_search_indexes = true
 "#;
 
-async fn mock_search_daemon() -> String {
-    let app = Router::new().route(
-        "/indexes/{id}/status",
-        get(|Path(id): Path<String>| async move {
-            if id == "cto-assistant" {
-                (
-                    AxumStatus::OK,
-                    Json(serde_json::json!({
-                        "index_id": "cto-assistant",
-                        "chunk_count": 200_090,
-                        "status": "ready",
-                    })),
-                )
+async fn mock_search_daemon() -> crate::uds_mock::MockMemoryDaemon {
+    crate::uds_mock::spawn(|_method: &str, params: serde_json::Value| {
+        Box::pin(async move {
+            if params["index_id"] == "cto-assistant" {
+                Ok(serde_json::json!({
+                    "index_id": "cto-assistant",
+                    "chunk_count": 200_090,
+                    "status": "ready",
+                }))
             } else {
-                (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
+                Err(crate::uds_mock::RpcError::new(
+                    trusty_common::search_rpc::CODE_NOT_FOUND,
+                    "no such index",
+                ))
             }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}")
+        })
+    })
+    .await
 }
 
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -137,7 +132,7 @@ async fn knowledge_route_reports_bound_store_and_granted_tool() {
             &[dir.path().to_path_buf()],
             "cto-assistant",
             dir.path(),
-            Some(&base),
+            Some(base.socket()),
             None,
         )
         .await;
@@ -186,7 +181,7 @@ async fn knowledge_route_surfaces_attached_search_indexes() {
             &[dir.path().to_path_buf()],
             "cto-assistant",
             dir.path(),
-            Some(&base),
+            Some(base.socket()),
             None,
         )
         .await;
@@ -250,7 +245,7 @@ async fn knowledge_route_reports_dead_store_with_reason_not_500() {
             &[dir.path().to_path_buf()],
             "ghosty",
             dir.path(),
-            Some(&base),
+            Some(base.socket()),
             None,
         )
         .await;
@@ -328,38 +323,34 @@ async fn knowledge_route_reports_corpus_open_failed_as_not_connected() {
         )
         .unwrap();
 
-        let app = axum::Router::new().route(
-            "/indexes/{id}/status",
-            get(|Path(id): Path<String>| async move {
-                if id == "cto-duetto" {
-                    (
-                        AxumStatus::OK,
-                        Json(serde_json::json!({
-                            "index_id": "cto-duetto",
-                            "chunk_count": 0,
-                            "status": "ready",
-                            "stages": {
-                                "lexical": {"status": "failed"},
-                                "semantic": {"status": "failed"},
-                                "graph": {"status": "failed"},
-                            },
-                        })),
-                    )
+        let base = crate::uds_mock::spawn(|_method: &str, params: serde_json::Value| {
+            Box::pin(async move {
+                if params["index_id"] == "cto-duetto" {
+                    Ok(serde_json::json!({
+                        "index_id": "cto-duetto",
+                        "chunk_count": 0,
+                        "status": "ready",
+                        "stages": {
+                            "lexical": {"status": "failed"},
+                            "semantic": {"status": "failed"},
+                            "graph": {"status": "failed"},
+                        },
+                    }))
                 } else {
-                    (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
+                    Err(crate::uds_mock::RpcError::new(
+                        trusty_common::search_rpc::CODE_NOT_FOUND,
+                        "no such index",
+                    ))
                 }
-            }),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let base = format!("http://{addr}");
+            })
+        })
+        .await;
 
         let resp = knowledge_at(
             &[dir.path().to_path_buf()],
             "cto-assistant",
             dir.path(),
-            Some(&base),
+            Some(base.socket()),
             None,
         )
         .await;

@@ -6,7 +6,7 @@
 //! health derivation, `failed_stages`, and their regression tests — mirrors
 //! the sibling `index_feed.rs` / `index_feed_tests.rs` split in this same
 //! directory.
-//! What: a mock trusty-search HTTP router and a mock trusty-memory socket,
+//! What: a mock trusty-search socket and a mock trusty-memory socket,
 //! covering connected, missing, corpus-open-failed, and unreachable;
 //! config-validation short-circuiting covered without any network at all.
 //! The memory half is a socket since #6286 — a stub that kept answering HTTP
@@ -14,68 +14,60 @@
 //! Test: this file IS the test module (`stores::status::tests`).
 
 use super::*;
-use axum::{Json, Router, extract::Path, http::StatusCode, routing::get};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 
 use crate::uds_mock::{self, MockMemoryDaemon, RpcError};
 
-/// Spin up a mock trusty-search exposing the index status route, and return
-/// its base URL.
+/// Spin up a mock trusty-search answering `search.index.status` on a scratch
+/// socket (#6285).
 ///
 /// Why: Testing against the developer's real daemons would make the suite
-/// depend on machine state; a mock keeps the probe logic (status codes,
-/// body parsing, reason strings) under test deterministically.
-async fn mock_daemon() -> String {
-    let app = Router::new().route(
-        "/indexes/{id}/status",
-        get(|Path(id): Path<String>| async move {
-            if id == "bob-kb" {
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "index_id": "bob-kb",
-                        "chunk_count": 552,
-                        "root_path": "/Users/masa/trusty-agents/bob-kb",
-                        "status": "ready",
-                        "stages": {
-                            "lexical": {"status": "ready"},
-                            "semantic": {"status": "ready"},
-                            "graph": {"status": "ready"},
-                        },
-                    })),
-                )
-            } else if id == "cto-duetto" {
+/// depend on machine state; a mock keeps the probe logic (error codes,
+/// body parsing, reason strings) under test deterministically, on the
+/// transport the code uses.
+async fn mock_daemon() -> MockMemoryDaemon {
+    uds_mock::spawn(|method: &str, params: Value| {
+        let method = method.to_string();
+        let id = params
+            .get("index_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Box::pin(async move {
+            assert_eq!(method, "search.index.status", "unexpected method");
+            match id.as_str() {
+                "bob-kb" => Ok(json!({
+                    "index_id": "bob-kb",
+                    "chunk_count": 552,
+                    "root_path": "/Users/masa/trusty-agents/bob-kb",
+                    "status": "ready",
+                    "stages": {
+                        "lexical": {"status": "ready"},
+                        "semantic": {"status": "ready"},
+                        "graph": {"status": "ready"},
+                    },
+                })),
                 // Issue #4115's exact real-world shape: reachable,
                 // `status: "ready"`, `chunk_count: 0`, but every
                 // stage failed to open — the false-green case.
-                (
-                    StatusCode::OK,
-                    Json(json!({
-                        "index_id": "cto-duetto",
-                        "chunk_count": 0,
-                        "status": "ready",
-                        "stages": {
-                            "lexical": {"status": "failed", "failure": "corpus open failed"},
-                            "semantic": {"status": "failed", "failure": "corpus open failed"},
-                            "graph": {"status": "failed", "failure": "corpus open failed"},
-                        },
-                    })),
-                )
-            } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "no such index"})),
-                )
+                "cto-duetto" => Ok(json!({
+                    "index_id": "cto-duetto",
+                    "chunk_count": 0,
+                    "status": "ready",
+                    "stages": {
+                        "lexical": {"status": "failed", "failure": "corpus open failed"},
+                        "semantic": {"status": "failed", "failure": "corpus open failed"},
+                        "graph": {"status": "failed", "failure": "corpus open failed"},
+                    },
+                })),
+                _ => Err(RpcError::new(
+                    trusty_common::search_rpc::CODE_NOT_FOUND,
+                    "no such index",
+                )),
             }
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
+        })
+    })
+    .await
 }
 
 /// Spin up a mock trusty-memory answering `memory.drawers_list` (#6286).
@@ -132,7 +124,8 @@ index = "bob-kb"
 palace = "owner-profile"
 "#,
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
+    let out =
+        resolve_store_statuses("izzie", &stores, Some(base.socket()), Some(memory.socket())).await;
     assert_eq!(out.len(), 1);
     let s = &out[0];
     assert!(s.connected, "expected connected, got reason {:?}", s.reason);
@@ -159,7 +152,7 @@ name = "cto-duetto-kb"
 index = "cto-duetto"
 "#,
     );
-    let out = resolve_store_statuses("cto-assistant", &stores, Some(&base), None).await;
+    let out = resolve_store_statuses("cto-assistant", &stores, Some(base.socket()), None).await;
     assert_eq!(out.len(), 1);
     let s = &out[0];
     assert!(
@@ -210,7 +203,8 @@ async fn reports_missing_index_as_not_connected() {
     let base = mock_daemon().await;
     let memory = mock_memory().await;
     let stores = stores_toml("[[stores]]\nname = \"nope\"\n");
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
+    let out =
+        resolve_store_statuses("izzie", &stores, Some(base.socket()), Some(memory.socket())).await;
     assert!(!out[0].connected);
     let reason = out[0].reason.as_deref().unwrap();
     assert!(reason.contains("not registered"), "reason was: {reason}");
@@ -236,7 +230,7 @@ async fn reports_missing_index_as_not_connected() {
 async fn reports_a_missing_index_as_an_error_naming_index_and_assistant() {
     let base = mock_daemon().await;
     let stores = stores_toml("[[stores]]\nname = \"cto-kb\"\nindex = \"never-created\"\n");
-    let out = resolve_store_statuses("cto-assistant", &stores, Some(&base), None).await;
+    let out = resolve_store_statuses("cto-assistant", &stores, Some(base.socket()), None).await;
     let wire = serde_json::to_value(&out[0]).unwrap();
 
     let error = wire
@@ -287,7 +281,8 @@ async fn reports_missing_palace_without_downgrading_index() {
     let stores = stores_toml(
         "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"ghost-palace\"\n",
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
+    let out =
+        resolve_store_statuses("izzie", &stores, Some(base.socket()), Some(memory.socket())).await;
     assert!(
         out[0].connected,
         "index health must not depend on the palace"
@@ -322,7 +317,8 @@ async fn reports_unopenable_palace_as_a_server_error_not_an_absence() {
     let stores = stores_toml(
         "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"unopenable-palace\"\n",
     );
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(memory.socket())).await;
+    let out =
+        resolve_store_statuses("izzie", &stores, Some(base.socket()), Some(memory.socket())).await;
     assert!(
         out[0].connected,
         "index health must not depend on the palace"
@@ -353,13 +349,41 @@ async fn reports_undiscoverable_search_daemon() {
     );
 }
 
+/// #6285 error arm: a search socket nothing is serving reports the daemon
+/// unreachable — with the socket path in the reason — and never retries over
+/// TCP. A separate daemon refusal (not "not found") is `IndexUnhealthy`.
+/// Test: itself.
+#[tokio::test]
+async fn dead_search_socket_is_unreachable_and_a_refusal_is_unhealthy() {
+    let stores = stores_toml("[[stores]]\nname = \"bob-kb\"\n");
+    let dead = std::path::Path::new("/nonexistent/trusty-search.sock");
+    let out = resolve_store_statuses("izzie", &stores, Some(dead), None).await;
+    assert!(!out[0].connected);
+    assert_eq!(out[0].fault, Some(StoreFault::DaemonUnreachable));
+    let reason = out[0].reason.as_deref().unwrap();
+    assert!(reason.contains("unreachable"), "{reason}");
+    assert!(reason.contains("trusty-search.sock"), "{reason}");
+
+    let refusing =
+        uds_mock::spawn(|_, _| Box::pin(async { Err(RpcError::internal("boom")) })).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(refusing.socket()), None).await;
+    assert_eq!(out[0].fault, Some(StoreFault::IndexUnhealthy));
+    assert!(out[0].reason.as_deref().unwrap().contains("boom"));
+}
+
 #[tokio::test]
 async fn invalid_binding_short_circuits_without_network() {
     // A bad tree scheme must be reported as the reason WITHOUT any probe
-    // — note the deliberately unroutable base URL: if this test made a
-    // network call it would report a connection error instead.
+    // — note the deliberately dead socket: if this test dialled it, it
+    // would report a connection error instead.
     let stores = stores_toml("[[stores]]\nname = \"kb\"\ntree = \"https://example.com\"\n");
-    let out = resolve_store_statuses("izzie", &stores, Some("http://127.0.0.1:1"), None).await;
+    let out = resolve_store_statuses(
+        "izzie",
+        &stores,
+        Some(std::path::Path::new("/nonexistent/trusty-search.sock")),
+        None,
+    )
+    .await;
     assert!(!out[0].connected);
     assert!(out[0].reason.as_deref().unwrap().contains("okg://"));
 }
@@ -450,7 +474,7 @@ async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
 
     let base = mock_daemon().await;
     let stores = stores_toml("[[stores]]\nname = \"bob-kb\"\ntree = \"okg://izzie\"\n");
-    let out = resolve_store_statuses("izzie", &stores, Some(&base), None).await;
+    let out = resolve_store_statuses("izzie", &stores, Some(base.socket()), None).await;
 
     assert!(out[0].connected, "reason: {:?}", out[0].reason);
     assert_eq!(

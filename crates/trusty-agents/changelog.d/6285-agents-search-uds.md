@@ -1,0 +1,3 @@
+Changed
+
+- Every trusty-agents call to trusty-search now uses the daemon's Unix socket (`trusty_common::search_rpc`) instead of loopback HTTP on `:7878`: the `vector_search` tool (`search.query`), store status resolution behind `GET /api/agents/:name/stores` and `/knowledge` and `tagent system status` (`search.index.status`), the persona-memory index probe, and the `trusty-search` health probe (`search.health`). A missing or unreachable socket reports "unreachable" or "down" with the socket path and never falls back to TCP. The unused `HttpIndexFeed` is removed, and a sweep test fails if `src/` reintroduces an HTTP call to trusty-search ([#6285](https://github.com/bobmatnyc/trusty-tools/issues/6285))
