@@ -5,11 +5,12 @@
 //! `[supervisor] projects` allowlist, the project's `profile = "supervisor"`,
 //! and the launch stamp. Setting that up by hand meant editing the operator's
 //! config file; `tm fleet init` does it in one idempotent command.
-//! What: [`init`] creates the project (local git repo, no remote), writes the
-//! profile request and the allowlist entry — each an atomic write that keeps
-//! the rest of the file — seeds the fleet files ([`seed`]), and starts the
-//! Architect's tmux session and its poller ([`poller`]). [`status()`] reads the
-//! four session facts back and exits 1 when any is missing. The session is
+//! What: [`init_with_session`] creates the project (local git repo, no
+//! remote), writes the profile request and the allowlist entry — each an
+//! atomic write that keeps the rest of the file — seeds the fleet files
+//! ([`seed`]), and starts the Architect's tmux session and its poller
+//! ([`poller`]). [`status()`] reads the four session facts back and exits 1
+//! when any is missing. The session is
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). Twin mode (#8878) is out of scope (ruling
 //! Q7). `add` and `remove` are phase P3.
@@ -44,9 +45,9 @@ pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
-/// What: resolves the home and the directory, runs [`init`] or [`status()`],
-/// and prints the report. `init` returns an error, so exit 1, when a step
-/// failed; `status` does when the setup is incomplete.
+/// What: resolves the home and the directory, runs [`init_with_session`] or
+/// [`status()`], and prints the report. `init` returns an error, so exit 1,
+/// when a step failed; `status` does when the setup is incomplete.
 /// Test: `tests/tm_fleet.rs`.
 pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     let home = dirs::home_dir().context("cannot resolve the home directory")?;
