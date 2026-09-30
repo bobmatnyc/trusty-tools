@@ -517,7 +517,7 @@ impl Anchors {
             AnchorWrite::IntoUnnamed(dir) => self.judge_unnamed(dir, base, home),
             AnchorWrite::Delete(word, reach) => self.judge_delete(word, *reach, base, home, strict),
             // #8878 "Keep the split": an unseen delete denies the PM only.
-            AnchorWrite::UnseenDelete(what) => strict.then(|| unplaceable_reason(*what)),
+            AnchorWrite::UnseenDelete(what) => strict.then(|| unplaceable_reason(what)),
             AnchorWrite::DirChange => None,
         }
     }

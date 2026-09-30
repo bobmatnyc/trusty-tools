@@ -19,3 +19,6 @@ Changed
   or subagent is denied only a delete whose path resolves to an anchor, a
   directory holding one, or, for a glob, a matching entry that is one; an
   unknown thread is judged as the PM (#8878).
+- The guard's brace expander now refuses a word whose comma groups would
+  exceed its reading cap (thirty `{a,b}` groups), so such a word is denied
+  at once instead of running the hook past its timeout (#8878).

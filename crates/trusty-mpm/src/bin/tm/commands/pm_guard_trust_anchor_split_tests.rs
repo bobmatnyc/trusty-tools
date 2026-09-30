@@ -251,3 +251,18 @@ fn an_agent_delete_that_cannot_be_read_is_denied() {
     }
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
 }
+
+/// A word of thirty `{a,b}` groups (2^30 readings) is refused past the
+/// expander's cap, quickly, and denied: the hook's timeout fails open.
+#[test]
+fn a_brace_bomb_is_denied_quickly() {
+    let fx = fixture();
+    let command = format!("rm -f ~/.trusty-mpm/{}", "{a,b}".repeat(30));
+    let started = std::time::Instant::now();
+    denied_to_all(&fx, &command, UNKNOWN);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "took {:?}",
+        started.elapsed()
+    );
+}
