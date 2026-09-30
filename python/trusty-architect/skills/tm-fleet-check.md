@@ -41,7 +41,7 @@ its `CLAUDE.md`.
    the poller runs, reading this session's name from tmux, never assuming it:
 
    ```sh
-   tmux has-session -t "=$(tmux display-message -p -t "$TMUX_PANE" '#S')-poll"
+   tmux has-session -t "=$(tmux display-message -p '#S')-poll"
    ```
 
    `tm fleet status --json` names the same session in its `session` field.

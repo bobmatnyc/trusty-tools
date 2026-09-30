@@ -216,7 +216,11 @@ fn fleet_init_with_a_session_override_names_every_session() {
     }
     let has = |name: &str| {
         Command::new("tmux")
-            .args(["has-session", "-t", &format!("={name}")])
+            .args([
+                "has-session",
+                "-t",
+                &trusty_common::tmux::exact_session_target(name),
+            ])
             .env("TMUX_TMPDIR", env.tmux_dir.path())
             .env_remove("TMUX")
             .env_remove("TMUX_SOCKET")

@@ -558,7 +558,7 @@ fn the_seeded_instructions_never_hard_code_the_poller_session() {
     }
     assert!(
         seeded(".claude/skills/tm-fleet-check/SKILL.md")
-            .contains(r#"display-message -p -t "$TMUX_PANE" '#S')-poll""#)
+            .contains(r#"has-session -t "=$(tmux display-message -p '#S')-poll""#)
     );
 }
 
