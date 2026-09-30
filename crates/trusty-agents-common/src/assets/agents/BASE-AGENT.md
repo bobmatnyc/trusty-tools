@@ -114,6 +114,11 @@ Read `{{TM_SKILLS}}/condition-based-waiting/SKILL.md`.
   run by path** — a heredoc or shell loop over paths is refused there (#7238).
   Commit messages: repeated `-m` flags, never a heredoc (see
   worktree-discipline.md, #8473).
+- **Write scratch files only in your own scratch directory (#7791).** The brief
+  names it: `<scratchpad>/<issue>-<round>/` or `<scratchpad>/<agent-id>/`. Never
+  write at the scratchpad root or in another agent's directory; sibling agents
+  overwrite and delete root files. No directory named? Use
+  `<scratchpad>/<your-agent-id>/`.
 - **Do not create your own worktree (#5649).** Isolation is the PM's to declare
   with `isolation: "worktree"`, which is the only mechanism `tm hook --pm-guard`
   can see — a worktree you make yourself leaves you counted against the shared

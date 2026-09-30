@@ -208,6 +208,12 @@ harness already notifies on completion. Past the box, send ONE corrective
 message with a specific instruction. A second overrun means stop and
 re-dispatch with a narrower brief, never another nudge.
 
+**Scratch directory, every brief (#7791).** Name the agent's own scratch
+directory: `<scratchpad>/<issue>-<round>/` or `<scratchpad>/<agent-id>/`. The
+agent writes scratch files only there (BASE-AGENT). Agents dispatched
+together get distinct directories; generic names at the scratchpad root
+collide.
+
 A brief never asks for output that scales with build length ("raw output",
 "full log") — it asks for gate summary lines per the gate-output rule
 (BASE-AGENT, "Gate Output: Quote Results, Summarize Progress").
