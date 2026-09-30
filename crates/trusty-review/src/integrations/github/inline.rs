@@ -318,17 +318,20 @@ impl InlinePlan {
 /// anchorable findings, `Effort::Low` (nit) findings beyond [`MAX_INLINE_NITS`]
 /// inline placements are not emitted inline — they increment `suppressed_nits`
 /// instead.  Higher-severity findings are never suppressed.  Input order is
-/// preserved.
+/// preserved. A `citation_partial` finding always goes to the summary (#8949).
 /// Test: `build_inline_plan_maps_on_diff_finding`,
 /// `build_inline_plan_off_diff_falls_back`, `build_inline_plan_no_line_falls_back`,
-/// `nit_cap_rolls_up_overflow`, `nit_cap_does_not_suppress_high_severity`.
+/// `nit_cap_rolls_up_overflow`, `nit_cap_does_not_suppress_high_severity`,
+/// `build_inline_plan_posts_a_partial_citation_in_the_body`.
 pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -> InlinePlan {
     let mut plan = InlinePlan::default();
     let mut inline_nits = 0usize;
 
     for (idx, finding) in findings.iter().enumerate() {
+        // #8949: a partly verified citation is posted in the body, never inline.
         let anchor = finding
             .line
+            .filter(|_| !finding.citation_partial)
             .filter(|l| commentable.contains(&finding.file, *l));
 
         let Some(line) = anchor else {

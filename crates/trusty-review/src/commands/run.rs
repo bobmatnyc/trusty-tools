@@ -148,6 +148,25 @@ pub struct RunArgs {
 
 // ─── handler ─────────────────────────────────────────────────────────────────
 
+/// Rebuild the review config with `run`'s per-invocation model overrides.
+///
+/// Why: #8947 — this rebuild used to pass no path, so a `--config` file's
+/// `[verification]` and `[models.verifier]` tables were read in `main` and then
+/// thrown away; only the env overrides survived.
+/// What: layers `--reviewer-model`/`--provider`/`--review-template` over the
+/// same `--config` file `main` loaded.
+/// Test: `run_config_honours_the_config_file_verification_settings`,
+/// `run_and_calibrate_rebuild_their_config_from_the_config_path` (main.rs).
+fn run_config(config_path: Option<&std::path::Path>, args: &RunArgs) -> ReviewConfig {
+    let overrides = RoleCliOverrides {
+        reviewer_model: args.reviewer_model.clone(),
+        provider: args.provider.clone(),
+        review_template: args.review_template.clone(),
+        ..Default::default()
+    };
+    ReviewConfig::from_env_and_file(config_path, Some(&overrides))
+}
+
 /// Execute the `run` subcommand.
 ///
 /// Why: one-shot review of a PR or local diff with the selected reviewer model.
@@ -165,7 +184,11 @@ pub struct RunArgs {
 /// `run_args_source_root_parses` / `run_args_source_root_absent_is_none`;
 /// the posting-mode gate covered by `trigger_for_live_flag_*` and
 /// `posting_mode_banner_*` below.
-pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
+pub async fn cmd_run(
+    config: ReviewConfig,
+    config_path: Option<&std::path::Path>,
+    args: RunArgs,
+) -> Result<()> {
     // #4460: print the resolved posting mode before any network call, so the
     // signal is visible at the moment it matters — never a silent ambient
     // default. Stderr, not stdout, so `--json` output stays parseable.
@@ -173,13 +196,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
 
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
-    let overrides = RoleCliOverrides {
-        reviewer_model: args.reviewer_model.clone(),
-        provider: args.provider.clone(),
-        review_template: args.review_template.clone(),
-        ..Default::default()
-    };
-    let mut config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
+    let mut config_with_overrides = run_config(config_path, &args);
     // Clone both to avoid holding a borrow across the mutable resolve_index call.
     let reviewer_model = config_with_overrides.role_models.reviewer.model.clone();
     let default_provider = config_with_overrides.role_models.reviewer.provider.clone();
@@ -777,6 +794,37 @@ mod tests {
                 "a local source can never post: {source:?}"
             );
         }
+    }
+
+    // ── --config (#8947) ────────────────────────────────────────────────────
+
+    /// REGRESSION (#8947): `run` must keep the `--config` file's verification
+    /// settings when it rebuilds the config with its model overrides.
+    #[test]
+    #[serial_test::serial]
+    fn run_config_honours_the_config_file_verification_settings() {
+        // SAFETY: `#[serial]` keeps every env-mutating test in this binary
+        // from running concurrently with this one.
+        unsafe {
+            std::env::remove_var("TRUSTY_REVIEW_VERIFICATION_ENABLED");
+            std::env::remove_var("TRUSTY_REVIEW_VERIFIER_MODEL");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("review.toml");
+        std::fs::write(
+            &path,
+            "[verification]\nenabled = false\n\n[models.verifier]\nmodel = \"test/verifier-8947\"\n",
+        )
+        .expect("write config");
+        let args = RunArgs::try_parse_from(["run", "--base", "main"]).expect("parse");
+
+        let config = run_config(Some(&path), &args);
+
+        assert!(
+            !config.verification.enabled,
+            "[verification] enabled = false from --config must reach the run"
+        );
+        assert_eq!(config.role_models.verifier.model, "test/verifier-8947");
     }
 
     // ── --source-root (#2994) ───────────────────────────────────────────────
