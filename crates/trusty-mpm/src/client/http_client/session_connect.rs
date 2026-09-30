@@ -23,17 +23,26 @@ impl DaemonClient {
     /// trusty-mpm session is always the `claude` (Claude Code) CLI, never
     /// `claude-mpm`; the trusty-mpm behaviour comes from the custom instructions
     /// (deployed agents + project `CLAUDE.md`) prepared before launch.
-    /// What: runs [`crate::core::session_launch::prepare_session`] (deploy
-    /// agents + merge `CLAUDE.md`), POSTs `{project, project_path}` to
-    /// `/sessions`, then creates a detached tmux session via `tmux new-session`
-    /// and starts `claude` in it via `tmux send-keys`. Returns the
-    /// daemon-assigned tmux session name. The daemon only registers session
-    /// state; the prep and launch (tmux + process) are owned by the client,
-    /// exactly as the CLI does it.
-    /// Test: `launch_session_errors_when_daemon_unreachable`.
+    /// What: probes `GET /health`, runs
+    /// [`crate::core::session_launch::prepare_session`] (deploy agents + merge
+    /// `CLAUDE.md`), builds the `claude` line, POSTs `{project, project_path}`
+    /// to `/sessions`, then creates a detached tmux session via
+    /// `tmux new-session` and starts `claude` in it via `tmux send-keys`.
+    /// Returns the daemon-assigned tmux session name. The daemon only registers
+    /// session state; the prep and launch (tmux + process) are owned by the
+    /// client, exactly as the CLI does it. #8719: an unreachable daemon fails
+    /// the probe before prep writes anything, and a fatal prep failure returns
+    /// before the POST; only a tmux failure follows the registration.
+    /// Test: `launch_session_errors_when_daemon_unreachable`,
+    /// `launch_session_writes_nothing_when_daemon_unreachable`,
+    /// `launch_session_prepares_under_the_pinned_home_before_tmux`.
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
         // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
+        // #8719: probe first, so an unreachable daemon fails the launch before
+        // prep writes anything to the project or the home.
+        self.get("/health").send().await?.error_for_status()?;
+
         // Prepare the custom instructions Claude Code reads at startup: deploy
         // composed agents to `~/.claude/agents/` and merge the project
         // `CLAUDE.md`. Most prep failures are logged but not fatal (#2149) —
@@ -80,24 +89,6 @@ impl DaemonClient {
             }
         }
 
-        #[derive(Deserialize)]
-        struct Body {
-            #[serde(default)]
-            name: String,
-        }
-        let url = "/sessions".to_string();
-        let body: Body = self
-            .post(&url)
-            .json(&serde_json::json!({
-                "project": workdir,
-                "project_path": workdir,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
         // Build the combined `--append-system-prompt` text (claude-mpm PM
         // instructions + trusty tool-priority block), resolved *for this project
         // directory* so override files under `<workdir>/.trusty-mpm/` take effect
@@ -130,6 +121,25 @@ impl DaemonClient {
                 }
             }
         };
+
+        // #8719: register only once prep and the line are ready, so the
+        // POST-to-tmux window holds nothing that can fail slowly.
+        #[derive(Deserialize)]
+        struct Body {
+            #[serde(default)]
+            name: String,
+        }
+        let body: Body = self
+            .post("/sessions")
+            .json(&serde_json::json!({
+                "project": workdir,
+                "project_path": workdir,
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
         // #2398: routes through `core::tmux::create_managed_session`, the
         // crate's single session-creation choke point, so the configured

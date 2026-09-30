@@ -1070,6 +1070,38 @@ fn head_rev_candidates_try_the_remote_ref() {
     );
 }
 
+// ── #8145: no gate script means no gate, whatever the --head ─────────────
+
+/// Why (#8145): adaptive-crm has no `scripts/check_changelog_fragment.sh`, and
+/// `tm pr open --head <branch>` still refused, naming that script — the
+/// `--head` check ran before the script-existence check. The agent passed
+/// `--docs-only` on an infra PR to get past it.
+/// Test target: [`open::changelog_gate_at`] in a directory with no script and
+/// a head that is not the checkout's commit.
+#[test]
+fn pr_8145_a_repo_without_the_gate_script_skips_for_any_head() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("no script is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::Skipped);
+}
+
+/// Why (#8145): the reorder must not loosen the gate where it exists. With the
+/// script present, a head this checkout cannot resolve is still refused.
+#[test]
+fn pr_8145_the_script_still_refuses_a_head_elsewhere() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(
+        dir.path().join("scripts/check_changelog_fragment.sh"),
+        "exit 0\n",
+    )
+    .expect("script");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("a head elsewhere is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::HeadElsewhere);
+}
+
 // ── #7615: --minimal opts out of the nine-heading contract ──────────────
 
 /// Why (#7615): on trusty-things#261 the PM authorized that project's own
@@ -1337,6 +1369,69 @@ fn pr_7336_minimal_validates_with_and_without_the_new_fields() {
         )
         .expect("--minimal accepts another project's standard, widened or not");
     }
+}
+
+// ── #8467: a contract refusal names the full opt-out ─────────────────────
+
+/// Why (#8467): three agents on two repos hit the nine-field contract with a
+/// sparse body their brief authorized and fell back to `gh pr create`, because
+/// the refusal never named `--minimal`. The hint must appear on a contract gap
+/// — missing or empty — and nowhere else. `--minimal` itself must still enforce
+/// the footer and the closing-keyword ban.
+/// Test target: [`open::minimal_hint`] over real `plan` failures.
+#[test]
+fn pr_8467_a_contract_gap_names_the_minimal_opt_out() {
+    let args = open_args("/dev/null");
+    let sparse = format!("Why: a docs fix.\n\n{ATTRIBUTION_FOOTER}\n");
+    let failures = open::plan(
+        &args,
+        &sparse,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("a sparse body fails the nine-field contract");
+    let hint = open::minimal_hint(&failures, false).expect("a missing heading names --minimal");
+    assert!(
+        hint.contains("--minimal") && hint.contains("Gates not run"),
+        "{hint}"
+    );
+
+    let empty_only = body::validate(&body::skeleton()).failures();
+    assert!(
+        open::minimal_hint(&empty_only, false).is_some(),
+        "{empty_only:?}"
+    );
+
+    let footer_only = body::validate("## Outcome\n\nx\n").merge_failures();
+    assert_eq!(open::minimal_hint(&footer_only, false), None);
+    assert_eq!(open::minimal_hint(&failures, true), None);
+
+    // The opt-out drops the headings and nothing else.
+    let mut minimal = open_args("/dev/null");
+    minimal.minimal = true;
+    let ticketing = ResolvedTicketing::default();
+    open::plan(
+        &minimal,
+        &sparse,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ticketing,
+    )
+    .expect("--minimal opens the sparse body");
+    let closes = format!("Why: a docs fix.\nCloses #12\n\n{ATTRIBUTION_FOOTER}\n");
+    let refused = open::plan(
+        &minimal,
+        &closes,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ticketing,
+    )
+    .expect_err("--minimal keeps the closing-keyword ban");
+    assert!(
+        refused.iter().any(|f| f.contains("closing keyword")),
+        "{refused:?}"
+    );
 }
 
 /// Why: without `--head` the diff must still be the checkout's `HEAD`.

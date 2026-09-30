@@ -162,7 +162,8 @@ pub(crate) struct PrOpenArgs {
     /// different one. With no opt-out, such a project's PR fell back to a
     /// hand-assembled `gh pr create`, which skips the attribution-footer and
     /// changelog checks too — losing three gates to escape one.
-    /// What: drops the missing/empty-heading half of the body report. The
+    /// What: drops the missing/empty-heading half of the body report — all
+    /// nine headings, the two #7336 disclosure fields included (#8467). The
     /// footer check, the `Refs`/`Closes` rule, the workstream label and the
     /// changelog fragment gate are unaffected.
     /// Test: `pr_7615_minimal_skips_the_heading_contract`,
