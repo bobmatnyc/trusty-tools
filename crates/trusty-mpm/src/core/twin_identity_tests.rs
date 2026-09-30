@@ -502,6 +502,42 @@ fn a_session_nested_under_the_twin_is_not_twin() {
     assert_eq!(walk(&own, 100), Ok(Some(armed)));
 }
 
+/// #8938: the hook's walk stays at one hop while `tm fleet status` walks
+/// three. From the Bash tool, `claude 60 → zsh 90 → tm 100`, only the status
+/// walk reaches the `claude`; a hook under that shell stays unbound.
+#[test]
+fn the_hook_walk_stays_one_hop() {
+    assert_eq!(twin_arming::MAX_ANCESTOR_HOPS, 1);
+    assert_eq!(twin_arming::STATUS_MAX_ANCESTOR_HOPS, 3);
+    let via_bash: [Row; 3] = [
+        (100, Some(90), Ok(false)),
+        (90, Some(60), Ok(false)),
+        (60, Some(1), Ok(true)),
+    ];
+    assert_eq!(walk(&via_bash, 100), Ok(None));
+    let find = |pid: u32| {
+        via_bash
+            .iter()
+            .find(|row| row.0 == pid)
+            .ok_or_else(|| format!("no pid {pid}"))
+    };
+    let status = twin_arming::nearest_claude_for_status_in(
+        100,
+        |pid| {
+            find(pid).map(|row| twin_arming::ProcessFacts {
+                parent: row.1,
+                start_time: u64::from(pid) * 10,
+            })
+        },
+        |pid| find(pid).and_then(|row| row.2.map_err(str::to_owned)),
+    );
+    let architect = ClaudeProcess {
+        pid: 60,
+        start_time: 600,
+    };
+    assert_eq!(status, Ok(Some(architect)));
+}
+
 /// A start process the table no longer holds is an error, never "no claude
 /// ancestor" (#8878 review).
 #[cfg(unix)]

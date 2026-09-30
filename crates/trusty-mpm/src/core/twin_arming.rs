@@ -44,7 +44,17 @@ pub const ARMED_DIR: &str = "twin/armed";
 /// process is not named `claude` (npm installs run as `node`), sits between
 /// its hook and the twin. A compound hook command (a surviving `sh`) or
 /// `CLAUDE_CODE_SHELL_PREFIX` puts the `claude` further up and fails closed.
-const MAX_ANCESTOR_HOPS: usize = 1;
+/// #8938: the hook keeps this limit; only `tm fleet status` walks further
+/// ([`STATUS_MAX_ANCESTOR_HOPS`]).
+pub const MAX_ANCESTOR_HOPS: usize = 1;
+
+/// Ancestor hops `tm fleet status`'s `this_session` check walks (#8938).
+///
+/// Why: the CLI runs from the Bash tool, `claude → zsh → tm`, so its `claude`
+/// is two hops up, not one; three leaves room for one more shell. The check
+/// is informational and never grants anything, so the wider walk opens no
+/// write the hook's one-hop walk refuses.
+pub const STATUS_MAX_ANCESTOR_HOPS: usize = 3;
 
 /// The machine-backed [`TwinProbe`].
 #[derive(Debug, Clone)]
@@ -322,27 +332,70 @@ fn is_claude(pid: u32) -> Result<bool, String> {
 ///
 /// Why: condition (c). Claude Code runs a hook as its own child, so the
 /// `claude` directly above the hook is the session the call belongs to.
-/// What: [`nearest_claude_in`] over the live process table.
+/// What: [`nearest_claude_in`] over the live process table: one hop.
+/// #8938: the hook stays at one hop on purpose. `tm fleet status` walks up to
+/// [`STATUS_MAX_ANCESTOR_HOPS`] ([`nearest_claude_for_status`]); a hook walk
+/// that deep would let a nested non-`claude` runtime under the Architect's
+/// Bash tool (`claude → zsh → node → hook`) pass as the Architect.
 /// Test: `the_nearest_claude_ancestor_is_found_with_its_start_time`,
-/// `a_reaped_process_has_no_claude_ancestor_it_is_an_error`.
+/// `a_reaped_process_has_no_claude_ancestor_it_is_an_error`,
+/// `the_hook_walk_stays_one_hop`.
 pub fn nearest_claude_ancestor(start_pid: u32) -> Result<Option<ClaudeProcess>, String> {
     nearest_claude_in(start_pid, process_facts, is_claude)
 }
 
-/// The nearest ancestor of `start_pid` that `is_claude` accepts.
+/// The `claude` that `tm fleet status`'s `this_session` check binds (#8938).
+///
+/// Why: the CLI runs from the Bash tool, so its `claude` sits above a shell:
+/// `claude → zsh → tm fleet status`. The hook's one-hop walk never reaches it
+/// and reported a bound Architect as unbound from inside its own session.
+/// What: [`nearest_claude_for_status_in`] over the live process table: at most
+/// [`STATUS_MAX_ANCESTOR_HOPS`], stopping at the first `claude`, an
+/// unidentifiable process in between an error. The result is informational;
+/// the hook keeps [`nearest_claude_ancestor`]'s one hop — see its doc.
+/// Test: `this_session_reaches_claude_through_the_bash_shell`,
+/// `a_nested_claude_under_the_architect_is_not_this_session`,
+/// `the_hook_walk_stays_one_hop`.
+pub fn nearest_claude_for_status(start_pid: u32) -> Result<Option<ClaudeProcess>, String> {
+    nearest_claude_for_status_in(start_pid, process_facts, is_claude)
+}
+
+/// [`nearest_claude_for_status`] over an injected process table.
+pub fn nearest_claude_for_status_in(
+    start_pid: u32,
+    facts: impl Fn(u32) -> Result<ProcessFacts, String>,
+    is_claude: impl Fn(u32) -> Result<bool, String>,
+) -> Result<Option<ClaudeProcess>, String> {
+    nearest_claude_within(start_pid, STATUS_MAX_ANCESTOR_HOPS, facts, is_claude)
+}
+
+/// The hook's walk ([`MAX_ANCESTOR_HOPS`]) over an injected process table.
 ///
 /// Why: the walk's fail-closed rules are testable only over an injected table.
-/// What: walks parent links from `start_pid` for at most
-/// [`MAX_ANCESTOR_HOPS`] and returns the FIRST accepted ancestor, with its
-/// start time — a nested `claude` below an armed one is the caller, not the
-/// armed one. Reaching PID 1, a process with no parent, or the hop limit →
-/// `Ok(None)`. Any `facts` or `is_claude` error → `Err`: an ancestor that
-/// cannot be identified is never skipped.
+/// What: [`nearest_claude_within`] at [`MAX_ANCESTOR_HOPS`].
 /// Test: `the_walk_stops_at_the_nearest_claude`,
 /// `a_session_nested_under_the_twin_is_not_twin`,
-/// `an_unidentifiable_ancestor_stops_the_walk`.
+/// `an_unidentifiable_ancestor_stops_the_walk`, `the_hook_walk_stays_one_hop`.
 pub fn nearest_claude_in(
     start_pid: u32,
+    facts: impl Fn(u32) -> Result<ProcessFacts, String>,
+    is_claude: impl Fn(u32) -> Result<bool, String>,
+) -> Result<Option<ClaudeProcess>, String> {
+    nearest_claude_within(start_pid, MAX_ANCESTOR_HOPS, facts, is_claude)
+}
+
+/// The nearest ancestor of `start_pid` that `is_claude` accepts, within
+/// `max_hops`.
+///
+/// What: walks parent links from `start_pid` for at most `max_hops` and
+/// returns the FIRST accepted ancestor, with its start time — a nested
+/// `claude` below an armed one is the caller, not the armed one. Reaching
+/// PID 1, a process with no parent, or the hop limit → `Ok(None)`. Any
+/// `facts` or `is_claude` error → `Err`: an ancestor that cannot be
+/// identified is never skipped.
+fn nearest_claude_within(
+    start_pid: u32,
+    max_hops: usize,
     facts: impl Fn(u32) -> Result<ProcessFacts, String>,
     is_claude: impl Fn(u32) -> Result<bool, String>,
 ) -> Result<Option<ClaudeProcess>, String> {
@@ -350,7 +403,7 @@ pub fn nearest_claude_in(
         Some(parent) => parent,
         None => return Ok(None),
     };
-    for _ in 0..MAX_ANCESTOR_HOPS {
+    for _ in 0..max_hops {
         if pid <= 1 {
             return Ok(None);
         }

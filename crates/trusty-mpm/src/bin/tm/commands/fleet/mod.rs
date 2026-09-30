@@ -74,7 +74,8 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             // #8878 PR-I: name why this session is not the bound Architect.
             report.this_session = Some(status::this_session_check(
                 &report.dir,
-                crate::commands::pm_guard_trust_anchor::HookEnv::ambient(),
+                // #8938: the status walk reaches the `claude` above the Bash shell.
+                status::this_session_env(),
                 trusty_mpm::core::config::MpmConfig::load_default,
             ));
             if json {

@@ -20,12 +20,13 @@ use trusty_mpm::core::architect_session::check_session_binding;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
+use trusty_mpm::core::twin_arming;
 
 use super::launch::PaneState;
 use super::session_name::{self, SessionNames};
 use super::{Probe, user_config_path};
 use crate::commands::pm_guard_architect_reason::session_binding;
-use crate::commands::pm_guard_trust_anchor::HookEnv;
+use crate::commands::pm_guard_trust_anchor::{ClaudeLookup, HookEnv};
 
 /// One check's verdict.
 #[derive(Debug, Clone, Serialize)]
@@ -187,7 +188,10 @@ pub(super) fn bound(
 /// What: [`session_binding`] over `env` and `config`. A Bash tool call
 /// carries no `CLAUDE_PROJECT_DIR`, so when `env` has none, `dir` stands in
 /// as the launch directory. The detail names the reason, never a PID.
-/// Test: `fleet_status_names_why_this_session_is_not_bound`.
+/// Production passes [`this_session_env`] (#8938).
+/// Test: `fleet_status_names_why_this_session_is_not_bound`,
+/// `this_session_reaches_claude_through_the_bash_shell`,
+/// `a_nested_claude_under_the_architect_is_not_this_session`.
 pub(crate) fn this_session_check(
     dir: &Path,
     mut env: HookEnv,
@@ -204,6 +208,22 @@ pub(crate) fn this_session_check(
         name: "this_session",
         ok,
         detail,
+    }
+}
+
+/// The calling process's inputs for [`this_session_check`] (#8938).
+///
+/// Why: `tm fleet status` runs from the Bash tool, `claude → zsh → tm`, so
+/// the hook's one-hop `claude` lookup never reaches the Architect.
+/// What: [`HookEnv::ambient`] with the `claude` found by
+/// [`twin_arming::nearest_claude_for_status`] (at most three hops, the first
+/// `claude` wins). The hook keeps its one-hop lookup; see
+/// `twin_arming::nearest_claude_ancestor`.
+/// Test: `this_session_reaches_claude_through_the_bash_shell`.
+pub(crate) fn this_session_env() -> HookEnv {
+    HookEnv {
+        claude: ClaudeLookup::new(|| twin_arming::nearest_claude_for_status(std::process::id())),
+        ..HookEnv::ambient()
     }
 }
 
