@@ -69,6 +69,42 @@ run_capture() {
     return "${rc}"
 }
 
+# Wait up to $2 seconds for $1 (a Unix socket path) to exist.
+# #8937: trusty-memory and trusty-analyze serve a socket only (ADR-0032).
+wait_socket() {
+    local sock="$1"
+    local timeout="${2:-30}"
+    local elapsed=0
+    while [ ! -S "${sock}" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+        if [ "${elapsed}" -ge "${timeout}" ]; then
+            echo "  ERROR: socket ${sock} did not appear within ${timeout}s" >&2
+            return 1
+        fi
+    done
+}
+
+# memory_tool_call TOOL ARGS_JSON — one MCP stdio session against
+# trusty-memory: initialize, then a single tools/call; prints the JSON-RPC
+# replies. The sleep keeps stdin open until the reply arrives.
+memory_tool_call() {
+    local tool="$1" args="$2"
+    local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e-smoke","version":"0"}}}'
+    local inited='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    local call
+    call="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}"
+    { printf '%s\n' "${init}" "${inited}" "${call}"; sleep 4; } \
+        | trusty-memory serve --stdio --palace personal
+}
+
+# mcp_result_ok OUTPUT — true when the id-2 reply is a result, not an error.
+mcp_result_ok() {
+    local reply
+    reply="$(echo "$1" | grep '"id":2' || true)"
+    [ -n "${reply}" ] && ! echo "${reply}" | grep -q '"error"\|"isError":true'
+}
+
 # Compare semver: returns 0 (true) if $1 >= $2.
 # Works for simple X.Y.Z strings without pre-release suffixes.
 semver_gte() {
@@ -201,13 +237,15 @@ TM_VERSION="$(trusty-memory --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
 echo "  Binary : ${TM_BIN}"
 echo "  Version: ${TM_VERSION}"
 
-# Start daemon in foreground on a fixed port to avoid port-file races.
-TRUSTY_MEMORY_HTTP="127.0.0.1:7070"
-trusty-memory serve --foreground --http "${TRUSTY_MEMORY_HTTP}" > "${E2E_LOG_DIR}/tm.log" 2>&1 &
+# Start the daemon in the foreground. Since #6286 (ADR-0032) it serves a Unix
+# socket only; --http is ignored, so there is no HTTP /health. #8937: readiness
+# is the socket appearing, and tool calls go through `serve --stdio`.
+TM_SOCK="${XDG_DATA_HOME:-/tmp/trusty-data}/trusty-memory/trusty-memory.sock"
+trusty-memory serve --foreground > "${E2E_LOG_DIR}/tm.log" 2>&1 &
 TM_PID=$!
 
-if wait_http "http://${TRUSTY_MEMORY_HTTP}/health" 60; then
-    pass "trusty-memory daemon healthy"
+if wait_socket "${TM_SOCK}" 60; then
+    pass "trusty-memory daemon healthy (socket ${TM_SOCK})"
 else
     echo "  --- daemon log ---"
     cat "${E2E_LOG_DIR}/tm.log"
@@ -218,43 +256,37 @@ else
 fi
 
 if [ -n "${TM_PID}" ]; then
-    # Create 'personal' palace (always valid regardless of cwd / project root).
+    # Create 'personal' palace (force: skip project-slug validation).
     echo "  Creating palace 'personal' ..."
-    CREATE_OUT="$(curl -sf -X POST "http://${TRUSTY_MEMORY_HTTP}/api/v1/palaces" \
-        -H 'Content-Type: application/json' \
-        -d '{"name":"personal"}' 2>/dev/null || echo '{}')"
-    echo "  Create response: ${CREATE_OUT}"
-
-    if echo "${CREATE_OUT}" | grep -q '"id"'; then
+    if run_capture CREATE_OUT "palace_create" memory_tool_call palace_create \
+        '{"name":"personal","force":true}' \
+        && mcp_result_ok "${CREATE_OUT}"; then
         pass "trusty-memory palace created"
     else
+        echo "  Create response: ${CREATE_OUT:-<none>}"
         fail "trusty-memory palace create failed"
     fi
 
     # Store a memory in the palace.
-    REMEMBER_TEXT="trusty-memory smoke test: remember this sentinel value 42xyzABC"
     echo "  Storing memory ..."
-    REMEMBER_OUT="$(curl -sf -X POST "http://${TRUSTY_MEMORY_HTTP}/api/v1/palaces/personal/drawers" \
-        -H 'Content-Type: application/json' \
-        -d "{\"content\":\"${REMEMBER_TEXT}\"}" 2>/dev/null || echo '{}')"
-    echo "  Remember response: ${REMEMBER_OUT}"
-
-    if echo "${REMEMBER_OUT}" | grep -q '"id"'; then
+    if run_capture REMEMBER_OUT "memory_remember" memory_tool_call memory_remember \
+        '{"palace":"personal","force":true,"text":"trusty-memory smoke test: remember this sentinel value 42xyzABC"}' \
+        && mcp_result_ok "${REMEMBER_OUT}"; then
         pass "trusty-memory memory stored"
     else
+        echo "  Remember response: ${REMEMBER_OUT:-<none>}"
         fail "trusty-memory memory store failed"
     fi
 
     # Recall and assert the sentinel text comes back.
     echo "  Recalling memory ..."
     sleep 2  # Allow indexing to complete before recall.
-    RECALL_OUT="$(curl -sf "http://${TRUSTY_MEMORY_HTTP}/api/v1/palaces/personal/recall?q=sentinel+value+42xyzABC&top_k=5" \
-        2>/dev/null || echo '{}')"
-    echo "  Recall response: ${RECALL_OUT}"
-
-    if echo "${RECALL_OUT}" | grep -q '42xyzABC\|sentinel'; then
+    if run_capture RECALL_OUT "memory_recall" memory_tool_call memory_recall \
+        '{"palace":"personal","query":"sentinel value 42xyzABC","top_k":5}' \
+        && echo "${RECALL_OUT}" | grep -q '42xyzABC\|sentinel'; then
         pass "trusty-memory recall returned stored text"
     else
+        echo "  Recall response: ${RECALL_OUT:-<none>}"
         fail "trusty-memory recall did not return stored text"
     fi
 
@@ -353,7 +385,11 @@ fi
 
 # Index the fixture for analyze to use.
 if [ -n "${TS2_PID}" ]; then
-    ANALYZE_INDEX="smoke-analyze"
+    # #8937: the registry persists across daemon restarts and a root may belong
+    # to one index only (#2336, #3993). /e2e/sample-code is already owned by
+    # scenario 1's "smoke-fixture", so a second name got "409 Conflict".
+    # Re-registering the same name over the same root is idempotent.
+    ANALYZE_INDEX="smoke-fixture"
     if ! run_capture TS2_INDEX_LOG "trusty-search index (analyze)" \
         trusty-search index "/e2e/sample-code" --name "${ANALYZE_INDEX}" --lexical-only; then
         fail "trusty-search index for analyze failed (see output above)"
@@ -363,12 +399,14 @@ if [ -n "${TS2_PID}" ]; then
     # Start trusty-analyze daemon.
     # Note: --search-url is a GLOBAL flag (before the subcommand), not a serve flag.
     # Use the TRUSTY_SEARCH_URL env var to keep the invocation readable.
-    echo "  Starting trusty-analyze daemon (port ${TA_PORT}) ..."
+    # #8937: the daemon serves a Unix socket only (ADR-0032); TA_PORT is unused.
+    TA_SOCK="${XDG_DATA_HOME:-/tmp/trusty-data}/trusty-analyze/trusty-analyze.sock"
+    echo "  Starting trusty-analyze daemon (socket ${TA_SOCK}) ..."
     TRUSTY_SEARCH_URL="http://127.0.0.1:${TS2_PORT}" \
         trusty-analyze serve --foreground > "${E2E_LOG_DIR}/ta.log" 2>&1 &
     TA_PID=$!
 
-    if wait_http "http://127.0.0.1:${TA_PORT}/health" 30; then
+    if wait_socket "${TA_SOCK}" 30; then
         pass "trusty-analyze daemon healthy"
     else
         echo "  --- analyze log ---"
@@ -392,13 +430,14 @@ if [ -n "${TS2_PID}" ]; then
             fail "trusty-analyze: analyze returned no recognizable output"
         fi
 
-        # Also verify the health endpoint reports search_reachable.
-        TA_HEALTH="$(curl -sf "http://127.0.0.1:${TA_PORT}/health" 2>/dev/null || echo '{}')"
-        echo "  Health: ${TA_HEALTH}"
-        if echo "${TA_HEALTH}" | grep -q '"status"'; then
-            pass "trusty-analyze: health endpoint returned structured JSON"
+        # `status` probes the socket and prints DOWN (exit 0) when nothing answers.
+        if run_capture TA_STATUS "trusty-analyze status" trusty-analyze status \
+            && ! echo "${TA_STATUS}" | grep -q 'DOWN'; then
+            echo "  Status: ${TA_STATUS}"
+            pass "trusty-analyze: status reports the daemon up"
         else
-            fail "trusty-analyze: health endpoint response missing 'status' field"
+            echo "  Status: ${TA_STATUS:-<none>}"
+            fail "trusty-analyze: status does not report the daemon up"
         fi
 
         kill "${TA_PID}" 2>/dev/null || true
