@@ -100,8 +100,9 @@ fn an_open_registry_warns_8980() {
     assert_warns(&check_session_claudes(&root), "only its owner may");
 }
 
-/// #8980: a daemon that loaded a corrupt registry stays sealed after the
-/// file is removed, and its own doctor route says so instead of `Ok`.
+/// #8980: a daemon that loaded a corrupt registry stays sealed, and its own
+/// doctor route says so. Covers the route wiring only: the route's file read
+/// uses the host's framework root, not this temp dir.
 #[tokio::test]
 async fn a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -124,6 +125,33 @@ async fn a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980(
         row.message
     );
     assert!(report.overall.worst(CheckStatus::Warn) == report.overall);
+}
+
+/// #8980: the seal override is hermetic of the host — it turns an `Ok` file
+/// row into `Warn`, re-folds `overall` to `Warn`, and `None` changes nothing.
+/// The route test above reads the host's own framework root, so this pins the
+/// override's mechanics on a temp dir.
+#[test]
+fn apply_daemon_seal_overrides_the_row_and_refolds_overall_8980() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut report = DoctorReport::from_checks(vec![check_session_claudes(dir.path())]);
+    assert_eq!(report.overall, CheckStatus::Ok);
+
+    let before = serde_json::to_value(&report).expect("serialize");
+    apply_daemon_seal(&mut report, None);
+    assert_eq!(serde_json::to_value(&report).expect("serialize"), before);
+
+    apply_daemon_seal(&mut report, Some("x".into()));
+    assert_eq!(report.checks.len(), 1, "the row is replaced, not appended");
+    assert_eq!(report.checks[0].status, CheckStatus::Warn);
+    assert!(
+        report.checks[0]
+            .message
+            .contains("stays sealed until restart: x"),
+        "{}",
+        report.checks[0].message
+    );
+    assert_eq!(report.overall, CheckStatus::Warn);
 }
 
 /// #8980 Fail-Open Check: a registry this process cannot read warns.
