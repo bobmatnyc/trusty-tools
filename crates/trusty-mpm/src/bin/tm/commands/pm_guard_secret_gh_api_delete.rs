@@ -155,7 +155,14 @@ fn segment_deletes_a_secret(segment: &str, secrets_named: bool, depth: usize) ->
 
 /// Whether an unlexable segment starts a `gh api|secret|alias` or `curl` call,
 /// read with quotes and backslashes both removed and turned into spaces.
+/// #9001: a word the shell rewrites (`$C$R`, `c?rl`) counts as `curl` when
+/// the segment names a DELETE of `secrets` — deny-only, closing a gap that
+/// predates #9001.
+/// Test: `a_heredoc_body_that_spells_gh_or_curl_still_denies_9001`,
+/// `a_rewritten_word_without_a_secrets_delete_is_not_a_curl_call_9001`.
 fn starts_a_watched_call(segment: &str) -> bool {
+    let rewritten_delete =
+        names_secrets(segment) && segment.to_ascii_lowercase().contains("delete");
     [
         segment.replace(['\'', '"', '\\'], ""),
         segment.replace(['\'', '"', '\\'], " "),
@@ -163,7 +170,9 @@ fn starts_a_watched_call(segment: &str) -> bool {
     .iter()
     .any(|flat| {
         let words: Vec<&str> = flat.split_whitespace().collect();
-        words.iter().any(|w| command_basename(w) == "curl")
+        words
+            .iter()
+            .any(|w| command_basename(w) == "curl" || (rewritten_delete && is_rewritten(w)))
             || words.windows(2).any(|w| {
                 ["api", "secret", "alias"]
                     .iter()

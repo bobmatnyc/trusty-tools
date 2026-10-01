@@ -24,6 +24,7 @@
 //! `a_well_formed_ref_name_follows_check_ref_format_7557`, and the rest of
 //! `pm_guard_secret_read`'s `tests` submodule.
 
+use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::{git_argv_at_subcommand, matches_only_name_substring_family};
 use crate::commands::pm_guard_secret_read::{
     NESTED_COMMAND_MARKERS, command_basename, has_a_named_extension,
@@ -418,25 +419,48 @@ pub(crate) const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message
 /// Empty when the segment runs a nested command, so
 /// `gh issue comment 1 --body "$(cat .env)"` still denies. Empty is also the
 /// answer for every segment carrying none of the flags, which leaves the scan
-/// exactly as it was.
+/// exactly as it was. #9001: a [`lists_gh_issues`] call's `--search` value
+/// is a payload too.
 /// Test: `allows_a_filename_named_in_a_text_payload`,
-/// `denies_a_file_flag_beside_a_text_payload`.
+/// `denies_a_file_flag_beside_a_text_payload`,
+/// `a_gh_search_string_names_no_file_9001`.
 pub(crate) fn text_payload_indices(segment: &str, argv: &[String]) -> Vec<usize> {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return Vec::new();
     }
+    // #9001: `gh issue|pr list --search` takes a GitHub query, never a path.
+    let search: &[&str] = if lists_gh_issues(argv) {
+        &["--search"]
+    } else {
+        &[]
+    };
+    let is_flag = |token: &str| TEXT_PAYLOAD_FLAGS.contains(&token) || search.contains(&token);
     argv.iter()
         .enumerate()
         .filter(|(index, token)| {
-            TEXT_PAYLOAD_FLAGS.iter().any(|flag| {
+            TEXT_PAYLOAD_FLAGS.iter().chain(search).any(|flag| {
                 token
                     .strip_prefix(*flag)
                     .is_some_and(|rest| rest.starts_with('='))
             }) || index
                 .checked_sub(1)
                 .and_then(|prev| argv.get(prev))
-                .is_some_and(|prev| TEXT_PAYLOAD_FLAGS.contains(&prev.as_str()))
+                .is_some_and(|prev| is_flag(prev))
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Whether `argv` runs `gh issue list` or `gh pr list` (#9001).
+///
+/// What: the program word past `strip_wrapper_prefix` is `gh` by basename,
+/// followed directly by `issue`/`pr` and `list`. A gh extension or any other
+/// subcommand keeps the argv scan.
+/// Test: `a_gh_search_string_names_no_file_9001`.
+pub(crate) fn lists_gh_issues(argv: &[String]) -> bool {
+    strip_wrapper_prefix(argv).is_some_and(|at| {
+        argv.get(at).is_some_and(|p| command_basename(p) == "gh")
+            && argv.get(at + 1).is_some_and(|s| s == "issue" || s == "pr")
+            && argv.get(at + 2).is_some_and(|s| s == "list")
+    })
 }

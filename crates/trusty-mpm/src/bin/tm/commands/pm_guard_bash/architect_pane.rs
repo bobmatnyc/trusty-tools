@@ -278,10 +278,17 @@ fn unresolved(hit: &Hit, target: &str, why: &str) -> String {
     } else {
         format!(" targets `{target}`, which")
     };
+    // #9001: name the text that did not parse, and the route when it is no tmux.
+    let token = hit.token.as_ref().map_or(String::new(), |t| {
+        format!(
+            " The text it cannot read is `{t}`; if the command runs no tmux, rewrite that \
+             text with ordinary `'…'` or `\"…\"` quoting."
+        )
+    });
     format!(
         "Hard-floor deny (#8902): `{}`{target} cannot be resolved ({why}). While an \
          Architect runs, a tmux command the guard cannot resolve counts as aimed at its pane. \
-         {REMEDY}",
+         {REMEDY}{token}",
         format!("tmux {}", hit.verb).trim_end()
     )
 }

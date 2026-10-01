@@ -318,6 +318,7 @@ const LOOP_NAMES: &[&str] = &[
 fn deny_reason(agent: &str, what: &str) -> String {
     // #8567: names the gh read verbs and `date`. #8586: the quoted-pattern hint.
     // #8628: names the one environment prefix `git ls-remote` may carry.
+    // #9001: names the literal-path remedy for a variable path.
     format!(
         "Read-only dispatch refused a command (#8439): `{agent}` is a read-only agent, and this \
          command has {what}. A read-only agent runs only allowlisted reads, one per call, with \
@@ -328,7 +329,9 @@ fn deny_reason(agent: &str, what: &str) -> String {
          launchctl print/list; tmux capture-pane -p; cargo metadata/tree; gh issue view/list, \
          gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd. A \
          pipe into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` \
-         and one leading `cd <dir> &&` with a literal path. An rg/grep pattern may carry `\\` \
+         and one leading `cd <dir> &&` with a literal path. Write every path out literally \
+         — `sed -n '10,20p' src/lib.rs`, never `sed -n '10,20p' \"$F\"`; a path held in a \
+         shell variable is refused. An rg/grep pattern may carry `\\` \
          escapes and an end-of-line `$` inside quotes; single quotes are the safest. If the \
          task needs a write, report back so the PM dispatches a writing agent."
     )

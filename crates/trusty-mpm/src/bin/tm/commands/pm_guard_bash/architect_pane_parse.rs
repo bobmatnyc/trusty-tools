@@ -15,6 +15,7 @@
 //! FAIL-CLOSED: see [`Hit::opaque`].
 //! Test: `architect_pane_tests.rs`.
 
+use super::ansi_c_decode::{Decoded, decode_ansi_c};
 use super::architect_pane_env::{
     ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, assigns_dynamic_name, moves_server_env, resets_env,
 };
@@ -71,6 +72,8 @@ pub(super) struct Hit {
     /// The same command renames or creates a session: the hit denies when its
     /// server holds an Architect pane (`architect_pane_env::RETARGET`).
     pub(super) retargeted: bool,
+    /// #9001: the text the guard could not read, named in the refusal.
+    pub(super) token: Option<String>,
 }
 
 impl Hit {
@@ -81,7 +84,15 @@ impl Hit {
             targets: Vec::new(),
             opaque: Some(why),
             retargeted: false,
+            token: None,
         }
+    }
+
+    /// #9001: an unparseable command, naming the text that did not parse.
+    fn unparsed(text: &str) -> Self {
+        let mut hit = Self::opaque("", &[], "the command does not parse");
+        hit.token = Some(text.chars().take(80).collect());
+        hit
     }
 }
 
@@ -194,15 +205,21 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
     // #8902: `$'\x74mux'` hides the program name itself, so at the top level
     // any command the guard cannot classify counts.
     if unclassifiable_command(command).is_some() && (depth == 0 || may_run_tmux(command, depth)) {
-        out.hits
-            .push(Hit::opaque("", &[], "the command does not parse"));
+        // #9001: judge what a `$'…'` quote spells; a token it cannot decode
+        // stays opaque, and so does a command still unclassifiable after it.
+        match decode_ansi_c(command) {
+            Decoded::Text(text) if unclassifiable_command(&text).is_none() => {
+                shell(&text, depth, out);
+            }
+            Decoded::Undecodable(text) => out.hits.push(Hit::unparsed(&text)),
+            _ => out.hits.push(Hit::unparsed(command.trim())),
+        }
         return;
     }
     for seg in segments(command) {
         let Some(argv) = shlex::split(seg.text.trim()) else {
             if may_run_tmux(&seg.text, depth) {
-                out.hits
-                    .push(Hit::opaque("", &[], "the command does not parse"));
+                out.hits.push(Hit::unparsed(seg.text.trim()));
             }
             continue;
         };
@@ -437,6 +454,7 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
                         targets,
                         opaque: None,
                         retargeted: false,
+                        token: None,
                     });
                 }
                 Ok(None) => {}

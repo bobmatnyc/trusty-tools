@@ -924,3 +924,24 @@ fn a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote() {
         ],
     );
 }
+
+/// #9001 case 6: a `sed -n` print of a variable path stays refused, and the
+/// refusal names the literal-path remedy; the literal spelling is allowed.
+#[test]
+fn a_variable_path_refusal_names_the_literal_path_remedy_9001() {
+    for command in [
+        "F=crates/x/src/lib.rs; sed -n '10,20p' $F",
+        "sed -n '10,20p' \"$F\"",
+    ] {
+        let reason = run(Some("code-critic"), command).expect("refused");
+        assert!(
+            reason.contains("Write every path out literally")
+                && reason.contains("sed -n '10,20p' src/lib.rs"),
+            "{command}: {reason}"
+        );
+    }
+    assert_eq!(
+        run(Some("code-critic"), "sed -n '10,20p' crates/x/src/lib.rs"),
+        None
+    );
+}
