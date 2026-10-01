@@ -1356,6 +1356,8 @@ async fn doctor_endpoint_returns_report() {
         "legacy_overrides",
         // #8453: the resolved session profile, or why it fell back to PM.
         "session_profile",
+        // #9018: whether `[pm_guard] enabled = false` turned the guard off.
+        "pm_guard",
         // #7616: the instruction fold's measured saving, or INACTIVE.
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.
