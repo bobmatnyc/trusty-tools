@@ -45,7 +45,7 @@ function render() {
 }
 
 describe('HitViewer', () => {
-  it("renders the hit's line range, numbered from its first line and highlighted", () => {
+  it("renders the hit's line range, numbered from its first line and highlighted", async () => {
     render();
     const dialog = target.querySelector('[role="dialog"]');
     expect(dialog.getAttribute('aria-modal')).toBe('true');
@@ -53,9 +53,34 @@ describe('HitViewer', () => {
     expect(dialog.textContent).toContain('Lines 10–12');
     expect(target.querySelector('.gutter').textContent).toBe('10\n11\n12');
     const source = target.querySelector('pre[aria-label="File source"]');
-    expect(source.querySelector('.hljs-keyword').textContent).toBe('fn');
+    expect(source.textContent).toBe(hit.content); // plain text until the grammar chunk loads
+    await vi.waitFor(() => {
+      flushSync();
+      expect(source.querySelector('.hljs-keyword')?.textContent).toBe('fn');
+    });
     expect(source.textContent).toBe(hit.content);
     expect(document.activeElement).toBe(target.querySelector('button[aria-label="Close file viewer"]'));
+  });
+
+  it('keeps Tab and Shift+Tab inside the dialog', () => {
+    render();
+    const close = target.querySelector('button[aria-label="Close file viewer"]');
+    const region = target.querySelector('[role="region"]');
+    const tab = (shiftKey) =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey, cancelable: true }));
+
+    region.focus();
+    tab(false); // past the last focusable element -> wraps to the first
+    expect(document.activeElement).toBe(close);
+    tab(true); // before the first -> wraps to the last
+    expect(document.activeElement).toBe(region);
+
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    tab(false); // focus that escaped the dialog is pulled back in
+    expect(document.activeElement).toBe(close);
+    outside.remove();
   });
 
   it('closes on Escape', () => {
