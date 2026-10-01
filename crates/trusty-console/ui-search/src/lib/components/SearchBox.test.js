@@ -28,7 +28,7 @@ afterEach(() => {
   target?.remove();
   target = null;
   vi.useRealTimers();
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 function render(props = {}) {
@@ -125,6 +125,23 @@ describe('SearchBox typeahead', () => {
     pending[0].resolve({ hits: [hit('stale')] });
     await settle();
     expect(options().map((o) => o.querySelector('.label').textContent)).toEqual(['current']);
+  });
+
+  it('announces the suggestion count in a polite status region', async () => {
+    api.typeahead.mockResolvedValueOnce({ hits: [hit('alpha', 3), hit('beta', 2)] });
+    const { input } = render();
+    const region = target.querySelector('[role="status"]');
+    expect(region.getAttribute('aria-live')).toBe('polite');
+    expect(region.textContent).toBe('');
+    type(input, 'a');
+    vi.advanceTimersByTime(150);
+    await settle();
+    expect(region.textContent).toMatch(/^2 suggestions available/);
+    api.typeahead.mockResolvedValueOnce({ hits: [] });
+    type(input, 'zz');
+    vi.advanceTimersByTime(150);
+    await settle();
+    expect(region.textContent).toBe('No suggestions');
   });
 
   it('stops asking after the server answers 501 (no typeahead route)', async () => {

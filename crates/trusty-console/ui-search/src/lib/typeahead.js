@@ -93,7 +93,7 @@ export async function fanOutTypeahead(indexIds, q, signal) {
  * Test: `SearchBox.test.js` — debounce and stale-response cases.
  * @param {{
  *   load: (q: string, signal: AbortSignal) => Promise<Array<object>>,
- *   onResults: (hits: Array<object>) => void,
+ *   onResults: (hits: Array<object>, q: string) => void,
  *   onError?: (e: unknown) => void,
  *   delay?: number,
  * }} opts
@@ -114,7 +114,7 @@ export function createTypeahead({ load, onResults, onError = () => {}, delay = T
   function schedule(q) {
     cancel();
     if (!q.trim()) {
-      onResults([]);
+      onResults([], q);
       return;
     }
     const mine = generation;
@@ -123,7 +123,7 @@ export function createTypeahead({ load, onResults, onError = () => {}, delay = T
       controller = ac;
       try {
         const hits = await load(q, ac.signal);
-        if (mine === generation) onResults(hits);
+        if (mine === generation) onResults(hits, q);
       } catch (e) {
         if (mine === generation && !ac.signal.aborted) onError(e);
       }

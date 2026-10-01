@@ -26,12 +26,33 @@ import { apiBase } from './base.js';
  * }} DashboardTransport
  */
 
+/** The prefix trusty-console bridges to the daemon socket (`tools_ui.rs` `SEARCH.api_base`). */
+export const CONSOLE_API_PREFIX = '/api/search/';
+
 /**
- * True when the console serves this page and bridges its API calls.
+ * Why: `__SEARCH_BASE__` is also the documented override for other
+ * deployments (base.js), so its mere presence does not mean the console
+ * serves the page. An override pointing at another host is a direct
+ * connection, not the console's socket bridge.
+ * What: true only when the base resolves to this page's own origin under the
+ * console's `/api/search/` prefix. That covers both a path-only value and the
+ * absolute same-origin URL the console injects (`new URL("/api/search/",
+ * document.baseURI).href`, `tools_ui.rs`).
+ * Test: `transport.test.js`.
  * @param {any} win
  */
 export function isConsoleServed(win = typeof window === 'undefined' ? undefined : window) {
-  return typeof win?.__SEARCH_BASE__ === 'string' && win.__SEARCH_BASE__ !== '';
+  const raw = win?.__SEARCH_BASE__;
+  if (typeof raw !== 'string' || raw === '') return false;
+  const origin = win?.location?.origin;
+  let url;
+  try {
+    url = new URL(raw, origin && origin !== 'null' ? origin : 'http://localhost/');
+  } catch {
+    return false;
+  }
+  const sameOrigin = raw.startsWith('/') || (origin != null && url.origin === origin);
+  return sameOrigin && url.pathname.startsWith(CONSOLE_API_PREFIX);
 }
 
 /**

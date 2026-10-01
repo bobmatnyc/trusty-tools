@@ -1,2 +1,3 @@
 Changed
 - The file viewer's highlighted source and diff blocks now come from the shared Foundry `CodeView` / `DiffView` components (canonical in `docs/design/UI/design-system/components/`, vendored under `ui/src/lib/foundry/` with a byte-identity test). The rendered output is unchanged.
+- `ui/tsconfig.json` sets `"noEmit": true`. The vendored `codeView.js` is the first `.js` file under `ui/src`, and with `allowJs` and no `noEmit` svelte-check warns "Cannot write file … because it would overwrite input file". Nothing runs `tsc` to emit (Vite builds the app; svelte-check only type-checks), so `noEmit` states what the config is for.

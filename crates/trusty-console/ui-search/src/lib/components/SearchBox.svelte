@@ -9,7 +9,8 @@
    * options, Enter on an option fills the box with its label and runs the
    * search, Enter with no option runs the search as typed, and Escape closes
    * the list. A 501 from every index (the console has no typeahead route
-   * yet) turns suggestions off for the session.
+   * yet) turns suggestions off for the session. A visually hidden
+   * `role="status"` region announces how many suggestions arrived.
    * Test: `SearchBox.test.js`.
    */
   import { onDestroy } from 'svelte';
@@ -26,13 +27,20 @@
   let open = $state(false);
   let focused = $state(false);
   let unroutable = $state(false);
+  // Spoken by the live region; set when an answer arrives, cleared on choose.
+  let status = $state('');
 
   const typeahead = createTypeahead({
     load: (q, signal) => fanOutTypeahead(indexIds, q, signal),
-    onResults: (hits) => {
+    onResults: (hits, q) => {
       suggestions = hits;
       active = -1;
       open = focused && hits.length > 0;
+      status = !q.trim()
+        ? ''
+        : hits.length === 0
+          ? 'No suggestions'
+          : `${hits.length} suggestion${hits.length === 1 ? '' : 's'} available; use up and down arrows to choose`;
     },
     onError: (e) => {
       if (isUnroutable(e)) unroutable = true;
@@ -57,6 +65,7 @@
   function choose(hit) {
     typeahead.cancel();
     value = hit.label;
+    status = '';
     close();
     onsearch(value);
   }
@@ -111,6 +120,7 @@
       close();
     }}
   />
+  <div class="visually-hidden" role="status" aria-live="polite">{status}</div>
   <ul id={listId} class="suggestions" role="listbox" aria-label="Suggestions" hidden={!expanded}>
     {#each suggestions as hit, i (`${hit.index_id}\0${hit.path}\0${hit.start_line}`)}
       <!-- Keyboard selection lives on the input (aria-activedescendant, the
@@ -157,6 +167,17 @@
     box-shadow: var(--trusty-shadow);
     max-height: 320px;
     overflow-y: auto;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
   }
   .suggestions[hidden] {
     display: none;

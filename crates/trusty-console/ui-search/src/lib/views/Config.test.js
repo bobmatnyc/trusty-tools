@@ -18,6 +18,9 @@ import { api } from '../api.js';
 import { refreshHealth } from '../state.svelte.js';
 import Config from './Config.svelte';
 
+// Exactly what trusty-console injects (tools_ui.rs `inject_api_base`).
+const CONSOLE_INJECTED_BASE = new URL('/api/search/', document.baseURI).href;
+
 let target = null;
 let instance = null;
 
@@ -50,11 +53,11 @@ function details() {
 
 describe('Daemon details', () => {
   it('under the console, shows the socket bridge and no daemon TCP port or localhost URL', () => {
-    window.__SEARCH_BASE__ = 'http://localhost:7788/api/search/';
+    window.__SEARCH_BASE__ = CONSOLE_INJECTED_BASE;
     const rows = details();
     expect(Object.keys(rows)).not.toContain('Daemon port');
     expect(Object.keys(rows)).not.toContain('API base URL');
-    expect(Object.values(rows).join(' ')).not.toMatch(/7878|7788|localhost/);
+    expect(Object.values(rows).join(' ')).not.toMatch(/7878|7788|localhost|https?:/);
     expect(rows['Dashboard reaches the daemon']).toContain("/api/search/ is bridged to the daemon's Unix socket");
     expect(rows['Daemon socket']).toBe('not reported by the daemon');
     expect(rows['Daemon HTTP listener']).toBe('not reported by the daemon');
@@ -71,7 +74,7 @@ describe('Daemon details', () => {
   });
 
   it('shows the socket path and listener state the daemon reports', async () => {
-    window.__SEARCH_BASE__ = 'http://localhost:7788/api/search/';
+    window.__SEARCH_BASE__ = CONSOLE_INJECTED_BASE;
     api.health.mockResolvedValue({
       status: 'ok',
       transport: { socket_path: '/data/trusty-search/search.sock', http_addr: null }
