@@ -1356,6 +1356,8 @@ async fn doctor_endpoint_returns_report() {
         "legacy_overrides",
         // #8453: the resolved session profile, or why it fell back to PM.
         "session_profile",
+        // #9018: whether `[pm_guard] enabled = false` turned the guard off.
+        "pm_guard",
         // #7616: the instruction fold's measured saving, or INACTIVE.
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.
@@ -1890,6 +1892,11 @@ async fn make_state_with_active_managed(
         }
         fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
             Ok(self.sessions.lock().unwrap().clone())
+        }
+        /// #8935: a pane id, so a teardown proves the session is the
+        /// record's own (the trait's `pane_exists` default confirms it).
+        fn get_pane_id(&self, _name: &str) -> Option<String> {
+            Some("%1".to_owned())
         }
     }
 

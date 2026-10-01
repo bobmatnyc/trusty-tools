@@ -1042,8 +1042,11 @@ impl SessionManager {
     ///
     /// #8942: a live protected-kind record is refused first, and a kill-floor
     /// refusal at the runtime teardown aborts before any removal or record
-    /// write. Test: `prune_include_active_never_decommissions_a_supervisor_record`,
-    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    /// write. #8935: so does a live session whose ownership of the record's
+    /// pane cannot be proved ([`ManagedError::InvalidState`]).
+    /// Test: `prune_include_active_never_decommissions_a_supervisor_record`,
+    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`,
+    /// `decommission_with_an_unlistable_pane_set_changes_nothing`.
     async fn decommission_with_root_checked(
         &self,
         id: &ManagedSessionId,
@@ -1099,14 +1102,14 @@ impl SessionManager {
         // a session whose runtime is already gone still decommissions cleanly —
         // the helper self-guards and is a no-op when the pane is already gone.
         //
-        // Effect 1 of the table above. `graceful_terminate_runtime` self-guards
-        // on `session_exists(name)` — LIVE-TMUX NAME MEMBERSHIP, not the record's
-        // captured `pane_id` (#4728) — so it kills whatever live session carries
-        // this name. Acceptable here, where teardown is the caller's stated
-        // intent; never acceptable on a listing sweep, which is why the
-        // record-only path is a separate function rather than a flag.
+        // Effect 1 of the table above. #8935: `graceful_terminate_runtime` kills
+        // only a live session proved to hold this record's own `pane_id`; a
+        // session that took the name since is left running and logged. The
+        // record-only path stays a separate function for listing sweeps.
         // #8942: a kill-floor refusal aborts before effects 2–3.
-        self.graceful_terminate_runtime(&record.tmux_name, "decommission")
+        // #8935: so does a live session whose ownership is unproven — it may
+        // be this record's claude. A `Foreign` session stays record-only.
+        self.terminate_proven_runtime(&record, "decommission")
             .await?;
 
         // Effects 2–3. Guard: only remove the workspace directory if the SM

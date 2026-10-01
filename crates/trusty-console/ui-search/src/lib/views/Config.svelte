@@ -6,12 +6,17 @@
    * highlight, and a confirmation dialog so a misclick can't drop the limit.
    * What: Read-only daemon-detail table plus an editable memory-limits form.
    * Pending edits are highlighted; Save asks for confirmation then PATCHes.
-   * Test: open #/config, change the memory limit, confirm the field turns
-   * amber, click Save, accept the dialog, observe the new value persist.
+   * The details table states how this page reaches the daemon from
+   * `dashboardTransport` — the console's socket bridge, or the daemon's own
+   * HTTP listener — and never a port or URL nothing reported (ADR-0032).
+   * Test: `Config.test.js`; manually, open #/config, change the memory limit,
+   * confirm the field turns amber, click Save, accept the dialog, observe the
+   * new value persist.
    */
   import { onMount } from 'svelte';
   import { api } from '../api.js';
-  import { getHealth, getIndexes } from '../state.svelte.js';
+  import { getHealth, getIndexes, getChatAvailable } from '../state.svelte.js';
+  import { dashboardTransport, chatUnavailableReason } from '../transport.js';
 
   let health = $derived(getHealth());
   let indexes = $derived(getIndexes());
@@ -20,12 +25,8 @@
     indexes.reduce((sum, ix) => sum + (ix.chunk_count || 0), 0)
   );
 
-  let openrouterEnabled = $derived(
-    typeof window !== 'undefined' && !!window.__OPENROUTER_ENABLED__
-  );
-  let daemonPort = $derived(
-    (typeof window !== 'undefined' && window.__DAEMON_PORT__) || null
-  );
+  let transport = $derived(dashboardTransport(health));
+  let chatAvailable = $derived(getChatAvailable());
 
   // Live config from the daemon, and the editable draft.
   let config = $state(null);
@@ -255,28 +256,50 @@
     <table class="table">
       <tbody>
         <tr>
-          <th style="width: 240px">OpenRouter chat</th>
+          <th style="width: 240px">Dashboard reaches the daemon</th>
           <td>
-            {#if openrouterEnabled}
-              <span class="badge badge-success">enabled</span>
-              <span class="text-muted text-sm">OPENROUTER_API_KEY detected</span>
+            {#if transport.mode === 'console'}
+              via trusty-console — <code>{transport.route}</code> is bridged to the
+              daemon's Unix socket
             {:else}
-              <span class="badge badge-muted">disabled</span>
-              <span class="text-muted text-sm">
-                Set <code>OPENROUTER_API_KEY</code> and restart the daemon to enable
-                <code>/chat</code>.
-              </span>
+              directly, over the daemon's HTTP listener at
+              <span class="text-mono">{transport.route}</span>
             {/if}
           </td>
         </tr>
         <tr>
-          <th>Daemon port</th>
-          <td class="text-mono">{daemonPort ?? '—'}</td>
+          <th>Daemon socket</th>
+          <td class="text-mono">
+            {#if transport.socketPath}
+              {transport.socketPath}
+            {:else}
+              <span class="text-muted text-sm">not reported by the daemon</span>
+            {/if}
+          </td>
         </tr>
         <tr>
-          <th>API base URL</th>
+          <th>Daemon HTTP listener</th>
           <td class="text-mono">
-            {typeof window !== 'undefined' ? window.location.origin : '—'}
+            {#if transport.httpAddr}
+              {transport.httpAddr}
+            {:else if transport.httpPort != null}
+              port {transport.httpPort}
+            {:else if transport.reported}
+              <span class="text-muted text-sm">none</span>
+            {:else}
+              <span class="text-muted text-sm">not reported by the daemon</span>
+            {/if}
+          </td>
+        </tr>
+        <tr>
+          <th>Chat</th>
+          <td>
+            {#if chatAvailable}
+              <span class="badge badge-success">enabled</span>
+            {:else}
+              <span class="badge badge-muted">unavailable</span>
+              <span class="text-muted text-sm">{chatUnavailableReason(transport.mode)}</span>
+            {/if}
           </td>
         </tr>
         <tr>

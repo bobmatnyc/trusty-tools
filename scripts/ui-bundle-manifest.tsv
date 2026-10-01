@@ -19,6 +19,12 @@
 #                  commit from before a move (#6155). First one that holds a
 #                  file at that rev wins.
 #   3. bundle_dir  committed build output, repo-relative — what cargo packages
+#   4. shared_dirs OPTIONAL. Comma-separated directories outside the UI project
+#                  that the build imports. Unlike source_dir's list these are
+#                  COMBINED: every one is hashed together with the chosen
+#                  source_dir, so an edit to any of them makes the bundle stale.
+#                  A row without this column hashes exactly what it did before
+#                  the column existed.
 #
 # Each bundle_dir carries ui-source-hash.txt, written by
 # scripts/stamp-ui-bundle.sh as part of the build. That file is the freshness
@@ -75,8 +81,8 @@
 # tarball carries. The stamper under-claims, the gate over-checks.
 #
 # crate_dir	source_dir	bundle_dir
-trusty-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-search/ui-dist
+trusty-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-search/ui-dist	docs/design/UI/design-system/components
 trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist
-trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist
+trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist	docs/design/UI/design-system/components
 trusty-console-memory	crates/trusty-console/ui-memory,crates/trusty-memory/ui	crates/trusty-console/ui-memory-dist
 trusty-console-analyze	crates/trusty-console/ui-analyze,crates/trusty-analyze/ui	crates/trusty-console/ui-analyze-dist

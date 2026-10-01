@@ -309,13 +309,14 @@ pub(crate) async fn install(
 pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
     let config_dir = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir()
         .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
-    install_claude_hooks_at(
+    let config = trusty_mpm::core::config::MpmConfig::load_default();
+    install_claude_hooks_at_with_pm_guard(
         &config_dir,
         trusty_mpm::core::standalone::hooks::resolve_current_exe(),
         // #8392: the opt-in lives in the user-level config only.
-        trusty_mpm::core::config::MpmConfig::load_default()
-            .notification_hook
-            .enabled,
+        config.notification_hook.enabled,
+        // #9018: `[pm_guard] enabled = false` strips a guard entry here too.
+        config.pm_guard.enabled,
     )
 }
 
@@ -338,10 +339,29 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 /// Test: see [`install_claude_hooks`]'s test list, plus
 /// `opt_in_off_installs_exactly_the_six_lifecycle_events` and
 /// `opt_in_on_installs_one_notification_entry_idempotently`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn install_claude_hooks_at(
     config_dir: &std::path::Path,
     exe: Option<std::path::PathBuf>,
     notify: bool,
+) -> anyhow::Result<usize> {
+    // #9018: `true` is the pre-existing behaviour.
+    install_claude_hooks_at_with_pm_guard(config_dir, exe, notify, true)
+}
+
+/// [`install_claude_hooks_at`], honouring `[pm_guard] enabled` (#9018).
+///
+/// Why: an additive seam rather than a fourth parameter, because every test of
+/// the function above asserts a shape this flag does not change.
+/// What: `pm_guard_enabled = false` routes the lifecycle write through
+/// [`trusty_mpm::core::standalone::hooks::write_project_hooks_honoring_pm_guard`],
+/// which also strips a `hook --pm-guard` entry; `true` is unchanged.
+/// Test: `install_with_the_guard_off_strips_an_existing_guard_entry`.
+fn install_claude_hooks_at_with_pm_guard(
+    config_dir: &std::path::Path,
+    exe: Option<std::path::PathBuf>,
+    notify: bool,
+    pm_guard_enabled: bool,
 ) -> anyhow::Result<usize> {
     use colored::Colorize;
 
@@ -352,16 +372,19 @@ fn install_claude_hooks_at(
     );
 
     // #8392: the lifecycle write first, so the opt-in step reads what it left.
-    let written =
-        trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref())
-            .and_then(|changed| {
-                trusty_mpm::core::standalone::hooks::notification::apply_notification_hook(
-                    &settings_path,
-                    exe.as_deref(),
-                    notify,
-                )
-                .map(|notified| changed || notified)
-            });
+    let written = trusty_mpm::core::standalone::hooks::write_project_hooks_honoring_pm_guard(
+        &settings_path,
+        exe.as_deref(),
+        pm_guard_enabled,
+    )
+    .and_then(|changed| {
+        trusty_mpm::core::standalone::hooks::notification::apply_notification_hook(
+            &settings_path,
+            exe.as_deref(),
+            notify,
+        )
+        .map(|notified| changed || notified)
+    });
     match written {
         Ok(true) => {
             println!("  {} {}", "✓".green(), settings_path.display());
@@ -397,7 +420,8 @@ fn install_claude_hooks_at(
 /// What: resolves `<project_dir>/.claude/settings.json` and calls
 /// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] with the
 /// absolute exe path from `current_exe()`. Returns `true` if the file was
-/// updated (new or changed), `false` when already configured.
+/// updated (new or changed), `false` when already configured. #9018: honours
+/// `[pm_guard] enabled` from the user config, stripping a guard entry when off.
 /// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
 /// `tests_behavior_a.rs`.
 pub(crate) fn write_project_hooks_for_dir(
@@ -411,7 +435,14 @@ pub(crate) fn write_project_hooks_for_dir(
     let exe = exe_override
         .map(std::path::Path::to_path_buf)
         .or_else(trusty_mpm::core::standalone::hooks::resolve_current_exe);
-    trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref())
+    // #9018: `[pm_guard] enabled = false` also strips a guard entry.
+    trusty_mpm::core::standalone::hooks::write_project_hooks_honoring_pm_guard(
+        &settings_path,
+        exe.as_deref(),
+        trusty_mpm::core::config::MpmConfig::load_default()
+            .pm_guard
+            .enabled,
+    )
 }
 
 // #7244: the test-only `mpm_hook_additions` wrapper is gone. Its one caller

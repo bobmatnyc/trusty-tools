@@ -148,6 +148,10 @@ mod tests_style_selection_8533;
 #[cfg(test)]
 #[path = "tests_supervisor_profile_8453.rs"]
 mod tests_supervisor_profile_8453;
+// #9018: `[pm_guard] enabled` wired into the launch and resume writers.
+#[cfg(test)]
+#[path = "tests_pm_guard_9018.rs"]
+mod tests_pm_guard_9018;
 
 // #8311: the catch-up watermark lands under `fw.root`, never the home.
 #[cfg(test)]
@@ -166,11 +170,12 @@ use settings::{
     remove_global_trusty_memory_hooks,
     write_auto_memory_enabled,
     write_output_style,
-    // #7688: the launch path is the only caller that turns the capture on, so
-    // the plain `write_project_hooks` is not reached from this module.
+    // #9018: the launch builds its additions with every toggle resolved — the
+    // #7688 capture and `[pm_guard] enabled` included — and hands them to the
+    // shared writer.
     // write_enabled_plugins is not imported here: it is already brought into
     // scope by the pub(crate) re-export below (#7678).
-    write_project_hooks_with_prompt_feedback,
+    write_project_hooks_with,
 };
 
 /// Re-export of the project-tier `enabledPlugins` writer (#7678).
@@ -995,8 +1000,10 @@ pub(super) fn prepare_session_inner(
     // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
     // `trusty-memory prompt-context` injection (and strips one a prior launch
     // wrote). Default `true` — every other hook is written either way.
-    let hooks_written = match write_project_hooks_with_prompt_feedback(
-        project_dir,
+    //
+    // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
+    // out and strips one a prior launch wrote; every other hook is unchanged.
+    let additions = project_hooks::project_managed_hook_additions_with_pm_guard(
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
         // than wiring every hook to a build artifact. A test pins a stable path
@@ -1007,7 +1014,9 @@ pub(super) fn prepare_session_inner(
         // #7688: register the `Stop`/`SubagentStop` capture only where the flag
         // is on, so a project with the feature off spawns no process per turn.
         crate::core::prompt_self_improvement::enabled_for(project_dir),
-    ) {
+        config.pm_guard.enabled,
+    );
+    let hooks_written = match write_project_hooks_with(project_dir, additions) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
