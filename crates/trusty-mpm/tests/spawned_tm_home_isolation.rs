@@ -258,6 +258,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // #8531: the daemon binds a SessionStart to the `claude` above `tm hook`,
     // so a fake `claude` shell runs `tm` by path; the isolation goes on it.
     ("tests/tm_hook_session_start_8531.rs", 1),
+    // #8980: a SessionEnd stales only for the `claude` above `tm hook`, so a
+    // fake `claude` shell runs `tm` by path; the isolation goes on it.
+    ("tests/tm_hook_session_end_8980.rs", 1),
     // `#[ignore]`d live test (#1053): it drives a real `claude` session against
     // the framework the operator actually installed, so a scratch `$HOME` would
     // make it untestable rather than hermetic. Never run in CI.

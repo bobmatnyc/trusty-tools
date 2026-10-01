@@ -14,7 +14,8 @@
 //! — IS the process the owning session was bound to when it announced itself
 //! over the socket (`daemon::state::session_claudes`). Every lookup that
 //! cannot answer yields [`RepairCaller::Unestablished`], which the repair
-//! gate refuses.
+//! gate refuses. #8980: [`stale_on_owner_session_end`] runs the same check
+//! before a `SessionEnd` stales the live records of the session it names.
 //! Test: `delegation_repair_caller_tests.rs`.
 
 use std::sync::Arc;
@@ -207,6 +208,66 @@ pub async fn bind_announcing_claude(
     })
     .await
     .map_err(|e| format!("the process walk did not finish: {e}"))?
+}
+
+/// Stale `session`'s live delegations on a `SessionEnd` its own `claude`
+/// sent (#8980, #6797).
+///
+/// Why: #6797 stales a harness session's live records when it ends, because
+/// its agents cannot outlive it and live records deny a merge or rebase in
+/// its checkout (ADR-0048) for 6 h. Any local process can name an id, which
+/// `GET /sessions` lists, so a forged `SessionEnd` used to release another
+/// session's live records — the second-writer harm #8531 closed for repairs.
+/// What: `Ok(0)` without a walk when `session` has no live record. Otherwise
+/// [`establish_caller`] over the records `session` owns, on the blocking
+/// pool, and [`stale_if_owner`]. `Err` naming why when the sender is not
+/// proven to run under the session's bound `claude`; nothing is staled then.
+/// Test: `the_owners_session_end_stales_its_records_8980`,
+/// `a_siblings_session_end_leaves_the_owners_records_live_8980`,
+/// `a_socket_session_end_from_a_sibling_leaves_the_owners_records_live_8980`.
+pub async fn stale_on_owner_session_end(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    peer: RepairPeer,
+) -> Result<usize, String> {
+    let live = state
+        .all_delegations()
+        .iter()
+        .any(|d| d.session == session && d.status.is_live());
+    if !live {
+        return Ok(0);
+    }
+    let held = Arc::clone(state);
+    let caller = tokio::task::spawn_blocking(move || {
+        establish_caller(&held, peer, |d| d.session == session)
+    })
+    .await
+    .map_err(|e| format!("the process walk did not finish: {e}"))?;
+    stale_if_owner(state, session, &caller)
+}
+
+/// The gate of [`stale_on_owner_session_end`], over an established caller.
+///
+/// What: stales `session`'s live records only when `caller` IS `session`;
+/// `Err` with the caller's refusal otherwise.
+/// Test: `a_siblings_session_end_leaves_the_owners_records_live_8980`,
+/// `an_unproven_session_end_stales_nothing_8980`.
+pub(crate) fn stale_if_owner(
+    state: &DaemonState,
+    session: SessionId,
+    caller: &RepairCaller,
+) -> Result<usize, String> {
+    match caller {
+        // #8980: only the owning session's own `claude` ends its records.
+        RepairCaller::Session(s) if *s == session => {
+            Ok(state.stale_delegations_of_dead_session(session))
+        }
+        RepairCaller::Session(s) => Err(format!(
+            "the SessionEnd came from session {}, not the session it names",
+            s.0
+        )),
+        RepairCaller::Unestablished(why) => Err(why.clone()),
+    }
 }
 
 /// The `claude` process that owns session `session` (#8531).

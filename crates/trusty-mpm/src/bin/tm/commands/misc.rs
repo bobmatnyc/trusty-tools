@@ -633,8 +633,10 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     // #8392: moved to `hook_notify` (this file is over the SLOC cap); same
     // 500 ms connect / 2 s total bounds, every failure dropped.
     // #8531: SessionStart over the socket, so the daemon can bind its claude.
-    if event == "SessionStart" {
-        super::hook_notify::post_session_start(client, url, &body).await;
+    // #8980: SessionEnd too — only a socket SessionEnd from that claude stales
+    // the session's live delegations.
+    if event == "SessionStart" || event == "SessionEnd" {
+        super::hook_notify::post_lifecycle_via_socket(client, url, &body).await;
         return Ok(());
     }
     super::hook_notify::post_best_effort(client, url, &body).await;

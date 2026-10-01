@@ -1404,6 +1404,8 @@ async fn doctor_endpoint_returns_report() {
         "bundled_asset_lag",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #8980: an untrusted `session-claudes.json` seals the registry.
+        "session_claudes",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
         // the hook cannot write into.
         "stop_spool",
@@ -2288,17 +2290,13 @@ async fn session_end_hook_clears_claude_session_id() {
 }
 
 #[tokio::test]
-async fn session_end_stales_the_dead_harness_sessions_delegations() {
-    // #6797: a harness session's subagents cannot outlive it, so its live records
-    // name agents that are gone. While they read as live, ADR-0048 decision 10 and
-    // ADR-0049 decision 3 deny a merge, a rebase, or a documents-only commit in
-    // that checkout for the six hours of RUNNING_STALE_AFTER_SECS. #6497 covers a
-    // session the tmux reaper buries; the reaper walks MANAGED sessions and skips
-    // non-tmux origins, while a delegation's `session` is the HARNESS id — so a
-    // plain `claude` run's agents were never reached, which is what this covers.
-    //
-    // No managed record is created here deliberately: that is exactly the case the
-    // reaper misses, and the disposition must not be gated on one.
+async fn an_http_session_end_leaves_the_sessions_delegations_live_8980() {
+    // #8980: an HTTP SessionEnd proves no sender, and any local process can name
+    // a session id (`GET /sessions` lists them). Before #8980 this staled the
+    // named session's live records (#6797), releasing the ADR-0048 guard on a
+    // checkout another session's agent still writes. The #6797 stale now runs
+    // only for a socket SessionEnd from the session's own claude:
+    // `the_owners_session_end_stales_its_records_8980`.
     let dir = tempfile::tempdir().expect("temp dir");
     let paths = crate::core::paths::FrameworkPaths::under(dir.path());
     let state = Arc::new(DaemonState::with_paths(&paths));
@@ -2331,23 +2329,14 @@ async fn session_end_stales_the_dead_harness_sessions_delegations() {
         .await
         .expect("ingest_hook(SessionEnd) must succeed");
 
-    assert!(
-        state
-            .live_shared_tree_writers(std::path::Path::new("/repo"), None)
-            .is_empty(),
-        "the ended session's agents must stop counting as live writers (#6797)"
-    );
-    // Stale, never Completed: tracking gave up; the agent is not reported as
-    // having finished, and the record stays resolvable by a late SubagentStop.
-    let records = state.delegations_for(session);
-    assert_eq!(records.len(), 1, "the record is staled, never evicted");
     assert_eq!(
-        records[0].status,
-        crate::core::agent::DelegationStatus::Stale
+        state.live_shared_tree_writers(std::path::Path::new("/repo"), None),
+        vec!["rust-engineer".to_string()],
+        "an unproven SessionEnd must leave the session's agents live writers (#8980)"
     );
-    assert!(
-        records[0].ended_at.is_none(),
-        "a staled record must not be stamped with a terminal end time"
+    assert_eq!(
+        state.delegations_for(session)[0].status,
+        crate::core::agent::DelegationStatus::Running
     );
 }
 

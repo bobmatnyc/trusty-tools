@@ -240,6 +240,8 @@ pub(crate) fn owner_liveness(state: &Arc<DaemonState>, session: SessionId) -> Ow
     if record.status == SessionStatus::Stopped {
         return OwnerLiveness::Gone;
     }
+    // #8980: no caller can write this pid on a session that owns delegations
+    // (`sessions_legacy_ops::set_session_pid`), so a dead one is evidence.
     match record.pid {
         Some(pid) if !crate::core::process::is_process_alive(pid) => OwnerLiveness::Gone,
         _ => OwnerLiveness::Live,

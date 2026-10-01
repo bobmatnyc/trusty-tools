@@ -269,7 +269,12 @@ enum StoredAnnouncement {
 /// `an_unreadable_file_seals_the_registry_8531`,
 /// `a_file_open_to_other_users_seals_the_registry_8531`,
 /// `a_missing_file_is_an_empty_registry_8531`.
-fn read_registry(path: &Path, uid: u32) -> Result<HashMap<SessionId, Announcement>, String> {
+// #8980: crate-visible so the `session_claudes` doctor row reads the file
+// through the daemon's own trust rules.
+pub(crate) fn read_registry(
+    path: &Path,
+    uid: u32,
+) -> Result<HashMap<SessionId, Announcement>, String> {
     let shown = path.display();
     let mut file = match open_no_follow(path) {
         Ok(file) => file,
@@ -390,7 +395,7 @@ fn write_registry(path: &Path, map: &HashMap<SessionId, Announcement>) -> std::i
 }
 
 /// The daemon's effective uid; `0` off Unix, where no owner check runs.
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     #[cfg(unix)]
     {
         // SAFETY: `geteuid` takes no arguments, reads a process property and
