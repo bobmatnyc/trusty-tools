@@ -178,6 +178,18 @@ fn every_unusable_record_starts_fresh_and_says_why() {
             Box::new(|s| std::fs::create_dir_all(conversation_path(&s.root)).expect("dir")),
             "could not be read",
         ),
+        // #8981 round 2: a resumable record reached through a symlink.
+        (
+            "symlinked",
+            Box::new(|s| {
+                write_mode(s, 0o600);
+                let path = conversation_path(&s.root);
+                let real = path.with_extension("real");
+                std::fs::rename(&path, &real).expect("move the record");
+                std::os::unix::fs::symlink(&real, &path).expect("symlink");
+            }),
+            "could not be read",
+        ),
     ];
     for (name, setup, want) in cases {
         let s = Scratch::new();
@@ -217,4 +229,25 @@ fn every_unusable_record_starts_fresh_and_says_why() {
         s.resolve(),
         ConversationStart::Fresh { reason: None, .. }
     ));
+}
+
+/// #8981 round 2: a record another user owns is refused. A test cannot
+/// `chown` without root, so it asks for the record as a uid that does not
+/// own it, which is the check a real other-owner record meets.
+#[test]
+fn a_record_owned_by_another_user_is_refused() {
+    use std::os::unix::fs::MetadataExt as _;
+    let s = Scratch::new();
+    record_conversation(&s.root, &s.dir, ID).expect("record");
+    let path = conversation_path(&s.root);
+    let owner = std::fs::metadata(&path).expect("record").uid();
+    assert!(matches!(read_owned_by(&path, owner), Ok(Some(_))));
+    let other = owner.wrapping_add(1);
+    let why = read_owned_by(&path, other).expect_err("another owner's record was read");
+    assert!(
+        why.contains(&format!(
+            "is owned by uid {owner}, not by this user (uid {other})"
+        )),
+        "{why}"
+    );
 }

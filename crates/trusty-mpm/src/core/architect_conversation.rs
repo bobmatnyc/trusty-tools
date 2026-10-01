@@ -12,7 +12,8 @@
 //! resumes it (`claude --resume <uuid>`) only when the id is a UUID recorded
 //! for this directory and Claude Code holds its transcript in this
 //! directory's project folder of the Architect's config dir, and the record
-//! is not writable by other users. Any other answer starts fresh and names
+//! is a regular file, not a symlink, that this user owns and no other user
+//! can write. Any other answer starts fresh and names
 //! the reason. A resume whose `claude` does not stay up is a failed resume:
 //! the launch removes the record with [`clear_conversation`], so the next
 //! launch starts fresh instead of retrying a dead conversation.
@@ -189,15 +190,33 @@ pub fn resolve_conversation(
 
 /// The record's text, `None` when absent (#8981 critic LOW).
 ///
-/// What: the mode is read from the open handle the text is read from, so the
-/// bytes checked are the bytes used. A non-file, a read failure, or a file
-/// group or others can write (mode `& 0o022`) is `Err` naming the path.
+/// What: [`read_owned_by`] with this process's effective uid as the owner.
 /// Test: `every_unusable_record_starts_fresh_and_says_why`.
 fn read_owner_only(path: &Path) -> Result<Option<String>, String> {
+    // SAFETY: `geteuid` takes no arguments, reads a process property and
+    // cannot fail.
+    read_owned_by(path, unsafe { libc::geteuid() })
+}
+
+/// The text of `path`, a regular file owned by `owner`; `None` when absent.
+///
+/// What: opened with `O_NOFOLLOW | O_NONBLOCK` (#8981 round 2), so neither a
+/// symlink nor a FIFO is followed or blocks the open. The owner and mode are
+/// read from the open handle the text is read from, so the bytes checked are
+/// the bytes used. A non-file, a read failure, another owner, or a file group
+/// or others can write (mode `& 0o022`) is `Err` naming the path.
+/// Test: `every_unusable_record_starts_fresh_and_says_why`,
+/// `a_record_owned_by_another_user_is_refused`.
+fn read_owned_by(path: &Path, owner: u32) -> Result<Option<String>, String> {
     use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
     let unreadable =
         |e: &dyn std::fmt::Display| format!("{} could not be read: {e}", path.display());
-    let mut file = match std::fs::File::open(path) {
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    let mut file = match opened {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(unreadable(&e)),
         Ok(file) => file,
@@ -206,16 +225,19 @@ fn read_owner_only(path: &Path) -> Result<Option<String>, String> {
     if !meta.is_file() {
         return Err(unreadable(&"not a regular file"));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = meta.permissions().mode() & 0o7777;
-        if mode & 0o022 != 0 {
-            return Err(format!(
-                "{} is writable by other users (mode {mode:o})",
-                path.display()
-            ));
-        }
+    if meta.uid() != owner {
+        return Err(format!(
+            "{} is owned by uid {}, not by this user (uid {owner})",
+            path.display(),
+            meta.uid()
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "{} is writable by other users (mode {mode:o})",
+            path.display()
+        ));
     }
     let mut text = String::new();
     file.read_to_string(&mut text).map_err(|e| unreadable(&e))?;
