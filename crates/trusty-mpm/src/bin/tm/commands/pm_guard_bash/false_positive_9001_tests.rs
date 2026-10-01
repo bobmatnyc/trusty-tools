@@ -41,6 +41,11 @@ fn a_secret_named_in_a_mysql_statement_still_denies_9001() {
         "mysql --defaults-extra-file=.env -e 'SELECT 1'",
         "mysql -e 'SELECT 1' < .env",
         "cat .env.*",
+        // #9001 critic: the client's `\!` and `system` run /bin/sh, which
+        // globs these onto `.env` and `.netrc`.
+        "mysql -e '\\! cat .*'",
+        "mysql -e 'system cat .*v'",
+        "mysql -e 'system cat .*rc'",
     ]);
 }
 
