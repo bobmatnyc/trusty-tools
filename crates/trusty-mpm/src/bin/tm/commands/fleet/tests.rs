@@ -872,3 +872,23 @@ fn every_architect_skill_asset_is_seeded() {
         assert_eq!(asset, skill.contents, "{}", skill.dest);
     }
 }
+
+/// #8981: the Architect line selects its conversation and ends in a bare
+/// `--remote-control`, for a resume and for a fresh start alike.
+#[test]
+fn the_architect_line_resumes_and_enables_remote_control() {
+    use trusty_mpm::core::architect_conversation::ConversationStart;
+    let id = "3f2b8c1e-5d4a-4b6f-9e2d-1a7c0b9e8f61".to_owned();
+    assert_eq!(
+        launch::architect_args(&ConversationStart::Resume(id.clone())),
+        ["--resume", id.as_str(), "--remote-control"]
+    );
+    let fresh = ConversationStart::Fresh {
+        id: id.clone(),
+        reason: Some("corrupt".to_owned()),
+    };
+    assert_eq!(
+        launch::architect_args(&fresh),
+        ["--session-id", id.as_str(), "--remote-control"]
+    );
+}

@@ -11,13 +11,17 @@
 //! `claude` line on the `opus` alias. It records the launch stamp in the tmux
 //! session environment, where [`launch_stamp`] reads it, and records the
 //! `claude` it started, with the session name, as the Architect's process
-//! ([`record_process`], #8878 ruling A). No daemon registration: the session
-//! is not in `tm ls` until #8536.
-//! Test: `fleet_init_launches_the_architect_and_status_is_complete`.
+//! ([`record_process`], #8878 ruling A). #8981: the `claude` line resumes the
+//! Architect's recorded conversation when one checks out, and carries
+//! `--remote-control` ([`architect_args`]). No daemon registration: the
+//! session is not in `tm ls` until #8536.
+//! Test: `fleet_init_launches_the_architect_and_status_is_complete`,
+//! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use trusty_mpm::core::architect_conversation::{self, ConversationStart};
 use trusty_mpm::core::architect_session;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
 use trusty_mpm::core::tmux::{self, TmuxCommand};
@@ -141,14 +145,16 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// What: see the module doc. Fails before creating the session when the
 /// profile would resolve to PM; kills the session when the `claude` line
 /// cannot be sent. `home` is the user home every write goes under; `session`
-/// is the validated session name. Returns the [`record_process`] outcome.
+/// is the validated session name. Returns the [`record_process`] outcome and
+/// how the conversation started (#8981).
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
-/// `fleet_init_with_a_session_override_names_every_session`.
+/// `fleet_init_with_a_session_override_names_every_session`,
+/// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`.
 pub(crate) fn start(
     dir: &Path,
     home: &Path,
     session: &str,
-) -> anyhow::Result<Result<ArmingRecord, String>> {
+) -> anyhow::Result<(Result<ArmingRecord, String>, ConversationStart)> {
     require_supervisor(dir, session)?;
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
         Ok(report) => {
@@ -180,7 +186,7 @@ pub(crate) fn start(
         Some(home),
     )?;
     // #8308: the launch travels in a spec under `home`; the pane types a short line.
-    let claude_spec = crate::commands::launch::launch_claude_spec(
+    let mut claude_spec = crate::commands::launch::launch_claude_spec(
         dir,
         trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
         &model,
@@ -189,6 +195,12 @@ pub(crate) fn start(
         &cli.env,
         scoped_mcp.as_deref(),
     );
+    // #8981: the conversation id comes from tm's own record, which outlives
+    // the daemon's session record.
+    let root = home.join(".trusty-mpm");
+    let conversation =
+        architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
+    claude_spec.args.extend(architect_args(&conversation));
     let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
     let workdir = dir
         .to_str()
@@ -207,7 +219,31 @@ pub(crate) fn start(
         });
         return Err(err);
     }
-    Ok(record_process(dir, home, session))
+    // #8981: a fresh conversation's id is recorded only once `claude` was
+    // started under it; a failed write means the next launch starts fresh.
+    if let ConversationStart::Fresh { id, .. } = &conversation
+        && let Err(err) = architect_conversation::record_conversation(&root, dir, id)
+    {
+        eprintln!(
+            "warning: conversation {id} was NOT recorded, so the next `tm fleet init` \
+             starts fresh: {err}"
+        );
+    }
+    Ok((record_process(dir, home, session), conversation))
+}
+
+/// The arguments the Architect's `claude` line adds for #8981.
+///
+/// Why: the owner (2026-10-01): "We should not require a remote session" —
+/// no `tmux attach` and `/remote-control` after a relaunch.
+/// What: the conversation's `--resume <id>` or `--session-id <id>`, then a
+/// bare `--remote-control` last, so its optional name never takes a
+/// following argument.
+/// Test: `the_architect_line_resumes_and_enables_remote_control`.
+pub(crate) fn architect_args(conversation: &ConversationStart) -> Vec<String> {
+    let mut args = conversation.claude_args().to_vec();
+    args.push("--remote-control".to_owned());
+    args
 }
 
 /// Bind the Architect identity to the `claude` [`start`] just launched

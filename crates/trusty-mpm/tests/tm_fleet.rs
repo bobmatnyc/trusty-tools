@@ -30,9 +30,14 @@ impl FleetEnv {
         // a copy: macOS kills an unsigned copy of a system binary.
         let sleeper = bin.path().join("claude-sleep");
         std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
+        // #8981: each start appends its argv, one line per launch.
         std::fs::write(
             &claude,
-            format!("#!/bin/sh\nexec {:?} 600\n", sleeper.display().to_string()),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {:?}\nexec {:?} 600\n",
+                bin.path().join(ARGV_LOG).display().to_string(),
+                sleeper.display().to_string()
+            ),
         )
         .expect("fake claude");
         use std::os::unix::fs::PermissionsExt;
@@ -72,6 +77,52 @@ impl FleetEnv {
     fn dir(&self) -> PathBuf {
         self.home.path().join("arch")
     }
+
+    /// The fake `claude`'s argv, one entry per Architect launch (a `--model`
+    /// line; tm's `claude --version` probes are skipped), waiting up to 10 s
+    /// for launch `n` (1-based) to appear.
+    fn launches(&self, n: usize) -> Vec<Vec<String>> {
+        let log = self.bin.path().join(ARGV_LOG);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let lines: Vec<Vec<String>> = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| line.split_whitespace().map(str::to_owned).collect())
+                .filter(|argv: &Vec<String>| argv.iter().any(|a| a == "--model"))
+                .collect();
+            if lines.len() >= n || std::time::Instant::now() >= deadline {
+                return lines;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// `tmux kill-session` on this environment's private server.
+    fn kill_session(&self, name: &str) {
+        let status = Command::new("tmux")
+            .args([
+                "kill-session",
+                "-t",
+                &trusty_common::tmux::exact_session_target(name),
+            ])
+            .env("TMUX_TMPDIR", self.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("tmux");
+        assert!(status.success(), "kill-session {name}");
+    }
+}
+
+/// The file, in the fake `bin` dir, where the fake `claude` logs its argv.
+const ARGV_LOG: &str = "claude-argv.log";
+
+/// The value after `flag` in one launch's argv.
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    argv.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
 }
 
 impl Drop for FleetEnv {
@@ -194,6 +245,88 @@ fn fleet_init_launches_the_architect_and_status_is_complete() {
         "{}",
         text(&out)
     );
+}
+
+/// #8981 regression: a relaunch resumes the prior Architect conversation
+/// with no daemon session record — the scratch HOME runs no daemon, which is
+/// the state after record a8a726e2 was deleted — and every launch carries
+/// `--remote-control`. Then a corrupt conversation record starts fresh and
+/// the summary says why.
+#[test]
+fn fleet_init_resumes_the_prior_conversation_after_the_record_is_gone() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    // Claude Code writes the conversation's transcript under the Architect's
+    // config dir, in the folder named for the directory it ran in.
+    if let Some(id) = flag_value(&first, "--session-id") {
+        let canonical = std::fs::canonicalize(&dir).expect("architect dir");
+        let folder: String = canonical
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let projects =
+            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at(env.home.path())
+                .join("projects")
+                .join(folder);
+        std::fs::create_dir_all(&projects).expect("project folder");
+        std::fs::write(projects.join(format!("{id}.jsonl")), "{}\n").expect("transcript");
+    }
+
+    env.kill_session("tm-architect");
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let launches = env.launches(2);
+    let second = launches.get(1).cloned().unwrap_or_default();
+    let resumed = flag_value(&second, "--resume");
+    assert!(
+        resumed.is_some(),
+        "the relaunch started a fresh conversation: {second:?}\n{}",
+        text(&out)
+    );
+    assert_eq!(
+        resumed,
+        flag_value(&first, "--session-id"),
+        "the relaunch resumed another conversation than the first launch started"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("resuming conversation"),
+        "{}",
+        text(&out)
+    );
+    for argv in [&first, &second] {
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("--remote-control"),
+            "{argv:?}"
+        );
+    }
+
+    // Error arm: a corrupt record is set aside, said on stdout and stderr.
+    let record = env
+        .home
+        .path()
+        .join(".trusty-mpm/architect-launch/last.architect-conversation");
+    std::fs::write(&record, "{not json").expect("corrupt record");
+    env.kill_session("tm-architect");
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let third = env.launches(3).get(2).cloned().unwrap_or_default();
+    assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
+    let fresh = flag_value(&third, "--session-id").expect("a new conversation id");
+    assert_ne!(Some(fresh), resumed, "{third:?}");
+    for stream in [&out.stdout, &out.stderr] {
+        let stream = String::from_utf8_lossy(stream);
+        assert!(
+            stream.contains("the prior one was not resumed"),
+            "{}",
+            text(&out)
+        );
+        assert!(stream.contains("is corrupt"), "{}", text(&out));
+    }
 }
 
 /// #8878 R1: `--session` names the Architect's session, its poller

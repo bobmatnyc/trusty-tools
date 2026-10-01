@@ -477,7 +477,16 @@ fn launch_step(
         ));
     }
     // #8878 ruling A: the record binds the Architect identity to this claude.
-    let (bound, unbound) = match launch::start(dir, home, session)? {
+    let (binding, conversation) = launch::start(dir, home, session)?;
+    // #8981: a set-aside conversation is said on stderr and in the summary.
+    use trusty_mpm::core::architect_conversation::ConversationStart;
+    if let ConversationStart::Fresh {
+        reason: Some(_), ..
+    } = &conversation
+    {
+        eprintln!("warning: {}", conversation.describe());
+    }
+    let (bound, unbound) = match binding {
         Ok(record) => (format!("bound to claude pid {}", record.pid), false),
         Err(err) => {
             eprintln!("warning: the Architect process was NOT recorded: {err}");
@@ -489,8 +498,9 @@ fn launch_step(
         }
     };
     let step = Step::Changed(format!(
-        "started tmux session {session} on the `opus` alias, {bound}; attach with `tmux attach \
-         -t ={session}`"
+        "started tmux session {session} on the `opus` alias, {bound}, {} with remote control \
+         on; attach with `tmux attach -t ={session}`",
+        conversation.describe()
     ));
     Ok((step, unbound))
 }
