@@ -296,9 +296,10 @@ impl SessionManager {
         // #5859: the gate fails CLOSED. `is_running` now returns `Err` when tmux
         // could not be observed at all, and that error aborts the whole prune
         // rather than reading as "not running" and tearing down a live pane.
-        // `include_active` short-circuits before the probe, so the bulk
-        // ephemeral sweep (which ignores liveness by design) still runs on a
-        // host with no reachable tmux.
+        // `include_active` short-circuits before the probe, but #8935: each
+        // selected record's decommission then refuses when its teardown cannot
+        // prove the live session is its own, so on a host with no reachable
+        // tmux a sweep of live records decommissions none of them.
         //
         // #6118: `Unresolvable` skips the probe rather than passing it. Its
         // members are live BY DEFINITION — that liveness is exactly what made
@@ -972,7 +973,8 @@ impl SessionManager {
     /// SAFETY: only `ephemeral == true` records are EVER in scope — real sessions
     /// default `false` and are unreachable by this path. State is irrelevant
     /// (a stuck Active ephemeral session past the age cutoff is reaped too, since
-    /// `decommission` kills the runtime first).
+    /// `decommission` kills the runtime first — #8935: only a runtime proved to
+    /// hold the record's pane; an unproven one is refused, logged and skipped).
     /// What: takes `max_age` as a parameter (for deterministic tests), snapshots the
     /// store, selects `ephemeral && created_at < now - max_age`, and decommissions
     /// each (best-effort; a per-session failure is logged and skipped). Returns the
