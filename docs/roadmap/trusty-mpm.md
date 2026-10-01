@@ -71,3 +71,52 @@ Work so trusty-mpm can drive coding harnesses other than Claude Code — Codex a
 0 of 7 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/99)
 
 <!-- END GENERATED: roadmap -->
+
+## Also on the roadmap
+
+These two initiatives are not part of a trusty-mpm release. They are tracked
+here because they change what trusty-mpm and the console do. States use the
+issue-lifecycle vocabulary: not started, in-progress, merged.
+
+### Console secrets service
+
+Epic [#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517) puts
+secrets behind `tm secrets` and the console, with macOS Keychain first and
+1Password, Keeper and others added one per PR. Specs:
+[PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) and
+[DOC-74](../specs/DOC-74-secrets-integration.md).
+
+Implementation starts after the search dashboard work: #9027, #9028, #9029
+and the #9030 backend routes (owner ruling).
+
+| Slice | Scope | State |
+|---|---|---|
+| S0 | PRD-SECRETS-01 and the DOC-74 amendment | in-progress |
+| S1 | `trusty-secrets` crate with the Keychain backend | not started |
+| S2 | tm daemon `secrets.*` UDS methods | not started |
+| S3a | Console bridge and hardening | not started |
+| S3b | Tailnet identity gate; also fixes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) | not started |
+| S4 | Console `/tools/secrets` UI with the per-key "agents may use" flag | not started |
+| S5 | Agent and skill text | not started |
+| S6+ | Integrations, one per PR: 1Password, Keeper, Vercel push, GitHub Actions push, Doppler, AWS Secrets Manager | not started |
+| S7 | `tm secrets exec --dotenv` | not started |
+| S8 | Exec-granted `secrets.resolve` | not started |
+| S9 | Rust client | not started |
+| S10 | Python (PyPI) and npm clients, with publish workflows | not started |
+
+### Instructional content outside the binary
+
+Epic [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378) tracks
+agents, skills, PM instructions and output styles with their own versions
+and releases, apart from any binary release. The content moves to the
+workspace-root `content/` tree
+([ADR-0064](../adr/0064-instructional-content-tracked-separately-from-code.md)).
+
+| Order | Phase | Issue | State |
+|---|---|---|---|
+| 1 | PR-A: content-release workflow and seed `content-v0.1.0` | [#8800](https://github.com/bobmatnyc/trusty-tools/pull/8800) | merged |
+| 2 | PHASE_3: content resolver, `tm content` commands | [#8389](https://github.com/bobmatnyc/trusty-tools/issues/8389) | in-progress; PR-C [#8982](https://github.com/bobmatnyc/trusty-tools/pull/8982) in progress |
+| 3 | PHASE_2: manifest, content version, schema major | [#8388](https://github.com/bobmatnyc/trusty-tools/issues/8388) | not started |
+| 4 | PHASE_1: per-crate move-and-drop, five PRs | [#8387](https://github.com/bobmatnyc/trusty-tools/issues/8387) | not started |
+| 5 | Republish wave | tracked under #8387 | not started |
+| 6 | PHASE_4: trusty-code's own asset tree | [#8390](https://github.com/bobmatnyc/trusty-tools/issues/8390) | not started |

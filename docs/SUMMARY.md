@@ -25,6 +25,9 @@
 - [trusty-memory](./trusty-memory/README.md)
 - [trusty-analyze](./trusty-analyze/README.md)
 - [trusty-console](./trusty-console/README.md)
+  - [Console Secrets Service (planned)](./trusty-console/secrets.md)
+  - [Using Secrets from Code (planned)](./guides/secrets-from-code.md)
+  - [Secrets Security Model (planned)](./guides/secrets-security-model.md)
 - [trusty-common](./trusty-common/README.md)
 
 # Roadmap
