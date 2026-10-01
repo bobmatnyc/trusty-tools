@@ -17,6 +17,11 @@ use crate::core::CodeIndexer;
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::watcher::{classify_debounced, rescan_sentinel_path, tag_rescan, WatchEvent};
 
+// #7379: the daemon watcher's live per-index file filters, end to end. Declared
+// here rather than in `service/mod.rs` so the coverage stays a test-only diff.
+#[path = "watcher_filters_7379_tests.rs"]
+mod watcher_filters_7379_tests;
+
 /// The event macOS delivers on a queue overflow.
 ///
 /// `fsevent.rs`'s `translate_flags` builds `EventKind::Other` + `Flag::Rescan`
