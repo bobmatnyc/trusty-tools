@@ -19,7 +19,7 @@
 //! `pm_guard_denies_a_gh_api_delete_of_a_secret_8875`.
 
 use super::is_redirect_shaped;
-use crate::commands::pm_guard_bash::{blank_spans, data_bodies, split_shell_segments, tokenize};
+use crate::commands::pm_guard_bash::{split_shell_segments, tokenize};
 use crate::commands::pm_guard_secret_read::command_basename;
 
 /// `gh api` switches: they take no value (pflag also accepts `--name=bool`).
@@ -122,53 +122,7 @@ const MAX_DEPTH: usize = 8;
 /// `keeps_the_get_listing_and_literal_non_secret_deletes_8875`,
 /// `every_gh_api_delete_arm_fails_closed_8875`.
 pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
-    // #9001: an inert data here-document body is no shell call.
-    judge(&without_inert_bodies(command), 0).then(deny_reason)
-}
-
-/// `command` with each inert data here-document body blanked (#9001 case 4).
-///
-/// Why: each line of a `python3 - <<'EOF'` body was judged as a shell
-/// segment, and a Python line that does not lex, with two bracketed words in
-/// a row (`d[k] {x}`), read as a rewritten `gh api` call.
-/// What: a body handed to a non-shell program (`data_bodies`) is blanked when
-/// it is inert: neither it nor its operator line names a `gh` or `curl` word
-/// with quotes and backslashes removed; an unquoted-delimiter body runs no
-/// `$(…)` or backtick; and a body carrying a `$` is quoted (`<<'EOF'`) and sits
-/// in a command that names no `gh`/`curl` anywhere. An expanding body with a
-/// `$` is never blanked: the shell joins `$G$H` into `gh` before the program
-/// runs. Any other body, and every operator line, is judged as before.
-/// Test: `a_python_heredoc_with_no_gh_or_curl_is_no_secret_delete_9001`,
-/// `a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001`.
-fn without_inert_bodies(command: &str) -> String {
-    let command_names_a_call = names_gh_or_curl(command);
-    let spans: Vec<(usize, usize)> = data_bodies(command)
-        .iter()
-        .filter(|body| {
-            let text = &command[body.span.0..body.span.1];
-            let operator = &command[body.operator_line.0..body.operator_line.1];
-            !names_gh_or_curl(text)
-                && !names_gh_or_curl(operator)
-                && !(body.expands && (text.contains("$(") || text.contains('`')))
-                // #9001 critic: an expanding body's `$G$H` becomes `gh` first.
-                && !(text.contains('$') && (command_names_a_call || body.expands))
-        })
-        .map(|body| body.span)
-        .collect();
-    blank_spans(command, &spans)
-}
-
-/// Whether `text`, quotes and backslashes removed, names a `gh`/`curl` word.
-fn names_gh_or_curl(text: &str) -> bool {
-    [
-        text.replace(['\'', '"', '\\'], ""),
-        text.replace(['\'', '"', '\\'], " "),
-    ]
-    .iter()
-    .any(|flat| {
-        flat.split(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c)))
-            .any(|w| matches!(command_basename(w).as_str(), "gh" | "curl"))
-    })
+    judge(command, 0).then(deny_reason)
 }
 
 /// Whether `command`, reached `depth` re-judges deep, deletes a secret.
@@ -201,9 +155,12 @@ fn segment_deletes_a_secret(segment: &str, secrets_named: bool, depth: usize) ->
 
 /// Whether an unlexable segment starts a `gh api|secret|alias` or `curl` call,
 /// read with quotes and backslashes both removed and turned into spaces.
+/// #9001: a word the shell rewrites (`$C$R`, `c?rl`) counts as `curl` when
+/// the segment names a DELETE of `secrets` — deny-only, closing a gap that
+/// predates #9001.
+/// Test: `a_heredoc_body_that_spells_gh_or_curl_still_denies_9001`,
+/// `a_rewritten_word_without_a_secrets_delete_is_not_a_curl_call_9001`.
 fn starts_a_watched_call(segment: &str) -> bool {
-    // #9001 critic: `$C$R -X DELETE …/secrets/X` spells curl from variables;
-    // a rewritten word counts when the segment names a DELETE of `secrets`.
     let rewritten_delete =
         names_secrets(segment) && segment.to_ascii_lowercase().contains("delete");
     [

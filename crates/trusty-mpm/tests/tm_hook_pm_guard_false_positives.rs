@@ -346,7 +346,7 @@ fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("git worktree add .worktrees/x config/credentials");
 }
 
-/// #9001 cases 2-4: the reported shapes allow through the real binary.
+/// #9001 cases 2-3: the reported shapes allow through the real binary.
 #[test]
 fn pm_guard_allows_the_9001_false_positives() {
     assert_allowed(
@@ -357,11 +357,6 @@ fn pm_guard_allows_the_9001_false_positives() {
         "for k in \"8902\" \".env.*\" \"mysql\"; do echo \"== $k\"; gh issue list -R o/r \
          --search \"$k\" --state all --limit 15 --json number,title \
          --jq '.[]|\"#\\(.number) \\(.title)\"'; done",
-    );
-    assert_allowed(
-        "python3 - <<'EOF'\np = 'docs/notes.md'\ns = open(p).read()\n\
-         print('it's d[k] x[0]')\ns = s.replace('old', 'new')\n\
-         open(p, 'w').write(s)\nEOF",
     );
 }
 

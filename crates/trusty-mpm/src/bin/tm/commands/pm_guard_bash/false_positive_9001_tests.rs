@@ -1,5 +1,5 @@
-//! #9001 cases 2-4: the secret rules' false positives, each beside the deny
-//! that bounds its fix. Every command goes through the unified secret entry
+//! #9001 cases 2-3: the secret rules' false positives, each beside the deny
+//! that bounds its fix, and the #8875 curl-fallback rows (case 4 is #9006). Every command goes through the unified secret entry
 //! point, so the #7266 read rule, the #8596 credential-print rule and the
 //! #8875 delete rule all judge it.
 
@@ -96,47 +96,46 @@ fn a_for_loop_whose_words_reach_anything_else_still_denies_9001() {
     ]);
 }
 
-/// Case 4: a Python here-document that edits a local file, with a line that
-/// does not lex (`'it's'`) and bracketed words, is no `gh api` secret DELETE.
+/// #8875 bound: a here-document body that spells gh or curl — literally,
+/// from split variables (expanding `<<EOF`, or exported prefix assignments
+/// read by the program's own shell under `<<'EOF'`), or through a glob —
+/// still denies, as does a real DELETE and a body fed to a shell. Case 4
+/// (body blanking) moved to #9006; bodies reach the #8875 judge unchanged.
 #[test]
-fn a_python_heredoc_with_no_gh_or_curl_is_no_secret_delete_9001() {
-    allowed(&[
-        "python3 - <<'EOF'\n\
-         p = 'docs/notes.md'\n\
-         s = open(p).read()\n\
-         print('it's d[k] x[0]')\n\
-         open(p, 'w').write(s.replace('old', 'new'))\n\
-         EOF",
-        "python3 - <<'EOF'\n\
-         p = 'src/x_tests.rs'\n\
-         print('it's the `cd` in d[k] x[0]')\n\
-         s = open(p).read().replace('\"cd $WT && x\"', '\"cd $WT && y\"')\n\
-         open(p, 'w').write(s)\n\
-         EOF",
-    ]);
-}
-
-/// Case 4 bound: a real secret DELETE, and a body that names gh, runs a
-/// substitution or sits beside a `gh` its `$` can spell, still deny; so does
-/// a here-document fed to a shell.
-#[test]
-fn a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001() {
+fn a_heredoc_body_that_spells_gh_or_curl_still_denies_9001() {
     denied(&[
         "gh api -X DELETE repos/o/r/actions/secrets/NAME",
-        "python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
-         os.system('gh api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
-        "python3 - <<EOF\nprint('it's d[k] x[0]')\n\
-         x = \"$(gh api -X DELETE repos/o/r/actions/secrets/X)\"\nEOF",
-        "G=gh A=api python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
-         os.system(\"$G $A -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
-        // #9001 critic: an expanding body spells the program from split
-        // variables the shell joins before Python runs.
         "G=g; H=h; python3 - <<EOF\nprint('it\\'s')\n\
          os.system(\"$G$H api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
         "C=cu; R=rl; python3 - <<EOF\nprint('it\\'s')\n\
          os.system(\"$C$R -X DELETE https://api.github.com/repos/o/r/actions/secrets/X\")\nEOF",
+        "G=g H=h python3 - <<'EOF'\nprint('it\\'s')\n\
+         os.system(\"$G$H api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+        "python3 - <<'EOF'\nprint('it\\'s')\n\
+         os.system(\"/opt/homebrew/bin/g? api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+        "python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
+         os.system('gh api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<EOF\nprint('it's d[k] x[0]')\n\
+         x = \"$(gh api -X DELETE repos/o/r/actions/secrets/X)\"\nEOF",
         "bash <<'EOF'\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "cat <<'EOF' | sh\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "gh auth token",
     ]);
+}
+
+/// #9001 curl fallback bound: a word the shell rewrites, in an unlexable
+/// segment that does not name a DELETE of `secrets`, is not read as `curl`.
+/// The row does not lex (an odd `'`), so it reaches `starts_a_watched_call`.
+#[test]
+fn a_rewritten_word_without_a_secrets_delete_is_not_a_curl_call_9001() {
+    use crate::commands::pm_guard_bash::tokenize;
+    use crate::commands::pm_guard_secret_consumers::evaluate_gh_api_secret_delete;
+    for command in [
+        "echo it's $HOME/notes c?rl -X GET https://example.com/x",
+        "echo it's $C$R -X DELETE https://example.com/items/1",
+    ] {
+        assert!(tokenize(command).is_err(), "must not lex: {command}");
+        assert_eq!(evaluate_gh_api_secret_delete(command), None, "{command}");
+        assert_eq!(secret(command), None, "{command}");
+    }
 }
