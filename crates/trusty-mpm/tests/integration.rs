@@ -57,6 +57,7 @@ mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
 mod tm_hook_idle_parking;
 mod tm_hook_notification_8392;
+// #8531: `tm hook` SessionStart over the socket, HTTP only on Unreachable.
 mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
@@ -71,6 +72,7 @@ mod tm_hook_pm_guard_stdin_7975;
 mod tm_hook_pm_guard_supervisor_8453;
 mod tm_hook_pm_guard_trust_anchor_8878;
 mod tm_hook_pretooluse_rewrite;
+mod tm_hook_session_start_8531;
 mod tm_ls_state_colors;
 mod tm_session_disk_cli;
 mod tm_sessions_alias_notice;
