@@ -106,6 +106,9 @@ pub use corpus_fault::CorpusReadUnavailable;
 pub use delete_close::IndexDeleted;
 // #8976: what one `index_file` write did, reported by `POST /index-file`.
 pub use ingest::outcome::IndexFileOutcome;
+// #8976: the failed-remove fault seam for `service::reindex::hash_withhold_tests`.
+#[cfg(test)]
+pub(crate) use files::TEST_FAIL_REMOVE;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;

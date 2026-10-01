@@ -440,7 +440,7 @@ pub(super) async fn commit_parsed_and_finalize(
     let embed_ms = parsed.embed_ms;
     let vector_count = parsed.vector_count;
 
-    let (commit, durable) = {
+    let (commit, durable, keep_chunkless) = {
         let indexer = ctx.handle.indexer.write().await;
 
         // Issue #855: delete-then-insert for changed files. For every file
@@ -476,6 +476,12 @@ pub(super) async fn commit_parsed_and_finalize(
         };
         // #8976: each file's chunk ids, read before the commit consumes them.
         let expected = chunk_ids_by_file(&parsed);
+        // #8976: a failed remove left the old chunks, so the file's zero
+        // chunks are not final; withhold its hash and let the next run retry.
+        let keep_chunkless: Vec<String> = final_chunkless_paths
+            .into_iter()
+            .filter(|p| !remove_failed_files.contains(p.as_str()))
+            .collect();
 
         let commit = match indexer.commit_parsed_batch(parsed, true).await {
             Ok(c) => c,
@@ -492,12 +498,12 @@ pub(super) async fn commit_parsed_and_finalize(
             }
         };
         let durable = indexer.files_with_all_chunks(&expected).await;
-        (commit, durable)
+        (commit, durable, keep_chunkless)
     };
     // #8976: a hash with no chunks behind it makes every later reindex skip
     // the file, so only files whose chunks all landed (or whose zero chunks
     // are final) keep it; the rest overwrite their old hash.
-    let new_hashes = withhold_chunkless_hashes(ctx, new_hashes, &durable, &final_chunkless_paths);
+    let new_hashes = withhold_chunkless_hashes(ctx, new_hashes, &durable, &keep_chunkless);
 
     apply_successful_commit(ctx, new_hashes, batch_files, &commit).await;
     let mem_limit_hit = check_post_commit_memory(ctx);

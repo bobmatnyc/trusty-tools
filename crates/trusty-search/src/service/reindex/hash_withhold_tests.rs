@@ -20,7 +20,7 @@ use super::progress::ReindexProgress;
 use super::spawn_reindex_awaitable;
 use crate::core::chunker::{chunk_ast, json_exceeds_window_ceiling};
 use crate::core::embed::{Embedder, MockEmbedder};
-use crate::core::indexer::{CodeIndexer, ParsedBatch};
+use crate::core::indexer::{CodeIndexer, ParsedBatch, TEST_FAIL_REMOVE};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::core::store::{VectorHit, VectorStore};
 use crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES;
@@ -246,6 +246,54 @@ async fn too_large_json_is_indexed_again_once_it_shrinks() {
     assert_eq!(
         hashes.get(&key).map(|h| h.clone()),
         Some(hash_content(after))
+    );
+}
+
+/// A file truncated to blank whose pre-commit remove fails keeps its old
+/// chunks, so its hash is withheld and the next reindex retries it. Fails
+/// against 00ef2cf9f4, which kept the blank file's hash over the stale chunk.
+#[tokio::test]
+async fn failed_remove_withholds_a_blank_files_hash_until_a_retry() {
+    let id = "failed-remove-blank-8976";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let path = root.join("data.json");
+    let key = PathBuf::from("data.json");
+    fs::write(&path, "{\n  \"stale_8976\": 1\n}\n").unwrap();
+    let handle = handle_over(id, &root, CodeIndexer::new(id, root.clone()));
+    let hashes = hashes_for(&handle.id);
+    reindex(&handle).await;
+    assert!(landed_text(&handle, "data.json")
+        .await
+        .contains("stale_8976"));
+
+    let blank = "\n  \n";
+    fs::write(&path, blank).unwrap();
+    let fault = (id.to_string(), "data.json".to_string());
+    TEST_FAIL_REMOVE.lock().unwrap().push(fault.clone());
+    reindex(&handle).await;
+    TEST_FAIL_REMOVE.lock().unwrap().retain(|f| *f != fault);
+    assert!(
+        landed_text(&handle, "data.json")
+            .await
+            .contains("stale_8976"),
+        "the failed remove left the old chunk"
+    );
+    assert_eq!(
+        hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "a file whose old chunks survived must not keep its hash"
+    );
+
+    reindex(&handle).await;
+    let text = landed_text(&handle, "data.json").await;
+    assert!(
+        text.is_empty(),
+        "the retry removed the stale chunk: {text:?}"
+    );
+    assert_eq!(
+        hashes.get(&key).map(|h| h.clone()),
+        Some(hash_content(blank))
     );
 }
 
