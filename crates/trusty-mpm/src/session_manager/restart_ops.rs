@@ -168,7 +168,7 @@ impl SessionManager {
         // #8935: prove the live session is this record's before any signal.
         // The fast path (`Absent`) skips the grace sleep, so callers looping
         // over dead sessions do not pay SIGTERM_GRACE_SECS each.
-        let ownership = self.classify_runtime(record);
+        let (ownership, liveness_known) = self.classify_runtime(record);
         if ownership == RuntimeOwnership::Absent {
             return Ok(RuntimeTeardown::Absent);
         }
@@ -180,7 +180,7 @@ impl SessionManager {
         if let Some(why) = self.tmux.supervisor_floor().refuse(tmux_name, caller) {
             return Err(ManagedError::KillRefused(why));
         }
-        let pane_id = match owned_pane(record, caller, ownership) {
+        let pane_id = match owned_pane(record, caller, ownership, liveness_known, false) {
             Ok(pane_id) => pane_id,
             Err(teardown) => return Ok(teardown),
         };
@@ -190,7 +190,9 @@ impl SessionManager {
         self.tmux.signal_terminate_pane(tmux_name, &pane_id, pid);
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
         // #8935: the grace window is long enough for the name to change hands.
-        if let Err(teardown) = owned_pane(record, caller, self.classify_runtime(record)) {
+        // #8935 delta critic: an unproven verdict here says the pane was signalled.
+        let (ownership, liveness_known) = self.classify_runtime(record);
+        if let Err(teardown) = owned_pane(record, caller, ownership, liveness_known, true) {
             return Ok(match teardown {
                 RuntimeTeardown::Absent => RuntimeTeardown::Terminated,
                 other => other,
@@ -215,9 +217,11 @@ impl SessionManager {
     /// Doing either under a live claude that may be this record's own loses
     /// work. A `Foreign` verdict is safe: the live session is another one.
     /// What: runs the teardown; [`RuntimeTeardown::Unproven`] becomes
-    /// [`ManagedError::InvalidState`] naming the reason, so the caller returns
+    /// [`ManagedError::InvalidState`] naming the reason, whether a signal was
+    /// sent, and the two ways out (#8935 delta critic), so the caller returns
     /// before it changes anything. Every other verdict passes through.
     /// Test: `decommission_with_an_unlistable_pane_set_changes_nothing`,
+    /// `a_pane_list_lost_after_the_signal_refuses_decommission`,
     /// `the_idle_reaper_stop_skips_an_unproven_runtime`.
     pub(crate) async fn terminate_proven_runtime(
         &self,
@@ -225,29 +229,63 @@ impl SessionManager {
         caller: &str,
     ) -> Result<RuntimeTeardown, ManagedError> {
         match self.graceful_terminate_runtime(record, caller).await? {
-            RuntimeTeardown::Unproven(why) => Err(ManagedError::InvalidState(
+            RuntimeTeardown::Unproven {
+                why,
+                liveness_known,
+                signalled,
+            } => Err(ManagedError::InvalidState(
                 record.id.to_string(),
-                format!(
-                    "{caller} refused: {why}, so the live session may still be \
-                     this record's; the workspace and the record were left as they are"
-                ),
+                unproven_refusal(record, caller, &why, liveness_known, signalled),
             )),
             teardown => Ok(teardown),
         }
     }
 
-    /// [`runtime_identity::runtime_ownership`] for a teardown: a probe error
-    /// counts as unverifiable, so a teardown that cannot prove ownership kills
-    /// nothing (#8935).
+    /// [`runtime_identity::runtime_ownership`] for a teardown, with whether
+    /// liveness is known: a probe error counts as unverifiable with liveness
+    /// unknown, so a teardown that cannot prove ownership kills nothing (#8935).
     /// Test: `an_unreadable_session_probe_leaves_the_runtime_running`.
-    fn classify_runtime(&self, record: &SessionRecord) -> RuntimeOwnership {
-        runtime_identity::runtime_ownership(record, self.tmux.as_ref()).unwrap_or_else(|e| {
-            RuntimeOwnership::Unverifiable(format!(
-                "the tmux probe for session '{}' failed ({e})",
-                record.tmux_name
-            ))
-        })
+    fn classify_runtime(&self, record: &SessionRecord) -> (RuntimeOwnership, bool) {
+        match runtime_identity::runtime_ownership(record, self.tmux.as_ref()) {
+            Ok(ownership) => (ownership, true),
+            Err(e) => (
+                RuntimeOwnership::Unverifiable(format!(
+                    "the tmux probe for session '{}' failed ({e})",
+                    record.tmux_name
+                )),
+                false,
+            ),
+        }
     }
+}
+
+/// The operator-facing text of an unproven-teardown refusal (#8935 delta
+/// critic): the reason, what was done, and the two ways out.
+/// Test: `a_pane_list_lost_after_the_signal_refuses_decommission`.
+fn unproven_refusal(
+    record: &SessionRecord,
+    caller: &str,
+    why: &str,
+    liveness_known: bool,
+    signalled: bool,
+) -> String {
+    let name = &record.tmux_name;
+    let doubt = if liveness_known {
+        format!("so the live tmux session '{name}' may still be this record's")
+    } else {
+        format!("so liveness unknown: tmux cannot say whether session '{name}' runs")
+    };
+    let done = if signalled {
+        "This record's pane was signalled; its workspace and record were kept."
+    } else {
+        "The workspace and the record were left as they are."
+    };
+    format!(
+        "{caller} refused: {why}, {doubt}. {done} If that session is this \
+         record's, end it yourself and rerun; otherwise run \
+         `tm session delete --force {id}` to drop the record only.",
+        id = record.id
+    )
 }
 
 /// `Ok(pane_id)` when `ownership` proves `record` owns its live tmux session;
@@ -258,6 +296,8 @@ fn owned_pane(
     record: &SessionRecord,
     caller: &str,
     ownership: RuntimeOwnership,
+    liveness_known: bool,
+    signalled: bool,
 ) -> Result<String, RuntimeTeardown> {
     match ownership {
         RuntimeOwnership::Owned { pane_id } => Ok(pane_id),
@@ -276,7 +316,11 @@ fn owned_pane(
                 id = %record.id, name = %record.tmux_name, caller,
                 "{why}; nothing was killed (#8935)"
             );
-            Err(RuntimeTeardown::Unproven(why))
+            Err(RuntimeTeardown::Unproven {
+                why,
+                liveness_known,
+                signalled,
+            })
         }
     }
 }

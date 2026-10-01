@@ -116,17 +116,26 @@ pub enum RuntimeTeardown {
     /// A live session carries the name and does not hold the record's pane:
     /// another session took the name. Nothing was killed. Carries the reason.
     Foreign(String),
-    /// A live session carries the name and the record's ownership of it could
-    /// not be proved — no pane id, an unreadable pane list, or a failed probe.
-    /// Nothing was killed. Carries the reason.
-    Unproven(String),
+    /// The record's ownership of a session carrying the name could not be
+    /// proved — no pane id, an unreadable pane list, or a failed probe.
+    /// Nothing was killed.
+    Unproven {
+        /// The operator-facing reason.
+        why: String,
+        /// `false` when the session probe itself failed, so whether any
+        /// session carries the name is unknown.
+        liveness_known: bool,
+        /// `true` when the record's pane was signalled before ownership was
+        /// lost (the post-grace re-check).
+        signalled: bool,
+    },
 }
 
 impl RuntimeTeardown {
     /// The operator-facing note when the runtime was left running.
     pub fn left_running(&self) -> Option<&str> {
         match self {
-            Self::Foreign(why) | Self::Unproven(why) => Some(why),
+            Self::Foreign(why) | Self::Unproven { why, .. } => Some(why),
             Self::Absent | Self::Terminated => None,
         }
     }

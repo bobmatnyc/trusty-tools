@@ -37,6 +37,8 @@ enum AfterSignal {
     Gone,
     /// The session lists these panes.
     Panes(&'static str),
+    /// `list-panes` fails: ownership can no longer be proved.
+    Unlistable,
 }
 
 /// One `echo` per row: `printf` would read `%9` as a conversion.
@@ -77,6 +79,9 @@ impl Fixture {
                 "if [ \"$1\" = list-panes ]; then {}; exit 0; fi",
                 echo_rows(rows)
             ),
+            Some(AfterSignal::Unlistable) => {
+                "if [ \"$1\" = list-panes ]; then echo 'lost server' >&2; exit 1; fi".into()
+            }
         };
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{log}'\n\
@@ -121,6 +126,27 @@ impl Fixture {
             .await
             .expect("seed");
         id
+    }
+
+    /// Give `id`'s record an owned workspace under a scratch managed root,
+    /// holding build output only so the removal would otherwise run (#8663).
+    /// Returns `(managed_root, workspace)`.
+    async fn own_workspace(&self, id: &ManagedSessionId) -> (PathBuf, PathBuf) {
+        let root = self.dir.path().join("managed-root");
+        let ws = root.join("owner").join("repo").join("sess");
+        std::fs::create_dir_all(ws.join("target")).expect("workspace");
+        std::fs::write(ws.join("target/sentinel.txt"), "kept").expect("sentinel");
+        let mut record = self.mgr.get(id).await.expect("record");
+        record.workspace_path = Some(ws.clone());
+        record.workspace_owned = true;
+        self.mgr
+            .store
+            .write()
+            .await
+            .upsert(record)
+            .await
+            .expect("seed");
+        (root, ws)
     }
 
     /// Every argv the fake was run with, one per line.
@@ -297,7 +323,7 @@ async fn an_unlistable_pane_set_leaves_the_runtime_running() {
         .expect("stop");
 
     assert!(
-        matches!(&report.runtime, RuntimeTeardown::Unproven(why) if why.contains("could not be listed")),
+        matches!(&report.runtime, RuntimeTeardown::Unproven { why, .. } if why.contains("could not be listed")),
         "{:?}",
         report.runtime
     );
@@ -411,35 +437,93 @@ async fn decommission_with_an_unlistable_pane_set_changes_nothing() {
     })
     .await;
     let id = f.seed("active", Some("%9")).await;
-    let root = f.dir.path().join("managed-root");
-    let ws = root.join("owner").join("repo").join("sess");
-    // Build output only, so the workspace removal would otherwise run (#8663).
-    std::fs::create_dir_all(ws.join("target")).expect("workspace");
-    std::fs::write(ws.join("target/sentinel.txt"), "kept").expect("sentinel");
-    let mut record = f.mgr.get(&id).await.expect("record");
-    record.workspace_path = Some(ws.clone());
-    record.workspace_owned = true;
-    f.mgr
-        .store
-        .write()
-        .await
-        .upsert(record)
-        .await
-        .expect("seed");
+    let (root, ws) = f.own_workspace(&id).await;
 
     let err = f
         .scoped(f.mgr.decommission_with_root(&id, &root, None))
         .await
         .expect_err("an unproven runtime refuses the decommission");
 
-    assert!(
-        matches!(&err, ManagedError::InvalidState(_, why) if why.contains("could not be listed")),
-        "{err}"
-    );
+    // #8935 delta critic: the refusal says nothing was done and names both
+    // ways out.
+    let ManagedError::InvalidState(_, why) = &err else {
+        panic!("{err}")
+    };
+    for part in [
+        "could not be listed",
+        "may still be this record's",
+        "left as they are",
+        "end it yourself and rerun",
+        "tm session delete --force",
+    ] {
+        assert!(why.contains(part), "missing {part:?}: {why}");
+    }
     assert!(ws.join("target/sentinel.txt").exists(), "workspace removed");
     let after = f.mgr.get(&id).await.expect("record");
     assert_eq!(after.state, ManagedSessionState::Active);
     f.assert_untouched();
+}
+
+/// #8935 delta critic: a failed session probe refuses decommission and says
+/// liveness is unknown rather than calling the session live.
+#[serial_test::serial]
+#[tokio::test]
+async fn decommission_with_a_failed_probe_says_liveness_unknown() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: true,
+        panes: Some("%9:1"),
+        after_signal: None,
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+    let (root, ws) = f.own_workspace(&id).await;
+
+    let err = f
+        .scoped(f.mgr.decommission_with_root(&id, &root, None))
+        .await
+        .expect_err("an unreadable probe refuses the decommission");
+
+    let ManagedError::InvalidState(_, why) = &err else {
+        panic!("{err}")
+    };
+    assert!(why.contains("liveness unknown"), "{why}");
+    assert!(!why.contains("the live tmux session"), "{why}");
+    assert!(ws.join("target/sentinel.txt").exists(), "workspace removed");
+    f.assert_untouched();
+}
+
+/// #8935 post-grace re-check, `Unproven` arm: the record's pane %9 is
+/// signalled, then the pane list cannot be read. Decommission refuses, says
+/// the pane was signalled, keeps the workspace and the record, and kills
+/// nothing.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_pane_list_lost_after_the_signal_refuses_decommission() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: false,
+        panes: Some("%9:1"),
+        after_signal: Some(AfterSignal::Unlistable),
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+    let (root, ws) = f.own_workspace(&id).await;
+
+    let err = f
+        .scoped(f.mgr.decommission_with_root(&id, &root, None))
+        .await
+        .expect_err("ownership lost after the signal refuses the decommission");
+
+    let ManagedError::InvalidState(_, why) = &err else {
+        panic!("{err}")
+    };
+    assert!(why.contains("signalled"), "{why}");
+    assert!(!why.contains("left as they are"), "{why}");
+    assert!(ws.join("target/sentinel.txt").exists(), "workspace removed");
+    let after = f.mgr.get(&id).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
+    let calls = f.calls();
+    assert!(calls.contains("send-keys"), "the pane was signalled: {calls}");
+    assert!(!calls.contains("kill-session"), "{calls}");
 }
 
 /// #8935 critic round: `--force` deletes the record even when the tmux probe
