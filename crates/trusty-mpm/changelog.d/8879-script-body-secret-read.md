@@ -2,8 +2,9 @@ Fixed
 
 - `tm hook --pm-guard` now judges a script a Bash command runs by the
   script's body: `bash <file>`, `sh`/`zsh`/`source`, `python3 <file>`,
-  `node`/`ruby`/`perl <file>`, a script on an interpreter's stdin, and
-  `./<file>`. A body that reads a Keychain entry, prints a token or names a
+  `node`/`ruby`/`perl <file>`, and `./<file>` (shebang scripts); scripts a
+  shell script calls are followed to the depth bound. A script fed on an
+  interpreter's stdin is not judged. A body that reads a Keychain entry, prints a token or names a
   secret-bearing file is refused exactly as the same read written inline
   (#8879, owner rulings 263 and 268). The guard reads at most 256 KiB of a
   body and fails closed: a script it cannot read in full (permission-denied,
