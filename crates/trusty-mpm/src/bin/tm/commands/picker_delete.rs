@@ -66,6 +66,9 @@ pub(crate) enum DeleteReport {
         prior_state: String,
         /// True when removed via the project-session store fallback.
         local: bool,
+        /// #8935: the daemon's note that a live tmux session carrying the
+        /// record's name was left running; `None` when no such session exists.
+        note: Option<String>,
     },
     /// The id was in neither the managed store nor the project-session store.
     NotFound,
@@ -403,10 +406,16 @@ pub(crate) async fn delete_managed_then_local(
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
                 .to_string();
+            // #8935: delete is record-only; carry the daemon's left-running note.
+            let note = body
+                .get("runtime_left_running")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             Ok(DeleteReport::Deleted {
                 name,
                 prior_state,
                 local: false,
+                note,
             })
         }
         ManagedDeleteNext::Refused => {
@@ -512,6 +521,7 @@ async fn delete_local(
         name: id.to_string(),
         prior_state,
         local: true,
+        note: None,
     })
 }
 
@@ -605,6 +615,7 @@ pub(crate) async fn delete_confirmed(
             name,
             prior_state,
             local,
+            note,
         } => {
             if local {
                 eprintln!(
@@ -617,6 +628,10 @@ pub(crate) async fn delete_confirmed(
                     "tm: '{name}' [was {prior_state}] marked --deleted-- \
                      (still listed; `tm sessions prune --state deleted` to remove)."
                 );
+            }
+            // #8935: record-only — say a live session with the name was kept.
+            if let Some(note) = note {
+                eprintln!("tm: record only: {note}.");
             }
             Ok(true)
         }

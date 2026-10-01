@@ -183,11 +183,14 @@ pub enum ManagedError {
     /// rather than guessing.
     /// What: `(session_id, pane_id)` — the missing pane's id, surfaced in the
     /// error message so the operator knows exactly what vanished.
+    // #8935: the advice names delete as record-only; it never tears down the
+    // sibling's session.
     #[error(
         "recorded pane {1} for session {0} no longer exists, but its tmux session is still \
          alive (likely a sibling window) — refusing to respawn into an unrelated active pane; \
-         close the sibling window and delete/recreate this session, or manually verify pane \
-         state with `tmux list-panes`"
+         close the sibling window and delete/recreate this session (delete removes the record \
+         only and never kills that tmux session), or manually verify pane state with \
+         `tmux list-panes`"
     )]
     PaneGone(String, String),
 

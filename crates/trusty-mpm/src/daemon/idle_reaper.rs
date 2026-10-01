@@ -310,8 +310,15 @@ async fn run_one_sweep<P: IdleVerdictProvider>(
             ReaperDecision::Stop => {
                 info!(id = %record.id, name = %record.tmux_name, "idle-reaper: idle threshold reached; stopping session");
                 state.remove(&record.id);
-                if let Err(e) = manager.stop(&record.id).await {
-                    warn!(id = %record.id, "idle-reaper: stop failed: {e}");
+                // #8935: a live session whose ownership is unproven may be this
+                // record's claude; skip it rather than mark the record Stopped.
+                let stop = manager.stop_proven(
+                    &record.id,
+                    crate::session_manager::StopCause::Deliberate,
+                    "idle-reaper",
+                );
+                if let Err(e) = stop.await {
+                    warn!(id = %record.id, "idle-reaper: stop skipped or failed: {e}");
                 }
             }
             ReaperDecision::Decommission if cfg.dry_run => {
@@ -566,7 +573,9 @@ mod tests {
     // store) so the full classify → decide → act path is exercised.
     // ─────────────────────────────────────────────────────────────
 
-    use crate::session_manager::{FakeNoopTmuxDriver, ManagedSessionState, SessionManager};
+    use crate::session_manager::{
+        FakeNoopTmuxDriver, ManagedError, ManagedSessionState, SessionManager,
+    };
     use tempfile::TempDir;
 
     /// A verdict provider that returns the same canned verdict for every session.
@@ -690,6 +699,68 @@ mod tests {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some(self.0.to_string())
         }
+    }
+
+    /// A tmux where the record's session is live and its pane list cannot be
+    /// read (#8935): ownership is unproven. Records every kill.
+    #[derive(Default)]
+    struct UnlistablePanes {
+        kills: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::session_manager::ManagedTmuxDriver for UnlistablePanes {
+        fn create_session(&self, _: &str, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.kills.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn send_line(&self, _: &str, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _: &str, _: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(vec!["tmpm-test-8935-idle".to_owned()])
+        }
+        fn pane_exists_checked(&self, _: &str, _: &str) -> Option<bool> {
+            None
+        }
+    }
+
+    /// #8935 critic round: the reaper skips an idle, then done, record whose
+    /// live session it cannot prove is its own; the record stays `Active` and
+    /// nothing is killed. Red on a73e5ac7f3, whose `stop` marked it `Stopped`.
+    #[tokio::test]
+    async fn the_idle_reaper_stop_skips_an_unproven_runtime() {
+        let dir = TempDir::new().unwrap();
+        let tmux = Arc::new(UnlistablePanes::default());
+        let mgr = Arc::new(
+            SessionManager::new(dir.path(), tmux.clone())
+                .await
+                .expect("manager"),
+        );
+        let id = ManagedSessionId::new();
+        let record: crate::session_manager::SessionRecord =
+            serde_json::from_value(serde_json::json!({
+                "id": id.to_string(), "task": "t", "tmux_name": "tmpm-test-8935-idle",
+                "cwd": "/work/x", "state": "active", "pane_id": "%9",
+                "created_at": "2026-09-30T00:00:00Z",
+            }))
+            .expect("record");
+        mgr.store.write().await.upsert(record).await.expect("seed");
+        let mut rs = IdleReaperState::new();
+        for verdict in ["idle", "done"] {
+            run_one_sweep(&mgr, &cfg(1, 1), &FixedVerdictProvider(verdict), &mut rs).await;
+            assert_eq!(
+                state_of(&mgr, &id).await,
+                ManagedSessionState::Active,
+                "a `{verdict}` sweep moved a record whose runtime is unproven"
+            );
+        }
+        assert!(tmux.kills.lock().unwrap().is_empty());
     }
 
     /// #8942: an idle, then done, Architect record is never classified,
