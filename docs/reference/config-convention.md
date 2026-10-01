@@ -193,6 +193,26 @@ overrides, PM toggles) is **unchanged** and still read. The YAML convention
 above is **additive** — it carries its own settings without disturbing the
 existing TOML.
 
+### The `[pm_guard]` section (#9018)
+
+```toml
+# Register the `tm hook --pm-guard` PreToolUse entry at every launch?
+[pm_guard]
+enabled = false   # default: true
+```
+
+`enabled = false` turns the PM guard off (owner ruling 307). The launch, resume
+and `tm install` writers then leave the `<tm> hook --pm-guard` entry out of
+`.claude/settings.json` and remove one a prior launch wrote, matched by its
+` hook --pm-guard` suffix. Every other managed hook stays, including the
+observability `tm hook` entry. A missing key or section means `true`, and so
+does a `config.toml` that cannot be read or parsed: a broken file fails closed
+to guarded. The `tm doctor` `pm_guard` row reports the state, and warns
+"pm-guard disabled by [pm_guard] enabled = false" when the key is off.
+
+A running Claude Code session keeps the hooks it loaded at startup, so the
+change takes effect at the session's next launch.
+
 ## Adding this convention to a crate
 
 Crate maintainers implementing this convention in a new trusty-* crate should
