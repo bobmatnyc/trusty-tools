@@ -293,3 +293,38 @@ fn a_peer_with_no_claude_above_it_is_refused_8531() {
         "{got:?}"
     );
 }
+
+/// #8980 HIGH regression: an HTTP `SessionStart` naming a bound owner's id
+/// auto-registers a record whose uuid-derived name is never a live session.
+/// The reaper must leave that record, and the owner's live records, alone; a
+/// daemon-minted session in the same sweep is still reaped.
+#[tokio::test]
+async fn the_reaper_keeps_an_announced_session_and_its_live_records_8980() {
+    use crate::core::session::{ControlModel, Session};
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let owner = SessionId::new();
+    state.bind_session_claude(owner, CLAUDE).expect("vacant");
+    state.upsert_delegation(Delegation::observed(owner, "version-control", "task", None));
+    let forged = crate::daemon::api::HookPost {
+        session_id: owner.0.to_string(),
+        event: crate::core::hook::HookEvent::SessionStart,
+        payload: serde_json::json!({}),
+    };
+    crate::daemon::rpc::sessions_legacy_ops::ingest_hook(&state, forged)
+        .await
+        .expect("SessionStart");
+    let minted = Session::new(SessionId::new(), "/repo", ControlModel::Tmux, None);
+    let minted_id = minted.id;
+    state.register_session(minted);
+
+    let result = state.reap_against(&std::collections::HashSet::new());
+
+    assert_eq!(result.reaped, 1, "only the daemon-minted session is reaped");
+    assert!(state.session(minted_id).is_none());
+    assert!(state.session(owner).is_some(), "the announced record stays");
+    assert_eq!(
+        state.all_delegations()[0].status,
+        crate::core::agent::DelegationStatus::Running
+    );
+}

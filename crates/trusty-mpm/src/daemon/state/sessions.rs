@@ -421,9 +421,12 @@ impl DaemonState {
     ///   [`SessionStatus::Stopped`] in place (kept so the operator can see it).
     ///
     /// Returns the [`ReapResult`] with both counts. Native sessions are left
-    /// untouched.
+    /// untouched, and so is any session whose id a `SessionStart` settled in
+    /// the session-claude registry, or every session while it is sealed
+    /// (#8980).
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
-    /// `reap_marks_stopped_when_pid_dead`.
+    /// `reap_marks_stopped_when_pid_dead`,
+    /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 
@@ -431,7 +434,13 @@ impl DaemonState {
         let mut stopped_ids: Vec<SessionId> = Vec::new();
         for entry in self.sessions.iter() {
             let session = entry.value();
-            if session.origin != SessionHost::Tmux {
+            // #8980: a `SessionStart`-announced id is a harness session, whose
+            // uuid-derived tmux name is never live; reaping it would stale its
+            // live agents on any forged or `compact`/`resume` SessionStart. A
+            // sealed registry settles every id, so it skips every session.
+            if session.origin != SessionHost::Tmux
+                || self.session_claudes.is_settled(*entry.key())
+            {
                 continue;
             }
             if !live.contains(&session.tmux_name) {

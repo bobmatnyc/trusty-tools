@@ -12,3 +12,8 @@ Fixed
   a `SessionStart` announced or that owns delegation records. A dead pid
   written there made the session read as gone, so a sibling could end its
   live records. A launcher's own session still accepts its pid (#8980).
+- The session reaper no longer removes a session that a `SessionStart`
+  announced, or stales its live delegations. Such a record's tmux name is
+  never live, so a forged `SessionStart`, or a `compact`/`clear`/`resume`
+  one, used to stale the session's own agents within a minute. While the
+  session-claude registry is sealed the reaper skips every session (#8980).
