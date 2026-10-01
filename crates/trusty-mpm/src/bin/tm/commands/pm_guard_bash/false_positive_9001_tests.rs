@@ -131,7 +131,8 @@ fn a_rewritten_word_without_a_secrets_delete_is_not_a_curl_call_9001() {
     use crate::commands::pm_guard_bash::tokenize;
     use crate::commands::pm_guard_secret_consumers::evaluate_gh_api_secret_delete;
     for command in [
-        "echo it's $HOME/notes c?rl -X GET https://example.com/x",
+        // One rewritten word only: two in a row already read as `gh api`.
+        "echo it's $HOME/notes -X GET https://example.com/x",
         "echo it's $C$R -X DELETE https://example.com/items/1",
     ] {
         assert!(tokenize(command).is_err(), "must not lex: {command}");
