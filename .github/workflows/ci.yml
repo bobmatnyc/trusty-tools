@@ -6,7 +6,7 @@
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
 #   fmt      – cargo fmt --all --check (stable)
-#   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
+#   clippy   – cargo clippy --workspace --all-targets -D warnings (1.98.1, SKIP_UI_BUILD=1)
 #   test-shard – cargo nextest run --workspace, split 8 ways (stable,
 #              SKIP_UI_BUILD=1, full clone for git tests, .NET SDK installed
 #              for trusty-analyze's C# Roslyn adapter tests, #1008). PUSH TO
@@ -24,7 +24,7 @@
 #              (scripts/select-test-crates.sh), in up to 8 legs; the
 #              `affected` roll-up is the one context
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
-#   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
+#   agents-ui – cargo clippy -p trusty-agents-ui (1.98.1, WebKit2GTK-enabled runner)
 #   code-gui – cargo clippy + test -p trusty-code-gui (same runner shape, #5934)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
@@ -489,7 +489,7 @@ jobs:
         run: cargo fmt --all --check
 
   # --------------------------------------------------------------------------
-  # clippy: deny warnings across the whole workspace (stable, all targets)
+  # clippy: deny warnings across the whole workspace (pinned 1.98.1, all targets)
   # trusty-code-gui, trusty-agents-ui excluded: Tauri desktop apps, need WebKit2GTK on Linux.
   # --------------------------------------------------------------------------
   clippy:
@@ -515,9 +515,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/ci-free-disk-space.sh
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 
@@ -1896,9 +1897,10 @@ jobs:
 
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 
@@ -1978,9 +1980,10 @@ jobs:
 
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 

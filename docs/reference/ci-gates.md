@@ -313,8 +313,8 @@ break; an infrastructure fault still stops it — owner ruling 2026-09-26.
 🔴 **A crate-scoped local `cargo clippy -p <crate>` exit 0 is not CI
 evidence.** The `clippy` job in
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is the source of
-truth for the pin, and today it installs `dtolnay/rust-toolchain@stable` — a
-floating pin, not a version literal — then lints the whole workspace. A local
+truth for the pin, and today it installs `dtolnay/rust-toolchain@1.98.1` — a
+version literal (owner ruling 306) — then lints the whole workspace. A local
 pass over one crate, or on a different rustc, proves neither half. PR #5488 is
 the incident: local clippy green, CI clippy red.
 
@@ -327,15 +327,15 @@ Since #8583 a tm-managed session no longer inherits that variable from the
 <pin>` overrides every case.
 
 ```bash
-# Confirm which clippy you are about to run. 2026-09-16: clippy 0.1.98.
-rustup run stable cargo clippy --version
+# Confirm which clippy you are about to run. CI pins 1.98.1 (clippy 0.1.98).
+rustup run 1.98.1 cargo clippy --version
 
 # The CI job's own invocation, copied from ci.yml's clippy step.
-rustup run stable cargo clippy --workspace --all-targets \
+rustup run 1.98.1 cargo clippy --workspace --all-targets \
   --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 ```
 
 Re-read the pin from `ci.yml` each time rather than trusting this snippet:
-`@stable` moves on its own, and the exclude list grows with each new Tauri UI
-crate (four today). If the job is ever pinned to a literal, substitute it —
-`rustup run 1.97.1 cargo clippy …`.
+the pin is bumped deliberately in its own PR, and the exclude list grows with
+each new Tauri UI crate (four today). Use the literal —
+`rustup run 1.98.1 cargo clippy …`.
