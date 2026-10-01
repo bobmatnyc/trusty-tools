@@ -100,10 +100,12 @@ fn a_subagent_heavy_build_is_rewritten_to_a_lease() {
         command.starts_with("cd crates/x && CARGO_BUILD_JOBS=6 "),
         "the composition is kept: {command}"
     );
-    assert!(
-        command.ends_with(" build-lease -- cargo test -p x"),
-        "{command}"
+    // #8969: the relative `cd` is resolved against the payload's cwd.
+    let expect = format!(
+        " build-lease --expect-cwd {}/crates/x -- cargo test -p x",
+        home.path().display()
     );
+    assert!(command.ends_with(&expect), "{command}");
     assert_eq!(
         input["run_in_background"], true,
         "a background build stays backgrounded"
@@ -475,5 +477,65 @@ fn a_subagents_leased_build_runs_in_its_slot_directory() {
     assert!(
         err.contains("Never override CARGO_TARGET_DIR EXCEPT with this granted slot"),
         "the notice must carry the rule's slot exception: {err}"
+    );
+}
+
+/// #8969: Claude Code strips a leading `cd <its cwd> &&` and runs the rest in
+/// the directory it tracks. On 2026-09-30 that left `tm build-lease -- cargo
+/// test` building another agent's worktree, green. This drives the real hook
+/// and the real lease: the rewrite, minus its `cd`, run from ANOTHER directory,
+/// must still build in the `cd`'s directory. Before the fix it built where the
+/// shell stood.
+#[test]
+fn a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969() {
+    let home = scratch_home();
+    let config = home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        "[builders]\nmax_concurrent = 2\ncount_foreign_builds = false\n\
+         memory_pressure_max = \"critical\"\nmin_available_pct = 0\nload_factor = 64\n\
+         heavy_build_commands = [\"sh\"]\n",
+    )
+    .expect("config");
+    let ours = home.path().join("agent-ours");
+    let theirs = home.path().join("agent-theirs");
+    for dir in [&ours, &theirs] {
+        std::fs::create_dir_all(dir).expect("worktree");
+    }
+    let ran_in = home.path().join("ran-in");
+    let cd = format!("cd {} && ", ours.display());
+    let command = format!("{cd}sh -c 'pwd -P > {}'", ran_in.display());
+    let (rewritten, _) = updated_command(&run_hook(
+        home.path(),
+        &["--pm-guard"],
+        &bash_payload(&ours, &command, true),
+    ));
+    let lost_cd = rewritten
+        .strip_prefix(&cd)
+        .unwrap_or_else(|| panic!("the rewrite keeps the `cd`: {rewritten}"));
+    let mut shell = std::process::Command::new("/bin/sh");
+    common::isolate_spawned_tm(&mut shell, home.path());
+    let out = shell
+        .args(["-c", lost_cd])
+        .current_dir(&theirs)
+        .env("TRUSTY_MPM_URL", UNREACHABLE_DAEMON)
+        .env(
+            "TRUSTY_MPM_TEST_BUILD_SLOT_FALLBACK",
+            home.path().join("fallback-store"),
+        )
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("run the rewrite");
+    assert!(
+        out.status.success(),
+        "{lost_cd}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let built_in = std::fs::read_to_string(&ran_in).expect("the build ran");
+    assert_eq!(
+        built_in.trim(),
+        ours.canonicalize().expect("ours").display().to_string(),
+        "the build must run in the `cd`'s directory, not where the shell stood: {lost_cd}"
     );
 }
