@@ -606,3 +606,36 @@ fn a_deeply_nested_expansion_is_read_in_linear_time() {
         "took {elapsed:?}"
     );
 }
+
+/// #9001 case 1: a `$'…'` quote in a command that runs no tmux is no tmux
+/// command; the #6660 floor still refuses it elsewhere, naming the token.
+#[test]
+fn an_ansi_c_quote_in_a_command_without_tmux_is_not_a_tmux_command_9001() {
+    for command in [r"grep -c $'\x1b' /tmp/x.log", r"printf $'a\tb' | wc -c"] {
+        assert_eq!(evaluate_architect_pane(command, &fake()), None, "{command}");
+    }
+}
+
+/// #9001 case 1: tmux hidden in a `$'…'` quote still denies, and so does a
+/// quote the decoder cannot read.
+#[test]
+fn an_ansi_c_quote_that_hides_tmux_or_will_not_decode_still_denies_9001() {
+    for command in [
+        r"$'\x74mux' kill-session -t =tm-architect",
+        r"$'\164mux' kill-server",
+        r"t$'mux' send-keys -t %1 x Enter",
+        r"grep -c $'\u001b' log",
+        r#"echo $"x" ; tmux ls"#,
+    ] {
+        assert!(denied(&fake(), command), "{command}");
+    }
+}
+
+/// #9001 case 1: an unreadable quote's refusal names the token and the
+/// quoting remedy.
+#[test]
+fn an_undecodable_quote_refusal_names_the_token_9001() {
+    let reason = evaluate_architect_pane(r"grep -c $'\u001b' log", &fake()).expect("denied");
+    assert!(reason.contains(r"`$'\u001b'`"), "{reason}");
+    assert!(reason.contains("ordinary `'…'`"), "{reason}");
+}

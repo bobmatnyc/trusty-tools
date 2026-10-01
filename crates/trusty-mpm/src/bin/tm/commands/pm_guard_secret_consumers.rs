@@ -38,6 +38,7 @@ use crate::commands::pm_guard_bash::{
 use crate::commands::pm_guard_secret_read::{
     NESTED_COMMAND_MARKERS, Scan, command_basename, secret_files_named_in,
 };
+use crate::commands::pm_guard_secret_search_loop::only_feeds_a_search;
 
 /// How one consumer mode reads its argv.
 ///
@@ -217,6 +218,17 @@ pub(crate) fn key_only_consumed(segment: &str, named: &[String]) -> bool {
 /// `denies_a_secrets_path_that_is_not_a_get_listing_8869`.
 pub(crate) fn gh_api_lists_secret_names(segment: &str, named: &[String]) -> bool {
     !has_nested_command(segment) && consumed_by(segment.trim(), named, SECRET_LISTINGS)
+}
+
+/// [`gh_api_lists_secret_names`], or a `for` header of `command` whose words
+/// reach only `echo` and a gh search (#9001).
+///
+/// Why: one call site in the grandfathered `pm_guard_secret_read`, so the
+/// read rule's line count does not grow.
+/// Test: `a_for_loop_feeding_only_a_gh_search_names_no_file_9001`,
+/// `allows_a_get_that_lists_secret_names_8869`.
+pub(crate) fn listed_or_searched(command: &str, segment: &str, named: &[String]) -> bool {
+    gh_api_lists_secret_names(segment, named) || only_feeds_a_search(command, segment)
 }
 
 /// Whether `text` carries a [`NESTED_COMMAND_MARKERS`] spelling.

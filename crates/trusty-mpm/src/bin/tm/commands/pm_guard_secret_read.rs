@@ -383,7 +383,7 @@ use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 // #8756 round 2: the dump rules, and every rule on each substitution body.
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
-use crate::commands::pm_guard_secret_consumers::{gh_api_lists_secret_names, key_only_consumed};
+use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -642,7 +642,8 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
         if segment_only_handles(trimmed, &named)
             || terraform_only_consumes_state(trimmed, &named)
             || key_only_consumed(trimmed, &named)
-            || gh_api_lists_secret_names(trimmed, &named)
+            || listed_or_searched(&argv_text, trimmed, &named)
+        // #9001
         {
             continue;
         }
