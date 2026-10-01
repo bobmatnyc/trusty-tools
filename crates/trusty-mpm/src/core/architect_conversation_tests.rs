@@ -1,0 +1,189 @@
+//! Tests for the Architect's conversation record (#8981).
+
+use super::*;
+
+/// A scratch `~/.trusty-mpm` root, Architect directory and claude config dir.
+struct Scratch {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    dir: PathBuf,
+    config: PathBuf,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+        let dir = base.join("arch");
+        std::fs::create_dir_all(&dir).expect("architect dir");
+        Self {
+            root: base.join(".trusty-mpm"),
+            config: base.join("claude-config"),
+            dir,
+            _tmp: tmp,
+        }
+    }
+
+    /// Claude Code's transcript for conversation `id` run in the Architect dir.
+    fn transcript(&self, id: &str) {
+        let folder = self.config.join("projects").join(project_folder(&self.dir));
+        std::fs::create_dir_all(&folder).expect("project folder");
+        std::fs::write(folder.join(format!("{id}.jsonl")), "{}\n").expect("transcript");
+    }
+
+    fn resolve(&self) -> ConversationStart {
+        resolve_conversation(&self.root, &self.dir, Some(&self.config))
+    }
+}
+
+const ID: &str = "3f2b8c1e-5d4a-4b6f-9e2d-1a7c0b9e8f61";
+
+#[test]
+fn the_project_folder_name_matches_claude_code() {
+    assert_eq!(
+        project_folder(Path::new(
+            "/Users/masa/trusty-mpm-projects/bobmatnyc/supervisor"
+        )),
+        "-Users-masa-trusty-mpm-projects-bobmatnyc-supervisor"
+    );
+    assert_eq!(
+        project_folder(Path::new("/a/.claude/_b c")),
+        "-a--claude--b-c"
+    );
+}
+
+#[test]
+fn the_claude_args_name_the_conversation() {
+    assert_eq!(
+        ConversationStart::Resume(ID.to_owned()).claude_args(),
+        ["--resume".to_owned(), ID.to_owned()]
+    );
+    let fresh = ConversationStart::Fresh {
+        id: ID.to_owned(),
+        reason: None,
+    };
+    assert_eq!(
+        fresh.claude_args(),
+        ["--session-id".to_owned(), ID.to_owned()]
+    );
+    assert_eq!(fresh.id(), ID);
+}
+
+#[test]
+fn no_record_starts_fresh_without_a_reason() {
+    let s = Scratch::new();
+    match s.resolve() {
+        ConversationStart::Fresh { id, reason: None } => {
+            assert!(uuid::Uuid::try_parse(&id).is_ok(), "{id}");
+        }
+        other => panic!("expected a plain fresh start, got {other:?}"),
+    }
+}
+
+/// #8981 regression: the id comes from tm's own record and Claude Code's
+/// transcript, so no daemon session record — deleted, tombstoned or never
+/// written — is consulted, and the prior conversation is resumed.
+#[test]
+fn a_recorded_conversation_with_a_transcript_is_resumed() {
+    let s = Scratch::new();
+    record_conversation(&s.root, &s.dir, ID).expect("record");
+    s.transcript(ID);
+    assert_eq!(s.resolve(), ConversationStart::Resume(ID.to_owned()));
+    assert!(
+        s.resolve()
+            .describe()
+            .contains(&format!("resuming conversation {ID}"))
+    );
+}
+
+/// #8981 error arms: each unusable record starts a NEW conversation, never
+/// the recorded one, and the summary line names why.
+#[test]
+fn every_unusable_record_starts_fresh_and_says_why() {
+    fn write(s: &Scratch, body: &str) {
+        let path = conversation_path(&s.root);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, body).expect("write");
+    }
+    fn record_json(dir: &Path, id: &str) -> String {
+        serde_json::json!({ "project_dir": dir, "conversation_id": id }).to_string()
+    }
+    type Setup = Box<dyn Fn(&Scratch)>;
+    let cases: Vec<(&str, Setup, &str)> = vec![
+        ("corrupt", Box::new(|s| write(s, "{not json")), "is corrupt"),
+        (
+            "unknown field",
+            Box::new(|s| {
+                write(
+                    s,
+                    &format!(
+                        r#"{{"project_dir":"{}","conversation_id":"{ID}","x":1}}"#,
+                        s.dir.display()
+                    ),
+                )
+            }),
+            "is corrupt",
+        ),
+        (
+            "another directory",
+            Box::new(|s| {
+                write(s, &record_json(&s.config, ID));
+                s.transcript(ID);
+            }),
+            "belongs to",
+        ),
+        (
+            "not a uuid",
+            Box::new(|s| write(s, &record_json(&s.dir, "--dangerously-skip-permissions"))),
+            "not a valid conversation id",
+        ),
+        (
+            "non-canonical uuid",
+            Box::new(|s| {
+                let upper = ID.to_uppercase();
+                write(s, &record_json(&s.dir, &upper));
+                s.transcript(&upper);
+            }),
+            "not a valid conversation id",
+        ),
+        (
+            "missing transcript",
+            Box::new(|s| record_conversation(&s.root, &s.dir, ID).expect("record")),
+            "has no transcript",
+        ),
+        (
+            "unreadable",
+            Box::new(|s| std::fs::create_dir_all(conversation_path(&s.root)).expect("dir")),
+            "could not be read",
+        ),
+    ];
+    for (name, setup, want) in cases {
+        let s = Scratch::new();
+        setup(&s);
+        match s.resolve() {
+            ConversationStart::Fresh {
+                id,
+                reason: Some(why),
+            } => {
+                assert!(why.contains(want), "{name}: {why}");
+                assert_ne!(id.to_lowercase(), ID, "{name}: reused the recorded id");
+                assert!(uuid::Uuid::try_parse(&id).is_ok(), "{name}: {id}");
+                let line = ConversationStart::Fresh {
+                    id,
+                    reason: Some(why),
+                }
+                .describe();
+                assert!(line.contains("was not resumed"), "{name}: {line}");
+            }
+            other => panic!("{name}: expected a fresh start with a reason, got {other:?}"),
+        }
+    }
+    // No config dir: the transcript cannot be checked, so no resume.
+    let s = Scratch::new();
+    record_conversation(&s.root, &s.dir, ID).expect("record");
+    s.transcript(ID);
+    assert!(matches!(
+        resolve_conversation(&s.root, &s.dir, None),
+        ConversationStart::Fresh { reason: Some(why), .. } if why.contains("cannot be checked")
+    ));
+}

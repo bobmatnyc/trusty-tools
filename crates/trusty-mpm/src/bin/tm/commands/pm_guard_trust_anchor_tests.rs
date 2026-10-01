@@ -647,6 +647,10 @@ fn the_launch_record_dir_is_an_anchor() {
         "cd ~/.trusty-mpm/architect-launch/envfile-grants && cat x > 1.grant",
         "cd /tmp && echo x > 1.GRANT",
         "cd /tmp && cp g.txt envfile-grants",
+        // #8981: the Architect's conversation record, placed or not.
+        "echo x > ~/.trusty-mpm/architect-launch/last.architect-conversation",
+        "echo x > $D/last.architect-conversation",
+        "cd /tmp && echo x > last.Architect-Conversation",
     ] {
         assert!(pm_bash(&fx, command).is_some(), "allowed: {command}");
     }
