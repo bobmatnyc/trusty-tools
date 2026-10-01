@@ -21,6 +21,7 @@ use trusty_mpm::core::architect_launch::live_architect_lineage;
 use trusty_mpm::core::architect_session::recorded_session_names;
 
 use super::architect_pane::{Pane, PaneProbe};
+use super::tmux_exact_target::{OBJECT_FORMAT, TmuxObject, classify_objects};
 use crate::commands::fleet::launch::ARCHITECT_SESSION;
 
 /// The `list-panes -F` format [`parse_panes`] reads, tab-separated.
@@ -109,31 +110,43 @@ impl PaneProbe for LivePanes {
     }
 
     fn panes(&self, server: &[String]) -> Result<Vec<Pane>, String> {
-        let mut argv = server.to_vec();
-        argv.extend(["list-panes", "-a", "-F", PANE_FORMAT].map(str::to_owned));
-        let run = trusty_mpm::core::tmux::run_tmux_argv(&argv);
-        let (stdout, stderr) = match &run {
-            Ok(out) => (
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
-            ),
-            Err(_) => Default::default(),
-        };
-        let listed = match &run {
-            Ok(out) => Listed::Ran {
-                ok: out.status.success(),
-                stdout: &stdout,
-                stderr: &stderr,
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Listed::NotFound,
-            Err(err) => Listed::Failed(err.to_string()),
-        };
-        classify_listing(listed, self.marks())
+        list_panes(server, PANE_FORMAT, |listed| {
+            classify_listing(listed, self.marks())
+        })
     }
 
     fn current_pane(&self) -> Option<String> {
         std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
     }
+
+    fn objects(&self, server: &[String]) -> Result<Vec<TmuxObject>, String> {
+        list_panes(server, OBJECT_FORMAT, classify_objects)
+    }
+}
+
+/// Run `tmux <server> list-panes -a -F <format>` and hand what it gave to
+/// `classify`.
+fn list_panes<T>(server: &[String], format: &str, classify: impl FnOnce(Listed<'_>) -> T) -> T {
+    let mut argv = server.to_vec();
+    argv.extend(["list-panes", "-a", "-F", format].map(str::to_owned));
+    let run = trusty_mpm::core::tmux::run_tmux_argv(&argv);
+    let (stdout, stderr) = match &run {
+        Ok(out) => (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        ),
+        Err(_) => Default::default(),
+    };
+    let listed = match &run {
+        Ok(out) => Listed::Ran {
+            ok: out.status.success(),
+            stdout: &stdout,
+            stderr: &stderr,
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Listed::NotFound,
+        Err(err) => Listed::Failed(err.to_string()),
+    };
+    classify(listed)
 }
 
 /// What one `tmux list-panes` run gave.

@@ -92,7 +92,10 @@ fn guard_env(fx: &Fixture, cmd: &mut Command, env: &[(&str, &str)], stamp: Optio
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
-        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT");
+        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+        // #9001: the guard lists the server `env` names, never the operator's.
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -323,20 +326,75 @@ fn the_architect_is_exempt_from_d4_and_d5_but_not_the_floors() {
     }
 }
 
+/// A private tmux server (its own `TMUX_TMPDIR`) holding a session `pm`.
+struct PmServer {
+    dir: tempfile::TempDir,
+}
+
+impl PmServer {
+    /// `None` where tmux is not installed.
+    fn start() -> Option<Self> {
+        // A short path: a tmux socket path is capped near 104 bytes on macOS.
+        let dir = tempfile::tempdir_in("/tmp").expect("tmux dir");
+        let started = Command::new("tmux")
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "pm",
+                "sleep 600",
+            ])
+            .env("TMUX_TMPDIR", dir.path())
+            .env_remove("TMUX")
+            .status();
+        match started {
+            Ok(status) if status.success() => Some(Self { dir }),
+            Ok(status) => panic!("tmux new-session: {status}"),
+            Err(_) => None,
+        }
+    }
+
+    /// The env pairs that point the guard at this server (#5784 opt-in).
+    fn env(&self) -> [(&str, &str); 2] {
+        let dir = self.dir.path().to_str().expect("utf-8 tmux dir");
+        [("TMUX_TMPDIR", dir), ("TRUSTY_MPM_ALLOW_HOST_STATE", "1")]
+    }
+}
+
+impl Drop for PmServer {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .arg("kill-server")
+            .env("TMUX_TMPDIR", self.dir.path())
+            .env_remove("TMUX")
+            .status();
+    }
+}
+
 /// Architect ruling 3: the Architect's tmux `send-keys` path still passes,
 /// with and without `TRUSTY_MPM_PM_UNRESTRICTED`, as it does for a PM.
+/// #9001: the target must exist, so it runs on a private server holding `pm`;
+/// skips where tmux is not installed.
 #[test]
 fn the_architects_send_keys_path_still_passes() {
+    let Some(server) = PmServer::start() else {
+        eprintln!("tmux not available; skipping");
+        return;
+    };
     let fx = Fixture::new();
     let stdin = bash_payload(
         &fx,
         "tmux send-keys -t =pm:0 'Run the gates, then git push your branch' Enter",
     );
     for bypass in BYPASSES {
-        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        let mut env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        env.extend(server.env());
         let out = run_under_claude_with(&fx, &stdin, true, &env);
         assert_eq!(out.trim(), "", "the Architect, {bypass:?}");
     }
-    let unrestricted = [("TRUSTY_MPM_PM_UNRESTRICTED", "1")];
+    let mut unrestricted = vec![("TRUSTY_MPM_PM_UNRESTRICTED", "1")];
+    unrestricted.extend(server.env());
     assert_eq!(run(&fx, &stdin, &unrestricted, Some("pm")).trim(), "");
 }

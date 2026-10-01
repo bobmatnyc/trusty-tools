@@ -12,6 +12,7 @@ crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tm
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t \'a b\'",	#8439 classifier fixture, not a tmux call: a `-t` value with a space the classifier must refuse
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -S-200 -t main:0\.1",	#8439 classifier fixture, not a tmux call: the bare session:window.pane form an agent types must be allowed
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"for x in a; do tmux capture-pane -p -t \\"\$x\\"; done",	#8439 classifier fixture, not a tmux call: a loop variable as `-t` value the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/tmux_exact_target_tests.rs	format!\("tmux \{verb\} -t \{target\} hi"\)	#9001 classifier fixture, not a tmux call: builds each prefix-only, missing and exact target the exact-target floor judges
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-print",$	`find -print` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-not",$	`find -not` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
 crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-mount",$	`find -mount` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
