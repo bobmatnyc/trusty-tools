@@ -152,6 +152,32 @@ impl FleetEnv {
             .is_ok_and(|s| s.success())
     }
 
+    /// Put a `tmux` first on `tm`'s `PATH` that runs the real one, except
+    /// that it fails a `#{pane_pid}` read while [`PANE_UNREADABLE`] exists and
+    /// a `kill-session` while [`KILL_FAILS`] exists (#8981 round 2).
+    fn wrap_tmux(&self) {
+        let real = trusty_common::bin_resolve::resolve_binary("tmux").expect("tmux on PATH");
+        let marker = |name: &str| self.bin.path().join(name).display().to_string();
+        let script = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    \
+             '#{{pane_pid}}') [ -e {pane:?} ] && {{ echo 'pane unreadable' >&2; exit 1; }};;\n    \
+             kill-session) [ -e {kill:?} ] && {{ echo 'kill refused' >&2; exit 1; }};;\n  \
+             esac\ndone\nexec {real:?} \"$@\"\n",
+            pane = marker(PANE_UNREADABLE),
+            kill = marker(KILL_FAILS),
+            real = real.display().to_string(),
+        );
+        let tmux = self.bin.path().join("tmux");
+        std::fs::write(&tmux, script).expect("tmux wrapper");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Create the marker `name` in the fake `bin` dir.
+    fn mark(&self, name: &str) {
+        std::fs::write(self.bin.path().join(name), "").expect("marker");
+    }
+
     /// `tmux kill-session` on this environment's private server.
     fn kill_session(&self, name: &str) {
         let status = Command::new("tmux")
@@ -174,6 +200,12 @@ const ARGV_LOG: &str = "claude-argv.log";
 
 /// The marker, in the fake `bin` dir, that makes a `--resume` start fail.
 const RESUME_FAILS: &str = "resume-fails";
+
+/// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a pane pid read.
+const PANE_UNREADABLE: &str = "pane-unreadable";
+
+/// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a kill-session.
+const KILL_FAILS: &str = "kill-fails";
 
 /// The value after `flag` in one launch's argv.
 fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -425,6 +457,82 @@ fn fleet_init_clears_the_conversation_record_when_the_resume_fails() {
     assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
     let fresh = flag_value(&third, "--session-id").expect("a new conversation id");
     assert_ne!(fresh, id, "{third:?}");
+}
+
+/// #8981 round 2, critic MEDIUM: when tmux cannot say which process runs in
+/// the resumed Architect's pane, nothing proves the resume failed, so the
+/// session and the conversation record are kept, with a warning naming both.
+#[test]
+fn fleet_init_keeps_the_resumed_architect_when_its_pane_cannot_be_read() {
+    let env = FleetEnv::new();
+    env.wrap_tmux();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    let id = env.write_transcript(&first).expect("a fresh --session-id");
+
+    env.kill_session("tm-architect");
+    env.mark(PANE_UNREADABLE);
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    let second = env.launches(2).get(1).cloned().unwrap_or_default();
+    assert_eq!(
+        flag_value(&second, "--resume"),
+        Some(id.as_str()),
+        "{second:?}"
+    );
+    assert!(
+        out.status.success(),
+        "an unreadable pane is not a failed resume: {}",
+        text(&out)
+    );
+    let record = env.conversation_record();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not tell whether the resumed `claude`")
+            && stderr.contains("tmux session tm-architect")
+            && stderr.contains(&record.display().to_string()),
+        "the warning names the session and the record: {}",
+        text(&out)
+    );
+    assert!(record.is_file(), "the conversation record was cleared");
+    assert!(env.has_session("tm-architect"), "the session was killed");
+}
+
+/// #8981 round 2, critic LOW: a failed resume whose session tmux will not
+/// kill says so, with the command to run, instead of "killed".
+#[test]
+fn fleet_init_says_so_when_the_failed_resume_session_cannot_be_killed() {
+    let env = FleetEnv::new();
+    env.wrap_tmux();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    env.write_transcript(&first).expect("a fresh --session-id");
+
+    env.kill_session("tm-architect");
+    env.mark(RESUME_FAILS);
+    env.mark(KILL_FAILS);
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(
+        !out.status.success(),
+        "a failed resume is a failed run: {}",
+        text(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "could NOT kill tmux session tm-architect; run `tmux kill-session -t =tm-architect`"
+        ),
+        "{}",
+        text(&out)
+    );
+    assert!(!stderr.contains("killed tmux session"), "{}", text(&out));
+    assert!(
+        !env.conversation_record().exists(),
+        "the dead conversation is still recorded"
+    );
 }
 
 /// A stand-in daemon on a unix socket that records each Architect
