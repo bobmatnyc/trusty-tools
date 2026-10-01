@@ -305,6 +305,24 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
     // `delegation_repair_caller::stale_on_owner_session_end`, which runs only
     // for a socket `SessionEnd` sent from under the session's own bound
     // `claude`. Here it ran for any caller that named the id, over HTTP too.
+    // A proven socket SessionEnd has already staled them, so any still live
+    // here were skipped: say so once.
+    if let Ok(uuid) = uuid::Uuid::parse_str(claude_session_id) {
+        let session = crate::core::session::SessionId(uuid);
+        let live = state
+            .all_delegations()
+            .iter()
+            .filter(|d| d.session == session && d.status.is_live())
+            .count();
+        if live > 0 {
+            tracing::info!(
+                claude_session_id = %claude_session_id,
+                live,
+                "SessionEnd left the session's live delegation records as they were: only a \
+                 socket SessionEnd from the session's own claude stales them (#8980)"
+            );
+        }
+    }
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     let matched = records.iter().find(|r| {
