@@ -229,19 +229,25 @@ pub(crate) fn owner_claude(
 /// [`owner_claude`] over an injected process table (#8531).
 ///
 /// What: the [`ClaudeProcess`] bound to `session` while a process with that
-/// pid AND start time still runs. `Err` when no binding exists — the session
-/// announced itself over HTTP, before this binding existed, or never — and
-/// when the bound process has exited or its pid now names a later process: a
-/// persisted binding outlives its process, and must then grant nothing.
+/// pid AND start time still runs. `Err` when the registry is sealed (naming
+/// why), when no binding exists — the session announced itself over HTTP,
+/// before this binding existed, or never — and when the bound process has
+/// exited or its pid now names a later process: a persisted binding outlives
+/// its process, and must then grant nothing.
 /// Test: `a_bound_owner_whose_claude_exited_has_no_process_8531`,
-/// `an_unbound_owner_has_no_process_8531`.
+/// `an_unbound_owner_has_no_process_8531`,
+/// `a_sealed_registry_names_the_seal_not_the_owner_8531`.
 pub(crate) fn owner_claude_with(
     state: &DaemonState,
     session: SessionId,
     facts: impl Fn(u32) -> Result<crate::core::twin_arming::ProcessFacts, String>,
 ) -> Result<ClaudeProcess, String> {
-    let bound = state.session_claudes().get(session).ok_or_else(|| {
-        "the owning session never announced its claude process over the daemon socket".to_string()
+    let claudes = state.session_claudes();
+    let bound = claudes.get(session).ok_or_else(|| match claudes.sealed() {
+        // #8531: a sealed registry grants nothing; say so, not "never announced".
+        Some(why) => format!("the session-claude registry is sealed: {why}"),
+        None => "the owning session never announced its claude process over the daemon socket"
+            .to_string(),
     })?;
     // #8531: the binding persists across restarts; its process may not.
     match facts(bound.pid) {

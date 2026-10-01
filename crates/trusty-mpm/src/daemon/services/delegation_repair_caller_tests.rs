@@ -230,6 +230,31 @@ fn a_bound_owner_whose_claude_exited_has_no_process_8531() {
     );
 }
 
+/// #8531 LOW: a sealed registry refuses every owner and says it is sealed,
+/// rather than blaming the owner for never announcing itself.
+#[test]
+fn a_sealed_registry_names_the_seal_not_the_owner_8531() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let paths = FrameworkPaths::under(root.path());
+    let file = DaemonState::with_paths(&paths)
+        .framework_root()
+        .join(crate::daemon::state::session_claudes::SESSION_CLAUDES_FILE);
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&file, b"{\"version\":1,\"sessions\":").expect("corrupt it");
+    // Owner-only, so the seal is the parse failure, not the mode.
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let state = DaemonState::with_paths(&paths);
+    let got = owner_claude_with(&state, SessionId::new(), live_owner);
+    assert!(
+        got.as_ref()
+            .is_err_and(|e| e.starts_with("the session-claude registry is sealed: ")
+                && e.contains("does not parse")
+                && !e.contains("never announced")),
+        "{got:?}"
+    );
+}
+
 /// #8531 Fail-Open Check: a `SessionStart` with no kernel pid binds nothing.
 #[tokio::test]
 async fn a_session_start_without_a_peer_pid_binds_nothing_8531() {

@@ -30,3 +30,19 @@ Fixed
 - `tm repair delegation` now always reaches the daemon over its socket. The
   HTTP repair routes still end records whose owner is gone, stale or forced,
   but never establish an owner (#8531).
+- A `SessionStart` that settles an id as unproven while the registry file
+  cannot be written (for example, a full disk) still closes the id to a
+  later announcer for the daemon's lifetime, and the failed save is logged
+  as a warning. A repair refused because the registry is sealed now says so,
+  instead of saying the owner never announced its `claude` (#8531).
+- Known limits. Three cases leave an owner unable to clear its own records
+  until the 6 h stale or owner-gone repair path ends them: sessions already
+  running at the first daemon start on this version, which has no registry
+  file yet; a session whose first `SessionStart` fell back to HTTP, which
+  stays unproven; and a resumed session (`claude --resume <id>`, which tm
+  uses to relaunch), whose id is settled while its earlier `claude` has
+  exited. Separately, a session id whose `SessionStart` never reached the daemon (daemon
+  down at launch, project missing the tm `SessionStart` hook — see the
+  `hooks_missing_tm_group` doctor check — or a session started before the
+  upgrade) can be claimed by a sibling that knows the id and announces it
+  first (#8531).

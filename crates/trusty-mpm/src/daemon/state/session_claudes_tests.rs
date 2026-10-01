@@ -244,6 +244,23 @@ fn an_unsaved_binding_does_not_count_8531() {
     assert!(!claudes.is_settled(session), "rolled back");
 }
 
+/// #8531 MEDIUM, Fail-Open Check: an unproven announcement that cannot be
+/// saved still settles the id, so the next socket announcer is not bound.
+#[test]
+fn an_unsaved_unproven_announcement_still_settles_the_id_8531() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blocker = dir.path().join("not-a-dir");
+    let claudes = SessionClaudes::load_as(blocker.join(SESSION_CLAUDES_FILE), current_uid());
+    std::fs::write(&blocker, b"").expect("a file where the directory goes");
+    let session = SessionId::new();
+    let got = claudes.record(session, Announcement::Unproven, || Ok(()));
+    assert!(got.is_err_and(|e| e.contains("could not be saved")));
+    assert!(claudes.is_settled(session), "kept: it can only deny");
+    let got = claudes.record(session, Announcement::Claude(CLAUDE), || Ok(()));
+    assert_eq!(got, Ok(Some(Announcement::Unproven)));
+    assert_eq!(claudes.get(session), None);
+}
+
 /// #8531: an id whose first announcement proved no process is never bound,
 /// before or after a restart.
 #[test]

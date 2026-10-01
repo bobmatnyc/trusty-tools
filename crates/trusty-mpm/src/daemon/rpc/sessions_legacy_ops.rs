@@ -587,7 +587,7 @@ pub async fn ingest_hook(
             .map_err(|e| e.to_string())
             .and_then(|r| r);
         if let Err(e) = settled {
-            tracing::debug!(session_id = %session.0, "SessionStart not recorded as unproven: {e}");
+            tracing::warn!(session_id = %session.0, "SessionStart not recorded as unproven: {e}");
         }
     }
 

@@ -27,6 +27,26 @@
 //! the daemon ever saw start, and every new id rewrites the whole file. An
 //! entry whose process has exited grants nothing (see
 //! `delegation_repair_caller::owner_claude`).
+//!
+//! Residuals (#8531, accepted). The first three leave an owner unable to
+//! repair its own records until the stale (6 h) or owner-gone path ends
+//! them; the fourth leaves an id open to a deliberate impersonator.
+//! - Upgrade window: the first daemon start on this code has no file, so no
+//!   session that started before it is bound.
+//! - A first `SessionStart` that fell back to HTTP settles its id as
+//!   unproven for good, so that owner can never repair its records.
+//! - A resumed session (`claude --resume <id>` keeps the id; tm relaunches
+//!   this way, see `runtime/claude_code.rs` and
+//!   `daemon/managed_routes/lifecycle.rs`) cannot clear its own records: the
+//!   id is settled and the old binding fails the pid + start-time check. No
+//!   rebind is safe, since the new `claude` is indistinguishable from a
+//!   sibling announcing the same id.
+//! - An id whose `SessionStart` never reached the daemon (daemon down at
+//!   start, no tm `SessionStart` hook — doctor check
+//!   `hooks_missing_tm_group` — or a pre-upgrade session) stays announceable
+//!   for the session's life. Claiming it takes a sibling that knows the id
+//!   and announces it first, on purpose.
+//!
 //! Test: `session_claudes_tests.rs`.
 
 use std::collections::{BTreeMap, HashMap};
@@ -62,8 +82,8 @@ pub enum Announcement {
 ///
 /// Why: see the module doc.
 /// What: session id → [`Announcement`], or the reason the registry is
-/// sealed. Every new id is written through to [`SESSION_CLAUDES_FILE`]
-/// before it counts.
+/// sealed. Every new binding is written through to [`SESSION_CLAUDES_FILE`]
+/// before it counts; an unproven id counts even when its save fails.
 /// Test: `a_session_is_bound_once_first_writer_wins_8531`,
 /// `a_restart_keeps_the_binding_8531`.
 #[derive(Debug)]
@@ -128,8 +148,12 @@ impl SessionClaudes {
     ///
     /// What: `Ok(None)` when it was recorded and saved; `Ok(Some(earlier))`
     /// when `session` already had one, which is left as it was; `Err` when
-    /// the registry is sealed, `admit` refuses, or the save fails — the
-    /// in-memory entry is then rolled back, so nothing unsaved ever counts.
+    /// the registry is sealed, `admit` refuses, or the save fails. On a failed
+    /// save an [`Announcement::Claude`] is rolled back, so no unsaved binding
+    /// ever grants; an [`Announcement::Unproven`] stays in memory, since it
+    /// can only deny, and reaches the file with the next saved id.
+    /// Test: `an_unsaved_binding_does_not_count_8531`,
+    /// `an_unsaved_unproven_announcement_still_settles_the_id_8531`.
     fn record(
         &self,
         session: SessionId,
@@ -146,7 +170,11 @@ impl SessionClaudes {
         admit()?;
         map.insert(session, announcement);
         if let Err(e) = write_registry(&self.path, map) {
-            map.remove(&session);
+            // #8531: only a grant is rolled back; a deny-only entry keeps the
+            // id closed to the next announcer.
+            if matches!(announcement, Announcement::Claude(_)) {
+                map.remove(&session);
+            }
             return Err(format!(
                 "the announcement could not be saved to {}: {e}",
                 self.path.display()
@@ -430,8 +458,10 @@ impl DaemonState {
     /// that could not be bound, would otherwise stay open to whichever
     /// process announces it next over the socket.
     /// What: records [`Announcement::Unproven`] when `session` has nothing
-    /// recorded; a no-op when it has. `Err` when sealed or the save fails.
-    /// Test: `an_unproven_session_is_never_bound_8531`.
+    /// recorded; a no-op when it has. `Err` when sealed or the save fails;
+    /// an unsaved record still settles the id for this daemon's lifetime.
+    /// Test: `an_unproven_session_is_never_bound_8531`,
+    /// `an_unsaved_unproven_announcement_still_settles_the_id_8531`.
     pub fn settle_unproven_session(&self, session: SessionId) -> Result<(), String> {
         self.session_claudes
             .record(session, Announcement::Unproven, || Ok(()))
