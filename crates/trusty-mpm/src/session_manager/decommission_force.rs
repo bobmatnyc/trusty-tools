@@ -527,15 +527,17 @@ fn ledger_kept_note(blocking: &[&str]) -> String {
         .into_iter()
         .filter(|file| blocking.iter().any(|line| *line == format!("?? {file}")))
         .collect();
-    // #7660: an English list — "A" or "A and B" — with a matching verb.
-    let (list, verb) = match named.as_slice() {
+    // #7660: an English list — "A" or "A and B" — with matching verbs.
+    let (list, is, differs) = match named.as_slice() {
         [] => return String::new(),
-        [one] => ((*one).to_string(), "differs"),
-        [init @ .., last] => (format!("{} and {last}", init.join(", ")), "differ"),
+        [one] => ((*one).to_string(), "is", "differs"),
+        [init @ .., last] => (format!("{} and {last}", init.join(", ")), "are", "differ"),
     };
+    // #8540: three keep cases — no ledger entry, a mismatch, an unreadable ledger.
     format!(
-        ". {list} {verb} from what tm's provisioning ledger recorded writing, or the ledger \
-         could not be read, so --force kept the worktree and deleted nothing"
+        ". {list} {is} not recorded in tm's provisioning ledger, or {differs} from what it \
+         recorded, or the ledger could not be read, so --force kept the worktree and deleted \
+         nothing"
     )
 }
 

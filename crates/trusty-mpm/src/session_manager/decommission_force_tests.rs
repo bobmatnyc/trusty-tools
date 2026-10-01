@@ -242,6 +242,39 @@ fn provisioning_entry_excuses_claude_files_only_as_the_ledger_recorded_them() {
     }
 }
 
+/// FAIL-CLOSED (#8540 critic): a `CLAUDE.md` that is a FIFO or a symlink is
+/// not the file tm wrote, and is never read. Fails before the regular-file
+/// check, which blocked forever opening the FIFO and followed the symlink to
+/// bytes matching the ledger.
+#[test]
+fn provisioning_entry_refuses_a_claude_md_that_is_not_a_regular_file() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-entry-fifo-8540");
+    let claude_md = wt.join("CLAUDE.md");
+    std::fs::rename(&claude_md, wt.join("tm-wrote.md")).expect("move the bytes aside");
+    std::os::unix::fs::symlink("tm-wrote.md", &claude_md).expect("symlink CLAUDE.md");
+    assert!(
+        !is_provisioning_entry(&wt, None, "?? CLAUDE.md"),
+        "a symlink is not the file tm wrote"
+    );
+    std::fs::remove_file(&claude_md).expect("drop the symlink");
+    let c = std::ffi::CString::new(claude_md.as_os_str().as_bytes()).expect("no NUL");
+    // SAFETY: `c` is a valid NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probe = wt.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(is_provisioning_entry(&probe, None, "?? CLAUDE.md"));
+    });
+    let answer = rx.recv_timeout(std::time::Duration::from_secs(10));
+    if answer.is_err() {
+        // Release the blocked reader so the thread can finish.
+        let _ = std::fs::OpenOptions::new().write(true).open(&claude_md);
+    }
+    assert_eq!(answer, Ok(false), "a FIFO is refused without being opened");
+}
+
 /// 🔴 #8540: notes a user appended to an untracked `CLAUDE.md` (Claude Code's
 /// `#` memory shortcut) keep the worktree under `--force`, survive
 /// byte-for-byte, and the refusal says why. Fails at a791b467ee, which
@@ -269,20 +302,22 @@ async fn force_decommission_keeps_notes_appended_to_an_untracked_claude_md() {
     );
     assert!(
         reason.contains(
-            "CLAUDE.md differs from what tm's provisioning ledger recorded writing, or the \
-             ledger could not be read, so --force kept the worktree and deleted nothing"
+            "CLAUDE.md is not recorded in tm's provisioning ledger, or differs from what it \
+             recorded, or the ledger could not be read, so --force kept the worktree and \
+             deleted nothing"
         ),
         "reason: {reason}"
     );
 }
 
 /// FAIL-CLOSED (#8540): when the ledger cannot vouch for `CLAUDE.md` — it is
-/// missing, corrupt, or `CLAUDE.md` cannot be read to hash — `--force` keeps
-/// the worktree. Fails at a791b467ee, which never consulted the ledger.
+/// missing, corrupt, holds no entry for it, or `CLAUDE.md` cannot be read to
+/// hash — `--force` keeps the worktree. Fails at a791b467ee, which never
+/// consulted the ledger.
 #[tokio::test]
 async fn force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it() {
     let fx = GitWorktreeFixture::new();
-    for case in ["missing", "corrupt", "unreadable"] {
+    for case in ["missing", "corrupt", "unrecorded", "unreadable"] {
         let wt = provisioned_tree(&fx, &format!("decom-force-ledger-{case}-8540"));
         let claude_md = wt.join("CLAUDE.md");
         let verdict = match case {
@@ -292,6 +327,18 @@ async fn force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it(
             }
             "corrupt" => {
                 std::fs::write(ledger_file(&wt), b"{not json").expect("corrupt the ledger");
+                remove(&wt, ProvisioningDirt::Discard).await
+            }
+            "unrecorded" => {
+                let bytes = std::fs::read(ledger_file(&wt)).expect("read the ledger");
+                let mut ledger: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("parse the ledger");
+                let files = ledger["files"].as_object_mut().expect("a files map");
+                assert!(
+                    files.remove("CLAUDE.md").is_some(),
+                    "premise: it was recorded"
+                );
+                std::fs::write(ledger_file(&wt), ledger.to_string()).expect("rewrite");
                 remove(&wt, ProvisioningDirt::Discard).await
             }
             _ => {
