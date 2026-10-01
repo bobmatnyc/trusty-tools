@@ -292,6 +292,10 @@ use doctor_search_pin::check_search_index_pin;
 #[path = "doctor_session_store.rs"]
 mod doctor_session_store;
 use doctor_session_store::check_session_store;
+// #8980: a `session-claudes.json` the daemon cannot trust seals the registry.
+#[path = "doctor_session_claudes.rs"]
+mod doctor_session_claudes;
+use doctor_session_claudes::check_session_claudes;
 // Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
 // written above real projects configures every session beneath it with nothing
 // in the project to point at. Read-only; the quarantine is opt-in.
@@ -677,6 +681,9 @@ pub(crate) async fn run_doctor_with_claims(
     // without this probe the condition is invisible until someone attempts a
     // mutation. Read-only; the repair is `tm repair session-store`.
     checks.push(check_session_store(&FrameworkPaths::default().root));
+    // #8980: whether `session-claudes.json` is one the daemon trusts. An
+    // untrusted file seals the registry until the daemon restarts. Read-only.
+    checks.push(check_session_claudes(&FrameworkPaths::default().root));
     // #6556: undelivered `SubagentStop` records waiting on disk, or a spool the
     // hook cannot write into — the one branch where a stop is dropped outright
     // and its delegation stays Running for six hours. Read-only.

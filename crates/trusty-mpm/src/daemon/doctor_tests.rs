@@ -557,6 +557,8 @@ async fn run_doctor_produces_sixty_three_checks() {
         "bundled_asset_lag",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #8980: an untrusted `session-claudes.json` seals the registry.
+        "session_claudes",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
         // the hook cannot write into.
         "stop_spool",

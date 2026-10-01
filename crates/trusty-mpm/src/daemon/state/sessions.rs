@@ -438,8 +438,7 @@ impl DaemonState {
             // uuid-derived tmux name is never live; reaping it would stale its
             // live agents on any forged or `compact`/`resume` SessionStart. A
             // sealed registry settles every id, so it skips every session.
-            if session.origin != SessionHost::Tmux
-                || self.session_claudes.is_settled(*entry.key())
+            if session.origin != SessionHost::Tmux || self.session_claudes.is_settled(*entry.key())
             {
                 continue;
             }
