@@ -104,7 +104,7 @@ pub(super) fn check_session_claudes_as(fw_root: &Path, uid: u32) -> DoctorCheck 
 /// `why` and re-folds `overall`. `None` leaves the report untouched.
 /// Test: `apply_daemon_seal_overrides_the_row_and_refolds_overall_8980`,
 /// `a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980`.
-pub fn apply_daemon_seal(report: &mut DoctorReport, sealed: Option<String>) {
+pub(crate) fn apply_daemon_seal(report: &mut DoctorReport, sealed: Option<String>) {
     let Some(why) = sealed else { return };
     let row = DoctorCheck::new(
         NAME,
