@@ -138,12 +138,13 @@ impl SessionManager {
     /// whose ownership cannot be proved, is neither signalled nor killed.
     /// What: classifies the runtime. `Absent` → [`RuntimeTeardown::Absent`], no
     /// signal, no grace sleep. Any live name → [`Self::kill_gate`] first.
-    /// `Foreign`/`Unverifiable`, or a probe error → warns under `caller` and
-    /// returns [`RuntimeTeardown::LeftRunning`]. `Owned` → the `claude` PID of the record's
-    /// pane, `signal_terminate` (SIGTERM when the PID is known, else one
-    /// Ctrl-C), a [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests), a
-    /// second ownership check, and `kill_session` only when the pane is still
-    /// the session's. A `kill_session` failure is logged, not returned, because
+    /// `Foreign` → warns under `caller` and returns [`RuntimeTeardown::Foreign`];
+    /// `Unverifiable`, or a probe error → [`RuntimeTeardown::Unproven`]. `Owned`
+    /// → the `claude` PID of the record's pane, `signal_terminate_pane`
+    /// (SIGTERM when the PID is known, else one Ctrl-C to that pane), a
+    /// [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests), a second
+    /// ownership check, and `kill_session` only when the pane is still the
+    /// session's; a session gone by then reports `Terminated`. A `kill_session` failure is logged, not returned, because
     /// the caller still needs to mark the record `Stopped` / decommissioned.
     /// #8942 (critic HIGH): the one failure that IS returned is a kill-floor
     /// refusal, [`ManagedError::KillRefused`] — from [`Self::kill_gate`] under
@@ -153,7 +154,9 @@ impl SessionManager {
     /// Test: `graceful_terminate_runtime_signals_then_kills` in restart_tests.rs;
     /// `stopping_a_stale_record_never_signals_the_live_session_that_reused_its_name`,
     /// `an_unlistable_pane_set_leaves_the_runtime_running`,
-    /// `stopping_a_record_whose_pane_is_live_still_kills_it` in
+    /// `stopping_a_record_whose_pane_is_live_still_kills_it`,
+    /// `a_pane_that_changes_hands_during_the_grace_window_is_not_killed`,
+    /// `a_session_gone_after_the_grace_window_is_terminated_without_a_kill` in
     /// runtime_identity_tests.rs; the refusal by
     /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
     pub(crate) async fn graceful_terminate_runtime(
@@ -181,9 +184,10 @@ impl SessionManager {
             Ok(pane_id) => pane_id,
             Err(teardown) => return Ok(teardown),
         };
-        // #8935: the record's own pane's claude, not the session's active pane.
+        // #8935: the record's own pane's claude, not the session's active pane;
+        // with no pid the Ctrl-C fallback targets that pane too.
         let pid = crate::core::process::find_claude_pid_in_pane(tmux_name, &pane_id);
-        self.tmux.signal_terminate(tmux_name, pid);
+        self.tmux.signal_terminate_pane(tmux_name, &pane_id, pid);
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
         // #8935: the grace window is long enough for the name to change hands.
         if let Err(teardown) = owned_pane(record, caller, self.classify_runtime(record)) {
@@ -201,6 +205,35 @@ impl SessionManager {
             Ok(()) => {}
         }
         Ok(RuntimeTeardown::Terminated)
+    }
+
+    /// [`Self::graceful_terminate_runtime`] for a caller that destroys state
+    /// after the teardown, refusing a teardown whose ownership is unproven.
+    ///
+    /// Why (#8935 critic round): decommission removes the workspace and
+    /// tombstones the record, and the idle reaper marks a record `Stopped`.
+    /// Doing either under a live claude that may be this record's own loses
+    /// work. A `Foreign` verdict is safe: the live session is another one.
+    /// What: runs the teardown; [`RuntimeTeardown::Unproven`] becomes
+    /// [`ManagedError::InvalidState`] naming the reason, so the caller returns
+    /// before it changes anything. Every other verdict passes through.
+    /// Test: `decommission_with_an_unlistable_pane_set_changes_nothing`,
+    /// `the_idle_reaper_stop_skips_an_unproven_runtime`.
+    pub(crate) async fn terminate_proven_runtime(
+        &self,
+        record: &SessionRecord,
+        caller: &str,
+    ) -> Result<RuntimeTeardown, ManagedError> {
+        match self.graceful_terminate_runtime(record, caller).await? {
+            RuntimeTeardown::Unproven(why) => Err(ManagedError::InvalidState(
+                record.id.to_string(),
+                format!(
+                    "{caller} refused: {why}, so the live session may still be \
+                     this record's; the workspace and the record were left as they are"
+                ),
+            )),
+            teardown => Ok(teardown),
+        }
     }
 
     /// [`runtime_identity::runtime_ownership`] for a teardown: a probe error
@@ -229,12 +262,21 @@ fn owned_pane(
     match ownership {
         RuntimeOwnership::Owned { pane_id } => Ok(pane_id),
         RuntimeOwnership::Absent => Err(RuntimeTeardown::Absent),
-        RuntimeOwnership::Foreign(why) | RuntimeOwnership::Unverifiable(why) => {
+        // #8935 critic round: the two verdicts stay apart so a destructive
+        // caller can refuse an unproven one.
+        RuntimeOwnership::Foreign(why) => {
             warn!(
                 id = %record.id, name = %record.tmux_name, caller,
-                "{why}; nothing was signalled or killed (#8935)"
+                "{why}; nothing was killed (#8935)"
             );
-            Err(RuntimeTeardown::LeftRunning(why))
+            Err(RuntimeTeardown::Foreign(why))
+        }
+        RuntimeOwnership::Unverifiable(why) => {
+            warn!(
+                id = %record.id, name = %record.tmux_name, caller,
+                "{why}; nothing was killed (#8935)"
+            );
+            Err(RuntimeTeardown::Unproven(why))
         }
     }
 }

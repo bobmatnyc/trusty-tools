@@ -102,22 +102,31 @@ pub fn runtime_ownership(
 }
 
 /// What a stop or decommission teardown did to the tmux runtime (#8935).
+///
+/// #8935 critic round: the two left-running verdicts are separate variants,
+/// because a caller that destroys state must tell "another session holds the
+/// name" (safe to act record-only) from "ownership could not be proved"
+/// (the live session may be this record's, so destroying state is unsafe).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeTeardown {
     /// No tmux session carried the record's name; nothing was signalled.
     Absent,
     /// The record's own pane was signalled and its session reclaimed.
     Terminated,
-    /// A live session carries the name but was not proved to be this
-    /// record's, so nothing was signalled or killed. Carries the reason.
-    LeftRunning(String),
+    /// A live session carries the name and does not hold the record's pane:
+    /// another session took the name. Nothing was killed. Carries the reason.
+    Foreign(String),
+    /// A live session carries the name and the record's ownership of it could
+    /// not be proved — no pane id, an unreadable pane list, or a failed probe.
+    /// Nothing was killed. Carries the reason.
+    Unproven(String),
 }
 
 impl RuntimeTeardown {
     /// The operator-facing note when the runtime was left running.
     pub fn left_running(&self) -> Option<&str> {
         match self {
-            Self::LeftRunning(why) => Some(why),
+            Self::Foreign(why) | Self::Unproven(why) => Some(why),
             Self::Absent | Self::Terminated => None,
         }
     }

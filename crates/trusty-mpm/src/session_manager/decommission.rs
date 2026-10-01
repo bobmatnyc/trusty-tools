@@ -1042,8 +1042,11 @@ impl SessionManager {
     ///
     /// #8942: a live protected-kind record is refused first, and a kill-floor
     /// refusal at the runtime teardown aborts before any removal or record
-    /// write. Test: `prune_include_active_never_decommissions_a_supervisor_record`,
-    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    /// write. #8935: so does a live session whose ownership of the record's
+    /// pane cannot be proved ([`ManagedError::InvalidState`]).
+    /// Test: `prune_include_active_never_decommissions_a_supervisor_record`,
+    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`,
+    /// `decommission_with_an_unlistable_pane_set_changes_nothing`.
     async fn decommission_with_root_checked(
         &self,
         id: &ManagedSessionId,
@@ -1104,7 +1107,9 @@ impl SessionManager {
         // session that took the name since is left running and logged. The
         // record-only path stays a separate function for listing sweeps.
         // #8942: a kill-floor refusal aborts before effects 2–3.
-        self.graceful_terminate_runtime(&record, "decommission")
+        // #8935: so does a live session whose ownership is unproven — it may
+        // be this record's claude. A `Foreign` session stays record-only.
+        self.terminate_proven_runtime(&record, "decommission")
             .await?;
 
         // Effects 2–3. Guard: only remove the workspace directory if the SM

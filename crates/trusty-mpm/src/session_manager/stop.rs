@@ -101,6 +101,38 @@ impl SessionManager {
         id: &ManagedSessionId,
         cause: StopCause,
     ) -> Result<StopReport, ManagedError> {
+        self.stop_checked(id, cause, "SessionManager::stop", false)
+            .await
+    }
+
+    /// [`Self::stop_reporting`] that refuses when the live session's ownership
+    /// cannot be proved, leaving the record as it was.
+    ///
+    /// Why (#8935 critic round): an automatic stop — the idle reaper — must
+    /// not mark a record `Stopped` while a claude that may be its own still
+    /// runs; the record would then never be reaped or resumed correctly.
+    /// What: the same stop through [`Self::terminate_proven_runtime`]; an
+    /// unproven teardown returns [`ManagedError::InvalidState`] before the
+    /// record moves.
+    /// Test: `the_idle_reaper_stop_skips_an_unproven_runtime`.
+    pub async fn stop_proven(
+        &self,
+        id: &ManagedSessionId,
+        cause: StopCause,
+        caller: &str,
+    ) -> Result<StopReport, ManagedError> {
+        self.stop_checked(id, cause, caller, true).await
+    }
+
+    /// The body behind [`Self::stop_reporting`] and [`Self::stop_proven`];
+    /// `require_proof` picks the teardown.
+    async fn stop_checked(
+        &self,
+        id: &ManagedSessionId,
+        cause: StopCause,
+        caller: &str,
+        require_proof: bool,
+    ) -> Result<StopReport, ManagedError> {
         let mut record = self.get(id).await?;
         if record.state.is_terminal() {
             return Err(ManagedError::InvalidState(
@@ -120,9 +152,12 @@ impl SessionManager {
         // #8942: a kill-floor refusal aborts here, before the record moves.
         // #8935: a live session that is not this record's is left running;
         // the record still moves, record-only.
-        let runtime = self
-            .graceful_terminate_runtime(&record, "SessionManager::stop")
-            .await?;
+        // #8935 critic round: an automatic stop refuses an unproven one.
+        let runtime = if require_proof {
+            self.terminate_proven_runtime(&record, caller).await?
+        } else {
+            self.graceful_terminate_runtime(&record, caller).await?
+        };
         record.state = ManagedSessionState::Stopped;
         // #6194: the caller names the cause; `stop` supplies Deliberate for
         // every "end this session" request, and an automatic resume must not

@@ -26,6 +26,25 @@ struct FakeTmux {
     sessions_fail: bool,
     /// The panes `list-panes` prints, or `None` to exit 1.
     panes: Option<&'static str>,
+    /// What tmux answers once a `send-keys` reached it — the state the
+    /// post-grace re-check sees — or `None` to keep the answers above.
+    after_signal: Option<AfterSignal>,
+}
+
+/// tmux's state after the teardown's signal (#8935 critic round).
+enum AfterSignal {
+    /// No session carries the name any more.
+    Gone,
+    /// The session lists these panes.
+    Panes(&'static str),
+}
+
+/// One `echo` per row: `printf` would read `%9` as a conversion.
+fn echo_rows(rows: &str) -> String {
+    rows.lines()
+        .map(|row| format!("echo '{row}'"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// A scratch framework root, a fake tmux and a manager over both.
@@ -47,19 +66,26 @@ impl Fixture {
             format!("echo '{LIVE}:1700000000:1'")
         };
         let panes = match fake.panes {
-            // One `echo` per row: `printf` would read `%9` as a conversion.
-            Some(rows) => rows
-                .lines()
-                .map(|row| format!("echo '{row}'"))
-                .collect::<Vec<_>>()
-                .join("; "),
+            Some(rows) => echo_rows(rows),
             None => "echo 'lost server' >&2; exit 1".to_string(),
+        };
+        let signalled = dir.path().join("signalled");
+        let after = match fake.after_signal {
+            None => String::new(),
+            Some(AfterSignal::Gone) => "if [ \"$1\" = list-sessions ]; then exit 0; fi".into(),
+            Some(AfterSignal::Panes(rows)) => format!(
+                "if [ \"$1\" = list-panes ]; then {}; exit 0; fi",
+                echo_rows(rows)
+            ),
         };
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{log}'\n\
+             if [ \"$1\" = send-keys ]; then touch '{signalled}'; fi\n\
+             if [ -f '{signalled}' ]; then :; {after}\nfi\n\
              if [ \"$1\" = list-sessions ]; then {sessions}; fi\n\
              if [ \"$1\" = list-panes ]; then {panes}; fi\nexit 0\n",
-            log = log.display()
+            log = log.display(),
+            signalled = signalled.display(),
         );
         std::fs::write(&bin, script).expect("write fake tmux");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -133,6 +159,7 @@ async fn stopping_a_stale_record_never_signals_the_live_session_that_reused_its_
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("errored", Some("%2077")).await;
@@ -152,6 +179,7 @@ async fn deleting_a_stale_record_never_touches_the_live_session_that_reused_its_
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -172,6 +200,7 @@ async fn deleting_a_stale_record_leaves_the_live_session_and_says_so() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -196,6 +225,7 @@ async fn the_stop_report_says_the_runtime_was_left_running() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1\n%10:0"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("active", Some("%2077")).await;
@@ -205,8 +235,11 @@ async fn the_stop_report_says_the_runtime_was_left_running() {
         .await
         .expect("stop");
 
-    let why = report.runtime.left_running().expect("left running");
-    assert!(why.contains("another session now uses the name"), "{why}");
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Foreign(why) if why.contains("another session now uses the name")),
+        "{:?}",
+        report.runtime
+    );
     assert_eq!(report.record.state, ManagedSessionState::Stopped);
     f.assert_untouched();
 }
@@ -219,6 +252,7 @@ async fn stopping_a_record_whose_pane_is_live_still_kills_it() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("active", Some("%9")).await;
@@ -230,9 +264,13 @@ async fn stopping_a_record_whose_pane_is_live_still_kills_it() {
 
     assert_eq!(report.runtime, RuntimeTeardown::Terminated);
     let calls = f.calls();
+    // #8935 critic round: with no claude pid, the Ctrl-C goes to the
+    // record's pane %9, not to the session's active pane.
     assert!(
-        calls.contains("send-keys"),
-        "the runtime was signalled: {calls}"
+        calls
+            .lines()
+            .any(|l| l.starts_with("send-keys") && l.contains("%9") && l.contains("C-c")),
+        "the record's pane %9 was signalled: {calls}"
     );
     assert!(
         calls.contains("kill-session"),
@@ -248,6 +286,7 @@ async fn an_unlistable_pane_set_leaves_the_runtime_running() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: None,
+        after_signal: None,
     })
     .await;
     let id = f.seed("active", Some("%9")).await;
@@ -257,8 +296,11 @@ async fn an_unlistable_pane_set_leaves_the_runtime_running() {
         .await
         .expect("stop");
 
-    let why = report.runtime.left_running().expect("left running");
-    assert!(why.contains("could not be listed"), "{why}");
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Unproven(why) if why.contains("could not be listed")),
+        "{:?}",
+        report.runtime
+    );
     f.assert_untouched();
 }
 
@@ -270,6 +312,7 @@ async fn an_unreadable_session_probe_leaves_the_runtime_running() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: true,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("active", Some("%9")).await;
@@ -299,6 +342,7 @@ async fn delete_refuses_an_unverifiable_live_name_without_force() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("active", None).await;
@@ -338,6 +382,7 @@ async fn decommissioning_a_stale_record_never_kills_the_live_session() {
     let f = Fixture::new(FakeTmux {
         sessions_fail: false,
         panes: Some("%9:1"),
+        after_signal: None,
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -350,4 +395,134 @@ async fn decommissioning_a_stale_record_never_kills_the_live_session() {
     let after = f.mgr.get(&id).await.expect("record");
     assert_eq!(after.state, ManagedSessionState::Decommissioned);
     f.assert_untouched();
+}
+
+/// #8935 critic round, error arm (Fail-Open Check): the pane list cannot be
+/// read, so the live session may be this record's claude. Decommission
+/// refuses before it removes the owned workspace or tombstones the record.
+/// Red on a73e5ac7f3, which discarded the verdict and decommissioned.
+#[serial_test::serial]
+#[tokio::test]
+async fn decommission_with_an_unlistable_pane_set_changes_nothing() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: false,
+        panes: None,
+        after_signal: None,
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+    let root = f.dir.path().join("managed-root");
+    let ws = root.join("owner").join("repo").join("sess");
+    // Build output only, so the workspace removal would otherwise run (#8663).
+    std::fs::create_dir_all(ws.join("target")).expect("workspace");
+    std::fs::write(ws.join("target/sentinel.txt"), "kept").expect("sentinel");
+    let mut record = f.mgr.get(&id).await.expect("record");
+    record.workspace_path = Some(ws.clone());
+    record.workspace_owned = true;
+    f.mgr
+        .store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("seed");
+
+    let err = f
+        .scoped(f.mgr.decommission_with_root(&id, &root, None))
+        .await
+        .expect_err("an unproven runtime refuses the decommission");
+
+    assert!(
+        matches!(&err, ManagedError::InvalidState(_, why) if why.contains("could not be listed")),
+        "{err}"
+    );
+    assert!(ws.join("target/sentinel.txt").exists(), "workspace removed");
+    let after = f.mgr.get(&id).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
+    f.assert_untouched();
+}
+
+/// #8935 critic round: `--force` deletes the record even when the tmux probe
+/// itself fails, and the note says so. Red on a73e5ac7f3, whose `?` turned
+/// the probe error into `TmuxUnavailable` under `--force` too.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_forced_delete_survives_a_failed_tmux_probe() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: true,
+        panes: Some("%9:1"),
+        after_signal: None,
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+
+    let (_, note) = f
+        .scoped(f.mgr.delete_record_reporting(&id, true))
+        .await
+        .expect("a forced delete does not need tmux");
+
+    let note = note.expect("the note names the failed probe");
+    assert!(note.contains("probe failed"), "{note}");
+    let after = f.mgr.get(&id).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Deleted);
+    f.assert_untouched();
+}
+
+/// #8935 post-grace re-check, `Foreign` arm: the record's pane %9 is signalled,
+/// and by the re-check the name holds only %10. The session is not killed.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_pane_that_changes_hands_during_the_grace_window_is_not_killed() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: false,
+        panes: Some("%9:1"),
+        after_signal: Some(AfterSignal::Panes("%10:1")),
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+    let record = f.mgr.get(&id).await.expect("record");
+
+    let teardown = f
+        .scoped(f.mgr.graceful_terminate_runtime(&record, "test"))
+        .await
+        .expect("teardown");
+
+    assert!(
+        matches!(&teardown, RuntimeTeardown::Foreign(why) if why.contains("%9")),
+        "{teardown:?}"
+    );
+    let calls = f.calls();
+    assert!(
+        calls.contains("send-keys"),
+        "the pane was signalled: {calls}"
+    );
+    assert!(!calls.contains("kill-session"), "{calls}");
+}
+
+/// #8935 post-grace re-check, `Absent` arm: the session ended during the
+/// grace window. The teardown reports `Terminated` and kills nothing.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_session_gone_after_the_grace_window_is_terminated_without_a_kill() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: false,
+        panes: Some("%9:1"),
+        after_signal: Some(AfterSignal::Gone),
+    })
+    .await;
+    let id = f.seed("active", Some("%9")).await;
+    let record = f.mgr.get(&id).await.expect("record");
+
+    let teardown = f
+        .scoped(f.mgr.graceful_terminate_runtime(&record, "test"))
+        .await
+        .expect("teardown");
+
+    assert_eq!(teardown, RuntimeTeardown::Terminated);
+    let calls = f.calls();
+    assert!(
+        calls.contains("send-keys"),
+        "the pane was signalled: {calls}"
+    );
+    assert!(!calls.contains("kill-session"), "{calls}");
 }

@@ -59,11 +59,14 @@ async fn graceful_terminate_runtime_signals_then_kills() {
         .expect("drain");
     assert_eq!(teardown, RuntimeTeardown::Terminated);
 
+    // #8935: the Ctrl-C fallback targets the record's own pane, never the
+    // session's active pane.
     assert_eq!(
-        *fake.interrupt_calls.lock().unwrap(),
-        vec!["tm-drain-1".to_string()],
-        "expected a Ctrl-C interrupt (SIGTERM fallback) before the pane is reclaimed"
+        *fake.pane_interrupt_calls.lock().unwrap(),
+        vec![("tm-drain-1".to_string(), "%1".to_string())],
+        "expected a Ctrl-C interrupt to the record's pane before it is reclaimed"
     );
+    assert!(fake.interrupt_calls.lock().unwrap().is_empty());
     assert_eq!(
         *fake.kill_calls.lock().unwrap(),
         vec!["tm-drain-1".to_string()],
@@ -93,7 +96,8 @@ async fn graceful_terminate_runtime_noop_when_session_gone() {
     assert_eq!(teardown, RuntimeTeardown::Absent);
 
     assert!(
-        fake.interrupt_calls.lock().unwrap().is_empty(),
+        fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty(),
         "must not signal a session that no longer exists"
     );
     assert!(

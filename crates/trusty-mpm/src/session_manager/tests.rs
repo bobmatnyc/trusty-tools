@@ -979,8 +979,10 @@ async fn decommission_record_only_never_touches_the_runtime() {
         .await
         .expect("record-only decommission");
 
+    // #8935: the teardown's Ctrl-C now targets the record's pane.
     assert!(
-        fake.interrupt_calls.lock().unwrap().is_empty(),
+        fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty(),
         "record-only must never signal the runtime; got {:?}",
         fake.interrupt_calls.lock().unwrap()
     );
@@ -1105,6 +1107,7 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
     assert!(
         fake.kill_calls.lock().unwrap().is_empty()
             && fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty()
             && fake.graceful_stop_calls.lock().unwrap().is_empty(),
         "effect 1: the runtime must be untouched"
     );

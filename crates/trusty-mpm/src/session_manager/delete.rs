@@ -95,10 +95,13 @@ impl SessionManager {
     /// [`runtime_identity::runtime_ownership`] instead of name membership, so
     /// a live session proved NOT to hold the record's pane (`Foreign`) no
     /// longer blocks the delete of a stale record; `Owned` and `Unverifiable`
-    /// still need `force`. The second value is
+    /// still need `force`. A failed probe refuses without `force` (#5859) and,
+    /// with `force`, reads as `Unverifiable` so the delete proceeds and the
+    /// note says the probe failed. The second value is
     /// [`runtime_identity::RuntimeOwnership::left_running_note`].
     /// Test: `deleting_a_stale_record_leaves_the_live_session_and_says_so`,
-    /// `delete_refuses_an_unverifiable_live_name_without_force`.
+    /// `delete_refuses_an_unverifiable_live_name_without_force`,
+    /// `a_forced_delete_survives_a_failed_tmux_probe`.
     pub async fn delete_record_reporting(
         &self,
         id: &ManagedSessionId,
@@ -113,7 +116,16 @@ impl SessionManager {
         // #8935: the guard asks whose the live session is, not only whether
         // the name is live; a session that took a stale record's name since
         // does not make the stale record "running".
-        let ownership = runtime_identity::runtime_ownership(&record, self.tmux.as_ref())?;
+        // #8935 critic round: `--force` asks for the record to go whatever
+        // tmux says, so under `force` a failed probe is a note, not an error.
+        let ownership = match runtime_identity::runtime_ownership(&record, self.tmux.as_ref()) {
+            Err(e) if force => runtime_identity::RuntimeOwnership::Unverifiable(format!(
+                "tmux probe failed ({e}), so any live tmux session named '{}' \
+                 could not be checked",
+                record.tmux_name
+            )),
+            probed => probed?,
+        };
         if !force && ownership.may_be_ours() {
             // #7224: the refusal used to inline the 36-character UUID twice, mid
             // sentence, which any width-clamped surface cut mid-token. The
