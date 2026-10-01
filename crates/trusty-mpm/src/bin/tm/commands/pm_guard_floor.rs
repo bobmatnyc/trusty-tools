@@ -43,7 +43,7 @@ use crate::commands::pm_guard_architect_reason::{
 };
 use crate::commands::pm_guard_bash::{
     ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, evaluate_architect_pane,
-    evaluate_d4_floor, evaluate_destructive_delete_command, unclassifiable_command,
+    evaluate_d4_floor, evaluate_destructive_delete_command, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -231,8 +231,9 @@ fn universal_floor(
     // #8878 fix round: `$'\x2f'` decoding hides a path or program from every
     // rule below, so a command the guard cannot read denies here too, as it
     // does first on the guarded path (#6660).
-    if let Some(reason) = command.and_then(unclassifiable_command) {
-        return deny("unclassifiable-command", reason.to_string());
+    // #9001: the refusal names the `$'…'` token it cannot decode.
+    if let Some(reason) = command.and_then(unclassifiable_reason) {
+        return deny("unclassifiable-command", reason);
     }
     if let Some(reason) = pm_guard_trust_anchor::evaluate(payload, &gate.env, &*gate.config) {
         return deny(TRUST_ANCHOR_RULE, reason);

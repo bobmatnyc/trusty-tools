@@ -221,7 +221,7 @@ use crate::commands::pm_guard_bash::{
     evaluate_main_checkout_destructive_command, evaluate_main_checkout_head_switch,
     evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
     evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_command,
+    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_reason,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_build_lease;
@@ -446,9 +446,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // or nesting past the descent budget silently satisfied every one of
         // them. Placing the refusal here rather than inside each rule is what
         // keeps a rule added later from inheriting the same hole.
-        if let Some(reason) = unclassifiable_command(command) {
-            audit_denied_tool(&refused, "unclassifiable-command", reason).await;
-            println!("{}", build_pm_guard_deny_response(reason));
+        if let Some(reason) = unclassifiable_reason(command) {
+            audit_denied_tool(&refused, "unclassifiable-command", &reason).await; // #9001
+            println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());
         }
         // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
