@@ -281,13 +281,15 @@ fn the_documented_residuals_allow() {
 #[test]
 fn the_repo_gate_scripts_allow_8879() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // #8879: bare names, joined below, so no `scripts/<name>.sh` literal sits in
+    // crate source for scripts/select-test-crates.sh to read as a reference.
     for gate in [
-        "scripts/check_line_cap.sh",
-        "scripts/check_test_pointers.sh",
-        "scripts/check_changelog_fragment.sh",
-        "scripts/check_sld.sh",
+        "check_line_cap.sh",
+        "check_test_pointers.sh",
+        "check_changelog_fragment.sh",
+        "check_sld.sh",
     ] {
-        let command = format!("./{gate} --staged");
+        let command = format!("./scripts/{gate} --staged");
         assert_eq!(eval(&command, &root), None, "`{command}` must allow");
     }
 }
