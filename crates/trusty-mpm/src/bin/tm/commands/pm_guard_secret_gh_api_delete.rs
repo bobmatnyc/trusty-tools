@@ -19,7 +19,7 @@
 //! `pm_guard_denies_a_gh_api_delete_of_a_secret_8875`.
 
 use super::is_redirect_shaped;
-use crate::commands::pm_guard_bash::{split_shell_segments, tokenize};
+use crate::commands::pm_guard_bash::{blank_spans, data_bodies, split_shell_segments, tokenize};
 use crate::commands::pm_guard_secret_read::command_basename;
 
 /// `gh api` switches: they take no value (pflag also accepts `--name=bool`).
@@ -122,7 +122,49 @@ const MAX_DEPTH: usize = 8;
 /// `keeps_the_get_listing_and_literal_non_secret_deletes_8875`,
 /// `every_gh_api_delete_arm_fails_closed_8875`.
 pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
-    judge(command, 0).then(deny_reason)
+    // #9001: an inert data here-document body is no shell call.
+    judge(&without_inert_bodies(command), 0).then(deny_reason)
+}
+
+/// `command` with each inert data here-document body blanked (#9001 case 4).
+///
+/// Why: each line of a `python3 - <<'EOF'` body was judged as a shell
+/// segment, and a Python line that does not lex, with two bracketed words in
+/// a row (`d[k] {x}`), read as a rewritten `gh api` call.
+/// What: a body handed to a non-shell program (`data_bodies`) is blanked when
+/// it is inert: it names no `gh` or `curl` word with quotes and backslashes
+/// removed; an unquoted-delimiter body runs no `$(…)` or backtick; and a body
+/// carrying a `$` sits in a command that names no `gh`/`curl` anywhere, so no
+/// variable set beside it can spell the call. Any other body, and every
+/// operator line, is judged as before.
+/// Test: `a_python_heredoc_with_no_gh_or_curl_is_no_secret_delete_9001`,
+/// `a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001`.
+fn without_inert_bodies(command: &str) -> String {
+    let command_names_a_call = names_gh_or_curl(command);
+    let spans: Vec<(usize, usize)> = data_bodies(command)
+        .iter()
+        .filter(|body| {
+            let text = &command[body.span.0..body.span.1];
+            !names_gh_or_curl(text)
+                && !(body.expands && (text.contains("$(") || text.contains('`')))
+                && !(text.contains('$') && command_names_a_call)
+        })
+        .map(|body| body.span)
+        .collect();
+    blank_spans(command, &spans)
+}
+
+/// Whether `text`, quotes and backslashes removed, names a `gh`/`curl` word.
+fn names_gh_or_curl(text: &str) -> bool {
+    [
+        text.replace(['\'', '"', '\\'], ""),
+        text.replace(['\'', '"', '\\'], " "),
+    ]
+    .iter()
+    .any(|flat| {
+        flat.split(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c)))
+            .any(|w| matches!(command_basename(w).as_str(), "gh" | "curl"))
+    })
 }
 
 /// Whether `command`, reached `depth` re-judges deep, deletes a secret.

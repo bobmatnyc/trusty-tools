@@ -126,7 +126,7 @@ pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
-pub(crate) use heredoc::{data_bodies, split_heredoc_bodies};
+pub(crate) use heredoc::{blank_spans, data_bodies, split_heredoc_bodies};
 // #9001: the `$'…'` decoder, and the #6660 refusal that names its token.
 mod ansi_c_decode;
 pub(crate) use ansi_c_decode::unclassifiable_reason;
@@ -1090,6 +1090,9 @@ mod tests;
 // the allow case and the deny case bounding it sit side by side per issue.
 #[cfg(test)]
 mod false_positive_tests;
+// #9001: cases 2-4, each allow beside the deny that bounds it.
+#[cfg(test)]
+mod false_positive_9001_tests;
 
 // #7839, #7833, #7479, #7744, #7743, #7738, #7728, #7863: one row per issue
 // for the shared-tokenizer cluster, beside the still-refused controls that

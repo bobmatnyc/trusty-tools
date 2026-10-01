@@ -46,11 +46,7 @@ fn refuses_what_it_cannot_decode() {
 /// A `$'` inside quotes, after a backslash, or after `$$` is no quote.
 #[test]
 fn leaves_a_quoted_dollar_quote_alone() {
-    for command in [
-        r#"echo "cost $'5'""#,
-        r"echo '$'",
-        r"echo \$'x'",
-    ] {
+    for command in [r#"echo "cost $'5'""#, r"echo '$'", r"echo \$'x'"] {
         assert_eq!(decode_ansi_c(command), Decoded::Plain, "{command}");
     }
     assert_eq!(text(r"echo $$ $'\x41'"), "echo $$ 'A'");

@@ -81,7 +81,11 @@ pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
         out.push(c);
         i += 1;
     }
-    if found { Decoded::Text(out) } else { Decoded::Plain }
+    if found {
+        Decoded::Text(out)
+    } else {
+        Decoded::Plain
+    }
 }
 
 /// The #6660 refusal for `command`, naming the `$'…'` token when that is the
