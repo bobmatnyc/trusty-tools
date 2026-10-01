@@ -96,37 +96,39 @@ fn a_for_loop_whose_words_reach_anything_else_still_denies_9001() {
     ]);
 }
 
-/// Case 4: a Python here-document that edits a local file, with an
-/// apostrophe line and bracketed words, is no `gh api` secret DELETE.
+/// Case 4: a Python here-document that edits a local file, with a line that
+/// does not lex (`'it's'`) and bracketed words, is no `gh api` secret DELETE.
 #[test]
 fn a_python_heredoc_with_no_gh_or_curl_is_no_secret_delete_9001() {
     allowed(&[
         "python3 - <<'EOF'\n\
-               p = 'docs/notes.md'\n\
-               s = open(p).read()\n\
-               # don't merge d[k] x[0] here\n\
-               s = s.replace('old', 'new')\n\
-               open(p, 'w').write(s)\n\
-               EOF",
+         p = 'docs/notes.md'\n\
+         s = open(p).read()\n\
+         print('it's d[k] x[0]')\n\
+         open(p, 'w').write(s.replace('old', 'new'))\n\
+         EOF",
         "python3 - <<'EOF'\n\
          p = 'src/x_tests.rs'\n\
-         # don't drop the `cd` in d[k] x[0]\n\
+         print('it's the `cd` in d[k] x[0]')\n\
          s = open(p).read().replace('\"cd $WT && x\"', '\"cd $WT && y\"')\n\
          open(p, 'w').write(s)\n\
          EOF",
     ]);
 }
 
-/// Case 4 bound: a real secret DELETE, and a body that names gh or curl or
-/// runs a substitution, still deny; so does a heredoc fed to a shell.
+/// Case 4 bound: a real secret DELETE, and a body that names gh, runs a
+/// substitution or sits beside a `gh` its `$` can spell, still deny; so does
+/// a here-document fed to a shell.
 #[test]
 fn a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001() {
     denied(&[
         "gh api -X DELETE repos/o/r/actions/secrets/NAME",
-        "python3 - <<'EOF'\n# don't d[k] x[0]\nimport os; os.system('gh api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
-        "python3 - <<EOF\n# don't d[k] x[0]\nx = \"$(gh api -X DELETE repos/o/r/actions/secrets/X)\"\nEOF",
-        "G=gh A=api python3 - <<'EOF'\n# don't d[k] x[0]\n\
-         import os; os.system(\"$G $A -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+        "python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
+         os.system('gh api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<EOF\nprint('it's d[k] x[0]')\n\
+         x = \"$(gh api -X DELETE repos/o/r/actions/secrets/X)\"\nEOF",
+        "G=gh A=api python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
+         os.system(\"$G $A -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
         "bash <<'EOF'\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "cat <<'EOF' | sh\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "gh auth token",

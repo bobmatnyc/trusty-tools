@@ -360,7 +360,7 @@ fn pm_guard_allows_the_9001_false_positives() {
     );
     assert_allowed(
         "python3 - <<'EOF'\np = 'docs/notes.md'\ns = open(p).read()\n\
-         # don't merge d[k] x[0] here\ns = s.replace('old', 'new')\n\
+         print('it's d[k] x[0]')\ns = s.replace('old', 'new')\n\
          open(p, 'w').write(s)\nEOF",
     );
 }

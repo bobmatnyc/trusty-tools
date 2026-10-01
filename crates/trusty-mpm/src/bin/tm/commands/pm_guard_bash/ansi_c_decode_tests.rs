@@ -25,8 +25,13 @@ fn decodes_each_supported_escape() {
 /// stays undecodable and is named.
 #[test]
 fn refuses_what_it_cannot_decode() {
+    // Built with `format!` so no editor decodes the `\u` escape on write.
+    let unicode = format!("$'{}u0074mux'", '\\');
+    assert_eq!(
+        decode_ansi_c(&format!("echo {unicode}")),
+        Decoded::Undecodable(unicode.clone())
+    );
     for (command, token) in [
-        (r"echo $'tmux'", r"$'tmux'"),
         (r"echo $'\cA'", r"$'\cA'"),
         (r"echo $'\q'", r"$'\q'"),
         (r"echo $'\0'", r"$'\0'"),
@@ -60,8 +65,9 @@ fn the_refusal_names_the_token_it_cannot_decode() {
     assert!(reason.starts_with(ANSI_C_QUOTING_REASON), "{reason}");
     assert!(reason.contains(r"`$'\x1b'`"), "{reason}");
     assert!(reason.contains("printf"), "{reason}");
-    let reason = unclassifiable_reason(r"echo $'t'").expect("refused");
-    assert!(reason.contains(r"`$'t'`"), "{reason}");
+    let unicode = format!("$'{}u0074'", '\\');
+    let reason = unclassifiable_reason(&format!("echo {unicode}")).expect("refused");
+    assert!(reason.contains(&format!("`{unicode}`")), "{reason}");
     assert_eq!(unclassifiable_reason("grep -c x log"), None);
     let wrapper = "sh -c \"git worktree remove 'unterminated\"";
     assert_eq!(

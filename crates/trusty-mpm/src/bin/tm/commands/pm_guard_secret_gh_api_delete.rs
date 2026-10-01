@@ -132,8 +132,8 @@ pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
 /// segment, and a Python line that does not lex, with two bracketed words in
 /// a row (`d[k] {x}`), read as a rewritten `gh api` call.
 /// What: a body handed to a non-shell program (`data_bodies`) is blanked when
-/// it is inert: it names no `gh` or `curl` word with quotes and backslashes
-/// removed; an unquoted-delimiter body runs no `$(…)` or backtick; and a body
+/// it is inert: neither it nor its operator line names a `gh` or `curl` word
+/// with quotes and backslashes removed; an unquoted-delimiter body runs no `$(…)` or backtick; and a body
 /// carrying a `$` sits in a command that names no `gh`/`curl` anywhere, so no
 /// variable set beside it can spell the call. Any other body, and every
 /// operator line, is judged as before.
@@ -145,7 +145,9 @@ fn without_inert_bodies(command: &str) -> String {
         .iter()
         .filter(|body| {
             let text = &command[body.span.0..body.span.1];
+            let operator = &command[body.operator_line.0..body.operator_line.1];
             !names_gh_or_curl(text)
+                && !names_gh_or_curl(operator)
                 && !(body.expands && (text.contains("$(") || text.contains('`')))
                 && !(text.contains('$') && command_names_a_call)
         })
