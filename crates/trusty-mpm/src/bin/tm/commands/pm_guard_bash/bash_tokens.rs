@@ -187,13 +187,6 @@ const INLINE_PROGRAM_INTERPRETERS: &[&str] = &[
 /// rather than under-refuses.
 const INLINE_PROGRAM_FLAGS: &[&str] = &["-c", "-e", "-r", "--eval", "--command"];
 
-/// SQL clients whose statement flag takes a SQL program, never a path (#9001).
-const SQL_CLIENTS: &[&str] = &["mysql", "mariadb"];
-
-/// The separate statement flags of [`SQL_CLIENTS`]; a joined `-e…` keeps the
-/// argv scan, which over-refuses.
-const SQL_STATEMENT_FLAGS: &[&str] = &["-e", "--execute"];
-
 /// The awk-family programs whose first positional argument IS the program.
 const AWK_PROGRAMS: &[&str] = &["awk", "gawk", "nawk", "mawk"];
 
@@ -228,8 +221,7 @@ const PROGRAM_FILE_FLAGS: &[&str] = &["-f", "--file"];
 /// rather than as an argv operand.
 /// What: `program` is the caller's already-resolved program basename and
 /// `start` its index in `argv`. For an [`INLINE_PROGRAM_INTERPRETERS`] entry,
-/// every token following an [`INLINE_PROGRAM_FLAGS`] spelling; for a
-/// [`SQL_CLIENTS`] entry, each [`SQL_STATEMENT_FLAGS`] value (#9001). For an
+/// every token following an [`INLINE_PROGRAM_FLAGS`] spelling. For an
 /// [`AWK_PROGRAMS`] or [`SED_PROGRAMS`] entry, every
 /// [`SED_EXPRESSION_FLAGS`] value, or — when none is present — the first
 /// operand that is neither a flag, nor a value-taking flag's value, nor (for
@@ -240,25 +232,17 @@ const PROGRAM_FILE_FLAGS: &[&str] = &["-f", "--file"];
 /// `bash_tokens_withdraws_on_a_program_file_flag`,
 /// `guard_tokenizer_bounds_the_program_text_relaxations`,
 /// `guard_7839_sed_expression_wildcard`, `guard_7744_awk_pattern_match_rule`,
-/// `guard_7738_python_inline_regex_literal`,
-/// `a_sql_wildcard_in_a_mysql_statement_is_no_path_9001`.
+/// `guard_7738_python_inline_regex_literal`.
 pub(crate) fn program_text_indices(program: &str, argv: &[String], start: usize) -> Vec<usize> {
     let rest_start = start + 1;
     let Some(rest) = argv.get(rest_start..) else {
         return Vec::new();
     };
-    // #9001: a SQL client's `-e` statement is program text, so `` `db`.* `` is a
-    // SQL wildcard; `.env` named in the statement still denies.
-    let flags = match program {
-        p if INLINE_PROGRAM_INTERPRETERS.contains(&p) => INLINE_PROGRAM_FLAGS,
-        p if SQL_CLIENTS.contains(&p) => SQL_STATEMENT_FLAGS,
-        _ => &[],
-    };
-    if !flags.is_empty() {
+    if INLINE_PROGRAM_INTERPRETERS.contains(&program) {
         return rest
             .iter()
             .enumerate()
-            .filter(|(_, token)| flags.contains(&token.as_str()))
+            .filter(|(_, token)| INLINE_PROGRAM_FLAGS.contains(&token.as_str()))
             .map(|(offset, _)| rest_start + offset + 1)
             .filter(|index| *index < argv.len())
             .collect();

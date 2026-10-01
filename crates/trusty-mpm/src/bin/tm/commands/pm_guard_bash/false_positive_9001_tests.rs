@@ -1,5 +1,6 @@
-//! #9001 cases 2-3: the secret rules' false positives, each beside the deny
-//! that bounds its fix, and the #8875 curl-fallback rows (case 4 is #9006). Every command goes through the unified secret entry
+//! #9001 case 3: the secret rule's false positive beside the deny that bounds
+//! it, the mysql DENY rows, and the #8875 curl-fallback rows (case 2 folds
+//! into #9006; case 4 is split out). Every command goes through the unified secret entry
 //! point, so the #7266 read rule, the #8596 credential-print rule and the
 //! #8875 delete rule all judge it.
 
@@ -23,16 +24,9 @@ fn denied(commands: &[&str]) {
     assert!(allowed.is_empty(), "expected DENY: {allowed:#?}");
 }
 
-/// Case 2: `` `db`.* `` in a `mysql -e` statement is a SQL wildcard.
-#[test]
-fn a_sql_wildcard_in_a_mysql_statement_is_no_path_9001() {
-    allowed(&[
-        "mysql -h db -u admin -e \"GRANT ALL PRIVILEGES ON \\`appdb\\`.* TO 'app'@'%'\"",
-        "mariadb --execute \"GRANT SELECT ON \\`appdb\\`.* TO 'ro'@'%'\" -h db",
-    ]);
-}
-
-/// Case 2 bound: a secret named in the statement or as an operand still denies.
+/// A secret named in a `mysql -e` statement or operand still denies, and so
+/// does a client shell escape that globs onto one. Case 2 (reading the
+/// statement as SQL) moved to #9006.
 #[test]
 fn a_secret_named_in_a_mysql_statement_still_denies_9001() {
     denied(&[
@@ -105,7 +99,7 @@ fn a_for_loop_whose_words_reach_anything_else_still_denies_9001() {
 /// from split variables (expanding `<<EOF`, or exported prefix assignments
 /// read by the program's own shell under `<<'EOF'`), or through a glob —
 /// still denies, as does a real DELETE and a body fed to a shell. Case 4
-/// (body blanking) moved to #9006; bodies reach the #8875 judge unchanged.
+/// (body blanking) is split out; bodies reach the #8875 judge unchanged.
 #[test]
 fn a_heredoc_body_that_spells_gh_or_curl_still_denies_9001() {
     denied(&[

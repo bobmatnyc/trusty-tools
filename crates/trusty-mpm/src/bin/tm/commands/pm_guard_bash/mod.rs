@@ -1090,7 +1090,7 @@ mod tests;
 // the allow case and the deny case bounding it sit side by side per issue.
 #[cfg(test)]
 mod false_positive_tests;
-// #9001: cases 2-3, each allow beside the deny that bounds it.
+// #9001: case 3's allow beside its deny bound, plus the mysql DENY rows.
 #[cfg(test)]
 mod false_positive_9001_tests;
 
