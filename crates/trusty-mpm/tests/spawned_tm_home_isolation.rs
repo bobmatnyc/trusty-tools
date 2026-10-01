@@ -255,6 +255,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // #8878 ruling A: the guard must be the child of a fake `claude` shell, so
     // the shell runs `tm` by path; the isolation goes on the shell.
     ("tests/tm_hook_pm_guard_trust_anchor_8878.rs", 1),
+    // #8531: the daemon binds a SessionStart to the `claude` above `tm hook`,
+    // so a fake `claude` shell runs `tm` by path; the isolation goes on it.
+    ("tests/tm_hook_session_start_8531.rs", 1),
     // `#[ignore]`d live test (#1053): it drives a real `claude` session against
     // the framework the operator actually installed, so a scratch `$HOME` would
     // make it untestable rather than hermetic. Never run in CI.

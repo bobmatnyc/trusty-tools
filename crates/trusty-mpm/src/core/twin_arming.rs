@@ -54,6 +54,9 @@ pub const MAX_ANCESTOR_HOPS: usize = 1;
 /// is two hops up, not one; three leaves room for one more shell. The check
 /// is informational and never grants anything, so the wider walk opens no
 /// write the hook's one-hop walk refuses.
+// #8531: `tm repair delegation` runs from the same Bash tool, so the repair
+// owner check walks this far too. It grants only when the `claude` it stops
+// at IS the owning session's process, never on the walk alone.
 pub const STATUS_MAX_ANCESTOR_HOPS: usize = 3;
 
 /// The machine-backed [`TwinProbe`].
@@ -311,7 +314,8 @@ pub fn process_facts(pid: u32) -> Result<ProcessFacts, String> {
 /// side, a failed read is `Err`, never `false`, so the walk cannot skip a
 /// process it could not identify.
 /// Test: `is_claude_of_a_dead_pid_is_an_error`.
-fn is_claude(pid: u32) -> Result<bool, String> {
+// #8531: the daemon's repair-owner walk uses the same rule.
+pub(crate) fn is_claude(pid: u32) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
         return Ok(comm.to_ascii_lowercase().contains("claude"));
