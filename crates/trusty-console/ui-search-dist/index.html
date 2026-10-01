@@ -16,13 +16,12 @@
       href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <!-- Injected by daemon at serve time. Defaults are dev-friendly. -->
-    <script>
-      window.__DAEMON_PORT__ = window.__DAEMON_PORT__ || 7878;
-      window.__OPENROUTER_ENABLED__ = window.__OPENROUTER_ENABLED__ || false;
-    </script>
-    <script type="module" crossorigin src="./assets/index-IvMcIKfO.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-zqEvT_dA.css">
+    <!-- No default port or chat flag here: trusty-search's own /ui injects
+         __DAEMON_PORT__ and __OPENROUTER_ENABLED__ at serve time, and the
+         console injects only __SEARCH_BASE__. A default would show a port the
+         page may not be using (src/lib/transport.js). -->
+    <script type="module" crossorigin src="./assets/index-D7Ig1cs4.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-C7Tko6u0.css">
   </head>
   <body>
     <div id="app"></div>
