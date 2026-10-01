@@ -49,6 +49,11 @@ fn a_missing_registry_is_ok_8980() {
     let check = check_session_claudes(dir.path());
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(check.message.contains("no session-claude registry yet"));
+    assert!(
+        check
+            .message
+            .contains("describes the file, not the running daemon")
+    );
 }
 
 /// #8980: a registry the daemon trusts is `Ok`, with its counts.
@@ -59,7 +64,11 @@ fn a_trusted_registry_is_ok_8980() {
     let check = check_session_claudes(&root);
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
-        check.message.contains("1 session(s) bound") && check.message.contains("1 unproven"),
+        check.message.contains("1 session(s) bound")
+            && check.message.contains("1 unproven")
+            && check
+                .message
+                .contains("describes the file, not the running daemon"),
         "{}",
         check.message
     );
@@ -89,6 +98,32 @@ fn an_open_registry_warns_8980() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (root, _) = registry(dir.path(), 0o644);
     assert_warns(&check_session_claudes(&root), "only its owner may");
+}
+
+/// #8980: a daemon that loaded a corrupt registry stays sealed after the
+/// file is removed, and its own doctor route says so instead of `Ok`.
+#[tokio::test]
+async fn a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_, file) = registry(dir.path(), 0o600);
+    std::fs::write(&file, b"{\"version\":1,\"sessions\":").expect("corrupt it");
+    let state = std::sync::Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    assert!(state.session_claudes().sealed().is_some(), "loaded sealed");
+    std::fs::remove_file(&file).expect("fix the file by removing it");
+    let report = crate::daemon::rpc::core_ops::doctor(&state, Default::default()).await;
+    let row = report
+        .checks
+        .iter()
+        .find(|c| c.name == "session_claudes")
+        .expect("session_claudes row");
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message
+            .contains("this daemon loaded an untrusted file and stays sealed until restart: "),
+        "{}",
+        row.message
+    );
+    assert!(report.overall.worst(CheckStatus::Warn) == report.overall);
 }
 
 /// #8980 Fail-Open Check: a registry this process cannot read warns.

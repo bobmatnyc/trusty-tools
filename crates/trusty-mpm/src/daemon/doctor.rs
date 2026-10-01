@@ -295,6 +295,7 @@ use doctor_session_store::check_session_store;
 // #8980: a `session-claudes.json` the daemon cannot trust seals the registry.
 #[path = "doctor_session_claudes.rs"]
 mod doctor_session_claudes;
+pub use doctor_session_claudes::apply_daemon_seal;
 use doctor_session_claudes::check_session_claudes;
 // Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
 // written above real projects configures every session beneath it with nothing

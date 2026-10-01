@@ -10,12 +10,14 @@
 //! the daemon's own trust rules (`session_claudes::read_registry`). Absent is
 //! `Ok`; trusted is `Ok` with the entry counts; anything the daemon would
 //! refuse — unreadable, corrupt, foreign-owned, open to other users — is
-//! `Warn`, never `Ok`. It never writes the file and never asks the daemon.
+//! `Warn`, never `Ok`. It never writes the file. The daemon's own doctor route
+//! then overrides the row with the running daemon's seal
+//! ([`apply_daemon_seal`]), since a fixed file does not unseal a daemon.
 //! Test: `doctor_session_claudes_tests.rs`.
 
 use std::path::Path;
 
-use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 use crate::daemon::state::session_claudes::{
     Announcement, SESSION_CLAUDES_FILE, current_uid, read_registry,
 };
@@ -53,7 +55,8 @@ pub(super) fn check_session_claudes_as(fw_root: &Path, uid: u32) -> DoctorCheck 
             CheckStatus::Ok,
             format!(
                 "no session-claude registry yet at {} — it is written at the first \
-                 SessionStart over the daemon socket",
+                 SessionStart over the daemon socket (this describes the file, not the \
+                 running daemon)",
                 path.display()
             ),
         );
@@ -68,7 +71,8 @@ pub(super) fn check_session_claudes_as(fw_root: &Path, uid: u32) -> DoctorCheck 
                 NAME,
                 CheckStatus::Ok,
                 format!(
-                    "{} is trusted — {bound} session(s) bound to their claude, {} unproven",
+                    "{} is trusted — {bound} session(s) bound to their claude, {} unproven \
+                     (this describes the file, not the running daemon)",
                     path.display(),
                     map.len() - bound
                 ),
@@ -87,6 +91,35 @@ pub(super) fn check_session_claudes_as(fw_root: &Path, uid: u32) -> DoctorCheck 
             ),
         ),
     }
+}
+
+/// Override the file-read `session_claudes` row with the running daemon's seal.
+///
+/// Why: the daemon reads the registry only at start, so a file fixed or
+/// removed after a sealed load reads `Ok` while the daemon stays sealed
+/// (#8980). Only the daemon's own route holds that state; the CLI fallback
+/// keeps the file-only row.
+/// What: when `sealed` is `Some(why)`, replaces the row with a `Warn` naming
+/// `why` and re-folds `overall`. `None` leaves the report untouched.
+/// Test: `a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980`.
+pub fn apply_daemon_seal(report: &mut DoctorReport, sealed: Option<String>) {
+    let Some(why) = sealed else { return };
+    let row = DoctorCheck::new(
+        NAME,
+        CheckStatus::Warn,
+        format!(
+            "this daemon loaded an untrusted file and stays sealed until restart: {why}. \
+             Restart the daemon (`tm restart`) to reload the file (#8980)"
+        ),
+    );
+    match report.checks.iter_mut().find(|c| c.name == NAME) {
+        Some(check) => *check = row,
+        None => report.checks.push(row),
+    }
+    report.overall = report
+        .checks
+        .iter()
+        .fold(CheckStatus::Ok, |acc, c| acc.worst(c.status));
 }
 
 #[cfg(test)]
