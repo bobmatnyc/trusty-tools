@@ -55,6 +55,8 @@ mod finish_teardown;
 mod guard;
 // #6570: `watch_rescan` reuses the content-hash cache to skip unchanged files.
 pub(crate) mod hash;
+// #8976: a withheld hash overwrites the old one, so a revert reindexes.
+mod hash_withhold;
 mod hnsw_swap;
 // #7991: the promotion never renames over a live corpus another opener holds.
 mod live_corpus_lock;
@@ -288,6 +290,10 @@ pub(crate) use tokio::sync::Semaphore;
 // ── test module ──────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests;
+
+// #8976: which content hashes a batch commit records.
+#[cfg(test)]
+mod hash_withhold_tests;
 
 // #6524: the embedding pause, end to end.
 #[cfg(test)]

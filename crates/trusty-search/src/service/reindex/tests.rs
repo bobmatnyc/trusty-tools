@@ -2535,7 +2535,10 @@ async fn reindex_withholds_the_hash_of_a_file_whose_chunks_did_not_land() {
     let mut hashed = Vec::new();
     for file in ["a.rs", "b.rs"] {
         let has_chunks = !indexer.chunk_ids_for_file(file).await.is_empty();
-        let has_hash = hashes.contains_key(&std::path::PathBuf::from(file));
+        // A withheld hash is recorded as `WITHHELD_HASH`, never a real one.
+        let has_hash = hashes
+            .get(&std::path::PathBuf::from(file))
+            .is_some_and(|h| *h != super::hash_withhold::WITHHELD_HASH);
         assert_eq!(
             has_hash, has_chunks,
             "{file}: a hash must imply landed chunks"

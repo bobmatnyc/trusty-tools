@@ -28,6 +28,10 @@ const JSON_MAX_LINES: usize = 500;
 /// Lines per window for a JSON file of [`JSON_MAX_LINES`] lines or more.
 const JSON_WINDOW_LINES: usize = 200;
 
+/// Most windows one JSON file may produce (owner ruling item 232, Q1(b)).
+/// A file above `JSON_MAX_WINDOWS * JSON_WINDOW_LINES` lines yields no chunks.
+const JSON_MAX_WINDOWS: usize = 50;
+
 /// Maximum lines per plaintext / log chunk. Long paragraphs are split.
 const PLAINTEXT_MAX_LINES: usize = 50;
 
@@ -314,13 +318,15 @@ fn chunk_by_top_level_key(
 /// skipped outright, which left it searchable nowhere (#8976); windows keep
 /// each chunk a size the embedder and BM25 handle.
 /// What: counts lines; blank content yields `Some(vec![])`, a small file one
-/// chunk, a large file non-overlapping windows covering every line. Never
-/// returns `None`.
-/// Test: `test_chunk_json_small_file_single_chunk` and
-/// `test_chunk_json_large_file_windowed`.
+/// chunk, a large file non-overlapping windows covering every line, and a
+/// file above the window ceiling `Some(vec![])`. Never returns `None`.
+/// Test: `test_chunk_json_small_file_single_chunk`,
+/// `test_chunk_json_large_file_windowed`, and
+/// `test_chunk_json_above_window_ceiling_yields_nothing`.
 pub(super) fn chunk_json(file: &str, content: &str) -> Option<Vec<RawChunk>> {
     // #8976: blank content has nothing to index; a whitespace chunk is noise.
-    if content.trim().is_empty() {
+    // Above the ceiling the caller reports `too_large` (owner ruling 232).
+    if content.trim().is_empty() || json_exceeds_window_ceiling(file, content) {
         return Some(Vec::new());
     }
     let line_count = content.lines().count();
@@ -355,6 +361,22 @@ pub(super) fn chunk_json(file: &str, content: &str) -> Option<Vec<RawChunk>> {
         })
         .collect();
     Some(windows)
+}
+
+/// Whether `file` is JSON with more lines than its windows may cover.
+///
+/// Why: owner ruling item 232, Q1(b) — one huge JSON file must not flood the
+/// corpus with windows, and its zero-chunk result is final, so the caller
+/// keeps its content hash instead of retrying it on every reindex (#8976).
+/// What: `.json` (any case) with more than `JSON_MAX_WINDOWS *
+/// JSON_WINDOW_LINES` lines.
+/// Test: `test_chunk_json_above_window_ceiling_yields_nothing`.
+pub fn json_exceeds_window_ceiling(file: &str, content: &str) -> bool {
+    let is_json = std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    is_json && content.lines().count() > JSON_MAX_WINDOWS * JSON_WINDOW_LINES
 }
 
 /// Plaintext / logs: split on blank-line paragraphs, cap at

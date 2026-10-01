@@ -342,9 +342,12 @@ impl CodeIndexer {
     /// file that stayed unsearchable (#8976).
     /// What: the same write; zero chunks for non-blank content logs at WARN
     /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
-    /// `Empty`, a tombstone `Removed`. Every `Err` arm is unchanged.
-    /// Test: `index_file_on_large_json_lands_chunks` and
-    /// `index_file_on_blank_content_reports_empty` in `indexer::tests::zero_chunk_8976`.
+    /// `Empty`, JSON above the window ceiling `TooLarge`, a tombstone
+    /// `Removed`. Every `Err` arm is unchanged.
+    /// Test: `index_file_on_large_json_lands_chunks`,
+    /// `index_file_on_blank_content_reports_empty`, and
+    /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
+    /// `indexer::tests::zero_chunk_8976`.
     pub async fn index_file_outcome(
         &self,
         file_path: &str,
@@ -366,7 +369,7 @@ impl CodeIndexer {
         }
         let (mut chunks, entities) = chunk_ast(file_path, content);
         // #8976: classify before `chunks` moves into the commit below.
-        let outcome = IndexFileOutcome::classify(content, chunks.len());
+        let outcome = IndexFileOutcome::classify(file_path, content, chunks.len());
         if outcome == IndexFileOutcome::NoChunks {
             tracing::warn!(
                 index_id = %self.index_id,

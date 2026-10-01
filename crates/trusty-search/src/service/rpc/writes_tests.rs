@@ -832,6 +832,32 @@ async fn index_file_error_arm_never_reports_indexed() {
     assert_eq!(body["indexed"], serde_json::json!(false), "{body}");
 }
 
+/// Why (owner ruling item 232, Q2): a tombstone write removes the file's
+/// chunks, and its reply is the one `indexed: true` with zero chunks, marked
+/// `removed: true`. Fails against 889f555fc3, whose reply had no `chunks` and
+/// no `removed`.
+/// What: index `FILE`, tombstone it, read the reply and the corpus.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("ts", tmp.path()))).await;
+    let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/ts/index-file", fits).await;
+
+    let tombstone = "---\nsource_status: deleted\nsource_id: auth-8976\n---\n";
+    let body = serde_json::json!({ "path": FILE, "content": tombstone });
+    let reply = http_ok(&http, "POST", "/indexes/ts/index-file", body).await;
+    assert_eq!(reply["indexed"], serde_json::json!(true), "{reply}");
+    assert_eq!(reply["chunks"], serde_json::json!(0), "{reply}");
+    assert_eq!(reply["removed"], serde_json::json!(true), "{reply}");
+    assert!(reply.get("reason").is_none(), "{reply}");
+    let handle = state.registry.get(&IndexId::new("ts")).expect("resident");
+    let left = handle.indexer.read().await.chunk_ids_for_file(FILE).await;
+    assert!(left.is_empty(), "the tombstone removed {FILE}: {left:?}");
+}
+
 /// Why: the delete half of the same contract. `removed_chunks` is the count a
 /// caller reconciles against, so a socket that reported a different one — or
 /// reported one for a removal that did not happen — would silently desynchronise

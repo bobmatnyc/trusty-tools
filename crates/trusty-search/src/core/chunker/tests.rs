@@ -242,6 +242,26 @@ fn test_chunk_json_large_file_windowed() {
     assert!(chunks[2].content.contains("\"k450\": 450"));
 }
 
+/// Owner ruling item 232, Q1(b): a JSON file above the 50-window ceiling
+/// (10,000 lines) yields no chunks; one at the ceiling still yields 50.
+#[test]
+fn test_chunk_json_above_window_ceiling_yields_nothing() {
+    let lines = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("  \"k{i}\": {i},"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let at_ceiling = lines(10_000);
+    assert!(!super::json_exceeds_window_ceiling("a.json", &at_ceiling));
+    assert_eq!(chunk_json("a.json", &at_ceiling).expect("Some").len(), 50);
+
+    let over = lines(10_001);
+    assert!(super::json_exceeds_window_ceiling("a.JSON", &over));
+    assert!(!super::json_exceeds_window_ceiling("a.txt", &over));
+    assert!(chunk_json("a.json", &over).expect("Some").is_empty());
+}
+
 #[test]
 fn test_chunk_plaintext_paragraphs() {
     let content = "First paragraph line 1.\nFirst paragraph line 2.\n\nSecond paragraph line 1.\nSecond paragraph line 2.\n\nThird paragraph.\n";

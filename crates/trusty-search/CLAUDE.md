@@ -658,11 +658,17 @@ Add or replace one file in the index.
   ```json
   { "index_id": "my-project", "path": "src/auth.rs", "indexed": true, "chunks": 3 }
   ```
-  - `indexed` (#8976): `true` only when the file's chunks landed (or a
-    tombstone removed them, which also sets `removed: true`). A write that
-    produced no chunks answers `200` with `indexed: false`, `chunks: 0`, and
-    `reason`: `empty_file` (blank content) or `no_chunks` (non-blank content
-    the chunker could not split; also logged at WARN).
+  - `indexed` (#8976): `true` only when the file's chunks landed. A write
+    that produced no chunks answers `200` with `indexed: false`, `chunks: 0`,
+    and `reason`: `empty_file` (blank content), `too_large` (a `.json` file
+    above the 50-window ceiling of 10,000 lines; owner ruling item 232, Q1(b)),
+    or `no_chunks` (non-blank content the chunker could not split; also logged
+    at WARN). A reindex keeps the content hash of an `empty_file` or
+    `too_large` file, so it is not re-read on every run.
+  - Tombstone exemption (owner ruling item 232, Q2): a tombstone write removes
+    the file's chunks and answers `indexed: true`, `chunks: 0`,
+    `removed: true`. It is the one reply where `indexed: true` comes with zero
+    chunks.
   - `chunks` (#8976): chunks the write committed.
 - **Response 500** `index_file_failed`: the write did not land (quarantine,
   chunk cap, embed failure). Carries `indexed: false` and `message`.
@@ -933,7 +939,7 @@ this table is generated from it, not maintained by hand.
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
-| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
+| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
 | `index_status` | `index_id?` | Get stats for an index (chunk count, root path). |
 | `list_chunks` | `index_id`, `after?`, `full?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?` | Paginated enumeration of every chunk in an index (issue #54). |
 | `list_indexes` | — | List all registered indexes on this daemon |

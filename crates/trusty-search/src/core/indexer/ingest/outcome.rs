@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 
 use super::super::CodeIndexer;
+use crate::core::chunker::json_exceeds_window_ceiling;
 
 impl CodeIndexer {
     /// The files in `expected` whose every chunk id is in the corpus.
@@ -42,8 +43,9 @@ impl CodeIndexer {
 ///
 /// Why: a write that produced no chunks is not the write the caller asked
 /// for, and the caller has no other way to learn it (#8976).
-/// What: `Indexed` carries how many chunks reached the corpus; `Empty` and
-/// `NoChunks` mean nothing was written; `Removed` is a tombstone write.
+/// What: `Indexed` carries how many chunks reached the corpus; `Empty`,
+/// `TooLarge` and `NoChunks` mean nothing was written; `Removed` is a
+/// tombstone write.
 /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexFileOutcome {
@@ -51,6 +53,8 @@ pub enum IndexFileOutcome {
     Indexed { chunks: usize },
     /// The content is empty or whitespace-only, so it has nothing to index.
     Empty,
+    /// A JSON file above the chunker's window ceiling (owner ruling 232).
+    TooLarge,
     /// The content is not blank, yet the chunker produced no chunks.
     NoChunks,
     /// The content was a tombstone; the file's chunks were removed.
@@ -60,18 +64,32 @@ pub enum IndexFileOutcome {
 impl IndexFileOutcome {
     /// Classify a write whose chunker produced `chunks` chunks for `content`.
     ///
-    /// Why: blank content legitimately has no chunks; anything else with none
-    /// is a chunker gap that must surface instead of passing as success.
-    /// What: `chunks > 0` is `Indexed`, blank content `Empty`, else `NoChunks`.
+    /// Why: blank content and over-ceiling JSON legitimately have no chunks;
+    /// anything else with none is a chunker gap that must surface instead of
+    /// passing as success.
+    /// What: `chunks > 0` is `Indexed`, blank content `Empty`, JSON above the
+    /// window ceiling `TooLarge`, else `NoChunks`.
     /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
-    pub fn classify(content: &str, chunks: usize) -> Self {
+    pub fn classify(file: &str, content: &str, chunks: usize) -> Self {
         if chunks > 0 {
             Self::Indexed { chunks }
         } else if content.trim().is_empty() {
             Self::Empty
+        } else if json_exceeds_window_ceiling(file, content) {
+            Self::TooLarge
         } else {
             Self::NoChunks
         }
+    }
+
+    /// Whether zero chunks is the final answer for this content.
+    ///
+    /// Why: the batch reindex keeps the content hash of a file whose zero
+    /// chunks are final, so it is not re-read on every reindex (#8976).
+    /// What: `true` for `Empty` and `TooLarge`.
+    /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
+    pub fn zero_chunks_is_final(&self) -> bool {
+        matches!(self, Self::Empty | Self::TooLarge)
     }
 
     /// The fields a transport adds to its `index-file` response body.
@@ -79,12 +97,14 @@ impl IndexFileOutcome {
     /// Why: HTTP and the socket must answer the same write the same way, and
     /// `indexed` keeps its name so existing callers read it unchanged.
     /// What: `indexed` and `chunks` always; `reason` when nothing was
-    /// indexed; `removed` for a tombstone, which keeps its old `indexed: true`.
+    /// indexed; `removed` for a tombstone. A tombstone keeps `indexed: true`
+    /// with zero chunks, the one exemption (owner ruling item 232, Q2).
     /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
     pub fn report_fields(&self) -> serde_json::Map<String, serde_json::Value> {
         let (indexed, chunks, reason) = match self {
             Self::Indexed { chunks } => (true, *chunks, None),
             Self::Empty => (false, 0, Some("empty_file")),
+            Self::TooLarge => (false, 0, Some("too_large")),
             Self::NoChunks => (false, 0, Some("no_chunks")),
             Self::Removed => (true, 0, None),
         };
@@ -106,27 +126,36 @@ mod tests {
     use super::IndexFileOutcome;
 
     /// #8976 fail-open check: a write with zero chunks must never read as
-    /// `indexed: true`, whether the content was blank or the chunker failed.
+    /// `indexed: true`, whether the content was blank, too large, or the
+    /// chunker failed. The tombstone is the one exemption (ruling 232, Q2).
     #[test]
     fn zero_chunk_outcomes_are_never_reported_as_indexed() {
+        let huge = "  \"k\": 1,\n".repeat(10_001);
         let cases = [
-            ("{\"a\": 1}", 1, true, None),
-            ("", 0, false, Some("empty_file")),
-            ("  \n\t\n", 0, false, Some("empty_file")),
-            ("{\"a\": 1}", 0, false, Some("no_chunks")),
+            ("a.json", "{\"a\": 1}", 1, true, None, false),
+            ("a.json", "", 0, false, Some("empty_file"), true),
+            ("a.json", "  \n\t\n", 0, false, Some("empty_file"), true),
+            ("a.json", huge.as_str(), 0, false, Some("too_large"), true),
+            ("a.txt", huge.as_str(), 0, false, Some("no_chunks"), false),
+            ("a.json", "{\"a\": 1}", 0, false, Some("no_chunks"), false),
         ];
-        for (content, chunks, indexed, reason) in cases {
-            let fields = IndexFileOutcome::classify(content, chunks).report_fields();
-            assert_eq!(fields["indexed"], indexed, "{content:?}/{chunks}");
-            assert_eq!(fields["chunks"], chunks, "{content:?}/{chunks}");
+        for (file, content, chunks, indexed, reason, is_final) in cases {
+            let outcome = IndexFileOutcome::classify(file, content, chunks);
+            let fields = outcome.report_fields();
+            let at = format!("{file}/{}/{chunks}", content.len());
+            assert_eq!(fields["indexed"], indexed, "{at}");
+            assert_eq!(fields["chunks"], chunks, "{at}");
             assert_eq!(
                 fields.get("reason").and_then(|r| r.as_str()),
                 reason,
-                "{content:?}/{chunks}"
+                "{at}"
             );
+            assert_eq!(outcome.zero_chunks_is_final(), is_final, "{at}");
         }
         let removed = IndexFileOutcome::Removed.report_fields();
         assert_eq!(removed["indexed"], true);
+        assert_eq!(removed["chunks"], 0);
         assert_eq!(removed["removed"], true);
+        assert!(!IndexFileOutcome::Removed.zero_chunks_is_final());
     }
 }
