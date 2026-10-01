@@ -110,3 +110,4 @@ mod persist_root_8438;
 mod persistence_and_search;
 mod ranking_and_modes;
 mod snapshot_guard_7920;
+mod zero_chunk_8976;

@@ -226,15 +226,40 @@ fn test_chunk_json_small_file_single_chunk() {
     assert_eq!(chunks[0].language.as_deref(), Some("json"));
 }
 
+/// #8976: a JSON file of 500+ lines used to yield zero chunks, so it was
+/// searchable nowhere. It now yields windows that cover every line once.
 #[test]
-fn test_chunk_json_large_file_skipped() {
+fn test_chunk_json_large_file_windowed() {
     let big = (0..600)
         .map(|i| format!("  \"k{i}\": {i},"))
         .collect::<Vec<_>>()
         .join("\n");
     let content = format!("{{\n{big}\n}}\n");
     let chunks = chunk_json("big.json", &content).expect("Some result");
-    assert!(chunks.is_empty(), "expected large JSON to be skipped");
+    let spans: Vec<(usize, usize)> = chunks.iter().map(|c| (c.start_line, c.end_line)).collect();
+    assert_eq!(spans, vec![(1, 200), (201, 400), (401, 600), (601, 602)]);
+    assert!(chunks.iter().all(|c| c.language.as_deref() == Some("json")));
+    assert!(chunks[2].content.contains("\"k450\": 450"));
+}
+
+/// Owner ruling item 232, Q1(b): a JSON file above the 50-window ceiling
+/// (10,000 lines) yields no chunks; one at the ceiling still yields 50.
+#[test]
+fn test_chunk_json_above_window_ceiling_yields_nothing() {
+    let lines = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("  \"k{i}\": {i},"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let at_ceiling = lines(10_000);
+    assert!(!super::json_exceeds_window_ceiling("a.json", &at_ceiling));
+    assert_eq!(chunk_json("a.json", &at_ceiling).expect("Some").len(), 50);
+
+    let over = lines(10_001);
+    assert!(super::json_exceeds_window_ceiling("a.JSON", &over));
+    assert!(!super::json_exceeds_window_ceiling("a.txt", &over));
+    assert!(chunk_json("a.json", &over).expect("Some").is_empty());
 }
 
 #[test]

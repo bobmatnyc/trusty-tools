@@ -40,5 +40,5 @@ mod tests;
 // Public re-exports — all external `crate::core::chunker::*` call sites
 // remain unchanged after the split.
 pub use ast::chunk_ast;
-pub use document::chunk_document;
+pub use document::{chunk_document, json_exceeds_window_ceiling};
 pub use types::{chunk_text, ChunkType, RawChunk};
