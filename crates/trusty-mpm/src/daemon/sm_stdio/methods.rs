@@ -262,7 +262,8 @@ pub async fn sm_sessions_send(d: &SmDispatcher, params: &Value) -> Result<Value,
         .map_err(map_control_err)
 }
 
-/// `sm.sessions.stop { session_id }` → `{ ok }` (§2.6).
+/// `sm.sessions.stop { session_id }` → `{ ok, runtime_left_running }` (§2.6;
+/// the second field is #8935's, additive).
 pub async fn sm_sessions_stop(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     let session_id = req_str(params, "session_id")?;
     d.sessions.stop(&session_id).await.map_err(map_control_err)

@@ -428,7 +428,8 @@ pub(crate) async fn session_activity(
 /// bulk teardown loop (the only other caller) already propagates this `Err`
 /// with `?`, matching its established fail-closed convention (#1508).
 /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`; a 404 bails with
-/// an error instead of printing "not found".
+/// an error instead of printing "not found". #8935: when the daemon reports
+/// `runtime_left_running`, prints that the record moved and tmux was not.
 /// Test: HTTP path covered by the integration test; parse by
 /// `cli_parses_session_managed_stop_verb`; `session_stop_not_found_errors`
 /// covers the #2457 exit-code fix.
@@ -443,8 +444,17 @@ pub(crate) async fn session_stop(
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("managed session '{id}' not found");
     }
-    resp.error_for_status()?;
-    println!("runtime stopped {id} (workspace intact; use 'resume' to restart)");
+    // #8935: a live tmux session that is not this record's was left running;
+    // never report it stopped, and never guess when the reply is unreadable.
+    let body = resp.error_for_status()?.json::<serde_json::Value>().await;
+    match body
+        .as_ref()
+        .map(|b| b.get("runtime_left_running").and_then(|v| v.as_str()))
+    {
+        Ok(Some(why)) => println!("record {id} marked stopped, record only: {why}"),
+        Ok(None) => println!("runtime stopped {id} (workspace intact; use 'resume' to restart)"),
+        Err(e) => println!("record {id} marked stopped; the daemon's reply was unreadable ({e})"),
+    }
     Ok(())
 }
 

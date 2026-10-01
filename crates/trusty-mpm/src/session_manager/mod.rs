@@ -46,6 +46,8 @@ pub(crate) mod resume_in_flight;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;
+/// #8935: whether a live tmux session is a record's own, by its `%N` pane.
+pub mod runtime_identity;
 pub mod search_gc;
 pub mod session_guard;
 pub mod session_kind;
@@ -279,6 +281,10 @@ mod send_input_gate_tests;
 #[cfg(test)]
 mod stop_cause_tests;
 
+// #8935: a stale record never tears down a live session that reused its name.
+#[cfg(test)]
+mod runtime_identity_tests;
+
 /// Shared real-git fixtures for the #4091 dirty-worktree-guard tests, used by
 /// both `worktree_safety::worktree_safety_tests` and `prune::orphan_tests`.
 #[cfg(test)]
@@ -297,9 +303,11 @@ pub use retention::{
     RetentionDebounce, RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS,
     retention_verdict,
 };
+pub use runtime_identity::RuntimeTeardown;
 pub use session_guard::TmuxSessionGuard;
 pub use session_kind::SessionKind;
 pub use slots::{NumberedSlot, SlotRegistry};
+pub use stop::StopReport;
 pub use store::{SessionStore, StoreDegradation, StoreError};
 pub use submit_probe::{SubmitState, classify_submit};
 pub use supervisor_floor::{KillVerdict, SidecarRole, SupervisorFloor};

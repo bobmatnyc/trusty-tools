@@ -378,6 +378,8 @@ async fn ephemeral_dry_run_selects_exactly_what_the_real_run_does() {
     let eph = ManagedSessionId::new();
     let durable = ManagedSessionId::new();
     seed_record(&mgr, &dir, eph, ManagedSessionState::Active, true).await;
+    // #8935: the record's pane proves the live session is its own.
+    super::super::tests::bind_pane(&mgr, &eph).await;
     seed_record(&mgr, &dir, durable, ManagedSessionState::Active, false).await;
 
     let preview = mgr.sweep_all_ephemeral(true).await.expect("preview");
@@ -420,6 +422,8 @@ async fn prune_never_selects_the_invoking_session() {
     let peer = ManagedSessionId::new();
     seed_record(&mgr, &dir, mine, ManagedSessionState::Active, false).await;
     seed_record(&mgr, &dir, peer, ManagedSessionState::Active, false).await;
+    // #8935: the record's pane proves the live session is its own.
+    super::super::tests::bind_pane(&mgr, &peer).await;
 
     let outcome = mgr
         .prune_managed(PruneFilter::All, false, true, None, Some(mine))

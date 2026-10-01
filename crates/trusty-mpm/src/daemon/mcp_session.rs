@@ -107,15 +107,28 @@ pub async fn session_new(
 /// Stop a session's runtime, keeping its workspace (`session_stop` tool).
 ///
 /// Why: thin wrapper over [`crate::session_manager::SessionManager::stop`].
-/// What: parses the id, calls `stop`, returns the updated record as JSON.
-/// Test: `session_stop_unknown_id_errors` in the `tests` module.
+/// What: parses the id, calls `stop_reporting`, returns the updated record as
+/// JSON plus `runtime_left_running` — the reason a live tmux session with the
+/// record's name was left running, or `null` (#8935; additive, as the HTTP
+/// route).
+/// Test: `unknown_id_errors_for_all_single_id_tools`,
+/// `session_stop_says_an_unproven_runtime_was_left_running`.
 pub async fn session_stop(state: &Arc<DaemonState>, session_id: &str) -> Result<Value, String> {
     let id = parse_managed_id(session_id)?;
     let mgr = state.session_manager().await;
-    mgr.stop(&id)
+    let report = mgr
+        .stop_reporting(&id, crate::session_manager::StopCause::Deliberate)
         .await
-        .map(|r| record_to_json(&r))
-        .map_err(managed_err)
+        .map_err(managed_err)?;
+    let mut json = record_to_json(&report.record);
+    // #8935: a record-only stop must not read as a stopped runtime.
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "runtime_left_running".into(),
+            report.runtime.left_running().into(),
+        );
+    }
+    Ok(json)
 }
 
 /// Resume a stopped session in its existing workspace (`session_resume` tool).
@@ -502,6 +515,53 @@ mod tests {
         ] {
             assert!(r.unwrap_err().contains("valid managed session id"));
         }
+    }
+
+    /// #8935 critic round: `session_stop` says when it moved the record only.
+    /// The live session carries the record's name and the record has no pane
+    /// id, so ownership is unproven and nothing is killed. Red on a73e5ac7f3,
+    /// whose response had no `runtime_left_running` key.
+    #[tokio::test]
+    async fn session_stop_says_an_unproven_runtime_was_left_running() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let tmux = LiveTrackingTmux::new();
+        let s = Arc::new(
+            DaemonState::with_root_isolated_managed_and_driver(
+                root.path().to_path_buf(),
+                tmux.clone(),
+            )
+            .await,
+        );
+        let id = ManagedSessionId::new();
+        let ws = root.path().join(format!("{id}-mcp-stop"));
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "mcp session_stop test".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_stop(&s, &id.to_string()).await.expect("stop");
+
+        let why = json["runtime_left_running"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the stop names the live session: {json}"));
+        assert!(why.contains("no pane id"), "{why}");
+        assert_eq!(json["state"], "stopped", "{json}");
+        assert!(
+            !tmux.live.lock().unwrap().is_empty(),
+            "the session was killed"
+        );
     }
 
     /// `session_delete` fail-closed guard + `force` bypass, driven end-to-end

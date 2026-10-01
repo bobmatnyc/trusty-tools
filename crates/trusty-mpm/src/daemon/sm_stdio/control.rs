@@ -194,12 +194,23 @@ impl SessionControl for DaemonSessionControl {
         Ok(serde_json::json!({ "ok": true }))
     }
 
-    /// Stop the runtime, keeping the workspace; returns `{ ok: true }`.
+    /// Stop the runtime, keeping the workspace; returns `{ ok: true,
+    /// runtime_left_running }`.
+    ///
+    /// #8935: `runtime_left_running` (additive) is the reason a live tmux
+    /// session with the record's name was left running, or `null`.
+    /// Test: `stop_says_an_unproven_runtime_was_left_running`.
     async fn stop(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        mgr.stop(&id).await.map_err(Self::map_managed_err)?;
-        Ok(serde_json::json!({ "ok": true }))
+        let report = mgr
+            .stop_reporting(&id, crate::session_manager::StopCause::Deliberate)
+            .await
+            .map_err(Self::map_managed_err)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "runtime_left_running": report.runtime.left_running(),
+        }))
     }
 
     /// Resume a stopped session and re-spawn its runtime; returns `{ ok: true }`.
@@ -412,6 +423,78 @@ mod tests {
         // so an exact `==` is fragile to float representation. 1e-6 is far
         // tighter than any meaningful confidence delta.
         assert!((s.confidence - 0.87).abs() < 1e-6);
+    }
+
+    /// A tmux where every created session stays live (#8935).
+    #[derive(Default)]
+    struct LiveTmux(std::sync::Mutex<Vec<String>>);
+
+    impl crate::session_manager::ManagedTmuxDriver for LiveTmux {
+        fn create_session(&self, name: &str, _: &str) -> Result<(), ManagedError> {
+            self.0.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.0.lock().unwrap().retain(|n| n != name);
+            Ok(())
+        }
+        fn send_line(&self, _: &str, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _: &str, _: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+
+    /// #8935 critic round: `sm.sessions.stop` says when it moved the record
+    /// only. The record has no pane id, so the live session's ownership is
+    /// unproven and it is left running. Red on a73e5ac7f3, which answered
+    /// `{ ok: true }` alone.
+    #[tokio::test]
+    async fn stop_says_an_unproven_runtime_was_left_running() {
+        let tmp = tempfile::tempdir().expect("daemon root");
+        let ws = tempfile::tempdir().expect("user directory");
+        let tmux = Arc::new(LiveTmux::default());
+        let state = Arc::new(
+            DaemonState::with_root_isolated_managed_and_driver(
+                tmp.path().to_path_buf(),
+                tmux.clone(),
+            )
+            .await,
+        );
+        let id = ManagedSessionId::new();
+        state
+            .session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8935 sm stop".to_string(),
+                Some(ws.path().to_path_buf()),
+                None,
+                Some(ws.path().to_path_buf()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = DaemonSessionControl::new(state)
+            .stop(&id.to_string())
+            .await
+            .expect("stop");
+
+        assert_eq!(json["ok"], serde_json::Value::Bool(true), "{json}");
+        let why = json["runtime_left_running"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the stop names the live session: {json}"));
+        assert!(why.contains("no pane id"), "{why}");
+        assert_eq!(tmux.0.lock().unwrap().len(), 1, "the session was killed");
     }
 
     /// #8663 critic round 1: `sm.sessions.kill` carries `workspace_removed`,

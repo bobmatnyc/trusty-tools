@@ -61,6 +61,7 @@ pub(crate) async fn session_delete(
             name,
             prior_state,
             local,
+            note,
         } => {
             if local {
                 // The legacy project-session store has no `--deleted--` state; a
@@ -73,6 +74,10 @@ pub(crate) async fn session_delete(
                     "deleted {id} ({name}) [was {prior_state}] — marked --deleted-- \
                      (still listed; `tm sessions prune --state deleted` to remove)"
                 );
+            }
+            // #8935: delete is record-only; a live session with the name stays.
+            if let Some(note) = note {
+                println!("record only: {note}");
             }
             Ok(())
         }

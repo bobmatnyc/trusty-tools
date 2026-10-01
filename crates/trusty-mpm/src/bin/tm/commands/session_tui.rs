@@ -297,8 +297,10 @@ pub(crate) async fn run_session_tui(
 /// 409 text; `StopFailed` (#7224) says the stop leg failed and NOTHING was
 /// deleted, carrying the daemon's full status and body; `NotFound` says the
 /// record was already gone. A transport error becomes an error line rather than
-/// ending the TUI.
+/// ending the TUI. #8935: a daemon note that a live tmux session with the
+/// name was left running is appended.
 /// Test: `delete_outcome_names_the_soft_delete`,
+/// `delete_outcome_says_a_live_session_was_left_running`,
 /// `delete_outcome_surfaces_a_refusal`,
 /// `delete_outcome_reports_a_failed_stop_as_not_deleted`,
 /// `delete_outcome_reports_not_found`,
@@ -312,16 +314,23 @@ pub(crate) fn delete_outcome(
             name,
             prior_state,
             local: true,
+            ..
         }) => (
             format!("deleted '{name}' [was {prior_state}] from the project store"),
             Severity::Info,
         ),
         Ok(DeleteReport::Deleted {
-            name, prior_state, ..
+            name,
+            prior_state,
+            note,
+            ..
         }) => (
             format!(
                 "'{name}' [was {prior_state}] marked --deleted-- \
-                 (still listed; `tm sessions prune --state deleted` removes it)"
+                 (still listed; `tm sessions prune --state deleted` removes it){}",
+                // #8935: delete is record-only; say a live session was kept.
+                note.map(|n| format!(" — record only: {n}"))
+                    .unwrap_or_default()
             ),
             Severity::Info,
         ),

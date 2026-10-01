@@ -192,6 +192,11 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.live.lock().unwrap().iter().cloned().collect())
     }
+    /// #8935: a pane id, so `stop` can prove the session is the record's own
+    /// and tear it down (the trait's `pane_exists` default confirms it).
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        Some("%1".to_owned())
+    }
 }
 
 /// A live pane whose SHELL works and whose runtime never comes up (#8233).

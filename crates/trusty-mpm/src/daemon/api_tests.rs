@@ -1891,6 +1891,11 @@ async fn make_state_with_active_managed(
         fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
             Ok(self.sessions.lock().unwrap().clone())
         }
+        /// #8935: a pane id, so a teardown proves the session is the
+        /// record's own (the trait's `pane_exists` default confirms it).
+        fn get_pane_id(&self, _name: &str) -> Option<String> {
+            Some("%1".to_owned())
+        }
     }
 
     let tmp = tempfile::TempDir::new().unwrap();

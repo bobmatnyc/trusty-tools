@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use crate::session_manager::decommission_force::{DecommissionReport, ProvisioningDirt};
 use crate::session_manager::manager::SessionManager;
 use crate::session_manager::record::ManagedSessionId;
-use crate::session_manager::tests::FakeTmuxDriver;
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 use crate::session_manager::worktree_ownership_location::write_sentinel_bytes;
 
@@ -37,9 +36,13 @@ async fn force_decommission(
     errored: bool,
 ) -> DecommissionReport {
     let store = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(store.path(), FakeTmuxDriver::new())
-        .await
-        .expect("manager");
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(
+        store.path(),
+        crate::session_manager::tests::fake_with_pane(),
+    )
+    .await
+    .expect("manager");
     let record = mgr
         .create_with_id(
             ManagedSessionId::new(),

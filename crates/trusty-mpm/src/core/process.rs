@@ -49,6 +49,19 @@ pub fn find_claude_pid_in_tmux(
     None
 }
 
+/// The `claude` PID under one pane, addressed by its `%N` pane id (#8935).
+///
+/// Why: [`find_claude_pid_in_tmux`] reads the session's ACTIVE pane, which may
+/// be a sibling window rather than the pane a record is bound to; a teardown
+/// that has proved the record's own pane must signal that pane's `claude`.
+/// What: one probe, no retry: the pane's shell PID, then [`claude_child_of`].
+/// `None` when tmux, the pane or a `claude` child is missing.
+/// Test: `find_claude_pid_in_pane_returns_none_for_an_unknown_pane`.
+pub fn find_claude_pid_in_pane(session_name: &str, pane_id: &str) -> Option<u32> {
+    let target = crate::core::tmux::TmuxTarget::pane(session_name, pane_id);
+    claude_child_of(tmux_target_pid(&target)?)
+}
+
 /// Read the shell PID of a tmux session's active pane.
 ///
 /// Why: the `claude` process is a child of this shell; it is the root we walk
@@ -59,15 +72,18 @@ pub fn find_claude_pid_in_tmux(
 /// the session does not exist.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn tmux_pane_pid(session_name: &str) -> Option<u32> {
-    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
-    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
     // `TmuxTarget::session` renders the BARE session name (never a
     // `"session:%pane"` compound, which tmux would parse as a window spec).
+    tmux_target_pid(&crate::core::tmux::TmuxTarget::session(session_name))
+}
+
+/// [`tmux_pane_pid`] for any target — a session's active pane or a `%N` pane
+/// id (#8935).
+fn tmux_target_pid(target: &crate::core::tmux::TmuxTarget) -> Option<u32> {
+    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
     let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
-    let argv = crate::core::tmux::display_message_argv(
-        Some(&crate::core::tmux::TmuxTarget::session(session_name)),
-        "#{pane_pid}",
-    );
+    let argv = crate::core::tmux::display_message_argv(Some(target), "#{pane_pid}");
     let output = crate::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
@@ -353,6 +369,13 @@ mod tests {
             2,
             Duration::from_millis(1),
         );
+        assert_eq!(pid, None);
+    }
+
+    /// #8935: a pane id no server has handed out yields `None`, read-only.
+    #[test]
+    fn find_claude_pid_in_pane_returns_none_for_an_unknown_pane() {
+        let pid = find_claude_pid_in_pane("tmpm-definitely-not-a-real-session-xyz", "%999999999");
         assert_eq!(pid, None);
     }
 

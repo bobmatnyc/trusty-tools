@@ -17,7 +17,6 @@ use super::decommission_owned::{discarded_entries, owned_workspace_keep_reason};
 use super::manager::SessionManager;
 use super::provisioning_ledger::{LEDGER_NAME, load, record, snapshot};
 use super::record::ManagedSessionId;
-use super::tests::FakeTmuxDriver;
 use super::worktree_git_fixture::GitWorktreeFixture;
 use super::worktree_ownership::{AgentWorktreeOwner, sentinel_payload_bytes, write_agent_sentinel};
 use super::worktree_ownership_location::write_sentinel_bytes;
@@ -68,9 +67,13 @@ fn provision(ws: &Path) {
 /// Decommission the owned `ws` through the plain route; `true` when removed.
 async fn plain_decommission(managed_root: &Path, ws: &Path) -> bool {
     let store = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(store.path(), FakeTmuxDriver::new())
-        .await
-        .expect("manager");
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(
+        store.path(),
+        crate::session_manager::tests::fake_with_pane(),
+    )
+    .await
+    .expect("manager");
     let record = mgr
         .create_with_id(
             ManagedSessionId::new(),

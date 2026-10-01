@@ -520,7 +520,6 @@ crates/trusty-mpm/src/daemon/mcp_session.rs	session_delete_refuses_running
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_delete_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_resume_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_send_unknown_id_errors
-crates/trusty-mpm/src/daemon/mcp_session.rs	session_stop_unknown_id_errors
 crates/trusty-mpm/src/daemon/optimizer.rs	get_optimizer_returns_default
 crates/trusty-mpm/src/daemon/optimizer.rs	optimize_rewrites_large_output
 crates/trusty-mpm/src/daemon/optimizer.rs	optimize_skips_small_output

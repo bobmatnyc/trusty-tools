@@ -201,7 +201,8 @@ async fn mark_reactivated_flips_decommissioned_to_active() {
 #[tokio::test]
 async fn mark_reactivated_refuses_when_workspace_removed_by_decommission() {
     let dir = TempDir::new().unwrap();
-    let (mgr, _fake) = make_manager(&dir).await;
+    // #8935: the record's pane proves the live session is its own.
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
 
     // Workspace INSIDE a temp "managed root" so decommission's path-containment
     // guard (`is_safe_to_remove`) passes and the directory is actually deleted —

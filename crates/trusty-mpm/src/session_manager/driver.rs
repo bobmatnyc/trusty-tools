@@ -620,6 +620,29 @@ pub trait ManagedTmuxDriver: Send + Sync {
             let _ = self.send_interrupt(name);
         }
     }
+
+    /// [`Self::signal_terminate`] for one known pane of `name` (#8935).
+    ///
+    /// Why: with no `claude` pid, `signal_terminate`'s Ctrl-C goes to the
+    /// session's ACTIVE pane, which need not be the pane the record owns.
+    /// What: a known pid gets `signal_terminate`'s SIGTERM; otherwise, unless
+    /// the [`Self::supervisor_floor`] refuses `name`, one
+    /// [`Self::send_interrupt_to_pane`] to `pane_id`. Errors are swallowed,
+    /// as in `signal_terminate`.
+    /// Test: `stopping_a_record_whose_pane_is_live_still_kills_it`.
+    fn signal_terminate_pane(&self, name: &str, pane_id: &str, claude_pid: Option<u32>) {
+        if claude_pid.is_some() {
+            return self.signal_terminate(name, claude_pid);
+        }
+        let floor = self.supervisor_floor();
+        if floor
+            .refuse(name, "ManagedTmuxDriver::signal_terminate_pane")
+            .is_some()
+        {
+            return;
+        }
+        let _ = self.send_interrupt_to_pane(name, pane_id);
+    }
 }
 
 #[cfg(test)]
