@@ -176,10 +176,14 @@ fn owned_worktree_force_excuses_only_provisioning_files() {
     write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
     write(&wt, "CLAUDE.md");
     assert!(owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Refuse).is_some());
-    assert_eq!(
-        owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard),
-        None
-    );
+    // #8540: `--force` excuses `CLAUDE.md` only as the ledger recorded it.
+    let forced = || owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard);
+    assert!(forced().is_some(), "no ledger vouches for CLAUDE.md");
+    std::fs::remove_file(wt.join("CLAUDE.md")).expect("start over as a fresh launch");
+    let before = crate::session_manager::provisioning_ledger::snapshot(&wt);
+    write(&wt, "CLAUDE.md");
+    crate::session_manager::provisioning_ledger::record(&wt, &before).expect("record the ledger");
+    assert_eq!(forced(), None);
     write(&wt, "notes.md");
     let reason = owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard)
         .expect("--force never excuses user files");
