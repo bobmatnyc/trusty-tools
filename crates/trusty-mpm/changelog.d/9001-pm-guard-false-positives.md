@@ -8,7 +8,10 @@ Fixed
   `echo` and that `--search` value is allowed too; any other use of the loop
   variable still refuses.
 - A Python (or other non-shell) here-document that names no `gh` or `curl` and
-  expands nothing is no longer refused as a `gh api` secret DELETE.
+  expands nothing is no longer refused as a `gh api` secret DELETE. An
+  unquoted-delimiter body carrying a `$` is always judged, and an unreadable
+  call that spells `curl` from variables (`$C$R -X DELETE …/secrets/X`) is
+  now refused.
 - A command with a `$'…'` quote and no tmux is no longer refused as an
   unresolvable tmux command. It is still refused, and the refusal now names the
   `$'…'` token it cannot decode.

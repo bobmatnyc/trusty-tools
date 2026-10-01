@@ -133,10 +133,11 @@ pub(crate) fn evaluate_gh_api_secret_delete(command: &str) -> Option<String> {
 /// a row (`d[k] {x}`), read as a rewritten `gh api` call.
 /// What: a body handed to a non-shell program (`data_bodies`) is blanked when
 /// it is inert: neither it nor its operator line names a `gh` or `curl` word
-/// with quotes and backslashes removed; an unquoted-delimiter body runs no `$(…)` or backtick; and a body
-/// carrying a `$` sits in a command that names no `gh`/`curl` anywhere, so no
-/// variable set beside it can spell the call. Any other body, and every
-/// operator line, is judged as before.
+/// with quotes and backslashes removed; an unquoted-delimiter body runs no
+/// `$(…)` or backtick; and a body carrying a `$` is quoted (`<<'EOF'`) and sits
+/// in a command that names no `gh`/`curl` anywhere. An expanding body with a
+/// `$` is never blanked: the shell joins `$G$H` into `gh` before the program
+/// runs. Any other body, and every operator line, is judged as before.
 /// Test: `a_python_heredoc_with_no_gh_or_curl_is_no_secret_delete_9001`,
 /// `a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001`.
 fn without_inert_bodies(command: &str) -> String {
@@ -149,7 +150,8 @@ fn without_inert_bodies(command: &str) -> String {
             !names_gh_or_curl(text)
                 && !names_gh_or_curl(operator)
                 && !(body.expands && (text.contains("$(") || text.contains('`')))
-                && !(text.contains('$') && command_names_a_call)
+                // #9001 critic: an expanding body's `$G$H` becomes `gh` first.
+                && !(text.contains('$') && (command_names_a_call || body.expands))
         })
         .map(|body| body.span)
         .collect();
@@ -200,6 +202,10 @@ fn segment_deletes_a_secret(segment: &str, secrets_named: bool, depth: usize) ->
 /// Whether an unlexable segment starts a `gh api|secret|alias` or `curl` call,
 /// read with quotes and backslashes both removed and turned into spaces.
 fn starts_a_watched_call(segment: &str) -> bool {
+    // #9001 critic: `$C$R -X DELETE …/secrets/X` spells curl from variables;
+    // a rewritten word counts when the segment names a DELETE of `secrets`.
+    let rewritten_delete =
+        names_secrets(segment) && segment.to_ascii_lowercase().contains("delete");
     [
         segment.replace(['\'', '"', '\\'], ""),
         segment.replace(['\'', '"', '\\'], " "),
@@ -207,7 +213,9 @@ fn starts_a_watched_call(segment: &str) -> bool {
     .iter()
     .any(|flat| {
         let words: Vec<&str> = flat.split_whitespace().collect();
-        words.iter().any(|w| command_basename(w) == "curl")
+        words
+            .iter()
+            .any(|w| command_basename(w) == "curl" || (rewritten_delete && is_rewritten(w)))
             || words.windows(2).any(|w| {
                 ["api", "secret", "alias"]
                     .iter()
