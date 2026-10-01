@@ -2502,3 +2502,47 @@ async fn reindex_producer_panic_does_not_report_complete() {
 // live in `tests/index_budget_env.rs`, its own test BINARY and therefore its own
 // process, so this binary has no writer of that variable. See that file's module
 // docs.
+
+/// Why (#8976): the batch reindex recorded a content hash for every file it
+/// sent to the commit, whether or not the file's chunks landed. A file with a
+/// hash and zero chunks is skipped by every later reindex, so it stays out of
+/// search for good. Pre-fix both files below keep a hash, so this fails
+/// against 889f555fc3.
+/// What: a one-chunk cap lets exactly one of two one-chunk files land. Only
+/// that file may keep a hash; the other must be retried next time.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_withholds_the_hash_of_a_file_whose_chunks_did_not_land() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::write(root.join("a.rs"), "pub fn alpha_8976() {}\n").unwrap();
+    fs::write(root.join("b.rs"), "pub fn bravo_8976() {}\n").unwrap();
+    let id = IndexId::new("hash-without-chunks-8976");
+    let indexer = CodeIndexer::new(id.0.clone(), root.clone()).with_chunk_cap(1);
+    let handle = Arc::new(IndexHandle::bare(
+        id.clone(),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+
+    let hashes = super::hash::hashes_for(&id);
+    let indexer = handle.indexer.read().await;
+    let mut hashed = Vec::new();
+    for file in ["a.rs", "b.rs"] {
+        let has_chunks = !indexer.chunk_ids_for_file(file).await.is_empty();
+        let has_hash = hashes.contains_key(&std::path::PathBuf::from(file));
+        assert_eq!(
+            has_hash, has_chunks,
+            "{file}: a hash must imply landed chunks"
+        );
+        if has_hash {
+            hashed.push(file);
+        }
+    }
+    assert_eq!(hashed.len(), 1, "exactly one file fits the cap: {hashed:?}");
+}

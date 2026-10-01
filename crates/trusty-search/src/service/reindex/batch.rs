@@ -175,6 +175,9 @@ pub(super) struct ParsedReadyBatch {
     /// BEFORE inserting the new chunks (fix for issue #855: delete-then-insert
     /// semantics to prevent orphan chunk IDs when a file shrinks).
     pub changed_corpus_paths: Vec<String>,
+    /// #8976: corpus-relative paths whose content is blank. Zero chunks is
+    /// the right result for these, so their hash is recorded without chunks.
+    pub blank_corpus_paths: Vec<String>,
 }
 
 /// Sanitised contents of one batch after read + filter passes.
@@ -190,6 +193,8 @@ pub(super) struct BatchPayload {
     /// Corpus-relative paths of files being re-indexed (same strings as the
     /// first element of each `to_index` entry).
     pub changed_corpus_paths: Vec<String>,
+    /// #8976: the subset of `changed_corpus_paths` whose content is blank.
+    pub blank_corpus_paths: Vec<String>,
 }
 
 /// Process a single batch end-to-end (sequential; not pipelined).
@@ -398,6 +403,7 @@ pub(super) async fn prepare_and_parse_batch(
         new_hashes: payload.new_hashes,
         batch_files,
         changed_corpus_paths: payload.changed_corpus_paths,
+        blank_corpus_paths: payload.blank_corpus_paths,
     })
 }
 
@@ -427,12 +433,13 @@ pub(super) async fn commit_parsed_and_finalize(
         new_hashes,
         batch_files,
         changed_corpus_paths,
+        blank_corpus_paths,
     } = ready;
     let parse_ms = parsed.parse_ms;
     let embed_ms = parsed.embed_ms;
     let vector_count = parsed.vector_count;
 
-    let commit = {
+    let (commit, durable) = {
         let indexer = ctx.handle.indexer.write().await;
 
         // Issue #855: delete-then-insert for changed files. For every file
@@ -455,8 +462,8 @@ pub(super) async fn commit_parsed_and_finalize(
                     error = %e,
                     remove_failures,
                     "reindex: #855 pre-commit remove failed — skipping insert for \
-                     this file to avoid duplicate chunks (issue #1002); stale \
-                     chunks will persist until next --force reindex"
+                     this file to avoid duplicate chunks (issue #1002); its hash \
+                     is withheld, so the next reindex retries it (#8976)"
                 );
             }
         }
@@ -466,8 +473,10 @@ pub(super) async fn commit_parsed_and_finalize(
         } else {
             parsed
         };
+        // #8976: each file's chunk ids, read before the commit consumes them.
+        let expected = chunk_ids_by_file(&parsed);
 
-        match indexer.commit_parsed_batch(parsed, true).await {
+        let commit = match indexer.commit_parsed_batch(parsed, true).await {
             Ok(c) => c,
             Err(e) => {
                 drop(indexer);
@@ -476,8 +485,13 @@ pub(super) async fn commit_parsed_and_finalize(
                 emit_batch_error(ctx, &placeholder_paths, e).await;
                 return BatchOutcome::default();
             }
-        }
+        };
+        let durable = indexer.files_with_all_chunks(&expected).await;
+        (commit, durable)
     };
+    // #8976: a hash with no chunks behind it makes every later reindex skip
+    // the file, so only files whose chunks all landed (or blank ones) keep it.
+    let new_hashes = withhold_chunkless_hashes(ctx, new_hashes, &durable, &blank_corpus_paths);
 
     apply_successful_commit(ctx, new_hashes, batch_files, &commit).await;
     let mem_limit_hit = check_post_commit_memory(ctx);
@@ -524,6 +538,7 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
     // chunks before inserting the new set (delete-then-insert per changed
     // file).
     let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
+    let mut blank_corpus_paths: Vec<String> = Vec::new();
     for (path, content_res) in read_results {
         let rel = to_corpus_relative_path(&ctx.root, &path);
         let content = match content_res {
@@ -563,6 +578,9 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // Issue #402 — relocation resilience: store file paths RELATIVE to the
         // index root so the corpus is portable when `root_path` is updated.
         let path_str = rel.clone();
+        if content.trim().is_empty() {
+            blank_corpus_paths.push(rel.clone()); // #8976
+        }
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());
         // Issue #1073: use the relative path as the hash-map key.
@@ -578,7 +596,55 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         to_index_paths,
         new_hashes,
         changed_corpus_paths,
+        blank_corpus_paths,
     }
+}
+
+/// Each file's chunk ids in `parsed` (#8976).
+fn chunk_ids_by_file(parsed: &ParsedBatch) -> Vec<(String, Vec<String>)> {
+    let mut by_file: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for chunk in &parsed.chunks {
+        by_file
+            .entry(chunk.file.as_str())
+            .or_default()
+            .push(chunk.id.clone());
+    }
+    by_file
+        .into_iter()
+        .map(|(file, ids)| (file.to_string(), ids))
+        .collect()
+}
+
+/// Drop the hash of every file whose chunks did not all land (#8976).
+///
+/// Why: a recorded hash makes the next reindex skip the file, so a hash over
+/// zero chunks left the file unsearchable until a manual repair.
+/// What: keeps a hash when its file is in `durable` or `blank`; logs each
+/// withheld one at WARN so the next reindex's retry is explained.
+/// Test: `reindex_withholds_the_hash_of_a_file_whose_chunks_did_not_land`.
+fn withhold_chunkless_hashes(
+    ctx: &BatchCtx,
+    new_hashes: Vec<(PathBuf, String)>,
+    durable: &std::collections::HashSet<String>,
+    blank: &[String],
+) -> Vec<(PathBuf, String)> {
+    new_hashes
+        .into_iter()
+        .filter(|(path, _)| {
+            let rel = path.to_string_lossy();
+            let keep = durable.contains(rel.as_ref()) || blank.iter().any(|b| *b == rel);
+            if !keep {
+                tracing::warn!(
+                    index_id = %ctx.index_id.0,
+                    file = %rel,
+                    "reindex: file's chunks did not all land; its hash is not \
+                     recorded, so the next reindex retries it (#8976)"
+                );
+            }
+            keep
+        })
+        .collect()
 }
 
 /// Push a `skip` SSE event, bumping the per-progress skipped/indexed counters.

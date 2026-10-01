@@ -753,6 +753,85 @@ async fn index_file_over_the_socket_matches_the_http_body() {
     assert_eq!(over_socket, over_http);
 }
 
+/// Why (#8976): a pretty-printed JSON file of 500+ lines produced zero chunks
+/// and `index-file` still answered `indexed: true`, so the file stayed out of
+/// search with no signal. Pre-fix the large file has no `chunks` field and
+/// nothing lands, so this fails against 889f555fc3.
+/// What: a 600-line JSON file lands with its chunk count reported; a blank
+/// file answers `indexed: false` with a reason instead of a silent success.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let entries: Vec<String> = (0..600).map(|i| format!("  \"key_{i}\": {i},")).collect();
+    let big = format!("{{\n{}\n  \"last\": 0\n}}\n", entries.join("\n"));
+    let body = serde_json::json!({ "path": "data/big.json", "content": big });
+
+    let landed = http_ok(&http, "POST", "/indexes/wf/index-file", body).await;
+    assert_eq!(landed["indexed"], serde_json::json!(true), "{landed}");
+    let chunks = landed["chunks"].as_u64().unwrap_or(0);
+    assert!(
+        chunks > 0,
+        "a 600-line JSON file must land chunks: {landed}"
+    );
+    let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+    let ids = handle
+        .indexer
+        .read()
+        .await
+        .chunk_ids_for_file("data/big.json")
+        .await;
+    assert_eq!(
+        ids.len() as u64,
+        chunks,
+        "the reported count is the landed count"
+    );
+
+    let blank = serde_json::json!({ "path": "data/empty.json", "content": "  \n" });
+    let refused = http_ok(&http, "POST", "/indexes/wf/index-file", blank).await;
+    assert_eq!(refused["indexed"], serde_json::json!(false), "{refused}");
+    assert_eq!(
+        refused["reason"],
+        serde_json::json!("empty_file"),
+        "{refused}"
+    );
+    assert_eq!(refused["chunks"], serde_json::json!(0), "{refused}");
+}
+
+/// Why (#8976 fail-open check): a write whose chunks did not land is an error,
+/// and the error body must not read as indexed. The chunk cap is the error
+/// source here: the chunker succeeds, the commit refuses.
+/// What: an index at a one-chunk cap takes `FILE`, then refuses a second file;
+/// that refusal is a 500 whose body says `indexed: false`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_error_arm_never_reports_indexed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let indexer = CodeIndexer::new("cap", tmp.path().to_str().expect("utf8")).with_chunk_cap(1);
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("cap"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    ));
+    let (_state, http, _rpc) = routers(SearchAppState::new(registry)).await;
+    let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/cap/index-file", fits).await;
+
+    let over = serde_json::json!({ "path": "src/b.rs", "content": "fn b() -> u8 { 2 }\n" });
+    let (status, body) =
+        http_raw(&http, json_request("POST", "/indexes/cap/index-file", over)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["error"],
+        serde_json::json!("index_file_failed"),
+        "{body}"
+    );
+    assert_eq!(body["indexed"], serde_json::json!(false), "{body}");
+}
+
 /// Why: the delete half of the same contract. `removed_chunks` is the count a
 /// caller reconciles against, so a socket that reported a different one — or
 /// reported one for a removal that did not happen — would silently desynchronise

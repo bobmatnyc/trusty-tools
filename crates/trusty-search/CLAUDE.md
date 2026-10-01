@@ -656,8 +656,16 @@ Add or replace one file in the index.
   ```
 - **Response 200**:
   ```json
-  { "index_id": "my-project", "path": "src/auth.rs", "indexed": true }
+  { "index_id": "my-project", "path": "src/auth.rs", "indexed": true, "chunks": 3 }
   ```
+  - `indexed` (#8976): `true` only when the file's chunks landed (or a
+    tombstone removed them, which also sets `removed: true`). A write that
+    produced no chunks answers `200` with `indexed: false`, `chunks: 0`, and
+    `reason`: `empty_file` (blank content) or `no_chunks` (non-blank content
+    the chunker could not split; also logged at WARN).
+  - `chunks` (#8976): chunks the write committed.
+- **Response 500** `index_file_failed`: the write did not land (quarantine,
+  chunk cap, embed failure). Carries `indexed: false` and `message`.
 
 ##### `POST /indexes/:id/remove-file`
 

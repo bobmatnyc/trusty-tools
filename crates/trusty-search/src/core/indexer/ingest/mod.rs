@@ -16,6 +16,8 @@
 pub(crate) mod commit;
 pub(crate) mod deferred;
 pub(crate) mod embed;
+// #8976: what one `index_file` write did, so zero chunks never read as success.
+pub(crate) mod outcome;
 // #8884: refused embeddings survive a restart so restore does not re-demote.
 pub(crate) mod refusals;
 
@@ -26,6 +28,7 @@ use crate::core::entity::RawEntity;
 use crate::core::symbol_graph::{ChunkTuple, ContribMergeOutcome, SymbolGraph};
 
 use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
+use outcome::IndexFileOutcome;
 
 /// What one deferred-embed catch-up pass achieved (#6524).
 ///
@@ -327,6 +330,26 @@ impl CodeIndexer {
     /// `skip_vector_false_index_file_still_embeds`, and
     /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
+        self.index_file_outcome(file_path, content)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::index_file`], reporting what the write did to the corpus.
+    ///
+    /// Why: `Ok(())` could not tell a file that landed as chunks from one that
+    /// produced none, so `POST /index-file` answered `"indexed": true` for a
+    /// file that stayed unsearchable (#8976).
+    /// What: the same write; zero chunks for non-blank content logs at WARN
+    /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
+    /// `Empty`, a tombstone `Removed`. Every `Err` arm is unchanged.
+    /// Test: `index_file_on_large_json_lands_chunks` and
+    /// `index_file_on_blank_content_reports_empty` in `indexer::tests::zero_chunk_8976`.
+    pub async fn index_file_outcome(
+        &self,
+        file_path: &str,
+        content: &str,
+    ) -> Result<IndexFileOutcome> {
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
         if self.refuse_incremental_write("index_file", file_path) {
@@ -339,9 +362,19 @@ impl CodeIndexer {
         }
         if trusty_common::knowledge_document::is_tombstone(content) {
             self.remove_file(file_path).await?;
-            return Ok(());
+            return Ok(IndexFileOutcome::Removed);
         }
         let (mut chunks, entities) = chunk_ast(file_path, content);
+        // #8976: classify before `chunks` moves into the commit below.
+        let outcome = IndexFileOutcome::classify(content, chunks.len());
+        if outcome == IndexFileOutcome::NoChunks {
+            tracing::warn!(
+                index_id = %self.index_id,
+                file = %file_path,
+                bytes = content.len(),
+                "index_file: non-empty file produced zero chunks; it is NOT indexed (#8976)"
+            );
+        }
 
         populate_virtual_terms(&mut chunks, &entities);
 
@@ -420,7 +453,7 @@ impl CodeIndexer {
                 dropped_by_cap
             );
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Run NER + ConceptCluster passes and merge their entities with the

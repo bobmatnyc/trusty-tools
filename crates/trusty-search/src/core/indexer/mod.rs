@@ -104,6 +104,8 @@ pub(crate) use helpers::{
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
 pub use delete_close::IndexDeleted;
+// #8976: what one `index_file` write did, reported by `POST /index-file`.
+pub use ingest::outcome::IndexFileOutcome;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;

@@ -9,7 +9,7 @@
 //!   - md/mdx  → section-per-heading (`chunk_markdown`)
 //!   - yaml/yml → top-level key sections (`chunk_yaml`)
 //!   - toml    → `[section]` blocks (`chunk_toml`)
-//!   - json    → whole file if < 500 lines, otherwise skip (`chunk_json`)
+//!   - json    → whole file if < 500 lines, otherwise 200-line windows (`chunk_json`)
 //!   - txt/log → blank-line paragraphs, capped at 50 lines/chunk (`chunk_plaintext`)
 //!   - xml     → top-level child elements (`chunk_xml`)
 //!
@@ -21,9 +21,12 @@
 
 use super::types::{ChunkType, RawChunk};
 
-/// Maximum lines for a JSON file to be indexed as a single chunk. Files
-/// larger than this are skipped (JSON is hard to chunk meaningfully).
+/// Maximum lines for a JSON file to be indexed as a single chunk. Larger
+/// files are split into [`JSON_WINDOW_LINES`]-line windows.
 const JSON_MAX_LINES: usize = 500;
+
+/// Lines per window for a JSON file of [`JSON_MAX_LINES`] lines or more.
+const JSON_WINDOW_LINES: usize = 200;
 
 /// Maximum lines per plaintext / log chunk. Long paragraphs are split.
 const PLAINTEXT_MAX_LINES: usize = 50;
@@ -304,34 +307,54 @@ fn chunk_by_top_level_key(
     out
 }
 
-/// JSON: if the file has fewer than `JSON_MAX_LINES` lines, emit a single
-/// whole-file chunk. Otherwise return `Some(empty)` to signal "skip indexing".
+/// JSON: one whole-file chunk below `JSON_MAX_LINES` lines, otherwise
+/// consecutive `JSON_WINDOW_LINES`-line windows.
 ///
-/// Why: large JSON files dominate BM25 with structural punctuation noise;
-/// small ones are genuinely useful to index as a single chunk.
-/// What: counts lines; returns `Some(vec![one_chunk])` if small,
-/// `Some(vec![])` if large (skip), and never returns `None`.
+/// Why: a small JSON file is most useful as one chunk. A large one used to be
+/// skipped outright, which left it searchable nowhere (#8976); windows keep
+/// each chunk a size the embedder and BM25 handle.
+/// What: counts lines; blank content yields `Some(vec![])`, a small file one
+/// chunk, a large file non-overlapping windows covering every line. Never
+/// returns `None`.
 /// Test: `test_chunk_json_small_file_single_chunk` and
-/// `test_chunk_json_large_file_skipped`.
+/// `test_chunk_json_large_file_windowed`.
 pub(super) fn chunk_json(file: &str, content: &str) -> Option<Vec<RawChunk>> {
+    // #8976: blank content has nothing to index; a whitespace chunk is noise.
+    if content.trim().is_empty() {
+        return Some(Vec::new());
+    }
     let line_count = content.lines().count();
-    if line_count == 0 {
-        return Some(Vec::new());
+    if line_count < JSON_MAX_LINES {
+        return Some(vec![document_chunk(
+            file,
+            1,
+            line_count,
+            content.to_string(),
+            None,
+            "json",
+            ChunkType::Constant,
+        )]);
     }
-    if line_count >= JSON_MAX_LINES {
-        // Skip large JSON: it's effectively un-chunkable and dominates BM25
-        // with structural punctuation noise.
-        return Some(Vec::new());
-    }
-    Some(vec![document_chunk(
-        file,
-        1,
-        line_count,
-        content.to_string(),
-        None,
-        "json",
-        ChunkType::Constant,
-    )])
+    // #8976: a large file used to return zero chunks here, so the file was
+    // never searchable and `index-file` still answered `indexed: true`.
+    let lines: Vec<&str> = content.lines().collect();
+    let windows = lines
+        .chunks(JSON_WINDOW_LINES)
+        .enumerate()
+        .map(|(i, window)| {
+            let start = i * JSON_WINDOW_LINES + 1;
+            document_chunk(
+                file,
+                start,
+                start + window.len() - 1,
+                window.join("\n"),
+                None,
+                "json",
+                ChunkType::Constant,
+            )
+        })
+        .collect();
+    Some(windows)
 }
 
 /// Plaintext / logs: split on blank-line paragraphs, cap at
