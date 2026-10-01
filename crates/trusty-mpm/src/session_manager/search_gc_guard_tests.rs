@@ -105,7 +105,8 @@ impl CountingDaemon {
 #[tokio::test]
 async fn decommission_issues_no_request_to_a_live_daemon_under_test() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
+    // #8935: the record's pane proves the live session is its own.
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     // The issue's own fixture name. A bare `file_name()` becomes the index id.

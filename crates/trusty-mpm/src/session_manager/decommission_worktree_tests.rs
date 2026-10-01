@@ -40,7 +40,8 @@ use super::tests::FakeTmuxDriver;
 #[tokio::test]
 async fn manager_decommission_removes_real_git_worktree() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let fake = FakeTmuxDriver::new();
+    // #8935: the record's pane proves the live session is its own.
+    let fake = super::tests::fake_with_pane();
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
@@ -252,7 +253,8 @@ fn push_to_bare_remote(repo: &std::path::Path) {
 #[tokio::test]
 async fn manager_decommission_refuses_dirty_worktree() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let fake = FakeTmuxDriver::new();
+    // #8935: the record's pane proves the live session is its own.
+    let fake = super::tests::fake_with_pane();
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
@@ -660,7 +662,8 @@ fn worktree_list(dir: &std::path::Path) -> String {
 #[tokio::test]
 async fn decommission_prunes_the_base_repo_worktree_registry() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(dir.path(), super::tests::fake_with_pane())
         .await
         .expect("manager");
 
@@ -741,7 +744,8 @@ async fn decommission_prunes_the_base_repo_worktree_registry() {
 #[tokio::test]
 async fn registry_root_to_repair_ignores_a_standalone_owned_clone() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(dir.path(), super::tests::fake_with_pane())
         .await
         .expect("manager");
 

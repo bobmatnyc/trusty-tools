@@ -421,6 +421,38 @@ pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmux
     (mgr, fake)
 }
 
+/// A [`FakeTmuxDriver`] whose new sessions carry pane `%1`, which its
+/// `pane_exists` reports present, so a decommission proves the live session
+/// is the record's own (#8935: an unproven one refuses).
+pub(super) fn fake_with_pane() -> Arc<FakeTmuxDriver> {
+    let fake = FakeTmuxDriver::new();
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
+    fake
+}
+
+/// Bind `id`'s record to pane `%1`, which [`FakeTmuxDriver`] reports present
+/// unless overridden, so a decommission proves the live session is the
+/// record's own (#8935). For records written by [`seed_record`].
+pub(super) async fn bind_pane(mgr: &SessionManager, id: &ManagedSessionId) {
+    let mut record = mgr.get(id).await.expect("record");
+    record.pane_id = Some("%1".into());
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("bind pane");
+}
+
+/// [`make_manager`] over [`fake_with_pane`].
+pub(super) async fn make_manager_with_pane(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
+    let fake = fake_with_pane();
+    let mgr = SessionManager::new(dir.path(), fake.clone())
+        .await
+        .expect("manager");
+    (mgr, fake)
+}
+
 #[tokio::test]
 async fn manager_create_record() {
     let dir = crate::test_support::hermetic_temp_dir();
@@ -771,7 +803,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
+    // #8935: the record's pane proves the live session is its own.
+    let (mgr, _fake) = make_manager_with_pane(&dir).await;
 
     // Build a workspace path INSIDE a temp "managed root" dir so the
     // path-containment guard passes. `decommission_with_root` is called with
@@ -2145,6 +2178,8 @@ async fn decommission_all_ephemeral_ignores_non_ephemeral() {
     let dur_active = ManagedSessionId::new();
     let dur_stopped = ManagedSessionId::new();
     seed_record(&mgr, &dir, eph_active, ManagedSessionState::Active, true).await;
+    // #8935: the record's pane proves the live session is its own.
+    bind_pane(&mgr, &eph_active).await;
     seed_record(&mgr, &dir, eph_stopped, ManagedSessionState::Stopped, true).await;
     seed_record(&mgr, &dir, dur_active, ManagedSessionState::Active, false).await;
     seed_record(&mgr, &dir, dur_stopped, ManagedSessionState::Stopped, false).await;
