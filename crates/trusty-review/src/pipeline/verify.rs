@@ -208,7 +208,7 @@ impl VerifyPolicy {
 /// report; otherwise returns `None` (findings and verdict untouched), logging
 /// at debug when disabled and at warn when enabled with no verifier (#8904).
 /// Test: `run_review_verification_disabled_skips_round`,
-/// `run_review_enabled_without_a_verifier_notes_unverified_findings`,
+/// `run_review_enabled_without_a_verifier_withholds_every_finding`,
 /// `run_review_posts_no_refuted_advisory_finding`.
 pub async fn maybe_verify(
     config: &ReviewConfig,
@@ -224,8 +224,8 @@ pub async fn maybe_verify(
         return None;
     }
     let Some(verifier) = verifier else {
-        // #8904: findings will be posted unchecked; `gate_then_verify` notes it.
-        warn!("verification enabled but no verifier provider wired — posting unverified");
+        // #4044: `gate_then_verify` withholds every finding.
+        warn!("verification enabled but no verifier provider wired — withholding every finding");
         return None;
     };
     let role = &config.role_models.verifier;
@@ -295,9 +295,10 @@ pub async fn run_verification_round(
 /// batches of `policy.batch_size`. Each batch is one verifier request (the
 /// whole `diff`, or with `policy.per_file` only its findings' files' sections) retried per
 /// `policy.max_attempts`. [`enforce_outcomes`] then records each outcome,
-/// drops refuted, unjudged and over-cap findings, and settles the verdict. An
-/// UNKNOWN primary is still verified — its findings are posted too — and
-/// stays UNKNOWN.
+/// drops every non-CONFIRMED finding (refuted, unjudged, over-cap,
+/// unverifiable, other), and settles the verdict. An UNKNOWN primary is still
+/// verified: only its CONFIRMED findings are posted, and the verdict stays
+/// UNKNOWN.
 /// Test: `verify_transient_failure_is_retried_until_it_succeeds`,
 /// `verify_permanent_transport_failure_is_withheld`,
 /// `verify_round_never_exceeds_the_configured_concurrency`,
@@ -391,10 +392,10 @@ pub async fn run_verification_round_with_policy(
 
 /// Re-derive the verdict when the round dropped nothing (#8904).
 ///
-/// Why: refuted, unjudged and over-cap findings are dropped and the #8905
-/// withhold policy settles those rounds, so this path sees only findings the
-/// verifier CONFIRMED, judged UNVERIFIABLE (#5309), or that arrived with an
-/// outcome already recorded (#4081). `derive_verdict` treats its baseline as a
+/// Why: refuted, unjudged, over-cap and unverifiable findings are dropped and
+/// the #8905 withhold policy settles those rounds (#4044), so from the round
+/// this path sees only CONFIRMED findings, or none when an approving review
+/// lost only advisory unverifiable ones. `derive_verdict` treats its baseline as a
 /// lower bound, so passing the model's BLOCK unchanged would pin it even when
 /// the confirmed evidence does not support it.
 ///
@@ -632,7 +633,7 @@ fn judgments_for(text: &str, size: usize) -> Vec<(VerifyOutcome, VerifierReach)>
 /// What: `Judged` for any parseable answer; `Failed` for an alarm error, an
 /// unparseable or truncated answer, or an exhausted retry budget.
 /// Test: `verify_permanent_transport_failure_is_withheld`,
-/// `verify_verifier_judged_unverifiable_is_posted_as_advisory`.
+/// `verify_unverifiable_finding_is_withheld_not_posted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerifierReach {
     /// The verifier answered with a parseable judgment.

@@ -177,19 +177,25 @@ async fn run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_un
 }
 
 /// Control: a blocker the verifier itself judged UNVERIFIABLE (#5309) is a
-/// judgment, not a failure: it is posted as a demoted advisory. The refuted
-/// nit is withheld, and a BLOCK review whose survivors alone would approve is
-/// withheld as UNKNOWN (#8904, the #8905 policy).
+/// judgment, not a failure. Since #4044 (owner ruling on #8905, 2026-09-30)
+/// only CONFIRMED findings are posted, so it is withheld as "unverifiable"
+/// beside the refuted nit, and the emptied BLOCK review is withheld as
+/// UNKNOWN (#8904, the #8905 policy) — not floored, since nothing failed.
 #[tokio::test]
 async fn run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes() {
     let result = review_with_infra(&format!("{},{}", blocker(UNSURE_MARKER), refuted_nit())).await;
 
-    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
+    assert_withheld_as_unknown(&result);
+    let unverifiable: Vec<_> = result
+        .withheld_findings
+        .iter()
+        .filter(|w| w.reason == "unverifiable")
+        .collect();
+    assert_eq!(unverifiable.len(), 1, "{:?}", result.withheld_findings);
     assert!(matches!(
-        result.findings[0].verified,
+        unverifiable[0].finding.verified,
         Some(VerifyOutcome::Unverifiable { .. })
     ));
-    assert_eq!(result.verdict, Verdict::Unknown);
 }
 
 /// A CONFIRMED High method-conformance finding, which caps at REQUEST_CHANGES

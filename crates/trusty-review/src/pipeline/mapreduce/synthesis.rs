@@ -242,6 +242,7 @@ pub async fn synthesize_review(
         grade_pre_floor: Some(pre_floor_grade_str),
         summary,
         tokens,
+        withheld_findings: reduced.withheld_findings,
     }
 }
 
