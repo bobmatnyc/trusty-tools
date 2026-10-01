@@ -1,6 +1,6 @@
 //! #9001 case 3: the secret rule's false positive beside the deny that bounds
-//! it, the mysql DENY rows, and the #8875 curl-fallback rows (case 2 folds
-//! into #9006; case 4 is split out). Every command goes through the unified secret entry
+//! it, the mysql DENY rows, and the #8875 curl-fallback rows (cases 2 and 4
+//! are left to #9006). Every command goes through the unified secret entry
 //! point, so the #7266 read rule, the #8596 credential-print rule and the
 //! #8875 delete rule all judge it.
 
@@ -99,7 +99,7 @@ fn a_for_loop_whose_words_reach_anything_else_still_denies_9001() {
 /// from split variables (expanding `<<EOF`, or exported prefix assignments
 /// read by the program's own shell under `<<'EOF'`), or through a glob —
 /// still denies, as does a real DELETE and a body fed to a shell. Case 4
-/// (body blanking) is split out; bodies reach the #8875 judge unchanged.
+/// (body blanking) is split out to #9006; bodies reach the #8875 judge unchanged.
 #[test]
 fn a_heredoc_body_that_spells_gh_or_curl_still_denies_9001() {
     denied(&[

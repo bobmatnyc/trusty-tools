@@ -361,7 +361,9 @@ fn pm_guard_allows_the_9001_false_positives() {
 #[test]
 fn pm_guard_still_denies_the_9001_bounds() {
     assert_denied("mysql -e \"SELECT LOAD_FILE('/srv/app/.env.production')\"");
+    assert_denied("mysql -e '\\! cat .*'");
     assert_denied("mysql -e 'system cat .*v'");
+    assert_denied("mysql -e 'system cat .*rc'");
     assert_denied("gh issue create --title x --body-file .env");
     assert_denied("for k in .env.*; do gh issue list --search \"$k\"; cat \"$k\"; done");
     assert_denied("gh api -X DELETE repos/o/r/actions/secrets/NAME");

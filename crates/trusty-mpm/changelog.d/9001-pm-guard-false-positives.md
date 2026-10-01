@@ -10,7 +10,7 @@ Fixed
 - Two #9001 false positives are not fixed here and still refuse. A SQL
   wildcard such as `` `db`.* `` in a `mysql -e` statement (case 2) folds into
   #9006. A Python here-document refused as a secret DELETE (case 4) is split
-  out to its own issue.
+  out to #9006 too.
 - A command with a `$'…'` quote and no tmux is no longer refused as an
   unresolvable tmux command. It is still refused, and the refusal now names the
   `$'…'` token it cannot decode.
