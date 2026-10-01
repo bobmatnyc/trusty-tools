@@ -4,7 +4,8 @@
 //! Why: agents, skills and instructions become runtime-only content pinned in
 //! `~/.trusty-mpm/content/content-lock.toml`; these verbs are how it gets there.
 //! What: [`ContentAction`] — `install --from`, `update [--content-ref]`, `status`.
-//! Test: `cli_parses_content_install_update_and_status`.
+//! Test: `cli_parses_content_install_update_and_status`,
+//! `update_help_limits_the_pin_check_to_the_current_pin`.
 
 use std::path::PathBuf;
 

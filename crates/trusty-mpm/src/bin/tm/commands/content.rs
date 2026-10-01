@@ -114,4 +114,21 @@ mod tests {
         assert!(verdict.is_err(), "a broken lock must not exit 0: {lines:?}");
         assert!(!lines.iter().any(|l| l.starts_with("info: ")), "{lines:?}");
     }
+
+    /// Critic M1 on #8982: `update --help` claims only what `commit` checks —
+    /// a re-fetch of the currently pinned tag — not every republished tag.
+    #[test]
+    fn update_help_limits_the_pin_check_to_the_current_pin() {
+        use clap::CommandFactory as _;
+        let mut root = crate::cli::Cli::command();
+        let help = root
+            .find_subcommand_mut("content")
+            .and_then(|c| c.find_subcommand_mut("update"))
+            .expect("content update")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("currently pinned tag"), "{help}");
+        assert!(help.contains("Only the current pin is checked"), "{help}");
+        assert!(!help.contains("tag republished"), "{help}");
+    }
 }
