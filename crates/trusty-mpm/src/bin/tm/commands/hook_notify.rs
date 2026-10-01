@@ -228,14 +228,14 @@ pub(crate) async fn post_best_effort(client: &reqwest::Client, url: &str, body: 
 /// Test: `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`,
 /// `tm_hook_session_start_8531::a_session_start_with_no_socket_falls_back_to_http`,
 /// `tm_hook_session_end_8980::the_owners_session_end_over_the_socket_stales_its_records`.
-pub(crate) async fn post_session_start(client: &reqwest::Client, url: &str, body: &Value) {
+pub(crate) async fn post_lifecycle_via_socket(client: &reqwest::Client, url: &str, body: &Value) {
     let socket = super::managed_merged_prs::is_loopback_url(url)
         .then(trusty_mpm::client::http_client::resolve_daemon_socket)
         .and_then(Result::ok);
     post_session_start_via(socket.as_deref(), client, url, body).await;
 }
 
-/// [`post_session_start`] over an explicit socket path.
+/// [`post_lifecycle_via_socket`] over an explicit socket path.
 ///
 /// What: one 2 s socket attempt. Only an unreachable socket — nothing
 /// listening — falls back to HTTP; a delivered, refused or timed-out attempt
