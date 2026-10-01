@@ -23,7 +23,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use super::manager::{ManagedError, SessionManager};
-use super::record::ManagedSessionState;
+use super::record::{ManagedSessionState, SessionRecord};
+use super::runtime_identity::{self, RuntimeOwnership, RuntimeTeardown};
 
 /// Grace window given to each session between signal and tmux kill.
 ///
@@ -122,7 +123,7 @@ impl SessionManager {
         info!("shutdown: gracefully stopped {stopped} live managed session(s)");
     }
 
-    /// Gracefully terminate ONE session's runtime: signal → grace → kill.
+    /// Gracefully terminate ONE record's runtime: signal → grace → kill.
     ///
     /// Why: CLI-initiated `stop`/`decommission` tear down a single session at a
     /// time (unlike [`Self::shutdown`], which batches one grace window across the
@@ -131,41 +132,66 @@ impl SessionManager {
     /// index, session record) before its pane was reclaimed. This drains one
     /// session the same way `shutdown` drains the fleet, honouring the repo's
     /// graceful-shutdown convention (SIGTERM drain, not an abrupt kill).
-    /// What: returns early (no signal, no grace sleep, no kill) when the tmux
-    /// session no longer exists; otherwise resolves the live `claude` PID via a
-    /// single [`crate::core::process::find_claude_pid_in_tmux`] probe (no retry),
-    /// calls `signal_terminate` (SIGTERM when the PID is known, else one Ctrl-C), awaits
-    /// a [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests) so the process
-    /// can checkpoint, then `kill_session` to reclaim the pane. Every step is
-    /// best-effort: a `kill_session` failure is logged, not returned, because the
-    /// caller still needs to mark the record `Stopped` / decommissioned even when
-    /// the runtime was already gone. Uses `tokio::time::sleep` — never a blocking
-    /// `std::thread::sleep` — so it does not starve the Tokio thread pool.
+    /// #8935: a tmux name is reusable, so the teardown first proves the live
+    /// session holds the record's own `%N` pane
+    /// ([`runtime_identity::runtime_ownership`]). A session that does not, or
+    /// whose ownership cannot be proved, is neither signalled nor killed.
+    /// What: classifies the runtime. `Absent` → [`RuntimeTeardown::Absent`], no
+    /// signal, no grace sleep. Any live name → [`Self::kill_gate`] first.
+    /// `Foreign`/`Unverifiable`, or a probe error → warns under `caller` and
+    /// returns [`RuntimeTeardown::LeftRunning`]. `Owned` → the `claude` PID of the record's
+    /// pane, `signal_terminate` (SIGTERM when the PID is known, else one
+    /// Ctrl-C), a [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests), a
+    /// second ownership check, and `kill_session` only when the pane is still
+    /// the session's. A `kill_session` failure is logged, not returned, because
+    /// the caller still needs to mark the record `Stopped` / decommissioned.
     /// #8942 (critic HIGH): the one failure that IS returned is a kill-floor
     /// refusal, [`ManagedError::KillRefused`] — from [`Self::kill_gate`] under
     /// `caller`'s name before any signal, or from the driver's own floor at the
     /// kill — so the caller aborts before it removes a workspace or moves the
     /// record.
-    /// Test: `graceful_terminate_runtime_signals_then_kills` in tests.rs (fake
-    /// driver records a Ctrl-C then a kill); exercised end-to-end by
-    /// `manager_stop_keeps_workspace` and `manager_decommission_removes_workspace`;
-    /// the refusal by `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    /// Test: `graceful_terminate_runtime_signals_then_kills` in restart_tests.rs;
+    /// `stopping_a_stale_record_never_signals_the_live_session_that_reused_its_name`,
+    /// `an_unlistable_pane_set_leaves_the_runtime_running`,
+    /// `stopping_a_record_whose_pane_is_live_still_kills_it` in
+    /// runtime_identity_tests.rs; the refusal by
+    /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
     pub(crate) async fn graceful_terminate_runtime(
         &self,
-        tmux_name: &str,
+        record: &SessionRecord,
         caller: &str,
-    ) -> Result<(), ManagedError> {
-        // Fast-path: nothing to drain if the pane is already gone. Skips the grace
-        // sleep entirely so callers looping over dead sessions (e.g. prune-idle) do
-        // not pay SIGTERM_GRACE_SECS per already-terminated session.
-        if !self.tmux.session_exists(tmux_name) {
-            return Ok(());
+    ) -> Result<RuntimeTeardown, ManagedError> {
+        let tmux_name = record.tmux_name.as_str();
+        // #8935: prove the live session is this record's before any signal.
+        // The fast path (`Absent`) skips the grace sleep, so callers looping
+        // over dead sessions do not pay SIGTERM_GRACE_SECS each.
+        let ownership = self.classify_runtime(record);
+        if ownership == RuntimeOwnership::Absent {
+            return Ok(RuntimeTeardown::Absent);
         }
+        // #8942: a live name the floor cannot clear refuses the teardown,
+        // typed, whichever session holds it.
         self.kill_gate(tmux_name, caller)?;
-        let pid =
-            crate::core::process::find_claude_pid_in_tmux(tmux_name, 1, Duration::from_millis(0));
+        // #8935: the driver's own floor answers here too, before the ownership
+        // verdict can turn a protected name into a quiet record-only stop.
+        if let Some(why) = self.tmux.supervisor_floor().refuse(tmux_name, caller) {
+            return Err(ManagedError::KillRefused(why));
+        }
+        let pane_id = match owned_pane(record, caller, ownership) {
+            Ok(pane_id) => pane_id,
+            Err(teardown) => return Ok(teardown),
+        };
+        // #8935: the record's own pane's claude, not the session's active pane.
+        let pid = crate::core::process::find_claude_pid_in_pane(tmux_name, &pane_id);
         self.tmux.signal_terminate(tmux_name, pid);
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
+        // #8935: the grace window is long enough for the name to change hands.
+        if let Err(teardown) = owned_pane(record, caller, self.classify_runtime(record)) {
+            return Ok(match teardown {
+                RuntimeTeardown::Absent => RuntimeTeardown::Terminated,
+                other => other,
+            });
+        }
         match self.tmux.kill_session(tmux_name) {
             Err(refused @ ManagedError::KillRefused(_)) => return Err(refused),
             Err(e) => warn!(
@@ -174,6 +200,41 @@ impl SessionManager {
             ),
             Ok(()) => {}
         }
-        Ok(())
+        Ok(RuntimeTeardown::Terminated)
+    }
+
+    /// [`runtime_identity::runtime_ownership`] for a teardown: a probe error
+    /// counts as unverifiable, so a teardown that cannot prove ownership kills
+    /// nothing (#8935).
+    /// Test: `an_unreadable_session_probe_leaves_the_runtime_running`.
+    fn classify_runtime(&self, record: &SessionRecord) -> RuntimeOwnership {
+        runtime_identity::runtime_ownership(record, self.tmux.as_ref()).unwrap_or_else(|e| {
+            RuntimeOwnership::Unverifiable(format!(
+                "the tmux probe for session '{}' failed ({e})",
+                record.tmux_name
+            ))
+        })
+    }
+}
+
+/// `Ok(pane_id)` when `ownership` proves `record` owns its live tmux session;
+/// otherwise the [`RuntimeTeardown`] to report, with a warning naming
+/// `caller` (#8935).
+/// Test: `stopping_a_stale_record_never_signals_the_live_session_that_reused_its_name`.
+fn owned_pane(
+    record: &SessionRecord,
+    caller: &str,
+    ownership: RuntimeOwnership,
+) -> Result<String, RuntimeTeardown> {
+    match ownership {
+        RuntimeOwnership::Owned { pane_id } => Ok(pane_id),
+        RuntimeOwnership::Absent => Err(RuntimeTeardown::Absent),
+        RuntimeOwnership::Foreign(why) | RuntimeOwnership::Unverifiable(why) => {
+            warn!(
+                id = %record.id, name = %record.tmux_name, caller,
+                "{why}; nothing was signalled or killed (#8935)"
+            );
+            Err(RuntimeTeardown::LeftRunning(why))
+        }
     }
 }

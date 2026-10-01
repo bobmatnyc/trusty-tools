@@ -409,6 +409,29 @@ pub struct DeleteResponse {
     pub summary: SessionSummary,
     /// Always `true` on success — the record was marked `--deleted--`.
     pub deleted: bool,
+    /// #8935: set when a live tmux session still carries the record's name.
+    /// Delete never touches tmux; this says the session was left running and
+    /// whether it is this record's or one that took the name since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
+}
+
+/// Response body for POST /api/v1/sessions/managed/{id}/runtime-stop.
+///
+/// Why (#8935): a stop whose record's tmux name now belongs to another
+/// session moves the record only. The caller must be told the live session
+/// was left running, not that the runtime stopped.
+/// What: the post-stop [`SessionSummary`], flattened so the body keeps its
+/// pre-#8935 shape, plus `runtime_left_running` when nothing was signalled.
+/// Test: `the_stop_report_says_the_runtime_was_left_running` (the report it carries).
+#[derive(Debug, Serialize)]
+pub struct StopResponse {
+    /// The record after the stop.
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    /// Why the live tmux session carrying the name was left running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/send.

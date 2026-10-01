@@ -643,6 +643,8 @@ async fn manager_stop_keeps_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let record = mgr
         .create(
@@ -692,6 +694,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let workspace_path = workspace_dir.path().to_owned();
 
@@ -1126,6 +1130,8 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
 async fn decommission_full_still_terminates_the_runtime() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let workspace_path = managed_root.path().join("owner").join("repo").join("full");

@@ -310,8 +310,13 @@ pub(crate) async fn runtime_stop_core(state: &Arc<DaemonState>, id_str: &str) ->
         Err(refusal) => return refusal,
     };
     let mgr = state.session_manager().await;
-    match mgr.stop(&id).await {
-        Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
+    // #8935: the report says whether the runtime was torn down or left alone.
+    let stop = mgr.stop_reporting(&id, crate::session_manager::StopCause::Deliberate);
+    match stop.await {
+        Ok(report) => RouteOutcome::ok(&StopResponse {
+            summary: record_to_summary(&report.record),
+            runtime_left_running: report.runtime.left_running().map(str::to_owned),
+        }),
         // #8942: a refused stop (the Architect's record, a terminal record,
         // or a kill the floor refused) is a 409 that says why.
         Err(e @ crate::session_manager::ManagedError::KillRefused(_)) => {

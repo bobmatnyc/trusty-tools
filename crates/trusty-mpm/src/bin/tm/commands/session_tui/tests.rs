@@ -602,6 +602,7 @@ fn delete_outcome_names_the_soft_delete() {
             name: "tm-bravo-02".to_string(),
             prior_state: "stopped".to_string(),
             local: false,
+            note: None,
         }),
     );
     assert_eq!(severity, Severity::Info);
@@ -619,9 +620,31 @@ fn delete_outcome_reports_the_local_store() {
             name: "local-01".to_string(),
             prior_state: "stopped".to_string(),
             local: true,
+            note: None,
         }),
     );
     assert!(text.contains("project store"), "{text}");
+}
+
+/// #8935: a delete that left a live tmux session with the record's name says
+/// so in the status line.
+#[test]
+fn delete_outcome_says_a_live_session_was_left_running() {
+    let note = "tmux session 'tm-x' is live but does not hold this record's pane %7; \
+                it was left running";
+    let (text, _) = delete_outcome(
+        "tm-x",
+        Ok(DeleteReport::Deleted {
+            name: "tm-x".to_string(),
+            prior_state: "stopped".to_string(),
+            local: false,
+            note: Some(note.to_string()),
+        }),
+    );
+    assert!(
+        text.contains("record only") && text.contains(note),
+        "{text}"
+    );
 }
 
 #[test]

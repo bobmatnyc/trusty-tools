@@ -337,6 +337,8 @@ async fn manager_decommission_refuses_dirty_worktree() {
 async fn prune_reports_dirty_worktree_retained() {
     let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");

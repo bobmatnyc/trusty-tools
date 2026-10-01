@@ -14,7 +14,20 @@ use std::sync::Mutex;
 use tempfile::TempDir;
 
 use super::manager::{ManagedError, ManagedTmuxDriver, SessionManager};
+use super::record::SessionRecord;
+use super::runtime_identity::RuntimeTeardown;
 use super::tests::FakeTmuxDriver;
+
+/// A record named `name`, bound to pane `%1` (#8935: the teardown kills only a
+/// session proved to hold the record's own pane).
+fn record_named(name: &str) -> SessionRecord {
+    serde_json::from_value(serde_json::json!({
+        "id": super::record::ManagedSessionId::new().to_string(),
+        "task": "t", "tmux_name": name, "cwd": "/tmp", "state": "active",
+        "created_at": "2026-09-30T00:00:00Z", "pane_id": "%1",
+    }))
+    .expect("record")
+}
 
 /// `graceful_terminate_runtime` signals the runtime BEFORE reclaiming the pane (#1975).
 ///
@@ -40,9 +53,11 @@ async fn graceful_terminate_runtime_signals_then_kills() {
         .unwrap()
         .push("tm-drain-1".to_string());
 
-    mgr.graceful_terminate_runtime("tm-drain-1", "test")
+    let teardown = mgr
+        .graceful_terminate_runtime(&record_named("tm-drain-1"), "test")
         .await
         .expect("drain");
+    assert_eq!(teardown, RuntimeTeardown::Terminated);
 
     assert_eq!(
         *fake.interrupt_calls.lock().unwrap(),
@@ -71,9 +86,11 @@ async fn graceful_terminate_runtime_noop_when_session_gone() {
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     // Do NOT seed "tm-already-gone" — the session_exists guard must short-circuit.
-    mgr.graceful_terminate_runtime("tm-already-gone", "test")
+    let teardown = mgr
+        .graceful_terminate_runtime(&record_named("tm-already-gone"), "test")
         .await
         .expect("no-op");
+    assert_eq!(teardown, RuntimeTeardown::Absent);
 
     assert!(
         fake.interrupt_calls.lock().unwrap().is_empty(),
