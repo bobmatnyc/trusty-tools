@@ -65,9 +65,10 @@ fn wrapper_value_options(wrapper: &str) -> &'static [&'static str] {
     }
 }
 
-/// One word of a segment: its byte span and its unquoted text.
+/// One word of a segment: its byte span `start..end` and its unquoted text.
 pub(super) struct Word {
     pub(super) start: usize,
+    pub(super) end: usize,
     pub(super) text: String,
 }
 
@@ -98,11 +99,12 @@ pub(super) fn words(seg: &str) -> Vec<Word> {
             }
             i += 1;
         }
-        let raw = &seg[start..i.min(bytes.len())];
+        let end = i.min(bytes.len());
+        let raw = &seg[start..end];
         let text = shlex::split(raw)
             .map(|parts| parts.concat())
             .unwrap_or_else(|| raw.to_string());
-        out.push(Word { start, text });
+        out.push(Word { start, end, text });
     }
     out
 }

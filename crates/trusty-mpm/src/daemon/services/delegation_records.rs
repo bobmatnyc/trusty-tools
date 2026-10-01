@@ -82,11 +82,10 @@ impl DelegationRecordView {
 
 /// A name for `session` that a caller cannot replay as its identity (#8257).
 ///
-/// Why: owner ruling 2026-09-24. The repair route identifies its caller by the
-/// `x-tm-caller-session` header, which
-/// [`super::delegation_repair::RepairCaller::from_request`] accepts only as a
-/// UUID. Every text or wire field a denied caller reads therefore names the
-/// owner without its UUID; the operator finds the UUID in the daemon log.
+/// Why: owner ruling 2026-09-24. Every text or wire field a denied caller
+/// reads names the owner without its UUID; the operator finds the UUID in the
+/// daemon log. #8531: the repair caller is now the kernel's peer process, so
+/// a UUID no longer establishes anyone; the label remains a second guard.
 /// What: `session `<tmux name>`` when the daemon holds a tmux name that does not
 /// parse as a UUID and does not contain this session's UUID in hyphenated or
 /// bare form; otherwise a fixed phrase with no identifier in it.

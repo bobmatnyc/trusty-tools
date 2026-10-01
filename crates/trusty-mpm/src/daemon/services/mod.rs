@@ -16,6 +16,8 @@ pub mod agent_worktree_reap;
 // probe the repair asks before it writes.
 pub mod delegation_records;
 pub mod delegation_repair;
+// #8531: the repair caller, established from the socket's kernel peer pid.
+pub mod delegation_repair_caller;
 pub(crate) mod delegation_repair_probe;
 pub mod delegation_tracker;
 pub mod hook_service;

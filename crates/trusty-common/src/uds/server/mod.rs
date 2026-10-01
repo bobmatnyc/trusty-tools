@@ -95,13 +95,13 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::uds::{
-    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_hardened, ensure_peer_is_self,
+    MAX_FRAME_BYTES, UdsSecurityError, accept_sized, bind_hardened, ensure_peer_is_self, peer_pid,
 };
 
 pub use idle::{IdleGuard, IdleTracker};
@@ -112,6 +112,70 @@ pub use wire::{
     CODE_PARSE_ERROR, CODE_STREAM_REQUIRED, CODE_STREAM_UNSUPPORTED, JSONRPC_VERSION, RpcError,
     RpcRequest, RpcResponse, RpcStreamFrame, StreamPhase,
 };
+
+tokio::task_local! {
+    /// The connection whose request is dispatching: its kernel-reported pid
+    /// and when it was accepted (#8531).
+    static REQUEST_PEER: (Option<u32>, SystemTime);
+}
+
+/// The process behind the request now being handled, as the kernel reports
+/// it, and when its connection was accepted (#8531).
+///
+/// Why: a pid names a process only while that process lives; once it exits
+/// the OS may hand the pid to a later process. A consumer that walks the
+/// process table after the request arrived needs the instant the connection
+/// was taken, so that a process under that pid that started later is seen as
+/// a reuse, not as the peer.
+/// What: the pid [`request_peer_pid`] returns plus [`Self::accepted_at`],
+/// stamped by [`handle_connection`] before it reads the request frame.
+/// Test: `a_handler_reads_its_peer_and_the_accept_instant_8531`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPeer {
+    /// The kernel-reported pid of the connected process.
+    pub pid: u32,
+    /// When the server began serving the connection, before the frame read.
+    pub accepted_at: SystemTime,
+}
+
+/// The peer of the request now being handled, with its accept instant (#8531).
+///
+/// What: [`RequestPeer`] for a socket dispatch whose kernel reported a pid;
+/// `None` in every case [`request_peer_pid`] is `None`.
+/// Test: `a_handler_reads_its_peer_and_the_accept_instant_8531`,
+/// `request_peer_pid_is_none_outside_a_socket_dispatch_8531`.
+#[must_use]
+pub fn request_peer() -> Option<RequestPeer> {
+    REQUEST_PEER
+        .try_with(|(pid, accepted_at)| {
+            pid.map(|pid| RequestPeer {
+                pid,
+                accepted_at: *accepted_at,
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+/// The pid of the process that sent the request now being handled (#8531).
+///
+/// Why: a handler that grants a privilege by caller identity must take that
+/// identity from the kernel, not from a parameter the caller writes. Handlers
+/// receive only their params, so the connection's peer pid travels beside the
+/// dispatch rather than through the [`RpcMethod`] signature every consumer
+/// implements.
+/// What: the [`peer_pid`] [`handle_connection`] read off the connection, for
+/// the handler future and anything it awaits in the same task. `None` when
+/// the kernel reported no pid, on a target without a peer-pid option, or
+/// outside a socket dispatch — a direct [`RpcRouter::dispatch`] call or a
+/// task the handler spawned. A caller that grants on it must treat `None` as
+/// "not established".
+/// Test: `a_handler_reads_the_peer_pid_of_its_own_connection_8531`,
+/// `request_peer_pid_is_none_outside_a_socket_dispatch_8531`.
+#[must_use]
+pub fn request_peer_pid() -> Option<u32> {
+    request_peer().map(|peer| peer.pid)
+}
 
 /// Everything that can stop this server, or stop one of its connections.
 ///
@@ -355,6 +419,9 @@ pub async fn handle_connection(
     // Sizing them again here would repeat four syscalls per connection — see
     // `uds::sockbuf` for why the listener's sizing is not enough on Linux.
     ensure_peer_is_self(&stream).map_err(|source| RpcServerError::Peer { source })?;
+    // #8531: stamped at accept, before the frame read, and carried with the
+    // peer pid, so a slow frame does not widen the pid-reuse window.
+    let peer = (peer_pid(&stream), SystemTime::now());
 
     let mut frame: Vec<u8> = Vec::new();
     {
@@ -381,7 +448,12 @@ pub async fn handle_connection(
     // #6621: classified BEFORE dispatch, off the frame the loop already read.
     let liveness = router.frame_is_liveness(&frame);
 
-    let errored = match router.dispatch_streaming(&frame).await {
+    // #8531: the connection's peer, so a handler can bind a privilege to the
+    // kernel's word rather than to a caller-written param.
+    let outcome = REQUEST_PEER
+        .scope(peer, router.dispatch_streaming(&frame))
+        .await;
+    let errored = match outcome {
         RpcOutcome::Single(response) => {
             let errored = response.is_error();
             // One owned, already-newline-terminated buffer, so the response

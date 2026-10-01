@@ -87,6 +87,62 @@ fn print_census() -> ! {
 /// The exit code for a command that is not a heavy build (`EX_USAGE`).
 const EXIT_NOT_A_HEAVY_BUILD: i32 = 64;
 
+/// The exit code for a build outside the directory its command meant
+/// (`EX_CONFIG`, #8969).
+const EXIT_WRONG_DIRECTORY: i32 = 78;
+
+/// Enter, or verify, the directory the hook resolved for the build (#8969).
+///
+/// Why: Claude Code can drop a leading `cd` and run the rest elsewhere, so the
+/// lease — the last process before cargo — must never build another checkout.
+/// What: `chdir` returns canonical `DIR` for the caller to run the build in
+/// (never a process-wide `set_current_dir`, #5544), naming the move when the
+/// shell stood elsewhere. `expect` compares the canonical cwd with canonical
+/// `DIR` and returns `None`. `Err` on a mismatch or an unusable directory: the
+/// caller refuses and the build never starts.
+/// Test: `a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969`,
+/// `a_build_outside_its_expected_directory_is_refused_8969`.
+fn pin_directory(chdir: Option<&Path>, expect: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let here = std::env::current_dir().and_then(|d| d.canonicalize());
+    let canonical = |dir: &Path| {
+        dir.canonicalize()
+            .ok()
+            .filter(|d| d.is_dir())
+            .ok_or_else(|| format!("the command's directory {} is unusable", dir.display()))
+    };
+    if let Some(dir) = chdir {
+        let dir = canonical(dir)?;
+        if here.as_ref().ok() != Some(&dir) {
+            eprintln!(
+                "tm build-lease: building in {} — the command's `cd`; the shell started in {} \
+                 (#8969)",
+                dir.display(),
+                here.as_ref().map_or_else(
+                    |e| format!("an unreadable directory ({e})"),
+                    |h| h.display().to_string()
+                )
+            );
+        }
+        return Ok(Some(dir));
+    }
+    let Some(want) = expect else {
+        return Ok(None);
+    };
+    let want = canonical(want)?;
+    let here = here.map_err(|e| format!("this process's directory is unreadable: {e}"))?;
+    if here == want {
+        return Ok(None);
+    }
+    Err(format!(
+        "the command meant to build in {}, but the shell ran it in {}, so cargo would build a \
+         different checkout. Re-run it with an absolute path, `cd {} && …`, or pass `cargo \
+         --manifest-path <dir>/Cargo.toml`",
+        want.display(),
+        here.display(),
+        want.display()
+    ))
+}
+
 /// `tm build-lease` arguments.
 ///
 /// Test: `cli_parses_build_lease_and_passes_the_exit_code_through`.
@@ -97,8 +153,16 @@ pub(crate) struct BuildLeaseArgs {
     wait_secs: Option<u64>,
     /// Print the lease holders and the census, per build group, and exit.
     // #8261: round 4 — the live check logs this while builds run.
-    #[arg(long, conflicts_with_all = ["command", "wait_secs"])]
+    #[arg(long, conflicts_with_all = ["command", "wait_secs", "chdir", "expect_cwd"])]
     census: bool,
+    /// Run the build in DIR: the command's own absolute `cd`, which the shell
+    /// may never see (#8969).
+    #[arg(long, value_name = "DIR", conflicts_with = "expect_cwd")]
+    chdir: Option<PathBuf>,
+    /// Refuse unless this process runs in DIR, the directory the hook resolved
+    /// for the command's `cd` (#8969).
+    #[arg(long, value_name = "DIR")]
+    expect_cwd: Option<PathBuf>,
     /// The heavy build to run, after `--`; anything else is refused.
     #[arg(
         trailing_var_arg = true,
@@ -130,6 +194,14 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
         );
         std::process::exit(EXIT_NOT_A_HEAVY_BUILD)
     }
+    // #8969: settle the build's directory before anything below reads the cwd.
+    let pinned = match pin_directory(args.chdir.as_deref(), args.expect_cwd.as_deref()) {
+        Ok(pinned) => pinned,
+        Err(why) => {
+            eprintln!("tm build-lease: not running `{command_line}` (#8969) — {why}");
+            std::process::exit(EXIT_WRONG_DIRECTORY)
+        }
+    };
     for warning in builders.deprecation_warnings() {
         eprintln!("tm build-lease: {warning}");
     }
@@ -140,7 +212,9 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
         .ok();
     let home = dirs::home_dir();
     let home_or_root = home.clone().unwrap_or_else(|| PathBuf::from("/"));
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = pinned
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     // The checkout ROOT keys slot affinity and the stale-build guard.
     let checkout = checkout_root(&cwd).display().to_string();
     // Critic round 1: an explicit `--wait-secs` is clamped like the config key.
@@ -251,6 +325,7 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             let status = spawn_and_wait(
                 &run_argv,
                 target.as_deref(),
+                pinned.as_deref(),
                 Some((&mut guard, &mut record)),
             )
             .await;
@@ -285,7 +360,7 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
                 &[],
             )
             .await;
-            exit_with(spawn_and_wait(&args.command, None, None).await)
+            exit_with(spawn_and_wait(&args.command, None, pinned.as_deref(), None).await)
         }
         Outcome::TimedOut { decision, holders } => {
             post_decision(
@@ -455,9 +530,11 @@ fn write_record(guard: &mut SlotGuard, record: &HolderRecord) {
 /// What: the signal handlers are installed BEFORE the spawn (#8261 round 3),
 /// so a SIGTERM that lands between the spawn and the handler cannot kill this
 /// holder with the default action and orphan the build.
+/// `dir` is the `--chdir` directory the build runs in (#8969).
 async fn spawn_and_wait(
     command: &[String],
     target_dir: Option<&str>,
+    dir: Option<&Path>,
     lease: Option<(&mut SlotGuard, &mut HolderRecord)>,
 ) -> std::io::Result<std::process::ExitStatus> {
     let Some((program, rest)) = command.split_first() else {
@@ -469,6 +546,9 @@ async fn spawn_and_wait(
     let mut hup = signal(SignalKind::hangup())?;
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(rest);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir).env("PWD", dir);
+    }
     if let Some(dir) = target_dir {
         cmd.env("CARGO_TARGET_DIR", dir);
     }

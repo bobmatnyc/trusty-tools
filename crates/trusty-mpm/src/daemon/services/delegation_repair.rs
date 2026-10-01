@@ -66,8 +66,9 @@
 //! # #8257 owner ruling (2026-09-24)
 //!
 //! The one exception to "a live owner refuses": the OWNING session may clear
-//! its own record. The caller is read from [`CALLER_SESSION_HEADER`], which
-//! `tm` fills from the harness's `CLAUDE_CODE_SESSION_ID` — never from a CLI
+//! its own record. #8531: the caller is established only over the daemon
+//! socket, from the kernel's peer pid and a parent-process walk
+//! ([`super::delegation_repair_caller`]) — never from a header, a param, a CLI
 //! argument or the request body. A caller that cannot be established refuses
 //! ([`owner_attests`]); live evidence from the probe still refuses the owner;
 //! every clear is logged and stamped on the record as a [`DelegationRepair`].
@@ -148,25 +149,15 @@ pub struct RepairDelegationRequest {
     pub force: bool,
 }
 
-/// The header carrying the calling harness session (#8257 owner ruling).
-///
-/// Why a header, not a body field: the request body is a public struct, and
-/// the caller identity is transport metadata `tm` fills from the harness's
-/// `CLAUDE_CODE_SESSION_ID` — never from a CLI argument.
-///
-/// Residual: the header is caller-asserted, so any local process that knows
-/// the owner's UUID can send it. Owner ruling 2026-09-24: 1.7.3 keeps that
-/// UUID out of every text and wire field a denied caller reads
-/// ([`owner_label`]); authenticating the caller by its peer pid is deferred to
-/// 1.7.4 (#8257).
-pub const CALLER_SESSION_HEADER: &str = "x-tm-caller-session";
-
 /// Who asked for the repair (#8257 owner ruling).
 ///
 /// Why: the owning session may clear its own live record on its own word, so
 /// the gate must know whether the caller IS that session — and "could not
 /// tell" must refuse rather than read as "someone else".
 /// What: an established session id, or the reason none could be established.
+/// #8531: `Session` is built only by
+/// [`super::delegation_repair_caller::establish_caller`], from the kernel's
+/// peer pid; no transport field parses into it.
 /// Test: `an_unestablished_caller_is_refused_on_a_live_record_8257`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepairCaller {
@@ -177,25 +168,6 @@ pub enum RepairCaller {
 }
 
 impl RepairCaller {
-    /// Read the caller from the request's [`CALLER_SESSION_HEADER`] value.
-    ///
-    /// Only a UUID establishes a caller, so an [`owner_label`] — a tmux name —
-    /// cannot be replayed as one (#8257 owner ruling).
-    pub fn from_request(raw: Option<&str>) -> Self {
-        match raw.map(str::trim).filter(|s| !s.is_empty()) {
-            None => Self::Unestablished(
-                "the request named no caller session — `tm` sends the harness's \
-                 CLAUDE_CODE_SESSION_ID, which was unset in the calling process"
-                    .to_string(),
-            ),
-            Some(s) => uuid::Uuid::parse_str(s)
-                .map(|u| Self::Session(SessionId(u)))
-                .unwrap_or_else(|_| {
-                    Self::Unestablished(format!("the caller session `{s}` is not a session id"))
-                }),
-        }
-    }
-
     fn session(&self) -> Option<SessionId> {
         match self {
             Self::Session(s) => Some(*s),
@@ -364,8 +336,8 @@ pub(crate) fn record_liveness(
 /// attests the agent finished. Otherwise `Err` with the refusal: a different
 /// session is told only the owner can clear it before the stop or the 6 h
 /// mark; an unestablished caller is told why none could be established. The
-/// owner is named by `owner`, an [`owner_label`] — never by its UUID, which
-/// the caller could replay in [`CALLER_SESSION_HEADER`] (#8257 owner ruling).
+/// owner is named by `owner`, an [`owner_label`] — never by its UUID (#8257
+/// owner ruling).
 /// Test: `the_owning_session_clears_its_own_live_record_8257`,
 /// `a_non_owning_session_is_refused_on_a_live_record_8257`,
 /// `an_unestablished_caller_is_refused_on_a_live_record_8257`,
