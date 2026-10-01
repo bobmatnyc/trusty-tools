@@ -6,7 +6,8 @@
 //! live session — on 2026-09-30, the relaunched Architect. The record's
 //! `pane_id` is tmux's own `%N` id, which one tmux server never hands out
 //! twice: a later session that reuses the name gets a new pane id.
-//! What: [`RuntimeOwnership`] and [`runtime_ownership`], the one
+//! What: [`RuntimeOwnership`](crate::session_manager::runtime_identity::RuntimeOwnership)
+//! and [`runtime_ownership`](crate::session_manager::runtime_identity::runtime_ownership), the one
 //! classification the stop/decommission teardown and the delete guard share,
 //! and [`RuntimeTeardown`], what a teardown reports back to its caller.
 //! Test: `runtime_identity_tests.rs`.
