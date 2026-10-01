@@ -13,6 +13,7 @@ use super::*;
 use crate::core::agent::DelegationId;
 use crate::core::session::SessionId;
 use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
+use crate::session_manager::provisioning_ledger;
 use crate::session_manager::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use crate::session_manager::worktree_ownership::{
     AgentWorktreeOwner, sentinel_payload_bytes, write_agent_sentinel,
@@ -35,19 +36,33 @@ fn admin_marker(wt: &Path) -> PathBuf {
 /// A pushed worktree carrying the ownership marker and a tracked
 /// `.gitignore`, then dirtied exactly as the issue's `git status` showed:
 /// ` M .gitignore`, `?? .claude/settings.json`, `?? .claude/settings.json.bak`,
-/// `?? CLAUDE.md`.
+/// `?? CLAUDE.md`. The provisioning ledger records those writes, as a launch
+/// records them (#8540).
 fn provisioned_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     let wt = fx.add_worktree(name);
     std::fs::write(wt.join(".gitignore"), "target/\n").expect("write .gitignore");
     GitWorktreeFixture::commit_all_and_push(&wt, "track .gitignore");
     mark_owned(&wt);
+    let before = provisioning_ledger::snapshot(&wt);
     // #7660: the real provisioning write, so the excused diff is the real one.
     crate::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold .gitignore");
     std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
     std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("write settings");
     std::fs::write(wt.join(".claude/settings.json.bak"), "{}\n").expect("write settings bak");
     std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("write CLAUDE.md");
+    assert!(
+        provisioning_ledger::record(&wt, &before).expect("record the ledger"),
+        "premise: the worktree has an admin dir for the ledger"
+    );
     wt
+}
+
+/// The provisioning ledger path of `wt` (#8540).
+fn ledger_file(wt: &Path) -> PathBuf {
+    admin_marker(wt)
+        .parent()
+        .expect("the marker has a parent")
+        .join(provisioning_ledger::LEDGER_NAME)
 }
 
 /// A `.claude/settings.json` snapshot named the way `snapshot_then_prune`
@@ -185,65 +200,116 @@ async fn decommission_reports_why_it_kept_a_provisioned_worktree() {
     assert!(reason.contains("--force"), "reason: {reason}");
 }
 
-/// #7660 interim ruling (#8540): the plain refusal recommends `--force`, which
-/// excuses an untracked `CLAUDE.md` / `.claude/settings.json` by path alone,
-/// so it must name them and say `--force` discards edits to them. Fails
-/// before the ruling, whose refusal carried no such warning.
+/// #8540: the plain refusal names the untracked `CLAUDE.md` and
+/// `.claude/settings.json`, and no longer warns that `--force` deletes them
+/// unread — `--force` now checks their content.
 #[tokio::test]
-async fn decommission_refusal_warns_force_discards_untracked_claude_md_edits() {
+async fn decommission_refusal_names_the_untracked_claude_files() {
     let fx = GitWorktreeFixture::new();
-    let wt = provisioned_tree(&fx, "decom-refuse-warn-7660");
+    let wt = provisioned_tree(&fx, "decom-refuse-names-8540");
 
     let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
 
     assert!(!verdict.removed && wt.exists());
     let reason = verdict.kept_reason.expect("a kept workspace must say why");
-    assert!(
-        reason.ends_with(
-            "unpushed commits. WARNING: --force deletes the untracked .claude/settings.json \
-             and CLAUDE.md with the worktree, including any edits made to them; copy out \
-             anything you added there first"
-        ),
-        "reason: {reason}"
-    );
-}
-
-/// #7660: one untracked content-unchecked file is named alone, with a
-/// singular pronoun — never a list with a dangling comma.
-#[tokio::test]
-async fn decommission_refusal_warning_names_a_single_untracked_file() {
-    let fx = GitWorktreeFixture::new();
-    let wt = provisioned_tree(&fx, "decom-refuse-warn-one-7660");
-    std::fs::remove_file(wt.join(".claude/settings.json")).expect("drop settings.json");
-
-    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
-
-    assert!(!verdict.removed && wt.exists());
-    let reason = verdict.kept_reason.expect("a kept workspace must say why");
-    assert!(
-        reason.ends_with(
-            "unpushed commits. WARNING: --force deletes the untracked CLAUDE.md with the \
-             worktree, including any edits made to it; copy out anything you added there first"
-        ),
-        "reason: {reason}"
-    );
-}
-
-/// #7660 interim ruling (#8540): with no untracked `CLAUDE.md` or
-/// `.claude/settings.json` in the tree, the refusal carries no warning.
-#[tokio::test]
-async fn decommission_refusal_omits_the_warning_without_untracked_claude_files() {
-    let fx = GitWorktreeFixture::new();
-    let wt = fx.add_worktree("decom-refuse-no-warn-7660");
-    mark_owned(&wt);
-    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("write user work");
-
-    let verdict = remove(&wt, ProvisioningDirt::Refuse).await;
-
-    assert!(!verdict.removed && wt.join("notes.rs").exists());
-    let reason = verdict.kept_reason.expect("a kept workspace must say why");
-    assert!(reason.contains("?? notes.rs"), "reason: {reason}");
+    for entry in ["?? CLAUDE.md", "?? .claude/settings.json"] {
+        assert!(reason.contains(entry), "reason: {reason}");
+    }
+    assert!(reason.contains("unedited CLAUDE.md"), "reason: {reason}");
     assert!(!reason.contains("WARNING"), "reason: {reason}");
+}
+
+/// #8540: the three ledger-checked files are excused only while their bytes
+/// equal what the ledger recorded. Fails before #8540, which excused
+/// `?? CLAUDE.md`, `?? .claude/settings.json` and `?? .claude/settings.json.bak`
+/// by path whatever they held.
+#[test]
+fn provisioning_entry_excuses_claude_files_only_as_the_ledger_recorded_them() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-entry-ledger-8540");
+    let is = |line: &str| is_provisioning_entry(&wt, None, line);
+    for rel in [
+        "CLAUDE.md",
+        ".claude/settings.json",
+        ".claude/settings.json.bak",
+    ] {
+        let line = format!("?? {rel}");
+        assert!(is(&line), "premise: tm's own {rel} is excused");
+        let mut body = std::fs::read(wt.join(rel)).expect("read");
+        body.extend_from_slice(b"# a user's note\n");
+        std::fs::write(wt.join(rel), &body).expect("edit");
+        assert!(!is(&line), "an edited {rel} is not provisioning");
+    }
+}
+
+/// 🔴 #8540: notes a user appended to an untracked `CLAUDE.md` (Claude Code's
+/// `#` memory shortcut) keep the worktree under `--force`, survive
+/// byte-for-byte, and the refusal says why. Fails at a791b467ee, which
+/// excused `?? CLAUDE.md` by path and deleted the notes with the worktree.
+#[tokio::test]
+async fn force_decommission_keeps_notes_appended_to_an_untracked_claude_md() {
+    let fx = GitWorktreeFixture::new();
+    let wt = provisioned_tree(&fx, "decom-force-claude-notes-8540");
+    let edited = "# tm\n- always run the gate twice\n";
+    std::fs::write(wt.join("CLAUDE.md"), edited).expect("append a note");
+
+    let verdict = remove(&wt, ProvisioningDirt::Discard).await;
+
+    assert!(!verdict.removed, "an edited CLAUDE.md must keep the tree");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("CLAUDE.md")).expect("CLAUDE.md survives"),
+        edited,
+        "the note survives untouched"
+    );
+    let reason = verdict.kept_reason.expect("a kept tree must say why");
+    assert_eq!(
+        count_and_list(&reason),
+        (1, vec!["?? CLAUDE.md".to_string()]),
+        "reason: {reason}"
+    );
+    assert!(
+        reason.contains(
+            "CLAUDE.md differs from what tm's provisioning ledger recorded writing, or the \
+             ledger could not be read, so --force kept the worktree and deleted nothing"
+        ),
+        "reason: {reason}"
+    );
+}
+
+/// FAIL-CLOSED (#8540): when the ledger cannot vouch for `CLAUDE.md` — it is
+/// missing, corrupt, or `CLAUDE.md` cannot be read to hash — `--force` keeps
+/// the worktree. Fails at a791b467ee, which never consulted the ledger.
+#[tokio::test]
+async fn force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it() {
+    let fx = GitWorktreeFixture::new();
+    for case in ["missing", "corrupt", "unreadable"] {
+        let wt = provisioned_tree(&fx, &format!("decom-force-ledger-{case}-8540"));
+        let claude_md = wt.join("CLAUDE.md");
+        let verdict = match case {
+            "missing" => {
+                std::fs::remove_file(ledger_file(&wt)).expect("drop the ledger");
+                remove(&wt, ProvisioningDirt::Discard).await
+            }
+            "corrupt" => {
+                std::fs::write(ledger_file(&wt), b"{not json").expect("corrupt the ledger");
+                remove(&wt, ProvisioningDirt::Discard).await
+            }
+            _ => {
+                let _restore = deny_all(&claude_md);
+                remove(&wt, ProvisioningDirt::Discard).await
+            }
+        };
+
+        assert!(!verdict.removed, "{case}: the tree must be kept");
+        assert_eq!(
+            std::fs::read_to_string(&claude_md).expect("CLAUDE.md survives"),
+            "# tm\n",
+            "{case}"
+        );
+        let reason = verdict.kept_reason.expect("a kept tree must say why");
+        assert!(reason.contains("?? CLAUDE.md"), "{case}: {reason}");
+        assert!(reason.contains("deleted nothing"), "{case}: {reason}");
+    }
 }
 
 /// The reported case: `--force` removes a tree dirty only from provisioning.
@@ -665,10 +731,12 @@ async fn force_decommission_is_never_stricter_than_plain_on_a_clean_tree() {
 fn untracked_gitignore_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     let wt = fx.add_worktree(name);
     mark_owned(&wt);
+    let before = provisioning_ledger::snapshot(&wt);
     crate::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold .gitignore");
     std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
     std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("write settings");
     std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("write CLAUDE.md");
+    provisioning_ledger::record(&wt, &before).expect("record the ledger");
     wt
 }
 

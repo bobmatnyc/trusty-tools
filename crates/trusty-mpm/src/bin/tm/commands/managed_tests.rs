@@ -1032,25 +1032,56 @@ fn pushed_repo_7660() -> (tempfile::TempDir, std::path::PathBuf, std::path::Path
     (tmp, root, repo)
 }
 
-/// Write `wt`'s ownership marker where tm writes it since #8511 — `git
-/// rev-parse --git-path trusty-mpm-worktree`, outside the working tree. The
-/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
-/// git for the same path.
-fn mark_owned_7660(wt: &std::path::Path) {
+/// The absolute path of `name` in `wt`'s git admin dir — `git rev-parse
+/// --git-path`, outside the working tree.
+fn admin_path_7660(wt: &std::path::Path, name: &str) -> std::path::PathBuf {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(wt)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "trusty-mpm-worktree",
-        ])
+        .args(["rev-parse", "--path-format=absolute", "--git-path", name])
         .output()
         .expect("run git rev-parse");
     assert!(out.status.success(), "git rev-parse --git-path failed");
-    let marker = String::from_utf8(out.stdout).expect("utf8 path");
-    std::fs::write(marker.trim(), b"").expect("write the admin-dir marker");
+    String::from_utf8(out.stdout)
+        .expect("utf8 path")
+        .trim()
+        .into()
+}
+
+/// Write `wt`'s ownership marker where tm writes it since #8511. The
+/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
+/// git for the same path.
+fn mark_owned_7660(wt: &std::path::Path) {
+    std::fs::write(admin_path_7660(wt, "trusty-mpm-worktree"), b"")
+        .expect("write the admin-dir marker");
+}
+
+/// Record the provisioning ledger a launch writes (#8663) for the files
+/// [`provision_dirt_7660`] wrote, so `--force` can match their content
+/// (#8540). The library's ledger writer is crate-private, so this writes its
+/// version-1 JSON beside the marker.
+fn record_ledger_7660(wt: &std::path::Path) {
+    use sha2::{Digest as _, Sha256};
+    let files: serde_json::Map<String, serde_json::Value> = [
+        "CLAUDE.md",
+        ".claude/settings.json",
+        ".claude/settings.json.bak",
+    ]
+    .into_iter()
+    .map(|rel| {
+        let bytes = std::fs::read(wt.join(rel)).expect("read a provisioned file");
+        (
+            rel.to_string(),
+            format!("{:x}", Sha256::digest(bytes)).into(),
+        )
+    })
+    .collect();
+    let ledger = serde_json::json!({ "version": 1, "files": files, "gitignore_appended": [] });
+    std::fs::write(
+        admin_path_7660(wt, "trusty-mpm-provisioning-ledger.json"),
+        serde_json::to_vec(&ledger).expect("serialize the ledger"),
+    )
+    .expect("write the ledger");
 }
 
 /// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
@@ -1117,6 +1148,7 @@ async fn spawn_daemon_with_provisioned_worktree() -> Served7660 {
     );
     mark_owned_7660(&wt);
     provision_dirt_7660(&wt);
+    record_ledger_7660(&wt);
     let (url, id) = serve_session_on_7660(&root, &wt).await;
     (url, id, wt, tmp)
 }

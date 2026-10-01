@@ -10,10 +10,11 @@
 //! [`WorkspaceVerdict`] that carries WHY a workspace was kept, and honours
 //! [`ProvisioningDirt::Discard`], under which tm's provisioning writes are
 //! excused only in the exact state provisioning leaves them
-//! ([`is_provisioning_entry`]): `.gitignore`, `.claude/settings.json`,
-//! `.claude/settings.json.bak`, `CLAUDE.md`, a timestamped
-//! `.claude/settings.json.<timestamp>.bak` snapshot, and a `TASK.md` whose
-//! bytes still equal the task tm wrote (#8688). Unpushed commits, any other
+//! ([`is_provisioning_entry`]): `.gitignore`, a timestamped
+//! `.claude/settings.json.<timestamp>.bak` snapshot, a `TASK.md` whose bytes
+//! still equal the task tm wrote (#8688), and a `.claude/settings.json`,
+//! `.claude/settings.json.bak` or `CLAUDE.md` whose bytes still equal what the
+//! provisioning ledger recorded (#8540). Unpushed commits, any other
 //! modified or untracked file, an edit to a tracked provisioning path,
 //! nested-repository work, and every check that cannot complete still keep
 //! the workspace.
@@ -26,6 +27,8 @@
 //! Test: `force_decommission_removes_a_provisioning_only_worktree`,
 //! `force_decommission_keeps_a_task_md_edited_after_spawn`,
 //! `force_decommission_keeps_an_edited_tracked_claude_md`,
+//! `force_decommission_keeps_notes_appended_to_an_untracked_claude_md`,
+//! `force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it`,
 //! `force_decommission_keeps_a_gitignore_with_a_non_provisioning_line`,
 //! `force_decommission_still_refuses_user_work`,
 //! `force_decommission_still_refuses_unpushed_commits`,
@@ -40,6 +43,7 @@ use super::decommission::{
     GIT_WORKTREE_REMOVE_TIMEOUT, WORKTREE_SENTINEL_FILE, WorktreeRemoval,
     remove_session_worktree_guarded,
 };
+use super::provisioning_ledger;
 use super::record::{ManagedSessionId, SessionRecord};
 use super::worktree_ownership::SentinelOwner;
 use super::worktree_ownership_location::{
@@ -57,10 +61,11 @@ use crate::core::standalone::hooks::backup;
 /// and a timestamped `.claude/settings.json` snapshot.
 pub(crate) const PROVISIONING_FILES: [&str; 6] = [
     ".gitignore",
-    ".claude/settings.json",
-    ".claude/settings.json.bak",
+    // #8540: excused only while they hold the bytes the ledger recorded.
+    "unedited .claude/settings.json",
+    "unedited .claude/settings.json.bak",
     ".claude/settings.json.<timestamp>.bak",
-    "CLAUDE.md",
+    "unedited CLAUDE.md",
     // #8688: excused only while it holds the task tm wrote.
     "unedited TASK.md",
 ];
@@ -115,9 +120,10 @@ pub(super) struct WorkspaceVerdict {
 }
 
 /// The provisioning paths `--force` excuses only while git does not track them
-/// (#7660). A tracked one showing ` M` is an edit someone made, not a write
-/// provisioning did, so it is never excused.
-const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
+/// (#7660) AND their bytes still hash to what the provisioning ledger recorded
+/// tm writing (#8540). A tracked one showing ` M` is an edit someone made, not
+/// a write provisioning did, so it is never excused.
+const LEDGER_CHECKED_FILES: [&str; 3] = [
     ".claude/settings.json",
     ".claude/settings.json.bak",
     "CLAUDE.md",
@@ -129,8 +135,9 @@ const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
 /// Why: `--force` is followed by `git worktree remove --force`, which destroys
 /// whatever it excused. A repository that tracks `CLAUDE.md` shows an agent's
 /// edit to it as ` M CLAUDE.md`, and excusing that by path alone discarded it.
-/// What: the [`UNTRACKED_PROVISIONING_FILES`] and a `.claude/settings.json`
-/// snapshot ([`is_settings_snapshot`]) are excused only as `??`. `TASK.md` is
+/// What: the [`LEDGER_CHECKED_FILES`] are excused only as `??` and only when
+/// [`is_ledgered_write`]; a `.claude/settings.json` snapshot
+/// ([`is_settings_snapshot`]) is excused only as `??`. `TASK.md` is
 /// excused only as `??` and only when [`task_md_is_unedited`] against `task`,
 /// the session record's task. `.gitignore` is excused as ` M` only when its
 /// unstaged diff adds nothing but the lines provisioning writes and removes
@@ -138,6 +145,7 @@ const UNTRACKED_PROVISIONING_FILES: [&str; 3] = [
 /// else — staged, deleted, renamed, conflicted, or an unreadable diff — is not
 /// excused.
 /// Test: `provisioning_entry_matches_only_the_four_paths_in_provisioning_states`,
+/// `provisioning_entry_excuses_claude_files_only_as_the_ledger_recorded_them`,
 /// `provisioning_entry_excuses_task_md_and_settings_snapshots_only_when_untracked`,
 /// `provisioning_entry_excuses_task_md_only_when_it_equals_the_session_task`,
 /// `force_decommission_keeps_an_edited_tracked_claude_md`,
@@ -155,9 +163,30 @@ pub(crate) fn is_provisioning_entry(ws: &Path, task: Option<&str>, line: &str) -
             .is_ok_and(|body| body.lines().all(is_provisioning_gitignore_line)),
         // #8688: agents may write to `TASK.md`, so it is checked by content.
         ("?? ", TASK_MD) => task_md_is_unedited(ws, task),
-        ("?? ", path) => UNTRACKED_PROVISIONING_FILES.contains(&path) || is_settings_snapshot(path),
+        // #8540: by content, never by path — `--force` deleted notes a user
+        // appended to an untracked `CLAUDE.md`.
+        ("?? ", path) if LEDGER_CHECKED_FILES.contains(&path) => is_ledgered_write(ws, line),
+        ("?? ", path) => is_settings_snapshot(path),
         _ => false,
     }
+}
+
+/// Whether the status `line` names a file whose bytes still hash to what the
+/// provisioning ledger recorded tm writing into `ws` (#8540).
+///
+/// Why: excusing `CLAUDE.md`, `.claude/settings.json` or its `.bak` by path
+/// let `--force` delete edits made to them after provisioning.
+/// What: [`provisioning_ledger::load`] then [`ProvisioningLedger::excuses`].
+/// Fails closed: no ledger (a launch before #8663, or no git admin dir), an
+/// unreadable or corrupt one, an unreadable file, or any byte difference is
+/// `false`, so the file keeps the worktree.
+/// Test: `provisioning_entry_excuses_claude_files_only_as_the_ledger_recorded_them`,
+/// `force_decommission_keeps_notes_appended_to_an_untracked_claude_md`,
+/// `force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it`.
+///
+/// [`ProvisioningLedger::excuses`]: provisioning_ledger::ProvisioningLedger::excuses
+fn is_ledgered_write(ws: &Path, line: &str) -> bool {
+    provisioning_ledger::load(ws).is_some_and(|ledger| ledger.excuses(ws, line))
 }
 
 /// The task brief the daemon writes at spawn (`write_task_md`, #1693).
@@ -447,19 +476,14 @@ fn keep_reason(
     inspect_dirt_excusing(ws, &excuse).map(|d| kept_for_dirt(ws, &d.reason, policy, &excuse))
 }
 
-/// The untracked provisioning files `--force` excuses by path alone, never by
-/// content, so an edit to one is lost with the worktree. See #8540.
-// #8688: `TASK.md` is content-checked (`task_md_is_unedited`), so not listed.
-const CONTENT_UNCHECKED_FILES: [&str; 2] = [".claude/settings.json", "CLAUDE.md"];
-
 /// The operator-facing reason a dirty worktree was kept (#7660).
 ///
 /// What: `reason` is the dirt check's own summary; the entries it names are
 /// the ones `excuse` — the same excuse that check counted with — does not
-/// accept, so the count and the list agree (#8688).
-/// Test: `decommission_refusal_warns_force_discards_untracked_claude_md_edits`,
-/// `decommission_refusal_warning_names_a_single_untracked_file`,
-/// `decommission_refusal_omits_the_warning_without_untracked_claude_files`,
+/// accept, so the count and the list agree (#8688). Under `--force`, a
+/// blocking [`LEDGER_CHECKED_FILES`] entry adds [`ledger_kept_note`] (#8540).
+/// Test: `force_decommission_keeps_notes_appended_to_an_untracked_claude_md`,
+/// `decommission_refusal_names_the_untracked_claude_files`,
 /// `decommission_refusal_count_matches_the_entries_it_lists`,
 /// `ledger_refusal_lists_only_the_entries_it_counts`.
 pub(super) fn kept_for_dirt(
@@ -470,27 +494,56 @@ pub(super) fn kept_for_dirt(
 ) -> String {
     let files = PROVISIONING_FILES.join(", ");
     let entries = dirty_entries(ws);
+    let blocking: Vec<&str> = entries
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !excuse(line))
+        .collect();
     // #7660: name what blocked the removal, not only how many entries did.
-    let named = blocking_entries(&entries, excuse);
+    let named = name_entries(&blocking);
     match policy {
         ProvisioningDirt::Refuse => format!(
             "the dirty-tree guard kept it ({reason}{named}). If the only changes are tm's own \
              provisioning files ({files}), re-run with --force to remove it; --force never \
-             discards other changes or unpushed commits{}",
-            force_discard_warning(&entries)
+             discards other changes or unpushed commits"
         ),
         ProvisioningDirt::Discard => format!(
             "--force excused tm's provisioning files ({files}), but the dirty-tree guard \
-             still kept it ({reason}{named}); --force never discards that"
+             still kept it ({reason}{named}); --force never discards that{}",
+            ledger_kept_note(&blocking)
         ),
     }
 }
 
-/// How many dirty entries [`blocking_entries`] names before it summarises.
+/// The note a `--force` refusal adds when `blocking` holds an untracked
+/// [`LEDGER_CHECKED_FILES`] entry, or `""` when it holds none (#8540).
+///
+/// Why: before #8540 `--force` deleted these files by path; the operator must
+/// see that tm now kept them, and why.
+/// Test: `force_decommission_keeps_notes_appended_to_an_untracked_claude_md`,
+/// `force_decommission_keeps_claude_md_when_the_ledger_cannot_vouch_for_it`.
+fn ledger_kept_note(blocking: &[&str]) -> String {
+    let named: Vec<&str> = LEDGER_CHECKED_FILES
+        .into_iter()
+        .filter(|file| blocking.iter().any(|line| *line == format!("?? {file}")))
+        .collect();
+    // #7660: an English list — "A" or "A and B" — with a matching verb.
+    let (list, verb) = match named.as_slice() {
+        [] => return String::new(),
+        [one] => ((*one).to_string(), "differs"),
+        [init @ .., last] => (format!("{} and {last}", init.join(", ")), "differ"),
+    };
+    format!(
+        ". {list} {verb} from what tm's provisioning ledger recorded writing, or the ledger \
+         could not be read, so --force kept the worktree and deleted nothing"
+    )
+}
+
+/// How many dirty entries [`name_entries`] names before it summarises.
 const NAMED_ENTRIES_CAP: usize = 10;
 
-/// `": <entry>, <entry>"` for the [`dirty_entries`] `excuse` does not accept,
-/// or `""` when there are none to name (#7660).
+/// `": <entry>, <entry>"` for the `blocking` [`dirty_entries`], or `""` when
+/// there are none to name (#7660).
 ///
 /// Why: "1 uncommitted/untracked file(s)" tells an operator THAT `--force`
 /// refused, not what to look at.
@@ -498,23 +551,21 @@ const NAMED_ENTRIES_CAP: usize = 10;
 /// [`keep_reason`], so a failed status read only drops the list.
 /// Test: `force_decommission_still_refuses_user_work`,
 /// `force_decommission_keeps_user_work_beside_task_md`.
-fn blocking_entries(entries: &[String], excuse: ExcuseEntry) -> String {
-    let entries: Vec<&str> = entries
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !excuse(line))
-        .collect();
-    if entries.is_empty() {
+fn name_entries(blocking: &[&str]) -> String {
+    if blocking.is_empty() {
         return String::new();
     }
-    let mut named = entries
+    let mut named = blocking
         .iter()
         .take(NAMED_ENTRIES_CAP)
         .map(|l| l.trim())
         .collect::<Vec<_>>()
         .join(", ");
-    if entries.len() > NAMED_ENTRIES_CAP {
-        named.push_str(&format!(", and {} more", entries.len() - NAMED_ENTRIES_CAP));
+    if blocking.len() > NAMED_ENTRIES_CAP {
+        named.push_str(&format!(
+            ", and {} more",
+            blocking.len() - NAMED_ENTRIES_CAP
+        ));
     }
     format!(": {named}")
 }
@@ -543,29 +594,6 @@ pub(super) fn dirty_entries(ws: &Path) -> Vec<String> {
         })
         .map(str::to_string)
         .collect()
-}
-
-/// The warning a plain refusal appends when `entries` hold an untracked file
-/// `--force` would discard unread, or `""` when they hold none (#7660).
-///
-/// Why: the owner's interim ruling for 1.7.3 — `--force` excuses these files
-/// by path, so notes a user appended to an untracked `CLAUDE.md` are lost.
-// See #8540
-fn force_discard_warning(entries: &[String]) -> String {
-    let named: Vec<&str> = CONTENT_UNCHECKED_FILES
-        .into_iter()
-        .filter(|file| entries.iter().any(|line| line == &format!("?? {file}")))
-        .collect();
-    // #7660: an English list — "A" or "A and B" — with a matching pronoun.
-    let (list, pronoun) = match named.as_slice() {
-        [] => return String::new(),
-        [one] => ((*one).to_string(), "it"),
-        [init @ .., last] => (format!("{} and {last}", init.join(", ")), "them"),
-    };
-    format!(
-        ". WARNING: --force deletes the untracked {list} with the worktree, including any edits \
-         made to {pronoun}; copy out anything you added there first"
-    )
 }
 
 /// Why `--force` may not act on `ws` for session `id`, or `None` when tm
