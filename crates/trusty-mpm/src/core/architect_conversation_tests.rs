@@ -41,10 +41,8 @@ const ID: &str = "3f2b8c1e-5d4a-4b6f-9e2d-1a7c0b9e8f61";
 #[test]
 fn the_project_folder_name_matches_claude_code() {
     assert_eq!(
-        project_folder(Path::new(
-            "/Users/masa/trusty-mpm-projects/bobmatnyc/supervisor"
-        )),
-        "-Users-masa-trusty-mpm-projects-bobmatnyc-supervisor"
+        project_folder(Path::new("/work/supervisor")),
+        "-work-supervisor"
     );
     assert_eq!(
         project_folder(Path::new("/a/.claude/_b c")),
