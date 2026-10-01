@@ -30,20 +30,48 @@
 #
 # Portability: POSIX tools only, bash 3.2 (macOS) and bash 5 (Linux CI).
 
-# ui_source_paths <repo> <rev|--worktree> <src_dir> <bundle_dir>
+# ui_pathspecs <src_dir> [<shared_list>]
+# Prints <src_dir>, then each entry of the comma-separated <shared_list>, one
+# per line. These are the pathspecs one digest covers.
+#
+# Why: a bundle can be built from files outside its own UI project — the
+#   search dashboard imports docs/design/UI/design-system/components/ through
+#   a Vite alias. Those directories are hashed TOGETHER with the source dir,
+#   unlike the source_dir list, whose entries are first-match alternatives.
+# What: an empty <shared_list> yields <src_dir> alone, so a row with no
+#   shared_dirs column hashes exactly what it hashed before that column existed.
+# Test: scripts/check-ui-bundle-freshness-selftest.sh case 26.
+ui_pathspecs() {
+  local src_dir="$1" rest="${2:-}" dir
+  printf '%s\n' "$src_dir"
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *,*) dir="${rest%%,*}"; rest="${rest#*,}" ;;
+      *) dir="$rest"; rest="" ;;
+    esac
+    [ -n "$dir" ] && printf '%s\n' "$dir"
+  done
+  return 0
+}
+
+# ui_source_paths <repo> <rev|--worktree> <src_dir> <bundle_dir> [<shared_list>]
 # Prints repo-relative paths, one per line, unsorted.
 ui_source_paths() {
-  local repo="$1" rev="$2" src_dir="$3" bundle_dir="$4"
-  local raw
+  local repo="$1" rev="$2" src_dir="$3" bundle_dir="$4" shared="${5:-}"
+  local raw spec
+  local specs=()
+  while IFS= read -r spec; do specs+=("$spec"); done <<EOF_SPECS
+$(ui_pathspecs "$src_dir" "$shared")
+EOF_SPECS
   if [ "$rev" = "--worktree" ]; then
     # Untracked-but-not-ignored files are included: a new .svelte that has not
     # been `git add`ed still changes what a build would produce.
     raw="$( {
-      git -C "$repo" ls-files -- "$src_dir"
-      git -C "$repo" ls-files --others --exclude-standard -- "$src_dir"
+      git -C "$repo" ls-files -- "${specs[@]}"
+      git -C "$repo" ls-files --others --exclude-standard -- "${specs[@]}"
     } | sort -u)"
   else
-    raw="$(git -C "$repo" ls-tree -r --name-only "$rev" -- "$src_dir" || true)"
+    raw="$(git -C "$repo" ls-tree -r --name-only "$rev" -- "${specs[@]}" || true)"
   fi
   printf '%s\n' "$raw" \
     | grep -v "^${bundle_dir}/" \
@@ -52,13 +80,19 @@ ui_source_paths() {
     | grep -v '^[[:space:]]*$' || true
 }
 
-# ui_source_digest <repo> <rev|--worktree> <src_dir> <bundle_dir>
+# ui_source_digest <repo> <rev|--worktree> <src_dir> <bundle_dir> [<shared_list>]
 # Prints "<digest> <file-count>". Returns 1 when there is nothing to hash —
 # callers must treat that as a failure, never as an empty-but-fine digest.
+# <shared_list> (comma-separated) is hashed together with <src_dir>; see
+# ui_pathspecs.
 ui_source_digest() {
-  local repo="$1" rev="$2" src_dir="$3" bundle_dir="$4"
-  local paths count records digest
-  paths="$(ui_source_paths "$repo" "$rev" "$src_dir" "$bundle_dir")"
+  local repo="$1" rev="$2" src_dir="$3" bundle_dir="$4" shared="${5:-}"
+  local paths count records digest spec
+  local specs=()
+  while IFS= read -r spec; do specs+=("$spec"); done <<EOF_SPECS
+$(ui_pathspecs "$src_dir" "$shared")
+EOF_SPECS
+  paths="$(ui_source_paths "$repo" "$rev" "$src_dir" "$bundle_dir" "$shared")"
   count="$(printf '%s\n' "$paths" | grep -c . || true)"
   [ "$count" -eq 0 ] && return 1
 
@@ -75,7 +109,7 @@ ui_source_digest() {
       <(printf '%s\n' "$existing" | git -C "$repo" hash-object --stdin-paths) \
       <(printf '%s\n' "$existing") | sort)"
   else
-    records="$(git -C "$repo" ls-tree -r "$rev" -- "$src_dir" \
+    records="$(git -C "$repo" ls-tree -r "$rev" -- "${specs[@]}" \
       | awk -v b="${bundle_dir}/" '
           { path = $0; sub(/^[^\t]*\t/, "", path)
             if (index(path, b) == 1) next
@@ -92,10 +126,11 @@ ui_source_digest() {
   echo "${digest} ${count}"
 }
 
-# ui_source_digest_any <repo> <rev|--worktree> <src_dir_list> <bundle_dir>
+# ui_source_digest_any <repo> <rev|--worktree> <src_dir_list> <bundle_dir> [<shared_list>]
 # Prints "<digest> <file-count> <src_dir_used>" for the FIRST directory in the
 # comma-separated list that holds any bundle-affecting file at <rev>. Returns 1
-# when none of them does.
+# when none of them does. <shared_list> is hashed together with whichever
+# source directory wins (ui_pathspecs); it never takes part in the choice.
 #
 # Why: a UI source directory can MOVE. #6155 moved the search dashboard from
 #   crates/trusty-search/ui to crates/trusty-console/ui-search, and the manifest
@@ -108,7 +143,7 @@ ui_source_digest() {
 # Test: scripts/check-ui-bundle-freshness-selftest.sh case 18 replays the real
 #   #3606 publish commit, which predates the #6155 move.
 ui_source_digest_any() {
-  local repo="$1" rev="$2" list="$3" bundle_dir="$4"
+  local repo="$1" rev="$2" list="$3" bundle_dir="$4" shared="${5:-}"
   local dir rest pair
   rest="$list"
   while [ -n "$rest" ]; do
@@ -123,7 +158,12 @@ ui_source_digest_any() {
         ;;
     esac
     [ -z "$dir" ] && continue
+    # The choice reads the source dir alone, so shared files can never make an
+    # empty (pre-move) source dir look like the live one.
     if pair="$(ui_source_digest "$repo" "$rev" "$dir" "$bundle_dir")"; then
+      if [ -n "$shared" ]; then
+        pair="$(ui_source_digest "$repo" "$rev" "$dir" "$bundle_dir" "$shared")" || return 1
+      fi
       echo "${pair} ${dir}"
       return 0
     fi
