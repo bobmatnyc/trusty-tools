@@ -8,5 +8,6 @@ Added
   the file and restart the daemon, which stays sealed until restart (#8980).
 - The daemon's doctor route reports the running daemon's own seal in the
   `session_claudes` row, so a file fixed or removed without a restart no
-  longer reads `Ok` while the daemon stays sealed. The daemonless `tm doctor`
-  fallback still reads only the file, and its `Ok` text says so (#8980).
+  longer reads `Ok` while the daemon stays sealed. `tm doctor`, which runs
+  in-process and never through the daemon, still reads only the file, and its
+  `Ok` text says so (#8980).
