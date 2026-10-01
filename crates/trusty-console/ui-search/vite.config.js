@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'node:url';
 // #5936: emptyOutDir below deletes the tracked ui-source-hash.txt; this
 // re-writes it after the build that removed it.
 import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
@@ -16,6 +17,17 @@ import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
 // Test: `pnpm build` produces ../ui-search-dist/index.html and
 // ../ui-search-dist/assets/*; `bash scripts/check-ui-bundle-freshness.sh
 // trusty-console` then passes both of the console's rows.
+// Why: the hit viewer imports the shared Foundry code/diff components from
+// their canonical home rather than a copy (`@foundry`). They sit outside this
+// package, so the dev server must be allowed to read them, and `svelte` must
+// resolve from this package's node_modules for them as well (`dedupe`). This
+// bundle ships prebuilt, so the cross-tree import never reaches a crate tarball.
+// What: the `@foundry` alias, `server.fs.allow`, and `resolve.dedupe`.
+// Test: `pnpm build` succeeds and `HitViewer.test.js` mounts the shared view.
+const FOUNDRY_COMPONENTS = fileURLToPath(
+  new URL('../../../docs/design/UI/design-system/components', import.meta.url),
+);
+
 export default defineConfig({
   plugins: [svelte(), stampUiBundle('trusty-console-search')],
   base: './',
@@ -24,6 +36,8 @@ export default defineConfig({
   // stub and mount() throws "lifecycle_function_unavailable" at runtime.
   resolve: {
     conditions: ['browser', 'module', 'import', 'default'],
+    alias: { '@foundry': FOUNDRY_COMPONENTS },
+    dedupe: ['svelte'],
   },
   build: {
     outDir: '../ui-search-dist',
@@ -35,6 +49,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    fs: { allow: ['.', FOUNDRY_COMPONENTS] },
     proxy: {
       // Forward API calls to the trusty-search daemon during dev. The console
       // is not in the loop here — `vite dev` serves the SPA at the origin root,

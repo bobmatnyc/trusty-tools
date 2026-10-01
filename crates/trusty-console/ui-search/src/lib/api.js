@@ -107,6 +107,23 @@ export const api = {
       body: JSON.stringify({ text, top_k })
     }),
 
+  /**
+   * Per-keystroke suggestions from one index, lexical mode (no embedding call).
+   * Resolves to `{ hits: [{ label, path, start_line, score, source, snippet }],
+   * mode, latency_ms }`. `signal` lets a newer keystroke abort this request.
+   * Through the console this needs a `search.typeahead` row in
+   * `search_uds/map.rs`; until it has one the console answers 501.
+   */
+  typeahead: (id, q, limit, signal) =>
+    request(
+      `/indexes/${encodeURIComponent(id)}/typeahead?${new URLSearchParams({
+        q,
+        limit: String(limit),
+        mode: 'lexical'
+      })}`,
+      { signal }
+    ),
+
   /** Cross-collection fan-out search across every registered index. */
   globalSearch: (query, top_k = 10, full_content = false) =>
     request('/search', {

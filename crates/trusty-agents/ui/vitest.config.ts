@@ -26,6 +26,11 @@ export default defineConfig({
   resolve: {
     conditions: ['browser'],
   },
+  // `src/lib/foundry/vendored.test.ts` reads the canonical copies of the
+  // vendored components, which sit outside this package's root.
+  server: {
+    fs: { allow: ['.', '../../../docs/design/UI/design-system/components'] },
+  },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.ts'],

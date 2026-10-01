@@ -10,6 +10,7 @@
 
 import { api } from './api.js';
 import { apiUrl } from './base.js';
+import { isConsoleServed } from './transport.js';
 
 let _health = $state(null);
 let _indexes = $state([]); // [{ id, chunk_count, root_path }]
@@ -30,6 +31,9 @@ let _statusRefcount = 0;
  * getChatAvailable() and assert true. Set to false, assert false.
  */
 export function getChatAvailable() {
+  // Through the console `/chat` answers 501 whatever the daemon's provider
+  // setup: no socket method serves it (#6285).
+  if (isConsoleServed()) return false;
   // Prefer the live /health value (updated by the poll loop) so a daemon
   // restart with a newly-configured key is picked up without page refresh.
   if (_health?.chat_available !== undefined) {

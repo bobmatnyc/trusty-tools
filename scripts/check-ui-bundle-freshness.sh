@@ -342,10 +342,10 @@ resolve_asset_ref() {
 }
 
 # ---------------------------------------------------------------------------
-# check_row <crate> <source_dir> <bundle_dir>
+# check_row <crate> <source_dir> <bundle_dir> [<shared_dirs>]
 # ---------------------------------------------------------------------------
 check_row() {
-  local crate="$1" src_dir="$2" bundle_dir="$3"
+  local crate="$1" src_dir="$2" bundle_dir="$3" shared_dirs="${4:-}"
   local row_findings_before="$FINDINGS"
   # #6155: the remedy names a `make -C crates/<dir>` target, and a suffixed row
   # key (`trusty-console-search`) is not a directory — printing it produced an
@@ -378,7 +378,9 @@ check_row() {
   # #6155: src_dir is a comma-separated list, current path first, so a source
   # tree that MOVED stays auditable at commits from before the move.
   local src_digest_pair src_digest src_count src_used
-  if src_digest_pair="$(ui_source_digest_any "$REPO_ROOT" "$DIGEST_REV" "$src_dir" "$bundle_dir")"; then
+  # Optional column 4 (shared_dirs) is hashed together with that source dir —
+  # files outside the UI project the build imports (ui_pathspecs).
+  if src_digest_pair="$(ui_source_digest_any "$REPO_ROOT" "$DIGEST_REV" "$src_dir" "$bundle_dir" "$shared_dirs")"; then
     src_digest="$(printf '%s' "$src_digest_pair" | awk '{ print $1 }')"
     src_count="$(printf '%s' "$src_digest_pair" | awk '{ print $2 }')"
     src_used="$(printf '%s' "$src_digest_pair" | awk '{ print $3 }')"
@@ -410,7 +412,7 @@ check_row() {
       "Remedy: rebuild, then bash scripts/stamp-ui-bundle.sh ${crate}" \
       "        (from crates/${crate_dir}, whose Makefile owns that rebuild)"
   elif [ "$stamp_digest" != "$src_digest" ]; then
-    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was built from different source than ${src_used} now holds." \
+    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was built from different source than ${src_used}${shared_dirs:+ + ${shared_dirs}} now holds." \
       "recorded  ${stamp_digest}  (${stamp_rel})" \
       "actual    ${src_digest}  (${src_count} source file(s) at ${REV})" \
       "source last changed in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_used" \
@@ -467,7 +469,7 @@ check_row() {
 # Run
 # ---------------------------------------------------------------------------
 MATCHED_ROW=0
-while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
+while IFS="$(printf '\t')" read -r crate src_dir bundle_dir shared_dirs _rest; do
   [ -z "${crate:-}" ] && continue
   row_matches_target "$crate" || continue
   MATCHED_ROW=1
@@ -475,7 +477,7 @@ while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
     fail "MANIFEST-STALE — ${crate}: row is missing a source_dir or bundle_dir column."
     continue
   fi
-  check_row "$crate" "$src_dir" "$bundle_dir"
+  check_row "$crate" "$src_dir" "$bundle_dir" "${shared_dirs:-}"
 done <<EOF_ROWS
 $MANIFEST_ROWS
 EOF_ROWS
