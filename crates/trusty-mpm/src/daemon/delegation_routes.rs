@@ -175,7 +175,7 @@ pub fn router() -> Router<Arc<DaemonState>> {
         // — the whole case is a record whose session the daemon has lost.
         .route(
             "/api/v1/delegations/{agent_id}/repair",
-            post(repair_delegation_as_route),
+            post(repair_delegation_route),
         )
         // #8257: the same repair addressed by delegation id — the only address
         // a record matched by agent type ever has — and the read-only listing.
@@ -222,18 +222,22 @@ pub fn list_delegations_op(
 ///
 /// Why: see [`crate::daemon::services::delegation_repair::repair_delegation_by_id`].
 /// What: a malformed id is a 400; otherwise the outcome, always 200, exactly
-/// as [`repair_delegation_route`] answers.
-/// Test: `repair_by_id_route_ends_a_record_with_no_agent_id_8257`.
+/// as [`repair_delegation_route`] answers. #8531: HTTP establishes no caller,
+/// so the owner path opens only over the socket.
+/// Test: `repair_by_id_route_ends_a_record_with_no_agent_id_8257`,
+/// `an_asserted_owner_session_id_is_refused_on_both_transports_8531`.
 pub async fn repair_delegation_by_id_route(
     State(state): State<Arc<DaemonState>>,
     Path(delegation_id): Path<String>,
-    headers: axum::http::HeaderMap,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Result<Json<crate::daemon::services::delegation_repair::RepairOutcome>, DaemonError> {
-    let (force, caller) = force_and_caller(&headers, body);
+    let force = body.is_some_and(|Json(b)| b.force);
+    // #8531: the `x-tm-caller-session` header is never read — any local
+    // process can write it, so it proved nothing.
+    let peer = crate::daemon::services::delegation_repair_caller::RepairPeer::http();
     // #6288: the body is shared with `mpm.delegation.repair_by_id`.
     Ok(Json(
-        repair_delegation_by_id_op(state, &delegation_id, force, caller).await?,
+        repair_delegation_by_id_op(state, &delegation_id, force, peer).await?,
     ))
 }
 
@@ -250,7 +254,7 @@ pub async fn repair_delegation_by_id_op(
     state: Arc<DaemonState>,
     delegation_id: &str,
     force: bool,
-    caller: crate::daemon::services::delegation_repair::RepairCaller,
+    peer: crate::daemon::services::delegation_repair_caller::RepairPeer,
 ) -> Result<crate::daemon::services::delegation_repair::RepairOutcome, DaemonError> {
     let id = uuid::Uuid::parse_str(delegation_id)
         .map(crate::core::agent::DelegationId)
@@ -258,6 +262,12 @@ pub async fn repair_delegation_by_id_op(
             DaemonError::InvalidRequest(format!("malformed delegation id: {delegation_id}"))
         })?;
     Ok(repair_off_worker(move || {
+        // #8531: the caller is the kernel's peer, walked to its session.
+        let caller = crate::daemon::services::delegation_repair_caller::establish_caller(
+            &state,
+            peer,
+            |d| d.id == id,
+        );
         crate::daemon::services::delegation_repair::repair_delegation_by_id(
             &state, id, force, &caller,
         )
@@ -291,52 +301,6 @@ async fn repair_off_worker(
         })
 }
 
-/// The body's `force` flag and the caller-session header of a repair (#8257).
-fn force_and_caller(
-    headers: &axum::http::HeaderMap,
-    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
-) -> (
-    bool,
-    crate::daemon::services::delegation_repair::RepairCaller,
-) {
-    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairCaller};
-    let force = body.is_some_and(|Json(b)| b.force);
-    let raw = headers.get(CALLER_SESSION_HEADER).map(|v| v.to_str());
-    let caller = match raw {
-        Some(Err(_)) => RepairCaller::Unestablished(format!(
-            "the {CALLER_SESSION_HEADER} header is not valid text"
-        )),
-        Some(Ok(s)) => RepairCaller::from_request(Some(s)),
-        None => RepairCaller::from_request(None),
-    };
-    (force, caller)
-}
-
-/// The repair caller a socket request names in its `caller_session` param
-/// (#6288 step 2a).
-///
-/// Why: the socket has no headers, so the [`CALLER_SESSION_HEADER`] value
-/// travels as a parameter. It stays caller-asserted exactly as the header is.
-/// What: absent or `null` reads as no header; a string goes through the same
-/// `RepairCaller::from_request` the header does; any other JSON type is
-/// `Unestablished`, as a header that is not text is — so a malformed value can
-/// never establish an owner.
-/// Test: `rpc_delegation_repair_caller_that_is_not_text_is_unestablished`.
-///
-/// [`CALLER_SESSION_HEADER`]: crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER
-pub fn caller_from_param(
-    raw: Option<&Value>,
-) -> crate::daemon::services::delegation_repair::RepairCaller {
-    use crate::daemon::services::delegation_repair::RepairCaller;
-    match raw {
-        None | Some(Value::Null) => RepairCaller::from_request(None),
-        Some(Value::String(s)) => RepairCaller::from_request(Some(s)),
-        Some(_) => {
-            RepairCaller::Unestablished("the caller_session parameter is not text".to_string())
-        }
-    }
-}
-
 /// `POST /api/v1/delegations/{agent_id}/repair` (#7602).
 ///
 /// Why: a delegation stuck non-terminal has no other way out — `SubagentStop`
@@ -348,52 +312,41 @@ pub fn caller_from_param(
 /// [`crate::daemon::services::delegation_repair::repair_delegation`], which owns
 /// every refusal arm, and returns its outcome as JSON. Always 200 — a refusal is
 /// an ANSWER, and a client that read it as a transport error would retry it.
+/// #8531: HTTP establishes no caller, so the owner path opens only over the
+/// socket (`mpm.delegation.repair`).
 /// Test: `repair_route_ends_a_stuck_record_7602`,
-/// `repair_route_refuses_a_live_owner_7602`.
+/// `repair_route_refuses_a_live_owner_7602`,
+/// `an_asserted_owner_session_id_is_refused_on_both_transports_8531`.
 pub async fn repair_delegation_route(
     State(state): State<Arc<DaemonState>>,
     Path(agent_id): Path<String>,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
-    // #8257: no headers, so no caller session — the owner path never opens.
-    repair_delegation_as_route(
-        State(state),
-        Path(agent_id),
-        axum::http::HeaderMap::new(),
-        body,
-    )
-    .await
-}
-
-/// [`repair_delegation_route`] reading the caller-session header (#8257).
-///
-/// Why: the owner ruling lets the owning session clear its own live record,
-/// so the router registers this form; the header-less one keeps its public
-/// signature and simply never establishes a caller.
-/// Test: `repair_route_lets_the_owning_session_clear_its_record_8257`,
-/// `repair_route_ignores_an_owner_id_the_caller_supplies_8257`.
-pub async fn repair_delegation_as_route(
-    State(state): State<Arc<DaemonState>>,
-    Path(agent_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
-) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
-    let (force, caller) = force_and_caller(&headers, body);
+    let force = body.is_some_and(|Json(b)| b.force);
+    // #8531: the `x-tm-caller-session` header is never read.
+    let peer = crate::daemon::services::delegation_repair_caller::RepairPeer::http();
     // #6288: the body is shared with `mpm.delegation.repair`.
-    Json(repair_delegation_op(state, agent_id, force, caller).await)
+    Json(repair_delegation_op(state, agent_id, force, peer).await)
 }
 
-/// [`repair_delegation_as_route`]'s body, with no transport in it (#6288
+/// [`repair_delegation_route`]'s body, with no transport in it (#6288
 /// step 2a). Always an outcome: a refusal is an answer, never an error.
+/// #8531: `peer` is what the transport proves about the caller; the caller
+/// session is established from it on the blocking pool.
 ///
 /// Test: `parity_delegation_repair_agrees_across_transports`.
 pub async fn repair_delegation_op(
     state: Arc<DaemonState>,
     agent_id: String,
     force: bool,
-    caller: crate::daemon::services::delegation_repair::RepairCaller,
+    peer: crate::daemon::services::delegation_repair_caller::RepairPeer,
 ) -> crate::daemon::services::delegation_repair::RepairOutcome {
     repair_off_worker(move || {
+        let caller = crate::daemon::services::delegation_repair_caller::establish_caller(
+            &state,
+            peer,
+            |d| d.agent_id.as_deref() == Some(agent_id.as_str()),
+        );
         crate::daemon::services::delegation_repair::repair_delegation_as(
             &state, &agent_id, force, &caller,
         )

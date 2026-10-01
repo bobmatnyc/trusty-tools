@@ -42,12 +42,10 @@ pub(crate) fn assert_no_uuid(text: &str, session: SessionId) {
 }
 
 // #8257 owner ruling: the view is what the deny JSON and the unauthenticated
-// listing carry, so its wire form must not hold the owner's UUID — and the
-// label it holds instead must not be a value the caller-session header takes.
+// listing carry, so its wire form must not hold the owner's UUID.
 #[test]
 fn owner_label_never_carries_the_owner_uuid_8257() {
     use crate::core::session::{ControlModel, Session};
-    use crate::daemon::services::delegation_repair::RepairCaller;
 
     let state = DaemonState::new();
     let named = SessionId::new();
@@ -80,14 +78,6 @@ fn owner_label_never_carries_the_owner_uuid_8257() {
         let view = DelegationRecordView::of(&state, &d, now, true);
         assert_eq!(view.owner, want);
         assert_no_uuid(&serde_json::to_string(&view).expect("json"), session);
-        assert!(
-            matches!(
-                RepairCaller::from_request(Some(&view.owner)),
-                RepairCaller::Unestablished(_)
-            ),
-            "the label must not establish a caller: {}",
-            view.owner
-        );
     }
 }
 

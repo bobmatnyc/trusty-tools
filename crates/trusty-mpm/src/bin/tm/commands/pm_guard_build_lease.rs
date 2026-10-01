@@ -47,7 +47,8 @@ use serde_json::Value;
 use trusty_mpm::core::build_lease::config::BuildLeaseConfig;
 
 use super::hook_rewrite::rewrite_bash_command_unless_isolated;
-use super::pm_guard_bash::build_lease_rewrite::{LeaseRewrite, rewrite_for_lease};
+use super::pm_guard_bash::build_lease_cwd::lease_prefix;
+use super::pm_guard_bash::build_lease_rewrite::{LeaseRewrite, rewrite_for_lease_with};
 use super::pm_guard_bash::{split_shell_segments, unclassifiable_command};
 use super::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use super::pm_guard_response::{
@@ -110,9 +111,11 @@ fn wait_for_call(tool_input: Option<&Value>, config_wait: u64) -> Option<u64> {
 /// What: [`LeaseRewrite::None`] when the original matches a `deny` Bash
 /// permission rule; otherwise [`rewrite_bash_command_unless_isolated`] when it
 /// applies (never inside an isolation worktree, #7477), then
-/// [`rewrite_for_lease`] over the result, paired with the permission decision
-/// the module doc describes.
-/// Test: `a_compressible_heavy_build_is_compressed_and_leased`,
+/// [`rewrite_for_lease_with`] over the result, each lease carrying the
+/// directory a preceding `cd` meant ([`lease_prefix`], #8969), paired with the
+/// permission decision the module doc describes.
+/// Test: `a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969`,
+/// `a_compressible_heavy_build_is_compressed_and_leased`,
 /// `an_isolation_worktree_build_is_leased_uncompressed`,
 /// `a_deny_rule_on_the_original_skips_the_rewrite`,
 /// `an_ask_rule_keeps_the_lease_and_asks`.
@@ -139,13 +142,13 @@ pub(crate) fn decide_rewrite(
     if let Some(wait) = wait_for_call(tool_input, lease.effective_lease_wait().as_secs()) {
         prefix.push_str(&format!(" --wait-secs {wait}"));
     }
-    prefix.push_str(" --");
     // #7477: no compression wrap inside an isolation worktree; the lease stays.
     let compressed = rewrite_bash_command_unless_isolated(command, Some(cwd));
-    (
-        rewrite_for_lease(compressed.as_deref().unwrap_or(command), &heavy, &prefix),
-        permission,
-    )
+    let text = compressed.as_deref().unwrap_or(command);
+    // #8969: each lease carries the directory its build's `cd` meant.
+    let base = Some(cwd).filter(|c| c.is_absolute());
+    let prefix_at = |at| lease_prefix(&prefix, text, at, base);
+    (rewrite_for_lease_with(text, &heavy, &prefix_at), permission)
 }
 
 /// The `updatedInput` response carrying `tool_input` with `command` replaced.

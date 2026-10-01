@@ -53,12 +53,12 @@ pub(crate) async fn dispatch(
         } => match (list, delegation_id, agent_id) {
             (Some(dir), _, _) => super::repair_delegation_list::list(client, url, &dir).await,
             (None, Some(id), _) => {
-                let route = format!("{url}/api/v1/delegations/by-id/{id}/repair");
-                repair_delegation(client, &route, &format!("delegation {id}"), force).await
+                let path = format!("/api/v1/delegations/by-id/{id}/repair");
+                repair_delegation(&path, &format!("delegation {id}"), force).await
             }
             (None, None, Some(agent_id)) => {
-                let route = format!("{url}/api/v1/delegations/{agent_id}/repair");
-                repair_delegation(client, &route, &format!("agent {agent_id}"), force).await
+                let path = format!("/api/v1/delegations/{agent_id}/repair");
+                repair_delegation(&path, &format!("agent {agent_id}"), force).await
             }
             (None, None, None) => anyhow::bail!("name an agent id, --delegation-id, or --list"),
         },
@@ -91,30 +91,23 @@ pub(crate) async fn dispatch(
 /// outcome. `no_record` and `refused` both exit nonzero — the first because the
 /// operator named an agent nothing knows, which is a fact they must see rather
 /// than a success; the second because the gate declined.
-/// #8257: the caller session travels in a header read from the environment.
+/// #8531: always over the daemon socket, which proves this process's pid to
+/// the daemon; the owning session is established from it. No caller id is
+/// sent — the daemon would ignore one.
 /// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`,
 /// `cli_rejects_a_caller_session_argument_8257`; the outcomes themselves in
 /// `delegation_repair_tests.rs`.
-async fn repair_delegation(
-    client: &reqwest::Client,
-    route: &str,
-    target: &str,
-    force: bool,
-) -> anyhow::Result<()> {
-    // #8257: `route` is the agent-id or the delegation-id endpoint; `target`
-    // names which in every line printed below. The caller session is the
-    // harness-exported CLAUDE_CODE_SESSION_ID — never a CLI argument — so an
-    // owning session can clear its own live record (#8257 owner ruling).
-    let mut req = client
-        .post(route)
-        .json(&serde_json::json!({ "force": force }));
-    if let Some(session) = trusty_mpm::core::savings::claude_code_session_id() {
-        req = req.header(
-            trusty_mpm::daemon::services::delegation_repair::CALLER_SESSION_HEADER,
-            session,
-        );
-    }
-    let resp = req.send().await?;
+async fn repair_delegation(path: &str, target: &str, force: bool) -> anyhow::Result<()> {
+    // #8257: `path` is the agent-id or the delegation-id endpoint; `target`
+    // names which in every line printed below.
+    // #8531: socket only, never HTTP — HTTP cannot prove the caller, so an
+    // owning session's own clear would be refused there.
+    let daemon = trusty_mpm::client::DaemonClient::from_resolved_socket()?;
+    let resp = daemon
+        .post(path)
+        .json(&serde_json::json!({ "force": force }))
+        .send()
+        .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
