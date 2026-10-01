@@ -2,7 +2,7 @@
 //! release source (#8378 PR-C; ADR-0064 PHASE_3, #8974 test plan cases 1-5,
 //! 10 and 13).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -22,7 +22,13 @@ const B: &str = "content-v0.2.0";
 
 /// A gzip tar laid out the way `scripts/package_content.sh` writes one.
 fn bundle(tag: &str, schema_major: u32, body: &[u8]) -> Vec<u8> {
-    let manifest = format!("tag = \"{tag}\"\nschema_major = {schema_major}\n");
+    bundle_with_manifest(
+        &format!("tag = \"{tag}\"\nschema_major = {schema_major}\n"),
+        body,
+    )
+}
+
+fn bundle_with_manifest(manifest: &str, body: &[u8]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
     for (path, data) in [
@@ -50,10 +56,13 @@ struct Gate {
     timeout: Duration,
 }
 
-/// An in-memory release host.
+/// An in-memory release host. Every tag with an asset is a release; `drafts`
+/// and `prereleases` flag some of them the way the releases API does.
 #[derive(Default)]
 struct FakeSource {
     assets: HashMap<String, Vec<u8>>,
+    drafts: HashSet<String>,
+    prereleases: HashSet<String>,
     offline: bool,
     gate: Option<Gate>,
 }
@@ -96,10 +105,10 @@ impl ReleaseSource for FakeSource {
         Ok(self.assets.get(&format!("{tag}/{file}")).cloned())
     }
 
-    fn content_tags(&self) -> Result<Vec<String>, FetchError> {
+    fn content_releases(&self) -> Result<Vec<Release>, FetchError> {
         if self.offline {
             return Err(FetchError {
-                url: "fake://tags".into(),
+                url: "fake://releases".into(),
                 reason: "network is unreachable".into(),
             });
         }
@@ -110,7 +119,14 @@ impl ReleaseSource for FakeSource {
             .collect();
         tags.sort();
         tags.dedup();
-        Ok(tags)
+        Ok(tags
+            .into_iter()
+            .map(|tag| Release {
+                draft: self.drafts.contains(&tag),
+                prerelease: self.prereleases.contains(&tag),
+                tag,
+            })
+            .collect())
     }
 }
 
@@ -216,23 +232,91 @@ fn update_with_no_lock_installs_the_latest_release() {
     resolves_to(cache.path(), B);
 }
 
-/// #8389 AC: a no-flag update never silently moves off a recorded pin.
+/// Owner ruling (Bob item 207): a no-flag update installs the newest
+/// published release and re-pins to it; a second run with nothing newer
+/// writes nothing.
 #[test]
-fn update_without_a_ref_keeps_the_recorded_pin() {
+fn update_without_a_ref_moves_the_pin_to_the_newest_release() {
     let cache = tempfile::tempdir().unwrap();
     let mut src = FakeSource::default();
     src.publish(A);
     update(cache.path(), &src, Some(A)).expect("pin A");
     src.publish(B);
     let out = update(cache.path(), &src, None).expect("update");
-    assert_eq!(out.tag, A);
-    assert_eq!(out.action, UpdateAction::AlreadyCurrent);
+    assert_eq!((out.tag.as_str(), out.action), (B, UpdateAction::Installed));
+    assert_eq!(pinned(cache.path()).tag(), B);
+    resolves_to(cache.path(), B);
+    let again = update(cache.path(), &src, None).expect("again");
     assert_eq!(
-        out.newer.as_deref(),
-        Some(B),
-        "the newer release is reported"
+        (again.tag.as_str(), again.action),
+        (B, UpdateAction::AlreadyCurrent)
     );
+}
+
+/// "Latest" is a published release: a draft or a release flagged as a
+/// pre-release is never installed, even when it carries the highest version.
+#[test]
+fn update_never_installs_a_draft_or_a_pre_release() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut src = FakeSource::default();
+    src.publish(A);
+    for tag in ["content-v0.8.0", "content-v0.9.0"] {
+        src.publish(tag);
+    }
+    src.drafts.insert("content-v0.9.0".to_owned());
+    src.prereleases.insert("content-v0.8.0".to_owned());
+    let out = update(cache.path(), &src, None).expect("update");
+    assert_eq!(out.tag, A);
     assert_eq!(pinned(cache.path()).tag(), A);
+}
+
+/// The sidecar is required: a release that ships a bundle without one is
+/// refused, and nothing is pinned or stored.
+#[test]
+fn update_refuses_a_release_without_a_sidecar() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut src = FakeSource::default();
+    src.publish(A);
+    src.assets.remove(&format!("{A}/{A}.tar.gz.sha256"));
+    let err = update(cache.path(), &src, None).expect_err("no sidecar");
+    match &err {
+        CacheError::SidecarNotPublished { tag, fallback, .. } => {
+            assert_eq!((tag.as_str(), fallback), (A, &Fallback::None));
+        }
+        other => panic!("expected SidecarNotPublished, got {other:?}"),
+    }
+    assert!(err.to_string().contains(INSTALL_HINT), "{err}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+    assert!(!cache.path().join(format!("{A}.tar.gz")).exists());
+}
+
+/// ADR-0064 PHASE_3 (iv) on the update path: a newer `schema_major` is
+/// `UnsupportedSchema`, a missing one is `BundleCorrupt`; the pin stays.
+#[test]
+fn update_refuses_a_newer_or_missing_schema_major_and_keeps_the_pin() {
+    let newer = format!(
+        "tag = \"{B}\"\nschema_major = {}\n",
+        SUPPORTED_SCHEMA_MAJOR + 1
+    );
+    let missing = format!("tag = \"{B}\"\n");
+    for (manifest, want_corrupt) in [(newer, false), (missing, true)] {
+        let cache = tempfile::tempdir().unwrap();
+        let mut src = FakeSource::default();
+        src.publish(A);
+        update(cache.path(), &src, Some(A)).expect("pin A");
+        src.put(B, &bundle_with_manifest(&manifest, B.as_bytes()));
+        let err = update(cache.path(), &src, None).expect_err("refused");
+        match (&err, want_corrupt) {
+            (CacheError::Content(ContentError::UnsupportedSchema { .. }), false) => {}
+            (CacheError::Content(ContentError::BundleCorrupt { reason, .. }), true) => {
+                assert!(reason.contains("no schema_major"), "{reason}");
+            }
+            (other, _) => panic!("{manifest:?}: unexpected {other:?}"),
+        }
+        assert_eq!(pinned(cache.path()).tag(), A);
+        assert!(!cache.path().join(format!("{B}.tar.gz")).exists());
+        resolves_to(cache.path(), A);
+    }
 }
 
 #[test]
@@ -276,9 +360,13 @@ fn update_to_a_tag_missing_upstream_is_a_named_error() {
     std::fs::remove_file(cache.path().join(format!("{A}.tar.gz"))).unwrap();
     let mut gone = FakeSource::default();
     gone.publish(B);
-    let err = update(cache.path(), &gone, None).expect_err("pinned tag gone");
+    let err = update(cache.path(), &gone, Some(A)).expect_err("pinned tag gone");
+    assert!(
+        matches!(&err, CacheError::TagNotFound { fallback, .. } if *fallback == Fallback::None),
+        "{err:?}"
+    );
     assert!(err.to_string().contains(INSTALL_HINT), "{err}");
-    assert_eq!(pinned(cache.path()).tag(), A, "no silent move to latest");
+    assert_eq!(pinned(cache.path()).tag(), A, "an explicit ref never moves");
 }
 
 /// #8974 case 1: offline with no cache, tm names the install command.
@@ -295,18 +383,24 @@ fn update_offline_with_no_cache_names_the_install_command() {
     assert!(!cache.path().join(LOCK_FILE_NAME).exists());
 }
 
+/// A releases-API failure is an error, never "already current": the update
+/// could not learn the newest release. The verified pin stays in use.
 #[test]
-fn update_offline_with_a_verified_cache_keeps_it_in_use() {
+fn update_offline_with_a_verified_cache_fails_and_keeps_the_pin() {
     let cache = tempfile::tempdir().unwrap();
     let mut src = FakeSource::default();
     src.publish(A);
     update(cache.path(), &src, Some(A)).expect("pin A");
     src.offline = true;
-    let out = update(cache.path(), &src, None).expect("no network needed");
-    assert_eq!(
-        (out.tag.as_str(), out.action, out.newer),
-        (A, UpdateAction::AlreadyCurrent, None)
-    );
+    let err = update(cache.path(), &src, None).expect_err("listing failed");
+    match &err {
+        CacheError::Network { url, fallback, .. } => {
+            assert_eq!(url, "fake://releases");
+            assert_eq!(fallback, &Fallback::Cached(A.to_owned()));
+        }
+        other => panic!("expected Network, got {other:?}"),
+    }
+    assert_eq!(pinned(cache.path()).tag(), A);
     let err = update(cache.path(), &src, Some(B)).expect_err("offline");
     assert!(
         err.to_string().contains("is verified and stays in use"),
@@ -360,12 +454,13 @@ fn concurrent_updates_serialise_on_the_file_lock() {
     src.publish(A);
     src.publish(B);
     update(cache.path(), &src, Some(A)).expect("pin A");
-    // The no-flag update below must fetch A again, which is where it pauses.
-    std::fs::remove_file(cache.path().join(format!("{A}.tar.gz"))).unwrap();
+    // The no-flag update below moves to B, and pauses while fetching it. The
+    // `--content-ref A` behind it must wait, then find B pinned and restore A;
+    // without the lock it would see A verified, write nothing, and lose to B.
     let (entered_tx, entered_rx) = channel();
     let (release_tx, release_rx) = channel();
     src.gate = Some(Gate {
-        file: format!("{A}.tar.gz"),
+        file: format!("{B}.tar.gz"),
         entered: entered_tx,
         release: Mutex::new(release_rx),
         timeout: Duration::from_secs(2),
@@ -376,15 +471,16 @@ fn concurrent_updates_serialise_on_the_file_lock() {
             .recv_timeout(Duration::from_secs(30))
             .expect("the first update reached its fetch");
         let second = s.spawn(|| {
-            let out = update(cache.path(), &src, Some(B));
+            let out = update(cache.path(), &src, Some(A));
             let _ = release_tx.send(());
             out
         });
         first.join().expect("join").expect("first update");
-        second.join().expect("join").expect("second update");
+        let second = second.join().expect("join").expect("second update");
+        assert_eq!(second.action, UpdateAction::Installed, "A was re-pinned");
     });
-    assert_eq!(pinned(cache.path()).tag(), B, "the last explicit pin wins");
-    resolves_to(cache.path(), B);
+    assert_eq!(pinned(cache.path()).tag(), A, "the last explicit pin wins");
+    resolves_to(cache.path(), A);
 }
 
 #[test]
@@ -473,15 +569,78 @@ fn github_source_reads_a_404_as_absent() {
     );
 }
 
+/// One release-API entry, as JSON.
+fn api_release(tag: &str, draft: bool, prerelease: bool) -> String {
+    format!(r#"{{"tag_name":"{tag}","draft":{draft},"prerelease":{prerelease},"name":"x"}}"#)
+}
+
+/// A full page of 100 releases: 99 crate releases and `content`.
+fn full_page(content: &str) -> &'static str {
+    let mut entries: Vec<String> = (0..99)
+        .map(|i| api_release(&format!("trusty-mpm-v1.0.{i}"), false, false))
+        .collect();
+    entries.push(content.to_owned());
+    Box::leak(format!("[{}]", entries.join(",")).into_boxed_str())
+}
+
+const PAGE_1: &str = "/releases?per_page=100&page=1";
+const PAGE_2: &str = "/releases?per_page=100&page=2";
+
+/// The releases API is paged; content releases on any page are found, with
+/// their draft and pre-release flags, and other releases are dropped.
 #[test]
-fn github_source_lists_content_tags() {
-    let body = r#"[{"ref":"refs/tags/content-v0.1.0"},{"ref":"refs/tags/content-v0.2.0"}]"#;
-    let base = serve(vec![("/git/matching-refs/tags/content-v", 200, body)]);
-    let src = GithubReleases::with_bases(&base, &base).expect("client");
-    assert_eq!(
-        src.content_tags().expect("tags"),
-        vec![A.to_owned(), B.to_owned()]
+fn github_source_lists_content_releases_across_pages() {
+    let page2 = Box::leak(
+        format!(
+            "[{},{}]",
+            api_release(B, false, true),
+            api_release("content-v0.3.0", true, false)
+        )
+        .into_boxed_str(),
     );
+    let base = serve(vec![
+        (PAGE_1, 200, full_page(&api_release(A, false, false))),
+        (PAGE_2, 200, page2),
+    ]);
+    let src = GithubReleases::with_bases(&base, &base).expect("client");
+    let release = |tag: &str, draft, prerelease| Release {
+        tag: tag.to_owned(),
+        draft,
+        prerelease,
+    };
+    assert_eq!(
+        src.content_releases().expect("releases"),
+        vec![
+            release(A, false, false),
+            release(B, false, true),
+            release("content-v0.3.0", true, false),
+        ]
+    );
+}
+
+/// A listing that is still full at the page cap was not read to the end, so
+/// the newest release may be missing from it: refused, not truncated.
+#[test]
+fn github_source_refuses_a_listing_longer_than_its_page_cap() {
+    let base = serve(vec![(
+        PAGE_1,
+        200,
+        full_page(&api_release(A, false, false)),
+    )]);
+    let src = GithubReleases::with_bases(&base, &base)
+        .expect("client")
+        .with_max_pages(1);
+    let err = src.content_releases().expect_err("over the cap");
+    assert!(err.reason.contains("not read to the end"), "{err:?}");
+}
+
+/// The repository always exists, so a 404 listing is a failure, not "none".
+#[test]
+fn github_source_reads_a_404_release_listing_as_a_failure() {
+    let base = serve(vec![]);
+    let src = GithubReleases::with_bases(&base, &base).expect("client");
+    let err = src.content_releases().expect_err("404");
+    assert!(err.reason.contains("404"), "{err:?}");
 }
 
 #[test]
@@ -496,14 +655,10 @@ fn github_source_reads_a_non_404_error_status_as_a_failure() {
 }
 
 #[test]
-fn github_source_refuses_a_refs_listing_that_is_not_json() {
-    let base = serve(vec![(
-        "/git/matching-refs/tags/content-v",
-        200,
-        "<html>rate limited</html>",
-    )]);
+fn github_source_refuses_a_release_listing_that_is_not_json() {
+    let base = serve(vec![(PAGE_1, 200, "<html>rate limited</html>")]);
     let src = GithubReleases::with_bases(&base, &base).expect("client");
-    let err = src.content_tags().expect_err("not JSON");
+    let err = src.content_releases().expect_err("not JSON");
     assert!(err.reason.starts_with("unexpected response"), "{err:?}");
 }
 
@@ -511,7 +666,7 @@ fn github_source_refuses_a_refs_listing_that_is_not_json() {
 /// string comparison ranks higher. The fake lists tags in string order, so
 /// first, last and string-max all pick a wrong tag.
 #[test]
-fn latest_release_and_newer_report_compare_versions_not_strings() {
+fn latest_release_compares_versions_not_strings() {
     let cache = tempfile::tempdir().unwrap();
     let mut src = FakeSource::default();
     for tag in ["content-v0.1.0", "content-v0.9.0", "content-v0.10.0"] {
@@ -523,8 +678,7 @@ fn latest_release_and_newer_report_compare_versions_not_strings() {
     let pinned_old = tempfile::tempdir().unwrap();
     update(pinned_old.path(), &src, Some("content-v0.9.0")).expect("pin 0.9.0");
     let out = update(pinned_old.path(), &src, None).expect("update");
-    assert_eq!(out.tag, "content-v0.9.0", "the pin is kept");
-    assert_eq!(out.newer.as_deref(), Some("content-v0.10.0"));
+    assert_eq!(out.tag, "content-v0.10.0", "0.10.0 is newer than 0.9.0");
 }
 
 #[test]
@@ -599,7 +753,7 @@ fn status_remedy_for_a_broken_lock_names_an_explicit_ref() {
     let text = status.lines().join("\n");
     assert!(text.contains("--content-ref"), "{text}");
     assert!(text.contains(INSTALL_HINT), "{text}");
-    assert!(!text.contains("fetch the pinned release again"), "{text}");
+    assert!(!text.contains("fetch and pin the newest release"), "{text}");
 }
 
 /// A too-new schema is not cleared by re-fetching the same release.
@@ -624,7 +778,7 @@ fn status_remedy_for_a_newer_schema_names_an_upgrade_or_an_older_pin() {
     let text = status.lines().join("\n");
     assert!(text.contains("upgrade tm"), "{text}");
     assert!(text.contains("--content-ref"), "{text}");
-    assert!(!text.contains("fetch the pinned release again"), "{text}");
+    assert!(!text.contains("fetch and pin the newest release"), "{text}");
 }
 
 #[test]

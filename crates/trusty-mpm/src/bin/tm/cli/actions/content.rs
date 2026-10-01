@@ -15,9 +15,15 @@ use clap::Subcommand;
 pub(crate) enum ContentAction {
     /// Install a content bundle from a local file, with no network.
     ///
-    /// The release's `<bundle>.sha256` sidecar must sit beside the bundle; the
-    /// bundle is refused unless it matches it and passes the same checks the
-    /// runtime applies. Only then is it stored and pinned.
+    /// The release's `<bundle>.sha256` sidecar is required and must sit beside
+    /// the bundle; the bundle is refused unless it matches it and passes the
+    /// same checks the runtime applies. Only then is it stored and pinned.
+    ///
+    /// Limit: the sidecar proves the transfer only. It comes from the same
+    /// place as the bundle, so it catches a corrupt or truncated copy, not a
+    /// bundle someone replaced together with its sidecar. Trust is on first
+    /// use: the sha256 pinned here is what every later read is checked
+    /// against.
     Install {
         /// The `content-vX.Y.Z.tar.gz` bundle.
         #[arg(long, value_name = "BUNDLE")]
@@ -25,10 +31,18 @@ pub(crate) enum ContentAction {
     },
     /// Fetch and pin a content release from GitHub.
     ///
-    /// With no flag: the latest release when nothing is installed, otherwise
-    /// the pinned release again (a newer one is reported, never applied). With
-    /// `--content-ref`: exactly that release. Fails closed on any sha256
-    /// mismatch; the previous pin stays in force.
+    /// With no flag: the newest published release — not a draft, not a
+    /// pre-release, as GitHub's releases API lists them — and re-pins to it.
+    /// With `--content-ref`: exactly that release. The pin changes only when
+    /// this command runs. The release's `.sha256` sidecar is required. Fails
+    /// closed on a sha256 mismatch, a missing sidecar or an unreachable
+    /// release; the previous pin stays in force.
+    ///
+    /// Limit: the sidecar proves the transfer only. It is downloaded from the
+    /// same release as the bundle, so it catches a corrupt or truncated
+    /// download, not a release someone replaced together with its sidecar.
+    /// Trust is on first use: the sha256 pinned for a tag is what every later
+    /// read checks, and a tag republished with other bytes is refused.
     Update {
         /// The release tag to pin, e.g. `content-v0.1.0`.
         #[arg(long, value_name = "TAG")]

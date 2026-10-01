@@ -9,7 +9,7 @@
 //! [`INSTALL_HINT`].
 //! What: every write holds an exclusive file lock on `<cache>/.update.lock`
 //! for its whole read-fetch-write span, checks the bytes against the release's
-//! sha256 sidecar, verifies them with the same `content::resolve` the runtime
+//! required sha256 sidecar, verifies them with the same `content::resolve` the runtime
 //! uses (in a staging directory inside the cache), stores `<tag>.tar.gz`
 //! atomically, and only then swaps `content-lock.toml`. A failure at any step
 //! leaves the previous pin and its bundle in place.
@@ -29,7 +29,7 @@ use trusty_common::content::{
 };
 use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
-pub use super::release_source::{FetchError, GithubReleases, ReleaseSource};
+pub use super::release_source::{FetchError, GithubReleases, Release, ReleaseSource};
 
 /// The file every writer locks exclusively, inside the cache directory.
 pub const UPDATE_LOCK_FILE: &str = ".update.lock";
@@ -73,8 +73,9 @@ impl std::fmt::Display for Fallback {
 /// `install_refuses_an_unparseable_sidecar`,
 /// `install_refuses_a_bundle_that_names_no_tag`,
 /// `install_refuses_an_oversized_sidecar`,
+/// `update_refuses_a_release_without_a_sidecar`,
 /// `update_with_only_prereleases_published_has_no_release`; version order in
-/// `latest_release_and_newer_report_compare_versions_not_strings`.
+/// `latest_release_compares_versions_not_strings`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CacheError {
@@ -112,7 +113,20 @@ pub enum CacheError {
         /// The digest of the bytes received.
         actual: Sha256Digest,
     },
-    /// The release, or one of its assets, does not exist upstream.
+    /// The release carries a bundle but no sha256 sidecar; the sidecar is required.
+    #[error(
+        "refusing {tag}: the release has no sha256 sidecar at {url}, and a bundle is never \
+         pinned without one; {fallback}"
+    )]
+    SidecarNotPublished {
+        /// The release tag.
+        tag: String,
+        /// The URL that answered 404.
+        url: String,
+        /// What stays in use.
+        fallback: Fallback,
+    },
+    /// The release, or its bundle, does not exist upstream.
     #[error("content release {tag} was not found upstream ({url}); {fallback}")]
     TagNotFound {
         /// The requested tag.
@@ -145,8 +159,10 @@ pub enum CacheError {
         /// The digest offered now.
         upstream: Sha256Digest,
     },
-    /// No `content-v*` release is published.
-    #[error("no content-v* release is published upstream")]
+    /// No published content release: none that is not a draft or a pre-release.
+    #[error(
+        "no published content-v* release upstream (drafts and pre-releases are never installed)"
+    )]
     NoReleases,
     /// Neither the sidecar nor the bundle's file name names a release tag.
     #[error(
@@ -201,8 +217,6 @@ pub struct UpdateOutcome {
     pub sha256: Sha256Digest,
     /// What was done.
     pub action: UpdateAction,
-    /// A newer release than the pin, found while checking; never applied.
-    pub newer: Option<String>,
 }
 
 /// Installs a bundle from a local file with no network (ADR-0064 (ii)).
@@ -243,25 +257,29 @@ pub fn install_from_file(cache: &Path, bundle: &Path) -> Result<UpdateOutcome, C
         current.as_ref(),
         &bundle.display().to_string(),
     )?;
-    Ok(outcome(lock, action, None))
+    Ok(outcome(lock, action))
 }
 
 /// Fetches and pins a content release (`tm content update`).
 ///
-/// Why: #8389 — no flags installs the latest release, `--content-ref` pins one
-/// exactly, and a later no-flag run never silently moves off a recorded pin.
+/// Why: #8389 and owner ruling (Bob item 207) — no flag installs the newest
+/// published release and re-pins to it; `--content-ref` pins one exactly. The
+/// pin moves only here: between updates nothing changes it.
 /// What: under the update lock, picks the target — `content_ref`, else the
-/// locked tag, else the newest published non-prerelease tag. A pinned bundle
-/// that already verifies needs no network: the call succeeds and reports any
-/// newer release as [`UpdateOutcome::newer`] (best effort). Otherwise fetches
-/// the sidecar and the bundle, and commits them through [`commit`]. A lock that
-/// does not parse is an error unless `content_ref` replaces it.
+/// newest release the releases API lists that is neither a draft nor a
+/// pre-release. A failed listing is an error that names what stays in use;
+/// it never reads as "already current". A target whose installed bundle
+/// already verifies is [`UpdateAction::AlreadyCurrent`]. Otherwise fetches the
+/// bundle and its required sidecar and commits them through [`commit`]. A
+/// lock that does not parse is an error unless `content_ref` replaces it.
 /// Test: `update_with_no_lock_installs_the_latest_release`,
-/// `update_without_a_ref_keeps_the_recorded_pin`,
+/// `update_without_a_ref_moves_the_pin_to_the_newest_release`,
 /// `update_refuses_a_bundle_whose_sha256_differs_from_the_sidecar`,
+/// `update_refuses_a_release_without_a_sidecar`,
 /// `update_to_a_tag_missing_upstream_is_a_named_error`,
 /// `update_offline_with_no_cache_names_the_install_command`,
-/// `update_offline_with_a_verified_cache_keeps_it_in_use`,
+/// `update_offline_with_a_verified_cache_fails_and_keeps_the_pin`,
+/// `update_never_installs_a_draft_or_a_pre_release`,
 /// `concurrent_updates_serialise_on_the_file_lock`.
 pub fn update<S: ReleaseSource + ?Sized>(
     cache: &Path,
@@ -281,30 +299,37 @@ pub fn update<S: ReleaseSource + ?Sized>(
     let fallback = verified
         .clone()
         .map_or(Fallback::None, |(tag, _)| Fallback::Cached(tag));
-    let target = match (content_ref, &current) {
-        (Some(tag), _) => tag.to_owned(),
-        (None, Some(lock)) => lock.tag().to_owned(),
-        (None, None) => latest_tag(source, &fallback)?,
+    let target = match content_ref {
+        Some(tag) => tag.to_owned(),
+        None => latest_tag(source, &fallback)?,
     };
     if let Some((tag, sha256)) = verified.filter(|(tag, _)| *tag == target) {
-        let newer = match content_ref {
-            None => latest_tag(source, &fallback)
-                .ok()
-                .filter(|latest| is_newer(latest, &tag)),
-            Some(_) => None,
-        };
         return Ok(UpdateOutcome {
             tag,
             sha256,
             action: UpdateAction::AlreadyCurrent,
-            newer,
         });
     }
     let bundle_name = format!("{target}.tar.gz");
     let sidecar_name = format!("{bundle_name}{SIDECAR_SUFFIX}");
-    let sidecar = fetch(source, &target, &sidecar_name, MAX_SIDECAR_BYTES, &fallback)?;
+    let bytes =
+        fetch(source, &target, &bundle_name, MAX_BUNDLE_BYTES, &fallback)?.ok_or_else(|| {
+            CacheError::TagNotFound {
+                tag: target.clone(),
+                url: source.asset_url(&target, &bundle_name),
+                fallback: fallback.clone(),
+            }
+        })?;
+    // #8389: the sidecar is required; a release without one is refused.
+    let sidecar =
+        fetch(source, &target, &sidecar_name, MAX_SIDECAR_BYTES, &fallback)?.ok_or_else(|| {
+            CacheError::SidecarNotPublished {
+                tag: target.clone(),
+                url: source.asset_url(&target, &sidecar_name),
+                fallback: fallback.clone(),
+            }
+        })?;
     let expected = parse_sidecar(&sidecar, &sidecar_name)?;
-    let bytes = fetch(source, &target, &bundle_name, MAX_BUNDLE_BYTES, &fallback)?;
     let action = pin_action(current.as_ref(), &target);
     let lock = commit(
         cache,
@@ -314,7 +339,7 @@ pub fn update<S: ReleaseSource + ?Sized>(
         current.as_ref(),
         &bundle_name,
     )?;
-    Ok(outcome(lock, action, None))
+    Ok(outcome(lock, action))
 }
 
 /// Verifies `bytes` and pins them: the one write path for install and update.
@@ -422,27 +447,29 @@ fn pin_action(current: Option<&ContentLock>, tag: &str) -> UpdateAction {
     }
 }
 
-fn outcome(lock: ContentLock, action: UpdateAction, newer: Option<String>) -> UpdateOutcome {
+fn outcome(lock: ContentLock, action: UpdateAction) -> UpdateOutcome {
     UpdateOutcome {
         tag: lock.tag().to_owned(),
         sha256: lock.sha256().clone(),
         action,
-        newer,
     }
 }
 
-/// The newest published tag that is not a prerelease.
+/// The newest published release: not a draft, not a pre-release (by flag or
+/// by a SemVer pre-release suffix), compared by version, not by string.
 fn latest_tag<S: ReleaseSource + ?Sized>(
     source: &S,
     fallback: &Fallback,
 ) -> Result<String, CacheError> {
-    let tags = source.content_tags().map_err(|e| CacheError::Network {
+    let releases = source.content_releases().map_err(|e| CacheError::Network {
         url: e.url,
         reason: e.reason,
         fallback: fallback.clone(),
     })?;
-    tags.into_iter()
-        .filter_map(|tag| Some((release_version(&tag)?, tag)))
+    releases
+        .into_iter()
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter_map(|release| Some((release_version(&release.tag)?, release.tag)))
         .filter(|(version, _)| version.pre.is_empty())
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, tag)| tag)
@@ -454,33 +481,21 @@ fn release_version(tag: &str) -> Option<semver::Version> {
     semver::Version::parse(tag.strip_prefix(content::TAG_PREFIX)?).ok()
 }
 
-fn is_newer(candidate: &str, pinned: &str) -> bool {
-    match (release_version(candidate), release_version(pinned)) {
-        (Some(c), Some(p)) => c > p,
-        _ => false,
-    }
-}
-
+/// One release asset: `Ok(None)` when upstream answers that it does not exist.
 fn fetch<S: ReleaseSource + ?Sized>(
     source: &S,
     tag: &str,
     file: &str,
     max_bytes: u64,
     fallback: &Fallback,
-) -> Result<Vec<u8>, CacheError> {
-    match source.asset(tag, file, max_bytes) {
-        Ok(Some(bytes)) => Ok(bytes),
-        Ok(None) => Err(CacheError::TagNotFound {
-            tag: tag.to_owned(),
-            url: source.asset_url(tag, file),
-            fallback: fallback.clone(),
-        }),
-        Err(e) => Err(CacheError::Network {
+) -> Result<Option<Vec<u8>>, CacheError> {
+    source
+        .asset(tag, file, max_bytes)
+        .map_err(|e| CacheError::Network {
             url: e.url,
             reason: e.reason,
             fallback: fallback.clone(),
-        }),
-    }
+        })
 }
 
 fn parse_sidecar(bytes: &[u8], origin: &str) -> Result<Sha256Digest, CacheError> {

@@ -108,11 +108,11 @@ impl ContentStatus {
 
 /// The command that clears `error`.
 ///
-/// Why: a no-flag `tm content update` re-reads the broken lock, and re-fetches
-/// the same too-new release, so naming it for those two causes loops.
+/// Why: a no-flag `tm content update` refuses a broken lock, and can fetch
+/// the same too-new release again, so naming it for those two causes loops.
 /// What: a broken lock needs an explicit `--content-ref` or an offline install,
 /// which replace it; a too-new schema needs a newer `tm` or an older pin; any
-/// other failure is cleared by fetching the pinned release again.
+/// other failure is cleared by a no-flag update, which pins the newest release.
 /// Test: `status_remedy_for_a_broken_lock_names_an_explicit_ref`,
 /// `status_remedy_for_a_newer_schema_names_an_upgrade_or_an_older_pin`.
 fn remedy(error: &ContentError) -> String {
@@ -126,7 +126,7 @@ fn remedy(error: &ContentError) -> String {
              content-vX.Y.Z`"
             .to_owned(),
         _ => format!(
-            "run `tm content update` to fetch the pinned release again, or offline \
+            "run `tm content update` to fetch and pin the newest release, or offline \
              `{INSTALL_HINT}`"
         ),
     }

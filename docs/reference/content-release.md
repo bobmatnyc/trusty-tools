@@ -51,18 +51,27 @@ hand.
 
 | Command | What it does |
 |---|---|
-| `tm content update` | Nothing installed: pins the newest non-prerelease `content-v*` release. Already pinned: keeps the pin, fetches its bundle again if it is missing, and reports a newer release without applying it. |
+| `tm content update` | Installs the newest published `content-v*` release and re-pins to it. "Published" means listed by GitHub's releases API as neither a draft nor a pre-release; a bare git tag does not count. A failed listing is an error, and the previous pin stays in force. |
 | `tm content update --content-ref content-vX.Y.Z` | Pins exactly that release. |
 | `tm content install --from content-vX.Y.Z.tar.gz` | Offline. The `.sha256` sidecar must sit beside the bundle. |
+
+The pin changes only when one of these commands runs. The `.sha256` sidecar
+is required by both `update` and `install`. It proves the transfer only: it
+comes from the same release as the bundle, so it catches a corrupt or
+truncated download, not a release replaced together with its sidecar. Trust is
+on first use: the sha256 pinned for a tag is what every later read checks, and
+a tag republished with other bytes is refused.
 | `tm content status` | Prints the source (`dev`, `bundle` or `none`), the pinned tag and sha256, and the binary version. Exits non-zero when nothing serves. |
 
 Every write fails closed. A bundle is pinned only after it matches its
 sidecar and passes the checks `content::resolve` applies at run time. It is
 stored before `content-lock.toml` names it, and every write holds an exclusive
-lock on `.update.lock`. A sha256 mismatch, a tag missing upstream, a tag
-republished with other bytes, a newer `schema_major` or an unreachable host
-leaves the previous pin in force. `tm doctor`'s `content` row reports the same
-facts as `tm content status`.
+lock on `.update.lock`. A sha256 mismatch, a missing sidecar, a tag missing
+upstream, a tag republished with other bytes, a newer or missing
+`schema_major` or an unreachable host leaves the previous pin in force.
+`tm doctor`'s `content` row reports the same facts as `tm content status`.
+With nothing installed it reports INFO while `tm` still compiles its content
+in, and WARN once ADR-0064 PHASE_1 removes it.
 
 ## What the bundle holds
 

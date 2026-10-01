@@ -46,11 +46,29 @@ fn content_row_is_ok_for_a_verified_bundle() {
     );
 }
 
+/// Owner ruling (Bob item 207): INFO while the binary still embeds content.
+/// See ADR-0064: PHASE_1 flips `BUILTIN_CONTENT_EMBEDDED` and deletes this test.
 #[test]
-fn content_row_warns_when_nothing_is_installed() {
+fn content_row_is_info_when_nothing_is_installed_before_phase_1() {
     let cache = tempfile::tempdir().unwrap();
     let row = check_content(Some(cache.path()), Some(cache.path()));
+    assert_eq!(row.status, CheckStatus::Ok);
+    assert!(row.message.starts_with("info: "), "{}", row.message);
+    assert!(row.message.contains("source: none"), "{}", row.message);
+    assert!(
+        row.message.contains("tm content install --from"),
+        "{}",
+        row.message
+    );
+}
+
+/// After ADR-0064 PHASE_1 nothing else serves, so nothing installed is WARN.
+#[test]
+fn content_row_warns_when_nothing_is_installed_after_phase_1() {
+    let cache = tempfile::tempdir().unwrap();
+    let row = grade(&content_status(cache.path(), Some(cache.path())), false);
     assert_eq!(row.status, CheckStatus::Warn);
+    assert!(!row.message.starts_with("info: "), "{}", row.message);
     assert!(row.message.contains("source: none"), "{}", row.message);
     assert!(
         row.message.contains("tm content install --from"),

@@ -59,7 +59,4 @@ fn print_outcome(outcome: &UpdateOutcome) {
         UpdateAction::AlreadyCurrent => "already pinned and verified:",
     };
     println!("{verb} {} (sha256 {})", outcome.tag, outcome.sha256);
-    if let Some(newer) = &outcome.newer {
-        println!("{newer} is published; `tm content update --content-ref {newer}` moves to it");
-    }
 }
