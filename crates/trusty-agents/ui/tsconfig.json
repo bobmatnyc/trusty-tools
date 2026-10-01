@@ -6,6 +6,7 @@
     "module": "ESNext",
     "resolveJsonModule": true,
     "allowJs": true,
+    "noEmit": true,
     "checkJs": true,
     "isolatedModules": true,
     "moduleResolution": "bundler",
