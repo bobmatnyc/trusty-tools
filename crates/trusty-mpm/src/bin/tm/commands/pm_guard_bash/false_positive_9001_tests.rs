@@ -17,10 +17,10 @@ fn allowed(commands: &[&str]) {
     }
 }
 
+/// Every row that is not denied, reported together.
 fn denied(commands: &[&str]) {
-    for command in commands {
-        assert!(secret(command).is_some(), "expected DENY: {command}");
-    }
+    let allowed: Vec<&&str> = commands.iter().filter(|c| secret(c).is_none()).collect();
+    assert!(allowed.is_empty(), "expected DENY: {allowed:#?}");
 }
 
 /// Case 2: `` `db`.* `` in a `mysql -e` statement is a SQL wildcard.
@@ -129,6 +129,12 @@ fn a_heredoc_body_that_names_gh_or_runs_a_substitution_still_denies_9001() {
          x = \"$(gh api -X DELETE repos/o/r/actions/secrets/X)\"\nEOF",
         "G=gh A=api python3 - <<'EOF'\nprint('it's d[k] x[0]')\n\
          os.system(\"$G $A -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+        // #9001 critic: an expanding body spells the program from split
+        // variables the shell joins before Python runs.
+        "G=g; H=h; python3 - <<EOF\nprint('it\\'s')\n\
+         os.system(\"$G$H api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+        "C=cu; R=rl; python3 - <<EOF\nprint('it\\'s')\n\
+         os.system(\"$C$R -X DELETE https://api.github.com/repos/o/r/actions/secrets/X\")\nEOF",
         "bash <<'EOF'\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "cat <<'EOF' | sh\ngh api -X DELETE repos/o/r/actions/secrets/X\nEOF",
         "gh auth token",
