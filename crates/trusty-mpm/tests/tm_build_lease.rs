@@ -535,6 +535,57 @@ fn a_command_that_is_not_a_heavy_build_is_refused() {
     assert!(err.contains("not a heavy build"), "{err}");
 }
 
+/// #8969, the Fail-Open Check's error arm at run time: a lease standing in a
+/// directory other than the one the hook resolved for the command's `cd`
+/// refuses with exit 78 and never starts the build — it never builds another
+/// checkout. The matching directory runs it.
+#[test]
+fn a_build_outside_its_expected_directory_is_refused_8969() {
+    let home = home_with_ceiling(2, "");
+    let (ours, theirs) = (home.path().join("ours"), home.path().join("theirs"));
+    for dir in [&ours, &theirs] {
+        std::fs::create_dir_all(dir).expect("dir");
+    }
+    let ran = home.path().join("ran");
+    let run_from = |cwd: &Path| {
+        build_lease(home.path())
+            .current_dir(cwd)
+            .arg("--expect-cwd")
+            .arg(&ours)
+            .args(["--wait-secs", "3", "--", "touch"])
+            .arg(&ran)
+            .output()
+            .expect("run")
+    };
+    let out = run_from(&theirs);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(78), "{err}");
+    assert!(!ran.exists(), "the build must not run elsewhere: {err}");
+    assert!(err.contains("#8969"), "{err}");
+    let out = run_from(&ours);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(ran.exists(), "the build runs in its own directory");
+}
+
+/// #8969: a `--chdir` directory that does not exist refuses with exit 78 and
+/// never starts the build — never a fallback to where the shell stands.
+#[test]
+fn a_chdir_to_a_missing_directory_is_refused_8969() {
+    let home = home_with_ceiling(2, "");
+    let ran = home.path().join("ran");
+    let out = build_lease(home.path())
+        .arg("--chdir")
+        .arg(home.path().join("gone"))
+        .args(["--wait-secs", "3", "--", "touch"])
+        .arg(&ran)
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(78), "{err}");
+    assert!(!ran.exists(), "the build must not run: {err}");
+    assert!(err.contains("#8969"), "{err}");
+}
+
 /// #8261 round 3 (critic finding 8): a waiter's refusal names the holder by
 /// program and subcommand only, never an argument value; slot files are 0600.
 #[test]
