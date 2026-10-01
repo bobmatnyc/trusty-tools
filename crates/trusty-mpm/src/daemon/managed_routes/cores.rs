@@ -625,8 +625,7 @@ mod cores_tests {
         record.pane_id = Some("%9".into());
         mgr.store.write().await.upsert(record).await.expect("seed");
 
-        let outcome =
-            decommission_core(&state, UNPROVEN_ID, false, ProvisioningDirt::Refuse).await;
+        let outcome = decommission_core(&state, UNPROVEN_ID, false, ProvisioningDirt::Refuse).await;
 
         assert_eq!(outcome.status, 409);
         match &outcome.body {

@@ -13,7 +13,14 @@ Fixed
   id, or the pane list or the session probe fails — decommission now refuses
   and leaves the workspace and the record as they were, and the idle reaper
   skips the session instead of marking it stopped. A plain stop still moves
-  the record only.
+  the record only. The refusal is an HTTP 409 whose message gives the reason,
+  says whether the record's pane was already signalled, and names the ways
+  out: end the session yourself and rerun, or `tm session delete --force <id>`
+  to drop the record only.
+- A stop no longer snapshots a tmux session it has not proved is the
+  record's own: the scrollback is read from the record's own pane, and a
+  session that took the name is never written into the stale record's
+  workspace.
 - `tm session delete` of a stale record whose name a different live session
   now uses no longer needs `--force`; a delete still never touches tmux.
   `tm session delete --force` now succeeds when tmux is absent or its session

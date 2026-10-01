@@ -464,6 +464,45 @@ async fn decommission_with_an_unlistable_pane_set_changes_nothing() {
     f.assert_untouched();
 }
 
+/// #8935 (supervisor ruling): a stop of a stale record whose name another
+/// session holds snapshots nothing. Red on 6310cfa9d8, which captured the
+/// live session by name into the stale record's workspace.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_foreign_stop_writes_no_scrollback_and_keeps_last_cwd() {
+    let f = Fixture::new(FakeTmux {
+        sessions_fail: false,
+        panes: Some("%9:1"),
+        after_signal: None,
+    })
+    .await;
+    let id = f.seed("active", Some("%2077")).await;
+    let (_, ws) = f.own_workspace(&id).await;
+    let mut record = f.mgr.get(&id).await.expect("record");
+    record.last_cwd = Some(PathBuf::from("/work/x"));
+    f.mgr
+        .store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("seed");
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+
+    assert!(matches!(report.runtime, RuntimeTeardown::Foreign(_)));
+    assert!(!ws.join(".trusty-mpm/scrollback.txt").exists());
+    assert_eq!(report.record.scrollback_path, None);
+    assert_eq!(report.record.last_cwd, Some(PathBuf::from("/work/x")));
+    let calls = f.calls();
+    assert!(!calls.contains("capture-pane"), "{calls}");
+    assert!(!calls.contains("pane_current_path"), "{calls}");
+    f.assert_untouched();
+}
+
 /// #8935 delta critic: a failed session probe refuses decommission and says
 /// liveness is unknown rather than calling the session live.
 #[serial_test::serial]
@@ -522,7 +561,10 @@ async fn a_pane_list_lost_after_the_signal_refuses_decommission() {
     let after = f.mgr.get(&id).await.expect("record");
     assert_eq!(after.state, ManagedSessionState::Active);
     let calls = f.calls();
-    assert!(calls.contains("send-keys"), "the pane was signalled: {calls}");
+    assert!(
+        calls.contains("send-keys"),
+        "the pane was signalled: {calls}"
+    );
     assert!(!calls.contains("kill-session"), "{calls}");
 }
 

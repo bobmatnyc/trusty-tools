@@ -21,7 +21,7 @@ use tracing::info;
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
-use super::runtime_identity::RuntimeTeardown;
+use super::runtime_identity::{self, RuntimeOwnership, RuntimeTeardown};
 
 impl SessionManager {
     /// Stop the runtime of a managed session, keeping the workspace intact.
@@ -145,7 +145,15 @@ impl SessionManager {
             ));
         }
         super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Stop)?;
-        super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #8935: classify before the snapshot. A capture by name would write
+        // whichever session holds the name now — possibly another session's,
+        // even the Architect's — into this record's workspace. Only a session
+        // proved to hold the record's pane is captured, from that pane.
+        if let Ok(RuntimeOwnership::Owned { pane_id }) =
+            runtime_identity::runtime_ownership(&record, self.tmux.as_ref())
+        {
+            super::snapshot::capture_into_pane(&mut record, &*self.tmux, Some(&pane_id)).await;
+        }
         // Graceful teardown (#1975): give the claude process a SIGTERM + grace
         // window to checkpoint before its tmux pane is reclaimed, instead of an
         // abrupt `kill_session`. The snapshot above already preserved the pane.
