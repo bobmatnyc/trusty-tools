@@ -1420,6 +1420,8 @@ fn blank_identity(body: &Value) -> Value {
             "cwd",
             "workspace_path",
             "created_at",
+            // #8935: the left-running note names the record's own session.
+            "runtime_left_running",
         ] {
             if map.contains_key(field) {
                 map.insert(field.to_owned(), Value::Null);

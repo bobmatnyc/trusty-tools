@@ -73,7 +73,8 @@ async fn an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_ses
         "the pane was killed"
     );
     assert!(
-        fake.interrupt_calls.lock().unwrap().is_empty(),
+        fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty(),
         "the pane was signalled"
     );
 }
@@ -98,6 +99,7 @@ async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
     assert_eq!(state_of(&mgr, &id).await, ManagedSessionState::Active);
     assert!(fake.kill_calls.lock().unwrap().is_empty());
     assert!(fake.interrupt_calls.lock().unwrap().is_empty());
+    assert!(fake.pane_interrupt_calls.lock().unwrap().is_empty());
 }
 
 /// The daemon's shutdown stops ordinary sessions and never the Architect's.

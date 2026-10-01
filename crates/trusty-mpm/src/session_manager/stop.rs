@@ -8,7 +8,9 @@
 //! other — `stop` IS `stop_with_cause` with the cause every "end this session"
 //! request implies.
 //! What: [`SessionManager::stop`] and [`SessionManager::stop_with_cause`]. No
-//! behavior change — a pure relocation.
+//! behavior change — a pure relocation. #8935 adds
+//! [`SessionManager::stop_reporting`], which also says whether the runtime
+//! was torn down or left running.
 //! Test: `manager_stop_keeps_workspace` in `tests.rs`;
 //! `stop_refuses_terminal_record` in `delete_tests.rs`;
 //! `stop_records_deliberate_cause` in `stop_cause_tests.rs`;
@@ -19,6 +21,7 @@ use tracing::info;
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
+use super::runtime_identity::{self, RuntimeOwnership, RuntimeTeardown};
 
 impl SessionManager {
     /// Stop the runtime of a managed session, keeping the workspace intact.
@@ -83,6 +86,53 @@ impl SessionManager {
         id: &ManagedSessionId,
         cause: StopCause,
     ) -> Result<SessionRecord, ManagedError> {
+        Ok(self.stop_reporting(id, cause).await?.record)
+    }
+
+    /// [`Self::stop_with_cause`], also returning what happened to the runtime.
+    ///
+    /// Why (#8935): a stop whose record's tmux name now belongs to another
+    /// session moves the record only; the operator-facing surfaces must say
+    /// the live session was left running instead of reporting it stopped.
+    /// What: the same stop; [`StopReport::runtime`] is the teardown's verdict.
+    /// Test: `stopping_a_stale_record_never_signals_the_live_session_that_reused_its_name`.
+    pub async fn stop_reporting(
+        &self,
+        id: &ManagedSessionId,
+        cause: StopCause,
+    ) -> Result<StopReport, ManagedError> {
+        self.stop_checked(id, cause, "SessionManager::stop", false)
+            .await
+    }
+
+    /// [`Self::stop_reporting`] that refuses when the live session's ownership
+    /// cannot be proved, leaving the record as it was.
+    ///
+    /// Why (#8935 critic round): an automatic stop — the idle reaper — must
+    /// not mark a record `Stopped` while a claude that may be its own still
+    /// runs; the record would then never be reaped or resumed correctly.
+    /// What: the same stop through [`Self::terminate_proven_runtime`]; an
+    /// unproven teardown returns [`ManagedError::InvalidState`] before the
+    /// record moves.
+    /// Test: `the_idle_reaper_stop_skips_an_unproven_runtime`.
+    pub async fn stop_proven(
+        &self,
+        id: &ManagedSessionId,
+        cause: StopCause,
+        caller: &str,
+    ) -> Result<StopReport, ManagedError> {
+        self.stop_checked(id, cause, caller, true).await
+    }
+
+    /// The body behind [`Self::stop_reporting`] and [`Self::stop_proven`];
+    /// `require_proof` picks the teardown.
+    async fn stop_checked(
+        &self,
+        id: &ManagedSessionId,
+        cause: StopCause,
+        caller: &str,
+        require_proof: bool,
+    ) -> Result<StopReport, ManagedError> {
         let mut record = self.get(id).await?;
         if record.state.is_terminal() {
             return Err(ManagedError::InvalidState(
@@ -95,13 +145,27 @@ impl SessionManager {
             ));
         }
         super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Stop)?;
-        super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #8935: classify before the snapshot. A capture by name would write
+        // whichever session holds the name now — possibly another session's,
+        // even the Architect's — into this record's workspace. Only a session
+        // proved to hold the record's pane is captured, from that pane.
+        if let Ok(RuntimeOwnership::Owned { pane_id }) =
+            runtime_identity::runtime_ownership(&record, self.tmux.as_ref())
+        {
+            super::snapshot::capture_into_pane(&mut record, &*self.tmux, Some(&pane_id)).await;
+        }
         // Graceful teardown (#1975): give the claude process a SIGTERM + grace
         // window to checkpoint before its tmux pane is reclaimed, instead of an
         // abrupt `kill_session`. The snapshot above already preserved the pane.
         // #8942: a kill-floor refusal aborts here, before the record moves.
-        self.graceful_terminate_runtime(&record.tmux_name, "SessionManager::stop")
-            .await?;
+        // #8935: a live session that is not this record's is left running;
+        // the record still moves, record-only.
+        // #8935 critic round: an automatic stop refuses an unproven one.
+        let runtime = if require_proof {
+            self.terminate_proven_runtime(&record, caller).await?
+        } else {
+            self.graceful_terminate_runtime(&record, caller).await?
+        };
         record.state = ManagedSessionState::Stopped;
         // #6194: the caller names the cause; `stop` supplies Deliberate for
         // every "end this session" request, and an automatic resume must not
@@ -110,7 +174,24 @@ impl SessionManager {
         self.store.write().await.upsert(record.clone()).await?;
         // #7087: a stopped session leaves the active-project set.
         self.bump_residency_generation();
-        info!(id = %id, name = %record.tmux_name, cause = ?cause, "managed session stopped (workspace intact)");
-        Ok(record)
+        match runtime.left_running() {
+            None => {
+                info!(id = %id, name = %record.tmux_name, cause = ?cause, "managed session stopped (workspace intact)")
+            }
+            // #8935: the log must not claim a stop that tmux never saw.
+            Some(why) => {
+                info!(id = %id, name = %record.tmux_name, cause = ?cause, "managed session record marked Stopped (record only: {why})")
+            }
+        }
+        Ok(StopReport { record, runtime })
     }
+}
+
+/// What [`SessionManager::stop_reporting`] did (#8935).
+#[derive(Debug, Clone)]
+pub struct StopReport {
+    /// The record after the stop, `Stopped`.
+    pub record: SessionRecord,
+    /// What the teardown did to the tmux runtime.
+    pub runtime: RuntimeTeardown,
 }

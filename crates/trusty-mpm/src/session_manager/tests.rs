@@ -421,6 +421,38 @@ pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmux
     (mgr, fake)
 }
 
+/// A [`FakeTmuxDriver`] whose new sessions carry pane `%1`, which its
+/// `pane_exists` reports present, so a decommission proves the live session
+/// is the record's own (#8935: an unproven one refuses).
+pub(super) fn fake_with_pane() -> Arc<FakeTmuxDriver> {
+    let fake = FakeTmuxDriver::new();
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
+    fake
+}
+
+/// Bind `id`'s record to pane `%1`, which [`FakeTmuxDriver`] reports present
+/// unless overridden, so a decommission proves the live session is the
+/// record's own (#8935). For records written by [`seed_record`].
+pub(super) async fn bind_pane(mgr: &SessionManager, id: &ManagedSessionId) {
+    let mut record = mgr.get(id).await.expect("record");
+    record.pane_id = Some("%1".into());
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("bind pane");
+}
+
+/// [`make_manager`] over [`fake_with_pane`].
+pub(super) async fn make_manager_with_pane(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
+    let fake = fake_with_pane();
+    let mgr = SessionManager::new(dir.path(), fake.clone())
+        .await
+        .expect("manager");
+    (mgr, fake)
+}
+
 #[tokio::test]
 async fn manager_create_record() {
     let dir = crate::test_support::hermetic_temp_dir();
@@ -643,6 +675,8 @@ async fn manager_stop_keeps_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let record = mgr
         .create(
@@ -692,6 +726,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let workspace_path = workspace_dir.path().to_owned();
 
@@ -767,7 +803,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
+    // #8935: the record's pane proves the live session is its own.
+    let (mgr, _fake) = make_manager_with_pane(&dir).await;
 
     // Build a workspace path INSIDE a temp "managed root" dir so the
     // path-containment guard passes. `decommission_with_root` is called with
@@ -975,8 +1012,10 @@ async fn decommission_record_only_never_touches_the_runtime() {
         .await
         .expect("record-only decommission");
 
+    // #8935: the teardown's Ctrl-C now targets the record's pane.
     assert!(
-        fake.interrupt_calls.lock().unwrap().is_empty(),
+        fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty(),
         "record-only must never signal the runtime; got {:?}",
         fake.interrupt_calls.lock().unwrap()
     );
@@ -1101,6 +1140,7 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
     assert!(
         fake.kill_calls.lock().unwrap().is_empty()
             && fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty()
             && fake.graceful_stop_calls.lock().unwrap().is_empty(),
         "effect 1: the runtime must be untouched"
     );
@@ -1126,6 +1166,8 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
 async fn decommission_full_still_terminates_the_runtime() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let workspace_path = managed_root.path().join("owner").join("repo").join("full");
@@ -2136,6 +2178,8 @@ async fn decommission_all_ephemeral_ignores_non_ephemeral() {
     let dur_active = ManagedSessionId::new();
     let dur_stopped = ManagedSessionId::new();
     seed_record(&mgr, &dir, eph_active, ManagedSessionState::Active, true).await;
+    // #8935: the record's pane proves the live session is its own.
+    bind_pane(&mgr, &eph_active).await;
     seed_record(&mgr, &dir, eph_stopped, ManagedSessionState::Stopped, true).await;
     seed_record(&mgr, &dir, dur_active, ManagedSessionState::Active, false).await;
     seed_record(&mgr, &dir, dur_stopped, ManagedSessionState::Stopped, false).await;

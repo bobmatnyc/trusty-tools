@@ -157,7 +157,7 @@ palace creation for the *spawned sessions* (that is separate work — §8.5).
 | `sm.sessions.list` | `{}` | `{ sessions: [...] }` | `GET /sessions` (§2.6) |
 | `sm.sessions.get` | `{ session_id }` | `{ session, output?, events? }` | `GET /sessions/{id}` + `/output` + `/events` (§2.6) |
 | `sm.sessions.send` | `{ session_id, text }` | `{ ok }` | `POST /sessions/{id}/command` (§2.6) |
-| `sm.sessions.stop` | `{ session_id }` | `{ ok }` | `DELETE /sessions/{id}` (§2.6) |
+| `sm.sessions.stop` | `{ session_id }` | `{ ok, runtime_left_running }` (#8935: the reason a live tmux session with the record's name was left running, or `null`) | `DELETE /sessions/{id}` (§2.6) |
 | `sm.sessions.resume` | `{ session_id }` | `{ ok }` | `POST /sessions/{id}/resume` (§2.6) |
 | `sm.sessions.kill` | `{ session_id }` | `{ ok }` | force-stop / reap (`DELETE /sessions/{id}`, `/sessions/dead`, §2.6) |
 | `sm.context.get` | `{ conv_id? }` | `{ compressed_context, recent_rounds, total_rounds, token_estimate }` | Context engine state (§7.1/§7.5) |
