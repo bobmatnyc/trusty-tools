@@ -103,10 +103,21 @@ fn every_unusable_record_starts_fresh_and_says_why() {
     fn write(s: &Scratch, body: &str) {
         let path = conversation_path(&s.root);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-        std::fs::write(path, body).expect("write");
+        std::fs::write(&path, body).expect("write");
+        // Owner-only, whatever the umask: these cases test the content.
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
     }
     fn record_json(dir: &Path, id: &str) -> String {
         serde_json::json!({ "project_dir": dir, "conversation_id": id }).to_string()
+    }
+    /// A resumable record and transcript, the record at `mode`.
+    fn write_mode(s: &Scratch, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        record_conversation(&s.root, &s.dir, ID).expect("record");
+        s.transcript(ID);
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(conversation_path(&s.root), perms).expect("chmod");
     }
     type Setup = Box<dyn Fn(&Scratch)>;
     let cases: Vec<(&str, Setup, &str)> = vec![
@@ -151,6 +162,17 @@ fn every_unusable_record_starts_fresh_and_says_why() {
             Box::new(|s| record_conversation(&s.root, &s.dir, ID).expect("record")),
             "has no transcript",
         ),
+        // #8981 critic LOW: a record another user could have written.
+        (
+            "group-writable",
+            Box::new(|s| write_mode(s, 0o620)),
+            "writable by other users (mode 620)",
+        ),
+        (
+            "world-writable",
+            Box::new(|s| write_mode(s, 0o602)),
+            "writable by other users (mode 602)",
+        ),
         (
             "unreadable",
             Box::new(|s| std::fs::create_dir_all(conversation_path(&s.root)).expect("dir")),
@@ -185,5 +207,14 @@ fn every_unusable_record_starts_fresh_and_says_why() {
     assert!(matches!(
         resolve_conversation(&s.root, &s.dir, None),
         ConversationStart::Fresh { reason: Some(why), .. } if why.contains("cannot be checked")
+    ));
+    // An owner-only record still resumes, and clearing it twice is `Ok`.
+    write_mode(&s, 0o644);
+    assert_eq!(s.resolve(), ConversationStart::Resume(ID.to_owned()));
+    clear_conversation(&s.root).expect("clear");
+    clear_conversation(&s.root).expect("clear an absent record");
+    assert!(matches!(
+        s.resolve(),
+        ConversationStart::Fresh { reason: None, .. }
     ));
 }

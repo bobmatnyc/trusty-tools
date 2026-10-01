@@ -30,13 +30,17 @@ impl FleetEnv {
         // a copy: macOS kills an unsigned copy of a system binary.
         let sleeper = bin.path().join("claude-sleep");
         std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
-        // #8981: each start appends its argv, one line per launch.
+        // #8981: each start appends its argv, one line per launch. While the
+        // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
+        // a `claude` that cannot load its conversation does.
+        let sleeper = sleeper.display().to_string();
         std::fs::write(
             &claude,
             format!(
-                "#!/bin/sh\necho \"$*\" >> {:?}\nexec {:?} 600\n",
+                "#!/bin/sh\necho \"$*\" >> {:?}\ncase \" $* \" in *\" --resume \"*) \
+                 [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} 600\n",
                 bin.path().join(ARGV_LOG).display().to_string(),
-                sleeper.display().to_string()
+                bin.path().join(RESUME_FAILS).display().to_string(),
             ),
         )
         .expect("fake claude");
@@ -55,13 +59,21 @@ impl FleetEnv {
 
     /// `tm <args>` confined to this environment.
     fn tm(&self, args: &[&str]) -> Output {
+        self.tm_with_socket(args, None)
+    }
+
+    /// `tm <args>`, dialling the daemon at `socket` when one is given.
+    fn tm_with_socket(&self, args: &[&str], socket: Option<&Path>) -> Output {
         let path = format!(
             "{}:{}",
             self.bin.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        common::tm_command_in(self.home.path())
-            .args(args)
+        let mut cmd = common::tm_command_in(self.home.path());
+        if let Some(socket) = socket {
+            cmd.env("TRUSTY_MPM_SOCKET", socket);
+        }
+        cmd.args(args)
             .env("TMUX_TMPDIR", self.tmux_dir.path())
             // #8436 P4 fix: the fleet scripts read TMUX_SOCKET, which would
             // take their tmux off the private server above.
@@ -98,6 +110,48 @@ impl FleetEnv {
         }
     }
 
+    /// Claude Code's transcript for the conversation `argv` started with
+    /// `--session-id`, under the Architect's config dir, in the folder named
+    /// for the directory it ran in. Returns the id.
+    fn write_transcript(&self, argv: &[String]) -> Option<String> {
+        let id = flag_value(argv, "--session-id")?;
+        let canonical = std::fs::canonicalize(self.dir()).expect("architect dir");
+        let folder: String = canonical
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let projects =
+            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at(self.home.path())
+                .join("projects")
+                .join(folder);
+        std::fs::create_dir_all(&projects).expect("project folder");
+        std::fs::write(projects.join(format!("{id}.jsonl")), "{}\n").expect("transcript");
+        Some(id.to_owned())
+    }
+
+    /// The Architect's conversation record under the scratch home.
+    fn conversation_record(&self) -> PathBuf {
+        self.home
+            .path()
+            .join(".trusty-mpm/architect-launch/last.architect-conversation")
+    }
+
+    /// Whether tmux session `name` runs on this environment's private server.
+    fn has_session(&self, name: &str) -> bool {
+        Command::new("tmux")
+            .args([
+                "has-session",
+                "-t",
+                &trusty_common::tmux::exact_session_target(name),
+            ])
+            .env("TMUX_TMPDIR", self.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
     /// `tmux kill-session` on this environment's private server.
     fn kill_session(&self, name: &str) {
         let status = Command::new("tmux")
@@ -117,6 +171,9 @@ impl FleetEnv {
 
 /// The file, in the fake `bin` dir, where the fake `claude` logs its argv.
 const ARGV_LOG: &str = "claude-argv.log";
+
+/// The marker, in the fake `bin` dir, that makes a `--resume` start fail.
+const RESUME_FAILS: &str = "resume-fails";
 
 /// The value after `flag` in one launch's argv.
 fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -259,22 +316,7 @@ fn fleet_init_resumes_the_prior_conversation_after_the_record_is_gone() {
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
     let first = env.launches(1).first().cloned().unwrap_or_default();
-    // Claude Code writes the conversation's transcript under the Architect's
-    // config dir, in the folder named for the directory it ran in.
-    if let Some(id) = flag_value(&first, "--session-id") {
-        let canonical = std::fs::canonicalize(&dir).expect("architect dir");
-        let folder: String = canonical
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let projects =
-            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at(env.home.path())
-                .join("projects")
-                .join(folder);
-        std::fs::create_dir_all(&projects).expect("project folder");
-        std::fs::write(projects.join(format!("{id}.jsonl")), "{}\n").expect("transcript");
-    }
+    env.write_transcript(&first);
 
     env.kill_session("tm-architect");
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
@@ -306,11 +348,7 @@ fn fleet_init_resumes_the_prior_conversation_after_the_record_is_gone() {
     }
 
     // Error arm: a corrupt record is set aside, said on stdout and stderr.
-    let record = env
-        .home
-        .path()
-        .join(".trusty-mpm/architect-launch/last.architect-conversation");
-    std::fs::write(&record, "{not json").expect("corrupt record");
+    std::fs::write(env.conversation_record(), "{not json").expect("corrupt record");
     env.kill_session("tm-architect");
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert!(out.status.success(), "{}", text(&out));
@@ -327,6 +365,234 @@ fn fleet_init_resumes_the_prior_conversation_after_the_record_is_gone() {
         );
         assert!(stream.contains("is corrupt"), "{}", text(&out));
     }
+}
+
+/// #8981 critic HIGH regression: a resume whose `claude` dies at once fails
+/// the run, kills the session it made and clears the conversation record, so
+/// the next `tm fleet init` starts a new conversation instead of retrying
+/// the dead one on every run.
+#[test]
+fn fleet_init_clears_the_conversation_record_when_the_resume_fails() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    let id = env.write_transcript(&first).expect("a fresh --session-id");
+    assert!(
+        env.conversation_record().is_file(),
+        "the fresh id is recorded"
+    );
+
+    env.kill_session("tm-architect");
+    std::fs::write(env.bin.path().join(RESUME_FAILS), "").expect("marker");
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    let second = env.launches(2).get(1).cloned().unwrap_or_default();
+    assert_eq!(
+        flag_value(&second, "--resume"),
+        Some(id.as_str()),
+        "{second:?}"
+    );
+    assert!(
+        !out.status.success(),
+        "a failed resume is a failed run: {}",
+        text(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "resuming the Architect's conversation {id} failed"
+        )),
+        "{}",
+        text(&out)
+    );
+    let record = env.conversation_record();
+    assert!(
+        stderr.contains(&format!("cleared {}", record.display())),
+        "the failure names the cleared record: {}",
+        text(&out)
+    );
+    assert!(!record.exists(), "the dead conversation is still recorded");
+    assert!(
+        !env.has_session("tm-architect"),
+        "the failed session was left"
+    );
+
+    // The next run starts fresh, even with the resume still failing.
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let third = env.launches(3).get(2).cloned().unwrap_or_default();
+    assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
+    let fresh = flag_value(&third, "--session-id").expect("a new conversation id");
+    assert_ne!(fresh, id, "{third:?}");
+}
+
+/// A stand-in daemon on a unix socket that records each Architect
+/// registration and answers it as the daemon does for a bound Architect.
+struct FakeDaemon {
+    socket: PathBuf,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The fake daemon's one method, `mpm.managed.register_supervisor`.
+struct Registrar(std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+
+#[async_trait::async_trait]
+impl trusty_common::uds::server::RpcFallback for Registrar {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, trusty_common::uds::server::RpcError> {
+        use trusty_mpm::session_manager::{
+            RegisteredSession, RegistrationReport, SessionKind, SupervisorRegistration,
+        };
+        const METHOD: &str = "mpm.managed.register_supervisor";
+        if method != METHOD {
+            return Err(trusty_common::uds::server::RpcError::method_not_found(
+                method,
+                &[METHOD],
+            ));
+        }
+        self.0.lock().expect("requests").push(params.clone());
+        let reg: SupervisorRegistration = serde_json::from_value(params)
+            .map_err(|e| trusty_common::uds::server::RpcError::invalid_params(e.to_string()))?;
+        let row = |name: &str, kind| RegisteredSession {
+            id: format!("id-{name}"),
+            tmux_name: name.to_owned(),
+            kind,
+        };
+        let mut registered = vec![row(&reg.session, SessionKind::Supervisor)];
+        for helper in [&reg.poll_session, &reg.collector_session]
+            .into_iter()
+            .flatten()
+        {
+            registered.push(row(helper, SessionKind::SupervisorAux));
+        }
+        let report = RegistrationReport {
+            registered,
+            ..Default::default()
+        };
+        serde_json::to_value(report)
+            .map_err(|e| trusty_common::uds::server::RpcError::internal(e.to_string()))
+    }
+}
+
+impl FakeDaemon {
+    /// Serve at `socket` on a runtime of its own, until dropped.
+    fn start(socket: PathBuf) -> Self {
+        let requests = std::sync::Arc::default();
+        let registrar = Registrar(std::sync::Arc::clone(&requests));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        let bind_at = socket.clone();
+        let thread = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async move {
+                let listener = trusty_common::uds::bind_hardened(&bind_at).expect("bind");
+                ready_tx.send(()).expect("ready");
+                let router = std::sync::Arc::new(
+                    trusty_common::uds::server::RpcRouter::new().fallback(registrar),
+                );
+                trusty_common::uds::server::serve_until(
+                    &listener,
+                    router,
+                    trusty_common::uds::server::RpcServeOptions::default(),
+                    async {
+                        let _ = stopped.await;
+                    },
+                )
+                .await;
+            });
+        });
+        ready.recv().expect("the fake daemon bound its socket");
+        Self {
+            socket,
+            requests,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().expect("requests").clone()
+    }
+}
+
+impl Drop for FakeDaemon {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// #8981 / #8942 live FAIL: a relaunch registers the Architect and both of
+/// its helpers, so `tm ls` lists the `architect` row and the
+/// `architect-helper` rows again (the daemon side and the tags are pinned by
+/// `a_relaunch_registers_the_architect_and_both_helpers` and
+/// `session_table_pins_and_tags_the_architect_row`).
+#[test]
+fn fleet_init_registers_the_architect_on_a_relaunch() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let out = env.tm_with_socket(
+        &["fleet", "init", "--dir", dir_arg(&dir)],
+        Some(&daemon.socket),
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let first = env.launches(1).first().cloned().unwrap_or_default();
+    env.write_transcript(&first);
+
+    env.kill_session("tm-architect");
+    let out = env.tm_with_socket(
+        &["fleet", "init", "--dir", dir_arg(&dir)],
+        Some(&daemon.socket),
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let second = env.launches(2).get(1).cloned().unwrap_or_default();
+    assert!(
+        flag_value(&second, "--resume").is_some(),
+        "not a relaunch: {second:?}"
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "registered tm-architect with the daemon as the Architect (record id-tm-architect; \
+             helpers: tm-architect-poll, tm-architect-collector)"
+        ),
+        "{}",
+        text(&out)
+    );
+    let requests = daemon.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one registration per launch: {requests:?}"
+    );
+    let canonical = std::fs::canonicalize(&dir).expect("architect dir");
+    let relaunch = &requests[1];
+    assert_eq!(relaunch["session"], "tm-architect", "{relaunch}");
+    assert_eq!(relaunch["poll_session"], "tm-architect-poll", "{relaunch}");
+    assert_eq!(
+        relaunch["collector_session"], "tm-architect-collector",
+        "{relaunch}"
+    );
+    assert_eq!(
+        relaunch["dir"],
+        canonical.to_str().expect("utf-8"),
+        "{relaunch}"
+    );
 }
 
 /// #8878 R1: `--session` names the Architect's session, its poller

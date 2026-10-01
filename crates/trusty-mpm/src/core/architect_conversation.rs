@@ -11,10 +11,14 @@
 //! records. [`resolve_conversation`] reads it back at the next launch and
 //! resumes it (`claude --resume <uuid>`) only when the id is a UUID recorded
 //! for this directory and Claude Code holds its transcript in this
-//! directory's project folder of the Architect's config dir. Any other
-//! answer starts fresh and names the reason.
+//! directory's project folder of the Architect's config dir, and the record
+//! is not writable by other users. Any other answer starts fresh and names
+//! the reason. A resume whose `claude` does not stay up is a failed resume:
+//! the launch removes the record with [`clear_conversation`], so the next
+//! launch starts fresh instead of retrying a dead conversation.
 //! Test: `architect_conversation_tests.rs`; `tests/tm_fleet.rs`
-//! (`fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`).
+//! (`fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
+//! `fleet_init_clears_the_conversation_record_when_the_resume_fails`).
 
 use std::path::{Path, PathBuf};
 
@@ -126,7 +130,8 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// the daemon's session record, and fail safe — never resume a conversation
 /// tm cannot prove is the Architect's.
 /// What: reads [`conversation_path`] under `root`. No record is a plain fresh
-/// start. A record that does not read or parse, names another directory, holds
+/// start. A record that does not read, is writable by other users, does not
+/// parse, names another directory, holds
 /// no valid UUID, or has no transcript under `config_dir` (the `claude`
 /// config dir the launch sets; `None` means it cannot be checked) is a fresh
 /// start whose reason says which. Only a record passing every check is
@@ -144,10 +149,10 @@ pub fn resolve_conversation(
         reason,
     };
     let path = conversation_path(root);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return fresh(None),
-        Err(e) => return fresh(Some(format!("{} could not be read: {e}", path.display()))),
+    let text = match read_owner_only(&path) {
+        Ok(Some(text)) => text,
+        Ok(None) => return fresh(None),
+        Err(why) => return fresh(Some(why)),
     };
     let record: ConversationRecord = match serde_json::from_str(&text) {
         Ok(record) => record,
@@ -180,6 +185,55 @@ pub fn resolve_conversation(
         )));
     }
     ConversationStart::Resume(id)
+}
+
+/// The record's text, `None` when absent (#8981 critic LOW).
+///
+/// What: the mode is read from the open handle the text is read from, so the
+/// bytes checked are the bytes used. A non-file, a read failure, or a file
+/// group or others can write (mode `& 0o022`) is `Err` naming the path.
+/// Test: `every_unusable_record_starts_fresh_and_says_why`.
+fn read_owner_only(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    let unreadable =
+        |e: &dyn std::fmt::Display| format!("{} could not be read: {e}", path.display());
+    let mut file = match std::fs::File::open(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable(&e)),
+        Ok(file) => file,
+    };
+    let meta = file.metadata().map_err(|e| unreadable(&e))?;
+    if !meta.is_file() {
+        return Err(unreadable(&"not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o7777;
+        if mode & 0o022 != 0 {
+            return Err(format!(
+                "{} is writable by other users (mode {mode:o})",
+                path.display()
+            ));
+        }
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|e| unreadable(&e))?;
+    Ok(Some(text))
+}
+
+/// Remove the conversation record after a failed resume (#8981 critic HIGH).
+///
+/// What: deletes [`conversation_path`] under `root`; an absent record is `Ok`.
+/// Test: `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
+pub fn clear_conversation(root: &Path) -> Result<(), String> {
+    let path = conversation_path(root);
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("{}: {e}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Record `id` as the Architect's conversation in `project_dir` (#8981).

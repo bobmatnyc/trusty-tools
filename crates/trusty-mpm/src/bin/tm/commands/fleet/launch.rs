@@ -13,10 +13,14 @@
 //! `claude` it started, with the session name, as the Architect's process
 //! ([`record_process`], #8878 ruling A). #8981: the `claude` line resumes the
 //! Architect's recorded conversation when one checks out, and carries
-//! `--remote-control` ([`architect_args`]). No daemon registration: the
-//! session is not in `tm ls` until #8536.
+//! `--remote-control` ([`architect_args`]). A resumed `claude` that does not
+//! stay up for [`RESUME_SETTLE`] is a failed resume: the session is killed,
+//! the conversation record cleared, and the launch fails, so the next run
+//! starts fresh. Daemon registration is not here: `fleet::run` registers a
+//! bound Architect after the poller step (`register`, #8942).
 //! Test: `fleet_init_launches_the_architect_and_status_is_complete`,
-//! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`.
+//! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
+//! `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +34,12 @@ use trusty_mpm::core::twin_identity::ArmingRecord;
 /// The Architect's default tmux session; the P1 poller's `ARCHITECT_SESSION`
 /// default. `--session` overrides it (#8878 R1).
 pub(crate) const ARCHITECT_SESSION: &str = architect_session::DEFAULT_ARCHITECT_SESSION;
+
+/// How long a resumed `claude` must stay up before the resume counts (#8981).
+///
+/// A `claude --resume` that cannot load its conversation exits within a
+/// second or two; a resume that dies later is caught on the next run.
+pub(crate) const RESUME_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What tmux reports about one session and its first pane (#8436 P4 fix).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,10 +156,12 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// profile would resolve to PM; kills the session when the `claude` line
 /// cannot be sent. `home` is the user home every write goes under; `session`
 /// is the validated session name. Returns the [`record_process`] outcome and
-/// how the conversation started (#8981).
+/// how the conversation started (#8981). A failed resume ([`resume_failed`])
+/// kills the session, clears the conversation record and is `Err`.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
 /// `fleet_init_with_a_session_override_names_every_session`,
-/// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`.
+/// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
+/// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
 pub(crate) fn start(
     dir: &Path,
     home: &Path,
@@ -229,7 +241,51 @@ pub(crate) fn start(
              starts fresh: {err}"
         );
     }
-    Ok((record_process(dir, home, session), conversation))
+    let binding = record_process(dir, home, session);
+    // #8981 critic HIGH: a dead resume must not be retried by every later run.
+    if let ConversationStart::Resume(id) = &conversation
+        && let Some(why) = resume_failed(&binding, session)
+    {
+        let _ = tmux::run_tmux(&TmuxCommand::KillSession {
+            name: session.to_owned(),
+        });
+        let path = architect_conversation::conversation_path(&root);
+        let record = match architect_conversation::clear_conversation(&root) {
+            Ok(()) => format!(
+                "cleared {}, so the next `tm fleet init` starts a new conversation",
+                path.display()
+            ),
+            Err(err) => format!(
+                "could NOT clear {} ({err}); remove it, or the next `tm fleet init` resumes \
+                 {id} again",
+                path.display()
+            ),
+        };
+        bail!(
+            "resuming the Architect's conversation {id} failed ({why}); killed tmux session \
+             {session} and {record}"
+        );
+    }
+    Ok((binding, conversation))
+}
+
+/// Why the resumed `claude` in `session` is not running, if it is not (#8981).
+///
+/// What: no `claude` in the session once [`record_process`] found none, or
+/// none [`RESUME_SETTLE`] later, is a failed resume.
+fn resume_failed(binding: &Result<ArmingRecord, String>, session: &str) -> Option<String> {
+    if let Err(why) = binding
+        && claude_pid(session).is_none()
+    {
+        return Some(why.clone());
+    }
+    std::thread::sleep(RESUME_SETTLE);
+    claude_pid(session).is_none().then(|| {
+        format!(
+            "`claude` exited within {} s of starting",
+            RESUME_SETTLE.as_secs()
+        )
+    })
 }
 
 /// The arguments the Architect's `claude` line adds for #8981.
