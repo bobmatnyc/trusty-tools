@@ -41,8 +41,9 @@ pub(crate) enum ContentAction {
     /// Limit: the sidecar proves the transfer only. It is downloaded from the
     /// same release as the bundle, so it catches a corrupt or truncated
     /// download, not a release someone replaced together with its sidecar.
-    /// Trust is on first use: the sha256 pinned for a tag is what every later
-    /// read checks, and a tag republished with other bytes is refused.
+    /// Trust is on first use: the pinned sha256 is what every later read
+    /// checks, and a re-fetch of the currently pinned tag that returns other
+    /// bytes is refused. Only the current pin is checked.
     Update {
         /// The release tag to pin, e.g. `content-v0.1.0`.
         #[arg(long, value_name = "TAG")]

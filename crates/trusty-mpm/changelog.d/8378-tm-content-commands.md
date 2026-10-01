@@ -13,7 +13,8 @@ Added
   neither a draft nor a pre-release in GitHub's releases API, not a bare
   `content-v*` git tag — and re-pins to it; the pin changes only when a
   `tm content` command runs. A sha256 mismatch, a missing sidecar, a tag
-  missing upstream, a republished tag, a newer or missing `schema_major`, a
+  missing upstream, a re-fetch of the currently pinned tag that returns other
+  bytes (only the current pin is checked), a newer or missing `schema_major`, a
   failed releases listing or an unreachable host fails without touching the
   previous pin; with nothing installed, the error names
   `tm content install --from <bundle.tar.gz>`.
