@@ -426,7 +426,8 @@ impl DaemonState {
     /// (#8980).
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
     /// `reap_marks_stopped_when_pid_dead`,
-    /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`.
+    /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`,
+    /// `a_sealed_registry_reaps_nothing_8980`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 

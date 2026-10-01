@@ -328,3 +328,30 @@ async fn the_reaper_keeps_an_announced_session_and_its_live_records_8980() {
         crate::core::agent::DelegationStatus::Running
     );
 }
+
+/// #8980 Fail-Open Check: while the registry is sealed the reaper skips
+/// every session, even a daemon-minted Tmux one with no live tmux name, so
+/// no record goes and no delegation is staled.
+#[tokio::test]
+async fn a_sealed_registry_reaps_nothing_8980() {
+    use crate::core::session::{ControlModel, Session};
+    let root = tempfile::tempdir().expect("tempdir");
+    let file = registry_file(&daemon_at(root.path()));
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&file, b"{\"version\":1,\"sessions\":").expect("corrupt it");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    assert!(state.session_claudes().sealed().is_some(), "loaded sealed");
+    let minted = Session::new(SessionId::new(), "/repo", ControlModel::Tmux, None);
+    let minted_id = minted.id;
+    state.register_session(minted);
+    state.upsert_delegation(Delegation::observed(minted_id, "engineer", "task", None));
+
+    let result = state.reap_against(&std::collections::HashSet::new());
+
+    assert_eq!(result.reaped, 0, "a sealed registry reaps nothing");
+    assert!(state.session(minted_id).is_some(), "the record stays");
+    assert_eq!(
+        state.all_delegations()[0].status,
+        crate::core::agent::DelegationStatus::Running
+    );
+}
