@@ -44,20 +44,29 @@ use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 /// Test: `refuses_a_process_dump_inside_a_command_substitution`,
 /// `allows_routine_commands_that_carry_a_substitution`.
 pub(crate) fn evaluate_nested_secret_rules(command: &str) -> Option<String> {
-    evaluate_at(command, 0)
+    evaluate_at(command, 0, true)
+}
+
+/// [`evaluate_nested_secret_rules`] without the #8875 secret-DELETE rule: the
+/// credential-READ subset a script body is judged by (#8879, ruling 268).
+/// That rule reads every pair of rewritten words as a possible `gh api` call,
+/// so over a whole shell program (`[ "$A" -eq 0 ]`) it refuses ordinary code.
+/// Test: `pm_guard_secret_script::tests::the_repo_gate_scripts_allow_8879`.
+pub(crate) fn evaluate_nested_secret_read_rules(command: &str) -> Option<String> {
+    evaluate_at(command, 0, false)
 }
 
 /// [`evaluate_nested_secret_rules`] at substitution depth `depth`.
-fn evaluate_at(command: &str, depth: usize) -> Option<String> {
-    if let Some(reason) = argv_rules(command, depth > 0) {
+fn evaluate_at(command: &str, depth: usize, with_delete: bool) -> Option<String> {
+    if let Some(reason) = argv_rules(command, depth > 0, with_delete) {
         return Some(reason);
     }
     command_substitutions(command).iter().find_map(|body| {
         if depth + 1 >= MAX_SUBSTITUTION_DEPTH {
             // #8756: too deep to decompose; read what is left once, flattened.
-            argv_rules(&flatten(body.text()), true)
+            argv_rules(&flatten(body.text()), true, with_delete)
         } else {
-            evaluate_at(body.text(), depth + 1)
+            evaluate_at(body.text(), depth + 1, with_delete)
         }
     })
 }
@@ -65,7 +74,7 @@ fn evaluate_at(command: &str, depth: usize) -> Option<String> {
 /// The argv-reading rules over one command text; the entry point already ran
 /// the secret-file rule on the top-level text, so `with_file_rule` adds it for
 /// a body only.
-fn argv_rules(command: &str, with_file_rule: bool) -> Option<String> {
+fn argv_rules(command: &str, with_file_rule: bool, with_delete: bool) -> Option<String> {
     let file = with_file_rule
         .then(|| evaluate_secret_file_read_command(command))
         .flatten();
@@ -73,7 +82,11 @@ fn argv_rules(command: &str, with_file_rule: bool) -> Option<String> {
     file.or_else(|| evaluate_pod_env_dump_command(&text))
         .or_else(|| evaluate_process_env_dump_command(&text))
         // #8875: a `gh api` DELETE of a secret names no secret-shaped word.
-        .or_else(|| evaluate_gh_api_secret_delete(&text))
+        .or_else(|| {
+            with_delete
+                .then(|| evaluate_gh_api_secret_delete(&text))
+                .flatten()
+        })
 }
 
 /// `text` with each grouping paren turned into a space (#8756).

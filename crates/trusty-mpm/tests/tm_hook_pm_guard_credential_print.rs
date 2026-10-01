@@ -152,6 +152,13 @@ fn pm_guard_denies_a_deeply_nested_expansion_without_crashing() {
 #[test]
 fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
     let cwd = tempfile::tempdir().expect("cwd");
+    // #8879: a script the command runs must exist to be judged; a missing one
+    // fails closed. This one reads no credential, so the consumer allows.
+    std::fs::write(
+        cwd.path().join("upload.py"),
+        "import sys\nprint(len(sys.argv))\n",
+    )
+    .expect("write upload.py");
     for (agent, command) in [
         (
             "local-ops",

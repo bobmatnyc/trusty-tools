@@ -996,6 +996,30 @@ fn deny_reason_never_echoes_the_command() {
     assert!(!reason.contains("cd \""), "{reason}");
 }
 
+/// 🔴 REGRESSION (#8879, owner ruling 263): the refusal stops the action and
+/// sends it to the Architect; it no longer suggests consuming the value inside
+/// another command or keeping it in a file.
+#[test]
+fn the_refusal_says_stop_and_report_to_the_architect_8879() {
+    let reason = evaluate_credential_print_command("security find-generic-password -s fake-svc -w")
+        .unwrap_or_default();
+    assert!(
+        reason.contains("Stop and report this refusal to the Architect"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("the guard reads the body of a script a command runs"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("refuses a script whose body it cannot judge"),
+        "{reason}"
+    );
+    for stale in ["consume a value", "umask 077", "password-stdin"] {
+        assert!(!reason.contains(stale), "`{stale}` must be gone: {reason}");
+    }
+}
+
 /// 🔴 REGRESSION (#8677): `security -i` (or `-p`, which implies it) runs the
 /// commands its stdin carries. Each row was allowed at 27ec6fa20.
 #[test]

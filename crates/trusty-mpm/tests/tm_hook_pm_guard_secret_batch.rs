@@ -270,3 +270,56 @@ fn pm_guard_refuses_a_traversal_past_a_branch_prefix_7557() {
         assert!(stdout.is_empty(), "{command} must allow: {stdout}");
     }
 }
+
+/// 🔴 REGRESSION (#8879, owner ruling 268): a script the command runs is
+/// judged by its body. A Keychain read moved into a script refuses; a body the
+/// guard cannot read in full — symlinked, over the 256 KiB bound, not UTF-8,
+/// permission-denied, missing, a computed path — refuses (fail closed); a
+/// clean script allows.
+#[test]
+fn pm_guard_refuses_a_script_whose_body_reads_a_credential_8879() {
+    use std::os::unix::fs::PermissionsExt;
+    let cwd = tempfile::tempdir().expect("cwd");
+    let write = |name: &str, body: &[u8]| {
+        let path = cwd.path().join(name);
+        std::fs::write(&path, body).expect("write fixture");
+        path
+    };
+    write(
+        "probe.sh",
+        b"security find-generic-password -s fake-svc -w\n",
+    );
+    write("read.py", b"print(open('.env').read())\n");
+    let clean = write("clean.sh", b"echo hello\n");
+    std::os::unix::fs::symlink(&clean, cwd.path().join("link.sh")).expect("symlink");
+    write("big.sh", "echo hello\n".repeat(24_000).as_bytes());
+    write("latin1.sh", b"echo caf\xe9\n");
+    let locked = write("locked.sh", b"echo hello\n");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let mut denied = vec![
+        "bash probe.sh",
+        "./probe.sh",
+        "python3 read.py",
+        "bash link.sh",
+        "bash big.sh",
+        "bash latin1.sh",
+        "bash missing.sh",
+        "bash \"$SCRIPT\"",
+    ];
+    // Root reads a 0o000 file; the read-error arm exists only when it cannot.
+    if std::fs::read(&locked).is_err() {
+        denied.push("bash locked.sh");
+    }
+    for command in denied {
+        assert_denied_citing(&run_bash(command, cwd.path()), "#8879", command);
+    }
+    for command in [
+        "bash clean.sh",
+        "./clean.sh",
+        "printf 'echo hi' > later.sh; bash later.sh",
+    ] {
+        let stdout = run_bash(command, cwd.path());
+        assert!(stdout.is_empty(), "{command} must allow: {stdout}");
+    }
+}
