@@ -81,9 +81,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// The sha256 (hex) of `path`'s bytes, or `None` when it cannot be read.
+/// The sha256 (hex) of `path`'s bytes, or `None` when it cannot be read or is
+/// not a regular file.
+///
+/// Why: `--force` deletes what this vouches for, and a FIFO named `CLAUDE.md`
+/// blocked the read forever inside decommission's blocking check (#8540).
+/// What: opened with `O_NOFOLLOW | O_NONBLOCK`, so neither a symlink nor a
+/// FIFO can stall the open; the handle must then be a regular file, and its
+/// bytes are streamed into the hash.
+/// Test: `provisioning_entry_refuses_a_claude_md_that_is_not_a_regular_file`.
 fn file_sha256(path: &Path) -> Option<String> {
-    std::fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // #8540: fail closed on a symlink, FIFO, socket or device.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// `path`'s [`PreState`]; only `NotFound` is [`PreState::Absent`].

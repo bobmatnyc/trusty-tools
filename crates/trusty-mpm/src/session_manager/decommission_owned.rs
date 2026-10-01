@@ -192,10 +192,10 @@ pub(super) async fn remove_owned_workspace(
 fn warn_force_losses(ws: &Path) {
     let lost = dirty_entries(ws);
     if !lost.is_empty() {
+        // #8540: an edited ledgered file keeps the workspace, so none is here.
         warn!(
             workspace = %ws.display(),
-            "decommission --force: deleting tm's provisioning files with the workspace, \
-             including any edits made to them: {}",
+            "decommission --force: deleting tm's provisioning files with the workspace: {}",
             lost.join(", ")
         );
     }
