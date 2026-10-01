@@ -108,6 +108,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Which instruction profile a launch in this project resolves. `Warn` when the project's committed `.trusty-mpm.toml` asks for `profile = \"supervisor\"` but the operator has not allow-listed it under `[supervisor] projects` in the user-level `~/.trusty-mpm/config.toml` — the session then runs the full PM profile. A project cannot exempt itself from the PM rules by editing its own file (issue #8453).",
     ),
     (
+        "pm_guard",
+        "Whether launches write the `tm hook --pm-guard` `PreToolUse` entry, read from `[pm_guard] enabled` in `~/.trusty-mpm/config.toml`. `Ok` when the guard is on — including a missing key or section, and a config that cannot be read or parsed, which fail closed to guarded. `Warn` with \"pm-guard disabled by [pm_guard] enabled = false\" when the key turns it off: every project-hook writer (launch, resume, `tm install`) then omits the entry and strips an existing one, leaving every other managed hook in place. A running Claude Code session keeps the hooks it loaded at startup, so the change applies at its next launch. Read-only (issue #9018, owner ruling 307).",
+    ),
+    (
         "instruction_fold",
         "How much the compose-time instruction fold saved this project, measured from its most recently compiled PM prompt: `Ok` with both byte counts and the percentage when the prompt came out smaller than the instruction bodies it was built from, `Warn` naming INACTIVE and both counts when it did not. Before this check the decline was a daemon-log line only, so nothing an operator reads said whether the fold was doing anything (issue #7616). Named `instruction_compression` until issue #7867 reserved \"compression\" for tool-output compression; this row claims nothing about the `💸` segment, which measures that instead.",
     ),

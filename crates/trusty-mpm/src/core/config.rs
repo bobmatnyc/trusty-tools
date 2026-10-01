@@ -319,6 +319,34 @@ impl Default for HooksConfig {
     }
 }
 
+/// `[pm_guard]` section — the off switch for the `tm hook --pm-guard` entry.
+///
+/// Why (#9018, owner ruling 307): the operator ruled the PM guard off
+/// fleet-wide. No runtime bypass reaches it — the hard floors run before both
+/// bypass env vars (#8878) — and hand-stripping the entry from
+/// `.claude/settings.json` is undone by the next launch, which rewrites it.
+/// What: one boolean, default `true`. `false` makes every project-hook writer
+/// omit the `<tm> hook --pm-guard` `PreToolUse` entry and strip one a prior
+/// launch wrote, leaving every other managed hook as it was. A missing key, a
+/// missing section and an unreadable or malformed file all mean `true`, so a
+/// broken config fails closed to guarded. A running Claude Code session keeps
+/// the hooks it loaded at startup; the change applies at its next launch.
+/// Test: `config_pm_guard_defaults_to_enabled`,
+/// `config_pm_guard_can_be_disabled`,
+/// `config_pm_guard_malformed_file_stays_enabled`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PmGuardConfig {
+    /// Write the `hook --pm-guard` `PreToolUse` entry at every launch.
+    pub enabled: bool,
+}
+
+impl Default for PmGuardConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// `[session_refs]` section — the ADR-0062 session-history ref publisher.
 ///
 /// Why (#7830): a pause now appends to
@@ -393,6 +421,11 @@ pub struct MpmConfig {
     /// write. Set `prompt_context = false` to suppress the per-prompt
     /// `trusty-memory prompt-context` injection.
     pub hooks: HooksConfig,
+
+    /// `[pm_guard]` — the off switch for the `tm hook --pm-guard` entry (#9018).
+    ///
+    /// Absent section → `enabled = true`, the entry is written as before.
+    pub pm_guard: PmGuardConfig,
 
     /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
     ///

@@ -83,6 +83,50 @@ fn config_session_refs_can_be_disabled() {
     );
 }
 
+/// #9018: a host that never mentions `[pm_guard]` keeps the guard — an absent
+/// file, an empty section, and an unrelated section all mean enabled.
+#[test]
+fn config_pm_guard_defaults_to_enabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(MpmConfig::load(dir.path()).pm_guard.enabled);
+    assert!(load_from_str(dir.path(), "[pm_guard]\n").pm_guard.enabled);
+    assert!(
+        load_from_str(dir.path(), "[hooks]\nprompt_context = false\n")
+            .pm_guard
+            .enabled
+    );
+}
+
+/// #9018: `enabled = false` turns the guard off and touches no other section.
+#[test]
+fn config_pm_guard_can_be_disabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(dir.path(), "[pm_guard]\nenabled = false\n");
+    assert!(!cfg.pm_guard.enabled);
+    assert_eq!(cfg.hooks, HooksConfig::default());
+}
+
+/// #9018 Fail-Open Check: a file that cannot be parsed — including one whose
+/// only fault is a mistyped `enabled` — leaves the guard ON, never off.
+#[test]
+fn config_pm_guard_malformed_file_stays_enabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        load_from_str(dir.path(), "[pm_guard]\nenabled = \"no\"\n")
+            .pm_guard
+            .enabled
+    );
+    assert!(
+        load_from_str(dir.path(), "[pm_guard\nenabled = false\n")
+            .pm_guard
+            .enabled
+    );
+    // Unreadable: `config.toml` is a directory, so the read itself fails.
+    let unreadable = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(unreadable.path().join("config.toml")).unwrap();
+    assert!(MpmConfig::load(unreadable.path()).pm_guard.enabled);
+}
+
 /// #7688: the host default is OFF, and "off" is spelled `None` — the key
 /// declines to decide so a project's own `.trusty-mpm.toml` can.
 #[test]

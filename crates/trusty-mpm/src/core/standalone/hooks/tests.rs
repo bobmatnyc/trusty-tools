@@ -1482,3 +1482,78 @@ fn lifecycle_event_names_match_the_written_block() {
         "MPM_LIFECYCLE_HOOK_EVENTS has drifted from mpm_hook_additions_with_exe"
     );
 }
+
+/// A settings file holding a `hook --pm-guard` entry and a foreign entry
+/// (#9018).
+fn pm_guard_seeded(dir: &Path) -> PathBuf {
+    let path = dir.join("settings.json");
+    let body = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                { "matcher": "", "hooks": [{ "type": "command", "command": "/usr/local/bin/tm hook --pm-guard", "timeout": 10 }] },
+                { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/opt/foreign/check-bash" }] }
+            ]
+        }
+    });
+    std::fs::write(&path, body.to_string()).unwrap();
+    path
+}
+
+/// Every hook command in the settings file at `path`.
+fn pm_guard_commands(path: &Path) -> Vec<String> {
+    let val: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for groups in val["hooks"]
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+    {
+        for group in groups.as_array().into_iter().flatten() {
+            for hook in group["hooks"].as_array().into_iter().flatten() {
+                out.extend(hook["command"].as_str().map(str::to_string));
+            }
+        }
+    }
+    out
+}
+
+/// #9018: with the guard off, `tm install` / the CLI launch strip a guard
+/// entry, write the lifecycle `tm hook` group, and keep the foreign entry.
+#[test]
+fn write_project_hooks_honoring_pm_guard_strips_the_guard_when_off() {
+    let tmp = TempDir::new().unwrap();
+    let path = pm_guard_seeded(tmp.path());
+    let exe = PathBuf::from("/usr/local/bin/tm");
+    assert!(write_project_hooks_honoring_pm_guard(&path, Some(&exe), false).unwrap());
+    let commands = pm_guard_commands(&path);
+    assert!(
+        !commands.iter().any(|c| c.ends_with(" hook --pm-guard")),
+        "{commands:?}"
+    );
+    assert!(
+        commands.iter().any(|c| c == "/usr/local/bin/tm hook"),
+        "{commands:?}"
+    );
+    assert!(
+        commands.iter().any(|c| c == "/opt/foreign/check-bash"),
+        "{commands:?}"
+    );
+}
+
+/// #9018: with the guard on, the writer leaves a guard entry in place — the
+/// pre-#9018 behaviour.
+#[test]
+fn write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on() {
+    let tmp = TempDir::new().unwrap();
+    let path = pm_guard_seeded(tmp.path());
+    let exe = PathBuf::from("/usr/local/bin/tm");
+    write_project_hooks_honoring_pm_guard(&path, Some(&exe), true).unwrap();
+    let commands = pm_guard_commands(&path);
+    assert!(
+        commands
+            .iter()
+            .any(|c| c == "/usr/local/bin/tm hook --pm-guard"),
+        "{commands:?}"
+    );
+}
