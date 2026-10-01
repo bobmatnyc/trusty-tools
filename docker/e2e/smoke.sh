@@ -50,6 +50,25 @@ wait_http() {
     done
 }
 
+# run_capture VAR LABEL CMD... — run CMD, store its stdout+stderr in VAR.
+# On a non-zero exit, print the captured output (so CI shows the error) and
+# return CMD's exit code. Call as `if ! run_capture ...; then fail ...; fi`:
+# a bare call under `set -e` would end the script. #8937: a bare
+# `VAR="$(cmd 2>&1)"` died before the output was ever printed.
+run_capture() {
+    local __var="$1" label="$2"
+    shift 2
+    local out rc=0
+    out="$("$@" 2>&1)" || rc=$?
+    printf -v "${__var}" '%s' "${out}"
+    if [ "${rc}" -ne 0 ]; then
+        echo "  --- ${label} output (exit ${rc}) ---"
+        echo "${out}"
+        echo "  --- end ---"
+    fi
+    return "${rc}"
+}
+
 # Compare semver: returns 0 (true) if $1 >= $2.
 # Works for simple X.Y.Z strings without pre-release suffixes.
 semver_gte() {
@@ -96,27 +115,49 @@ if wait_http "http://127.0.0.1:${TS_PORT}/health" 30; then
     FIXTURE_DIR="/e2e/sample-code"
     INDEX_ID="smoke-fixture"
 
+    # #8937: indexing is default-deny (#767). Approve the fixture root with the
+    # supported verb before indexing; the allowlist persists under $HOME, so
+    # scenario 4 reuses it.
+    echo "  Approving ${FIXTURE_DIR} for indexing ..."
+    if ! run_capture APPROVE_LOG "trusty-search index add" \
+        trusty-search index add "${FIXTURE_DIR}" --name "${INDEX_ID}"; then
+        fail "trusty-search index add ${FIXTURE_DIR} failed (see output above)"
+    fi
+
     echo "  Indexing ${FIXTURE_DIR} ..."
-    INDEX_LOG="$(trusty-search index "${FIXTURE_DIR}" --name "${INDEX_ID}" --lexical-only 2>&1)"
-    echo "  Index output: ${INDEX_LOG}"
-    if echo "${INDEX_LOG}" | grep -q "chunks"; then
-        pass "trusty-search index created"
+    INDEX_OK=1
+    if ! run_capture INDEX_LOG "trusty-search index" \
+        trusty-search index "${FIXTURE_DIR}" --name "${INDEX_ID}" --lexical-only; then
+        INDEX_OK=0
+        fail "trusty-search index failed (non-zero exit, see output above)"
     else
-        fail "trusty-search index failed (no chunks in output)"
+        echo "  Index output: ${INDEX_LOG}"
+        if echo "${INDEX_LOG}" | grep -q "chunks"; then
+            pass "trusty-search index created"
+        else
+            fail "trusty-search index failed (no chunks in output)"
+        fi
     fi
 
     # Run a query and assert we get a hit on 'authenticate' using the CLI.
     # (The /grep HTTP endpoint requires POST with JSON body; the CLI `query`
     # subcommand is simpler and always works regardless of lexical/semantic mode.)
-    echo "  Running query for 'authenticate' ..."
-    QUERY_OUT="$(trusty-search query 'authenticate' --index "${INDEX_ID}" 2>&1 || echo '')"
-    echo "  Query output (first 5 lines):"
-    echo "${QUERY_OUT}" | head -5
-
-    if echo "${QUERY_OUT}" | grep -qi "authenticate\|auth\.rs"; then
-        pass "trusty-search query returned results for 'authenticate'"
+    if [ "${INDEX_OK}" -eq 1 ]; then
+        echo "  Running query for 'authenticate' ..."
+        if ! run_capture QUERY_OUT "trusty-search query" \
+            trusty-search query 'authenticate' --index "${INDEX_ID}"; then
+            fail "trusty-search query failed (non-zero exit, see output above)"
+        else
+            echo "  Query output (first 5 lines):"
+            echo "${QUERY_OUT}" | head -5
+            if echo "${QUERY_OUT}" | grep -qi "authenticate\|auth\.rs"; then
+                pass "trusty-search query returned results for 'authenticate'"
+            else
+                fail "trusty-search search returned no results for 'authenticate'"
+            fi
+        fi
     else
-        fail "trusty-search search returned no results for 'authenticate'"
+        skip "trusty-search query skipped: index was not created"
     fi
 
     # -------------------------------------------------------------------------
@@ -313,8 +354,11 @@ fi
 # Index the fixture for analyze to use.
 if [ -n "${TS2_PID}" ]; then
     ANALYZE_INDEX="smoke-analyze"
-    trusty-search index "/e2e/sample-code" --name "${ANALYZE_INDEX}" --lexical-only \
-        > "${E2E_LOG_DIR}/ts2-index.log" 2>&1 || true
+    if ! run_capture TS2_INDEX_LOG "trusty-search index (analyze)" \
+        trusty-search index "/e2e/sample-code" --name "${ANALYZE_INDEX}" --lexical-only; then
+        fail "trusty-search index for analyze failed (see output above)"
+    fi
+    echo "${TS2_INDEX_LOG}" > "${E2E_LOG_DIR}/ts2-index.log"
 
     # Start trusty-analyze daemon.
     # Note: --search-url is a GLOBAL flag (before the subcommand), not a serve flag.
