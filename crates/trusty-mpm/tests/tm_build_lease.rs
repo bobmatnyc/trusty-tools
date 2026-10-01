@@ -567,6 +567,25 @@ fn a_build_outside_its_expected_directory_is_refused_8969() {
     assert!(ran.exists(), "the build runs in its own directory");
 }
 
+/// #8969: a `--chdir` directory that does not exist refuses with exit 78 and
+/// never starts the build — never a fallback to where the shell stands.
+#[test]
+fn a_chdir_to_a_missing_directory_is_refused_8969() {
+    let home = home_with_ceiling(2, "");
+    let ran = home.path().join("ran");
+    let out = build_lease(home.path())
+        .arg("--chdir")
+        .arg(home.path().join("gone"))
+        .args(["--wait-secs", "3", "--", "touch"])
+        .arg(&ran)
+        .output()
+        .expect("run");
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(78), "{err}");
+    assert!(!ran.exists(), "the build must not run: {err}");
+    assert!(err.contains("#8969"), "{err}");
+}
+
 /// #8261 round 3 (critic finding 8): a waiter's refusal names the holder by
 /// program and subcommand only, never an argument value; slot files are 0600.
 #[test]

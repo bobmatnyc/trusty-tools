@@ -37,6 +37,7 @@ fn a_pure_absolute_cd_chain_pins_the_directory() {
         ("cd ~/src && cargo build", pinned("/home/u/src")),
         ("cd /a && cd /wt && cargo build", pinned("/wt")),
         ("cd '/my wt' && cargo check", pinned("/my wt")),
+        ("cd /wt && cargo test;", pinned("/wt")),
     ] {
         assert_eq!(dir(command), want, "{command}");
     }
@@ -66,6 +67,15 @@ fn a_resolvable_cd_is_expected_not_pinned() {
         ),
         ("echo $(cd /wt; cargo build)", expected("/wt")),
         ("if cd /wt; then cargo test; fi", expected("/wt")),
+        // Review of e99edff804: a segment after the build would run where the
+        // shell stands if the `cd` were dropped, so the lease refuses instead.
+        (
+            "cd /wt && cargo build && git add . && git commit -m x",
+            expected("/wt"),
+        ),
+        ("cd /wt && cargo build | tail -5", expected("/wt")),
+        // A quoted `~` is a literal directory, never the home directory.
+        ("cd \"~/x\" && cargo build", expected("/base/~/x")),
     ] {
         assert_eq!(dir(command), want, "{command}");
     }
@@ -114,6 +124,9 @@ fn an_unresolvable_cd_refuses_the_build() {
         "popd && cargo test",
         "cd $(git rev-parse --show-toplevel) && cargo test",
         "case x in a) cd /wt;; esac; cargo test",
+        "cd '' && cargo test",
+        "cd -- \"\" && cargo test",
+        "cd /wt && cargo test 'unbalanced",
     ] {
         assert!(
             matches!(dir(command), BuildDir::Unresolvable(_)),
@@ -135,8 +148,14 @@ fn an_unresolvable_cd_refuses_the_build() {
         panic!("an unresolvable cd must refuse, got {verdict:?}");
     };
     assert!(reason.contains("#8969"), "{reason}");
-    // An already-leased build is left alone: the escape the refusal names.
-    let wrapped = "cd \"$WT\" && tm build-lease -- cargo test";
+    // An already-leased build is never rewritten, so the escape the refusal
+    // names must carry its directory: a `cd` before it can be dropped.
+    assert!(
+        reason.contains("`tm build-lease --chdir /abs/path -- <command>`")
+            && !reason.contains("&& tm build-lease"),
+        "{reason}"
+    );
+    let wrapped = "cd \"$WT\" && tm build-lease --chdir /wt -- cargo test";
     let verdict = rewrite_for_lease_with(wrapped, &heavy, &|at| {
         lease_prefix("tm build-lease", wrapped, at, Some(Path::new(BASE)))
     });

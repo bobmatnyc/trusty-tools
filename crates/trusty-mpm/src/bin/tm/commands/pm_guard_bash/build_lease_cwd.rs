@@ -6,12 +6,14 @@
 //! rewrite, as `tm build-lease -- cargo test` in ANOTHER agent's worktree and
 //! exited 0 — green evidence for the wrong tree. The `cd` the rewrite kept never
 //! reached the shell, so the lease itself must know the directory.
-//! What: [`lease_prefix`] adds `--chdir <dir>` when the command's own literal
-//! absolute `cd` chain names the directory, `--expect-cwd <dir>` when the
-//! directory is resolved from the hook's cwd (the lease refuses to run anywhere
-//! else), nothing when no directory change precedes the build, and refuses a
-//! build after a directory change it cannot resolve. It never leaves a `cd`-ed
-//! build unchecked.
+//! What: [`lease_prefix`] adds `--chdir <dir>` when the command is only a
+//! literal absolute `cd` chain and the build, `--expect-cwd <dir>` for any other
+//! resolvable `cd` (the lease refuses to run anywhere else), nothing when no
+//! directory change precedes the build, and refuses a build after a directory
+//! change it cannot resolve. That covers every build the hook rewrites. A
+//! command already wrapped in `tm build-lease` is never rewritten, so its
+//! directory is only what its own flags say; the refusal therefore advises
+//! `tm build-lease --chdir <dir>`, which survives a dropped `cd`.
 //! Test: `a_pure_absolute_cd_chain_pins_the_directory`,
 //! `a_resolvable_cd_is_expected_not_pinned`, `an_unresolvable_cd_refuses_the_build`,
 //! `a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969`.
@@ -73,7 +75,8 @@ pub(crate) fn lease_prefix(
 /// segment's program or opens a `(`/`$(`, keeps those whose subshell is still
 /// open at `at`, and folds them over `base` lexically (`..` pops, as a logical
 /// `cd` does). [`BuildDir::Pinned`] only for a pure `&&` chain of literal
-/// absolute `cd`s; any other resolvable shape is [`BuildDir::Expected`].
+/// absolute `cd`s with no segment after the build; any other resolvable shape
+/// is [`BuildDir::Expected`], so a later `git commit` cannot run elsewhere.
 /// Test: `a_pure_absolute_cd_chain_pins_the_directory`,
 /// `a_resolvable_cd_is_expected_not_pinned`,
 /// `a_scoped_or_quoted_cd_leaves_the_directory_unchanged`,
@@ -138,14 +141,24 @@ pub(crate) fn build_dir(
     }
     match cur {
         _ if applied == 0 => BuildDir::Unchanged,
-        Some(dir) if all_absolute && is_pure_cd_chain(command, at) => BuildDir::Pinned(dir),
+        Some(dir)
+            if all_absolute && is_pure_cd_chain(command, at) && nothing_follows(command, at) =>
+        {
+            BuildDir::Pinned(dir)
+        }
         Some(dir) => BuildDir::Expected(dir),
         None => BuildDir::Unresolvable("its directory cannot be resolved".into()),
     }
 }
 
+/// One operand of a directory change: the word as written, and unquoted.
+struct Operand {
+    raw: String,
+    text: String,
+}
+
 /// Every directory change before `at`: (offset of the verb, verb, operands).
-fn dir_changes(command: &str, at: usize) -> Vec<(usize, String, Vec<String>)> {
+fn dir_changes(command: &str, at: usize) -> Vec<(usize, String, Vec<Operand>)> {
     let origin = command.as_ptr() as usize;
     let bodies = HeredocBodies::scan(command);
     let mut out = Vec::new();
@@ -171,10 +184,14 @@ fn dir_changes(command: &str, at: usize) -> Vec<(usize, String, Vec<String>)> {
                 .iter()
                 .position(|w| w.text.ends_with(')'))
                 .map_or(ws.len(), |p| i + 2 + p);
+            // A lone `)` is syntax and dropped; a quoted `''` is an operand.
             let operands = ws[i + 1..close]
                 .iter()
-                .map(|w| w.text.trim_end_matches(')').to_string())
-                .filter(|w| !w.is_empty() && !w.contains(['<', '>']))
+                .map(|w| Operand {
+                    raw: seg[w.start..w.end].trim_end_matches(')').to_string(),
+                    text: w.text.trim_end_matches(')').to_string(),
+                })
+                .filter(|o| !o.raw.is_empty() && !o.text.contains(['<', '>']))
                 .collect();
             out.push((offset, bare.to_string(), operands));
         }
@@ -195,11 +212,17 @@ fn program_index(ws: &[Word]) -> Option<usize> {
 }
 
 /// The directory a `cd`'s operands name; `Err` when it is not a literal.
-fn target_of(operands: &[String], home: Option<&Path>) -> Result<PathBuf, String> {
-    let mut rest = operands.iter().map(String::as_str);
+///
+/// What: `~` expands only when the raw word starts with an unquoted `~` or
+/// `~/`, as in the shell; a quoted `"~/x"` is a literal relative path. An empty
+/// operand (`cd ''`) is refused: shells disagree on what it does.
+/// Test: `a_pure_absolute_cd_chain_pins_the_directory`,
+/// `an_unresolvable_cd_refuses_the_build`.
+fn target_of(operands: &[Operand], home: Option<&Path>) -> Result<PathBuf, String> {
+    let mut rest = operands.iter();
     let mut operand = None;
     for word in rest.by_ref() {
-        match word {
+        match word.text.as_str() {
             "-L" | "-P" | "-e" | "-@" => {}
             "--" => {
                 operand = rest.next();
@@ -218,16 +241,24 @@ fn target_of(operands: &[String], home: Option<&Path>) -> Result<PathBuf, String
         home.map(|h| h.join(tail.trim_start_matches('/')))
             .ok_or_else(|| "its `cd ~` has no home directory to resolve".to_string())
     };
-    match operand {
-        None | Some("~") => home_or(""),
-        Some(op) if op.starts_with("~/") => home_or(&op[2..]),
-        Some(op) if op == "-" || op.starts_with(['~', '+', '-']) => {
+    let Some(Operand { raw, text: op }) = operand else {
+        return home_or("");
+    };
+    // #8969: tilde expansion is decided on the raw word, never the unquoted one.
+    match op.as_str() {
+        _ if raw == "~" => home_or(""),
+        _ if raw.starts_with("~/") => op
+            .strip_prefix("~/")
+            .ok_or_else(|| format!("`cd {raw}` names a directory only the shell knows"))
+            .and_then(home_or),
+        "" => Err(format!("`cd {raw}` names no directory")),
+        _ if raw.starts_with('~') || op.starts_with(['+', '-']) => {
             Err(format!("`cd {op}` names a directory only the shell knows"))
         }
-        Some(op) if op.contains(['$', '`', '*', '?', '[', '{']) => {
+        _ if op.contains(['$', '`', '*', '?', '[', '{']) => {
             Err(format!("`cd {op}` expands at run time"))
         }
-        Some(op) => Ok(PathBuf::from(op)),
+        _ => Ok(PathBuf::from(op)),
     }
 }
 
@@ -274,6 +305,14 @@ fn is_pure_cd_chain(command: &str, at: usize) -> bool {
         })
 }
 
+/// Whether no command follows the build at `at` (a trailing `;` is not one).
+fn nothing_follows(command: &str, at: usize) -> bool {
+    let origin = command.as_ptr() as usize;
+    split_shell_segments_raw(command)
+        .iter()
+        .all(|s| s.as_ptr() as usize - origin <= at || s.trim().is_empty())
+}
+
 /// Resolve `.` and `..` lexically, as a logical `cd` does.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -294,8 +333,8 @@ fn refusal(why: &str) -> String {
         "Build lease (#8969): this heavy build follows a directory change the hook cannot \
          resolve — {why}. Claude Code can drop a leading `cd`, and the lease must not run cargo \
          in a directory the command did not mean, so it needs the directory up front. Use a \
-         literal path (`cd /abs/path && cargo …`), or wrap the build yourself: \
-         `cd <dir> && tm build-lease -- <command>`."
+         literal path (`cd /abs/path && cargo …`), or wrap the build yourself with its \
+         directory: `tm build-lease --chdir /abs/path -- <command>`."
     )
 }
 
