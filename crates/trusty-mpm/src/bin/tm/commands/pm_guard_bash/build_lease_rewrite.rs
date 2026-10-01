@@ -65,6 +65,20 @@ pub(crate) fn rewrite_for_lease(
     heavy: &[(String, Option<String>)],
     prefix: &str,
 ) -> LeaseRewrite {
+    rewrite_for_lease_with(command, heavy, &|_| Ok(prefix.to_string()))
+}
+
+/// [`rewrite_for_lease`] with a per-insertion prefix (#8969).
+///
+/// What: `prefix_at(offset)` names the lease invocation for the heavy build
+/// at `offset` in `command`; an `Err(reason)` refuses the whole command.
+/// Test: `a_cd_prefixed_build_runs_in_its_directory_when_the_cd_is_lost_8969`
+/// in `tests/tm_hook_pm_guard_build_lease.rs`.
+pub(crate) fn rewrite_for_lease_with(
+    command: &str,
+    heavy: &[(String, Option<String>)],
+    prefix_at: &dyn Fn(usize) -> Result<String, String>,
+) -> LeaseRewrite {
     if command.trim().is_empty() || heavy.is_empty() {
         return LeaseRewrite::None;
     }
@@ -97,8 +111,12 @@ pub(crate) fn rewrite_for_lease(
     let mut out = String::with_capacity(command.len() + inserts.len() * 32);
     let mut last = 0;
     for at in inserts {
+        let prefix = match prefix_at(at) {
+            Ok(prefix) => prefix,
+            Err(reason) => return LeaseRewrite::Refuse(reason),
+        };
         out.push_str(&command[last..at]);
-        out.push_str(prefix);
+        out.push_str(&prefix);
         out.push(' ');
         last = at;
     }
