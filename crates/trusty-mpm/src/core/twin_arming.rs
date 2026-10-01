@@ -314,7 +314,8 @@ pub fn process_facts(pid: u32) -> Result<ProcessFacts, String> {
 /// side, a failed read is `Err`, never `false`, so the walk cannot skip a
 /// process it could not identify.
 /// Test: `is_claude_of_a_dead_pid_is_an_error`.
-fn is_claude(pid: u32) -> Result<bool, String> {
+// #8531: the daemon's repair-owner walk uses the same rule.
+pub(crate) fn is_claude(pid: u32) -> Result<bool, String> {
     #[cfg(target_os = "linux")]
     if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
         return Ok(comm.to_ascii_lowercase().contains("claude"));

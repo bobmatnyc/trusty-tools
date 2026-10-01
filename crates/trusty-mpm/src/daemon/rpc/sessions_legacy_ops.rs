@@ -518,6 +518,34 @@ pub fn get_output(
     })
 }
 
+/// `mpm.hooks.ingest`: [`ingest_hook`], plus the #8531 binding.
+///
+/// Why: only the socket names the sending process, so only a socket
+/// `SessionStart` can record which `claude` owns the session it announces —
+/// the identity a delegation repair later compares its caller against.
+/// What: on `SessionStart` with a well-formed id,
+/// `delegation_repair_caller::bind_announcing_claude` over `peer`; a failure
+/// is logged and leaves the session unbound (refused as a repair owner), and
+/// never fails the hook. Then [`ingest_hook`], unchanged.
+/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`.
+pub async fn ingest_hook_from_socket(
+    state: &Arc<DaemonState>,
+    post: HookPost,
+    peer: Option<u32>,
+) -> Result<HookAcceptedResponse, DaemonError> {
+    // #8531: bind before ingest, from the kernel's peer; HTTP never binds.
+    if post.event == HookEvent::SessionStart
+        && let Ok(session) = parse_id(&post.session_id)
+        && let Err(e) = crate::daemon::services::delegation_repair_caller::bind_announcing_claude(
+            state, session, peer,
+        )
+        .await
+    {
+        tracing::warn!(session_id = %session.0, "SessionStart left the session unbound: {e}");
+    }
+    ingest_hook(state, post).await
+}
+
 /// Ingest one Claude Code hook event (`POST /hooks`, `mpm.hooks.ingest`).
 ///
 /// Why this is the write that matters most: it is how a claude session announces

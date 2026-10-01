@@ -99,6 +99,8 @@ pub struct DaemonState {
     pub(super) sessions: DashMap<SessionId, Session>,
     /// Active delegations, keyed by delegation id.
     pub(super) delegations: DashMap<uuid::Uuid, Delegation>,
+    /// #8531: the kernel-bound `claude` of each session announced over the socket.
+    pub(super) session_claudes: super::session_claudes::SessionClaudes,
     /// Circuit breakers, keyed by agent name.
     pub(super) breakers: DashMap<String, CircuitBreaker>,
     /// Latest token-usage snapshot per session.
@@ -537,6 +539,7 @@ impl DaemonState {
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
+            session_claudes: Default::default(),
             breakers: DashMap::new(),
             memory: DashMap::new(),
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),
@@ -617,6 +620,7 @@ impl DaemonState {
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
+            session_claudes: Default::default(),
             breakers: DashMap::new(),
             memory: DashMap::new(),
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),

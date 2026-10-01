@@ -1,28 +1,43 @@
 //! Coverage for establishing a repair caller from the kernel's peer (#8531).
 //!
-//! The walk and the owner lookup are injected, so every refusal arm runs
-//! without a live `claude`; `owner_claude_pid`'s native arm runs against a
-//! real child process.
+//! The walk and the owner lookup are injected for the refusal arms. The
+//! regression and end-to-end cases run a real process chain under `/bin/bash`
+//! exec'd as `claude`, so the live process table — not a stub — names
+//! the `claude` every walk stops at.
 
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use super::*;
-use crate::core::session::{ControlModel, Session, SessionHost};
+use crate::core::agent::DelegationStatus;
+use crate::core::paths::FrameworkPaths;
+use crate::core::session::{ControlModel, Session, SessionStatus};
 
-const OWNER_CLAUDE: u32 = 4100;
-const SIBLING_CLAUDE: u32 = 4200;
+const OWNER: ClaudeProcess = ClaudeProcess {
+    pid: 4100,
+    start_time: 100,
+};
+const SIBLING: ClaudeProcess = ClaudeProcess {
+    pid: 4200,
+    start_time: 100,
+};
 
-fn claude(pid: u32) -> ClaudeProcess {
-    ClaudeProcess { pid, start_time: 1 }
+fn kernel(pid: u32) -> RepairPeer {
+    RepairPeer::Kernel {
+        pid,
+        seen_at: 1_000,
+    }
 }
 
-/// An owner lookup that names `OWNER_CLAUDE` for `owner` and fails for any
-/// other session.
-fn owner_lookup(owner: SessionId) -> impl Fn(SessionId) -> Result<u32, String> {
+/// An owner lookup that names `OWNER` for `owner` and fails for any other
+/// session.
+fn owner_lookup(owner: SessionId) -> impl Fn(SessionId) -> Result<ClaudeProcess, String> {
     move |s| {
         if s == owner {
-            Ok(OWNER_CLAUDE)
+            Ok(OWNER)
         } else {
             Err("no record".to_string())
         }
@@ -41,9 +56,9 @@ fn unestablished(caller: &RepairCaller) -> &str {
 fn the_owner_process_establishes_the_owner_8531() {
     let owner = SessionId::new();
     let caller = establish_caller_with(
-        RepairPeer::Kernel(9001),
+        kernel(9001),
         &[SessionId::new(), owner],
-        |_| Ok(Some(claude(OWNER_CLAUDE))),
+        |_, _| Ok(OWNER),
         owner_lookup(owner),
     );
     assert_eq!(caller, RepairCaller::Session(owner));
@@ -55,17 +70,35 @@ fn the_owner_process_establishes_the_owner_8531() {
 fn a_sibling_session_process_is_not_the_owner_8531() {
     let owner = SessionId::new();
     let caller = establish_caller_with(
-        RepairPeer::Kernel(9002),
+        kernel(9002),
         &[owner],
-        |_| Ok(Some(claude(SIBLING_CLAUDE))),
+        |_, _| Ok(SIBLING),
         owner_lookup(owner),
     );
     let why = unestablished(&caller);
-    assert!(why.contains(&SIBLING_CLAUDE.to_string()), "{why}");
+    assert!(why.contains(&SIBLING.pid.to_string()), "{why}");
     assert!(
         !why.contains(&owner.0.to_string()),
         "names no owner id: {why}"
     );
+}
+
+/// #8531: the owner's pid, reused by a process with another start time, is
+/// not the owner's process.
+#[test]
+fn a_reused_owner_pid_with_another_start_time_is_not_the_owner_8531() {
+    let owner = SessionId::new();
+    let reused = ClaudeProcess {
+        pid: OWNER.pid,
+        start_time: OWNER.start_time + 1,
+    };
+    let caller = establish_caller_with(
+        kernel(9006),
+        &[owner],
+        |_, _| Ok(reused),
+        owner_lookup(owner),
+    );
+    unestablished(&caller);
 }
 
 /// #8531 Fail-Open Check: no kernel pid (HTTP, or a socket that could not
@@ -77,45 +110,29 @@ fn an_unproven_peer_is_unestablished_8531() {
         let caller = establish_caller_with(
             peer,
             &[owner],
-            |_| panic!("no walk without a pid"),
+            |_, _| panic!("no walk without a pid"),
             owner_lookup(owner),
         );
         unestablished(&caller);
     }
-    assert_eq!(RepairPeer::from_socket(Some(7)), RepairPeer::Kernel(7));
+    assert!(matches!(
+        RepairPeer::from_socket(Some(7)),
+        RepairPeer::Kernel { pid: 7, seen_at } if seen_at > 0
+    ));
 }
 
-/// #8531 Fail-Open Check: an ancestry that cannot be read refuses — it is
-/// never read as "under the owner".
+/// #8531 Fail-Open Check: a peer walk that fails — an unreadable ancestry, a
+/// reused peer pid, no `claude` above — refuses, and says why.
 #[test]
-fn an_unreadable_ancestry_is_unestablished_8531() {
+fn a_failed_peer_walk_is_unestablished_8531() {
     let owner = SessionId::new();
     let caller = establish_caller_with(
-        RepairPeer::Kernel(9003),
+        kernel(9003),
         &[owner],
-        |_| Err("ps failed".to_string()),
+        |_, _| Err("ps failed".to_string()),
         owner_lookup(owner),
     );
-    assert!(
-        unestablished(&caller).contains("could not be read: ps failed"),
-        "{caller:?}"
-    );
-}
-
-/// #8531: a caller with no `claude` above it runs in no session at all.
-#[test]
-fn a_caller_with_no_claude_above_it_is_unestablished_8531() {
-    let owner = SessionId::new();
-    let caller = establish_caller_with(
-        RepairPeer::Kernel(9004),
-        &[owner],
-        |_| Ok(None),
-        owner_lookup(owner),
-    );
-    assert!(
-        unestablished(&caller).contains("no claude session process"),
-        "{caller:?}"
-    );
+    assert!(unestablished(&caller).contains("ps failed"), "{caller:?}");
 }
 
 /// #8531 Fail-Open Check: an owner whose process cannot be found refuses,
@@ -124,121 +141,212 @@ fn a_caller_with_no_claude_above_it_is_unestablished_8531() {
 fn an_owner_process_that_cannot_be_found_is_unestablished_8531() {
     let owner = SessionId::new();
     let caller = establish_caller_with(
-        RepairPeer::Kernel(9005),
+        kernel(9005),
         &[owner],
-        |_| Ok(Some(claude(OWNER_CLAUDE))),
-        |_| Err("no claude process could be found in the pane".to_string()),
+        |_, _| Ok(OWNER),
+        |_| Err("never announced".to_string()),
     );
     assert!(
-        unestablished(&caller).contains("no claude process could be found in the pane"),
+        unestablished(&caller).contains("never announced"),
         "{caller:?}"
     );
 }
 
-fn native_owner(
-    state: &DaemonState,
-    pid: u32,
-    created_at: SystemTime,
-    status: SessionStatus,
-) -> SessionId {
-    let id = SessionId::new();
-    let mut s = Session::new(id, "/repo", ControlModel::Tmux, None);
-    s.origin = SessionHost::Native;
-    s.pid = Some(pid);
-    s.created_at = created_at;
-    s.status = status;
-    state.register_session(s);
-    id
-}
-
-/// #8531: a native session's recorded pid is its process while that process
-/// predates the record.
+/// #8531 Fail-Open Check: a session record from before this fix — with a
+/// `pid` and a tmux name, but announced by no socket `SessionStart` — has no
+/// owner process. Bound, it has.
 #[test]
-fn a_native_owner_pid_that_predates_its_record_is_its_process_8531() {
+fn an_unbound_owner_has_no_process_8531() {
     let state = DaemonState::new();
-    let pid = std::process::id();
-    let owner = native_owner(
-        &state,
-        pid,
-        SystemTime::now() + Duration::from_secs(5),
-        SessionStatus::Active,
-    );
-    assert_eq!(
-        owner_claude_pid(&state, owner, crate::core::twin_arming::process_facts),
-        Ok(pid)
-    );
-}
-
-/// #8531 Fail-Open Check: a recorded pid now naming a process that started
-/// after the record — a reused pid — is not the owner's process.
-#[test]
-fn a_native_owner_pid_started_after_its_record_is_refused_8531() {
-    let state = DaemonState::new();
-    let owner = native_owner(
-        &state,
-        4242,
-        SystemTime::UNIX_EPOCH + Duration::from_secs(10),
-        SessionStatus::Active,
-    );
-    let facts = |_| {
-        Ok(ProcessFacts {
-            parent: Some(1),
-            start_time: 20,
-        })
-    };
-    let got = owner_claude_pid(&state, owner, facts);
+    let owner = SessionId::new();
+    let mut old = serde_json::to_value(Session::new(owner, "/repo", ControlModel::Tmux, None))
+        .expect("serialize");
+    old["tmux_name"] = serde_json::json!("tm-brave-otter");
+    old["pid"] = serde_json::json!(4100);
+    let record: Session = serde_json::from_value(old).expect("an old record deserializes");
+    state.register_session(record);
+    let got = owner_claude(&state, owner);
     assert!(
-        got.as_ref()
-            .is_err_and(|e| e.contains("started after the owning session registered")),
+        got.as_ref().is_err_and(|e| e.contains("never announced")),
         "{got:?}"
     );
-    let gone = owner_claude_pid(&state, owner, |_| Err("no entry".to_string()));
-    assert_eq!(gone, Err("no entry".to_string()));
+    state.bind_session_claude(owner, OWNER).expect("vacant");
+    assert_eq!(owner_claude(&state, owner), Ok(OWNER));
 }
 
-/// #8531 Fail-Open Check: no record, or a stopped one, has no process.
-#[test]
-fn a_missing_or_stopped_owner_record_is_an_error_8531() {
-    let state = DaemonState::new();
-    let facts = |_| panic!("no process lookup without a live record");
-    assert!(owner_claude_pid(&state, SessionId::new(), facts).is_err());
-    let stopped = native_owner(
-        &state,
-        std::process::id(),
-        SystemTime::now(),
-        SessionStatus::Stopped,
-    );
-    assert!(owner_claude_pid(&state, stopped, facts).is_err());
-}
-
-/// #8531 end to end over the real socket: this test process asserts the
-/// owner's id in the old `caller_session` param and is refused — it runs
-/// under no `claude` the owner's record names.
+/// #8531 Fail-Open Check: a `SessionStart` with no kernel pid binds nothing.
 #[tokio::test]
-async fn a_socket_caller_without_a_claude_owner_process_is_refused_8531() {
-    use crate::core::agent::DelegationStatus;
-
-    let dir = tempfile::tempdir().expect("tempdir");
+async fn a_session_start_without_a_peer_pid_binds_nothing_8531() {
     let state = Arc::new(DaemonState::new());
+    let session = SessionId::new();
+    let got = bind_announcing_claude(&state, session, None).await;
+    assert!(got.is_err_and(|e| e.contains("no peer pid")));
+    assert_eq!(state.session_claudes().get(session), None);
+}
+
+/// #8531 Fail-Open Check: a `SessionStart` whose peer cannot be walked — it
+/// has exited — binds nothing.
+#[tokio::test]
+async fn a_session_start_whose_walk_fails_binds_nothing_8531() {
+    let mut gone = Command::new("true").spawn().expect("spawn true");
+    let pid = gone.id();
+    gone.wait().expect("reap true");
+    let state = Arc::new(DaemonState::new());
+    let session = SessionId::new();
+    let got = bind_announcing_claude(&state, session, Some(pid)).await;
+    assert!(got.is_err_and(|e| e.contains("could not be read")));
+    assert_eq!(state.session_claudes().get(session), None);
+}
+
+/// `/bin/bash` exec'd under the name `claude`, so the process table names it
+/// so. A symlink, not a copy: macOS kills a copied system binary.
+fn fake_claude(dir: &Path) -> PathBuf {
+    let path = dir.join("claude");
+    std::os::unix::fs::symlink("/bin/bash", &path).expect("symlink /bin/bash");
+    path
+}
+
+/// Kills its child on drop, so a failed assertion leaves no process behind.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A fake `claude` running one `sleep`: (the `claude`, the sleep's pid).
+fn claude_with_a_child(dir: &Path) -> (Reaped, u32) {
+    let mut child = Command::new(fake_claude(dir))
+        .arg("-c")
+        .arg("sleep 30 & echo $!; wait")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn the fake claude");
+    let mut line = String::new();
+    let out = child.stdout.take().expect("stdout");
+    std::io::BufReader::new(out)
+        .read_line(&mut line)
+        .expect("read the child pid");
+    let pid = line.trim().parse().expect("a pid");
+    (Reaped(child), pid)
+}
+
+/// A live hook-registered owner with one open record, in a hermetic state.
+fn owner_with_a_record(
+    tmux_name: Option<&str>,
+) -> (Arc<DaemonState>, SessionId, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
     let owner = SessionId::new();
-    // A tmux session no server hosts, so its `claude` cannot be found.
-    let mut s = Session::new(owner, "/repo", ControlModel::Tmux, None);
-    s.tmux_name = format!("tm-8531-absent-{}", owner.0.simple());
+    let mut s = Session::new(owner, String::new(), ControlModel::Tmux, None);
+    s.status = SessionStatus::Active;
+    if let Some(name) = tmux_name {
+        s.tmux_name = name.to_string();
+    }
     state.register_session(s);
     let mut d = Delegation::observed(owner, "version-control", "task", Some("toolu-8531".into()));
     d.agent_id = Some("a8531".to_string());
     state.upsert_delegation(d);
+    (state, owner, root)
+}
 
-    let socket = dir.path().join("mpm.sock");
-    let bound = crate::daemon::socket::bind(&socket).await.expect("bind");
+/// #8531 CRITICAL regression: a pid written through `PATCH
+/// /sessions/{id}/pid` / `mpm.sessions.set_pid` — here naming the caller's
+/// own `claude` — does not make the caller the owner. The walk itself
+/// succeeds; the owner has no kernel-bound process.
+#[test]
+fn a_patched_pid_does_not_establish_the_owner_8531() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (claude, caller_pid) = claude_with_a_child(dir.path());
+    let (state, owner, _root) = owner_with_a_record(None);
+    crate::daemon::rpc::sessions_legacy_ops::set_session_pid(
+        &state,
+        &owner.0.to_string(),
+        claude.0.id(),
+    )
+    .expect("the shared set_pid body writes the pid");
+
+    let caller = establish_caller(&state, RepairPeer::from_socket(Some(caller_pid)), |_| true);
+    assert!(
+        unestablished(&caller).contains("never announced"),
+        "{caller:?}"
+    );
+}
+
+/// #8531 CRITICAL regression: a tmux session squatted under the owner's tmux
+/// name, running a `claude` the caller runs under, does not make the caller
+/// the owner.
+#[test]
+fn a_squatted_tmux_name_does_not_establish_the_owner_8531() {
+    use crate::test_support::tmux_session::{ScratchTmuxSession, reserved_session_name};
+    if !ScratchTmuxSession::tmux_available("tmux") {
+        eprintln!("tmux not available; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude = fake_claude(dir.path());
+    let pid_file = dir.path().join("pid");
+    let name = reserved_session_name("8531squat");
+    let pane = format!(
+        "'{}' -c 'sleep 30 & echo $! > {}; wait'; true",
+        claude.display(),
+        pid_file.display()
+    );
+    let _squat = ScratchTmuxSession::spawn("tmux", &name, &pane);
+    let mut caller_pid = None;
+    for _ in 0..200 {
+        if let Some(pid) = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            caller_pid = Some(pid);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let caller_pid = caller_pid.expect("the squatted pane started its claude");
+    let (state, _owner, _root) = owner_with_a_record(Some(&name));
+
+    let caller = establish_caller(&state, RepairPeer::from_socket(Some(caller_pid)), |_| true);
+    assert!(
+        unestablished(&caller).contains("never announced"),
+        "{caller:?}"
+    );
+}
+
+/// The daemon socket, served from `state` until the returned sender fires.
+async fn serve(
+    state: &Arc<DaemonState>,
+    socket: &Path,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let bound = crate::daemon::socket::bind(socket).await.expect("bind");
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(crate::daemon::socket::serve_until_shutdown(
-        bound,
-        Arc::clone(&state),
-        async {
-            let _ = stopped.await;
-        },
-    ));
+    let server = tokio::spawn({
+        let state = Arc::clone(state);
+        async move {
+            let _ = crate::daemon::socket::serve_until_shutdown(bound, state, async {
+                let _ = stopped.await;
+            })
+            .await;
+        }
+    });
+    (stop, server)
+}
+
+/// #8531 end to end over the real socket: this test process asserts the
+/// owner's id in the old `caller_session` param and is refused — no socket
+/// `SessionStart` bound the owner to a `claude` it runs under.
+#[tokio::test]
+async fn a_socket_caller_without_a_claude_owner_process_is_refused_8531() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, owner, _root) = owner_with_a_record(None);
+    let socket = dir.path().join("mpm.sock");
+    let (stop, server) = serve(&state, &socket).await;
     let client = crate::client::DaemonClient::over_socket(&socket);
     let mut answer = None;
     for _ in 0..200 {
@@ -263,4 +371,121 @@ async fn a_socket_caller_without_a_claude_owner_process_is_refused_8531() {
         DelegationStatus::Running,
         "a refused repair writes nothing"
     );
+}
+
+const HELPER: &str = "daemon::services::delegation_repair_caller::delegation_repair_caller_tests::socket_client_helper_8531";
+const HELPER_DIR_ENV: &str = "TM_TEST_8531_HELPER_DIR";
+const HELPER_SESSION_ENV: &str = "TM_TEST_8531_SESSION";
+
+/// Poll for `path` for up to 30 s.
+async fn appears(path: &Path) -> bool {
+    for _ in 0..1200 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// The process [`the_bound_owner_ends_its_own_record_over_the_socket_8531`]
+/// runs under its fake `claude`. A no-op unless that test set its env.
+///
+/// What: announces the session with a socket `SessionStart`, writes
+/// `bound`, waits for `go`, asks for the repair, and writes the answer to
+/// `outcome`.
+#[test]
+#[ignore = "a child-process helper; a no-op when run directly"]
+fn socket_client_helper_8531() {
+    let (Some(dir), Some(session)) = (
+        std::env::var_os(HELPER_DIR_ENV).map(PathBuf::from),
+        std::env::var(HELPER_SESSION_ENV).ok(),
+    ) else {
+        return;
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async move {
+        let client = crate::client::DaemonClient::over_socket(dir.join("mpm.sock"));
+        let start = serde_json::json!({
+            "session_id": session,
+            "event": "SessionStart",
+            "payload": {},
+        });
+        client
+            .post("/hooks")
+            .json(&start)
+            .send()
+            .await
+            .expect("SessionStart over the socket");
+        std::fs::write(dir.join("bound"), b"").expect("bound marker");
+        assert!(appears(&dir.join("go")).await, "the parent never said go");
+        let answer = client
+            .post("/api/v1/delegations/a8531/repair")
+            .json(&serde_json::json!({ "force": false }))
+            .send()
+            .await
+            .expect("repair over the socket")
+            .text()
+            .await
+            .expect("answer");
+        std::fs::write(dir.join("outcome"), answer).expect("outcome");
+    });
+}
+
+/// #8531 positive end to end: a session announced by a socket `SessionStart`
+/// from under its `claude` ends its own live record, over the real socket,
+/// from a process under that same `claude`.
+///
+/// Real: the socket, the kernel's peer pids, the process walk, start times,
+/// the `claude` name read from the process table. The `claude` itself is
+/// `/bin/bash` exec'd as `claude`, not Claude Code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bound_owner_ends_its_own_record_over_the_socket_8531() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
+    let (stop, server) = serve(&state, &dir.path().join("mpm.sock")).await;
+    let owner = SessionId::new();
+    let exe = std::env::current_exe().expect("test binary");
+    let claude = Command::new(fake_claude(dir.path()))
+        .arg("-c")
+        .arg("\"$0\" --exact \"$1\" --ignored --test-threads=1; true")
+        .arg(&exe)
+        .arg(HELPER)
+        .env(HELPER_DIR_ENV, dir.path())
+        .env(HELPER_SESSION_ENV, owner.0.to_string())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn the fake claude");
+    let claude = Reaped(claude);
+
+    assert!(appears(&dir.path().join("bound")).await, "no SessionStart");
+    let bound = state
+        .session_claudes()
+        .get(owner)
+        .expect("SessionStart bound the owner");
+    assert_eq!(
+        bound.pid,
+        claude.0.id(),
+        "bound to the claude above the hook"
+    );
+    let mut d = Delegation::observed(owner, "version-control", "task", Some("toolu-8531".into()));
+    d.agent_id = Some("a8531".to_string());
+    state.upsert_delegation(d);
+    std::fs::write(dir.path().join("go"), b"").expect("go");
+    assert!(
+        appears(&dir.path().join("outcome")).await,
+        "no repair answer"
+    );
+    let _ = stop.send(());
+    let _ = server.await;
+    drop(claude);
+
+    let answer = std::fs::read_to_string(dir.path().join("outcome")).expect("outcome");
+    let answer: serde_json::Value = serde_json::from_str(&answer).expect("json");
+    assert_eq!(answer["outcome"], serde_json::json!("ended"), "{answer}");
+    assert!(state.all_delegations()[0].status.is_terminal());
 }
