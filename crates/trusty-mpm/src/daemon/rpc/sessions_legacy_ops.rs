@@ -359,21 +359,30 @@ pub fn reap_sessions(state: &Arc<DaemonState>) -> ReapResponse {
 ///
 /// # Errors
 ///
-/// [`DaemonError::InvalidRequest`] for a malformed id, and for a session
+/// [`DaemonError::InvalidRequest`] for a malformed id, for any session while
+/// the session-claude registry is sealed (naming the seal), and for a session
 /// announced by a `SessionStart` or naming delegation records;
 /// [`DaemonError::SessionNotFound`] for an unknown one.
 ///
 /// Test: `parity_sessions_set_pid_agrees_across_transports`,
 /// `parity_sessions_set_pid_unknown_agrees_across_transports`,
 /// `set_pid_cannot_make_an_announced_owner_read_gone_8980`,
-/// `set_pid_refuses_a_session_that_owns_delegations_8980`.
+/// `set_pid_refuses_a_session_that_owns_delegations_8980`,
+/// `a_sealed_registry_refuses_set_pid_8980`.
 pub fn set_session_pid(
     state: &Arc<DaemonState>,
     id: &str,
     pid: u32,
 ) -> Result<SetPidResponse, DaemonError> {
     let session = parse_id(id)?;
-    // #8980: a sealed registry settles every id, so it refuses too.
+    // #8980: a sealed registry cannot tell an announced id from a launcher's,
+    // so it refuses every pid, and says why.
+    if let Some(why) = state.session_claudes().sealed() {
+        return Err(DaemonError::InvalidRequest(format!(
+            "session {id}: the session-claude registry is sealed, so no claude pid is \
+             caller-settable until it is fixed and the daemon restarts: {why} (#8980)"
+        )));
+    }
     let announced = state.session_claudes().is_settled(session);
     if announced || state.all_delegations().iter().any(|d| d.session == session) {
         return Err(DaemonError::InvalidRequest(format!(

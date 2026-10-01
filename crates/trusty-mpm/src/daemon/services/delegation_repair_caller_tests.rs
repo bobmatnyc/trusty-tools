@@ -780,3 +780,33 @@ fn set_pid_refuses_a_session_that_owns_delegations_8980() {
     state.register_session(Session::new(launched, "/repo", ControlModel::Tmux, None));
     assert!(set_session_pid(&state, &launched.0.to_string(), 4242).is_ok());
 }
+
+/// #8980 Fail-Open Check: a sealed registry cannot tell a launcher's session
+/// from an announced one, so `set_pid` refuses even a daemon-minted id, and
+/// the refusal names the seal.
+#[test]
+fn a_sealed_registry_refuses_set_pid_8980() {
+    use crate::daemon::rpc::sessions_legacy_ops::set_session_pid;
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().expect("tempdir");
+    let paths = FrameworkPaths::under(root.path());
+    let file = DaemonState::with_paths(&paths)
+        .framework_root()
+        .join(crate::daemon::state::session_claudes::SESSION_CLAUDES_FILE);
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("mkdir");
+    std::fs::write(&file, b"{\"version\":1,\"sessions\":").expect("corrupt it");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let state = Arc::new(DaemonState::with_paths(&paths));
+    let minted = SessionId::new();
+    state.register_session(Session::new(minted, "/repo", ControlModel::Tmux, None));
+
+    let got = set_session_pid(&state, &minted.0.to_string(), 4242);
+    assert!(
+        got.as_ref().is_err_and(|e| {
+            let e = e.to_string();
+            e.contains("registry is sealed") && e.contains("does not parse")
+        }),
+        "{got:?}"
+    );
+    assert_eq!(state.session(minted).and_then(|s| s.pid), None);
+}

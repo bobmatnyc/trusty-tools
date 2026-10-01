@@ -11,7 +11,9 @@ Fixed
 - `PATCH /sessions/{id}/pid` and `mpm.sessions.set_pid` refuse a session that
   a `SessionStart` announced or that owns delegation records. A dead pid
   written there made the session read as gone, so a sibling could end its
-  live records. A launcher's own session still accepts its pid (#8980).
+  live records. A launcher's own session still accepts its pid. While the
+  session-claude registry is sealed, every pid is refused and the error
+  names the seal (#8980).
 - The session reaper no longer removes a session that a `SessionStart`
   announced, or stales its live delegations. Such a record's tmux name is
   never live, so a forged `SessionStart`, or a `compact`/`clear`/`resume`
