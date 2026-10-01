@@ -103,6 +103,35 @@ pub(super) fn project_managed_hook_additions_with_prompt_feedback(
     divert_enabled: bool,
     prompt_feedback_enabled: bool,
 ) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
+    // #9018: `true` is the pre-existing behaviour, byte for byte.
+    project_managed_hook_additions_with_pm_guard(
+        exe_override,
+        inject_prompt_context,
+        divert_enabled,
+        prompt_feedback_enabled,
+        true,
+    )
+}
+
+/// [`project_managed_hook_additions_with_prompt_feedback`], with the PM guard
+/// toggled by the `[pm_guard] enabled` config key.
+///
+/// Why (#9018, owner ruling 307): the guard needs an off switch the launch
+/// writer honours, because a hand-stripped entry comes back at the next launch.
+/// What: `pm_guard_enabled = false` leaves out the [`pm_guard_hook_value`]
+/// group, so `PreToolUse` carries only the lifecycle triad's `tm hook` group
+/// (and the divert groups when on). The writer's strip domain still covers
+/// [`PM_GUARD_SUFFIX`], so a guard entry a prior launch wrote is removed.
+/// `true` builds exactly what the function above builds.
+/// Test: `a_disabled_guard_is_left_out_of_the_additions`,
+/// `launch_with_the_guard_disabled_removes_an_existing_entry`.
+pub(super) fn project_managed_hook_additions_with_pm_guard(
+    exe_override: Option<&std::path::Path>,
+    inject_prompt_context: bool,
+    divert_enabled: bool,
+    prompt_feedback_enabled: bool,
+    pm_guard_enabled: bool,
+) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
     // #7244: resolved first — a refusal must reach the caller before the
     // project's `.claude/` directory is created or its settings file read.
     let triad = mpm_hook_additions_with_exe(exe_override)?;
@@ -110,7 +139,10 @@ pub(super) fn project_managed_hook_additions_with_prompt_feedback(
     let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
     if let Some(obj) = hooks.as_object_mut() {
-        obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
+        // #9018: off → no guard group; the triad below still fills `PreToolUse`.
+        if pm_guard_enabled {
+            obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
+        }
         // #5034: the opt-out drops only this one event. `SessionStart` (also a
         // TRUSTY_MEMORY_HOOKS key) and every other source stay as they are.
         if !inject_prompt_context {

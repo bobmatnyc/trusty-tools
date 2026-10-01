@@ -194,3 +194,44 @@ fn opt_in_on_installs_one_notification_entry_idempotently() {
         format!("{} hook", crate::test_support::STABLE_HOOK_EXE)
     );
 }
+
+/// Why (#9018): with `[pm_guard] enabled = false`, `tm install` must take a
+/// guard entry out of the settings file it writes, not leave it to fire.
+/// What: seeds a guard entry and a foreign entry, installs with the guard off,
+/// and asserts the guard is gone while the lifecycle `tm hook` group and the
+/// foreign entry remain.
+#[test]
+fn install_with_the_guard_off_strips_an_existing_guard_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = format!("{} hook --pm-guard", crate::test_support::STABLE_HOOK_EXE);
+    let seeded = serde_json::json!({
+        "hooks": { "PreToolUse": [
+            { "matcher": "", "hooks": [{ "type": "command", "command": guard }] },
+            { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/opt/foreign/x" }] }
+        ] }
+    });
+    std::fs::write(tmp.path().join("settings.json"), seeded.to_string()).unwrap();
+
+    let exe = Some(std::path::PathBuf::from(
+        crate::test_support::STABLE_HOOK_EXE,
+    ));
+    assert_eq!(
+        install_claude_hooks_at_with_pm_guard(tmp.path(), exe, false, false).unwrap(),
+        1
+    );
+
+    let val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tmp.path().join("settings.json")).unwrap()).unwrap();
+    let commands: Vec<&str> = val["hooks"]["PreToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(!commands.contains(&guard.as_str()), "{commands:?}");
+    assert!(commands.contains(&"/opt/foreign/x"), "{commands:?}");
+    assert!(
+        commands.iter().any(|c| c.ends_with(" hook")),
+        "{commands:?}"
+    );
+}
