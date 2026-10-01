@@ -89,7 +89,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use trusty_common::uds::server::{RpcRouter, request_peer_pid};
+use trusty_common::uds::server::{RpcRouter, request_peer};
 
 use crate::core::compress::CompressionLevel;
 use crate::daemon::state::DaemonState;
@@ -332,7 +332,7 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
         "mpm.hooks.ingest",
         HookPost,
         t::HookAcceptedResponse,
-        // #8531: the kernel peer of this connection, read in the handler's task.
-        |s, p| ops::ingest_hook_from_socket(&s, p, request_peer_pid()).await
+        // #8531: the kernel peer of this connection and its accept instant.
+        |s, p| ops::ingest_hook_from_socket(&s, p, request_peer()).await
     )
 }

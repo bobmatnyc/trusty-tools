@@ -11,7 +11,7 @@
 //!
 //! Step 2a adds the read-only listing and both repair verbs. #8531: the
 //! repair's caller is the kernel's peer pid for this connection
-//! (`trusty_common::uds::server::request_peer_pid`), walked to its session by
+//! (`trusty_common::uds::server::request_peer`), walked to its session by
 //! `delegation_repair_caller::establish_caller`. No param names the caller; a
 //! `caller_session` an older client still sends is ignored.
 //!
@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
-use trusty_common::uds::server::{RpcError, RpcRouter, request_peer_pid};
+use trusty_common::uds::server::{RpcError, RpcRouter, request_peer};
 
 use crate::daemon::delegation_routes as dg;
 use crate::daemon::services::delegation_records::DelegationListing;
@@ -120,8 +120,8 @@ fn register_step_2a(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let r = r.typed::<RepairParams, RepairOutcome, _, _>("mpm.delegation.repair", move |p| {
         let s = Arc::clone(&held);
         async move {
-            // #8531: read in the handler's own task, where the server set it.
-            let peer = RepairPeer::from_socket(request_peer_pid());
+            // #8531: the peer and its accept instant, set by the server for this task.
+            let peer = RepairPeer::from_socket(request_peer());
             Ok::<_, RpcError>(dg::repair_delegation_op(s, p.agent_id, p.force, peer).await)
         }
     });
@@ -130,8 +130,8 @@ fn register_step_2a(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     r.typed::<RepairByIdParams, RepairOutcome, _, _>("mpm.delegation.repair_by_id", move |p| {
         let s = Arc::clone(&held);
         async move {
-            // #8531: read in the handler's own task, where the server set it.
-            let peer = RepairPeer::from_socket(request_peer_pid());
+            // #8531: the peer and its accept instant, set by the server for this task.
+            let peer = RepairPeer::from_socket(request_peer());
             dg::repair_delegation_by_id_op(s, &p.delegation_id, p.force, peer)
                 .await
                 .map_err(Into::into)

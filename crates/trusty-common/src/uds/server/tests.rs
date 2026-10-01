@@ -1851,4 +1851,49 @@ async fn request_peer_pid_is_none_outside_a_socket_dispatch_8531() {
         Some(serde_json::Value::Null),
         "{response:?}"
     );
+    assert_eq!(request_peer(), None);
+}
+
+/// #8531 MEDIUM: the accept instant is stamped before the frame is read, so a
+/// client that waits before sending does not move it. The client holds the
+/// connection open 400 ms before writing; the stamp must predate the write.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_handler_reads_its_peer_and_the_accept_instant_8531() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let router = RpcRouter::new().typed("peer", |_req: ()| async move {
+        let peer = request_peer().expect("a socket dispatch has a peer");
+        let millis = peer
+            .accepted_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis() as u64;
+        Ok::<_, RpcError>((peer.pid, millis))
+    });
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let mut stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let sent_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_millis() as u64;
+    let mut request = frame(3, "peer", json!(null));
+    request.push(b'\n');
+    stream.write_all(&request).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+    let response: RpcResponse = serde_json::from_slice(raw.trim_ascii()).expect("one frame");
+
+    let (pid, accepted_ms): (u32, u64) =
+        serde_json::from_value(response.result.clone().expect("result")).expect("shape");
+    assert_eq!(pid, std::process::id(), "{response:?}");
+    assert!(
+        accepted_ms + 300 <= sent_at,
+        "stamped at accept ({accepted_ms}), not at the frame read ({sent_at})"
+    );
 }

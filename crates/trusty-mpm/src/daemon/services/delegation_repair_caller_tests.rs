@@ -115,10 +115,26 @@ fn an_unproven_peer_is_unestablished_8531() {
         );
         unestablished(&caller);
     }
-    assert!(matches!(
-        RepairPeer::from_socket(Some(7)),
-        RepairPeer::Kernel { pid: 7, seen_at } if seen_at > 0
-    ));
+    // #8531 MEDIUM: `seen_at` is the server's accept instant, not "now".
+    let accepted_at = std::time::UNIX_EPOCH + Duration::from_secs(1_234);
+    assert_eq!(
+        RepairPeer::from_socket(Some(RequestPeer {
+            pid: 7,
+            accepted_at
+        })),
+        RepairPeer::Kernel {
+            pid: 7,
+            seen_at: 1_234
+        }
+    );
+}
+
+/// The peer of a socket request from `pid`, accepted now.
+fn socket_peer(pid: u32) -> RepairPeer {
+    RepairPeer::from_socket(Some(RequestPeer {
+        pid,
+        accepted_at: std::time::SystemTime::now(),
+    }))
 }
 
 /// #8531 Fail-Open Check: a peer walk that fails — an unreadable ancestry, a
@@ -171,7 +187,47 @@ fn an_unbound_owner_has_no_process_8531() {
         "{got:?}"
     );
     state.bind_session_claude(owner, OWNER).expect("vacant");
-    assert_eq!(owner_claude(&state, owner), Ok(OWNER));
+    assert_eq!(owner_claude_with(&state, owner, live_owner), Ok(OWNER));
+}
+
+/// A process table in which `OWNER` runs, with its recorded start time.
+fn live_owner(pid: u32) -> Result<crate::core::twin_arming::ProcessFacts, String> {
+    if pid == OWNER.pid {
+        Ok(crate::core::twin_arming::ProcessFacts {
+            parent: Some(1),
+            start_time: OWNER.start_time,
+        })
+    } else {
+        Err(format!("no entry for {pid}"))
+    }
+}
+
+/// #8531 Fail-Open Check: a persisted binding outlives its process. Once the
+/// bound `claude` has exited — or its pid names a later process — the
+/// binding grants nothing.
+#[test]
+fn a_bound_owner_whose_claude_exited_has_no_process_8531() {
+    let state = DaemonState::new();
+    let owner = SessionId::new();
+    state.bind_session_claude(owner, OWNER).expect("vacant");
+    let gone = owner_claude_with(&state, owner, |pid| Err(format!("no entry for {pid}")));
+    assert!(
+        gone.as_ref()
+            .is_err_and(|e| e.contains("no longer running")),
+        "{gone:?}"
+    );
+    let reused = owner_claude_with(&state, owner, |_| {
+        Ok(crate::core::twin_arming::ProcessFacts {
+            parent: Some(1),
+            start_time: OWNER.start_time + 60,
+        })
+    });
+    assert!(
+        reused
+            .as_ref()
+            .is_err_and(|e| e.contains("no longer running")),
+        "{reused:?}"
+    );
 }
 
 /// #8531 Fail-Open Check: a `SessionStart` with no kernel pid binds nothing.
@@ -179,8 +235,8 @@ fn an_unbound_owner_has_no_process_8531() {
 async fn a_session_start_without_a_peer_pid_binds_nothing_8531() {
     let state = Arc::new(DaemonState::new());
     let session = SessionId::new();
-    let got = bind_announcing_claude(&state, session, None).await;
-    assert!(got.is_err_and(|e| e.contains("no peer pid")));
+    let got = bind_announcing_claude(&state, session, RepairPeer::from_socket(None)).await;
+    assert!(got.is_err_and(|e| e.contains("could not read the calling process's pid")));
     assert_eq!(state.session_claudes().get(session), None);
 }
 
@@ -193,7 +249,7 @@ async fn a_session_start_whose_walk_fails_binds_nothing_8531() {
     gone.wait().expect("reap true");
     let state = Arc::new(DaemonState::new());
     let session = SessionId::new();
-    let got = bind_announcing_claude(&state, session, Some(pid)).await;
+    let got = bind_announcing_claude(&state, session, socket_peer(pid)).await;
     assert!(got.is_err_and(|e| e.contains("could not be read")));
     assert_eq!(state.session_claudes().get(session), None);
 }
@@ -268,7 +324,7 @@ fn a_patched_pid_does_not_establish_the_owner_8531() {
     )
     .expect("the shared set_pid body writes the pid");
 
-    let caller = establish_caller(&state, RepairPeer::from_socket(Some(caller_pid)), |_| true);
+    let caller = establish_caller(&state, socket_peer(caller_pid), |_| true);
     assert!(
         unestablished(&caller).contains("never announced"),
         "{caller:?}"
@@ -309,7 +365,7 @@ fn a_squatted_tmux_name_does_not_establish_the_owner_8531() {
     let caller_pid = caller_pid.expect("the squatted pane started its claude");
     let (state, _owner, _root) = owner_with_a_record(Some(&name));
 
-    let caller = establish_caller(&state, RepairPeer::from_socket(Some(caller_pid)), |_| true);
+    let caller = establish_caller(&state, socket_peer(caller_pid), |_| true);
     assert!(
         unestablished(&caller).contains("never announced"),
         "{caller:?}"
@@ -488,4 +544,46 @@ async fn the_bound_owner_ends_its_own_record_over_the_socket_8531() {
     let answer: serde_json::Value = serde_json::from_str(&answer).expect("json");
     assert_eq!(answer["outcome"], serde_json::json!("ended"), "{answer}");
     assert!(state.all_delegations()[0].status.is_terminal());
+}
+
+/// #8531 HIGH regression: a daemon restart does not hand a bound owner's id
+/// to a sibling. The owner binds; the daemon restarts on the same root; a
+/// process under a sibling `claude` sends a `SessionStart` naming the owner's
+/// id before the owner has any record. The binding stays the owner's, the
+/// owner's process is granted its record, and the sibling's is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_does_not_hand_the_owner_id_to_a_sibling_8531() {
+    let (owner_dir, sibling_dir) = (
+        tempfile::tempdir().expect("tempdir"),
+        tempfile::tempdir().expect("tempdir"),
+    );
+    let (owner_claude, owner_peer) = claude_with_a_child(owner_dir.path());
+    let (_sibling_claude, sibling_peer) = claude_with_a_child(sibling_dir.path());
+    let root = tempfile::tempdir().expect("tempdir");
+    let paths = FrameworkPaths::under(root.path());
+    let owner = SessionId::new();
+
+    let before = Arc::new(DaemonState::with_paths(&paths));
+    bind_announcing_claude(&before, owner, socket_peer(owner_peer))
+        .await
+        .expect("the owner's SessionStart binds");
+    drop(before);
+
+    // The restart: a fresh daemon over the same framework root.
+    let after = Arc::new(DaemonState::with_paths(&paths));
+    let _ = bind_announcing_claude(&after, owner, socket_peer(sibling_peer)).await;
+    let bound = after.session_claudes().get(owner).expect("still bound");
+    assert_eq!(
+        bound.pid,
+        owner_claude.0.id(),
+        "the sibling took the binding"
+    );
+
+    let mut d = Delegation::observed(owner, "version-control", "task", Some("toolu-8531".into()));
+    d.agent_id = Some("a8531".to_string());
+    after.upsert_delegation(d);
+    let caller = establish_caller(&after, socket_peer(owner_peer), |_| true);
+    assert_eq!(caller, RepairCaller::Session(owner), "the owner is granted");
+    let caller = establish_caller(&after, socket_peer(sibling_peer), |_| true);
+    unestablished(&caller);
 }

@@ -222,8 +222,8 @@ pub(crate) async fn post_best_effort(client: &reqwest::Client, url: &str, body: 
 /// registers unbound, and its own repairs are refused.
 /// What: [`post_session_start_via`] over the resolved daemon socket when
 /// `url` names a loopback daemon; the plain [`post_best_effort`] otherwise.
-/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531` sends the
-/// same socket `POST /hooks`; this function itself has no test.
+/// Test: `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`,
+/// `tm_hook_session_start_8531::a_session_start_with_no_socket_falls_back_to_http`.
 pub(crate) async fn post_session_start(client: &reqwest::Client, url: &str, body: &Value) {
     let socket = super::managed_merged_prs::is_loopback_url(url)
         .then(trusty_mpm::client::http_client::resolve_daemon_socket)
@@ -236,6 +236,8 @@ pub(crate) async fn post_session_start(client: &reqwest::Client, url: &str, body
 /// What: one 2 s socket attempt. Only an unreachable socket — nothing
 /// listening — falls back to HTTP; a delivered, refused or timed-out attempt
 /// ends here, so the daemon never ingests the event twice.
+/// Test: the two `tm_hook_session_start_8531` cases (#8531), through the
+/// built `tm`.
 pub(crate) async fn post_session_start_via(
     socket: Option<&Path>,
     client: &reqwest::Client,

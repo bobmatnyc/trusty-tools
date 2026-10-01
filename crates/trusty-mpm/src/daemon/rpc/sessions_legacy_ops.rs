@@ -525,21 +525,20 @@ pub fn get_output(
 /// the identity a delegation repair later compares its caller against.
 /// What: on `SessionStart` with a well-formed id,
 /// `delegation_repair_caller::bind_announcing_claude` over `peer`; a failure
-/// is logged and leaves the session unbound (refused as a repair owner), and
-/// never fails the hook. Then [`ingest_hook`], unchanged.
-/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`.
+/// is logged and never fails the hook. Then [`ingest_hook`], which records an
+/// id still unbound as unproven (refused as a repair owner, for good).
+/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
+/// `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`.
 pub async fn ingest_hook_from_socket(
     state: &Arc<DaemonState>,
     post: HookPost,
-    peer: Option<u32>,
+    peer: Option<trusty_common::uds::server::RequestPeer>,
 ) -> Result<HookAcceptedResponse, DaemonError> {
+    use crate::daemon::services::delegation_repair_caller::{RepairPeer, bind_announcing_claude};
     // #8531: bind before ingest, from the kernel's peer; HTTP never binds.
     if post.event == HookEvent::SessionStart
         && let Ok(session) = parse_id(&post.session_id)
-        && let Err(e) = crate::daemon::services::delegation_repair_caller::bind_announcing_claude(
-            state, session, peer,
-        )
-        .await
+        && let Err(e) = bind_announcing_claude(state, session, RepairPeer::from_socket(peer)).await
     {
         tracing::warn!(session_id = %session.0, "SessionStart left the session unbound: {e}");
     }
@@ -577,6 +576,19 @@ pub async fn ingest_hook(
         new_session.status = SessionStatus::Active;
         state.register_session(new_session);
         tracing::info!("auto-registered session on SessionStart: {session:?}");
+    }
+    // #8531: the first SessionStart decides an id's binding on either
+    // transport. One that bound no claude (HTTP, or a socket bind that
+    // failed) leaves the id unproven, never open to a later announcer.
+    if post.event == HookEvent::SessionStart {
+        let held = Arc::clone(state);
+        let settled = tokio::task::spawn_blocking(move || held.settle_unproven_session(session))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        if let Err(e) = settled {
+            tracing::debug!(session_id = %session.0, "SessionStart not recorded as unproven: {e}");
+        }
     }
 
     // #1744: correlate Claude session id → managed session on SessionStart;

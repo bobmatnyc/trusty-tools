@@ -20,6 +20,8 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use trusty_common::uds::server::RequestPeer;
+
 use super::delegation_repair::RepairCaller;
 use crate::core::agent::Delegation;
 use crate::core::session::SessionId;
@@ -48,28 +50,28 @@ pub enum RepairPeer {
     Unproven(String),
 }
 
-/// Now, in Unix seconds; `0` when the clock reads before the epoch, which
+/// `at` in Unix seconds; `0` when the clock reads before the epoch, which
 /// every real process postdates, so a broken clock refuses every peer.
-pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+fn unix_secs(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 impl RepairPeer {
     /// The peer of a socket request: the pid the socket server read off the
-    /// connection, seen now, or `Unproven` when the kernel reported none.
-    pub fn from_socket(pid: Option<u32>) -> Self {
-        pid.map_or_else(
+    /// connection, seen when the connection was accepted, or `Unproven` when
+    /// the kernel reported none.
+    // #8531: `seen_at` is the accept instant, stamped before the frame read.
+    pub fn from_socket(peer: Option<RequestPeer>) -> Self {
+        peer.map_or_else(
             || {
                 Self::Unproven(
                     "the daemon socket could not read the calling process's pid from the kernel"
                         .to_string(),
                 )
             },
-            |pid| Self::Kernel {
-                pid,
-                seen_at: unix_now(),
+            |peer| Self::Kernel {
+                pid: peer.pid,
+                seen_at: unix_secs(peer.accepted_at),
             },
         )
     }
@@ -175,29 +177,36 @@ pub(crate) fn establish_caller_with(
 /// later.
 /// What: the nearest `claude` above the kernel peer `peer`
 /// ([`SessionClaudes::peer_claude`](crate::daemon::state::session_claudes::SessionClaudes::peer_claude)),
-/// walked on the blocking pool, then
-/// [`DaemonState::bind_session_claude`] (first writer wins). `Err` naming the
-/// failed step when there is no peer pid, the walk fails, or the bind is
-/// refused; the session then stays unbound, and an unbound owner is refused.
+/// then [`DaemonState::bind_session_claude`] (first announcement wins), both
+/// on the blocking pool — the walk reads the process table and the bind
+/// writes the registry file. `Ok` without a walk when the id's first
+/// announcement is already recorded. `Err` naming the failed step when there
+/// is no peer pid, the walk fails, or the bind is refused; `ingest_hook` then
+/// records the id as unproven, and an unproven owner is refused.
 /// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
 /// `a_session_start_without_a_peer_pid_binds_nothing_8531`,
-/// `a_session_start_whose_walk_fails_binds_nothing_8531`.
+/// `a_session_start_whose_walk_fails_binds_nothing_8531`,
+/// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`.
 pub async fn bind_announcing_claude(
     state: &Arc<DaemonState>,
     session: SessionId,
-    peer: Option<u32>,
+    peer: RepairPeer,
 ) -> Result<(), String> {
-    let pid = peer.ok_or_else(|| "the socket reported no peer pid".to_string())?;
-    if state.session_claudes().get(session).is_some() {
+    let (pid, seen_at) = match peer {
+        RepairPeer::Kernel { pid, seen_at } => (pid, seen_at),
+        RepairPeer::Unproven(why) => return Err(why),
+    };
+    // #8531: a recorded first announcement is final, so skip the walk.
+    if state.session_claudes().is_settled(session) {
         return Ok(());
     }
-    let seen_at = unix_now();
     let held = Arc::clone(state);
-    let claude =
-        tokio::task::spawn_blocking(move || held.session_claudes().peer_claude(pid, seen_at))
-            .await
-            .map_err(|e| format!("the process walk did not finish: {e}"))??;
-    state.bind_session_claude(session, claude)
+    tokio::task::spawn_blocking(move || {
+        let claude = held.session_claudes().peer_claude(pid, seen_at)?;
+        held.bind_session_claude(session, claude)
+    })
+    .await
+    .map_err(|e| format!("the process walk did not finish: {e}"))?
 }
 
 /// The `claude` process that owns session `session` (#8531).
@@ -206,9 +215,7 @@ pub async fn bind_announcing_claude(
 /// record's `pid` is PATCHable and its tmux name can be squatted, so neither
 /// is read; only the kernel-derived binding made when the session announced
 /// itself over the socket is.
-/// What: the [`ClaudeProcess`] bound to `session`, or `Err` when none is —
-/// the session announced itself over HTTP, before this binding existed, or
-/// never.
+/// What: [`owner_claude_with`] over the live process table.
 /// Test: `an_unbound_owner_has_no_process_8531`,
 /// `a_patched_pid_does_not_establish_the_owner_8531`,
 /// `a_squatted_tmux_name_does_not_establish_the_owner_8531`.
@@ -216,9 +223,34 @@ pub(crate) fn owner_claude(
     state: &DaemonState,
     session: SessionId,
 ) -> Result<ClaudeProcess, String> {
-    state.session_claudes().get(session).ok_or_else(|| {
+    owner_claude_with(state, session, crate::core::twin_arming::process_facts)
+}
+
+/// [`owner_claude`] over an injected process table (#8531).
+///
+/// What: the [`ClaudeProcess`] bound to `session` while a process with that
+/// pid AND start time still runs. `Err` when no binding exists — the session
+/// announced itself over HTTP, before this binding existed, or never — and
+/// when the bound process has exited or its pid now names a later process: a
+/// persisted binding outlives its process, and must then grant nothing.
+/// Test: `a_bound_owner_whose_claude_exited_has_no_process_8531`,
+/// `an_unbound_owner_has_no_process_8531`.
+pub(crate) fn owner_claude_with(
+    state: &DaemonState,
+    session: SessionId,
+    facts: impl Fn(u32) -> Result<crate::core::twin_arming::ProcessFacts, String>,
+) -> Result<ClaudeProcess, String> {
+    let bound = state.session_claudes().get(session).ok_or_else(|| {
         "the owning session never announced its claude process over the daemon socket".to_string()
-    })
+    })?;
+    // #8531: the binding persists across restarts; its process may not.
+    match facts(bound.pid) {
+        Ok(f) if f.start_time == bound.start_time => Ok(bound),
+        _ => Err(format!(
+            "the owning session's claude (pid {}) is no longer running",
+            bound.pid
+        )),
+    }
 }
 
 #[cfg(test)]
