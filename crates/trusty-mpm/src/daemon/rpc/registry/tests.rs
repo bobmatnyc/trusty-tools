@@ -1753,17 +1753,6 @@ fn active_owner(state: &DaemonState) -> crate::core::session::SessionId {
     id
 }
 
-/// A repair outcome with the per-record ids blanked, so two records' answers
-/// compare on everything the transport could have changed.
-fn without_ids(mut outcome: Value, ids: &[String]) -> Value {
-    if let Some(Value::String(reason)) = outcome.get_mut("reason") {
-        for id in ids {
-            *reason = reason.replace(id.as_str(), "<id>");
-        }
-    }
-    outcome
-}
-
 /// The header the HTTP repair routes read the caller from before #8531.
 fn caller_header(session: crate::core::session::SessionId) -> (&'static str, String) {
     ("x-tm-caller-session", session.0.to_string())
@@ -1868,9 +1857,8 @@ async fn rpc_delegation_list_requires_a_cwd() {
 async fn parity_delegation_repair_agrees_across_transports() {
     let (state, _dir) = hermetic();
     let owner = active_owner(&state);
-    let over_http = live_record(&state, owner, "a-http");
-    let over_rpc = live_record(&state, owner, "a-rpc");
-    let ids = [over_http.id.0.to_string(), over_rpc.id.0.to_string()];
+    live_record(&state, owner, "a-http");
+    live_record(&state, owner, "a-rpc");
     let router = rpc_router(&state);
     let stranger = crate::core::session::SessionId(uuid::Uuid::new_v4());
 
@@ -1897,12 +1885,8 @@ async fn parity_delegation_repair_agrees_across_transports() {
             json!("refused"),
             "caller {caller:?} must be refused: {body}"
         );
-        assert_same(
-            "mpm.delegation.repair",
-            without_ids(body, &ids),
-            without_ids(result, &ids),
-            &[],
-        );
+        // #8531: each reason names its own transport's missing proof.
+        assert_same("mpm.delegation.repair", body, result, &["reason"]);
     }
 }
 
@@ -1915,7 +1899,6 @@ async fn parity_delegation_repair_by_id_agrees_across_transports() {
     let owner = active_owner(&state);
     let over_http = live_record(&state, owner, "b-http");
     let over_rpc = live_record(&state, owner, "b-rpc");
-    let ids = [over_http.id.0.to_string(), over_rpc.id.0.to_string()];
 
     let (status, body) = http_with_headers(
         &state,
@@ -1936,12 +1919,8 @@ async fn parity_delegation_repair_by_id_agrees_across_transports() {
     .await;
     // #8531: the owner's asserted id is refused on both transports.
     assert_eq!(body["outcome"], json!("refused"), "{body}");
-    assert_same(
-        "mpm.delegation.repair_by_id",
-        without_ids(body, &ids),
-        without_ids(result, &ids),
-        &[],
-    );
+    // #8531: each reason names its own transport's missing proof.
+    assert_same("mpm.delegation.repair_by_id", body, result, &["reason"]);
 }
 
 /// Why: a malformed id is a 400 over HTTP; the socket must refuse with the
