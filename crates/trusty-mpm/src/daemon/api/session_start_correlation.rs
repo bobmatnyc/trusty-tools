@@ -297,28 +297,14 @@ pub(super) fn session_end_pane_still_live(
 /// transition itself (tmux is unavailable/pane-not-found in that harness, so
 /// the gate fails open); the gate's own decision logic is covered by the
 /// `session_end_pane_still_live_*` unit tests above;
-/// `session_end_hook_clears_claude_session_id` covers the #4337 clear.
+/// `session_end_hook_clears_claude_session_id` covers the #4337 clear;
+/// `an_http_session_end_leaves_the_sessions_delegations_live_8980` covers
+/// that this function stales no delegation.
 pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
-    // #6797: FIRST, and gated on neither of the two conditions below. A harness
-    // session's subagents cannot outlive it, so its live delegation records name
-    // agents that are gone — and while they read as live, ADR-0048 decision 10
-    // and ADR-0049 decision 3 deny a `git merge`, `git rebase`, or documents-only
-    // commit in that checkout for the six hours of `RUNNING_STALE_AFTER_SECS`.
-    // #6497 already does this for a session the tmux reaper buries; that reaper
-    // walks the daemon's MANAGED sessions and skips non-tmux origins, while a
-    // delegation's `session` is the HARNESS id, so a plain `claude` run's agents
-    // were never reached by it. This is the same disposition — `Stale`, never
-    // `Completed`: tracking gave up, the agent is not reported as having finished.
-    //
-    // Not gated on the managed-record match below, because a harness session with
-    // no managed record is exactly the case that reaper misses. Not gated on the
-    // #2454 pane-liveness deferral either, for the reason the #4337 clear below
-    // already gives: that gate is about the TMUX PANE, and this signal is about
-    // the Claude conversation, which has ended whatever the pane still shows.
-    if let Ok(uuid) = uuid::Uuid::parse_str(claude_session_id) {
-        state.stale_delegations_of_dead_session(crate::core::session::SessionId(uuid));
-    }
-
+    // #8980: the #6797 stale of this session's live delegations moved to
+    // `delegation_repair_caller::stale_on_owner_session_end`, which runs only
+    // for a socket `SessionEnd` sent from under the session's own bound
+    // `claude`. Here it ran for any caller that named the id, over HTTP too.
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     let matched = records.iter().find(|r| {

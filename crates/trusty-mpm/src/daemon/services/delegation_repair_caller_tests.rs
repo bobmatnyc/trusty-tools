@@ -333,21 +333,25 @@ fn owner_with_a_record(
     (state, owner, root)
 }
 
-/// #8531 CRITICAL regression: a pid written through `PATCH
-/// /sessions/{id}/pid` / `mpm.sessions.set_pid` — here naming the caller's
-/// own `claude` — does not make the caller the owner. The walk itself
-/// succeeds; the owner has no kernel-bound process.
+/// #8531 CRITICAL regression: a pid on the owner's record — here naming the
+/// caller's own `claude` — does not make the caller the owner. The walk
+/// itself succeeds; the owner has no kernel-bound process.
 #[test]
 fn a_patched_pid_does_not_establish_the_owner_8531() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (claude, caller_pid) = claude_with_a_child(dir.path());
     let (state, owner, _root) = owner_with_a_record(None);
-    crate::daemon::rpc::sessions_legacy_ops::set_session_pid(
-        &state,
-        &owner.0.to_string(),
-        claude.0.id(),
-    )
-    .expect("the shared set_pid body writes the pid");
+    // #8980: `set_pid` now refuses a session that owns records, so the pid
+    // is written below the route; the owner check must still not read it.
+    assert!(
+        crate::daemon::rpc::sessions_legacy_ops::set_session_pid(
+            &state,
+            &owner.0.to_string(),
+            claude.0.id(),
+        )
+        .is_err()
+    );
+    assert!(state.set_session_pid(owner, claude.0.id()));
 
     let caller = establish_caller(&state, socket_peer(caller_pid), |_| true);
     assert!(
@@ -611,4 +615,168 @@ async fn a_restart_does_not_hand_the_owner_id_to_a_sibling_8531() {
     assert_eq!(caller, RepairCaller::Session(owner), "the owner is granted");
     let caller = establish_caller(&after, socket_peer(sibling_peer), |_| true);
     unestablished(&caller);
+}
+
+// ── #8980: SessionEnd and set_pid need the owner ─────────────────────────────
+
+/// A Running record owned by `owner`, inserted into `state`.
+fn running_record(state: &DaemonState, owner: SessionId) {
+    state.upsert_delegation(Delegation::observed(
+        owner,
+        "version-control",
+        "task",
+        Some("toolu-8980".into()),
+    ));
+}
+
+/// The status of the one record in `state`.
+fn only_status(state: &DaemonState) -> DelegationStatus {
+    let all = state.all_delegations();
+    assert_eq!(all.len(), 1, "{all:?}");
+    all[0].status
+}
+
+/// #8980: a `SessionEnd` from a process under a sibling's `claude` stales
+/// none of the owner's live records.
+#[test]
+fn a_siblings_session_end_leaves_the_owners_records_live_8980() {
+    let (state, owner, _root) = owner_with_a_record(None);
+    let caller = establish_caller_with(
+        kernel(9010),
+        &[owner],
+        |_, _| Ok(SIBLING),
+        owner_lookup(owner),
+    );
+    assert!(stale_if_owner(&state, owner, &caller).is_err());
+    assert_eq!(only_status(&state), DelegationStatus::Running);
+}
+
+/// #8980 Fail-Open Check: a `SessionEnd` with no kernel pid, or one whose
+/// caller names another session, stales nothing.
+#[tokio::test]
+async fn an_unproven_session_end_stales_nothing_8980() {
+    let (state, owner, _root) = owner_with_a_record(None);
+    let got = stale_on_owner_session_end(&state, owner, RepairPeer::from_socket(None)).await;
+    assert!(got.is_err_and(|e| e.contains("could not read the calling process's pid")));
+    let other = RepairCaller::Session(SessionId::new());
+    assert!(stale_if_owner(&state, owner, &other).is_err());
+    assert_eq!(only_status(&state), DelegationStatus::Running);
+}
+
+/// #8980 + #6797, over the live process table: the owner's bound `claude`
+/// ends its own session and its live records go Stale — never Completed,
+/// with no end time, so a late `SubagentStop` can still resolve them. A
+/// sibling's `SessionEnd` before it stales nothing.
+#[tokio::test]
+async fn the_owners_session_end_stales_its_records_8980() {
+    let (owner_dir, sibling_dir) = (
+        tempfile::tempdir().expect("tempdir"),
+        tempfile::tempdir().expect("tempdir"),
+    );
+    let (_owner_claude, owner_peer) = claude_with_a_child(owner_dir.path());
+    let (_sibling_claude, sibling_peer) = claude_with_a_child(sibling_dir.path());
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
+    let owner = SessionId::new();
+    bind_announcing_claude(&state, owner, socket_peer(owner_peer))
+        .await
+        .expect("the owner's SessionStart binds");
+    running_record(&state, owner);
+
+    let sibling = stale_on_owner_session_end(&state, owner, socket_peer(sibling_peer)).await;
+    assert!(sibling.is_err(), "{sibling:?}");
+    assert_eq!(only_status(&state), DelegationStatus::Running);
+
+    let staled = stale_on_owner_session_end(&state, owner, socket_peer(owner_peer)).await;
+    assert_eq!(staled, Ok(1));
+    assert_eq!(only_status(&state), DelegationStatus::Stale);
+    assert!(state.all_delegations()[0].ended_at.is_none());
+}
+
+/// #8980 regression, over the real socket: a `SessionEnd` naming the owner's
+/// id, sent by this test process — not under the owner's `claude` — leaves
+/// the owner's live record Running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_session_end_from_a_sibling_leaves_the_owners_records_live_8980() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_owner_claude, owner_peer) = claude_with_a_child(dir.path());
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
+    let owner = SessionId::new();
+    bind_announcing_claude(&state, owner, socket_peer(owner_peer))
+        .await
+        .expect("the owner's SessionStart binds");
+    running_record(&state, owner);
+    let socket = dir.path().join("mpm.sock");
+    let (stop, server) = serve(&state, &socket).await;
+    let client = crate::client::DaemonClient::over_socket(&socket);
+    let end = serde_json::json!({
+        "session_id": owner.0.to_string(),
+        "event": "SessionEnd",
+        "payload": {},
+    });
+    let mut delivered = false;
+    for _ in 0..200 {
+        if client.post("/hooks").json(&end).send().await.is_ok() {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = stop.send(());
+    let _ = server.await;
+
+    assert!(delivered, "the socket accepted the SessionEnd");
+    assert_eq!(only_status(&state), DelegationStatus::Running);
+}
+
+/// A pid that named a process which has since exited.
+fn exited_pid() -> u32 {
+    let mut gone = Command::new("true").spawn().expect("spawn true");
+    let pid = gone.id();
+    gone.wait().expect("reap true");
+    pid
+}
+
+/// #8980 regression: `set_pid` cannot point a session a `SessionStart`
+/// announced at an exited process, so its owner never reads as gone — not
+/// even when the pid is written before the session owns any record.
+#[tokio::test]
+async fn set_pid_cannot_make_an_announced_owner_read_gone_8980() {
+    use crate::daemon::rpc::sessions_legacy_ops::{ingest_hook, set_session_pid};
+    use crate::daemon::services::delegation_repair::{OwnerLiveness, owner_liveness};
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(root.path())));
+    let owner = SessionId::new();
+    let start = crate::daemon::api::HookPost {
+        session_id: owner.0.to_string(),
+        event: crate::core::hook::HookEvent::SessionStart,
+        payload: serde_json::json!({}),
+    };
+    ingest_hook(&state, start).await.expect("SessionStart");
+
+    let refused = set_session_pid(&state, &owner.0.to_string(), exited_pid());
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("#8980")),
+        "{refused:?}"
+    );
+    running_record(&state, owner);
+    assert_eq!(owner_liveness(&state, owner), OwnerLiveness::Live);
+}
+
+/// #8980: a session that owns delegation records refuses `set_pid` even when
+/// no `SessionStart` announced it, and a launcher's session still takes one.
+#[test]
+fn set_pid_refuses_a_session_that_owns_delegations_8980() {
+    use crate::daemon::rpc::sessions_legacy_ops::set_session_pid;
+    use crate::daemon::services::delegation_repair::{OwnerLiveness, owner_liveness};
+    let (state, owner, _root) = owner_with_a_record(None);
+    assert!(set_session_pid(&state, &owner.0.to_string(), exited_pid()).is_err());
+    assert_eq!(owner_liveness(&state, owner), OwnerLiveness::Live);
+
+    let launched = SessionId::new();
+    state.register_session(Session::new(launched, "/repo", ControlModel::Tmux, None));
+    assert!(set_session_pid(&state, &launched.0.to_string(), 4242).is_ok());
 }

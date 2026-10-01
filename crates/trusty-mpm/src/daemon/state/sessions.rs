@@ -478,14 +478,20 @@ impl DaemonState {
     /// still resolve the record to the truth for the rest of its
     /// [`STALE_RETENTION_SECS`] window.
     ///
-    /// It is driven only by the reaper, which acts on POSITIVE evidence — the
+    /// It is driven by the reaper, which acts on POSITIVE evidence — the
     /// tmux session is gone from `list-sessions`, or the tracked `claude`
-    /// process has exited. Absence from the registry is deliberately NOT a
-    /// trigger: a session the daemon never registered is undeterminable rather
-    /// than dead (ADR-0045), and treating it as dead would quietly disarm the
-    /// ADR-0048 shared-checkout guard for every unregistered session.
+    /// process has exited — and by a `SessionEnd` proven to come from the
+    /// session's own `claude` (#6797, #8980:
+    /// `delegation_repair_caller::stale_on_owner_session_end`). The reaper's
+    /// pid is not caller-writable on a session that owns delegations (#8980:
+    /// `sessions_legacy_ops::set_session_pid`). Absence from the registry is
+    /// deliberately NOT a trigger: a session the daemon never registered is
+    /// undeterminable rather than dead (ADR-0045), and treating it as dead
+    /// would quietly disarm the ADR-0048 shared-checkout guard for every
+    /// unregistered session.
     /// Test: `reap_stales_a_dead_sessions_delegations`,
-    /// `reap_leaves_a_live_sessions_delegations_alone`.
+    /// `reap_leaves_a_live_sessions_delegations_alone`,
+    /// `the_owners_session_end_stales_its_records_8980`.
     pub(crate) fn stale_delegations_of_dead_session(&self, session: SessionId) -> usize {
         let mut staled = 0;
         for mut entry in self.delegations.iter_mut() {
