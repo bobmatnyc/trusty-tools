@@ -588,9 +588,9 @@ fn fleet_init_registers_the_architect_on_a_relaunch() {
         relaunch["collector_session"], "tm-architect-collector",
         "{relaunch}"
     );
-    assert_eq!(
-        relaunch["dir"],
-        canonical.to_str().expect("utf-8"),
+    let sent = relaunch["dir"].as_str().map(std::fs::canonicalize);
+    assert!(
+        sent.is_some_and(|d| d.ok() == Some(canonical.clone())),
         "{relaunch}"
     );
 }
