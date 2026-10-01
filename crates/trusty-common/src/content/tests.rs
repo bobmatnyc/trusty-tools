@@ -327,6 +327,21 @@ fn resolve_refuses_a_newer_schema_major() {
     resolve(&options(same.path(), DevOverride::Off)).expect("same major loads");
 }
 
+/// #8378 PR-C: the major is read before the rest of the manifest, so a newer
+/// layout that renamed `tag` is refused as too new, not as malformed.
+#[test]
+fn a_newer_schema_major_without_a_tag_key_is_unsupported_not_corrupt() {
+    let newer = SUPPORTED_SCHEMA_MAJOR + 1;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = format!("release_tag = \"{TAG}\"\nschema_major = {newer}\n");
+    let bytes = bundle_with_manifest(&manifest, &[("skills/a.md", b"a")]);
+    install(dir.path(), &bytes, &Sha256Digest::of_bytes(&bytes));
+    match resolve_err(&options(dir.path(), DevOverride::Off)) {
+        ContentError::UnsupportedSchema { bundle, .. } => assert_eq!(bundle, newer),
+        other => panic!("expected UnsupportedSchema, got {other:?}"),
+    }
+}
+
 #[test]
 fn resolve_refuses_a_manifest_without_a_schema_major() {
     let manifest = format!("tag = \"{TAG}\"\n");

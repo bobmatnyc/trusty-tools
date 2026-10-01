@@ -485,6 +485,149 @@ fn github_source_lists_content_tags() {
 }
 
 #[test]
+fn github_source_reads_a_non_404_error_status_as_a_failure() {
+    let base = serve(vec![("/dl/content-v0.1.0/broken", 500, "oops")]);
+    let src = GithubReleases::with_bases(&format!("{base}/dl"), &base).expect("client");
+    let err = src
+        .asset("content-v0.1.0", "broken", 64)
+        .expect_err("a 500 is not an asset");
+    assert!(err.reason.contains("HTTP 500"), "{err:?}");
+    assert!(err.url.ends_with("/content-v0.1.0/broken"), "{err:?}");
+}
+
+#[test]
+fn github_source_refuses_a_refs_listing_that_is_not_json() {
+    let base = serve(vec![(
+        "/git/matching-refs/tags/content-v",
+        200,
+        "<html>rate limited</html>",
+    )]);
+    let src = GithubReleases::with_bases(&base, &base).expect("client");
+    let err = src.content_tags().expect_err("not JSON");
+    assert!(err.reason.starts_with("unexpected response"), "{err:?}");
+}
+
+/// The newest release is chosen by semver: `0.10.0` beats `0.9.0`, which a
+/// string comparison ranks higher. The fake lists tags in string order, so
+/// first, last and string-max all pick a wrong tag.
+#[test]
+fn latest_release_and_newer_report_compare_versions_not_strings() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut src = FakeSource::default();
+    for tag in ["content-v0.1.0", "content-v0.9.0", "content-v0.10.0"] {
+        src.publish(tag);
+    }
+    let out = update(cache.path(), &src, None).expect("update");
+    assert_eq!(out.tag, "content-v0.10.0");
+
+    let pinned_old = tempfile::tempdir().unwrap();
+    update(pinned_old.path(), &src, Some("content-v0.9.0")).expect("pin 0.9.0");
+    let out = update(pinned_old.path(), &src, None).expect("update");
+    assert_eq!(out.tag, "content-v0.9.0", "the pin is kept");
+    assert_eq!(out.newer.as_deref(), Some("content-v0.10.0"));
+}
+
+#[test]
+fn update_with_only_prereleases_published_has_no_release() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut src = FakeSource::default();
+    src.publish("content-v0.3.0-rc.1");
+    let err = update(cache.path(), &src, None).expect_err("no release");
+    assert!(matches!(err, CacheError::NoReleases), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+#[test]
+fn install_refuses_an_unparseable_sidecar() {
+    let (src, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let file = bundle_file(src.path(), A, &bundle(A, 1, b"x"), false);
+    std::fs::write(
+        src.path().join(format!("{A}.tar.gz.sha256")),
+        "not-a-digest  content-v0.1.0.tar.gz\n",
+    )
+    .unwrap();
+    let err = install_from_file(cache.path(), &file).expect_err("bad sidecar");
+    assert!(matches!(err, CacheError::Sidecar { .. }), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+#[test]
+fn install_refuses_a_bundle_that_names_no_tag() {
+    let (src, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let bytes = bundle(A, 1, b"x");
+    let file = src.path().join("bundle.tar.gz");
+    std::fs::write(&file, &bytes).unwrap();
+    std::fs::write(
+        src.path().join("bundle.tar.gz.sha256"),
+        format!("{}  bundle.tar.gz\n", Sha256Digest::of_bytes(&bytes)),
+    )
+    .unwrap();
+    let err = install_from_file(cache.path(), &file).expect_err("no tag");
+    assert!(matches!(err, CacheError::UnknownTag { .. }), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+#[test]
+fn install_refuses_an_oversized_sidecar() {
+    let (src, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let bytes = bundle(A, 1, b"x");
+    let file = bundle_file(src.path(), A, &bytes, false);
+    let mut line = sidecar(A, &bytes);
+    line.resize(MAX_SIDECAR_BYTES as usize + 1, b'\n');
+    std::fs::write(src.path().join(format!("{A}.tar.gz.sha256")), line).unwrap();
+    let err = install_from_file(cache.path(), &file).expect_err("oversized");
+    match err {
+        CacheError::TooLarge { len, cap, .. } => {
+            assert_eq!(cap, MAX_SIDECAR_BYTES);
+            assert!(len > cap);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+/// A broken lock is not cleared by a no-flag update, which re-reads it.
+#[test]
+fn status_remedy_for_a_broken_lock_names_an_explicit_ref() {
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(cache.path().join(LOCK_FILE_NAME), "not = [toml").unwrap();
+    let status = content_status(cache.path(), None);
+    assert!(
+        matches!(status.installed, Err(ContentError::LockInvalid { .. })),
+        "{:?}",
+        status.installed
+    );
+    let text = status.lines().join("\n");
+    assert!(text.contains("--content-ref"), "{text}");
+    assert!(text.contains(INSTALL_HINT), "{text}");
+    assert!(!text.contains("fetch the pinned release again"), "{text}");
+}
+
+/// A too-new schema is not cleared by re-fetching the same release.
+#[test]
+fn status_remedy_for_a_newer_schema_names_an_upgrade_or_an_older_pin() {
+    let cache = tempfile::tempdir().unwrap();
+    let bytes = bundle(A, SUPPORTED_SCHEMA_MAJOR + 1, A.as_bytes());
+    std::fs::write(cache.path().join(format!("{A}.tar.gz")), &bytes).unwrap();
+    ContentLock::new(A, Sha256Digest::of_bytes(&bytes))
+        .expect("lock")
+        .store(&cache.path().join(LOCK_FILE_NAME))
+        .expect("store");
+    let status = content_status(cache.path(), None);
+    assert!(
+        matches!(
+            status.installed,
+            Err(ContentError::UnsupportedSchema { .. })
+        ),
+        "{:?}",
+        status.installed
+    );
+    let text = status.lines().join("\n");
+    assert!(text.contains("upgrade tm"), "{text}");
+    assert!(text.contains("--content-ref"), "{text}");
+    assert!(!text.contains("fetch the pinned release again"), "{text}");
+}
+
+#[test]
 fn github_source_reports_an_unreachable_host() {
     // Bind then drop, so nothing listens on the port.
     let port = std::net::TcpListener::bind("127.0.0.1:0")

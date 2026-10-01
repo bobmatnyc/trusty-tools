@@ -6,7 +6,8 @@
 //! What: [`check_content`] grades [`content_status`]: a dev checkout or a
 //! verified bundle is OK; no bundle installed is WARN, naming `tm content
 //! update` and the offline `tm content install --from`; a lock or bundle that
-//! fails verification is FAIL. The message carries the source (`dev`/`bundle`/
+//! fails verification is FAIL, or WARN when a dev checkout still serves. The
+//! message carries the source (`dev`/`bundle`/
 //! `none`), the tag, the sha256 and the binary version. Read-only.
 //! Test: `doctor_content_tests.rs`.
 

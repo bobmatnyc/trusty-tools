@@ -47,7 +47,9 @@ pub trait ReleaseSource {
 /// What: assets from `<download_base>/<tag>/<file>`; tags from
 /// `<api_base>/git/matching-refs/tags/content-v`. Bounded timeouts; every body
 /// is read through a size cap.
-/// Test: `github_source_reads_a_404_as_absent`, `github_source_lists_content_tags`.
+/// Test: `github_source_reads_a_404_as_absent`, `github_source_lists_content_tags`,
+/// `github_source_reads_a_non_404_error_status_as_a_failure`,
+/// `github_source_refuses_a_refs_listing_that_is_not_json`.
 #[derive(Debug, Clone)]
 pub struct GithubReleases {
     client: reqwest::blocking::Client,

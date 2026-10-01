@@ -98,13 +98,36 @@ impl ContentStatus {
             Err(ContentError::NotInstalled { .. }) => lines.push(format!(
                 "installed: none — run `tm content update`, or offline `{INSTALL_HINT}`"
             )),
-            Err(e) => lines.push(format!(
-                "installed: UNHEALTHY — {e}; run `tm content update` to fetch the pinned \
-                 release again, or offline `{INSTALL_HINT}`"
-            )),
+            Err(e) => lines.push(format!("installed: UNHEALTHY — {e}; {}", remedy(e))),
         }
         lines.push(format!("cache: {}", self.cache_dir.display()));
         lines.push(format!("binary: trusty-mpm {}", env!("CARGO_PKG_VERSION")));
         lines
+    }
+}
+
+/// The command that clears `error`.
+///
+/// Why: a no-flag `tm content update` re-reads the broken lock, and re-fetches
+/// the same too-new release, so naming it for those two causes loops.
+/// What: a broken lock needs an explicit `--content-ref` or an offline install,
+/// which replace it; a too-new schema needs a newer `tm` or an older pin; any
+/// other failure is cleared by fetching the pinned release again.
+/// Test: `status_remedy_for_a_broken_lock_names_an_explicit_ref`,
+/// `status_remedy_for_a_newer_schema_names_an_upgrade_or_an_older_pin`.
+fn remedy(error: &ContentError) -> String {
+    match error {
+        ContentError::LockInvalid { .. } | ContentError::LockUnreadable { .. } => format!(
+            "the lock cannot be read, so replace it: run `tm content update --content-ref \
+             content-vX.Y.Z`, or offline `{INSTALL_HINT}`"
+        ),
+        ContentError::UnsupportedSchema { .. } => "upgrade tm to a release that reads this \
+             schema, or pin an older release with `tm content update --content-ref \
+             content-vX.Y.Z`"
+            .to_owned(),
+        _ => format!(
+            "run `tm content update` to fetch the pinned release again, or offline \
+             `{INSTALL_HINT}`"
+        ),
     }
 }

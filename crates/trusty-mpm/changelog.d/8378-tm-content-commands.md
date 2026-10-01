@@ -14,5 +14,8 @@ Added
   fails without touching the previous pin; with nothing installed, the error
   names `tm content install --from <bundle.tar.gz>`.
 - `tm doctor` gains a `content` row: OK for a dev checkout or a verified
-  bundle, WARN when nothing is installed, FAIL when the lock or the bundle
-  fails verification.
+  bundle, WARN when nothing is installed and no checkout serves, and, when
+  the lock or the bundle fails verification, FAIL if no checkout serves or
+  WARN if a dev checkout does. The remedy it names fits the failure: a
+  broken lock or a too-new schema names `--content-ref` (and, for the
+  schema, upgrading `tm`), not a plain `tm content update`.

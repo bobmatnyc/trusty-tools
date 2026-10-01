@@ -69,7 +69,12 @@ impl std::fmt::Display for Fallback {
 /// Why: the fix differs per cause, and none of them may be answered by
 /// pinning bytes that failed a check (owner ruling on #8974: fail closed).
 /// What: `#[non_exhaustive]`; resolver failures pass through as `Content`.
-/// Test: one error-arm test per variant in `bundle_cache_tests.rs`.
+/// Test: one error-arm test per variant in `bundle_cache_tests.rs`, among them
+/// `install_refuses_an_unparseable_sidecar`,
+/// `install_refuses_a_bundle_that_names_no_tag`,
+/// `install_refuses_an_oversized_sidecar`,
+/// `update_with_only_prereleases_published_has_no_release`; version order in
+/// `latest_release_and_newer_report_compare_versions_not_strings`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CacheError {
