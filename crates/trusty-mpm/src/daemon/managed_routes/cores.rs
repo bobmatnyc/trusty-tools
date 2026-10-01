@@ -376,10 +376,12 @@ pub(crate) async fn resume_core(state: &Arc<DaemonState>, id_str: &str) -> Route
 /// a refused-because-of-current-state request (see `resume_core`'s
 /// `InvalidState` arm), so the socket transport's `status_to_rpc_code` already
 /// carries it.
-/// What: 409 for the two guard refusals, 500 for everything else (an I/O
-/// failure, a tmux failure, a store write) — those really are server faults.
+/// What: 409 for the two guard refusals and (#8935) for `InvalidState` and
+/// `KillRefused`, 500 for everything else (an I/O failure, a tmux failure, a
+/// store write) — those really are server faults.
 /// The message is the error's `Display` in both cases, unchanged.
 /// Test: `a_shared_workspace_guard_refusal_is_a_409_not_a_500`,
+/// `an_unproven_runtime_refusal_is_a_409_that_names_the_reason`,
 /// `an_ordinary_decommission_failure_is_still_a_500`.
 fn decommission_failure_status(err: &crate::session_manager::ManagedError) -> u16 {
     use crate::session_manager::ManagedError;
@@ -387,6 +389,9 @@ fn decommission_failure_status(err: &crate::session_manager::ManagedError) -> u1
         ManagedError::ForeignActiveWorkspaceClaim(..) | ManagedError::WorktreeOwnerMismatch(..) => {
             409
         }
+        // #8935: an unproven teardown and a kill-floor refusal are refusals
+        // of the request, and the CLI reads the reason only on a 409.
+        ManagedError::InvalidState(..) | ManagedError::KillRefused(..) => 409,
         _ => 500,
     }
 }
@@ -484,7 +489,7 @@ pub(crate) fn resume_http_response(outcome: RouteOutcome) -> axum::response::Res
 mod cores_tests {
     use super::*;
     use crate::daemon::rpc::managed::outcome::{RouteBody, status_to_rpc_code};
-    use crate::session_manager::{ManagedSessionState, SessionRecord};
+    use crate::session_manager::{ManagedError, ManagedSessionState, SessionRecord};
 
     /// An `Active` record claiming `workspace_path` — the #1744 collision shape.
     fn active_record_claiming(
@@ -570,6 +575,66 @@ mod cores_tests {
         // Nothing may have been mutated — the guard runs before every removal.
         assert_eq!(
             mgr.get(&target).await.expect("target record").state,
+            ManagedSessionState::Active
+        );
+    }
+
+    /// A tmux where every session is live and no pane list can be read (#8935).
+    struct UnlistablePanes;
+
+    impl crate::session_manager::ManagedTmuxDriver for UnlistablePanes {
+        fn create_session(&self, _: &str, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, _: &str, _: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _: &str, _: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(vec![format!("tm-7877-{}", UNPROVEN_ID)])
+        }
+        fn pane_exists_checked(&self, _: &str, _: &str) -> Option<bool> {
+            None
+        }
+    }
+
+    /// The id the [`UnlistablePanes`] fixture's live session is named for.
+    const UNPROVEN_ID: &str = "00000000-0000-4000-8000-000000008935";
+
+    /// #8935 delta critic: decommission's unproven-runtime refusal is a 409
+    /// whose body names the reason, so the CLI prints it instead of a bare
+    /// 500. Red on 6310cfa9d8, which mapped `InvalidState` to 500.
+    #[tokio::test]
+    async fn an_unproven_runtime_refusal_is_a_409_that_names_the_reason() {
+        let data_root = crate::test_support::hermetic_temp_dir();
+        let state = Arc::new(
+            crate::daemon::state::DaemonState::with_root_isolated_managed_and_driver(
+                data_root.path().to_path_buf(),
+                Arc::new(UnlistablePanes),
+            )
+            .await,
+        );
+        let mgr = state.session_manager().await;
+        let id = ManagedSessionId(UNPROVEN_ID.parse().expect("id"));
+        let mut record = active_record_claiming(id, &data_root.path().join("ws-8935"));
+        record.pane_id = Some("%9".into());
+        mgr.store.write().await.upsert(record).await.expect("seed");
+
+        let outcome =
+            decommission_core(&state, UNPROVEN_ID, false, ProvisioningDirt::Refuse).await;
+
+        assert_eq!(outcome.status, 409);
+        match &outcome.body {
+            RouteBody::Text(msg) => assert!(msg.contains("could not be listed"), "{msg}"),
+            other => panic!("a refusal body must be text, got {other:?}"),
+        }
+        assert_eq!(
+            mgr.get(&id).await.expect("record").state,
             ManagedSessionState::Active
         );
     }
