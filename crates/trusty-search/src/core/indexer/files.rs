@@ -18,6 +18,13 @@ use crate::core::entity::EntityType;
 
 use super::{build_compact_snippet, raw_to_code_chunk, CodeChunk, CodeIndexer};
 
+/// #8976: test-only fault seam. `remove_file_no_kg_rebuild` fails, before it
+/// removes anything, for each `(index_id, file)` pair listed here. Keyed by
+/// index id so concurrent tests never see each other's faults.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_REMOVE: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// A resolved `path_prefix` filter for corpus enumeration (#7677).
 ///
 /// Why: both `list_chunks` pagination modes need the identical "is this chunk
@@ -581,6 +588,13 @@ impl CodeIndexer {
     /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
     /// `service::reindex::tests`.
     pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
+        #[cfg(test)]
+        if TEST_FAIL_REMOVE
+            .lock()
+            .is_ok_and(|f| f.contains(&(self.index_id.clone(), file_path.to_string())))
+        {
+            anyhow::bail!("injected remove failure for {file_path} (#8976 test seam)");
+        }
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids).await;
