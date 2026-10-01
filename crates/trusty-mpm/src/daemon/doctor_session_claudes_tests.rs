@@ -137,3 +137,14 @@ fn an_unreadable_registry_warns_8980() {
     let (root, _) = registry(dir.path(), 0o000);
     assert_warns(&check_session_claudes(&root), "could not be opened");
 }
+
+/// #8980 Fail-Open Check: a dangling symlink at the registry path is not
+/// "absent" — the daemon's no-follow open refuses it, so it warns.
+#[test]
+fn a_dangling_symlink_registry_warns_8980() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (root, file) = registry(dir.path(), 0o600);
+    std::fs::remove_file(&file).expect("remove the real file");
+    std::os::unix::fs::symlink(dir.path().join("nowhere"), &file).expect("dangling symlink");
+    assert_warns(&check_session_claudes(&root), "could not be opened");
+}

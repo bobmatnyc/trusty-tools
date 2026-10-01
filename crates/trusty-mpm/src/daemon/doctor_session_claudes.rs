@@ -42,7 +42,8 @@ pub(super) fn check_session_claudes(fw_root: &Path) -> DoctorCheck {
 /// says the daemon stays sealed until restart even once the file is fixed.
 /// Test: `a_missing_registry_is_ok_8980`, `a_trusted_registry_is_ok_8980`,
 /// `a_corrupt_registry_warns_and_names_the_restart_8980`,
-/// `a_foreign_owned_registry_warns_8980`, `an_open_registry_warns_8980`.
+/// `a_foreign_owned_registry_warns_8980`, `an_open_registry_warns_8980`,
+/// `a_dangling_symlink_registry_warns_8980`.
 pub(super) fn check_session_claudes_as(fw_root: &Path, uid: u32) -> DoctorCheck {
     let path = fw_root.join(SESSION_CLAUDES_FILE);
     // #8980: `read_registry` reads NotFound as empty; only a path with nothing
