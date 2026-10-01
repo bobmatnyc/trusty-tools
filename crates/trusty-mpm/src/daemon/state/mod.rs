@@ -17,6 +17,8 @@ mod overseer;
 pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
+// #8531: the kernel-bound `claude` of each session id.
+pub(crate) mod session_claudes;
 mod sm;
 // #8535, #8161: which records write in a given tree.
 mod tree_membership;
