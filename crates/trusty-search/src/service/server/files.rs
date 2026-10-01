@@ -60,8 +60,11 @@ pub(super) async fn index_file_handler(
 /// one that did — so the error arm returning `index_file_failed` rather than
 /// `indexed: true` has to be the SAME arm on both transports.
 /// What: [`index_file_handler`]'s whole former body, with the refusal as its
-/// HTTP status beside its body.
+/// HTTP status beside its body. #8976: `indexed` is `true` only when chunks
+/// landed (or a tombstone removed them); a zero-chunk write answers
+/// `indexed: false` with a `reason`, and every body carries `chunks`.
 /// Test: `index_file_over_the_socket_matches_the_http_body`,
+/// `index_file_reports_chunks_and_never_indexes_an_empty_file`,
 /// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
 /// `crate::service::rpc::writes`.
 pub(crate) async fn index_file_report(
@@ -79,8 +82,8 @@ pub(crate) async fn index_file_report(
     // concurrent DELETE cannot remove_dir_all this index's data mid-write.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
-    indexer
-        .index_file(&req.path, &req.content)
+    let outcome = indexer
+        .index_file_outcome(&req.path, &req.content)
         .await
         .map_err(|e| {
             // #5061: a write that failed must say so — the caller cannot infer
@@ -98,15 +101,18 @@ pub(crate) async fn index_file_report(
                     "error": "index_file_failed",
                     "index_id": index_id.0,
                     "path": req.path,
+                    // #8976: the error body says outright that nothing landed.
+                    "indexed": false,
                     "message": e.to_string(),
                 }),
             )
         })?;
-    Ok(serde_json::json!({
-        "index_id": index_id.0,
-        "path": req.path,
-        "indexed": true,
-    }))
+    // #8976: `indexed` follows the outcome; `chunks`/`reason` are additive.
+    let mut body = serde_json::Map::new();
+    body.insert("index_id".into(), index_id.0.into());
+    body.insert("path".into(), req.path.into());
+    body.extend(outcome.report_fields());
+    Ok(serde_json::Value::Object(body))
 }
 
 /// `POST /indexes/:id/remove-file` — drop one file's chunks from an index.

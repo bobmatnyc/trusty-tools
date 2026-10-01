@@ -72,6 +72,7 @@ mod tm_hook_pm_guard_stdin_7975;
 mod tm_hook_pm_guard_supervisor_8453;
 mod tm_hook_pm_guard_trust_anchor_8878;
 mod tm_hook_pretooluse_rewrite;
+mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 mod tm_ls_state_colors;
 mod tm_session_disk_cli;
