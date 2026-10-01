@@ -16,6 +16,7 @@
    */
   import { api } from '../api.js';
   import { getIndexes, getChatAvailable } from '../state.svelte.js';
+  import { dashboardTransport, chatUnavailableReason } from '../transport.js';
   import { tick } from 'svelte';
 
   // ─── Search state ────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@
   // ─── Shared state ────────────────────────────────────────────────────────────
   let indexes = $derived(getIndexes());
   let chatAvailable = $derived(getChatAvailable());
+  let chatOffReason = $derived(chatUnavailableReason(dashboardTransport(null).mode));
 
   // ─── Chat state ──────────────────────────────────────────────────────────────
 
@@ -143,7 +145,7 @@
       const detail = e.message || String(e);
       const friendly =
         e.status === 503
-          ? 'Chat unavailable — set OPENROUTER_API_KEY in .env.local and restart the daemon.'
+          ? `Chat unavailable — ${chatOffReason}`
           : `Request failed: ${detail}`;
       messages = [
         ...messages,
@@ -279,9 +281,7 @@
   <div class="chat-header">
     <h2 class="section-title">Chat</h2>
     {#if !chatAvailable}
-      <span class="chat-unavailable-hint text-muted text-sm">
-        Set <code>OPENROUTER_API_KEY</code> in <code>.env.local</code> to enable chat.
-      </span>
+      <span class="chat-unavailable-hint text-muted text-sm">{chatOffReason}</span>
     {:else}
       <div class="chat-toolbar">
         {#if indexes.length > 0}
@@ -387,7 +387,7 @@
     <div class="chat-disabled-panel">
       <textarea
         class="chat-textarea chat-textarea-disabled"
-        placeholder="Chat disabled — configure OPENROUTER_API_KEY to enable"
+        placeholder="Chat unavailable"
         rows="2"
         disabled
       ></textarea>

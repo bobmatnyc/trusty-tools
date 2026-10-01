@@ -1,0 +1,2 @@
+Fixed
+- Search dashboard "Daemon details" no longer shows a default "Daemon port 7878" or the console's own origin as "API base URL". It states how the page reaches the daemon (the console's `/api/search/` bridge to the Unix socket, or the daemon's own HTTP listener with the port the daemon injected), and shows a socket path or listener only when the daemon reports one (field proposed in #9030). The chat hint no longer tells console users to set `OPENROUTER_API_KEY`: no socket method serves `/chat` (#6285).
