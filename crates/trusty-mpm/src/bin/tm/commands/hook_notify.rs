@@ -214,24 +214,28 @@ pub(crate) async fn post_best_effort(client: &reqwest::Client, url: &str, body: 
         .await;
 }
 
-/// Deliver a `SessionStart` over the daemon socket (#8531).
+/// Deliver a `SessionStart` or `SessionEnd` over the daemon socket (#8531,
+/// #8980).
 ///
 /// Why: only the socket proves the sender's pid, and the daemon binds the
 /// session to the `claude` above that pid — the identity a later
 /// `tm repair delegation` is checked against. Over HTTP the session
-/// registers unbound, and its own repairs are refused.
+/// registers unbound, and its own repairs are refused. #8980: a `SessionEnd`
+/// stales the session's live delegations only when it arrives over the
+/// socket from under that bound `claude`.
 /// What: [`post_session_start_via`] over the resolved daemon socket when
 /// `url` names a loopback daemon; the plain [`post_best_effort`] otherwise.
 /// Test: `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`,
-/// `tm_hook_session_start_8531::a_session_start_with_no_socket_falls_back_to_http`.
-pub(crate) async fn post_session_start(client: &reqwest::Client, url: &str, body: &Value) {
+/// `tm_hook_session_start_8531::a_session_start_with_no_socket_falls_back_to_http`,
+/// `tm_hook_session_end_8980::the_owners_session_end_over_the_socket_stales_its_records`.
+pub(crate) async fn post_lifecycle_via_socket(client: &reqwest::Client, url: &str, body: &Value) {
     let socket = super::managed_merged_prs::is_loopback_url(url)
         .then(trusty_mpm::client::http_client::resolve_daemon_socket)
         .and_then(Result::ok);
     post_session_start_via(socket.as_deref(), client, url, body).await;
 }
 
-/// [`post_session_start`] over an explicit socket path.
+/// [`post_lifecycle_via_socket`] over an explicit socket path.
 ///
 /// What: one 2 s socket attempt. Only an unreachable socket — nothing
 /// listening — falls back to HTTP; a delivered, refused or timed-out attempt
