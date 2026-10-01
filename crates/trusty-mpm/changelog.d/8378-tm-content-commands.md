@@ -17,7 +17,10 @@ Added
   bytes (only the current pin is checked), a newer or missing `schema_major`, a
   failed releases listing or an unreachable host fails without touching the
   previous pin; with nothing installed, the error names
-  `tm content install --from <bundle.tar.gz>`.
+  `tm content install --from <bundle.tar.gz>`. `tm content status` with
+  nothing installed prints the doctor's `info:` line and exits 0 while `tm`
+  still compiles its content in, and exits non-zero once ADR-0064 PHASE_1
+  removes it.
 - `tm doctor` gains a `content` row: OK for a dev checkout or a verified
   bundle; with nothing installed and no checkout serving, INFO (an `Ok` row
   whose message starts `info:`) while `tm` still compiles its content in, and

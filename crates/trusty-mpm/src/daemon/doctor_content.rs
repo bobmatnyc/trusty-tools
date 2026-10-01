@@ -15,17 +15,12 @@
 
 use std::path::Path;
 
+use crate::content::BUILTIN_CONTENT_EMBEDDED;
 use crate::content::status::{ContentStatus, content_status};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
 /// The `tm doctor` row name.
 pub(crate) const CHECK_NAME: &str = "content";
-
-/// Whether this binary still compiles in the content ADR-0064 PHASE_1 moves
-/// out. While it does, nothing installed loses nothing, so the row is INFO.
-// See ADR-0064: the PHASE_1 PR that drops the embedded content sets this to
-// `false`, which turns "nothing installed" into WARN.
-pub(crate) const BUILTIN_CONTENT_EMBEDDED: bool = true;
 
 /// Grades the content cache at `cache_dir`, and the checkout above
 /// `project_dir`. `cache_dir` is `None` when no home directory resolves.
@@ -57,15 +52,8 @@ fn grade(status: &ContentStatus, builtin_embedded: bool) -> DoctorCheck {
         if status.serves() {
             // A dev checkout serves.
             CheckStatus::Ok
-        } else if builtin_embedded {
-            return DoctorCheck::new(
-                CHECK_NAME,
-                CheckStatus::Ok,
-                format!(
-                    "info: no content bundle installed; this binary's built-in content \
-                     serves until ADR-0064 PHASE_1 removes it; {message}"
-                ),
-            );
+        } else if let Some(info) = status.builtin_info(builtin_embedded) {
+            return DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, format!("{info}; {message}"));
         } else {
             CheckStatus::Warn
         }

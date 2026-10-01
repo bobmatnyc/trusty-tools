@@ -82,6 +82,26 @@ impl ContentStatus {
         matches!(self.installed, Err(ContentError::NotInstalled { .. }))
     }
 
+    /// The `info:` line for "nothing installed, nothing else serves", while
+    /// `builtin_embedded` ([`super::BUILTIN_CONTENT_EMBEDDED`]) holds; `None`
+    /// otherwise. A broken lock or bundle never gets one.
+    ///
+    /// Test: `status_with_nothing_installed_is_info_while_builtin_content_ships`.
+    pub fn builtin_info(&self, builtin_embedded: bool) -> Option<&'static str> {
+        (builtin_embedded && !self.serves() && self.not_installed()).then_some(
+            "info: no content bundle installed; this binary's built-in content \
+             serves until ADR-0064 PHASE_1 removes it",
+        )
+    }
+
+    /// Whether `tm content status` exits 0: a source serves, or nothing is
+    /// installed while built-in content still serves.
+    ///
+    /// Test: `status_with_nothing_installed_is_info_while_builtin_content_ships`.
+    pub fn exits_ok(&self, builtin_embedded: bool) -> bool {
+        self.serves() || self.builtin_info(builtin_embedded).is_some()
+    }
+
     /// One line per fact, for `tm content status` and the doctor row.
     ///
     /// Test: `status_with_nothing_installed_names_the_fix`.

@@ -11,6 +11,14 @@
 //! Test: catalog_sync.rs carries unit tests with a FakeGitBackend;
 //! `bundle_cache_tests.rs` covers the content cache.
 
+/// Whether this binary still compiles in the content ADR-0064 PHASE_1 moves
+/// out. While it does, nothing installed loses nothing: `tm doctor` reports
+/// INFO and `tm content status` exits 0.
+// See ADR-0064: the PHASE_1 PR that drops the embedded content sets this to
+// `false`, which turns "nothing installed" into a doctor WARN and a non-zero
+// `tm content status`.
+pub const BUILTIN_CONTENT_EMBEDDED: bool = true;
+
 pub mod bundle_cache;
 pub mod catalog_sync;
 mod catalog_url;

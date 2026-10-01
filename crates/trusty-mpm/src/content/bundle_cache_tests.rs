@@ -510,6 +510,28 @@ fn status_with_nothing_installed_names_the_fix() {
     assert!(status.lines().join("\n").contains(INSTALL_HINT));
 }
 
+/// Critic M2: while built-in content ships, `tm content status` with nothing
+/// installed prints the doctor's info line and exits 0; after ADR-0064
+/// PHASE_1 it exits non-zero. A broken install never exits 0.
+#[test]
+fn status_with_nothing_installed_is_info_while_builtin_content_ships() {
+    let cache = tempfile::tempdir().unwrap();
+    let status = content_status(cache.path(), Some(cache.path()));
+    let info = status.builtin_info(true).expect("info line");
+    assert!(info.starts_with("info: "), "{info}");
+    assert!(status.exits_ok(true));
+    assert!(status.builtin_info(false).is_none());
+    assert!(!status.exits_ok(false));
+
+    let mut src = FakeSource::default();
+    src.publish(A);
+    update(cache.path(), &src, Some(A)).expect("pin A");
+    std::fs::write(cache.path().join(format!("{A}.tar.gz")), b"tampered").unwrap();
+    let broken = content_status(cache.path(), None);
+    assert!(broken.builtin_info(true).is_none());
+    assert!(!broken.exits_ok(true), "a broken install never exits 0");
+}
+
 #[test]
 fn status_reports_a_tampered_bundle_as_unhealthy() {
     let cache = tempfile::tempdir().unwrap();
@@ -632,6 +654,26 @@ fn github_source_refuses_a_listing_longer_than_its_page_cap() {
         .with_max_pages(1);
     let err = src.content_releases().expect_err("over the cap");
     assert!(err.reason.contains("not read to the end"), "{err:?}");
+}
+
+/// Critic M3: a rate-limited (403) or unavailable (503) listing is a failure
+/// that names the status, and an update reads it as `Network`, never as
+/// `NoReleases`.
+#[test]
+fn github_source_reads_a_rate_limited_or_5xx_listing_as_a_failure() {
+    for (status, label) in [(403, "403"), (503, "503")] {
+        let base = serve(vec![(PAGE_1, status, "{\"message\":\"no\"}")]);
+        let src = GithubReleases::with_bases(&base, &base).expect("client");
+        let err = src.content_releases().expect_err("error status");
+        assert!(err.reason.contains(label), "{status}: {err:?}");
+        let cache = tempfile::tempdir().unwrap();
+        let err = update(cache.path(), &src, None).expect_err("no listing");
+        assert!(
+            matches!(err, CacheError::Network { .. }),
+            "{status}: {err:?}"
+        );
+        assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+    }
 }
 
 /// The repository always exists, so a 404 listing is a failure, not "none".

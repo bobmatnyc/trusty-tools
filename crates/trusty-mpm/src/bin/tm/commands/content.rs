@@ -10,6 +10,7 @@
 //! is covered in `trusty_mpm::content::bundle_cache::tests`.
 
 use anyhow::Context;
+use trusty_mpm::content::BUILTIN_CONTENT_EMBEDDED;
 use trusty_mpm::content::bundle_cache::{
     GithubReleases, INSTALL_HINT, UpdateAction, UpdateOutcome, install_from_file, update,
 };
@@ -42,7 +43,11 @@ fn run_blocking(action: ContentAction) -> anyhow::Result<()> {
             for line in status.lines() {
                 println!("{line}");
             }
-            if !status.serves() {
+            // See ADR-0064: built-in content serves until PHASE_1 removes it.
+            if let Some(info) = status.builtin_info(BUILTIN_CONTENT_EMBEDDED) {
+                println!("{info}");
+            }
+            if !status.exits_ok(BUILTIN_CONTENT_EMBEDDED) {
                 anyhow::bail!(
                     "no verified content source; run `tm content update`, or offline `{INSTALL_HINT}`"
                 );

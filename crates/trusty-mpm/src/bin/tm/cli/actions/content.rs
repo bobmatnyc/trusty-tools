@@ -51,6 +51,8 @@ pub(crate) enum ContentAction {
     },
     /// Show the content source `tm` reads and the installed pin's health.
     ///
-    /// Exits non-zero when no source can serve content.
+    /// Exits non-zero when no source can serve content. Until ADR-0064
+    /// PHASE_1, nothing installed prints an `info:` line and exits 0, because
+    /// the binary's built-in content still serves.
     Status,
 }

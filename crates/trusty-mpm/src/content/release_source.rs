@@ -72,7 +72,8 @@ pub trait ReleaseSource {
 /// `github_source_reads_a_non_404_error_status_as_a_failure`,
 /// `github_source_refuses_a_release_listing_that_is_not_json`,
 /// `github_source_refuses_a_listing_longer_than_its_page_cap`,
-/// `github_source_reads_a_404_release_listing_as_a_failure`.
+/// `github_source_reads_a_404_release_listing_as_a_failure`,
+/// `github_source_reads_a_rate_limited_or_5xx_listing_as_a_failure`.
 #[derive(Debug, Clone)]
 pub struct GithubReleases {
     client: reqwest::blocking::Client,
