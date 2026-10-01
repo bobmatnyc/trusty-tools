@@ -18,11 +18,12 @@ use super::hash::{hash_content, hashes_for};
 use super::hash_withhold::{withhold_chunkless_hashes, WITHHELD_HASH};
 use super::progress::ReindexProgress;
 use super::spawn_reindex_awaitable;
-use crate::core::chunker::chunk_ast;
+use crate::core::chunker::{chunk_ast, json_exceeds_window_ceiling};
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::{CodeIndexer, ParsedBatch};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::core::store::{VectorHit, VectorStore};
+use crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES;
 
 /// One chunk: the content a file is reverted to.
 const ALPHA: &str = "pub fn alpha_8976() -> u8 {\n    1\n}\n";
@@ -159,15 +160,32 @@ async fn partial_chunk_landing_withholds_the_hash() {
     );
 }
 
+/// JSON above the 10,000-line window ceiling that the walker still reads.
+///
+/// Why: the walker drops a `.json` file over its 64 KiB data cap before it is
+/// read, so a fixture over that cap never reaches the `too_large` path (#8976).
+/// What: a 10,004-line array of 3-byte lines, about 30 KB; asserts both bounds.
+fn over_ceiling_json() -> String {
+    let huge = format!("[\n{}0\n]\n", "1,\n".repeat(10_001));
+    assert!(json_exceeds_window_ceiling("huge.json", &huge));
+    assert!(
+        huge.len() as u64 <= DEFAULT_DATA_FILE_MAX_BYTES,
+        "the walker's data cap would drop the fixture: {} bytes",
+        huge.len()
+    );
+    huge
+}
+
 /// Blank content and JSON above the window ceiling have final zero chunks,
-/// so they keep their hash and are not re-read on every reindex. Fails when
-/// the `final_chunkless` keep rule is removed from `withhold_chunkless_hashes`.
+/// so they keep their hash and are not re-read on every reindex. Fails on
+/// `huge.json` when the `final_chunkless` keep rule is removed from
+/// `withhold_chunkless_hashes`.
 #[tokio::test]
 async fn blank_and_too_large_files_keep_their_hash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let blank = "\n  \n\n";
-    let huge = format!("{{\n{}  \"end\": 0\n}}\n", "  \"k\": 1,\n".repeat(10_001));
+    let huge = over_ceiling_json();
     fs::write(root.join("blank.json"), blank).unwrap();
     fs::write(root.join("huge.json"), &huge).unwrap();
     let indexer = CodeIndexer::new("final-chunkless-8976", root.clone());
@@ -175,7 +193,7 @@ async fn blank_and_too_large_files_keep_their_hash() {
 
     reindex(&handle).await;
     let hashes = hashes_for(&handle.id);
-    for (file, content) in [("blank.json", blank), ("huge.json", huge.as_str())] {
+    for (file, content) in [("huge.json", huge.as_str()), ("blank.json", blank)] {
         let ids = handle.indexer.read().await.chunk_ids_for_file(file).await;
         assert!(ids.is_empty(), "{file} has no chunks: {ids:?}");
         assert_eq!(
@@ -184,6 +202,51 @@ async fn blank_and_too_large_files_keep_their_hash() {
             "{file} keeps its hash"
         );
     }
+}
+
+/// A kept `too_large` hash must not hide a real edit. Growing over the
+/// ceiling removes the file's old chunks; shrinking back under it indexes
+/// the new content on the next reindex. Fails when a kept hash skips the
+/// file whatever its new content is.
+#[tokio::test]
+async fn too_large_json_is_indexed_again_once_it_shrinks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let path = root.join("data.json");
+    let key = PathBuf::from("data.json");
+    let before = "{\n  \"before_8976\": 1\n}\n";
+    let after = "{\n  \"shrunk_8976\": 2\n}\n";
+    let huge = over_ceiling_json();
+    fs::write(&path, before).unwrap();
+    let indexer = CodeIndexer::new("too-large-shrinks-8976", root.clone());
+    let handle = handle_over("too-large-shrinks-8976", &root, indexer);
+    let hashes = hashes_for(&handle.id);
+
+    reindex(&handle).await;
+    assert!(landed_text(&handle, "data.json")
+        .await
+        .contains("before_8976"));
+
+    fs::write(&path, &huge).unwrap();
+    reindex(&handle).await;
+    let text = landed_text(&handle, "data.json").await;
+    assert!(text.is_empty(), "no chunk survives the growth: {text:?}");
+    assert_eq!(
+        hashes.get(&key).map(|h| h.clone()),
+        Some(hash_content(&huge))
+    );
+
+    fs::write(&path, after).unwrap();
+    reindex(&handle).await;
+    let text = landed_text(&handle, "data.json").await;
+    assert!(
+        text.contains("shrunk_8976"),
+        "the shrunk file is indexed: {text:?}"
+    );
+    assert_eq!(
+        hashes.get(&key).map(|h| h.clone()),
+        Some(hash_content(after))
+    );
 }
 
 /// A store whose upsert always fails, so `commit_parsed_batch` errors after
