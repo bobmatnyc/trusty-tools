@@ -6,7 +6,7 @@ model: sonnet
 extends: base-engineer
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # Prompt Engineer

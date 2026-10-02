@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # Secrets Manager Agent

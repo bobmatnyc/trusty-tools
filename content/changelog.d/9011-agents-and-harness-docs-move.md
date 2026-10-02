@@ -3,5 +3,5 @@ Added
   under `content/agents/`, and the four harness-understanding docs under
   `content/instructions/harness_understanding/`, moved from
   `crates/trusty-agents-common/src/assets/` (#9011).
-- Every agent declares `metadata: {version: "1.0.0"}`; `content/manifest.toml`
-  lists all 43 as members under bundle version 1.0.0 (#9011).
+- Every agent declares `metadata: {version: "0.1.0"}`; `content/manifest.toml`
+  lists all 43 as members under bundle version 0.2.0 (#9011).

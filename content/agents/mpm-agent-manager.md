@@ -7,7 +7,7 @@ extends: base-agent
 skills: [tm-capabilities]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # MPM Agent Manager

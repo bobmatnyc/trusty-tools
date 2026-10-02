@@ -7,7 +7,7 @@ extends: base-qa
 skills: [code-review-standards, contract-driven-testing]
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-review, mcp__trusty-search]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # Code Critic

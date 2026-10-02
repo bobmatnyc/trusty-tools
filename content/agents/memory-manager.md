@@ -6,7 +6,7 @@ model: haiku
 extends: base-agent
 tools: [Read, Grep, mcp__trusty-memory]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # Memory Manager

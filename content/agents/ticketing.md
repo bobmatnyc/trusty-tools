@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # Ticketing Agent
@@ -117,8 +117,7 @@ yours, and the pull-request side is `version-control`'s, applied by
 
 🔴 **Every issue carries three label families the moment it is created.**
 Labeling later does not happen: an issue filed bare stays bare, and the board
-loses the only axes anyone triages on. A `gh issue create` missing these is an
-incomplete filing, not something to tidy up afterwards.
+loses the only axes anyone triages on.
 
 **1. Type — exactly one** of `bug`, `enhancement`, `refactor`, `chore`,
 `documentation`, `epic`.

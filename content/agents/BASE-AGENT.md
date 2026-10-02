@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents

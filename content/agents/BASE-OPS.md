@@ -3,7 +3,7 @@ name: base-ops
 role: base-ops
 extends: base-agent
 metadata:
-  version: "1.0.0"
+  version: "0.1.0"
 ---
 
 # BASE-OPS — Foundation for all ops agents
