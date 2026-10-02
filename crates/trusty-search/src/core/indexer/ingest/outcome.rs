@@ -45,7 +45,7 @@ impl CodeIndexer {
 /// for, and the caller has no other way to learn it (#8976).
 /// What: `Indexed` carries how many chunks reached the corpus; `Empty`,
 /// `TooLarge` and `NoChunks` mean nothing was written; `Removed` is a
-/// tombstone write.
+/// tombstone write; `SopsEncrypted` was refused and its old chunks dropped.
 /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexFileOutcome {
@@ -59,6 +59,9 @@ pub enum IndexFileOutcome {
     NoChunks,
     /// The content was a tombstone; the file's chunks were removed.
     Removed,
+    /// #8922: the content is a sops-encrypted file. Nothing was indexed and
+    /// any chunks an earlier write left for the file were removed.
+    SopsEncrypted,
 }
 
 impl IndexFileOutcome {
@@ -67,11 +70,14 @@ impl IndexFileOutcome {
     /// Why: blank content and over-ceiling JSON legitimately have no chunks;
     /// anything else with none is a chunker gap that must surface instead of
     /// passing as success.
-    /// What: `chunks > 0` is `Indexed`, blank content `Empty`, JSON above the
-    /// window ceiling `TooLarge`, else `NoChunks`.
+    /// What: sops-encrypted content is `SopsEncrypted` whatever the count
+    /// (#8922); otherwise `chunks > 0` is `Indexed`, blank content `Empty`,
+    /// JSON above the window ceiling `TooLarge`, else `NoChunks`.
     /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
     pub fn classify(file: &str, content: &str, chunks: usize) -> Self {
-        if chunks > 0 {
+        if crate::core::sops::is_sops_encrypted(content) {
+            Self::SopsEncrypted
+        } else if chunks > 0 {
             Self::Indexed { chunks }
         } else if content.trim().is_empty() {
             Self::Empty
@@ -86,10 +92,10 @@ impl IndexFileOutcome {
     ///
     /// Why: the batch reindex keeps the content hash of a file whose zero
     /// chunks are final, so it is not re-read on every reindex (#8976).
-    /// What: `true` for `Empty` and `TooLarge`.
+    /// What: `true` for `Empty`, `TooLarge` and `SopsEncrypted`.
     /// Test: `zero_chunk_outcomes_are_never_reported_as_indexed`.
     pub fn zero_chunks_is_final(&self) -> bool {
-        matches!(self, Self::Empty | Self::TooLarge)
+        matches!(self, Self::Empty | Self::TooLarge | Self::SopsEncrypted)
     }
 
     /// The fields a transport adds to its `index-file` response body.
@@ -107,6 +113,7 @@ impl IndexFileOutcome {
             Self::TooLarge => (false, 0, Some("too_large")),
             Self::NoChunks => (false, 0, Some("no_chunks")),
             Self::Removed => (true, 0, None),
+            Self::SopsEncrypted => (false, 0, Some("sops_encrypted")),
         };
         let mut fields = serde_json::Map::new();
         fields.insert("indexed".into(), indexed.into());
@@ -152,6 +159,19 @@ mod tests {
             );
             assert_eq!(outcome.zero_chunks_is_final(), is_final, "{at}");
         }
+        // #8922: sops content is refused whatever the chunker would produce,
+        // and its zero chunks are final. Built from parts so this file is not
+        // itself a sops document.
+        let sops = format!(
+            "k: ENC[AES256{}data:eA==,type:str]\nsops:\n    version: 3.8.1\n",
+            "_GCM,"
+        );
+        let refused = IndexFileOutcome::classify("s.yaml", &sops, 3);
+        assert_eq!(refused, IndexFileOutcome::SopsEncrypted);
+        let fields = refused.report_fields();
+        assert_eq!(fields["indexed"], false);
+        assert_eq!(fields["reason"], "sops_encrypted");
+        assert!(refused.zero_chunks_is_final());
         let removed = IndexFileOutcome::Removed.report_fields();
         assert_eq!(removed["indexed"], true);
         assert_eq!(removed["chunks"], 0);

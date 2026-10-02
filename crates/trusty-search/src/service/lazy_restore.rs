@@ -267,6 +267,9 @@ pub(crate) async fn restore_index_on_demand(
         corpus_open_failure,
     );
 
+    // #8922: a persisted glob that does not parse is skipped, never applied
+    // to every path; say so with the index id, and GET config reports it.
+    crate::core::repo_config::report_invalid_restored_globs(&entry.id, &entry.exclude_globs);
     let handle = IndexHandle {
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
