@@ -61,7 +61,11 @@ the value.
 - **Console-first entry.** Secrets are their own service page in the
   trusty-console dashboard, scoped to a project or an owner.
 - **Lightweight and fast.** A library crate served over an existing UDS
-  socket. No new daemon, no startup work, no background task.
+  socket. No new daemon, no startup work, no background task. Daemon here
+  means a resident, supervised process started at login or by launchd. An
+  on-demand trusty-secrets socket that spawns on the first call, holds no
+  background task and exits when idle is not a daemon (owner ruling 28,
+  2026-10-02; ADR-0034 pattern).
 - **Many stores, one surface.** Keychain, 1Password, Keeper, Vercel, GitHub
   Actions and more behind one trait.
 - **Usable from any language.** App code reads secrets through env injection,
@@ -69,7 +73,7 @@ the value.
 
 ### Non-Goals
 
-- A new daemon or TCP listener for secrets (owner ruling 2026-10-01).
+- A new daemon (as defined above) or TCP listener for secrets (owner ruling 2026-10-01).
 - A machine-wide secret scope. Scope is project or owner only.
 - Showing a stored value. The console shows length and last-updated only.
 - Rotating or generating secrets.

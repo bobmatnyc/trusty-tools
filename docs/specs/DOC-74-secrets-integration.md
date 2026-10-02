@@ -692,6 +692,9 @@ Product requirements: [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md)
 Design record: [#7517, 2026-10-01 design and owner answers](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5941463665).
 Source citations below are pinned to commit `51d28c2562`.
 
+**Daemon, defined.** "Daemon" here means a resident, supervised process started at login or by launchd. An on-demand trusty-secrets socket that spawns on the first call, holds no background task and exits when idle is not a daemon (owner ruling 28, 2026-10-02; ADR-0034 pattern).
+Owner ruling 24 (2026-10-02) moves hosting of the `secrets.*` methods from the tm daemon to the trusty-secrets on-demand socket, with tm and console as clients.
+
 ### 15.1 What changed and why
 
 The owner directed (2026-10-01, verbatim): *"Secrets should be its own
