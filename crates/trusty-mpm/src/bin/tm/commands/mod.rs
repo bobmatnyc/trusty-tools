@@ -47,6 +47,8 @@ pub(crate) mod doctor_fix_agents;
 // #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
 pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
+// #8371: the opt-in `--network` gcloud auth row.
+pub(crate) mod doctor_gcloud;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
 // #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
