@@ -65,7 +65,7 @@ const EVALUATORS: &[&str] = &[
 
 /// The basename of a program word, lowercased: APFS is case-insensitive, so
 /// `SECURITY` runs `security`.
-pub(super) fn basename(word: &str) -> String {
+pub(crate) fn basename(word: &str) -> String {
     let word = word.strip_prefix('\\').unwrap_or(word);
     word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase()
 }
@@ -294,7 +294,7 @@ fn options_enable_xtrace(args: &[String]) -> bool {
 /// `php` —
 /// attached (`-cCODE`) or the next word, found anywhere in `args`. A script
 /// path and its arguments are not code: they are judged like any program's.
-pub(super) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a str> {
+pub(crate) fn code_operands<'a>(program: &str, args: &'a [String]) -> Vec<&'a str> {
     let all = || args.iter().map(String::as_str).collect();
     let (short, long): (&[char], &[&str]) = match program {
         // #8676 round 3: PowerShell reads `-c`, `-Command`, `-EncodedCommand`
@@ -345,7 +345,7 @@ pub(crate) fn is_evaluator(program: &str) -> bool {
 
 /// The [`EVALUATORS`] or shell entry `program` runs as, with a version suffix
 /// dropped (#8676 round 3): `python3.12` and `lua5.4` run as `python`, `lua`.
-pub(super) fn evaluator_name(program: &str) -> Option<&str> {
+pub(crate) fn evaluator_name(program: &str) -> Option<&str> {
     let known = |p: &str| EVALUATORS.contains(&p) || DASH_C_SHELLS.contains(&p);
     if known(program) {
         return Some(program);
@@ -360,7 +360,8 @@ const KEYWORDS: &[&str] = &[
 ];
 
 /// The compound-command openers a `coproc NAME` can precede.
-const COMPOUND_OPENERS: &[&str] = &["{", "while", "until", "if", "for", "select", "case", "[["];
+pub(crate) const COMPOUND_OPENERS: &[&str] =
+    &["{", "while", "until", "if", "for", "select", "case", "[["];
 
 /// How many words of `argv` from `from` are leading keywords, and whether one
 /// is `coproc` (#8676 round 4).

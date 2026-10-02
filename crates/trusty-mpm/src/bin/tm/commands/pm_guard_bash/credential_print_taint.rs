@@ -224,7 +224,7 @@ fn braced_carries(body: &str, names: &BTreeSet<String>, depth: usize) -> bool {
 }
 
 /// Whether `text` is a shell variable name.
-pub(super) fn is_identifier(text: &str) -> bool {
+pub(crate) fn is_identifier(text: &str) -> bool {
     text.as_bytes()
         .first()
         .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')

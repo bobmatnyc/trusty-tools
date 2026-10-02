@@ -98,11 +98,17 @@ mod architect_pane;
 mod architect_pane_env;
 mod architect_pane_parse;
 mod architect_pane_probe;
+mod architect_pane_reach;
 mod architect_pane_verbs;
 #[cfg(test)]
 pub(crate) use architect_pane::Pane;
 pub(crate) use architect_pane::{ARCHITECT_PANE_RULE, PaneProbe, evaluate_architect_pane};
 pub(crate) use architect_pane_probe::LivePanes;
+// #9001: the exact-target floor — a tmux target must name an existing object.
+mod tmux_exact_target;
+#[cfg(test)]
+pub(crate) use tmux_exact_target::TmuxObject;
+pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
 mod floor_d4;
 mod floor_d4_rules;

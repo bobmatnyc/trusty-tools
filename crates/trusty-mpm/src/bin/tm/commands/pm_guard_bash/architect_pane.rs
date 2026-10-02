@@ -39,6 +39,7 @@
 
 use super::architect_pane_env::{PICKED, RETARGET};
 use super::architect_pane_parse::{Hit, Target, tmux_hits};
+use super::tmux_exact_target::TmuxObject;
 
 /// One pane as `tmux list-panes -a` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,12 @@ pub(crate) trait PaneProbe {
     fn panes(&self, server: &[String]) -> Result<Vec<Pane>, String>;
     /// The caller's own pane, `$TMUX_PANE`.
     fn current_pane(&self) -> Option<String>;
+    /// Every pane of that server with its window and session, for the #9001
+    /// exact-target rule; no server running is `Ok(vec![])`.
+    // #9001: a probe that cannot list denies every target (fail closed).
+    fn objects(&self, _server: &[String]) -> Result<Vec<TmuxObject>, String> {
+        Err("this probe lists no tmux objects".into())
+    }
 }
 
 /// One server's pane list, or why tmux would not give it.

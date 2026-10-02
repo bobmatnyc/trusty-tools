@@ -18,6 +18,9 @@
 //! here. Architect-exempt, on every path: the D4 remainder
 //! (`pm_guard_bash::evaluate_d4_floor`) and, since #8902, any tmux verb aimed
 //! at the Architect's pane (`pm_guard_bash::evaluate_architect_pane`).
+//! Universal on every path since #9001: a tmux target that does not resolve
+//! exactly to an existing pane, window or session
+//! (`pm_guard_bash::evaluate_tmux_exact_target`).
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -42,8 +45,9 @@ use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
 };
 use crate::commands::pm_guard_bash::{
-    ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, evaluate_architect_pane,
-    evaluate_d4_floor, evaluate_destructive_delete_command, unclassifiable_reason,
+    ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
+    evaluate_architect_pane, evaluate_d4_floor, evaluate_destructive_delete_command,
+    evaluate_tmux_exact_target, unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -206,6 +210,13 @@ pub(crate) fn evaluate_floors(
         return Some(FloorDeny {
             rule: ARCHITECT_PANE_RULE,
             reason: with_identity(reason, why),
+        });
+    }
+    // #9001: a tmux target must resolve exactly; every caller is bound.
+    if let Some(reason) = command.and_then(|c| evaluate_tmux_exact_target(c, probes.panes)) {
+        return Some(FloorDeny {
+            rule: TMUX_TARGET_RULE,
+            reason,
         });
     }
     None
