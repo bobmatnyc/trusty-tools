@@ -6,7 +6,8 @@
 //! mocks, because each one lives entirely in what git reports about a working
 //! directory. The remote canonicalization is pure and gets ordinary table
 //! tests.
-//! What: `canonical_remote` equivalence and non-equivalence; the
+//! What: `canonical_remote` equivalence and non-equivalence, including SSH
+//! alias resolution from an injected table (#9089); the
 //! remote-mismatch and no-origin refusals; the dirty-tree warn-and-proceed
 //! (including that the fetch still lands and the local branch does not move);
 //! the clean-reuse fast-forward; the fresh clone; and the truncation of a long
@@ -82,6 +83,116 @@ fn equivalent_remote_spellings_match() {
         "HTTPS://GitHub.com/BobMatNYC/Trusty-Tools.git",
     ] {
         assert_eq!(canonical_remote(url), want, "canonicalizing {url}");
+    }
+}
+
+/// The #9089 repro's alias table, parsed from a literal — never `~/.ssh/config`.
+fn duetto_aliases() -> SshHostAliases {
+    SshHostAliases::parse("Host github-duetto\n  HostName github.com\n")
+}
+
+/// A checkout at `<tmp>/base` whose `origin` is the #9089 alias remote.
+fn alias_origin_checkout(tmp: &Path) -> std::path::PathBuf {
+    let base = init_origin(&tmp.join("base")).to_path_buf();
+    git(
+        &base,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github-duetto:duettoresearch/APEX.git",
+        ],
+    );
+    base
+}
+
+/// #9089: an SSH alias for github.com is the github.com repository, in the
+/// scp-style and `ssh://` spellings both.
+/// Test: itself.
+#[test]
+fn an_ssh_alias_origin_matches_its_github_remote() {
+    let aliases = duetto_aliases();
+    let want = canonical_remote("https://github.com/duettoresearch/apex.git");
+    for url in [
+        "git@github-duetto:duettoresearch/APEX.git",
+        "github-duetto:duettoresearch/apex",
+        "ssh://git@github-duetto/duettoresearch/APEX.git",
+        "git+ssh://git@github-duetto/duettoresearch/apex",
+    ] {
+        assert_eq!(
+            canonical_remote_with(url, &aliases),
+            want,
+            "canonicalizing {url}"
+        );
+    }
+}
+
+/// #9089: a host with no alias entry, a non-SSH scheme, and a local path that
+/// merely contains the alias text all canonicalize exactly as before.
+/// Test: itself.
+#[test]
+fn a_host_with_no_alias_entry_canonicalizes_as_before() {
+    let aliases = duetto_aliases();
+    for url in [
+        "git@github.com:acme/widget.git",
+        "git@gitlab.com:acme/widget.git",
+        "git@gh-other:acme/widget.git",
+        "ssh://git@gh-other:2222/acme/widget.git",
+        "https://github-duetto/acme/widget",
+        "/tmp/github-duetto:x/widget",
+    ] {
+        assert_eq!(
+            canonical_remote_with(url, &aliases),
+            canonical_remote(url),
+            "canonicalizing {url}"
+        );
+    }
+}
+
+/// #9089 end to end through the identity check: a real checkout whose origin
+/// is the alias remote is accepted for the github.com clone URL.
+/// Test: itself.
+#[test]
+fn an_ssh_alias_origin_checkout_matches_its_github_remote() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = alias_origin_checkout(tmp.path());
+
+    verify_remote_matches(
+        &base,
+        "https://github.com/duettoresearch/apex.git",
+        &duetto_aliases(),
+    )
+    .expect("an alias origin is the repository its real host serves");
+}
+
+/// FAIL-OPEN CHECK, error arm (#9089): an ssh config that is missing, is not
+/// a readable file, or holds no parseable `Host` entry resolves no alias, so
+/// the alias origin is still `RemoteMismatch` — today's behaviour, never a
+/// match.
+/// Test: itself.
+#[test]
+fn an_unreadable_ssh_config_never_turns_an_alias_into_a_match() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let base = alias_origin_checkout(tmp.path());
+    let garbage = tmp.path().join("garbage-config");
+    std::fs::write(&garbage, "\u{0}\u{1} === not ssh config\nHostName\n").expect("write");
+
+    for config in [
+        tmp.path().join("no-such-config"),
+        tmp.path().to_path_buf(),
+        garbage,
+    ] {
+        let aliases = SshHostAliases::load(&config);
+        let err = verify_remote_matches(
+            &base,
+            "https://github.com/duettoresearch/apex.git",
+            &aliases,
+        )
+        .expect_err("an unread alias must not match");
+        assert!(
+            matches!(err, ColdStartError::RemoteMismatch { .. }),
+            "config {config:?}: expected RemoteMismatch, got {err:?}"
+        );
     }
 }
 

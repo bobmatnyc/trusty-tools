@@ -61,6 +61,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{inproject, inproject_hygiene};
+use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// How many working-tree entries a skipped-refresh notice lists before it
 /// summarises the rest.
@@ -224,7 +225,9 @@ pub fn ensure_managed_checkout_at(
     if reused {
         // The one refusal: an existing checkout must be the repo that was asked
         // for. Checked before any write.
-        verify_remote_matches(base_path, clone_url)?;
+        // #9089: an unreadable `~/.ssh/config` loads as the empty table, which
+        // resolves no alias — today's comparison, never a match by default.
+        verify_remote_matches(base_path, clone_url, &SshHostAliases::for_current_user())?;
 
         refresh_skipped = fast_forward_skip_reason(base_path);
         if let Some(reason) = &refresh_skipped {
@@ -275,10 +278,18 @@ pub fn ensure_managed_checkout_at(
 /// cannot read the remote of is `OriginUnreadable` (#4734), because "move or
 /// remove that directory" is the wrong instruction for a config git refused to
 /// parse.
+/// #9089: both sides are canonicalized through `aliases`, so an origin on a
+/// `~/.ssh/config` alias host matches the real host it names.
 /// Test: `existing_checkout_on_a_different_remote_fails_loud`,
 /// `existing_checkout_with_an_unreadable_remote_fails_loud`,
-/// `equivalent_remote_spellings_match`.
-fn verify_remote_matches(base_path: &Path, requested: &str) -> Result<(), ColdStartError> {
+/// `equivalent_remote_spellings_match`,
+/// `an_ssh_alias_origin_checkout_matches_its_github_remote`,
+/// `an_unreadable_ssh_config_never_turns_an_alias_into_a_match`.
+fn verify_remote_matches(
+    base_path: &Path,
+    requested: &str,
+    aliases: &SshHostAliases,
+) -> Result<(), ColdStartError> {
     let found = inproject::get_origin_url(base_path).map_err(|reason| {
         ColdStartError::OriginUnreadable {
             path: base_path.to_path_buf(),
@@ -292,7 +303,7 @@ fn verify_remote_matches(base_path: &Path, requested: &str) -> Result<(), ColdSt
             requested: requested.to_string(),
         });
     };
-    if canonical_remote(&found) == canonical_remote(requested) {
+    if canonical_remote_with(&found, aliases) == canonical_remote_with(requested, aliases) {
         return Ok(());
     }
     Err(ColdStartError::RemoteMismatch {
@@ -366,20 +377,40 @@ fn fast_forward_skip_reason(base_path: &Path) -> Option<String> {
 /// `https://host:443/o/r` and `https://host/o/r` compare UNEQUAL — a false
 /// mismatch, which fails loud rather than silently proceeding, the safe
 /// direction for a check whose whole job is to refuse.
+/// This form resolves no SSH alias; the cold-start check uses
+/// [`canonical_remote_with`] (#9089).
 /// Test: `equivalent_remote_spellings_match`, `different_hosts_do_not_match`.
 pub fn canonical_remote(url: &str) -> String {
+    canonical_remote_with(url, &SshHostAliases::empty())
+}
+
+/// [`canonical_remote`], with an SSH transport's host resolved through `aliases`.
+///
+/// Why (#9089): `git@github-duetto:o/r.git`, where `~/.ssh/config` maps
+/// `Host github-duetto` to `github.com`, is the repository at
+/// `https://github.com/o/r`. Keeping the alias as the host refused that
+/// checkout with `RemoteMismatch`. Same bug class as #7196.
+/// What: the [`canonical_remote`] steps, plus one: for an `ssh://` URL or an
+/// scp-style `host:path` remote, a host that
+/// [`SshHostAliases::hostname_for`] renames is replaced by the name it gives.
+/// A host with no entry, and every non-SSH scheme, is left as written.
+/// Test: `an_ssh_alias_origin_matches_its_github_remote`,
+/// `a_host_with_no_alias_entry_canonicalizes_as_before`.
+pub(crate) fn canonical_remote_with(url: &str, aliases: &SshHostAliases) -> String {
     let lowered = url.trim().to_ascii_lowercase();
-    let after_scheme = match lowered.find("://") {
-        Some(i) => &lowered[i + 3..],
-        None => &lowered[..],
+    let (scheme, after_scheme) = match lowered.find("://") {
+        Some(i) => (Some(&lowered[..i]), &lowered[i + 3..]),
+        None => (None, &lowered[..]),
     };
     let after_creds = match after_scheme.find('@') {
         Some(i) => &after_scheme[i + 1..],
         None => after_scheme,
     };
+    // #9089: an SSH alias names a machine only through `~/.ssh/config`.
+    let resolved = resolve_ssh_alias_host(scheme, after_creds, aliases);
     // scp-syntax `host:owner/repo` and an explicit `host:port/…` both collapse
     // to a path separator; both sides of the comparison get the same treatment.
-    let normalized = after_creds.replacen(':', "/", 1);
+    let normalized = resolved.replacen(':', "/", 1);
     let trimmed = normalized.trim_end_matches('/');
     let no_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     no_git
@@ -388,6 +419,28 @@ pub fn canonical_remote(url: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// `rest` with its host replaced by the machine an SSH alias names (#9089).
+///
+/// `rest` is a lowercased remote with its scheme and `user@` already removed.
+/// Only an SSH transport consults `aliases`: `ssh://` (and git's `git+ssh://`
+/// / `ssh+git://` spellings), or a scheme-less `host:path` whose colon comes
+/// before any slash — otherwise it is a local path. Anything else is returned
+/// unchanged.
+fn resolve_ssh_alias_host(scheme: Option<&str>, rest: &str, aliases: &SshHostAliases) -> String {
+    let host_end = match scheme {
+        Some("ssh" | "git+ssh" | "ssh+git") => rest.find([':', '/']),
+        None => rest.find(':').filter(|&i| !rest[..i].contains('/')),
+        Some(_) => None,
+    };
+    match host_end
+        .filter(|&end| end > 0)
+        .and_then(|end| Some((aliases.hostname_for(&rest[..end])?, end)))
+    {
+        Some((real, end)) => format!("{real}{}", &rest[end..]),
+        None => rest.to_string(),
+    }
 }
 
 /// Render the working-tree entries naming why a fast-forward was skipped.
