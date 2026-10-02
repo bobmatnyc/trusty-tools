@@ -76,6 +76,8 @@ pub mod server;
 pub mod service;
 // #6642: per-service pid discovery + CPU sampling for the home-page graphs.
 pub mod service_metrics;
+// #9035: peer-identity gate for the `--tailscale` listener.
+pub(crate) mod tailnet_peer;
 // #6155: the trusty-search, trusty-memory and trusty-analyze SPAs, mounted
 // under /tools/<tool>/.
 pub mod tools_ui;
@@ -600,10 +602,20 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         info!("trusty-console also listening on http://{extra_local}");
         eprintln!("trusty-console (tailnet): http://{extra_local}");
         let r = router.clone();
+        // #9035: the tailnet listener serves only nodes owned by this machine's
+        // own Tailscale login; the loopback listener below is not gated.
+        let gate = Arc::new(tailnet_peer::TailnetPeerGate::new(
+            Arc::new(tailnet_peer::TailscaleCliResolver),
+            extra_addr.ip(),
+        ));
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(extra_listener, r)
-                .with_graceful_shutdown(trusty_common::shutdown_signal())
-                .await
+            if let Err(e) = tailnet_peer::serve_tailnet(
+                extra_listener,
+                r,
+                gate,
+                trusty_common::shutdown_signal(),
+            )
+            .await
             {
                 tracing::warn!("extra listener {extra_local} exited: {e}");
             }
