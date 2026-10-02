@@ -149,7 +149,7 @@ impl SessionManager {
         // whichever session holds the name now — possibly another session's,
         // even the Architect's — into this record's workspace. Only a session
         // proved to hold the record's pane is captured, from that pane.
-        if let Ok(RuntimeOwnership::Owned { pane_id }) =
+        if let Ok(RuntimeOwnership::Owned { pane_id, .. }) =
             runtime_identity::runtime_ownership(&record, self.tmux.as_ref())
         {
             super::snapshot::capture_into_pane(&mut record, &*self.tmux, Some(&pane_id)).await;

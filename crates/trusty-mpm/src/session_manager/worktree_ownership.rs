@@ -909,6 +909,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: Some(id),
             terminal_at: None,
@@ -1065,6 +1066,7 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None, // registry field unset — must fall back
             terminal_at: None,

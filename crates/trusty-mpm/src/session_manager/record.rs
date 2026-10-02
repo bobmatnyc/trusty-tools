@@ -488,6 +488,20 @@ pub struct SessionRecord {
     #[serde(default)]
     pub pane_id: Option<String>,
 
+    /// The tmux server instance `pane_id` was read on, `<pid>:<start_time>`
+    /// (#9004).
+    ///
+    /// Why: a `%N` pane id is unique within one tmux server only, and a
+    /// restarted server reuses `%0`, `%1`, …, so `pane_id` alone cannot prove
+    /// the live pane is this record's.
+    /// What: written with `pane_id` at every capture
+    /// ([`super::pane_identity::capture`]). `#[serde(default)]` loads every
+    /// record written before this field as `None`, and a `None` is never
+    /// `Owned`: such a record fails closed.
+    /// Test: `a_record_without_a_server_identity_never_owns_its_pane`.
+    #[serde(default)]
+    pub tmux_server: Option<String>,
+
     /// Delivery status of the turnkey `--task` pane injection (#2364).
     ///
     /// Why: `inject_task_when_ready` was fire-and-forget before this field

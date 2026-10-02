@@ -708,6 +708,7 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
