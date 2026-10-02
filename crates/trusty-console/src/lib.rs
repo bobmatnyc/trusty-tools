@@ -594,33 +594,15 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     info!("trusty-console listening on http://{primary_local}");
 
     // ── bind additional listeners (Tailscale mode: secondary addr) ──────────
-    for &extra_addr in addrs.get(1..).unwrap_or(&[]) {
-        let extra_listener = bind::bind_listener(extra_addr).await?;
-        let extra_local = extra_listener
-            .local_addr()
-            .context("get extra local addr")?;
-        info!("trusty-console also listening on http://{extra_local}");
-        eprintln!("trusty-console (tailnet): http://{extra_local}");
-        let r = router.clone();
-        // #9035: the tailnet listener serves only nodes owned by this machine's
-        // own Tailscale login; the loopback listener below is not gated.
-        let gate = Arc::new(tailnet_peer::TailnetPeerGate::new(
-            Arc::new(tailnet_peer::TailscaleCliResolver),
-            extra_addr.ip(),
-        ));
-        tokio::spawn(async move {
-            if let Err(e) = tailnet_peer::serve_tailnet(
-                extra_listener,
-                r,
-                gate,
-                trusty_common::shutdown_signal(),
-            )
-            .await
-            {
-                tracing::warn!("extra listener {extra_local} exited: {e}");
-            }
-        });
-    }
+    // #9035: each serves only nodes owned by this machine's own Tailscale
+    // login, addressed to itself by exact Host/Origin; loopback is not gated.
+    tailnet_peer::spawn_tailnet_listeners(
+        addrs.get(1..).unwrap_or(&[]),
+        &router,
+        Arc::new(tailnet_peer::TailscaleCliResolver),
+        shutdown_signal,
+    )
+    .await?;
 
     // ── write discovery file (primary address) ──────────────────────────────
     // Best-effort: log a warning on failure but do not abort the serve.

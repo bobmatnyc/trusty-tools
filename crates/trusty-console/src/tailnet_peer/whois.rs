@@ -26,6 +26,8 @@ pub struct PeerIdentity {
     pub login: String,
     /// True when the node carries ACL tags; a tagged node has no human owner.
     pub tagged: bool,
+    /// The node's MagicDNS name, lowercased, trailing dot removed, when known.
+    pub node_name: Option<String>,
 }
 
 /// Why an identity lookup produced no identity. Every variant fails closed.
@@ -109,6 +111,8 @@ struct WhoisJson {
 struct WhoisNode {
     #[serde(rename = "Tags", default)]
     tags: Option<Vec<String>>,
+    #[serde(rename = "Name", default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,9 +124,10 @@ struct WhoisUser {
 /// Parse `tailscale whois --json` output into a [`PeerIdentity`].
 ///
 /// Why: kept pure so the shape the gate depends on is pinned by unit tests.
-/// What: reads `UserProfile.LoginName` and `Node.Tags`. A node is tagged when it
-/// has any tag or its login is `tagged-devices`. A missing or empty login is
-/// [`WhoisError::NoLogin`], never an empty identity that could compare equal.
+/// What: reads `UserProfile.LoginName`, `Node.Tags` and `Node.Name` (the
+/// MagicDNS FQDN, normalized). A node is tagged when it has any tag or its login
+/// is `tagged-devices`. A missing or empty login is [`WhoisError::NoLogin`],
+/// never an empty identity that could compare equal.
 /// Test: `parse_whois_reads_login_and_untagged_node`,
 /// `parse_whois_flags_tagged_node`, `parse_whois_rejects_missing_login`.
 pub fn parse_whois_json(bytes: &[u8]) -> Result<PeerIdentity, WhoisError> {
@@ -133,10 +138,15 @@ pub fn parse_whois_json(bytes: &[u8]) -> Result<PeerIdentity, WhoisError> {
         .map(|u| u.login_name.trim().to_owned())
         .filter(|l| !l.is_empty())
         .ok_or(WhoisError::NoLogin)?;
-    let has_tags = parsed
-        .node
-        .and_then(|n| n.tags)
-        .is_some_and(|tags| !tags.is_empty());
+    let (tags, name) = parsed.node.map_or((None, None), |n| (n.tags, n.name));
+    let has_tags = tags.is_some_and(|tags| !tags.is_empty());
     let tagged = has_tags || login == TAGGED_DEVICES_LOGIN;
-    Ok(PeerIdentity { login, tagged })
+    let node_name = name
+        .map(|n| n.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|n| !n.is_empty());
+    Ok(PeerIdentity {
+        login,
+        tagged,
+        node_name,
+    })
 }

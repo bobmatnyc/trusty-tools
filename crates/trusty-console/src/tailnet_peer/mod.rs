@@ -4,16 +4,23 @@
 //! #9035 it served every route, writes included, to any tailnet node the ACLs
 //! let reach the port. The origin guard does not help there: it only inspects an
 //! `Origin` header when one is present, so `curl` from a foreign node passed.
+//! A peer gate alone is not enough either: CORS is permissive, so a foreign
+//! page in the owner's own browser on another of the owner's devices could read
+//! `GET` responses, and DNS rebinding reaches the same place.
 //! What: [`TailnetPeerGate`] decides, per peer address, whether the node behind
 //! it belongs to this machine's own Tailscale login and is untagged. Anything
 //! else — a foreign login, a tagged node, or an identity that cannot be
-//! determined — is refused with `403` before routing, on every route.
-//! [`serve_tailnet`] is the one place the tailnet listener is served, so the
-//! gate cannot be left off it. The loopback listener does not use this module.
+//! determined — is refused with `403` before routing, on every route. An
+//! allowed peer must then also name this listener exactly in `Host`, and any
+//! `Origin` it sends, on any method, must be that same self-origin
+//! ([`self_origin::check_target`]). [`spawn_tailnet_listeners`] is the one
+//! place the tailnet listeners are bound and served, so neither check can be
+//! left off. The loopback listener does not use this module.
 //! Lookups are bounded by a timeout and cached per peer address, single-flight,
 //! so a request burst runs one `tailscale whois`, not one per request.
 //! Test: `tailnet_peer/tests.rs`.
 
+mod self_origin;
 mod whois;
 
 use std::collections::HashMap;
@@ -22,6 +29,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use anyhow::Context;
 use axum::Router;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
@@ -31,6 +39,7 @@ use tokio::sync::OnceCell;
 // #9035: tokio's clock, so a paused test clock can expire cache entries.
 use tokio::time::Instant;
 
+pub use self_origin::{SelfAuthorities, check_target};
 pub use whois::{PeerIdentity, PeerResolver, TailscaleCliResolver, WhoisError};
 
 /// Upper bound on one identity lookup; past it the request is refused.
@@ -137,6 +146,11 @@ impl TailnetPeerGate {
         }
     }
 
+    /// The host node's MagicDNS name, once its identity has resolved.
+    pub async fn host_node_name(&self) -> Option<String> {
+        self.identity(self.host_ip).await.ok()?.node_name
+    }
+
     /// Resolve `ip` through the cache: fresh hits are reused, concurrent misses
     /// share one in-flight lookup, and the lookup is bounded by `self.timeout`.
     async fn identity(&self, ip: IpAddr) -> Result<PeerIdentity, String> {
@@ -188,18 +202,31 @@ fn forbidden() -> Response {
         .into_response()
 }
 
+/// Middleware state for one tailnet listener.
+#[derive(Clone)]
+pub struct TailnetGuard {
+    /// The peer-identity gate.
+    pub gate: Arc<TailnetPeerGate>,
+    /// The listener's own bound address, the base of its self-authorities.
+    pub listen: SocketAddr,
+}
+
 /// Axum middleware: refuse any request whose tailnet peer the gate does not
-/// allow.
+/// allow, or whose `Host`/`Origin` is not this listener's own.
 ///
 /// Why: layered outermost on the tailnet listener's router, so it runs before
 /// routing, CORS and the origin guard — every route, every method, the fallback
-/// included, and regardless of any `Origin` header.
-/// What: reads the peer address from `ConnectInfo` (missing → refuse), asks
-/// [`TailnetPeerGate::authorize`], and logs every refusal at WARN with the peer
-/// address.
-/// Test: the `serve_tailnet` cases in `tailnet_peer/tests.rs`.
+/// included.
+/// What: reads the peer address from `ConnectInfo` (missing → refuse, with no
+/// lookup), asks [`TailnetPeerGate::authorize`], then runs [`check_target`]
+/// against the listen address and the host's MagicDNS name. Every refusal is
+/// logged at WARN with the peer address.
+/// Test: `missing_connect_info_is_refused_without_a_lookup`,
+/// `foreign_login_peer_gets_403_on_every_route`,
+/// `wrong_host_is_refused_for_an_allowed_peer`,
+/// `foreign_origin_is_refused_on_get`, `self_origin_is_served`.
 pub async fn guard_tailnet_peer(
-    State(gate): State<Arc<TailnetPeerGate>>,
+    State(guard): State<TailnetGuard>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -207,39 +234,48 @@ pub async fn guard_tailnet_peer(
         tracing::warn!("tailnet listener refused a request with no peer address");
         return forbidden();
     };
-    match gate.authorize(peer.ip()).await {
-        PeerVerdict::Allow => next.run(req).await,
+    match guard.gate.authorize(peer.ip()).await {
+        PeerVerdict::Allow => {}
         PeerVerdict::ForeignLogin(login) => {
             tracing::warn!(peer = %peer, login = %login, "tailnet listener refused a peer owned by another login");
-            forbidden()
+            return forbidden();
         }
         PeerVerdict::Tagged => {
             tracing::warn!(peer = %peer, "tailnet listener refused a tagged node (or the host is tagged)");
-            forbidden()
+            return forbidden();
         }
         PeerVerdict::Unresolved(reason) => {
             tracing::warn!(peer = %peer, reason = %reason, "tailnet listener refused a peer whose identity could not be determined");
-            forbidden()
+            return forbidden();
         }
     }
+    let name = guard.gate.host_node_name().await;
+    let allowed = SelfAuthorities::new(guard.listen, name.as_deref());
+    if let Err(reason) = check_target(req.headers(), req.uri(), &allowed) {
+        tracing::warn!(peer = %peer, reason, "tailnet listener refused a request not addressed to itself");
+        return forbidden();
+    }
+    next.run(req).await
 }
 
 /// Serve `router` on the tailnet listener behind the peer gate.
 ///
-/// Why: the one serve path for the tailnet listener, so `run_serve` cannot wire
-/// it without the gate, and tests drive the exact production wiring.
-/// What: layers [`guard_tailnet_peer`] outermost and serves with
-/// `ConnectInfo<SocketAddr>`, which the guard reads the peer address from.
-/// Test: `serve_tailnet` cases in `tailnet_peer/tests.rs`.
+/// Why: the one serve path for a tailnet listener, so tests drive the exact
+/// production wiring.
+/// What: layers [`guard_tailnet_peer`] outermost, keyed to the listener's own
+/// bound address, and serves with `ConnectInfo<SocketAddr>`, which the guard
+/// reads the peer address from.
+/// Test: `same_login_peer_is_served`, `foreign_login_peer_gets_403_on_every_route`.
 pub async fn serve_tailnet(
     listener: tokio::net::TcpListener,
     router: Router,
     gate: Arc<TailnetPeerGate>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    let listen = listener.local_addr()?;
     // #9035: the tailnet listener must never serve an unauthenticated peer.
     let app = router.layer(axum::middleware::from_fn_with_state(
-        gate,
+        TailnetGuard { gate, listen },
         guard_tailnet_peer,
     ));
     axum::serve(
@@ -248,6 +284,44 @@ pub async fn serve_tailnet(
     )
     .with_graceful_shutdown(shutdown)
     .await
+}
+
+/// Bind every tailnet address in `addrs` and serve `router` on each behind its
+/// own peer gate.
+///
+/// Why: `run_serve` calls this for the `--tailscale` listener, so a revert to a
+/// plain `axum::serve` here turns `spawn_tailnet_listeners_gates_every_listener`
+/// red. The resolver is a parameter so that test needs no tailnet.
+/// What: binds each address, builds a [`TailnetPeerGate`] for its bound IP and
+/// spawns [`serve_tailnet`] with a fresh `shutdown()` future. Returns the bound
+/// addresses in order; a bind failure aborts with an error.
+/// Test: `spawn_tailnet_listeners_gates_every_listener`.
+pub async fn spawn_tailnet_listeners<S, F>(
+    addrs: &[SocketAddr],
+    router: &Router,
+    resolver: Arc<dyn PeerResolver>,
+    shutdown: S,
+) -> anyhow::Result<Vec<SocketAddr>>
+where
+    S: Fn() -> F,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let mut bound = Vec::with_capacity(addrs.len());
+    for &addr in addrs {
+        let listener = crate::bind::bind_listener(addr).await?;
+        let local = listener.local_addr().context("get extra local addr")?;
+        tracing::info!("trusty-console also listening on http://{local}");
+        eprintln!("trusty-console (tailnet): http://{local}");
+        let gate = Arc::new(TailnetPeerGate::new(Arc::clone(&resolver), local.ip()));
+        let serve = serve_tailnet(listener, router.clone(), gate, shutdown());
+        tokio::spawn(async move {
+            if let Err(e) = serve.await {
+                tracing::warn!("extra listener {local} exited: {e}");
+            }
+        });
+        bound.push(local);
+    }
+    Ok(bound)
 }
 
 #[cfg(test)]
