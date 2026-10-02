@@ -55,6 +55,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The `embedder-test-support` feature no longer implies `embedder`. On its own it compiles nothing and pulls no ONNX; it exposes `MockEmbedder` and `seed_shared_embedder_with_mock` only alongside `embedder` or `memory-core`. A crate that enabled `embedder-test-support` alone to get the embedder must now name `embedder` as well — every in-workspace consumer already does.
+- `content::DEV_CLASS_SOURCES` now lists bundle destinations under the three content classes, `agents`, `skills` and `instructions` (owner ruling 2026-10-01, #8378). The former classes `output-styles`, `sm_instructions` and `harness_understanding` are served as `instructions/output-styles/`, `instructions/sm_instructions/` and `instructions/harness_understanding/`, read from the same crate directories as before. In a checkout, `ResolvedContent::list("instructions")` includes those subfolders and `list("instructions/output-styles")` lists one of them; `read("output-styles/…")` now finds nothing in a checkout or in a bundle built after this change, and `list("output-styles")` returns the new `ContentError::UnknownClass` in both backings, as does any first path segment other than the three classes.
 
 ### Removed
 
