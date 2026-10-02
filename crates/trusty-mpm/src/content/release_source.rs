@@ -7,7 +7,7 @@
 //! implementation over GitHub's release-download URLs, its
 //! `git/matching-refs` endpoint and `releases/tags/{tag}`.
 //! Test: `github_source_reads_a_404_as_absent`,
-//! `github_source_lists_content_tags_across_pages`,
+//! `github_source_lists_every_content_tag_in_one_request`,
 //! `github_source_reports_an_unreachable_host`.
 
 use std::io::Read;
@@ -18,14 +18,9 @@ use trusty_common::content::TAG_PREFIX;
 /// The repository that publishes `content-v*` releases (ADR-0064 decision 4).
 pub const CONTENT_REPO: &str = "bobmatnyc/trusty-tools";
 
-/// Refs requested per page of the matching-refs API (its maximum).
-const REFS_PER_PAGE: usize = 100;
-
-/// Pages read before the tag listing is refused as too long to read to the end.
-pub const MAX_RELEASE_PAGES: u32 = 50;
-
-/// Largest API response read; a page of 100 refs is about 40 KB.
-const MAX_LISTING_BYTES: u64 = 4 * 1024 * 1024;
+/// Largest API response read; one ref is about 400 bytes, so this holds
+/// about 10 000 `content-v*` tags. A longer listing is refused, not truncated.
+pub(crate) const MAX_LISTING_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A request that did not produce an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +52,8 @@ pub trait ReleaseSource {
     /// Every git tag starting `content-v`, in no particular order. A listing
     /// that cannot be read in full is an error; an empty one is `Ok`.
     fn content_tags(&self) -> Result<Vec<String>, FetchError>;
-    /// The release of `tag`. A tag with no release is an error.
+    /// The release of `tag`. A tag with no release, or whose release is a
+    /// draft (GitHub answers 404 for one), is an error.
     fn release(&self, tag: &str) -> Result<Release, FetchError>;
 }
 
@@ -69,17 +65,20 @@ pub trait ReleaseSource {
 /// listing only `content-v*` refs, and only that tag's release is read (#9036).
 /// A tag alone is not a release (it may be a draft or pre-release), so the
 /// chosen tag's release is still read before anything is installed (#8389).
-/// What: assets from `<download_base>/<tag>/<file>`; tags from
-/// `<api_base>/git/matching-refs/tags/content-v`, paged to the end (at most
-/// `max_pages` pages); one release from `<api_base>/releases/tags/<tag>`.
+/// What: assets from `<download_base>/<tag>/<file>`; tags from one unpaged
+/// read of `<api_base>/git/matching-refs/tags/content-v`, which GitHub answers
+/// in full (it ignores `per_page`/`page`), bounded by `MAX_LISTING_BYTES`;
+/// one release from `<api_base>/releases/tags/<tag>`, which answers 404 for a
+/// draft.
 /// API calls send `Authorization: Bearer <token>` when a token is set; the
 /// token is marked sensitive and redacted from `Debug`. Bounded timeouts;
 /// every body is read through a size cap.
 /// Test: `github_source_reads_a_404_as_absent`,
-/// `github_source_lists_content_tags_across_pages`,
+/// `github_source_lists_every_content_tag_in_one_request`,
 /// `github_source_reads_a_non_404_error_status_as_a_failure`,
 /// `github_source_refuses_a_tag_listing_that_is_not_json`,
-/// `github_source_refuses_a_listing_longer_than_its_page_cap`,
+/// `github_source_refuses_a_tag_listing_over_its_size_cap`,
+/// `github_source_refuses_a_malformed_or_mismatched_answer`,
 /// `github_source_reads_a_404_tag_listing_as_a_failure`,
 /// `github_source_reads_a_rate_limited_or_5xx_response_as_a_failure`,
 /// `update_finds_the_newest_release_in_two_api_requests`,
@@ -90,7 +89,6 @@ pub struct GithubReleases {
     client: reqwest::blocking::Client,
     download_base: String,
     api_base: String,
-    max_pages: u32,
     token: Option<String>,
 }
 
@@ -99,19 +97,26 @@ impl std::fmt::Debug for GithubReleases {
         f.debug_struct("GithubReleases")
             .field("download_base", &self.download_base)
             .field("api_base", &self.api_base)
-            .field("max_pages", &self.max_pages)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .finish_non_exhaustive()
     }
 }
 
 /// The GitHub token from the environment: `GITHUB_TOKEN`, else `GH_TOKEN`
-/// (the order `trusty-installer` reads); empty counts as unset.
+/// (the order `trusty-installer` reads).
 fn github_token_from_env() -> Option<String> {
-    std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
-        .or_else(|_| std::env::var("GH_TOKEN"))
-        .ok()
-        .filter(|t| !t.is_empty())
+    github_token_from(|name| std::env::var(name).ok())
+}
+
+/// The first non-empty of `GITHUB_TOKEN` and `GH_TOKEN` as `var` reads them.
+/// #9036: an empty `GITHUB_TOKEN` falls through to `GH_TOKEN`; an empty
+/// `GH_TOKEN` is unset.
+/// Test: `an_empty_github_token_falls_through_to_gh_token`.
+pub(super) fn github_token_from(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    [trusty_common::env_vars::ENV_GITHUB_TOKEN, "GH_TOKEN"]
+        .into_iter()
+        .filter_map(var)
+        .find(|t| !t.is_empty())
 }
 
 impl GithubReleases {
@@ -140,15 +145,8 @@ impl GithubReleases {
             client,
             download_base: download_base.trim_end_matches('/').to_owned(),
             api_base: api_base.trim_end_matches('/').to_owned(),
-            max_pages: MAX_RELEASE_PAGES,
             token: None,
         })
-    }
-
-    /// The same source with another page cap.
-    pub fn with_max_pages(mut self, max_pages: u32) -> Self {
-        self.max_pages = max_pages;
-        self
     }
 
     /// The same source sending `token` on API calls; `None` stays unauthenticated.
@@ -214,40 +212,27 @@ impl ReleaseSource for GithubReleases {
         struct ApiRef {
             r#ref: String,
         }
-        let mut found = Vec::new();
-        for page in 1..=self.max_pages {
-            let url = format!(
-                "{}/git/matching-refs/tags/{TAG_PREFIX}?per_page={REFS_PER_PAGE}&page={page}",
-                self.api_base
-            );
-            let refs: Vec<ApiRef> =
-                serde_json::from_slice(&self.api(&url)?).map_err(|e| FetchError {
-                    url: url.clone(),
-                    reason: format!("unexpected response: {e}"),
-                })?;
-            let last_page = refs.len() < REFS_PER_PAGE;
-            for entry in refs {
+        // #9036: matching-refs ignores `per_page` and `page` and sends no Link
+        // header, so one unpaged read is the whole list; paging re-reads it.
+        let url = format!("{}/git/matching-refs/tags/{TAG_PREFIX}", self.api_base);
+        let refs: Vec<ApiRef> =
+            serde_json::from_slice(&self.api(&url)?).map_err(|e| FetchError {
+                url: url.clone(),
+                reason: format!("unexpected response: {e}"),
+            })?;
+        refs.into_iter()
+            .map(|entry| {
                 // A ref outside refs/tags/ is not what was asked for: refuse it.
-                let tag = entry
+                entry
                     .r#ref
                     .strip_prefix("refs/tags/")
+                    .map(str::to_owned)
                     .ok_or_else(|| FetchError {
                         url: url.clone(),
                         reason: format!("unexpected ref {:?}", entry.r#ref),
-                    })?;
-                found.push(tag.to_owned());
-            }
-            if last_page {
-                return Ok(found);
-            }
-        }
-        Err(FetchError {
-            url: format!("{}/git/matching-refs/tags/{TAG_PREFIX}", self.api_base),
-            reason: format!(
-                "more than {} pages of tags; the listing was not read to the end",
-                self.max_pages
-            ),
-        })
+                    })
+            })
+            .collect()
     }
 
     fn release(&self, tag: &str) -> Result<Release, FetchError> {

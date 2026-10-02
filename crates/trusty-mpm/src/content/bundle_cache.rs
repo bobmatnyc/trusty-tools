@@ -470,8 +470,9 @@ fn outcome(lock: ContentLock, action: UpdateAction) -> UpdateOutcome {
 /// release of the highest stable one (one more). A tag that is not a
 /// `content-vX.Y.Z[-pre]` version is an error, never skipped: a listing this
 /// code cannot read in full must not pick a "latest" from part of it. A
-/// highest tag whose release is flagged draft or pre-release is passed over
-/// for the next one down.
+/// highest tag whose release is flagged pre-release is passed over for the
+/// next one down. A draft, or a tag with no release, is an error, not passed
+/// over: GitHub's `releases/tags/{tag}` answers 404 for both.
 fn latest_tag<S: ReleaseSource + ?Sized>(
     source: &S,
     fallback: &Fallback,

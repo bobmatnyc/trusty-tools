@@ -51,7 +51,7 @@ hand.
 
 | Command | What it does |
 |---|---|
-| `tm content update` | Installs the newest published `content-v*` release and re-pins to it. "Published" means the highest `content-v*` tag (found through `git/matching-refs`) whose `releases/tags/<tag>` release is neither a draft nor a pre-release; a tag with no release is an error. Sends `GITHUB_TOKEN`/`GH_TOKEN` when set (60 requests/hour otherwise). A failed or empty listing is an error, and the previous pin stays in force. |
+| `tm content update` | Installs the newest published `content-v*` release and re-pins to it. "Published" means the highest `content-v*` tag (found through one unpaged `git/matching-refs` request) whose `releases/tags/<tag>` release is not a pre-release; a pre-release is passed over, and a draft or a tag with no release (GitHub answers 404 for both) is an error. Sends `GITHUB_TOKEN`, else `GH_TOKEN`, when non-empty (60 requests/hour otherwise). A failed or empty listing is an error, and the previous pin stays in force. |
 | `tm content update --content-ref content-vX.Y.Z` | Pins exactly that release. |
 | `tm content install --from content-vX.Y.Z.tar.gz` | Offline. The `.sha256` sidecar must sit beside the bundle. |
 | `tm content status` | Prints the source (`dev`, `bundle` or `none`), the pinned tag and sha256, and the binary version. With nothing installed it prints an `info:` line and exits 0 while `tm` still compiles its content in; otherwise it exits non-zero when nothing serves. |
