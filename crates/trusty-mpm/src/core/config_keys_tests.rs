@@ -130,3 +130,45 @@ fn build_lease_keys_are_not_reported() {
         vec!["builders.max_concurent".to_string()]
     );
 }
+
+/// #9097: `tm fleet init --session` writes `[supervisor] session`; the report
+/// must not call a key the product wrote a typo.
+#[test]
+fn a_product_written_supervisor_session_is_not_reported() {
+    let text = "[supervisor]\nprojects = [\"/p\"]\nsession = \"tm-supervisor\"\n";
+    assert!(mpm_unknown(text).is_empty(), "{:?}", mpm_unknown(text));
+}
+
+/// #9097: `tm doctor` loads `config.toml` about twenty times per run, and each
+/// load printed the same warning. Two loads of one file with one real typo
+/// must warn exactly once, and never about `supervisor.session`.
+#[test]
+fn an_unknown_key_warns_once_per_process_across_repeated_loads() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    crate::test_support::enable_event_capture();
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        root.path().join("config.toml"),
+        "[supervisor]\nsession = \"tm-supervisor\"\n\n[modles]\ndefault = \"opus\"\n",
+    )
+    .expect("write config");
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        MpmConfig::load(root.path());
+        MpmConfig::load(root.path());
+    });
+
+    let warnings: Vec<String> = buffer
+        .tail(64)
+        .into_iter()
+        .filter(|l| l.contains("unrecognised key"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert!(warnings[0].contains("modles"), "{warnings:#?}");
+    assert!(!warnings[0].contains("supervisor.session"), "{warnings:#?}");
+}
