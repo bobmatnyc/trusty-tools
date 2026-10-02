@@ -1,0 +1,3 @@
+Fixed
+- `tm build-lease` no longer stalls on a pool slot with a large `deps` directory. The stale-slot guard lists only the slot root and probes `<profile>/.cargo-lock`, `<triple>/<profile>/.cargo-lock` and the matching `.fingerprint` directories by direct path; it never reads `deps`, `build` or `incremental`. Before, it read every directory three levels deep, and a slot whose `debug/deps` held 458,794 entries kept a lease waiting past its 90 s limit while the readdir ran for 30+ minutes.
+- The guard now fails closed: a slot root it cannot list, or a `.cargo-lock` it cannot stat or open, marks the slot busy. Before, a lock file behind an unreadable profile directory read as absent and the slot as free.
