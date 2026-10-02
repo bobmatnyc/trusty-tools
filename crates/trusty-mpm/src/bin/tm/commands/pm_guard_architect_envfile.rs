@@ -9,7 +9,8 @@
 //! both deny sites call — `pm_guard` on the guarded path and `pm_guard_floor`
 //! under a bypass — so the two cannot drift. Its order: the value-printing
 //! rules (a printed credential, the pod/launchd/pm2 env dumps, a launchd
-//! plist) deny unconditionally; then the #7266 file rule; then a file-rule
+//! plist, and since #8879 a run script whose body reads a credential) deny
+//! unconditionally; then the #7266 file rule; then a file-rule
 //! deny is lifted only when [`envfile_shape`] matches AND the call is the
 //! process-bound Architect's main thread. A shape match with a failed
 //! identity denies with the #8878 PR-I identity suffix. [`gate_secret_file_read`]
@@ -46,6 +47,7 @@ use crate::commands::pm_guard_floor::ArchitectGate;
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
+use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 use crate::commands::pm_guard_trust_anchor_paths::{Resolved, resolve};
 
@@ -136,6 +138,8 @@ pub(crate) fn evaluate_secret_file_read_gated(
             evaluate_credential_print_command(c).or_else(|| evaluate_nested_secret_rules(c))
         })
         .or_else(|| evaluate_env_plist_read(tool_name, tool_input, hook_cwd))
+        // #8879: a script the command runs is judged by its body.
+        .or_else(|| command.and_then(|c| evaluate_script_body_secret_read(c, hook_cwd)))
     {
         return Some(reason);
     }

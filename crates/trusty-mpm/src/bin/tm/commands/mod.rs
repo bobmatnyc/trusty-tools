@@ -169,6 +169,9 @@ pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_secret_consumers;
 // #9001: a `for` loop whose words reach only `echo` and a gh search.
 pub(crate) mod pm_guard_secret_search_loop;
+// #8879: the credential rules over the body of a script a command runs.
+pub(crate) mod pm_guard_secret_script;
+pub(crate) mod pm_guard_secret_script_read;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
 pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod pm_guard_trust_anchor_paths;
