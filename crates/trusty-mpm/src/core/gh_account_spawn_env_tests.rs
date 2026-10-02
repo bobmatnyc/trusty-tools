@@ -864,31 +864,34 @@ async fn a_github_account_only_pin_spawns_as_that_login_without_the_map() {
 
 /// 🔴 #9091 r2: a record pinned only by `github.token_env` is a pin too. The
 /// spawn must not read the `[accounts]` table, and injects nothing, as before
-/// #9091.
+/// #9091. #9091 r3: a blank `config_dir` beside it is absent, not a dir pin.
 /// Test: itself.
 #[tokio::test]
 async fn a_token_env_only_pin_spawns_as_before_without_the_map() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
-    let origin = "https://github.com/acme-9091/widget";
-    registry
-        .register(Project {
-            github: Some(GithubConfig {
-                token_env: Some("TM_9091_TOKEN".into()),
-                ..Default::default()
-            }),
-            ..project("widget", origin, None)
-        })
-        .await
-        .expect("register");
-    let workspace = tempfile::tempdir().expect("workspace tempdir");
-    workspace_with_origin(workspace.path(), "https://github.com/acme-9091/widget.git");
+    for config_dir in [None, Some(PathBuf::from("  "))] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+        let origin = "https://github.com/acme-9091/widget";
+        registry
+            .register(Project {
+                github: Some(GithubConfig {
+                    token_env: Some("TM_9091_TOKEN".into()),
+                    config_dir: config_dir.clone(),
+                    ..Default::default()
+                }),
+                ..project("widget", origin, None)
+            })
+            .await
+            .expect("register");
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        workspace_with_origin(workspace.path(), "https://github.com/acme-9091/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), || {
-        panic!("a pinned origin must not read the [accounts] table")
-    })
-    .await;
-    assert!(vars.is_empty(), "vars: {vars:?}");
+        let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), || {
+            panic!("a pinned origin must not read the [accounts] table")
+        })
+        .await;
+        assert!(vars.is_empty(), "{config_dir:?}: {vars:?}");
+    }
 }
 
 // ── #8510: an account-only spawn pin never falls back to "no identity" ─────

@@ -227,8 +227,11 @@ are mapped. An SSH host alias is resolved through `~/.ssh/config` first, so
 `git@github-bob:duettoresearch/x` maps when `github-bob` names github.com.
 gitlab.com, Bitbucket and GitHub Enterprise Server remotes are never mapped.
 
-Precedence, highest first. Clone and spawn apply the same order, so a session
-runs as the account its base clone was made with:
+Precedence, highest first. For a github.com remote, clone, spawn and the
+launch preflight read the registry pin through one selection, so a session runs
+as the account its base clone was made with. For any other host (for example
+GitHub Enterprise Server), clone and preflight do not read the pin, and the
+spawn still applies and proves it.
 
 1. An explicit selection: `--account`, `--user` or `--u`, or a
    `<login>@<owner>/<repo>` positional.

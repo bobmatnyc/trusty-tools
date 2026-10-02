@@ -4,8 +4,11 @@ Added
   `gh` account that clones and spawns for it, for example
   `duettoresearch = "bob-duetto"`. Precedence: `--account`/`--user`/`--u`, then
   the project's registry pin (any pinned field, login from `gh_account` or
-  `github.account`), then the table, then the ambient identity. Clone, spawn
-  and the launch preflight read the pin through one selection, so they agree. Org names match without case. Only
+  `github.account`), then the table, then the ambient identity. For a
+  github.com remote, clone, spawn and the launch preflight read the pin through
+  one selection, so they agree. For any other host (for example GitHub
+  Enterprise Server), clone and preflight do not read the pin, and the spawn
+  still applies and proves it. Org names match without case. Only
   github.com remotes are mapped, after resolving an SSH host alias; gitlab.com,
   Bitbucket and Enterprise Server remotes are not.
 - A malformed table is an error: `tm run` and `tm launch` refuse and print it,

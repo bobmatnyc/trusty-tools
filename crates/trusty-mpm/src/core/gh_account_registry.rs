@@ -290,12 +290,15 @@ pub(crate) async fn find_pinned_gh_identity(
 /// The spawn identity a selected pin names (#9091 r2).
 ///
 /// What: `account` is [`RegistryPin::login`] — the login the clone path uses —
-/// and `config_dir` is the pin's own `github.config_dir`.
-/// Test: `a_github_account_only_pin_spawns_as_that_login_without_the_map`.
+/// and `config_dir` is the pin's own `github.config_dir` through
+/// [`selected_config_dir`], so a blank one is absent.
+/// Test: `a_github_account_only_pin_spawns_as_that_login_without_the_map`,
+/// `a_token_env_only_pin_spawns_as_before_without_the_map`.
 pub(crate) fn pinned_identity(pin: &RegistryPin) -> PinnedGhIdentity {
     PinnedGhIdentity {
         account: pin.login().map(str::to_string),
-        config_dir: pin.github.as_ref().and_then(|cfg| cfg.config_dir.clone()),
+        // #9091 r3: a blank dir is absent, as `select_pin` reads it.
+        config_dir: pin.github.as_ref().and_then(selected_config_dir),
         ..Default::default()
     }
 }
