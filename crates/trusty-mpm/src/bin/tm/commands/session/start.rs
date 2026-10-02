@@ -257,11 +257,7 @@ async fn start_session_in_place(
     // #8286: the PM prompt goes to `claude` as `--append-system-prompt-file`,
     // like every other PM launch mode. Built before `POST /sessions`, so a
     // prompt that cannot be written refuses the launch with nothing registered.
-    let prompt_file = inplace_prompt_file(
-        path,
-        native,
-        trusty_mpm::core::model_inject::write_prompt_file,
-    )?;
+    let prompt_file = inplace_prompt_file(path, native, &std::env::temp_dir())?;
 
     #[derive(Deserialize)]
     struct Body {
@@ -353,29 +349,23 @@ async fn start_session_in_place(
 /// launching without the flag would silently repeat the defect.
 /// What: composes the prompt with
 /// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
-/// for `path` (no explicit style, the caller's `native` probe), hands it to
-/// `write` (production: [`trusty_mpm::core::model_inject::write_prompt_file`]),
-/// and returns the written path for [`inplace_session_spec`]. `Err` when
-/// `write` returns `None`.
+/// for `path` (no explicit style, the caller's `native` probe), writes it under
+/// `dir` (production: the process temp dir) through
+/// [`trusty_mpm::core::model_inject::write_pm_prompt_file_in`], and returns the
+/// written path for [`inplace_session_spec`]. `Err` names the file, the I/O
+/// cause and the project.
 /// Test: `inplace_prompt_file_returns_the_written_prompt_file`,
 /// `inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written` in
 /// `start_tests.rs`.
 fn inplace_prompt_file(
     path: &std::path::Path,
     native: bool,
-    write: impl FnOnce(&str) -> Option<std::path::PathBuf>,
+    dir: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
     let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
         path, None, native,
     );
-    write(&prompt).ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not write the PM system-prompt file for {}; refusing to start a \
-             session without its instructions (#8286). Check that the temp directory \
-             is writable and retry.",
-            path.display()
-        )
-    })
+    trusty_mpm::core::model_inject::write_pm_prompt_file_in(dir, &prompt, path, "launch")
 }
 
 // Unit tests live in session/start_tests.rs (test-file budget: 1500 SLOC).

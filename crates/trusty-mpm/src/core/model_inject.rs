@@ -8,7 +8,7 @@
 //! command.
 //! What: [`build_claude_command`] composes the full shell string passed to
 //! `tmux send-keys`; it optionally appends `--model <id>` and
-//! `--append-system-prompt-file <path>` flags. [`write_prompt_file`] handles
+//! `--append-system-prompt-file <path>` flags. [`write_prompt_file_in`] handles
 //! the temp-file side of that second flag.
 //!
 //! Issue #4467: this module owns THREE launch-line builders, and every one of
@@ -23,7 +23,7 @@
 //! of the operator's own settings and agents load.
 //! Test: `claude_command_bare`, `claude_command_with_model`,
 //! `claude_command_with_prompt`, `claude_command_with_both`,
-//! `write_prompt_file_returns_path`,
+//! `write_prompt_file_in_returns_the_written_path`,
 //! `inplace_session_command_scrubs_inherited_session_markers`,
 //! `client_session_command_scrubs_inherited_session_markers`.
 
@@ -31,20 +31,6 @@ use std::path::{Path, PathBuf};
 
 use crate::core::config::MpmConfig;
 use crate::core::delegation_authority::AgentSummary;
-
-/// Write the session prompt text to a unique temp file.
-///
-/// Why: `claude --append-system-prompt-file` requires a file path; callers
-/// must create that file before spawning `claude`. This helper encapsulates the
-/// temp-file creation so every launch path handles it consistently.
-/// What: writes `prompt` to `<tmp>/trusty-mpm-system-prompt-<uuid>.txt` and
-/// returns the path. Returns `None` and logs a warning on any I/O error.
-/// Test: `write_prompt_file_returns_path`.
-pub fn write_prompt_file(prompt: &str) -> Option<PathBuf> {
-    write_prompt_file_in(&std::env::temp_dir(), prompt)
-        .inspect_err(|err| tracing::warn!("{err}"))
-        .ok()
-}
 
 /// A system-prompt file that could not be written (#8286).
 ///
@@ -61,7 +47,7 @@ pub struct PromptFileError {
     pub cause: std::io::Error,
 }
 
-/// [`write_prompt_file`] under a caller-named directory, keeping the error.
+/// Write the session prompt to a unique file under `dir`, keeping the error.
 ///
 /// Why (#8286): the PM launch paths refuse on a write failure, and their tests
 /// need a real failing write without touching the process-global `TMPDIR`.
@@ -77,6 +63,27 @@ pub fn write_prompt_file_in(dir: &Path, prompt: &str) -> Result<PathBuf, PromptF
         Ok(()) => Ok(path),
         Err(cause) => Err(PromptFileError { path, cause }),
     }
+}
+
+/// [`write_prompt_file_in`] for a PM launch that refuses on failure (#8286).
+///
+/// Why: every PM launch mode shares one refusal wording, so an operator reads
+/// the same file, cause and project whichever mode failed.
+/// What: `Err` is "<PromptFileError>; refusing to `action` `project` without
+/// its PM instructions (#8286)".
+/// Test: `write_pm_prompt_file_in_names_the_path_the_cause_and_the_project`.
+pub fn write_pm_prompt_file_in(
+    dir: &Path,
+    prompt: &str,
+    project: &Path,
+    action: &str,
+) -> anyhow::Result<PathBuf> {
+    write_prompt_file_in(dir, prompt).map_err(|err| {
+        anyhow::anyhow!(
+            "{err}; refusing to {action} {} without its PM instructions (#8286)",
+            project.display()
+        )
+    })
 }
 
 /// Resolve the model for a PM-session launch (no named agent).
@@ -1309,12 +1316,27 @@ mod tests {
     }
 
     #[test]
-    fn write_prompt_file_returns_path() {
-        let path = write_prompt_file("hello trusty-mpm").unwrap();
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "hello trusty-mpm");
-        std::fs::remove_file(path).unwrap();
+    fn write_prompt_file_in_returns_the_written_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_prompt_file_in(tmp.path(), "hello trusty-mpm").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello trusty-mpm");
+    }
+
+    /// #8286: the shared refusal names the file, the cause and the project.
+    #[test]
+    fn write_pm_prompt_file_in_names_the_path_the_cause_and_the_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let err = write_pm_prompt_file_in(&not_a_dir, "p", Path::new("/proj"), "launch")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&*not_a_dir.to_string_lossy()), "{err}");
+        assert!(err.contains("os error"), "{err}");
+        assert!(
+            err.contains("refusing to launch /proj without its PM"),
+            "{err}"
+        );
     }
 
     /// #8286: the refusal text names the file and the I/O cause.

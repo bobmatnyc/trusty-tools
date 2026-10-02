@@ -662,27 +662,24 @@ fn inplace_session_spec_carries_the_prompt_file() {
     );
 }
 
-/// The composed PM prompt reaches the writer and its path comes back.
+/// The composed PM prompt is written and its path comes back.
 ///
 /// Why: the spec can only carry a prompt that was composed and written.
-/// What: drives [`super::inplace_prompt_file`] with a writer that records the
-/// prompt and returns a fixed path, then asserts the prompt was composed and
-/// that path is returned.
+/// What: drives [`super::inplace_prompt_file`] against a writable directory and
+/// reads the returned file back.
 #[test]
 fn inplace_prompt_file_returns_the_written_prompt_file() {
     let project = tempfile::TempDir::new().expect("tmp project");
-    let mut written = String::new();
-    let file = super::inplace_prompt_file(project.path(), false, |prompt| {
-        written = prompt.to_owned();
-        Some(std::path::PathBuf::from("/probe/pm-prompt.txt"))
-    })
-    .expect("a written prompt file is returned");
+    let dir = tempfile::TempDir::new().expect("tmp prompt dir");
+    let file = super::inplace_prompt_file(project.path(), false, dir.path())
+        .expect("a written prompt file is returned");
 
+    assert!(file.starts_with(dir.path()), "{}", file.display());
+    let written = std::fs::read_to_string(&file).expect("read the prompt file");
     assert!(
         !written.trim().is_empty(),
-        "the composed PM prompt must reach the writer"
+        "the composed PM prompt must reach the file"
     );
-    assert_eq!(file, std::path::PathBuf::from("/probe/pm-prompt.txt"));
 }
 
 /// A prompt file that cannot be written refuses the launch.
@@ -690,16 +687,22 @@ fn inplace_prompt_file_returns_the_written_prompt_file() {
 /// Why: the fail-open alternative — launching without the flag — is the #8286
 /// defect itself, and #4752 already refuses a launch whose compiled
 /// instructions could not be written.
-/// What: a writer returning `None` must make [`super::inplace_prompt_file`]
-/// return an error that names the refusal.
+/// What: a real write failure (the prompt dir is a regular file, ENOTDIR) must
+/// make [`super::inplace_prompt_file`] return an error naming the file, the I/O
+/// cause and the refusal.
 #[test]
 fn inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written() {
     let project = tempfile::TempDir::new().expect("tmp project");
-    let err = super::inplace_prompt_file(project.path(), false, |_| None)
-        .expect_err("a failed prompt write must refuse the launch");
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let not_a_dir = tmp.path().join("not-a-dir");
+    std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
+    let err = super::inplace_prompt_file(project.path(), false, &not_a_dir)
+        .expect_err("a failed prompt write must refuse the launch")
+        .to_string();
     assert!(
-        err.to_string()
-            .contains("refusing to start a session without its instructions"),
-        "the error must name the refusal: {err}"
+        err.contains(&*not_a_dir.to_string_lossy())
+            && err.contains("os error")
+            && err.contains("refusing to launch"),
+        "the error must name the file, the cause and the refusal: {err}"
     );
 }
