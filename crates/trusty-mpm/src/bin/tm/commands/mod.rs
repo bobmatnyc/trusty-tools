@@ -26,6 +26,8 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 pub(crate) mod daemon;
+// #9034: three-state daemon pid identity, read from argv.
+pub(crate) mod daemon_pid_identity;
 pub(crate) mod delete;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;
@@ -63,8 +65,12 @@ pub(crate) mod fleet;
 pub(crate) mod generate;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+// #9034: the autostart decision, with launchctl and the process table injected.
+pub(crate) mod guided_autostart_plan;
 pub(crate) mod guided_inplace;
 pub(crate) mod guided_launch;
+// #9034: down versus slow, and the picker/autostart sequence.
+pub(crate) mod guided_liveness;
 pub(crate) mod guided_outside_git;
 pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;

@@ -99,21 +99,36 @@ pub fn render_lock(lock: &DaemonLock) -> String {
 
 /// Is `pid` a live process?
 ///
-/// What: `kill(pid, 0)` on Unix; assumes alive on other platforms, where the
-/// lock file's PID cannot be checked.
-/// Test: `pid_alive_true_for_self`, `read_lock_rejects_dead_pid`.
+/// What: `kill(pid, 0)` on Unix, read by [`kill_probe_means_alive`]; assumes
+/// alive on other platforms, where the lock file's PID cannot be checked.
+/// Test: `pid_alive_true_for_self`, `read_lock_rejects_dead_pid`,
+/// `kill_probe_eperm_means_alive`.
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: `kill` with signal 0 performs the permission/existence check
         // only; it delivers no signal and cannot affect the target process.
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        kill_probe_means_alive(rc, errno)
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         true
     }
+}
+
+/// Map a `kill(pid, 0)` result onto "the process exists".
+///
+/// Why: #9034 — `EPERM` means the process exists but belongs to another
+/// user (a `sudo tm daemon`). Reading it as dead made its lock stale and
+/// deletable. Fail closed: only `ESRCH` (or any other error) is dead.
+/// What: `rc == 0` → alive; `errno == EPERM` → alive; otherwise dead.
+/// Test: `kill_probe_eperm_means_alive`.
+#[cfg(unix)]
+pub fn kill_probe_means_alive(rc: i32, errno: Option<i32>) -> bool {
+    rc == 0 || errno == Some(libc::EPERM)
 }
 
 /// Read the daemon's lock record, if one belongs to us and its PID is alive.
@@ -347,6 +362,18 @@ mod tests {
     #[test]
     fn pid_alive_true_for_self() {
         assert!(pid_alive(std::process::id()));
+    }
+
+    /// #9034: another user's process answers `EPERM`; it exists, so its lock
+    /// must not be judged stale.
+    #[cfg(unix)]
+    #[test]
+    fn kill_probe_eperm_means_alive() {
+        assert!(kill_probe_means_alive(0, None));
+        assert!(kill_probe_means_alive(-1, Some(libc::EPERM)));
+        assert!(!kill_probe_means_alive(-1, Some(libc::ESRCH)));
+        // pid 1 (launchd/init) runs as root: `kill(1, 0)` from a user is EPERM.
+        assert!(pid_alive(1), "a root-owned live process is alive");
     }
 
     #[test]

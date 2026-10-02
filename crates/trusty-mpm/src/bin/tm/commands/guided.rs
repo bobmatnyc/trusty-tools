@@ -312,59 +312,30 @@ pub(crate) async fn run_guided_default(
     // the project's canonical name so operators can quickly find their projects.
     super::managed_root::try_register_alias(&cwd);
 
-    // Use a mutable URL so that a successful auto-start can update it to the
-    // actual bound address discovered via the lock file.
-    let mut effective_url = url.to_string();
-
     // Try the rich UX when CWD is a GitHub-backed git project.
     if let Some((source_id, workspace, git_root)) = derive_project(&cwd) {
         // Pass the git root as repo_url so daemon detects .git at root even
         // when tm is invoked from a subdirectory (#1705 LOW fix).
         let repo_url = git_root.to_string_lossy().to_string();
-
-        // First attempt: daemon may already be up.
-        if let Some(r) = try_show_picker(
-            client,
-            &effective_url,
-            &source_id,
-            &workspace,
-            &repo_url,
-            &cwd,
-        )
-        .await
-        {
-            return r;
-        }
-
-        // Daemon unreachable — try to auto-start it transparently.
-        eprintln!("tm: daemon not running — starting it…");
-        match super::guided_autostart::ensure_daemon_started(client, &effective_url).await {
-            Ok(new_url) => {
-                effective_url = new_url;
-                // Retry the full picker flow with the freshly-started daemon.
-                if let Some(r) = try_show_picker(
-                    client,
-                    &effective_url,
-                    &source_id,
-                    &workspace,
-                    &repo_url,
-                    &cwd,
-                )
-                .await
-                {
-                    return r;
-                }
-                eprintln!("tm: daemon started but sessions still unreachable; falling back");
-            }
-            Err(e) => eprintln!("tm: auto-start failed ({e}); falling back to offline mode"),
+        let project = super::guided_liveness::PickerProject {
+            source_id: &source_id,
+            workspace: &workspace,
+            repo_url: &repo_url,
+            cwd: &cwd,
+        };
+        // #9034: a slow daemon stops here; only a down one that could not be
+        // started reaches the offline fallback below.
+        match super::guided_liveness::picker_or_autostart(client, url, &project).await {
+            super::guided_liveness::PickerFlow::Done(r) => return r,
+            super::guided_liveness::PickerFlow::Offline => {}
         }
     }
 
-    // Daemon unreachable OR not a GitHub project: protected fallback (#1724).
+    // Daemon down OR not a GitHub project: protected fallback (#1724).
     // For GitHub projects this redirects to the managed-clone workspace.
     // For non-GitHub git projects it refuses (live-checkout guard).
     // For non-git directories it falls through to the classic `tm launch` path.
-    fallback_protected(client, &effective_url, &cwd).await
+    fallback_protected(client, url, &cwd).await
 }
 
 /// Attempt to list sessions and display the interactive picker for a GitHub project.
@@ -378,39 +349,48 @@ pub(crate) async fn run_guided_default(
 /// banner (#1808), then hands off to
 /// [`super::session_ls_connector::run_bare_tm_surface`] (#7224 — the session
 /// TUI, or the numbered picker when the shared gate refuses raw mode).
-/// Returns `None` when the daemon is unreachable so the caller can try
-/// auto-start; returns `Some(result)` once the daemon responded.
-/// Test: indirectly covered by guided-default e2e tests; the pure sub-functions
-/// (`tty_gate`, `parse_picker_choice`, `is_live_session_state`) are unit-tested
-/// independently.
-async fn try_show_picker(
+/// Returns `ListFailed(err)` when the listing fails — #9034: the caller
+/// classifies `err` as down or slow — and `Shown(result)` once the daemon
+/// responded.
+/// Test: `slow_listing_stops_without_autostart` (the failure arm); the pure
+/// sub-functions (`tty_gate`, `parse_picker_choice`, `is_live_session_state`)
+/// are unit-tested independently.
+pub(crate) async fn try_show_picker(
     client: &reqwest::Client,
     url: &str,
-    source_id: &str,
-    workspace: &std::path::Path,
-    repo_url: &str,
-    cwd: &std::path::Path,
-) -> Option<anyhow::Result<()>> {
+    project: &super::guided_liveness::PickerProject<'_>,
+) -> super::guided_liveness::PickerAttempt {
+    use super::guided_liveness::PickerAttempt;
+    let super::guided_liveness::PickerProject {
+        source_id,
+        workspace,
+        repo_url,
+        cwd,
+    } = *project;
     // #1809: exclude decommissioned tombstones from the picker by default. The
     // shared fetch path returns the same live-only list the static renderer uses.
     // #4702: no TTY pre-gate here any more — the auto-prune this fetch runs
     // touches neither the filesystem nor the runtime (see #4728, which is what
     // made the second half of that true), so a scripted bare `tm` prunes exactly
     // like an interactive one instead of leaving dead records to accumulate.
-    let sessions = super::session_picker::fetch_live_sessions(
+    let sessions = match super::session_picker::fetch_live_sessions(
         &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         Some(source_id),
         false,
     )
     .await
-    .ok()?;
+    {
+        Ok(sessions) => sessions,
+        // #9034: keep the error — its kind separates a down daemon from a slow one.
+        Err(e) => return PickerAttempt::ListFailed(e),
+    };
     if !tty_gate(
         std::io::stdin().is_terminal(),
         source_id,
         workspace,
         &sessions,
     ) {
-        return Some(Ok(()));
+        return PickerAttempt::Shown(Ok(()));
     }
     // #1808: render the same two-panel banner as `tm banner` — version in the
     // title bar, 24-row clipped art, project/workspace fields — no sleep.
@@ -424,7 +404,9 @@ async fn try_show_picker(
     // [`super::session_ls_connector::bare_tm_opens_session_tui`]. The numbered
     // picker is still what an empty fleet, a managed pane, or a `TERM` with no
     // cursor addressing gets.
-    Some(super::session_ls_connector::run_bare_tm_surface(client, url, &mut scope, sessions).await)
+    PickerAttempt::Shown(
+        super::session_ls_connector::run_bare_tm_surface(client, url, &mut scope, sessions).await,
+    )
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────
