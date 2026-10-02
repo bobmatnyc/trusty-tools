@@ -32,6 +32,10 @@
 //! appended block. This only edits the WORKING TREE file — it never `git
 //! add`s or commits it, so the change goes through the project's normal
 //! review/diff flow like any other tm-authored edit.
+//! #8758: the session launch no longer calls [`ensure_scaffold_gitignored`];
+//! it writes [`SCAFFOLD_IGNORED_PATHS`] to `.git/info/exclude` through
+//! [`crate::core::harness_exclude`], so a tracked `.gitignore` stays clean.
+//! A block already in a `.gitignore` is left as it is.
 //! Test: `writes_block_to_fresh_gitignore`, `idempotent_on_repeat_call`,
 //! `preserves_unrelated_existing_content`, `noop_when_not_a_git_repo`,
 //! `appends_newline_when_existing_file_lacks_trailing_newline`.
