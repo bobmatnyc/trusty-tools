@@ -41,9 +41,10 @@ fn repo_tracking_gitignore(dir: &std::path::Path, gitignore: &str) {
     git(dir, &["commit", "-q", "-m", "base"]);
 }
 
-/// #8758: a launch leaves the tracked `.gitignore` byte-identical, an old
-/// managed block in it included, and puts the scaffolding paths in the
-/// shared `info/exclude` instead.
+/// #8758: a launch leaves the tracked `.gitignore` byte-identical and
+/// `.gitignore` out of `git status`, even when it holds an old managed block with operator
+/// lines inside it and CRLF line endings (the old refresh dropped those lines
+/// and converted CRLF to LF). The paths go to the shared `info/exclude`.
 #[test]
 #[serial_test::serial]
 fn launch_leaves_a_tracked_gitignore_untouched() {
@@ -55,9 +56,9 @@ fn launch_leaves_a_tracked_gitignore_untouched() {
     let tmp = crate::test_support::hermetic_temp_dir();
     let project = tmp.path();
     // An outdated block from a pre-#8758 launch: it lacks most managed paths,
-    // which the old launch rewrote on every run.
+    // carries two operator lines between the markers, and uses CRLF.
     let tracked = format!(
-        "target/\n\n{}\n.claude/agents/\n{}\n",
+        "target/\r\n\r\n{}\r\n.claude/agents/\r\nmy-private-notes/\r\n*.secret\r\n{}\r\n",
         crate::core::scaffold_gitignore::SCAFFOLD_GITIGNORE_BEGIN,
         crate::core::scaffold_gitignore::SCAFFOLD_GITIGNORE_END
     );
@@ -66,11 +67,18 @@ fn launch_leaves_a_tracked_gitignore_untouched() {
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let after = std::fs::read_to_string(project.join(".gitignore")).unwrap();
-    assert_eq!(after, tracked, "launch edited the tracked .gitignore");
+    let after = std::fs::read(project.join(".gitignore")).unwrap();
     assert_eq!(
-        git(project, &["status", "--porcelain", "--", ".gitignore"]),
-        ""
+        after,
+        tracked.as_bytes(),
+        "launch edited the tracked .gitignore"
+    );
+    // The launch still writes `CLAUDE.md` and `.claude/` (untracked, not this
+    // fix's concern); `.gitignore` must not appear in `git status` at all.
+    let status = git(project, &["status", "--porcelain"]);
+    assert!(
+        !status.contains(".gitignore"),
+        ".gitignore is dirty after launch:\n{status}"
     );
     let exclude = std::fs::read_to_string(project.join(".git/info/exclude")).unwrap();
     for path in crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS {
