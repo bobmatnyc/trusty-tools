@@ -31,6 +31,8 @@ import {
   displayTitle,
   renderRegion,
   spliceRegion,
+  groupByStage,
+  parseReleaseOrder,
   main,
 } from "./generate.mjs";
 
@@ -171,4 +173,93 @@ test("main() end to end: fixture milestones splice cleanly and --check reports n
     process.exitCode = undefined;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- release-order sort key (#9085) ---------------------------------------
+
+/** A `next`-stage milestone with an optional Release-order line. */
+function ordered(number, key, extra = {}) {
+  const line = key === undefined ? "" : `Release-order: ${key}\n`;
+  return milestoneFixture({
+    number,
+    title: `trusty-mpm 0.0.${number}`,
+    description: `Prose ${number}.\n${line}Roadmap: trusty-mpm · next`,
+    ...extra,
+  });
+}
+
+const numbersOf = (milestones) =>
+  groupByStage(milestones, "trusty-mpm").next.map((m) => m.number);
+
+/** Capture console.error output while `fn` runs. */
+function captureStderr(fn) {
+  const original = console.error;
+  const lines = [];
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    return { result: fn(), lines };
+  } finally {
+    console.error = original;
+  }
+}
+
+test("release-order: keyed milestones sort ascending regardless of number", () => {
+  // Mirrors the real data: 2.1.0 (#72), 2.0.0 (#97), 1.9.0 (#124).
+  assert.deepEqual(
+    numbersOf([ordered(72, 3), ordered(97, 2), ordered(124, 1)]),
+    [124, 97, 72],
+  );
+});
+
+test("release-order: keyed milestones sort before unkeyed, unkeyed keep due/number order", () => {
+  const unkeyedDated = ordered(5, undefined, { due_on: "2026-01-01T00:00:00Z" });
+  const unkeyedLow = ordered(3, undefined);
+  const unkeyedHigh = ordered(4, undefined);
+  assert.deepEqual(numbersOf([unkeyedHigh, unkeyedLow, unkeyedDated, ordered(99, 7)]), [
+    99, 5, 3, 4,
+  ]);
+});
+
+test("release-order: equal keys fall back to due_on, then number", () => {
+  const dated = ordered(50, 1, { due_on: "2026-01-01T00:00:00Z" });
+  const undated = ordered(10, 1);
+  const lowNumber = ordered(20, 1, { due_on: "2026-06-01T00:00:00Z" });
+  const highNumber = ordered(30, 1, { due_on: "2026-06-01T00:00:00Z" });
+  assert.deepEqual(numbersOf([highNumber, undated, lowNumber, dated]), [50, 20, 30, 10]);
+});
+
+test("release-order: parse tolerates whitespace and position, rejects anything but a non-negative integer", () => {
+  assert.equal(parseReleaseOrder("Intro\n   Release-order:   12  \nmore"), 12);
+  assert.equal(parseReleaseOrder("Release-order: 0"), 0);
+  assert.equal(parseReleaseOrder("no key"), null);
+  assert.equal(parseReleaseOrder(null), null);
+
+  const { lines } = captureStderr(() => {
+    for (const bad of ["soon", "-1", "2.5", "", "1e3", "99999999999999999999"]) {
+      assert.equal(parseReleaseOrder(`Release-order: ${bad}`), null, `value ${bad}`);
+    }
+  });
+  assert.equal(lines.length, 6, "each malformed value warns once on stderr");
+  assert.ok(lines.every((l) => l.startsWith("warning:")));
+});
+
+test("release-order: a malformed key warns, counts as unkeyed, and does not crash", () => {
+  const { result, lines } = captureStderr(() =>
+    numbersOf([ordered(1, "soon"), ordered(2, 5), ordered(3, undefined)]),
+  );
+  assert.deepEqual(result, [2, 1, 3]);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].includes("#1"), "the warning names the milestone");
+});
+
+test("release-order: the line is not published; unkeyed input keeps due/number order", () => {
+  const region = renderRegion([ordered(2, 1)], "trusty-mpm");
+  assert.ok(!region.includes("Release-order"));
+
+  // Same milestones, unkeyed: today's due_on/number order. Keyed: reordered,
+  // so this assertion fails against a comparator that ignores the key.
+  const plain = [ordered(72, undefined), ordered(97, undefined), ordered(124, undefined)];
+  assert.deepEqual(numbersOf(plain), [72, 97, 124]);
+  const keyed = [ordered(72, 3), ordered(97, 2), ordered(124, 1)];
+  assert.notDeepEqual(numbersOf(keyed), numbersOf(plain));
 });

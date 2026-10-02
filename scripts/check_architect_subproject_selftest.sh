@@ -27,8 +27,8 @@ GATE="$SCRIPT_DIR/check_architect_subproject.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/architect-selftest.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-SKILL_SRC="python/trusty-architect/skills/tm-supervisor-setup.md"
-SKILL_DST="crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+SKILL_SRC="python/trusty-architect/skills/tm-architect-setup.md"
+SKILL_DST="crates/trusty-mpm/src/assets/skills/tm-architect-setup.md"
 PAIRS="$("$GATE" --list-pairs)"
 [ -n "$PAIRS" ] || { echo "FAIL: the gate lists no shipped-copy pairs" >&2; exit 1; }
 

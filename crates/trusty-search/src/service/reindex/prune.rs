@@ -61,7 +61,8 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
 /// What: computes `deleted_files = (files stored in staging corpus) − (walked
 /// file set)` and, for each deleted file:
 ///   1. verifies it DOES NOT exist on disk (disk-existence guard — belt-and-
-///      suspenders against any residual path-normalisation mismatch),
+///      suspenders against any residual path-normalisation mismatch), or that
+///      the index's admission policy now EXCLUDES it (#8922),
 ///   2. removes its data from: the staging redb corpus (chunk rows, entity row,
 ///      file-hash entry), the in-memory HNSW + BM25 + chunk map + embedding LRU,
 ///      and the in-process file-hash DashMap.
@@ -80,8 +81,9 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
 /// Applies ONLY to the NON-force incremental path (corpus_swap_tmp.is_some()
 /// && !force && !memory_aborted); the caller already gates it.
 ///
-/// Test: `prune_pass_removes_deleted_file_from_staged_corpus` and
-/// `disk_existence_guard_skips_live_file` in `prune_tests.rs`.
+/// Test: `prune_pass_removes_deleted_file_from_staged_corpus`,
+/// `disk_existence_guard_skips_live_file` and
+/// `reindex_prunes_a_file_that_became_excluded_and_sops_content` in `prune_tests.rs`.
 pub(super) async fn prune_deleted_files_from_staging(
     handle: &IndexHandle,
     walked_files: &[PathBuf],
@@ -171,7 +173,13 @@ pub(super) async fn prune_deleted_files_from_staging(
         // deleted file because `PathBuf::exists` returns false for any path
         // that has no corresponding directory entry (including ENOENT).
         let absolute = canonical_root.join(file_path);
-        if absolute.exists() {
+        // #8922: a file still on disk that the walker now excludes is not a
+        // normalisation mismatch — its chunks are pruned. Only an admitted or
+        // undetermined file is kept (#7396: never delete on an uncertain answer).
+        if absolute.exists()
+            && crate::service::index_admission::admits(handle, &absolute)
+                != crate::service::index_admission::Admission::Excluded
+        {
             tracing::warn!(
                 "reindex[{}]: prune: skipping {} — still exists on disk, \
                  likely a path-normalisation mismatch; will NOT prune live data",

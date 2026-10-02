@@ -1,4 +1,0 @@
-Fixed
-- The `bug-capture` error store (`errors.jsonl`) no longer grows without bound. The live file rotates to `errors.jsonl.1` at 4 MiB and at most two rotated files are kept; an oversized pre-fix file keeps only its newest 4 MiB when first rotated. When a rotation fails, the store stops writing to disk and counts the refusal (`ErrorStore::refused_disk_writes`) instead of growing the file; records stay in memory and the next append retries.
-- Concurrent writers no longer corrupt `errors.jsonl`. Each record is written as one full line in a single append, so records from separate processes cannot fuse into one line.
-- A malformed line in `errors.jsonl`, including invalid UTF-8, is skipped and counted (`ErrorStore::corrupt_lines_skipped`) and no longer empties the whole read. Readers also load records from the rotated files.

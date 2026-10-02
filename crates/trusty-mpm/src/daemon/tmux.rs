@@ -1125,6 +1125,10 @@ pub struct SessionSnapshot {
     pub captured_at: i64,
 }
 
+// #9004: pane identity and kill-by-id, split out for the SLOC cap.
+#[path = "tmux_pane_identity.rs"]
+mod pane_identity;
+
 #[cfg(test)]
 #[path = "tmux_tests.rs"]
 mod tests;

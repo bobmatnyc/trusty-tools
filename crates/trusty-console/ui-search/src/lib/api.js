@@ -111,8 +111,8 @@ export const api = {
    * Per-keystroke suggestions from one index, lexical mode (no embedding call).
    * Resolves to `{ hits: [{ label, path, start_line, score, source, snippet }],
    * mode, latency_ms }`. `signal` lets a newer keystroke abort this request.
-   * Through the console this needs a `search.typeahead` row in
-   * `search_uds/map.rs`; until it has one the console answers 501.
+   * Through the console it reaches `search.typeahead` via the `search_uds/map.rs`
+   * row (#9028); an older console without the row answers 501.
    */
   typeahead: (id, q, limit, signal) =>
     request(

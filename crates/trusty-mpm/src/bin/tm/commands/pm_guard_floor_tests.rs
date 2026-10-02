@@ -68,6 +68,22 @@ impl PaneProbe for ArchitectPane {
     fn current_pane(&self) -> Option<String> {
         Some("%2".into())
     }
+    fn objects(
+        &self,
+        _server: &[String],
+    ) -> Result<Vec<crate::commands::pm_guard_bash::TmuxObject>, String> {
+        let object = |n: u8, name: &str| crate::commands::pm_guard_bash::TmuxObject {
+            session: format!("${n}"),
+            window: format!("@{n}"),
+            window_index: "0".into(),
+            window_active: true,
+            pane: format!("%{n}"),
+            pane_index: "0".into(),
+            session_name: name.into(),
+            window_name: "zsh".into(),
+        };
+        Ok(vec![object(1, "tm-architect"), object(2, "pm")])
+    }
 }
 
 /// The floors' probes over `panes` and a repository on `main`.

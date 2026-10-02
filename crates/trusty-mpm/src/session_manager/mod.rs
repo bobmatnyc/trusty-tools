@@ -31,6 +31,7 @@ mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;
+pub mod pane_identity;
 pub mod prune;
 pub mod reactivate;
 mod reconcile;
@@ -207,6 +208,10 @@ mod decommission_owned_tests;
 // #8663 critic round 1: the provisioning ledger, lock and force gates.
 #[cfg(test)]
 mod decommission_owned_ledger_tests;
+
+// #8540: a FIFO provisioning file never blocks a launch or a decommission.
+#[cfg(test)]
+mod provisioning_ledger_fifo_tests;
 
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]

@@ -243,6 +243,9 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 400** `invalid_exclude_glob` (#8922): an `exclude_globs` entry
+  does not parse. Nothing is registered. `PATCH /indexes/:id/config` refuses
+  the same way.
 - **Response 409** (#8499): the index store would land inside the git work
   tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
   repository (not only under `<root_path>`), or the default data dir under a
@@ -433,8 +436,17 @@ Per-index stats.
     }
   }
   ```
-  - `status`: one of three values, checked in this order.
+  - `status`: one of four values, checked in this order.
     - `"indexing"` — a reindex task is running for this index.
+    - `"held"` (#9059) — an `exclude_globs` entry does not parse (a glob
+      restored from `indexes.toml`; entry points reject one). The index
+      serves reads but indexes nothing: watcher saves, `index-file`, rescans,
+      boot reconcile and reindexes all refuse. `last_walk_error` names the
+      glob, and `GET /indexes/:id/config` lists it in `invalid_exclude_globs`.
+      A `PATCH /indexes/:id/config` with valid globs lifts it, no restart,
+      and starts a catch-up reindex for the changes refused while held. The
+      PATCH response reports it as `catch_up_reindex` (`started`, then
+      `stream_url` or the refusal `reason`).
     - `"degraded"` (#8134) — a stage in `stages` has `failed`, or
       `migration_error` is non-null. Both fields name the cause. An index
       that restored vectors over an empty corpus reports this, not `ready`.
@@ -670,6 +682,22 @@ Add or replace one file in the index.
     `removed: true`. It is the one reply where `indexed: true` comes with zero
     chunks.
   - `chunks` (#8976): chunks the write committed.
+- **Response 403** `index_file_excluded` (#8922): the write is refused and
+  nothing is indexed. `reason` is `excluded_path` — the reindex walker would
+  skip this path (`exclude_globs`, `extensions`, `include_paths`,
+  `path_filter`, ignore files when the file is on disk, skip dirs, source
+  extensions, size caps measured on `content`, or a `..` segment) — or
+  `sops_encrypted` — the content is a sops-encrypted file. Either way any
+  chunks an earlier write left for the path are removed (`removed_chunks`).
+  Carries `indexed: false` and `chunks: 0`. A tombstone write is never refused.
+- **Response 503** `index_file_admission_undetermined` (#8922): the
+  filesystem could not say whether the path is admitted (an unresolvable
+  symlink, a permission error). Nothing is indexed or removed;
+  `retryable: true`.
+- **Response 409** `index_held` (#9059): the index is held because an
+  `exclude_globs` entry does not parse. Nothing is indexed or removed.
+  `reason: "invalid_exclude_glob"`, the patterns in `invalid_exclude_globs`,
+  `retryable: false`; fix them with `PATCH /indexes/:id/config`.
 - **Response 500** `index_file_failed`: the write did not land (quarantine,
   chunk cap, embed failure). Carries `indexed: false` and `message`.
 
@@ -799,6 +827,9 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
 - **Response 503** `reindex_guard_unavailable` (#8889): the one-reindex guard
   could not be checked, so the reindex is refused rather than started
   unguarded. `retryable: false`; restart the daemon.
+- **Response 409** `index_held` (#9059): an `exclude_globs` entry does not
+  parse, so the index takes no reindex. Same body as `index-file`'s 409, plus
+  `queued: false`. Fix the globs with `PATCH /indexes/:id/config`.
 
 ##### `GET /indexes/:id/reindex/stream`
 

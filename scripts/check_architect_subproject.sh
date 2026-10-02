@@ -57,7 +57,7 @@ SUB="$ROOT/$SUB_REL"
 # Shipped copies: "<path under the sub-project>|<path under the repo root>",
 # one per line. P4 added what `tm fleet init` writes into the Architect.
 PAIRS="
-skills/tm-supervisor-setup.md|crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md
+skills/tm-architect-setup.md|crates/trusty-mpm/src/assets/skills/tm-architect-setup.md
 skills/tm-fleet-check.md|crates/trusty-mpm/src/assets/architect/skills/tm-fleet-check.md
 skills/tm-context-refresh.md|crates/trusty-mpm/src/assets/architect/skills/tm-context-refresh.md
 scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py

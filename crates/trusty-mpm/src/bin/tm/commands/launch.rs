@@ -200,6 +200,9 @@ pub(crate) async fn launch(
         return Ok(());
     }
 
+    // #9091: a broken `[accounts]` table refuses before provisioning.
+    super::run_target::accounts_preflight(None, &origin_url)?;
+
     // 5. --style is not yet honoured in managed mode.
     if style.is_some() {
         tracing::warn!("--style not yet supported for managed launches; ignoring style flag");
