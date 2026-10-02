@@ -2,7 +2,7 @@
 #
 # python/trusty-architect/ is a self-contained, standard-library Python
 # sub-project: the Architect's deterministic fleet poller, its helpers and the
-# canonical copy of the bundled `tm-supervisor-setup` skill. This job runs its
+# canonical copy of the bundled `tm-architect-setup` skill. This job runs its
 # pytest suite and the independence/drift check
 # (scripts/check_architect_subproject.sh), selftest first — a gate only seen
 # passing cannot be told apart from one that always exits 0.
@@ -18,7 +18,7 @@ on:
     branches: [main]
     paths:
       - "python/trusty-architect/**"
-      - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "crates/trusty-mpm/src/assets/skills/tm-architect-setup.md"
       - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"
@@ -34,7 +34,7 @@ on:
     branches: [main]
     paths:
       - "python/trusty-architect/**"
-      - "crates/trusty-mpm/src/assets/skills/tm-supervisor-setup.md"
+      - "crates/trusty-mpm/src/assets/skills/tm-architect-setup.md"
       - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"

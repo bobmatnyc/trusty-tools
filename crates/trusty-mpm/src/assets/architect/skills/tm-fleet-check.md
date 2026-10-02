@@ -4,13 +4,13 @@ description: The Architect's supervision pass. Discover the live tmux sessions, 
 user-invocable: true
 version: "0.1.0"
 category: monitoring
-tags: [architect, supervisor, fleet, monitoring, tmux]
+tags: [architect, fleet, monitoring, tmux]
 effort: high
 ---
 
 # tm-fleet-check — One Supervision Pass
 
-One pass of the Architect's supervision loop. Your supervisor instructions set
+One pass of the Architect's supervision loop. Your Architect instructions set
 the rules: the hard limits, the relay protocol, decisions as options and the
 evidence labels. This skill is the checklist. This project's `CLAUDE.md` holds
 the fleet specifics: the watch set, the user's name for the relay marker, and
@@ -136,4 +136,4 @@ its `CLAUDE.md`.
 ## Related skills
 
 - `tm-context-refresh`: the pause, clear and resume procedure step 8 starts.
-- `tm-supervisor-setup`: how this project and its poller were set up.
+- `tm-architect-setup`: how this project and its poller were set up.

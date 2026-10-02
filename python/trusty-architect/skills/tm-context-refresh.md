@@ -4,7 +4,7 @@ description: The Architect's context refresh for a watched trusty-mpm session. C
 user-invocable: true
 version: "0.1.0"
 category: monitoring
-tags: [architect, supervisor, context, pause, resume, tmux]
+tags: [architect, context, pause, resume, tmux]
 effort: high
 ---
 

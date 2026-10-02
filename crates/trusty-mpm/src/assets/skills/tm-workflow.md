@@ -306,7 +306,7 @@ is recorded in that checkout — pm-guard denies a HEAD-moving git command there
 while the daemon records one. `tm pr` with no `--repo` prints `local-only repo:
 no remote; skipping push/PR` and exits 0; with `--repo` it runs and fails. The
 session's `gh` is disabled, so no `gh` step can run — except in the
-allow-listed supervisor (Architect) directory, which keeps the machine's gh.
+allow-listed Architect directory, which keeps the machine's gh.
 
 **Python editable installs across worktrees (#8386).** pip's wheel cache can
 serve one worktree's editable build to another, so the `.pth` file points at a
