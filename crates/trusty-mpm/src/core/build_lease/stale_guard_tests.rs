@@ -378,7 +378,7 @@ fn fingerprint_search_lists_only_the_slot_root() {
     let slot = built_slot();
     fill_deps(&slot.path().join("debug/deps"));
     let fs = CountingFs::default();
-    let mut dirs = fingerprint_dirs(&fs, slot.path());
+    let mut dirs = fingerprint_dirs(&fs, slot.path()).expect("listed");
     dirs.sort();
     assert_eq!(
         dirs,
@@ -393,4 +393,57 @@ fn fingerprint_search_lists_only_the_slot_root() {
         !visited.iter().any(|p| in_unbounded_dir(slot.path(), p)),
         "{visited:?}"
     );
+}
+
+/// #9045 fail-closed: an error on one listing entry is an error, never
+/// `NotFound`, so it cannot read as an absent (free) slot; an entry that
+/// vanished is skipped.
+#[test]
+fn a_per_entry_listing_error_is_never_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir_type = || std::fs::metadata(tmp.path()).expect("meta").file_type();
+    let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+    let gone = || io::Error::from(io::ErrorKind::NotFound);
+    let name = |n: &str| OsString::from(n);
+
+    let got = dirs_in(vec![Err(gone())].into_iter()).expect_err("entry error fails");
+    assert!(!is_absent(&got), "{got:?}");
+    let got = dirs_in(vec![Ok((name("a"), Err(denied())))].into_iter()).expect_err("type error");
+    assert!(!is_absent(&got), "{got:?}");
+    let got = dirs_in(
+        vec![Ok((
+            name("a"),
+            Err(io::Error::from(io::ErrorKind::NotADirectory)),
+        ))]
+        .into_iter(),
+    )
+    .expect_err("type error");
+    assert!(!is_absent(&got), "{got:?}");
+    let kept = dirs_in(
+        vec![
+            Ok((name("gone"), Err(gone()))),
+            Ok((name("debug"), Ok(dir_type()))),
+        ]
+        .into_iter(),
+    )
+    .expect("a vanished entry is skipped");
+    assert_eq!(kept, vec![name("debug")]);
+}
+
+/// #9045 fail-closed: when fingerprint enumeration fails (EACCES on a profile
+/// directory), the invalidation errors and the marker is not advanced.
+#[test]
+fn a_fingerprint_enumeration_error_keeps_the_marker() {
+    let slot = slot();
+    std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
+    let profile = slot.path().join("debug");
+    chmod(&profile, 0o000);
+    let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/b"), || {
+        Ok(vec!["trusty-mpm".into()])
+    });
+    chmod(&profile, 0o755);
+    let err = got.expect_err("an unenumerable fingerprint dir must fail the call");
+    assert!(err.contains("could not list fingerprints"), "{err}");
+    let marker = std::fs::read_to_string(slot.path().join(LAST_CHECKOUT_MARKER)).expect("m");
+    assert_eq!(marker, "/wt/a", "the marker is unchanged");
 }
