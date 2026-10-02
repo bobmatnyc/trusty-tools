@@ -209,6 +209,10 @@ mod decommission_owned_tests;
 #[cfg(test)]
 mod decommission_owned_ledger_tests;
 
+// #8540: a FIFO provisioning file never blocks a launch or a decommission.
+#[cfg(test)]
+mod provisioning_ledger_fifo_tests;
+
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
 mod worktree_ignored_output_route_tests;
