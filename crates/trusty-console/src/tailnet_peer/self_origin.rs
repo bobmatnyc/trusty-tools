@@ -7,7 +7,8 @@
 //! What: [`check_target`] accepts a request only when its `Host` names this
 //! listener exactly (the tailnet `ip:port` or the node's MagicDNS name and
 //! port) and any `Origin` it carries, on every method, is that same `http://`
-//! authority. A repeated, unreadable or missing value is refused.
+//! authority. A missing `Host`, or a repeated or unreadable `Host` or
+//! `Origin`, is refused.
 //! Test: `check_target_refuses_every_unknown_shape`,
 //! `check_target_accepts_the_listener_authorities`.
 
