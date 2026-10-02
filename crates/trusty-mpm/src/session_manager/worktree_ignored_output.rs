@@ -10,10 +10,10 @@
 //! What — THE RULE: a gitignored entry does not block removal when
 //! - it is harness bookkeeping tm or Claude Code writes into every tree
 //!   ([`is_harness_path`]: `.trusty-mpm/`, the ownership marker,
-//!   `.claude/settings.json` with its `.bak` and timestamped snapshots
-//!   ([`is_settings_json_harness`]), `.claude/settings.local.json*`, the deploy
-//!   ledgers, and the scaffold paths outside `.claude/agents/` and
-//!   `.claude/skills/`);
+//!   `.claude/settings.json` and `.claude/settings.local.json` with their
+//!   `.bak`, timestamped snapshots and staging leftovers
+//!   ([`is_settings_harness`]), the deploy ledgers, and the scaffold paths
+//!   outside `.claude/agents/` and `.claude/skills/`);
 //! - it is an agent or skill file tm deployed and nobody edited since
 //!   ([`super::worktree_deployed_assets`]);
 //! - the directory git matched is build or tool output: its last component is
@@ -68,11 +68,10 @@ const REGENERABLE_SUFFIXES: &[&str] = &[".pyc", ".tsbuildinfo"];
 
 /// Harness paths beyond [`SCAFFOLD_IGNORED_PATHS`] that tm writes into a tree.
 /// A trailing `*` matches the rest of that path segment.
-// #8540: `.claude/settings.json` is matched by exact name in
-// `is_settings_json_harness`, never by a `settings.json*` prefix.
+// #8540: the settings files are matched by exact name in `is_settings_harness`,
+// never by a `settings.json*` or `settings.local.json*` prefix.
 const HARNESS_PATHS: &[&str] = &[
     ".trusty-mpm/",
-    ".claude/settings.local.json*",
     // #8534 critic round 3: the deploy ledgers with their lock and temp
     // sidecars, and the project-tier stamp.
     ".claude/skills/.trusty-mpm-skills-manifest.json*",
@@ -137,27 +136,60 @@ pub(crate) fn is_regenerable(entry: &str) -> bool {
 pub(crate) fn is_harness_path(rel: &str) -> bool {
     let rel = rel.trim_end_matches('/');
     rel == super::decommission::WORKTREE_SENTINEL_FILE
-        || is_settings_json_harness(rel)
+        || is_settings_harness(rel)
         || HARNESS_PATHS
             .iter()
             .chain(SCAFFOLD_IGNORED_PATHS.iter().filter(|p| !is_asset_path(p)))
             .any(|pattern| path_matches(pattern, rel))
 }
 
-/// Is `rel` a `.claude/settings.json` file tm writes: the file itself, its
-/// `.bak`, or a timestamped snapshot ([`backup::is_snapshot_of`])?
+/// The `.claude/` settings files tm and Claude Code write into a tree.
+const SETTINGS_FILES: [&str; 2] = ["settings.json", "settings.local.json"];
+
+/// Is `rel` a `.claude/` settings file tm writes: one of [`SETTINGS_FILES`],
+/// its `.bak`, a timestamped snapshot ([`backup::is_snapshot_of`]), or a
+/// staging file a crashed atomic write left behind ([`is_staging_suffix`])?
 ///
-/// Why: the `.claude/settings.json*` prefix it replaces also excused a user's
-/// `.claude/settings.json-notes.md`, which removal then deleted (#8540).
+/// Why: the `.claude/settings.json*` and `.claude/settings.local.json*`
+/// prefixes this replaces also excused a user's `settings.json-notes.md` or
+/// `settings.local.json-notes.md`, which removal then deleted (#8540).
 /// Test: `harness_paths_are_excused_and_look_alikes_are_not`,
-/// `settings_json_look_alikes_are_not_harness`.
-fn is_settings_json_harness(rel: &str) -> bool {
-    // #8540: exact names and the snapshot pruner's own rule, nothing broader.
-    rel.strip_prefix(".claude/").is_some_and(|name| {
-        name == "settings.json"
-            || name == "settings.json.bak"
-            || backup::is_snapshot_of("settings.json", name)
+/// `settings_json_look_alikes_are_not_harness`,
+/// `settings_local_json_look_alikes_are_not_harness`,
+/// `settings_staging_leftovers_are_harness`.
+fn is_settings_harness(rel: &str) -> bool {
+    // #8540: exact names and the writers' own name shapes, nothing broader.
+    let Some(name) = rel.strip_prefix(".claude/") else {
+        return false;
+    };
+    SETTINGS_FILES.iter().any(|base| {
+        name.strip_prefix(base)
+            .is_some_and(|rest| rest.is_empty() || rest == ".bak" || is_staging_suffix(rest))
+            || backup::is_snapshot_of(base, name)
     })
+}
+
+/// Is `rest`, the text after a settings file's name, an atomic writer's
+/// staging suffix: `.tmp.<pid>.<seq>` or `.bak.<pid>.<seq>`
+/// (`trusty_common::claude_config::write_json_atomic`), or `.<pid>.<seq>.tmp`
+/// (`core::settings_lock`)?
+///
+/// Why: a crash between staging and rename leaves that file, and an
+/// unexcused one kept the tree dirty forever (#8540).
+/// Test: `settings_staging_leftovers_are_harness`.
+fn is_staging_suffix(rest: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let pid_seq = |s: &str| {
+        s.split_once('.')
+            .is_some_and(|(p, q)| digits(p) && digits(q))
+    };
+    rest.strip_prefix(".tmp.")
+        .or_else(|| rest.strip_prefix(".bak."))
+        .is_some_and(pid_seq)
+        || rest
+            .strip_prefix('.')
+            .and_then(|r| r.strip_suffix(".tmp"))
+            .is_some_and(pid_seq)
 }
 
 /// `rel` is `pattern` or lies beneath it; a `*` matches the rest of one segment.
