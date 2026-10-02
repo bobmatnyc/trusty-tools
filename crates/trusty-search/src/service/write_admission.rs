@@ -86,11 +86,13 @@ pub(crate) fn admits_pushed(handle: &IndexHandle, path: &str, content_len: usize
 ///
 /// Why: see [`admits_pushed`]. An excluded file may also hold chunks from an
 /// earlier write, which must not keep answering searches.
-/// What: a tombstone only removes, so it passes. An excluded path has its
+/// What: a tombstone only removes, so it passes. A held index (#9059) answers
+/// 409 `index_held` and touches nothing. An excluded path has its
 /// chunks removed and answers 403; an undetermined one answers 503 and removes
 /// nothing, since the file may still be admitted (#7396).
 /// Test: `pushed_write_to_an_excluded_path_is_refused_and_purged`,
-/// `pushed_write_the_filesystem_cannot_resolve_is_refused`.
+/// `pushed_write_the_filesystem_cannot_resolve_is_refused`,
+/// `every_ingest_path_refuses_a_held_index`.
 pub(crate) async fn gate(
     handle: &IndexHandle,
     indexer: &CodeIndexer,
@@ -99,6 +101,14 @@ pub(crate) async fn gate(
 ) -> Result<(), (StatusCode, serde_json::Value)> {
     if trusty_common::knowledge_document::is_tombstone(content) {
         return Ok(());
+    }
+    // #9059: a held index takes no write; the 409 names the invalid glob.
+    if let Some(hold) = crate::service::exclude_hold::hold(handle) {
+        let (status, mut body) = hold.refusal();
+        body["path"] = path.into();
+        body["indexed"] = false.into();
+        body["chunks"] = 0.into();
+        return Err((status, body));
     }
     let index_id = handle.id.0.as_str();
     match admits_pushed(handle, path, content.len()) {

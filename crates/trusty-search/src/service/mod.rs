@@ -13,6 +13,8 @@ pub mod daemon_client;
 pub(crate) mod data_dir;
 pub mod embed_pool;
 pub mod embedder_supervisor;
+// #9059: hold an index whose exclude globs do not parse.
+pub(crate) mod exclude_hold;
 pub mod fs_discovery;
 pub mod grep;
 // #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.
@@ -76,6 +78,9 @@ pub(crate) mod write_admission;
 // #8922: every ingest path against one fixture tree.
 #[cfg(test)]
 mod excludes_8922_tests;
+// #9059: every ingest path against an index held by an invalid exclude glob.
+#[cfg(test)]
+mod exclude_hold_9059_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 

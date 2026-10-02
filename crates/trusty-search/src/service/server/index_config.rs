@@ -11,7 +11,8 @@
 //! updates the in-memory handle AND persists to `indexes.toml`. Hygiene edits
 //! don't auto-trigger a reindex — the PATCH response carries
 //! `reindex_required: true` so the caller knows the change takes effect on the
-//! next reindex. Component toggles (`kg`/`vector`) are different: turning a
+//! next reindex. The exception is a PATCH that releases a held index (#9059),
+//! which starts a catch-up reindex itself. Component toggles (`kg`/`vector`) are different: turning a
 //! component OFF is instantaneous (soft-disable); turning one ON spawns a
 //! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
@@ -62,8 +63,9 @@ pub struct IndexConfigView {
     pub extensions: Vec<String>,
     /// Glob patterns excluded on top of the built-in ignores.
     pub exclude_globs: Vec<String>,
-    /// #8922: the `exclude_globs` entries that do not parse and are skipped.
-    /// Only a glob persisted before entry validation can land here.
+    /// #8922: the `exclude_globs` entries that do not parse. Only a glob
+    /// persisted before entry validation can land here. #9059: non-empty means
+    /// the index is held — it indexes nothing until a PATCH fixes them.
     #[serde(default)]
     pub invalid_exclude_globs: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
@@ -207,7 +209,10 @@ pub(crate) fn index_config_report(
 /// any; an embed-only re-arm is queued behind the background permit, #8148).
 /// A persistence failure returns **500** with a clear error body so the
 /// UI never claims success while `indexes.toml` silently went stale.
-/// Test: `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
+/// #9059: a PATCH that releases a held index starts a catch-up reindex and
+/// reports it as `catch_up_reindex`.
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
+/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
 /// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
 /// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
 /// for the component-toggle paths.
@@ -298,6 +303,8 @@ pub(crate) async fn patch_index_config_report(
     // the `indexes.toml` upsert below (which would otherwise resurrect an entry a
     // concurrent delete had just removed) and the catch-up's corpus writes.
     let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
+    // #9059: a PATCH that releases a hold starts a catch-up reindex below.
+    let was_held = crate::service::exclude_hold::hold(&existing).is_some();
 
     // Issue #2984 Phase 1 CRITICAL finding 2: resolve the component
     // transition and, if it needs a catch-up, acquire THIS index's
@@ -452,6 +459,16 @@ pub(crate) async fn patch_index_config_report(
     // already `InProgress`; a 500 that spawned nothing left the stage
     // `InProgress` forever, and every retry was refused as "already running".
     let catch_up_started = transition.needs_catch_up() || rearm;
+    // #9059: work refused while held is caught up once the hold lifts. The
+    // reindex waits on this index's permit, so it queues behind a component
+    // catch-up started below. Like that catch-up, it starts even when the
+    // persist fails: the in-memory config it serves is live.
+    let catch_up_reindex = if was_held && crate::service::exclude_hold::hold(&registered).is_none()
+    {
+        Some(super::reindex_handlers::start_release_catch_up(state, Arc::clone(&registered)).await)
+    } else {
+        None
+    };
     if let Some(permit) = permit {
         if transition.needs_catch_up() {
             // #3049: the teardown guard moves with the permit, so the catch-up's
@@ -482,29 +499,28 @@ pub(crate) async fn patch_index_config_report(
         state.emit(DaemonEvent::IndexRegistered {
             id: index_id.0.clone(),
         });
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "config applied in memory but could not be persisted to indexes.toml: {e}. \
-                     The change will be lost on the next daemon restart."
-                ),
-                "config": view,
-                "persisted": false,
-                "components": {
-                    "kg": view.kg,
-                    "vector": view.vector,
-                    "catch_up_started": catch_up_started,
-                },
-            }),
-        ));
+        let mut body = serde_json::json!({
+            "error": format!(
+                "config applied in memory but could not be persisted to indexes.toml: {e}. \
+                 The change will be lost on the next daemon restart."
+            ),
+            "config": view,
+            "persisted": false,
+            "components": {
+                "kg": view.kg,
+                "vector": view.vector,
+                "catch_up_started": catch_up_started,
+            },
+        });
+        with_catch_up_reindex(&mut body, catch_up_reindex);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
 
     state.emit(DaemonEvent::IndexRegistered {
         id: index_id.0.clone(),
     });
 
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "id": index_id.0,
         "config": view,
         "reindex_required": true,
@@ -514,7 +530,20 @@ pub(crate) async fn patch_index_config_report(
             "vector": view.vector,
             "catch_up_started": catch_up_started,
         },
-    }))
+    });
+    with_catch_up_reindex(&mut body, catch_up_reindex);
+    Ok(body)
+}
+
+/// Add `catch_up_reindex` to a PATCH body when the PATCH released a hold (#9059).
+///
+/// What: `Some` inserts the object [`super::reindex_handlers::start_release_catch_up`]
+/// returned; `None` leaves the body unchanged, so a PATCH of an unheld index
+/// answers exactly as before.
+fn with_catch_up_reindex(body: &mut serde_json::Value, catch_up: Option<serde_json::Value>) {
+    if let (Some(map), Some(catch_up)) = (body.as_object_mut(), catch_up) {
+        map.insert("catch_up_reindex".into(), catch_up);
+    }
 }
 
 /// Trim empties from a directory / glob list and drop blank entries.
