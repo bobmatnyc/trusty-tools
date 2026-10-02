@@ -61,14 +61,10 @@ struct RealFs;
 
 impl SlotFs for RealFs {
     fn child_dirs(&self, dir: &Path) -> io::Result<Vec<OsString>> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                out.push(entry.file_name());
-            }
-        }
-        Ok(out)
+        // #9045: only this open error may say "absent"; entry errors go
+        // through `dirs_in`, which never reports one as absent.
+        let read = std::fs::read_dir(dir)?;
+        dirs_in(read.map(|e| e.map(|e| (e.file_name(), e.file_type()))))
     }
 
     fn file_type(&self, path: &Path) -> io::Result<FileType> {
@@ -87,6 +83,31 @@ impl SlotFs for RealFs {
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
         Ok(true)
     }
+}
+
+/// The directory names in a listing, failing closed on a per-entry error.
+///
+/// Why (#9045): an entry error carrying `NotFound` must not reach
+/// [`is_absent`], where it would read as "slot does not exist" and so free.
+/// What: a directory is kept; a non-directory is skipped; an entry whose type
+/// lookup says `NotFound` vanished mid-listing and is skipped; every other
+/// entry error fails the listing as `ErrorKind::Other`.
+/// Test: `a_per_entry_listing_error_is_never_absent`.
+fn dirs_in(
+    entries: impl Iterator<Item = io::Result<(OsString, io::Result<FileType>)>>,
+) -> io::Result<Vec<OsString>> {
+    let entry_error = |err: io::Error| io::Error::other(format!("slot entry unreadable: {err}"));
+    let mut out = Vec::new();
+    for entry in entries {
+        let (name, kind) = entry.map_err(entry_error)?;
+        match kind {
+            Ok(kind) if kind.is_dir() => out.push(name),
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(entry_error(err)),
+        }
+    }
+    Ok(out)
 }
 
 /// Whether `err` means the path is not there (as opposed to unreadable).
@@ -137,14 +158,16 @@ pub fn checkout_root(cwd: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// A description when a matching fingerprint entry could not be removed (the
-/// marker is then left unchanged, and the caller must not build in the slot,
-/// #8261 round 3), or when the marker could not be written.
+/// A description when a matching fingerprint entry could not be removed or the
+/// fingerprints could not be enumerated (the marker is then left unchanged, and
+/// the caller must not build in the slot, #8261 round 3, #9045), or when the
+/// marker could not be written.
 ///
 /// Test: `a_different_checkout_clears_only_workspace_fingerprints`,
 /// `the_same_checkout_touches_nothing`, `a_missing_marker_clears`,
 /// `an_unreadable_package_list_clears_every_fingerprint`,
-/// `a_failed_removal_is_an_error_and_keeps_the_marker`.
+/// `a_failed_removal_is_an_error_and_keeps_the_marker`,
+/// `a_fingerprint_enumeration_error_keeps_the_marker`.
 pub fn invalidate_if_checkout_changed(
     slot_dir: &Path,
     checkout: &Path,
@@ -162,11 +185,32 @@ pub fn invalidate_if_checkout_changed(
     let all = names.is_err();
     let names = names.unwrap_or_default();
     let mut removed = 0;
-    for dir in fingerprint_dirs(&RealFs, slot_dir) {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+    // #9045: an enumeration error must not advance the marker, or the next
+    // holder would skip a clear that never finished.
+    let dirs = fingerprint_dirs(&RealFs, slot_dir).map_err(|err| {
+        format!(
+            "could not list fingerprints in {}: {err}; the slot is not used",
+            slot_dir.display()
+        )
+    })?;
+    for dir in dirs {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if is_absent(&err) => continue,
+            Err(err) => {
+                return Err(format!(
+                    "could not list {}: {err}; the slot is not used",
+                    dir.display()
+                ));
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                format!(
+                    "could not list {}: {err}; the slot is not used",
+                    dir.display()
+                )
+            })?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if !(all || names.iter().any(|pkg| is_unit_of(&name, pkg))) {
                 continue;
@@ -278,35 +322,42 @@ fn is_unit_of(entry: &str, pkg: &str) -> bool {
 /// Every `<profile>/.fingerprint` and `<triple>/<profile>/.fingerprint` in `root`.
 ///
 /// What: profiles are the root's child directories holding a `.fingerprint`;
-/// the triple layouts reuse their names. An unlistable root yields nothing,
-/// as before.
+/// the triple layouts reuse their names.
+///
+/// # Errors
+///
+/// #9045: an unlistable root, or a `.fingerprint` stat failing for any reason
+/// but absence, is an error — never an empty answer, which would read as
+/// "nothing to clear".
+///
 /// Cost (#9045): one `read_dir` of `root` and direct-path stats; no `deps`,
 /// `build` or `incremental` listing.
-/// Test: `fingerprint_search_lists_only_the_slot_root`.
-fn fingerprint_dirs(fs: &impl SlotFs, root: &Path) -> Vec<PathBuf> {
-    let Ok(children) = fs.child_dirs(root) else {
-        return Vec::new();
-    };
-    let fingerprints = |dir: PathBuf| {
+/// Test: `fingerprint_search_lists_only_the_slot_root`,
+/// `a_fingerprint_enumeration_error_keeps_the_marker`.
+fn fingerprint_dirs(fs: &impl SlotFs, root: &Path) -> io::Result<Vec<PathBuf>> {
+    let children = fs.child_dirs(root)?;
+    let fingerprints = |dir: PathBuf| -> io::Result<Option<PathBuf>> {
         let fp = dir.join(FINGERPRINT_DIR);
-        fs.file_type(&fp).is_ok_and(|t| t.is_dir()).then_some(fp)
+        match fs.file_type(&fp) {
+            Ok(kind) => Ok(kind.is_dir().then_some(fp)),
+            Err(err) if is_absent(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
     };
-    let profiles: Vec<&OsString> = children
-        .iter()
-        .filter(|child| fingerprints(root.join(child)).is_some())
-        .collect();
-    let mut out: Vec<PathBuf> = profiles
-        .iter()
-        .map(|profile| root.join(profile).join(FINGERPRINT_DIR))
-        .collect();
+    let mut profiles: Vec<&OsString> = Vec::new();
+    let mut out: Vec<PathBuf> = Vec::new();
     for child in &children {
-        out.extend(
-            profiles
-                .iter()
-                .filter_map(|profile| fingerprints(root.join(child).join(profile))),
-        );
+        if let Some(fp) = fingerprints(root.join(child))? {
+            profiles.push(child);
+            out.push(fp);
+        }
     }
-    out
+    for child in &children {
+        for profile in &profiles {
+            out.extend(fingerprints(root.join(child).join(profile))?);
+        }
+    }
+    Ok(out)
 }
 
 /// The checkout's own workspace package names, via `cargo metadata --no-deps`.
