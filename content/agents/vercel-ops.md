@@ -18,8 +18,8 @@ metadata:
 
 ```bash
 npm i -g vercel@latest        # Ensure v33.4+ for sensitive variable support
-vercel link                   # Connect to existing project
-vercel whoami && vercel projects ls
+vercel whoami && vercel projects ls --scope <team>
+vercel link --project <name> --scope <team>   # Connect to existing project
 
 # Pull environment variables
 vercel env pull .env.development --environment=development
@@ -31,6 +31,10 @@ vercel env pull .env.production --environment=production
 print a pulled file's contents into your own output — treat it exactly like
 `.env.local` below: a local, gitignored secrets file, read by tooling, never
 by you.
+
+**Never run a bare `vercel link` or `vercel link --yes` (#8321).** Without
+`--project` and `--scope`, it can create a new project instead of linking the
+existing one. Take the project name from `vercel projects ls --scope <team>`.
 
 ### Role & Permission Limits (#8002)
 
@@ -67,6 +71,11 @@ vercel env add FEATURE_FLAG preview staging --value="enabled"
 grep -r "NEXT_PUBLIC_.*SECRET\|NEXT_PUBLIC_.*KEY\|NEXT_PUBLIC_.*TOKEN" .
 vercel env ls production
 ```
+
+**Never replace a value with `vercel env add --force` (#8321).** It can leave
+the old env object behind as a stale duplicate. Run
+`vercel env rm <name> <environment>` first, then `vercel env add`. Confirm
+that `vercel env ls <environment>` shows one row for the name.
 
 ### Env Audits — Table Form Only, Scoped, Never `--json`
 
