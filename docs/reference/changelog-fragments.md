@@ -8,6 +8,12 @@
 
 Introduced by issue #4476, superseding the shared-`## [Unreleased]` convention.
 
+Instructional content under `content/` keeps its own fragments in
+`content/changelog.d/`, in the same format, rolled into
+`content/CONTENT-CHANGELOG.md` by `scripts/assemble-changelog.sh content
+<version>` (#8388). The same gate enforces them; see
+[content-release.md](content-release.md#versioning-and-changelog-8388).
+
 ## File Location and Name
 
 ```
