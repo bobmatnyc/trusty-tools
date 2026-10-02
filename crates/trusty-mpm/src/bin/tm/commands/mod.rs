@@ -53,6 +53,8 @@ pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 // #8939: `tm env set|keys` — dotenv edits that print no value.
 pub(crate) mod env_file;
+// #8378 PR-C: `tm content install|update|status`.
+pub(crate) mod content;
 // #8939 fix round: `tm env`'s no-follow file access and its guard grant.
 pub(crate) mod env_file_fs;
 pub(crate) mod env_file_grant;
@@ -169,6 +171,9 @@ pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_secret_consumers;
 // #9001: a `for` loop whose words reach only `echo` and a gh search.
 pub(crate) mod pm_guard_secret_search_loop;
+// #8879: the credential rules over the body of a script a command runs.
+pub(crate) mod pm_guard_secret_script;
+pub(crate) mod pm_guard_secret_script_read;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
 pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod pm_guard_trust_anchor_paths;
