@@ -832,6 +832,65 @@ async fn a_broken_accounts_table_spawns_with_the_nobody_token() {
     }
 }
 
+/// 🔴 #9091 r2: a record pinned only by `github.account` is a pin. The spawn
+/// must not read the `[accounts]` table, and must run as that login — the one
+/// the clone and the launch preflight choose.
+/// Test: itself.
+#[tokio::test]
+async fn a_github_account_only_pin_spawns_as_that_login_without_the_map() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let origin = "https://github.com/acme-9091/widget";
+    registry
+        .register(Project {
+            github: Some(GithubConfig {
+                account: Some("octo-9091-gh".into()),
+                ..Default::default()
+            }),
+            ..project("widget", origin, None)
+        })
+        .await
+        .expect("register");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    workspace_with_origin(workspace.path(), "https://github.com/acme-9091/widget.git");
+
+    let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), || {
+        panic!("a pinned origin must not read the [accounts] table")
+    })
+    .await;
+    assert_eq!(value_of(&vars, GH_USER_ENV_VAR), "octo-9091-gh");
+    assert_eq!(value_of(&vars, GH_TOKEN_ENV_VAR), super::REFUSED_GH_TOKEN);
+}
+
+/// 🔴 #9091 r2: a record pinned only by `github.token_env` is a pin too. The
+/// spawn must not read the `[accounts]` table, and injects nothing, as before
+/// #9091.
+/// Test: itself.
+#[tokio::test]
+async fn a_token_env_only_pin_spawns_as_before_without_the_map() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let origin = "https://github.com/acme-9091/widget";
+    registry
+        .register(Project {
+            github: Some(GithubConfig {
+                token_env: Some("TM_9091_TOKEN".into()),
+                ..Default::default()
+            }),
+            ..project("widget", origin, None)
+        })
+        .await
+        .expect("register");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    workspace_with_origin(workspace.path(), "https://github.com/acme-9091/widget.git");
+
+    let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), || {
+        panic!("a pinned origin must not read the [accounts] table")
+    })
+    .await;
+    assert!(vars.is_empty(), "vars: {vars:?}");
+}
+
 // ── #8510: an account-only spawn pin never falls back to "no identity" ─────
 
 /// A repository whose registry record pins only an account.

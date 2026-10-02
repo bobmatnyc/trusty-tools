@@ -6,7 +6,7 @@
 //! What: [`OrgAccounts`] is the validated table. [`OrgAccounts::inspect`] reads
 //! it strictly: a malformed table is an `Err`, never an empty map, because an
 //! empty map would clone and spawn as the machine's active account. The one
-//! exception is a TOML syntax error in a file with no `[accounts]` header,
+//! exception is a TOML syntax error in a file where no line names `accounts`,
 //! which is an empty map plus a warning, as `MpmConfig::load` treats it.
 //! [`resolve_gh_account_with`] is the one precedence rule — an explicit
 //! selection, then the registry pin, then the org map, then none — and
@@ -103,8 +103,9 @@ impl OrgAccounts {
     /// The table and any warning, from a whole `config.toml` text.
     ///
     /// What: an absent table is an empty map. #9091: a text that does not
-    /// parse is an empty map and a warning when no line is an `[accounts]`
-    /// header, and [`OrgAccountsError::Parse`] when one is. An `accounts`
+    /// parse is an empty map and a warning when no line names the `accounts`
+    /// table (see [`has_accounts_header`]), and [`OrgAccountsError::Parse`]
+    /// when one does. An `accounts`
     /// value that is not a table, a non-string or blank value, a key or login
     /// with characters outside `[A-Za-z0-9._-]`, and two orgs that differ only
     /// in case are each an `Err` naming the problem.
@@ -116,7 +117,7 @@ impl OrgAccounts {
             // #9091: the MpmConfig::load rule, unless the table is in the file.
             Err(e) if !has_accounts_header(raw) => {
                 let warning = format!(
-                    "{} is not valid TOML ({}); it has no [accounts] table, so no org is \
+                    "{} is not valid TOML ({}); no line names an [accounts] table, so no org is \
                      mapped to a gh account",
                     path.display(),
                     e.message()
@@ -219,17 +220,30 @@ fn log_warning((accounts, warning): Inspected) -> OrgAccounts {
     accounts
 }
 
-/// Does any line of `raw` open the `[accounts]` table?
+/// Does any line of `raw` name the `accounts` table?
 ///
-/// What: a line-level match after dropping a `#` comment and every whitespace
-/// character, so `[ accounts ]  # work` counts and `[accounts.x]` does not.
-/// Test: `a_syntax_error_with_an_accounts_header_is_an_error`.
+/// What: a line-level match after dropping a `#` comment, every whitespace
+/// character and every quote. A header counts when it opens `accounts` or a
+/// table under it — `[accounts]`, `["accounts"]`, `[[accounts]]`,
+/// `[accounts.x]` — since the parser reads each of those as a malformed or
+/// valid table. So does a key line `accounts = …` or `accounts.org = …`. A key
+/// line under another table also counts, which errs toward refusing (#9091 r2).
+/// Test: `a_syntax_error_with_an_accounts_header_is_an_error`,
+/// `a_syntax_error_without_an_accounts_header_is_an_empty_map`.
 fn has_accounts_header(raw: &str) -> bool {
     raw.lines().any(|line| {
-        let code = line.split('#').next().unwrap_or_default();
-        code.chars()
-            .filter(|c| !c.is_whitespace())
-            .eq("[accounts]".chars())
+        let code: String = line
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\''))
+            .collect();
+        let name = code.trim_start_matches('[');
+        if name.len() < code.len() {
+            return name.starts_with("accounts]") || name.starts_with("accounts.");
+        }
+        code.starts_with("accounts=") || code.starts_with("accounts.")
     })
 }
 

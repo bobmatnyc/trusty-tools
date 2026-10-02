@@ -5,8 +5,9 @@
 //! see that where they look, not only in the daemon log.
 //! What: [`check_org_accounts`] reads `~/.trusty-mpm/config.toml` through
 //! [`OrgAccounts::inspect`], the same strict read every clone and spawn makes,
-//! and reports `Ok` with the mapped orgs, `Warn` for a syntax error the table
-//! was read past, and `Fail` with the error for a table that cannot be read.
+//! and reports `Ok` with the mapped orgs, `Warn` for a syntax error in a file
+//! where no line names `accounts`, and `Fail` with the error for a table that
+//! cannot be read.
 //! Read-only.
 //! Test: `an_absent_table_is_ok_and_says_missing`,
 //! `a_valid_table_is_ok_and_counts_the_orgs`,
@@ -25,8 +26,8 @@ const NAME: &str = "org_accounts";
 ///
 /// Why: see the module doc.
 /// What: `Ok` "missing" for a file or table that is absent, `Ok` with the
-/// org count otherwise; `Warn` with the parse error when it is outside any
-/// `[accounts]` table; `Fail` with the error for every [`OrgAccounts::inspect`]
+/// org count otherwise; `Warn` with the parse error when no line of the file
+/// names `accounts`; `Fail` with the error for every [`OrgAccounts::inspect`]
 /// `Err`.
 /// Test: the four tests named in the module doc.
 pub(super) fn check_org_accounts(home: &Path) -> DoctorCheck {

@@ -74,12 +74,19 @@ fn a_malformed_accounts_table_is_an_error() {
 
 /// 🔴 #9091 Fail-Open Check: the likeliest typo — an unquoted login — is a
 /// TOML syntax error. In a file holding the table it must surface, not read as
-/// "no mapping"; a header spelled with spaces and a comment still counts.
+/// "no mapping" — in every spelling TOML allows for it (#9091 r2).
 #[test]
 fn a_syntax_error_with_an_accounts_header_is_an_error() {
     for raw in [
         "[accounts]\nduettoresearch = bob-duetto\n",
         "[models]\ndefault = sonnet\n\n  [ accounts ]  # work orgs\nacme = \"octo\"\n",
+        "[\"accounts\"]\nduettoresearch = bob-duetto\n",
+        "['accounts']\nduettoresearch = bob-duetto\n",
+        "accounts = { duettoresearch = \"bob-duetto\" }\noops = bare\n",
+        "accounts.duettoresearch = \"bob-duetto\"\noops = bare\n",
+        "\"accounts\".duettoresearch = \"bob-duetto\"\noops = bare\n",
+        "[accounts.sub]\nx = bare\n",
+        "[[accounts]]\nx = bare\n",
     ] {
         let err = parse(raw).expect_err(raw);
         assert!(matches!(err, OrgAccountsError::Parse { .. }), "{err:?}");
@@ -94,6 +101,7 @@ fn a_syntax_error_without_an_accounts_header_is_an_empty_map() {
     for raw in [
         "[models]\ndefault = sonnet\n",
         "# [accounts]\n[models]\nx = y\n",
+        "[accountsx]\naccounts_extra = \"a\"\nx = y\n",
     ] {
         let (accounts, warning) =
             OrgAccounts::parse(raw, Path::new("/home/u/.trusty-mpm/config.toml")).expect(raw);

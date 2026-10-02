@@ -234,7 +234,10 @@ runs as the account its base clone was made with:
    `<login>@<owner>/<repo>` positional.
 2. The registry pin for the repository, written by an earlier flag or by
    `tm projects register --gh-account`. The registry pin wins over this table.
-   A pin that names only a `gh` config dir also wins, and the table is not read.
+   A record pinned by any field — `gh_account`, `github.account`,
+   `github.config_dir` or `github.token_env` — counts, and the table is not
+   read. The login is `gh_account`, else `github.account`; a pin naming
+   neither runs with the identity it pinned before this table existed.
 3. This table, looked up by the repository owner.
 4. The ambient identity, exactly as before. An org with no entry stays here.
 
@@ -247,9 +250,12 @@ This table is read strictly, unlike the rest of the file. A malformed table is
 an error that names the problem: a value that is not a string, a blank or
 invalid login, two orgs that differ only in case, or `accounts` that is not a
 table. A TOML syntax error (an unquoted login is the common case) is an error
-when any line of the file is an `[accounts]` header, matched with whitespace and
-`#` comments ignored. In a file with no such header, a syntax error reads as an
-empty table and logs a warning, the way the rest of the file treats it.
+when any line of the file names `accounts`: a header `[accounts]`,
+`["accounts"]`, `['accounts']`, `[[accounts]]` or `[accounts.<x>]`, or a key
+line `accounts = …` or `accounts.<org> = …`. Whitespace, quotes and `#`
+comments are ignored in the match, and a matching key line under another table
+also counts. In a file where no line names `accounts`, a syntax error reads as
+an empty table and logs a warning, the way the rest of the file treats it.
 
 When the table cannot be read:
 

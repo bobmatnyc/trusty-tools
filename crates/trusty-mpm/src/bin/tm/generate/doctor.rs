@@ -113,7 +113,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "org_accounts",
-        "Whether the `[accounts]` table in `~/.trusty-mpm/config.toml` reads. It maps a GitHub org to the `gh` account that clones and spawns for it. `Ok` naming how many orgs it maps, or \"missing\" when there is no table (clones and spawns use the registry pin or the ambient identity). `Warn` when the file has a TOML syntax error but no `[accounts]` header, which is read as an empty table. `Fail` with the error when the table cannot be read — a syntax error in a file that holds the table, a value that is not a string, an invalid login, two orgs differing only in case — since clones then refuse and spawned sessions' `gh` authenticates as nobody. Read-only (issue #9091).",
+        "Whether the `[accounts]` table in `~/.trusty-mpm/config.toml` reads. It maps a GitHub org to the `gh` account that clones and spawns for it. `Ok` naming how many orgs it maps, or \"missing\" when there is no table (clones and spawns use the registry pin or the ambient identity). `Warn` when the file has a TOML syntax error and no line names `accounts` (a `[accounts]`, `[\"accounts\"]` or `[accounts.x]` header, or an `accounts = …` or `accounts.org = …` key), which is read as an empty table. `Fail` with the error when the table cannot be read — a syntax error in a file that holds the table, a value that is not a string, an invalid login, two orgs differing only in case — since clones then refuse and spawned sessions' `gh` authenticates as nobody. Read-only (issue #9091).",
     ),
     (
         "instruction_fold",

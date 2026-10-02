@@ -42,6 +42,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// #9091: moved out with the pin selection the clone path shares.
+use crate::core::gh_account_registry::find_pinned_gh_identity;
 use crate::core::trusty_tools_config::GithubConfig;
 
 /// Bound for the `gh auth status` probe `tm doctor` runs (#5032).
@@ -722,7 +724,7 @@ pub fn resolve_gh_account_env(
 /// `disagreeing_pins_spawn_with_the_nobody_token`,
 /// `an_unreadable_registry_spawns_with_the_nobody_token`
 /// (`gh_account_spawn_env_tests.rs`); the registry-matching step is
-/// separately, directly tested via `find_pinned_gh_identity` below.
+/// separately, directly tested via `gh_account_registry::find_pinned_gh_identity`.
 pub async fn resolve_gh_account_env_for_registry(
     registry: &crate::project::ProjectRegistry,
     cwd: &std::path::Path,
@@ -769,6 +771,9 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
     // #8914 HIGH 2: a registry that cannot name one pin fails the session's gh
     // closed; it never spawns as the machine's active account.
     let pinned = match find_pinned_gh_identity(registry, &origin).await {
+        // #9091: any pin beats the org map; one naming no login and no config
+        // dir (a `token_env`-only record) injects nothing, as before #9091.
+        Ok(Some(p)) if p.account.is_none() && p.config_dir.is_none() => return Vec::new(),
         Ok(Some(pinned)) => pinned,
         // #9091: no pin → the `[accounts]` org map; a broken table fails closed.
         Ok(None) => match crate::core::gh_org_accounts::org_map_pin(
@@ -1013,59 +1018,6 @@ pub struct PinnedGhIdentity {
     pub config_dir: Option<PathBuf>,
     /// #9091: a registry record, or the `[accounts]` org map — names the fix.
     pub source: crate::core::gh_org_accounts::AccountSource,
-}
-
-/// Look up the pinned `gh` identity among the registered projects whose
-/// `repo_url` matches `origin` — the pure(ish), registry-backed matching
-/// step [`resolve_gh_account_env_for_registry`] delegates to, isolated so it
-/// is directly testable against a real (temp-dir-backed) `ProjectRegistry`
-/// fixture without needing a real git repository or a live `gh` subprocess
-/// (#3025 review follow-up item 1: this is the exact step that proves the
-/// registry — not the static config — is consulted).
-///
-/// #5851 widened it from `gh_account` alone to the `(account, config_dir)`
-/// pair: returning only the account is what forced the caller down the
-/// non-discriminating `gh auth token -u` path.
-/// What: `None` when no project matches, or when the matched project pins
-/// NEITHER key (nothing to inject, no regression). #5850: every matching record
-/// is considered through [`crate::core::gh_account_registry::select_pin`], the
-/// daemon's own rule. #8914 HIGH 2: records that pin different identities, or a
-/// registry that cannot be read, are an `Err` the caller fails closed on.
-/// Test: `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`,
-/// `resolve_gh_account_env_for_registry_no_match_is_none`,
-/// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`,
-/// `find_pinned_gh_identity_reads_config_dir`,
-/// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
-/// `find_pinned_gh_identity_refuses_disagreeing_pins`.
-async fn find_pinned_gh_identity(
-    registry: &crate::project::ProjectRegistry,
-    origin: &str,
-) -> Result<Option<PinnedGhIdentity>, String> {
-    use crate::core::gh_account_registry::{RegistryPin, select_pin};
-    // #8914 HIGH 2: an unreadable registry cannot say "unpinned".
-    let projects = registry
-        .list()
-        .await
-        .map_err(|e| format!("the project registry could not be read ({e})"))?;
-    // #5850: every matching record, chosen by the same rule the daemon uses —
-    // `list` is `HashMap`-ordered, so a first match was an arbitrary one.
-    let candidates = projects
-        .iter()
-        .filter(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
-        .map(|p| (p.name.clone(), RegistryPin::from_project(p)))
-        .collect();
-    // #8914 HIGH 2: disagreeing pins fail closed, as the daemon's own do.
-    let Some(pin) = select_pin(candidates)? else {
-        return Ok(None);
-    };
-    // #5851: `github.config_dir` already exists on the record and is persisted;
-    // it was simply never read here.
-    let pinned = PinnedGhIdentity {
-        account: pin.account,
-        config_dir: pin.github.and_then(|cfg| cfg.config_dir),
-        ..Default::default()
-    };
-    Ok((pinned != PinnedGhIdentity::default()).then_some(pinned))
 }
 
 #[cfg(test)]
