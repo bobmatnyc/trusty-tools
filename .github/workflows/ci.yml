@@ -2760,8 +2760,7 @@ jobs:
   # fails (#8378). The owner-approved required list is CI gate, line-cap,
   # generation-artifact-lint, test-pointers, PR version bump and
   # capabilities-drift; this job is what lets the covered contexts leave it.
-  # NOT a required context yet — branch protection is changed by hand, after
-  # the probes pass on GitHub.
+  # CI gate is the required context (owner ruling 407).
   #
   # Invariant: a required context must always produce a check run, and a
   # skip must be one the classifier asked for. `always()` makes this job run

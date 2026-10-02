@@ -3,7 +3,7 @@
 # ci-gate-selftest.sh — fixtures for the `CI gate` job's two scripts and its
 #   ci.yml wiring (#8378).
 #
-# Why: `CI gate` is meant to become the one required context standing in for
+# Why: `CI gate` is the required context standing in for
 #   the others. Its failure modes are silent: a relevance rule that
 #   answers `false` for a real input skips a gate, a verdict that accepts an
 #   unordered skip reports green on nothing, and a `needs:` list that drifts
@@ -182,6 +182,8 @@ assert_eq "every changelog-fragment step after checkout survives an earlier fail
   "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc '!cancelled()')"
 assert_eq "every changelog-fragment step runs on workflow_dispatch off main" "0" \
   "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'")"
+assert_eq "every changelog-fragment step runs on pull_request" "0" \
+  "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'pull_request'")"
 assert_eq "no changelog-fragment step carries continue-on-error" "0" \
   "$(printf '%s\n' "$cf_job" | grep -c 'continue-on-error')"
 for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
