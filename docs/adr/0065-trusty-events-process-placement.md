@@ -1,6 +1,6 @@
 # 0065. Run the trusty-events bus as its own supervised daemon
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-02
 - **Scope:** Workspace-wide — concretely the new `trusty-events` crate,
   `trusty-console`, `trusty-common::control_bus`, `trusty-installer` (`tctl`),
@@ -314,6 +314,16 @@ no client.
 
 - If the console's 15 s poller probes `trusty-events` with an answered method,
   it costs one RPC per poll; use the liveness-marked probe (#6621).
+
+## Acceptance
+
+Status: Accepted, 2026-10-02, owner ruling 2a. Bob accepted option A at
+14:58Z (relayed by the Architect) on four conditions, each already a rule of the Decision above:
+
+1. No other crate links the bus library (decision 1).
+2. The socket is `daemon_socket_path("trusty-events")` (decision 2).
+3. The wire contract stays in `trusty-common::control_bus` (decision 3).
+4. No daemon may need the bus to do its own job (decision 4).
 
 ## Documents to amend on acceptance
 
