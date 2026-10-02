@@ -128,6 +128,13 @@ name = "trusty-common"
 # requires a bump. Additive-only: no public item removed or changed shape, so
 # no semver-accepted-breaks record is needed; owner ruling directs PATCH
 # regardless of break status per docs/reference/semver-gate.md.
+# 0.53.0 (Refs #8749): minor — a 0.x break is MINOR. Four breaks since 0.52.7:
+# `RpcError`/`SearchRpcError` gain a public `data` field (#6285), the new
+# `HnswStoreError::WriteDeadline` variant on a non-`#[non_exhaustive]` enum
+# (#8749), `embedder-test-support` no longer enables `embedder` (#8838), and
+# the `symgraph::server` module plus `symgraph-server` feature are removed
+# (#8926). Listed under `### Breaking` in CHANGELOG.md; 0.52.8 was never
+# published, so 0.53.0 follows 0.52.7 on crates.io.
 version = "0.53.0"
 edition.workspace = true
 authors.workspace = true

@@ -11,6 +11,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Breaking
 
 - `uds::server::RpcError` and `search_rpc::SearchRpcError` each gain a public `data: Option<serde_json::Value>` field. Code that builds either with a struct literal, or destructures one without `..`, must add the field; `RpcError::new` and the other constructors are unchanged (#6285).
+- `memory_core::store::hnsw_store::HnswStoreError` gains the variant `WriteDeadline`, for a palace write transaction that stalls past its deadline. The enum is public and not `#[non_exhaustive]`, so an exhaustive `match` on it must add an arm (#8749).
+- The `embedder-test-support` feature no longer enables `embedder`. A crate that relied on it to get the embedder must enable `embedder` itself; see Changed (#8838).
+- The `symgraph::server` module and the `symgraph-server` cargo feature are removed; see Removed (#8926).
 
 ### Added
 
