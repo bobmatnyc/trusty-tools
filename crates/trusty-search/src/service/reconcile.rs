@@ -700,14 +700,21 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 ///
 /// Test: `reconcile_stale_index_stamps_new_sha`,
 ///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs,
-///       `boot_reconcile_delta_honours_the_walker_policy` and
-///       `boot_reconcile_delta_leaves_an_undetermined_file_alone`.
+///       `boot_reconcile_delta_honours_the_walker_policy`,
+///       `boot_reconcile_delta_leaves_an_undetermined_file_alone` and
+///       `every_ingest_path_refuses_a_held_index`.
 pub(super) async fn apply_delta(
     handle: &Arc<IndexHandle>,
     index_id: &str,
     files: &[String],
     new_sha: &str,
 ) -> bool {
+    // #9059: a held index takes no delta. The SHA stays unstamped, so the
+    // next boot retries once a PATCH fixes the globs.
+    if let Some(hold) = crate::service::exclude_hold::hold(handle) {
+        tracing::error!("reconcile[{index_id}]: {}", hold.reason());
+        return false;
+    }
     let root = &handle.root_path;
     let mut indexed = 0usize;
     let mut removed = 0usize;

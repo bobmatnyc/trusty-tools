@@ -49,6 +49,8 @@ pub(crate) mod byte_cap;
 pub(crate) mod compact;
 pub(crate) mod descriptors;
 pub(crate) mod health;
+// #9059: the pure verdict helpers split out of `health` for the SLOC cap.
+mod health_verdicts;
 pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod index_directory;
