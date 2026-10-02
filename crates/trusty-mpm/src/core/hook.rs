@@ -220,6 +220,55 @@ impl HookEvent {
             | HookEvent::SkillActivated => HookCategory::System,
         }
     }
+
+    /// Whether Claude Code sends this event only after the session's
+    /// `SessionStart` (#8984).
+    ///
+    /// Why: the daemon settles an id it has no `SessionStart` for on such an
+    /// event, so a later forged `SessionStart` cannot bind it. An event that
+    /// can fire while the session is still starting must not, or it would
+    /// refuse the session's own bind.
+    /// What: `true` for turn, tool, agent, task, permission, compaction and
+    /// session-end events; `false` for `SessionStart` and for start-up,
+    /// configuration and system events. No wildcard arm, so a new variant
+    /// needs a decision here.
+    /// Test: `only_in_session_events_follow_session_start_8984`.
+    pub fn follows_session_start(&self) -> bool {
+        match self {
+            HookEvent::PreToolUse
+            | HookEvent::PostToolUse
+            | HookEvent::PostToolUseFailure
+            | HookEvent::Stop
+            | HookEvent::StopFailure
+            | HookEvent::SubagentStart
+            | HookEvent::SubagentStop
+            | HookEvent::SubagentStopFailure
+            | HookEvent::TeammateIdle
+            | HookEvent::SessionEnd
+            | HookEvent::UserPromptSubmit
+            | HookEvent::PreCompact
+            | HookEvent::PostCompact
+            | HookEvent::TaskCreated
+            | HookEvent::TaskCompleted
+            | HookEvent::TaskUpdated
+            | HookEvent::TaskStopped
+            | HookEvent::PermissionDenied
+            | HookEvent::PermissionGranted => true,
+            HookEvent::SessionStart
+            | HookEvent::WorktreeCreate
+            | HookEvent::WorktreeRemove
+            | HookEvent::InstructionsLoaded
+            | HookEvent::ConfigChange
+            | HookEvent::CwdChanged
+            | HookEvent::FileChanged
+            | HookEvent::Notification
+            | HookEvent::McpServerConnected
+            | HookEvent::McpServerDisconnected
+            | HookEvent::TokenUsageUpdate
+            | HookEvent::ErrorRaised
+            | HookEvent::SkillActivated => false,
+        }
+    }
 }
 
 /// Coarse grouping of hook events for dashboard panels and alert filters.
@@ -314,6 +363,28 @@ mod tests {
         for event in HookEvent::ALL {
             let _ = event.category();
         }
+    }
+
+    /// #8984: every event tm subscribes to except `SessionStart` settles an
+    /// unannounced id; `SessionStart` and the start-up events never do.
+    #[test]
+    fn only_in_session_events_follow_session_start_8984() {
+        for name in crate::core::standalone::hooks::MPM_LIFECYCLE_HOOK_EVENTS {
+            let event = HookEvent::from_wire(name).expect("a known event");
+            assert_eq!(
+                event.follows_session_start(),
+                event != HookEvent::SessionStart,
+                "{name}"
+            );
+        }
+        for event in [
+            HookEvent::InstructionsLoaded,
+            HookEvent::ConfigChange,
+            HookEvent::WorktreeCreate,
+        ] {
+            assert!(!event.follows_session_start(), "{event:?}");
+        }
+        assert!(HookEvent::UserPromptSubmit.follows_session_start());
     }
 
     #[test]

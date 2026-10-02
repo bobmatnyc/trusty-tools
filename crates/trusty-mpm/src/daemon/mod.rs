@@ -559,8 +559,9 @@ impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
     }
 }
 
-/// Interval between dead-session reap sweeps.
-const REAP_INTERVAL_SECS: u64 = 60;
+/// Interval between dead-session reap sweeps. #9010: also how recent a hook
+/// event must be to hold a settled session whose `claude` is gone.
+pub(crate) const REAP_INTERVAL_SECS: u64 = 60;
 
 /// Periodically prune registry entries whose tmux session has exited.
 ///
