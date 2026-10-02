@@ -1,0 +1,3 @@
+Fixed
+
+- `tm content update` finds the newest `content-v*` release with `git/matching-refs/tags/content-v` and one `releases/tags/<tag>` read, about 2 API requests however many releases the repository has. Before, it paged the whole `/releases` listing (about 6.4 MB over 4 requests) against GitHub's 60 requests/hour unauthenticated limit. It now sends `Authorization: Bearer <token>` on API calls when `GITHUB_TOKEN` (or `GH_TOKEN`) is set; the token is never logged or put in an error. A non-2xx answer, an empty tag list, or a `content-v*` tag that is not a version is an error, never "no update". `--content-ref` is unchanged.

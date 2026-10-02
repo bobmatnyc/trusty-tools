@@ -146,6 +146,14 @@ pub enum CacheError {
         /// What stays in use.
         fallback: Fallback,
     },
+    /// A `content-v*` git tag upstream is not a `content-vX.Y.Z` version.
+    #[error("upstream has a content tag {tag:?} that is not a content-vX.Y.Z version; {fallback}")]
+    UnparsableTag {
+        /// The tag as listed.
+        tag: String,
+        /// What stays in use.
+        fallback: Fallback,
+    },
     /// The lock pins this tag with other bytes than the release now carries.
     #[error(
         "refusing {tag}: the lock pins sha256 {pinned}, but the release now hashes to {upstream}; \
@@ -266,7 +274,7 @@ pub fn install_from_file(cache: &Path, bundle: &Path) -> Result<UpdateOutcome, C
 /// published release and re-pins to it; `--content-ref` pins one exactly. The
 /// pin moves only here: between updates nothing changes it.
 /// What: under the update lock, picks the target — `content_ref`, else the
-/// newest release the releases API lists that is neither a draft nor a
+/// newest release (found through `git/matching-refs`, #9036) that is neither a draft nor a
 /// pre-release. A failed listing is an error that names what stays in use;
 /// it never reads as "already current". A target whose installed bundle
 /// already verifies is [`UpdateAction::AlreadyCurrent`]. Otherwise fetches the
@@ -457,23 +465,40 @@ fn outcome(lock: ContentLock, action: UpdateAction) -> UpdateOutcome {
 
 /// The newest published release: not a draft, not a pre-release (by flag or
 /// by a SemVer pre-release suffix), compared by version, not by string.
+///
+/// #9036: lists only the `content-v*` tags (one request), then reads the
+/// release of the highest stable one (one more). A tag that is not a
+/// `content-vX.Y.Z[-pre]` version is an error, never skipped: a listing this
+/// code cannot read in full must not pick a "latest" from part of it. A
+/// highest tag whose release is flagged draft or pre-release is passed over
+/// for the next one down.
 fn latest_tag<S: ReleaseSource + ?Sized>(
     source: &S,
     fallback: &Fallback,
 ) -> Result<String, CacheError> {
-    let releases = source.content_releases().map_err(|e| CacheError::Network {
+    let network = |e: FetchError| CacheError::Network {
         url: e.url,
         reason: e.reason,
         fallback: fallback.clone(),
-    })?;
-    releases
-        .into_iter()
-        .filter(|release| !release.draft && !release.prerelease)
-        .filter_map(|release| Some((release_version(&release.tag)?, release.tag)))
-        .filter(|(version, _)| version.pre.is_empty())
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, tag)| tag)
-        .ok_or(CacheError::NoReleases)
+    };
+    let mut stable = Vec::new();
+    for tag in source.content_tags().map_err(network)? {
+        let version = release_version(&tag).ok_or_else(|| CacheError::UnparsableTag {
+            tag: tag.clone(),
+            fallback: fallback.clone(),
+        })?;
+        if version.pre.is_empty() {
+            stable.push((version, tag));
+        }
+    }
+    stable.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, tag) in stable {
+        let release = source.release(&tag).map_err(network)?;
+        if !release.draft && !release.prerelease {
+            return Ok(tag);
+        }
+    }
+    Err(CacheError::NoReleases)
 }
 
 fn release_version(tag: &str) -> Option<semver::Version> {
