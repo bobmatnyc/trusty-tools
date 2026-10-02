@@ -82,6 +82,7 @@ pub(super) fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

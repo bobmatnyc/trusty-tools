@@ -153,6 +153,16 @@ pub enum RescanError {
         /// Index whose handle could not be resolved.
         index_id: String,
     },
+    /// #9059: an exclude glob does not parse, so the pass walks nothing. The
+    /// watch loop re-arms it like any failed pass, so the first retry after a
+    /// PATCH fixes the globs reconciles what changed during the hold.
+    #[error("{message}")]
+    Held {
+        /// The held index.
+        index_id: String,
+        /// The hold reason, naming every invalid glob and the fix.
+        message: String,
+    },
     /// Chunks for a file that no longer exists could not be dropped.
     #[error("index '{index_id}': could not drop chunks for deleted file '{path}' after a dropped-event rescan: {source}")]
     Remove {
@@ -255,7 +265,9 @@ pub(crate) async fn reconcile_registered(
 /// #8922: a walked file whose content is sops-encrypted has its chunks dropped
 /// instead of indexed, and a tracked file the policy now excludes is dropped by
 /// the sweep; both are counted in [`RescanStats::files_excluded`].
-/// Test: `rescan_drops_sops_files_and_files_the_policy_now_excludes`.
+/// #9059: a held policy refuses with [`RescanError::Held`] before the walk.
+/// Test: `rescan_drops_sops_files_and_files_the_policy_now_excludes`,
+/// `every_ingest_path_refuses_a_held_index`.
 pub(crate) async fn reconcile_with_policy(
     index_id: &IndexId,
     canonical_root: &Path,
@@ -264,6 +276,12 @@ pub(crate) async fn reconcile_with_policy(
     indexed_files: &IndexedFiles,
     policy: Option<&crate::core::registry::IndexHandle>,
 ) -> Result<RescanStats, RescanError> {
+    if let Some(hold) = policy.and_then(crate::service::exclude_hold::hold) {
+        return Err(RescanError::Held {
+            message: hold.reason(),
+            index_id: hold.index_id,
+        });
+    }
     let walked = policy
         .map(crate::service::index_admission::walk)
         .unwrap_or_else(|| walk_source_files(canonical_root))

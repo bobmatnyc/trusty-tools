@@ -858,8 +858,11 @@ impl SessionManager {
         // matter — no earlier capture exists to protect), but a
         // known-good id, once captured at spawn/adopt time, is NEVER
         // re-derived here again.
+        // #9004: a known pane id with no server stays serverless; only a
+        // fresh capture may pair a pane with the server it was read on.
         if record.pane_id.is_none() {
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            (record.pane_id, record.tmux_server) =
+                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
@@ -1061,7 +1064,9 @@ impl SessionManager {
             // match this session again until the next runtime-exit reconcile
             // heals it. Best-effort — `None` on failure, consistent with
             // every other `get_pane_id` call site.
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            // #9004: the new pane with the server it was read on.
+            (record.pane_id, record.tmux_server) =
+                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,

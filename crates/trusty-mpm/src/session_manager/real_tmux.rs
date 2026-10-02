@@ -262,6 +262,31 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_id(name)
     }
 
+    /// #9004: one `display-message -t %N`, parsed strictly — a missing pane
+    /// answers exit 0 with empty fields, which parses as `Err`.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        let line = self
+            .driver
+            .pane_identity_line(pane_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        super::pane_identity::PaneIdentity::parse(pane_id, &line)
+            .map_err(ManagedError::TmuxUnavailable)
+    }
+
+    /// #9004: `kill-session -t $N`, after the floor answers for `name`.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        let floor = self.driver.supervisor_floor();
+        if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session_id") {
+            return Err(ManagedError::KillRefused(why));
+        }
+        self.driver
+            .kill_session_id(name, session_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// Report the runtime ready when the `claude` child PID has appeared under
     /// the pane shell (overrides the trait's weaker `session_exists` default;
     /// issue #1903 / #1299).

@@ -19,10 +19,11 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::claim::{try_claim_reindex, ReindexClaim, ReindexClaimError};
+use super::claim::{ReindexClaim, ReindexClaimError};
 use super::progress::ReindexProgress;
 use super::quarantine::ReindexQuarantine;
 use super::semaphore::BACKGROUND_QUEUE_DEPTH;
+use crate::service::exclude_hold::claim_reindex;
 
 /// Spawn a background tokio task that walks `handle.root_path`, indexes each
 /// source file, and emits progress events into `progress`.
@@ -30,7 +31,8 @@ use super::semaphore::BACKGROUND_QUEUE_DEPTH;
 /// Why: thin wrapper for callers that don't need GC, aborted-map tracking, or
 /// the embedderd RSS poller. Always treated as interactive (priority=true).
 /// What: claims the index (#8889) and spawns with all optional maps as `None`
-/// and `priority=true`. `Err` when another reindex of the index is running, or
+/// and `priority=true`. `Err` when another reindex of the index is running, the
+/// index is held by an invalid exclude glob (#9059), or
 /// the claim cannot be checked; nothing is spawned then.
 /// Test: `claim_tests::spawn_reindex_refuses_while_the_index_is_claimed`.
 pub fn spawn_reindex(
@@ -38,7 +40,8 @@ pub fn spawn_reindex(
     progress: Arc<ReindexProgress>,
     force: bool,
 ) -> Result<(), ReindexClaimError> {
-    let claim = try_claim_reindex(&handle.id, "api", force)?;
+    // #9059: a held index is refused at the claim, before anything runs.
+    let claim = claim_reindex(&handle, "api", force)?;
     spawn_claimed_reindex(claim, handle, progress, force, None, None, None, true, None);
     Ok(())
 }
@@ -68,7 +71,7 @@ pub(crate) fn spawn_reindex_awaitable(
     progress: Arc<ReindexProgress>,
     force: bool,
 ) -> tokio::task::JoinHandle<()> {
-    let claim = try_claim_reindex(&handle.id, "test", force)
+    let claim = claim_reindex(&handle, "test", force)
         .expect("#8889: a test reindex overlapped another run of the same index");
     tokio::spawn(super::runner::run_reindex(
         handle, progress, force, None, None, None, true, None, claim,
@@ -105,7 +108,8 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
 /// What: claims the index (#8889), then spawns a `tokio::task` that acquires
 /// the appropriate semaphore permit, runs the three reindex phases, emits the
 /// terminal SSE event, and GC's the progress entry. `Err` — and nothing
-/// spawned — when the index is already claimed or the claim cannot be checked.
+/// spawned — when the index is already claimed, held (#9059), or the claim
+/// cannot be checked.
 /// Test: `interactive_reindex_not_starved_by_background` verifies that a
 /// background task holding the background semaphore does not block a concurrent
 /// interactive request; `claim_tests::spawn_reindex_refuses_while_the_index_is_claimed`.
@@ -120,7 +124,8 @@ pub fn spawn_reindex_with_cleanup(
     priority: bool,
     quarantine: Option<ReindexQuarantine>,
 ) -> Result<(), ReindexClaimError> {
-    let claim = try_claim_reindex(&handle.id, "internal", force)?;
+    // #9059: see `spawn_reindex`.
+    let claim = claim_reindex(&handle, "internal", force)?;
     spawn_claimed_reindex(
         claim,
         handle,

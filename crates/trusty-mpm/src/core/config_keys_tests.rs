@@ -130,3 +130,12 @@ fn build_lease_keys_are_not_reported() {
         vec!["builders.max_concurent".to_string()]
     );
 }
+
+/// #9091: `[accounts]` is read by `core::gh_org_accounts`, so it is known.
+#[test]
+fn accounts_table_is_not_reported() {
+    assert_eq!(
+        mpm_unknown("[accounts]\nduettoresearch = \"bob-duetto\"\n\n[acounts]\nx = \"y\"\n"),
+        vec!["acounts".to_string()]
+    );
+}

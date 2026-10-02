@@ -404,6 +404,40 @@ async fn search_health_reports_a_failed_migration_instead_of_prescribing_a_reind
     );
 }
 
+/// #9059: a held index must not read `ok` because it still holds chunks.
+///
+/// Why: a held index answers searches, so the chunk-count arm reported it
+/// healthy while it indexed nothing new.
+/// What: serves a status body with chunks, `status: "held"` and the hold
+/// reason in `last_walk_error`; asserts the verdict names the glob.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_reports_a_held_index() {
+    let reason = "index 'mine' is held: exclude glob(s) [\"**/secrets/[**\"] do not parse";
+    let status = json!({
+        "index_id": "mine",
+        "chunk_count": 42,
+        "status": "held",
+        "last_walk_error": reason,
+    });
+    let base = spawn_health_daemon((200, healthy_body(1, 42)), (200, status)).await;
+    let server = McpServer::new(base).with_pinned_index("mine");
+
+    let report = health_report(&server, json!({})).await;
+
+    assert_eq!(
+        report["status"],
+        crate::mcp::tools::health::HEALTH_INDEX_HELD,
+        "{report}"
+    );
+    assert_eq!(report["healthy"], Value::Bool(false));
+    let message = report["message"].as_str().expect("message");
+    assert!(message.contains("**/secrets/[**"), "{message}");
+    // The remediation names what happens after the fix, not only what to avoid.
+    let remediation = report["remediation"].as_str().expect("remediation");
+    assert!(remediation.contains("catch-up reindex"), "{remediation}");
+}
+
 /// A 200 status body that simply omits `chunk_count` is also unknown, not zero.
 ///
 /// Why (#5633): the same `unwrap_or(0)` swallowed an absent key exactly as it
