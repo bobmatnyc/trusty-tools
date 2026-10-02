@@ -95,10 +95,16 @@ fn capture_pairs_the_pane_with_its_server() {
 }
 
 /// A failed or malformed server read stores the pane with no server, so the
-/// record fails closed rather than carrying a server it never proved.
+/// record fails closed rather than carrying a server it never proved. So does
+/// an identity naming another session: the server restarted between the pane
+/// id read and the identity read, and `%7` is now another session's pane.
 #[test]
 fn capture_without_a_readable_server_stores_no_server() {
-    for identity in [None, Some("||4242:1790954333|")] {
+    for identity in [
+        None,
+        Some("||4242:1790954333|"),
+        Some("%7|$1|5151:1790990000|tm-other"),
+    ] {
         let tmux = CaptureDriver {
             pane: Some("%7"),
             identity,

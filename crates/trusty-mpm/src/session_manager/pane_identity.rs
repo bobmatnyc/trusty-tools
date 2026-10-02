@@ -11,6 +11,8 @@
 //! together with the server it was read on, for a record to store.
 //! Test: `pane_identity_tests.rs`; ownership in `runtime_identity_tests.rs`.
 
+use tracing::warn;
+
 use super::manager::ManagedTmuxDriver;
 
 /// The `display-message` format a [`PaneIdentity`] is parsed from: the pane
@@ -85,15 +87,39 @@ impl PaneIdentity {
 /// server.
 /// What: [`ManagedTmuxDriver::get_pane_id`], then
 /// [`ManagedTmuxDriver::pane_identity`] of that pane. The server is `None`
-/// when either read fails, so the record fails closed: it is never `Owned`.
+/// when either read fails, or when the identity names a session other than
+/// `name` (the server restarted between the two reads), so the record fails
+/// closed: it is never `Owned`. A failed read is logged at `warn`.
 /// Test: `capture_pairs_the_pane_with_its_server`,
 /// `capture_without_a_readable_server_stores_no_server`.
 pub fn capture(tmux: &dyn ManagedTmuxDriver, name: &str) -> (Option<String>, Option<String>) {
     let Some(pane_id) = tmux.get_pane_id(name) else {
         return (None, None);
     };
-    let server = tmux.pane_identity(&pane_id).ok().map(|id| id.server);
-    (Some(pane_id), server)
+    let identity = match tmux.pane_identity(&pane_id) {
+        Ok(identity) => identity,
+        Err(e) => {
+            warn!(
+                session = %name,
+                pane_id = %pane_id,
+                "pane identity read failed; the record stores no tmux server (#9004): {e}"
+            );
+            return (Some(pane_id), None);
+        }
+    };
+    // #9004: the same session-name check `same_server` applies at ownership
+    // time, so a server restart between the two reads stores no server.
+    let expected = trusty_common::tmux::check_session_name(name).ok();
+    if expected.as_deref() != Some(identity.session_name.as_str()) {
+        warn!(
+            session = %name,
+            pane_id = %pane_id,
+            identity_session = %identity.session_name,
+            "pane identity names another session; the record stores no tmux server (#9004)"
+        );
+        return (Some(pane_id), None);
+    }
+    (Some(pane_id), Some(identity.server))
 }
 
 #[cfg(test)]
