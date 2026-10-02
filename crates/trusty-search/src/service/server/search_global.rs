@@ -88,10 +88,12 @@ pub struct GlobalSearchRequest {
     #[serde(default)]
     pub repos: Vec<String>,
 
-    /// Per-index search deadline in milliseconds for this call (#9027).
-    /// Overrides `TRUSTY_SEARCH_FANOUT_INDEX_DEADLINE_MS` (default 3000).
-    /// An index that misses it is skipped and counted in
-    /// `rehydrating_indexes_skipped`. Clamped to `>= 1`.
+    /// Fan-out deadline in milliseconds for this call (#9027): one instant,
+    /// taken when the per-index searches start, that every one of them must
+    /// answer by. Not a per-index budget, despite the name (kept for
+    /// compatibility). Overrides `TRUSTY_SEARCH_FANOUT_INDEX_DEADLINE_MS`
+    /// (default 3000). An index that misses it is skipped and counted in
+    /// `deadline_indexes_skipped`. Clamped to `>= 1`.
     #[serde(default)]
     pub per_index_deadline_ms: Option<u64>,
 }
@@ -157,9 +159,15 @@ pub(super) async fn global_search_handler(
 /// `corpus_failed_indexes_skipped`, `corpus_read_failed_indexes_skipped` — are
 /// the fields a caller reads to know the sweep was partial, so a second
 /// implementation that omitted one would report a complete answer over a
-/// missing corpus.
-/// What: [`global_search_handler`]'s whole former body.
-/// Test: `global_search_over_the_socket_matches_the_http_body`.
+/// missing corpus. `partial` (#9027) folds them, plus a degraded query embed,
+/// into one flag.
+/// What: [`global_search_handler`]'s whole former body. Order (#9027): embed
+/// under its own timeout, route, kick rehydrates for the routed indexes, then
+/// take the one fan-out deadline and search.
+/// Test: `global_search_over_the_socket_matches_the_http_body`,
+/// `a_slow_embed_degrades_to_lexical_and_still_searches_every_index`,
+/// `the_fan_out_deadline_starts_after_the_query_embed`,
+/// `global_search_skips_an_index_that_misses_the_deadline`.
 pub(crate) async fn global_search_report(
     state: &Arc<SearchAppState>,
     req: GlobalSearchRequest,
@@ -220,28 +228,33 @@ pub(crate) async fn global_search_report(
             "migration_in_progress_indexes_skipped": 0_usize,
             // #9027: same contract — present on every response.
             "rehydrating_indexes_skipped": 0_usize,
+            "deadline_indexes_skipped": 0_usize,
             "deadline_skipped_index_ids": Vec::<String>::new(),
             "per_index_deadline_ms": per_index_deadline_ms,
+            "query_embed": "not_run",
+            "embed_degraded": false,
+            "partial": cold_indexes_skipped > 0,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         }));
     }
 
     let started = std::time::Instant::now();
-    // #9027: one instant bounds every per-index search, so the fan-out as a
-    // whole answers within the deadline however many waves it runs in.
-    let deadline_at = tokio::time::Instant::now() + per_index_deadline;
     let intent = QueryClassifier::classify(&req.query);
 
     // Issue #112: compute per-index context weights, then apply the routing
     // strategy to decide which indexes participate in the fan-out.
     let routing_mode = RoutingMode::from_request(&req);
-    // #9027: embed once; the routing weights and every per-index search reuse it.
-    super::fanout_deadline::kick_evicted_rehydrates(&state.registry, &index_ids);
-    let query_vector =
-        super::fanout_deadline::embed_query_once(&state.registry, &index_ids, &req.query)
-            .await
-            .map(Arc::new);
+    // #9027: embed once, under its own timeout; the routing weights and every
+    // per-index search reuse it. A timeout degrades every index to lexical.
+    let embed = super::fanout_deadline::embed_query_once(
+        &state.registry,
+        &index_ids,
+        &req.query,
+        super::fanout_deadline::resolve_embed_timeout(),
+    )
+    .await;
+    let query_vector = embed.vector;
     let routing_vector = query_vector
         .as_deref()
         .and_then(|r| r.as_ref().ok())
@@ -351,6 +364,11 @@ pub(crate) async fn global_search_report(
         serial = req.serial,
         "global search: bounded fan-out"
     );
+    // #9027: rehydrate only what routing kept, all at once, then start the
+    // deadline. Taking it any earlier let a slow embed spend it before a single
+    // index was searched.
+    super::fanout_deadline::kick_evicted_rehydrates(&state.registry, &active_ids);
+    let deadline_at = tokio::time::Instant::now() + per_index_deadline;
     // #4087 / #5917 / #6581 / #9027: every way an index can contribute no lane
     // is classified by `search_one_index` and counted below, so a partial
     // fan-out is visible in the payload rather than only in the daemon log.
@@ -444,6 +462,15 @@ pub(crate) async fn global_search_report(
         .collect();
 
     let latency_ms = started.elapsed().as_millis() as u64;
+    let deadline_skipped = skips.deadline_ids.len();
+    // #9027: one flag for "this is not the full answer over every index".
+    let partial = cold_indexes_skipped
+        + skips.corpus_failed
+        + skips.corpus_read_failed
+        + skips.migration_in_progress
+        + deadline_skipped
+        > 0
+        || embed.status.degraded();
     Ok(serde_json::json!({
         "results": results,
         "indexes_searched": indexes_searched,
@@ -466,12 +493,23 @@ pub(crate) async fn global_search_report(
         // Non-zero means this result set is not the complete answer over the
         // fan-out and the missing lanes are transient — retry once they settle.
         "migration_in_progress_indexes_skipped": skips.migration_in_progress,
-        // #9027: indexes that missed the per-index deadline — most often
-        // rehydrating after idle eviction. Their rehydrate keeps running in the
-        // background; non-zero means this is not the answer over every index.
-        "rehydrating_indexes_skipped": skips.deadline_ids.len(),
+        // #9027: indexes that missed the fan-out deadline (often rehydrating
+        // after idle eviction; a held lock or a slow search counts too). Any
+        // rehydrate keeps running in the background. `rehydrating_…` is the
+        // original name of the same count, kept for compatibility.
+        "rehydrating_indexes_skipped": deadline_skipped,
+        "deadline_indexes_skipped": deadline_skipped,
         "deadline_skipped_index_ids": skips.deadline_ids,
+        // One deadline for the whole fan-out, not a per-index budget.
         "per_index_deadline_ms": per_index_deadline_ms,
+        // #9027: how the one query embed ended — `embedded`, `failed`,
+        // `timed_out` or `per_index` (`not_run` when there was nothing to
+        // search). `embed_degraded` is true when every
+        // index answered from the lexical lane because the embed failed.
+        "query_embed": embed.status.label(),
+        "embed_degraded": embed.status.degraded(),
+        // #9027: true when any index was skipped or the embed degraded.
+        "partial": partial,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

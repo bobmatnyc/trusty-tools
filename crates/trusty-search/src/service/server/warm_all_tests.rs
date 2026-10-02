@@ -332,7 +332,148 @@ fn warm_config_prefers_the_request_over_the_defaults() {
     let cfg = WarmConfig::resolve(&WarmStartRequest {
         window_secs: Some(90),
         concurrency: Some(0),
-    });
+    })
+    .expect("a valid request");
     assert_eq!(cfg.window, Duration::from_secs(90));
     assert_eq!(cfg.concurrency, 1, "concurrency clamps to >= 1");
+}
+
+/// Why: every concurrent warm checks the RSS ceiling before it starts, so an
+/// unbounded concurrency let one wave of loads overshoot it (#9027).
+/// Test: this test.
+#[test]
+fn warm_config_clamps_concurrency_to_the_cap() {
+    let cfg = WarmConfig::resolve(&WarmStartRequest {
+        window_secs: None,
+        concurrency: Some(10_000),
+    })
+    .expect("a large concurrency is clamped, not refused");
+    assert_eq!(cfg.concurrency, MAX_WARM_CONCURRENCY);
+}
+
+/// Why: Fail-Open Check — a window past the cap overflowed the pin instant and
+/// panicked the warm task; it must be refused before anything runs (#9027).
+/// What: `window_secs: u64::MAX` answers `400 invalid_warm_request` and leaves
+/// no run behind.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn a_warm_window_past_the_cap_is_refused_with_400() {
+    let state = new_state(IndexRegistry::new());
+    let (status, body) = warm_start_report(
+        &state,
+        Some(WarmStartRequest {
+            window_secs: Some(u64::MAX),
+            concurrency: None,
+        }),
+    )
+    .expect_err("refused");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], json!("invalid_warm_request"));
+    assert_eq!(body["max_window_secs"], json!(MAX_WARM_WINDOW_SECS));
+    assert_eq!(warm_status_report(&state)["run"], Value::Null);
+}
+
+/// Why: the pressure sweep reclaims at the high-water mark and ignores pins,
+/// so a warm ceiling above it filled memory the next sweep took back (#9027).
+/// Test: this test.
+#[test]
+fn the_default_warm_ceiling_is_the_pressure_high_water_mark() {
+    use crate::core::memguard::{high_water_pct, high_water_target_mb, memory_limit_mb};
+    if std::env::var(WARM_MAX_RSS_ENV).is_ok() {
+        return; // An explicit ceiling wins; nothing to compare.
+    }
+    let limit = memory_limit_mb().expect("the daemon always resolves a memory limit");
+    let cfg = WarmConfig::resolve(&WarmStartRequest::default()).expect("defaults");
+    assert_eq!(
+        cfg.max_rss_mb,
+        Some(high_water_target_mb(limit, high_water_pct()))
+    );
+}
+
+/// Why: pinned only on completion, a residency sweep could park an index while
+/// it was still warming and throw the warm away (#9027).
+/// What: holds the index's write lock so the warm stalls in `warming`, and
+/// asserts the pin is already granted; then lets it finish, still pinned.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn an_index_is_pinned_while_it_warms() {
+    let registry = IndexRegistry::new();
+    let _a = add_index(&registry, "mid").await;
+    let state = new_state(registry);
+    let handle = state
+        .registry
+        .get(&IndexId::new("mid".to_string()))
+        .expect("registered");
+    let lock = handle.indexer.write().await;
+
+    start_with(&state, config(60)).expect("start");
+    let mut warming = false;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+        if warm_status_report(&state)["totals"]["warming"] == json!(1) {
+            warming = true;
+            break;
+        }
+    }
+    assert!(warming, "{}", warm_status_report(&state));
+    assert!(
+        state.warm.is_pinned("mid"),
+        "a warming index is pinned before it loads"
+    );
+
+    drop(lock);
+    wait_for_run_end(&state).await;
+    assert!(state.warm.is_pinned("mid"));
+}
+
+/// Why: Fail-Open Check — with no RSS reading the ceiling is not checked, and
+/// the status must say so rather than imply it was enforced (#9027).
+/// What: a probe that cannot read RSS; the start still runs, and both the
+/// start body and the status report `ceiling_unenforced: true`.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn a_start_with_no_rss_reading_runs_and_reports_the_ceiling_unenforced() {
+    fn no_rss() -> Option<u64> {
+        None
+    }
+    let registry = IndexRegistry::new();
+    let _a = add_index(&registry, "blind").await;
+    let state = new_state(registry);
+    state.warm.set_rss_probe(no_rss);
+
+    let started = start_with(&state, config(60)).expect("not refused");
+    let status = wait_for_run_end(&state).await;
+
+    assert_eq!(
+        status["memory"]["ceiling_unenforced"],
+        json!(true),
+        "{status}"
+    );
+    assert_eq!(started["ceiling_unenforced"], json!(true), "{started}");
+    assert_eq!(status["totals"]["warm"], json!(1), "{status}");
+}
+
+/// Why: an expired pin used to stay in the map for the daemon's lifetime (#9027).
+/// What: pins for 1 s, advances past it, reads once, and asserts the map is
+/// empty; a new pin prunes any other expired entry.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn expired_pins_are_pruned() {
+    let state = new_state(IndexRegistry::new());
+    state.warm.pin_for_test("gone", Duration::from_secs(1));
+    state.warm.pin_for_test("other", Duration::from_secs(1));
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    assert!(!state.warm.is_pinned("gone"));
+    assert!(
+        !state.warm.lock().pins.contains_key("gone"),
+        "pruned on read"
+    );
+    state.warm.mark_warm(0, "fresh", Duration::from_secs(60));
+    let inner = state.warm.lock();
+    assert!(
+        !inner.pins.contains_key("other"),
+        "pruned when a pin is granted"
+    );
+    assert!(inner.pins.contains_key("fresh"));
 }

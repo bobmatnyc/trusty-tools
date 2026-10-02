@@ -448,6 +448,8 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
                     .removed
                 {
                     reaped += 1;
+                    // #9027: a warm-all pin never outlives its index.
+                    state.warm.unpin(&id);
                     tracing::info!(
                         "orphan-reaper: unregistered index '{id}' — root_path deleted \
                          (data preserved)"

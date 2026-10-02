@@ -150,3 +150,37 @@ async fn delete_index_with_delete_data_true_destroys_data() {
         index_data_dir.display()
     );
 }
+
+/// #9027: a delete drops the index's warm-all pin.
+///
+/// Why: a pin outliving its index kept a re-registered index of the same id
+/// pinned against eviction it never asked for, and the entry never left the map.
+/// What: pins the index for 10 min, deletes it over HTTP, and asserts the pin
+/// is gone.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn delete_clears_a_warm_pin() {
+    let isolated = super::tests_components::IsolatedDataDir::new();
+    let registry = IndexRegistry::new();
+    let root_path = isolated.path().join("corpus-root");
+    std::fs::create_dir_all(&root_path).expect("create index root");
+    registry.register(IndexHandle::bare(
+        IndexId::new(INDEX_ID),
+        Arc::new(RwLock::new(CodeIndexer::new(INDEX_ID, root_path.clone()))),
+        root_path,
+    ));
+    let state = SearchAppState::new(registry);
+    state
+        .warm
+        .pin_for_test(INDEX_ID, std::time::Duration::from_secs(600));
+
+    let body =
+        send_delete_request(build_router(state.clone()), &format!("/indexes/{INDEX_ID}")).await;
+
+    assert_eq!(body["removed"], true, "{body}");
+    assert!(
+        !state.warm.is_pinned(INDEX_ID),
+        "a deleted index keeps no warm pin"
+    );
+}

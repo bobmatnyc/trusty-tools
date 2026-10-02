@@ -32,8 +32,17 @@ pub(crate) const WARM_CONCURRENCY_ENV: &str = "TRUSTY_WARM_ALL_CONCURRENCY";
 /// Default warm concurrency. A rehydrate is an O(corpus) redb scan plus a BM25
 /// rebuild; four keeps the disk busy without starving interactive searches.
 pub(crate) const DEFAULT_WARM_CONCURRENCY: usize = 4;
+/// Upper bound on the residency window: 24 h. A request above it is refused;
+/// an env value above it is clamped. An unbounded window overflowed the pin
+/// instant and panicked the warm task (#9027).
+pub(crate) const MAX_WARM_WINDOW_SECS: u64 = 86_400;
+/// Upper bound on warm concurrency. Every concurrent warm checks the RSS
+/// ceiling before it starts, so a large concurrency let one wave overshoot it.
+pub(crate) const MAX_WARM_CONCURRENCY: usize = 16;
 /// Env var: RSS ceiling in MB; warming stops starting new indexes past it.
-/// Unset falls back to the daemon's `TRUSTY_MEMORY_LIMIT_MB`.
+/// Unset falls back to the memory-pressure high-water mark
+/// (`TRUSTY_MEMORY_HIGH_WATER_PCT` of `TRUSTY_MEMORY_LIMIT_MB`), the point at
+/// which the pressure sweep starts reclaiming what a warm loaded.
 pub(crate) const WARM_MAX_RSS_ENV: &str = "TRUSTY_WARM_ALL_MAX_RSS_MB";
 /// Env var: per-index warm timeout, in seconds.
 pub(crate) const WARM_INDEX_TIMEOUT_ENV: &str = "TRUSTY_WARM_ALL_INDEX_TIMEOUT_SECS";
@@ -53,10 +62,11 @@ fn env_u64(name: &str) -> Option<u64> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarmStartRequest {
-    /// Residency window override, seconds (`> 0`).
+    /// Residency window override, seconds (`> 0`, at most
+    /// [`MAX_WARM_WINDOW_SECS`]; above it the start is refused with `400`).
     #[serde(default)]
     pub window_secs: Option<u64>,
-    /// Warm concurrency override (clamped to `>= 1`).
+    /// Warm concurrency override (clamped to `1..=`[`MAX_WARM_CONCURRENCY`]).
     #[serde(default)]
     pub concurrency: Option<usize>,
 }
@@ -73,26 +83,51 @@ pub(crate) struct WarmConfig {
 impl WarmConfig {
     /// Request override, then env var, then default, per field.
     ///
-    /// Test: `warm_config_prefers_the_request_over_the_defaults`.
-    pub(crate) fn resolve(req: &WarmStartRequest) -> Self {
+    /// Why: the window becomes a pin instant and the concurrency a wave of RSS
+    /// checks, so both are bounded here, where every transport passes (#9027).
+    /// What: `Err` (the caller answers `400` / `invalid_params`) for a request
+    /// window above [`MAX_WARM_WINDOW_SECS`]; an env window above it is clamped.
+    /// Concurrency clamps to `1..=`[`MAX_WARM_CONCURRENCY`]. The RSS ceiling
+    /// defaults to the memory-pressure high-water mark.
+    /// Test: `warm_config_prefers_the_request_over_the_defaults`,
+    /// `warm_config_clamps_concurrency_to_the_cap`,
+    /// `a_warm_window_past_the_cap_is_refused_with_400`,
+    /// `the_default_warm_ceiling_is_the_pressure_high_water_mark`.
+    pub(crate) fn resolve(req: &WarmStartRequest) -> Result<Self, String> {
+        if let Some(secs) = req.window_secs.filter(|&s| s > MAX_WARM_WINDOW_SECS) {
+            return Err(format!(
+                "window_secs {secs} is above the {MAX_WARM_WINDOW_SECS} s (24 h) cap"
+            ));
+        }
         let window = req
             .window_secs
             .filter(|&s| s > 0)
             .or_else(|| env_u64(WARM_WINDOW_ENV))
-            .unwrap_or(DEFAULT_WARM_WINDOW_SECS);
+            .unwrap_or(DEFAULT_WARM_WINDOW_SECS)
+            .min(MAX_WARM_WINDOW_SECS);
         let concurrency = req
             .concurrency
             .or_else(|| env_u64(WARM_CONCURRENCY_ENV).map(|n| n as usize))
             .unwrap_or(DEFAULT_WARM_CONCURRENCY)
-            .max(1);
+            .clamp(1, MAX_WARM_CONCURRENCY);
         let timeout = env_u64(WARM_INDEX_TIMEOUT_ENV).unwrap_or(DEFAULT_WARM_INDEX_TIMEOUT_SECS);
-        Self {
+        Ok(Self {
             window: Duration::from_secs(window),
             concurrency,
             index_timeout: Duration::from_secs(timeout),
-            max_rss_mb: env_u64(WARM_MAX_RSS_ENV).or_else(crate::core::memguard::memory_limit_mb),
-        }
+            max_rss_mb: env_u64(WARM_MAX_RSS_ENV).or_else(default_ceiling_mb),
+        })
     }
+}
+
+/// The default warm RSS ceiling: the pressure sweep's high-water mark.
+///
+/// Why: the sweep reclaims at `TRUSTY_MEMORY_HIGH_WATER_PCT` (default 90 %) of
+/// the limit and ignores pins, so a warm allowed up to 100 % filled memory the
+/// next sweep took back (#9027).
+fn default_ceiling_mb() -> Option<u64> {
+    use crate::core::memguard::{high_water_pct, high_water_target_mb, memory_limit_mb};
+    memory_limit_mb().map(|limit| high_water_target_mb(limit, high_water_pct()))
 }
 
 /// One index's warm state as the status route reports it.
@@ -126,6 +161,9 @@ struct WarmRun {
     rss_mb_before: Option<u64>,
     rss_mb_after: Option<u64>,
     ceiling_hit: bool,
+    /// #9027: no ceiling configured, or the RSS probe could not read RSS, so
+    /// the ceiling was not checked at least once in this run.
+    ceiling_unenforced: bool,
 }
 
 #[derive(Default)]
@@ -186,12 +224,26 @@ impl WarmTracker {
     ///
     /// Why: the idle-eviction and residency-cap tickers skip a pinned index, so
     /// a warmed index stays resident for the window instead of 300 s.
-    /// Test: `a_warmed_index_is_pinned_for_the_window_then_released`.
+    /// What: an expired pin is removed on the read that finds it (#9027).
+    /// Test: `a_warmed_index_is_pinned_for_the_window_then_released`,
+    /// `expired_pins_are_pruned`.
     pub fn is_pinned(&self, id: &str) -> bool {
-        self.lock()
-            .pins
-            .get(id)
-            .is_some_and(|until| *until > tokio::time::Instant::now())
+        let mut inner = self.lock();
+        let Some(until) = inner.pins.get(id).copied() else {
+            return false;
+        };
+        if until > tokio::time::Instant::now() {
+            return true;
+        }
+        inner.pins.remove(id);
+        false
+    }
+
+    /// Drop `id`'s pin. Called when the index is deleted (#9027), so a pin
+    /// never outlives its index or carries over to a re-registered one.
+    /// Test: `delete_clears_a_warm_pin`.
+    pub fn unpin(&self, id: &str) {
+        self.lock().pins.remove(id);
     }
 
     fn set(&self, run_id: u64, id: &str, state: WarmState, error: Option<String>) {
@@ -202,11 +254,31 @@ impl WarmTracker {
         }
     }
 
+    /// Mark `id` warming and pin it for `window` before any load starts.
+    ///
+    /// Why: pinned only on completion, a residency sweep could park an index
+    /// mid-warm and throw the warm away (#9027).
+    /// Test: `an_index_is_pinned_while_it_warms`.
+    fn begin_warming(&self, run_id: u64, id: &str, window: Duration) {
+        pin(&mut self.lock(), id, window);
+        self.set(run_id, id, WarmState::Warming, None);
+    }
+
+    /// Mark `id` failed and drop the pin [`Self::begin_warming`] granted.
+    fn fail(&self, run_id: u64, id: &str, error: String) {
+        self.lock().pins.remove(id);
+        self.set(run_id, id, WarmState::Failed, Some(error));
+    }
+
+    fn note_ceiling_unenforced(&self, run_id: u64) {
+        if let Some(run) = self.lock().run.as_mut().filter(|r| r.run_id == run_id) {
+            run.ceiling_unenforced = true;
+        }
+    }
+
     fn mark_warm(&self, run_id: u64, id: &str, window: Duration) {
         let mut inner = self.lock();
-        inner
-            .pins
-            .insert(id.to_string(), tokio::time::Instant::now() + window);
+        pin(&mut inner, id, window);
         if let Some(run) = inner.run.as_mut().filter(|r| r.run_id == run_id) {
             run.indexes.insert(
                 id.to_string(),
@@ -232,16 +304,28 @@ impl WarmTracker {
         let Some(run) = inner.run.as_mut().filter(|r| r.run_id == run_id) else {
             return;
         };
-        for progress in run.indexes.values_mut() {
+        let mut unfinished = Vec::new();
+        for (id, progress) in run.indexes.iter_mut() {
             if matches!(progress.state, WarmState::Cold | WarmState::Warming) {
                 progress.state = WarmState::Failed;
                 progress.error = Some("the warm run ended before this index finished".into());
+                unfinished.push(id.clone());
             }
         }
         run.running = false;
         run.finished_unix_ms = Some(unix_ms_now());
         run.rss_mb_after = rss_mb_after;
+        for id in unfinished {
+            inner.pins.remove(&id);
+        }
     }
+}
+
+/// Pin `id` until `window` from now, pruning every expired pin (#9027).
+fn pin(inner: &mut Inner, id: &str, window: Duration) {
+    let now = tokio::time::Instant::now();
+    inner.pins.retain(|_, until| *until > now);
+    inner.pins.insert(id.to_string(), now + window);
 }
 
 fn unix_ms_now() -> u64 {
@@ -283,13 +367,29 @@ pub(super) async fn warm_status_handler(State(state): State<Arc<SearchAppState>>
 /// the RSS ceiling is checked — at or past it the start is refused with
 /// `503 warm_memory_ceiling` and nothing runs — and a new run is spawned over
 /// [`warm_targets`]. Must be called inside a tokio runtime.
+/// A window above [`MAX_WARM_WINDOW_SECS`] is refused with `400
+/// invalid_warm_request` before anything starts. With no ceiling or no RSS
+/// reading the start proceeds and the run reports `ceiling_unenforced`.
 /// Test: `a_second_start_joins_the_running_warm`,
-/// `a_start_past_the_memory_ceiling_is_refused_and_runs_nothing`.
+/// `a_start_past_the_memory_ceiling_is_refused_and_runs_nothing`,
+/// `a_warm_window_past_the_cap_is_refused_with_400`,
+/// `a_start_with_no_rss_reading_runs_and_reports_the_ceiling_unenforced`.
 pub(crate) fn warm_start_report(
     state: &Arc<SearchAppState>,
     req: Option<WarmStartRequest>,
 ) -> Result<Value, (StatusCode, Value)> {
-    start_with(state, WarmConfig::resolve(&req.unwrap_or_default()))
+    let config = WarmConfig::resolve(&req.unwrap_or_default()).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error": "invalid_warm_request",
+                "retryable": false,
+                "max_window_secs": MAX_WARM_WINDOW_SECS,
+                "message": message,
+            }),
+        )
+    })?;
+    start_with(state, config)
 }
 
 /// [`warm_start_report`] with an explicit configuration (the test seam).
@@ -344,6 +444,7 @@ pub(crate) fn start_with(
         rss_mb_before: rss_now,
         rss_mb_after: None,
         ceiling_hit: false,
+        ceiling_unenforced: config.max_rss_mb.is_none() || rss_now.is_none(),
     };
     let body = start_body(&run, false);
     let run_id = run.run_id;
@@ -371,6 +472,7 @@ fn start_body(run: &WarmRun, joined: bool) -> Value {
         "total": run.indexes.len(),
         "window_secs": run.config.window.as_secs(),
         "concurrency": run.config.concurrency,
+        "ceiling_unenforced": run.ceiling_unenforced,
         "status_route": "/warm/status",
     })
 }
@@ -388,8 +490,8 @@ async fn run_warm(state: Arc<SearchAppState>, run_id: u64, ids: Vec<String>, con
 
 async fn warm_one_tracked(state: &Arc<SearchAppState>, run_id: u64, id: &str, config: WarmConfig) {
     let tracker = &state.warm;
-    if let (Some(max), Some(now)) = (config.max_rss_mb, tracker.rss_mb()) {
-        if now >= max {
+    match (config.max_rss_mb, tracker.rss_mb()) {
+        (Some(max), Some(now)) if now >= max => {
             tracing::warn!("warm-all: not warming '{id}' — daemon RSS {now} MB >= {max} MB");
             tracker.note_ceiling_hit(run_id);
             tracker.set(
@@ -402,19 +504,23 @@ async fn warm_one_tracked(state: &Arc<SearchAppState>, run_id: u64, id: &str, co
             );
             return;
         }
+        (Some(_), Some(_)) => {}
+        // #9027: say so rather than silently warming past an unchecked ceiling.
+        _ => tracker.note_ceiling_unenforced(run_id),
     }
-    tracker.set(run_id, id, WarmState::Warming, None);
+    // #9027: pinned before the load, so no sweep parks it mid-warm.
+    tracker.begin_warming(run_id, id, config.window);
     match tokio::time::timeout(config.index_timeout, warm_one(state, id)).await {
         Ok(Ok(())) => tracker.mark_warm(run_id, id, config.window),
         Ok(Err(e)) => {
             tracing::warn!("warm-all: index '{id}' failed to warm: {e}");
-            tracker.set(run_id, id, WarmState::Failed, Some(e));
+            tracker.fail(run_id, id, e);
         }
         Err(_) => {
             let secs = config.index_timeout.as_secs();
             tracing::warn!("warm-all: index '{id}' did not warm within {secs}s");
             let msg = format!("timed out after {secs}s; its rehydrate continues in the background");
-            tracker.set(run_id, id, WarmState::Failed, Some(msg));
+            tracker.fail(run_id, id, msg);
         }
     }
 }
@@ -444,7 +550,8 @@ async fn warm_one(state: &Arc<SearchAppState>, id: &str) -> Result<(), String> {
 /// a warmed index the pressure sweep evicted since reads `cold` — and a lock
 /// held elsewhere falls back to the run's record. `all_warm` is true only when
 /// no run is in progress and every row is `warm`. `expires_at_unix_ms` is the
-/// earliest residency-pin expiry among pinned rows.
+/// earliest residency-pin expiry among pinned rows. `memory.ceiling_unenforced`
+/// is true when the run had no ceiling or could not read RSS (#9027).
 /// Test: `warm_all_rehydrates_an_evicted_index_and_reports_it_warm`,
 /// `a_failed_index_is_reported_failed_and_the_set_is_not_warm`,
 /// `a_warmed_index_is_pinned_for_the_window_then_released`.
@@ -511,6 +618,7 @@ pub(crate) fn warm_status_report(state: &Arc<SearchAppState>) -> Value {
             "rss_mb_after": inner.run.as_ref().and_then(|r| r.rss_mb_after),
             "max_rss_mb": inner.run.as_ref().and_then(|r| r.config.max_rss_mb),
             "ceiling_hit": inner.run.as_ref().is_some_and(|r| r.ceiling_hit),
+            "ceiling_unenforced": inner.run.as_ref().is_some_and(|r| r.ceiling_unenforced),
         },
         "indexes": rows,
     })

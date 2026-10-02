@@ -134,3 +134,27 @@ async fn warm_over_the_socket_matches_the_http_body() {
     .expect("the socket refuses a stray field");
     assert_eq!(refused.code, CODE_INVALID_PARAMS);
 }
+
+/// Why: a window past the 24 h cap is refused on the socket exactly as on HTTP
+/// (`400` maps to `invalid_params`), before any run starts (#9027).
+/// Test: this test.
+#[tokio::test]
+async fn the_socket_refuses_a_warm_window_past_the_cap() {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    state.warm.set_rss_probe(fixed_rss);
+    let rpc_router = warm::register(RpcRouter::new(), &state);
+
+    let refused = rpc(
+        &rpc_router,
+        warm::METHOD_WARM_START,
+        serde_json::json!({ "window_secs": u64::MAX }),
+    )
+    .await
+    .error
+    .expect("an oversized window is refused");
+    assert_eq!(refused.code, CODE_INVALID_PARAMS);
+    assert_eq!(
+        crate::service::server::warm_status_report(&state)["run"],
+        serde_json::Value::Null
+    );
+}
