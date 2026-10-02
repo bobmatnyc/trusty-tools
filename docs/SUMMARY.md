@@ -48,6 +48,7 @@
 - [Environment Variables](./reference/environment-variables.md)
 - [Running MCP Servers](./reference/running-mcp-servers.md)
 - [Release Workflow](./reference/release-workflow.md)
+- [Install Checkpoint Runbook](./reference/install-checkpoint.md)
 - [Changelog Fragments](./reference/changelog-fragments.md)
 - [Test Ladder Baseline](./reference/test-ladder-baseline.md)
 - [Generated Documentation Regions](./reference/generated-doc-regions.md)

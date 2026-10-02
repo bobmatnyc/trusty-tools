@@ -103,6 +103,9 @@ they serve. These are not:
   workflow, which of them block a merge, and which have a self-test
 - [ci-gates.md](ci-gates.md) — required contexts, merge states, and the jobs
   that gate nothing
+- [install-checkpoint.md](install-checkpoint.md) — installing a trusty-mpm build on a
+  machine with live sessions: checkpoint, git-rev install, daemon restart,
+  session relaunch, rollback
 - [test-ladder-baseline.md](test-ladder-baseline.md) — the six rungs, their
   commands, and baseline-red triage
 - [content-release.md](content-release.md) — cutting a `content-vX.Y.Z`
