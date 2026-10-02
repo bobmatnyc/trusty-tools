@@ -568,55 +568,22 @@ indexes:
         assert!(validate_exclude_globs(&["**/ok/**".to_string()]).is_ok());
     }
 
-    /// Counts ERROR events whose message names `needle`.
-    struct CountErrors {
-        needle: &'static str,
-        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountErrors {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(&mut self, _: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                    self.0.push_str(&format!("{v:?}"));
-                }
-            }
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            if *event.metadata().level() == tracing::Level::ERROR && message.0.contains(self.needle)
-            {
-                self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-    }
-
-    /// #8922: the runtime backstop skips the bad pattern and logs it once, not
-    /// once per path checked. Fails with the `first_report_of_invalid_glob`
-    /// check removed (three errors are logged).
+    /// #8922: the runtime backstop skips the bad pattern and reports it once
+    /// per process, not once per path checked. Asserted on the dedup set itself:
+    /// counting `error!` events races tracing's per-callsite cache when other
+    /// threads hit the same callsite. Fails with the dedup check removed (the
+    /// pattern is then never recorded, so the final call reports "first").
     #[test]
     fn the_invalid_glob_backstop_logs_once() {
-        use tracing_subscriber::layer::SubscriberExt;
         const PATTERN: &str = "logs-once-8922/[unclosed";
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(CountErrors {
-            needle: PATTERN,
-            hits: hits.clone(),
-        });
         let excludes = vec![PATTERN.to_string()];
-        tracing::subscriber::with_default(subscriber, || {
-            // An earlier test may have cached this callsite as disabled under
-            // the no-op global dispatcher; re-evaluate it under this one.
-            tracing::callsite::rebuild_interest_cache();
-            for path in ["/repo/a.rs", "/repo/b.rs", "/repo/c/d.py"] {
-                assert!(!path_matches_any_glob(Path::new(path), &excludes));
-            }
-        });
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for path in ["/repo/a.rs", "/repo/b.rs", "/repo/c/d.py"] {
+            assert!(!path_matches_any_glob(Path::new(path), &excludes));
+        }
+        assert!(
+            !first_report_of_invalid_glob(PATTERN),
+            "the pattern must already have been reported by the first match call"
+        );
     }
 
     #[test]
