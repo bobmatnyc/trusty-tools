@@ -128,7 +128,7 @@ name = "trusty-common"
 # requires a bump. Additive-only: no public item removed or changed shape, so
 # no semver-accepted-breaks record is needed; owner ruling directs PATCH
 # regardless of break status per docs/reference/semver-gate.md.
-version = "0.52.8"
+version = "0.53.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

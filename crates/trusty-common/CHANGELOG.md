@@ -6,6 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.0] — 2026-10-02
+
+### Breaking
+
+- `uds::server::RpcError` and `search_rpc::SearchRpcError` each gain a public `data: Option<serde_json::Value>` field. Code that builds either with a struct literal, or destructures one without `..`, must add the field; `RpcError::new` and the other constructors are unchanged (#6285).
+
+### Added
+
+- `uds::server::RpcError` now carries JSON-RPC 2.0's optional `data` member, set with the new `RpcError::with_data` builder. It is omitted from the frame when unset, and a frame from an older peer with no `data` still parses (#6285).
+- `search_rpc::SearchRpcError` carries the daemon's `data` member, so `search_rpc::call_at` callers read a refusal's structured detail, not only its code and message (#6285).
+- `memory_pressure::read_memory_pressure` (feature `memory-pressure`) reads the kernel's own memory-pressure verdict — macOS `kern.memorystatus_vm_pressure_level` and `kern.memorystatus_level` via `sysctlbyname`, Linux cgroup v2 `memory.pressure` inside a container, host PSI `/proc/pressure/memory`, or `MemAvailable / MemTotal` without PSI — as a normal/warn/critical level with every raw signal attached (#8261). Nothing is guessed: an unreadable source is an error the caller decides on.
+- `content::resolve` (feature `content-resolver`) is the runtime resolver for instructional content (ADR-0064, #8378). A trusty-tools checkout wins when one is found from the start directory or named explicitly; otherwise `content-lock.toml` pins a `content-vX.Y.Z` tag and a sha256, and the cached `<tag>.tar.gz` is hashed, checked against the lock, checked against its own `bundle-manifest.toml` tag, and unpacked in memory. A missing or unreadable lock, a missing bundle, a sha256 mismatch, a tag mismatch, a malformed archive and an incomplete named checkout each return a typed `ContentError`; none falls back to another source. `ContentLock` loads and atomically stores the lock.
+- The content resolver's hardening (#8378 review): a checkout is detected only at the enclosing repository root (the walk stops at the first `.git`), and is trusted only with a `.git` marker, a `Cargo.toml` holding a `[workspace]` table and, on unix, a root, `.git` and `Cargo.toml` all owned by the current effective uid in a root that is not world-writable (group write is allowed), so a tree planted under a shared directory such as `/tmp` is never served, not even to root (`ContentError::UntrustedCheckout`). A bundle is refused as `BundleCorrupt` for a duplicate entry (`./a` and `a` included), and as `BundleTooLarge` over `MAX_BUNDLE_BYTES` (64 MiB), `MAX_UNPACKED_BYTES` (256 MiB) or `MAX_BUNDLE_ENTRIES` (20,000). `MAX_UNPACKED_BYTES` counts each entry's size as tar reads it, a pax `size=` override included, and the decompressed stream itself is capped at that plus 4 KiB per permitted entry, so oversized pax or GNU long-name records are refused too. Dev mode serves only regular files reached through real directories; a symlink, a directory or a dot-file is `NotFound`. `DevOverride`, `ResolveOptions` and `ContentSource` are `#[non_exhaustive]`; build options with `ResolveOptions::new`.
+- `integrity::Sha256Digest` (feature `integrity`) parses a digest or a `sha256sum` sidecar line, hashes bytes or a file, and verifies against a pinned digest. It is the one sha256 implementation; trusty-installer's pinned downloads now call it (#8378).
+- `content::resolve` refuses a bundle whose `bundle-manifest.toml` declares a
+  `schema_major` newer than `SUPPORTED_SCHEMA_MAJOR` (1) with the new
+  `ContentError::UnsupportedSchema`, and refuses a manifest with no
+  `schema_major` as `BundleCorrupt` (ADR-0064 PHASE_3 (iv)). The major is
+  read before the rest of the manifest, so a newer layout that renames a key
+  is refused as `UnsupportedSchema`, not as `BundleCorrupt`.
+- `content::validate_tag` is public, so a caller can refuse a malformed
+  `content-vX.Y.Z` tag before it builds a download URL from it.
+- `uds::server::request_peer_pid()` returns the kernel-reported pid of the
+  process whose request a socket handler is serving, or `None` outside a
+  socket dispatch. A handler can bind a privilege to the caller's process
+  instead of a caller-written parameter (#8531).
+- `uds::server::request_peer()` returns that pid with the instant the
+  connection was accepted, stamped before the request frame is read, so a
+  consumer can refuse a process that took the pid over later (#8531).
+
+### Fixed
+
+- The `bug-capture` error store (`errors.jsonl`) no longer grows without bound. The live file rotates to `errors.jsonl.1` at 4 MiB and at most two rotated files are kept; an oversized pre-fix file keeps only its newest 4 MiB when first rotated. When a rotation fails, the store stops writing to disk and counts the refusal (`ErrorStore::refused_disk_writes`) instead of growing the file; records stay in memory and the next append retries.
+- Concurrent writers no longer corrupt `errors.jsonl`. Each record is written as one full line in a single append, so records from separate processes cannot fuse into one line.
+- A malformed line in `errors.jsonl`, including invalid UTF-8, is skipped and counted (`ErrorStore::corrupt_lines_skipped`) and no longer empties the whole read. Readers also load records from the rotated files.
+- Compacting an oversized pre-fix `errors.jsonl` no longer loses records that other processes append while it runs. The live file is renamed aside first, so new appends start a fresh file, and bytes written through an already-open descriptor are copied into the compacted slot. When the compaction fails, the whole file moves into `errors.jsonl.1` instead; no failure path deletes a record.
+- `ErrorStore::append` no longer holds the store lock while it waits for the rotation lock or writes to disk, and that wait is capped at 50 ms instead of 2 s. A stuck rotation-lock holder no longer delays every other ERROR event and every reader of the store.
+- Reading a store while it rotates no longer returns the same records twice, so the multi-store bug-report view no longer double-counts them.
+- The search-index registry confirm poll (feature `search-index`) now reads its deadline from an injected clock, so its test drives the poll schedule on a stepped clock instead of the wall clock. The test no longer flakes when one slow registry read under CI load spends the whole deadline (#8284). Production behaviour is unchanged.
+- `uds::rpc` clients no longer fail an exchange with `half-close … Socket is not connected (os error 57)` on macOS when the daemon replies and closes before the client shuts down its write side. `ENOTCONN` from that shutdown now means the peer already closed, and the response read decides the outcome: the buffered reply, or `NoResponse` (#8464). This was the intermittent `memory_verbs_socket` failure in `tm memory recall|remember|note`.
+- `memory_core`: a palace redb write transaction that stalls past its deadline is rolled back instead of committed, so it releases redb's write lock and the palace commit-order guard and the next writer proceeds. The deadline lives in the new shared `store::write_deadline::DeadlinedWrite`, checked between ops and before commit on every kg.redb write and on the vector store's `compact_orphans` / `unalias` sweeps. The abort surfaces as the typed `WriteTxnError::DeadlineExceeded` (also `HnswStoreError::WriteDeadline`), including to every caller queued in the aborted `KgWriter` batch, and is logged at warn with the palace id and how long the lock was held. Default 30 s, overridable with `TRUSTY_WRITE_TXN_DEADLINE_SECS`; a value of zero or at/above the write-pipeline ceiling or the write-lock wait (`TRUSTY_WRITE_LOCK_TIMEOUT_SECS`) falls back to the default with a warning logged once per process. The write-pipeline ceiling's floor warning is also logged once per process now that it is read on every write transaction. A stall inside one redb call (one op, or `commit()`'s fsync) still cannot be interrupted (#8749).
+- `memory_core`: a writer that gives up waiting now fails with the typed `timeouts::WriteTimeout` — `LockWait` for the palace write mutex, `PipelineBudget` for the write-pipeline ceiling — with the same message text as before (#8749).
+
+### Changed
+
+- The `embedder-test-support` feature no longer implies `embedder`. On its own it compiles nothing and pulls no ONNX; it exposes `MockEmbedder` and `seed_shared_embedder_with_mock` only alongside `embedder` or `memory-core`. A crate that enabled `embedder-test-support` alone to get the embedder must now name `embedder` as well — every in-workspace consumer already does.
+
+### Removed
+
+- BREAKING (public API): deleted the `symgraph::server` module (`AppState`, `router`, `serve`, `DEFAULT_PORT`, `ApiError`) and the `symgraph-server` cargo feature. The module bound `0.0.0.0` and had no caller in the workspace; only the console may bind TCP (ADR-0032). Refs [#8926](https://github.com/bobmatnyc/trusty-tools/issues/8926)
+
 ## [0.52.7] — 2026-09-28
 
 ### Breaking
