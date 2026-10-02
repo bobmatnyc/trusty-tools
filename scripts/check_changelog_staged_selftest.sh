@@ -93,7 +93,7 @@
 # Exit: 0 when every case holds; 1 (naming the case) when one does not.
 #
 # Test: this IS the test. It is wired into
-#   .github/workflows/changelog-fragment.yml ahead of the real gate run.
+#   .github/workflows/ci.yml (changelog-fragment job) ahead of the real gate run.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only. Same constraints as the script under test.

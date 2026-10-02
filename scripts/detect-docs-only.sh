@@ -8,7 +8,7 @@
 #   filter on the workflow trigger is NOT the fix: GitHub never creates the
 #   check runs for a workflow the filters skipped, so a REQUIRED context stays
 #   pending forever and the PR becomes unmergeable rather than fast. The same
-#   trap is documented in .github/workflows/changelog-fragment.yml. So the
+#   trap is documented in .github/workflows/ci.yml. So the
 #   exemption lives here, in a script the always-running job consults, and the
 #   jobs keep reporting.
 #

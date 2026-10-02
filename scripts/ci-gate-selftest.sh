@@ -3,8 +3,8 @@
 # ci-gate-selftest.sh — fixtures for the `CI gate` job's two scripts and its
 #   ci.yml wiring (#8378).
 #
-# Why: `CI gate` is meant to become the one required context standing in for
-#   fourteen others. Its failure modes are silent: a relevance rule that
+# Why: `CI gate` is the required context standing in for
+#   the others. Its failure modes are silent: a relevance rule that
 #   answers `false` for a real input skips a gate, a verdict that accepts an
 #   unordered skip reports green on nothing, and a `needs:` list that drifts
 #   from the covered-context table drops a gate from the verdict entirely.
@@ -168,7 +168,25 @@ assert_eq "trusty-common-lanes steps read the plan's trusty_common" "1" \
   "$(printf '%s\n' "$lanes_job" | grep -c 'SELECTED: \${{ needs\.affected-plan\.outputs\.trusty_common }}')"
 assert_eq "no single cargo test -p trusty-common step remains" "0" \
   "$(grep -vE '^[[:space:]]*#' "$ci" | grep -c 'cargo test -p trusty-common')"
-for moved in teardown-guard tmux-exact-targets tag-publish-parity; do
+assert_eq "changelog-fragment row allows no skip" "1" \
+  "$(bash scripts/ci-gate-verdict.sh --list | grep -cx 'changelog-fragment|Per-PR changelog fragment|-')"
+assert_eq "changelog-fragment unordered skip fails the gate" "1" \
+  "$(verdict changelog-fragment=skipped out:docs_only=true)"
+assert_eq "changelog-fragment failed" "1" "$(verdict changelog-fragment=failure)"
+assert_eq "changelog-fragment cancelled" "1" "$(verdict changelog-fragment=cancelled)"
+cf_job="$(sed -n '/^  changelog-fragment:$/,/^  # ----/p' "$ci")"
+assert_eq "changelog-fragment has no job-level if or needs" "0" \
+  "$(printf '%s\n' "$cf_job" | grep -cE '^    (if|needs):')"
+# One `if:` lacks it: the checkout, which nothing precedes.
+assert_eq "every changelog-fragment step after checkout survives an earlier failure" "1" \
+  "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc '!cancelled()')"
+assert_eq "every changelog-fragment step runs on workflow_dispatch off main" "0" \
+  "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'")"
+assert_eq "every changelog-fragment step runs on pull_request" "0" \
+  "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'pull_request'")"
+assert_eq "no changelog-fragment step carries continue-on-error" "0" \
+  "$(printf '%s\n' "$cf_job" | grep -c 'continue-on-error')"
+for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"
 done

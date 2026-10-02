@@ -71,7 +71,7 @@
 #   --file already accepts that path.
 #
 # Exit: 0 when every case holds; 1 naming each case that did not.
-# Test: this IS the test; wired into .github/workflows/changelog-fragment.yml.
+# Test: this IS the test; wired into .github/workflows/ci.yml (changelog-fragment job).
 # Portability: bash 3.2 and bash 5; needs git and Python 3.11+.
 
 # #7812: re-run under bash when invoked as `zsh <this script>`.

@@ -7,7 +7,7 @@
 #   docs or instruction-content PR only starts in order to skip. The owner
 #   approved a six-item list — CI gate, line-cap, generation-artifact-lint,
 #   test-pointers, PR version bump, capabilities-drift — which is safe only if
-#   `CI gate` fails whenever any of the other fourteen would have. This script
+#   `CI gate` fails whenever any covered context would have. This script
 #   is that promise, stated once.
 #
 # What: reads `needs` as JSON ($NEEDS_JSON, the job's `toJSON(needs)`) and
@@ -53,6 +53,7 @@ parity-selftest|Parity gate self-test (must catch a drifted tag)|-
 check5-decision|CHECK 5 decision self-test (0 compared must never print PASS)|-
 check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gated)|-
 website-corpus|Website content corpus|-
+changelog-fragment|Per-PR changelog fragment|-
 "
 
 if [ "${1:-}" = "--list" ]; then
