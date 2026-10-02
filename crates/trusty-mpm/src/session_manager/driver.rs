@@ -440,6 +440,38 @@ pub trait ManagedTmuxDriver: Send + Sync {
         None
     }
 
+    /// The identity of pane `pane_id` on the live tmux server (#9004).
+    ///
+    /// Why: a `%N` id is unique within one server only, so ownership also
+    /// needs the server instance and the session's `$N` id to kill by.
+    /// What: the default is `Err` — a driver that cannot read the identity
+    /// never proves ownership. [`super::real_tmux::RealTmuxDriver`] reads it
+    /// with one `display-message -t %N`.
+    /// Test: `an_unreadable_pane_identity_leaves_the_runtime_running`.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot read the identity of pane {pane_id}"
+        )))
+    }
+
+    /// Kill the session whose `$N` id is `session_id`, which carries `name`,
+    /// unless the [`Self::supervisor_floor`] refuses `name` (#9004).
+    ///
+    /// Why: a kill by name reaches whichever session holds the name at that
+    /// instant; a session id is never reused within one server instance.
+    /// What: the default is `Err`, so a driver that cannot kill by id kills
+    /// nothing. [`super::real_tmux::RealTmuxDriver`] runs
+    /// `kill-session -t $N`.
+    /// Test: `stopping_a_record_whose_pane_is_live_still_kills_it`.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot kill session {session_id} ('{name}') by id"
+        )))
+    }
+
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 

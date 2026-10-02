@@ -31,6 +31,7 @@ mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;
+pub mod pane_identity;
 pub mod prune;
 pub mod reactivate;
 mod reconcile;
