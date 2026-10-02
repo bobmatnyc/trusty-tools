@@ -1,6 +1,6 @@
 # trusty-architect
 
-Content for the Architect, the one fleet supervisor session per user that
+Content for the Architect, the one fleet session per user that
 trusty-mpm 2.0 sets up (trusty-tools #8436). The Architect watches the PM
 sessions of the projects a user names, relays between them and the user, and
 does not implement.
@@ -14,7 +14,7 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 
 | Path | Purpose |
 | --- | --- |
-| `skills/tm-supervisor-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
+| `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
 | `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
 | `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `records/`. |
 | `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
