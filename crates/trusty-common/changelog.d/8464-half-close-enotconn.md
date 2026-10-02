@@ -1,2 +1,0 @@
-Fixed
-- `uds::rpc` clients no longer fail an exchange with `half-close … Socket is not connected (os error 57)` on macOS when the daemon replies and closes before the client shuts down its write side. `ENOTCONN` from that shutdown now means the peer already closed, and the response read decides the outcome: the buffered reply, or `NoResponse` (#8464). This was the intermittent `memory_verbs_socket` failure in `tm memory recall|remember|note`.
