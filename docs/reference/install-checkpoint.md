@@ -226,7 +226,7 @@ jq -r '.sessions | to_entries[] | .value | select(.state=="active" or .state=="s
 
 ### 7.2 Relaunch a live, unpaired session
 
-The script is `scripts/session-relaunch.sh` in the **supervisor** project
+The script is session-relaunch.sh, under scripts/ in the **supervisor** project
 (`bobmatnyc/supervisor`), not in this repo. Run it from that checkout, one
 session at a time:
 
