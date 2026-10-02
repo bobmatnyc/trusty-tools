@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::core::agent::Delegation;
+use crate::core::hook::HookEvent;
 
 const CLAUDE: ClaudeProcess = ClaudeProcess {
     pid: 300,
@@ -354,4 +355,101 @@ async fn a_sealed_registry_reaps_nothing_8980() {
         state.all_delegations()[0].status,
         crate::core::agent::DelegationStatus::Running
     );
+}
+
+/// Ingest one hook `event` for `session` over the shared (HTTP) body.
+async fn ingest(state: &std::sync::Arc<DaemonState>, session: SessionId, event: HookEvent) {
+    let post = crate::daemon::api::HookPost {
+        session_id: session.0.to_string(),
+        event,
+        payload: serde_json::json!({}),
+    };
+    crate::daemon::rpc::sessions_legacy_ops::ingest_hook(state, post)
+        .await
+        .expect("ingested");
+}
+
+/// #8984: an id whose `SessionStart` never reached the daemon is settled by
+/// its first in-session event, so a sibling's later `SessionStart` — the
+/// socket bind `bind_announcing_claude` makes after its walk — binds nothing.
+#[tokio::test]
+async fn a_forged_session_start_after_another_event_binds_nothing_8984() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = SessionId::new();
+    ingest(&state, session, HookEvent::PreToolUse).await;
+
+    let forged = state.bind_session_claude(session, CLAUDE);
+
+    assert!(
+        forged
+            .as_ref()
+            .is_err_and(|e| e.contains("without a kernel-verified claude")),
+        "{forged:?}"
+    );
+    assert_eq!(state.session_claudes().get(session), None);
+    // The settle is persisted, so a restart does not reopen the id.
+    let restarted = daemon_at(root.path());
+    assert!(restarted.session_claudes().is_settled(session));
+}
+
+/// #8984: a start-up event does not settle the id, so the session's own
+/// `SessionStart`, arriving after it, still binds.
+#[tokio::test]
+async fn a_start_up_event_leaves_the_id_open_to_its_session_start_8984() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = SessionId::new();
+    ingest(&state, session, HookEvent::InstructionsLoaded).await;
+    assert!(!state.session_claudes().is_settled(session));
+    state.bind_session_claude(session, CLAUDE).expect("vacant");
+    assert_eq!(state.session_claudes().get(session), Some(CLAUDE));
+}
+
+/// #8984: a later event that races a legitimate socket `SessionStart`
+/// already in flight leaves the id to that bind.
+#[tokio::test]
+async fn an_in_flight_session_start_still_binds_8984() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = SessionId::new();
+    let in_flight = state.session_claudes().begin_bind(session);
+    let second = state.session_claudes().begin_bind(session);
+    drop(second);
+    ingest(&state, session, HookEvent::PreToolUse).await;
+    assert!(
+        !state.session_claudes().is_settled(session),
+        "left to the bind"
+    );
+    state.bind_session_claude(session, CLAUDE).expect("vacant");
+    drop(in_flight);
+    assert_eq!(state.session_claudes().get(session), Some(CLAUDE));
+    // With no bind in flight, the next unannounced id is settled.
+    let other = SessionId::new();
+    ingest(&state, other, HookEvent::Stop).await;
+    assert!(state.session_claudes().is_settled(other));
+}
+
+/// #8984 Fail-Open Check: a settle that cannot be saved still settles the id
+/// in memory, and a sealed registry records nothing and says why.
+#[test]
+fn an_unsaved_settle_after_an_event_still_refuses_a_bind_8984() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blocker = dir.path().join("not-a-dir");
+    let claudes = SessionClaudes::load_as(blocker.join(SESSION_CLAUDES_FILE), current_uid());
+    std::fs::write(&blocker, b"").expect("a file where the directory goes");
+    let session = SessionId::new();
+    let got = claudes.settle_after_event(session);
+    assert!(got.is_err_and(|e| e.contains("could not be saved")));
+    assert!(claudes.is_settled(session), "kept: it can only deny");
+    let got = claudes.record(session, Announcement::Claude(CLAUDE), || Ok(()));
+    assert_eq!(got, Ok(Some(Announcement::Unproven)));
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let file = root.path().join(SESSION_CLAUDES_FILE);
+    std::fs::write(&file, b"{").expect("corrupt it");
+    let sealed = SessionClaudes::load_as(file, current_uid());
+    let got = sealed.settle_after_event(session);
+    assert!(got.is_err_and(|e| e.contains("sealed")));
+    assert_eq!(sealed.get(session), None);
 }

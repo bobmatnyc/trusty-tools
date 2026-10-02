@@ -28,9 +28,8 @@
 //! entry whose process has exited grants nothing (see
 //! `delegation_repair_caller::owner_claude`).
 //!
-//! Residuals (#8531, accepted). The first three leave an owner unable to
-//! repair its own records until the stale (6 h) or owner-gone path ends
-//! them; the fourth leaves an id open to a deliberate impersonator.
+//! Residuals (#8531, accepted). Each leaves an owner unable to repair its
+//! own records until the stale (6 h) or owner-gone path ends them.
 //! - Upgrade window: the first daemon start on this code has no file, so no
 //!   session that started before it is bound.
 //! - A first `SessionStart` that fell back to HTTP settles its id as
@@ -41,11 +40,14 @@
 //!   id is settled and the old binding fails the pid + start-time check. No
 //!   rebind is safe, since the new `claude` is indistinguishable from a
 //!   sibling announcing the same id.
-//! - An id whose `SessionStart` never reached the daemon (daemon down at
-//!   start, no tm `SessionStart` hook — doctor check
-//!   `hooks_missing_tm_group` — or a pre-upgrade session) stays announceable
-//!   for the session's life. Claiming it takes a sibling that knows the id
-//!   and announces it first, on purpose.
+//!
+//! #8984: an id whose `SessionStart` never reached the daemon (daemon down
+//! at start, no tm `SessionStart` hook — doctor check
+//! `hooks_missing_tm_group` — or a pre-upgrade session) is settled as
+//! unproven by its first event that only follows a `SessionStart`
+//! ([`SessionClaudes::settle_after_event`]), unless a socket bind of it is
+//! in flight. A sibling can still claim such an id only by announcing it
+//! before the session's first turn.
 //!
 //! Test: `session_claudes_tests.rs`.
 
@@ -90,6 +92,8 @@ pub enum Announcement {
 pub struct SessionClaudes {
     path: PathBuf,
     registry: Mutex<Result<HashMap<SessionId, Announcement>, String>>,
+    /// #8984: ids with a socket `SessionStart` bind in flight, and how many.
+    binding: Mutex<HashMap<SessionId, usize>>,
 }
 
 impl SessionClaudes {
@@ -115,6 +119,7 @@ impl SessionClaudes {
         Self {
             path,
             registry: Mutex::new(registry),
+            binding: Mutex::new(HashMap::new()),
         }
     }
 
@@ -183,6 +188,43 @@ impl SessionClaudes {
         Ok(None)
     }
 
+    /// Mark a socket `SessionStart` bind of `session` in flight (#8984).
+    ///
+    /// Why: a later event settles an unrecorded id as unproven, and must not
+    /// race the legitimate bind already under way for it.
+    /// What: counts the bind until the returned guard drops.
+    /// Test: `an_in_flight_session_start_still_binds_8984`.
+    pub(crate) fn begin_bind(&self, session: SessionId) -> BindInFlight<'_> {
+        *self.binding.lock().entry(session).or_insert(0) += 1;
+        BindInFlight {
+            claudes: self,
+            session,
+        }
+    }
+
+    /// Settle `session` as unproven because it produced an event that only
+    /// follows its `SessionStart` (#8984).
+    ///
+    /// Why: an id whose `SessionStart` never reached the daemon stayed open
+    /// to whichever sibling announced it first, for the session's life.
+    /// What: `Ok(true)` when [`Announcement::Unproven`] was recorded;
+    /// `Ok(false)` when the id was already recorded or a socket bind of it is
+    /// in flight — that bind decides it. `Err` as [`Self::record`]; an
+    /// unsaved record still settles the id.
+    /// Test: `a_forged_session_start_after_another_event_binds_nothing_8984`,
+    /// `an_in_flight_session_start_still_binds_8984`,
+    /// `an_unsaved_settle_after_an_event_still_refuses_a_bind_8984`.
+    pub(crate) fn settle_after_event(&self, session: SessionId) -> Result<bool, String> {
+        // #8984: held across the record, so a bind cannot start between them.
+        let binding = self.binding.lock();
+        if binding.contains_key(&session) {
+            return Ok(false);
+        }
+        Ok(self
+            .record(session, Announcement::Unproven, || Ok(()))?
+            .is_none())
+    }
+
     /// The nearest `claude` above the kernel-reported peer `pid` (#8531).
     ///
     /// Why: both the binding and the repair check start from a pid the kernel
@@ -198,6 +240,25 @@ impl SessionClaudes {
             process_facts,
             crate::core::twin_arming::is_claude,
         )
+    }
+}
+
+/// A socket `SessionStart` bind in flight; see [`SessionClaudes::begin_bind`].
+#[derive(Debug)]
+pub(crate) struct BindInFlight<'a> {
+    claudes: &'a SessionClaudes,
+    session: SessionId,
+}
+
+impl Drop for BindInFlight<'_> {
+    fn drop(&mut self) {
+        let mut binding = self.claudes.binding.lock();
+        if let Some(count) = binding.get_mut(&self.session) {
+            *count -= 1;
+            if *count == 0 {
+                binding.remove(&self.session);
+            }
+        }
     }
 }
 
