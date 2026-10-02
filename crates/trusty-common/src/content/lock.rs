@@ -118,8 +118,10 @@ impl ContentLock {
 ///
 /// Why: the tag becomes a file name inside the cache directory, so anything
 /// outside this grammar (a `/`, a `..`) is refused before a path is built.
+/// Public so a caller can refuse a bad `--content-ref` before it builds a
+/// download URL from it (#8378 PR-C).
 /// Test: `lock_rejects_a_tag_that_would_escape_the_cache`.
-fn validate_tag(tag: &str) -> Result<(), ContentError> {
+pub fn validate_tag(tag: &str) -> Result<(), ContentError> {
     let invalid = || ContentError::InvalidTag {
         tag: tag.to_owned(),
     };

@@ -374,6 +374,10 @@ trusty-common = { workspace = true, features = [
     # sizing input trusty-search and trusty-memory already read, so the three
     # daemons agree about the machine they share.
     "machine-tier",
+    # #8378 PR-C (ADR-0064): `content::resolve` and `integrity::Sha256Digest`
+    # back `tm content install|update|status` and the doctor `content` row.
+    # Adds `tar`, already in the lockfile.
+    "content-resolver",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
@@ -516,6 +520,11 @@ trusty-common = { workspace = true, features = [
 # --all-targets`, in every worktree — which is the cost that mattered.
 # `scripts/check_dev_dep_edges.sh` refuses a new edge of this shape.
 tempfile.workspace = true
+# #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
+# Both are already in this crate's normal graph through
+# `trusty-common/content-resolver`.
+flate2.workspace = true
+tar.workspace = true
 axum.workspace = true
 http-body-util.workspace = true
 # serial_test: run env-mutating tests serially to prevent env-var races across

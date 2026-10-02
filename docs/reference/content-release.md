@@ -42,6 +42,38 @@ version (`X.Y.Z-pre`) is published with `--prerelease`.
 still uses up the version: this workflow refuses a tag that already exists,
 so no release can be cut for it. Pick the next version.
 
+## Installing a release (`tm content`)
+
+`tm` pins one release in `~/.trusty-mpm/content/content-lock.toml` (tag and
+sha256) and keeps the bundle beside it as `<tag>.tar.gz`. Nothing is compiled
+in (#8974), so a host with no cache and no network must install a bundle by
+hand.
+
+| Command | What it does |
+|---|---|
+| `tm content update` | Installs the newest published `content-v*` release and re-pins to it. "Published" means listed by GitHub's releases API as neither a draft nor a pre-release; a bare git tag does not count. A failed listing is an error, and the previous pin stays in force. |
+| `tm content update --content-ref content-vX.Y.Z` | Pins exactly that release. |
+| `tm content install --from content-vX.Y.Z.tar.gz` | Offline. The `.sha256` sidecar must sit beside the bundle. |
+| `tm content status` | Prints the source (`dev`, `bundle` or `none`), the pinned tag and sha256, and the binary version. With nothing installed it prints an `info:` line and exits 0 while `tm` still compiles its content in; otherwise it exits non-zero when nothing serves. |
+
+The pin changes only when one of these commands runs. The `.sha256` sidecar
+is required by both `update` and `install`. It proves the transfer only: it
+comes from the same release as the bundle, so it catches a corrupt or
+truncated download, not a release replaced together with its sidecar. Trust is
+on first use: the pinned sha256 is what every later read checks, and a
+re-fetch of the currently pinned tag that returns other bytes is refused. Only
+the current pin is checked.
+
+Every write fails closed. A bundle is pinned only after it matches its
+sidecar and passes the checks `content::resolve` applies at run time. It is
+stored before `content-lock.toml` names it, and every write holds an exclusive
+lock on `.update.lock`. A sha256 mismatch, a missing sidecar, a tag missing
+upstream, a re-fetch of the pinned tag that returns other bytes, a newer or missing
+`schema_major` or an unreachable host leaves the previous pin in force.
+`tm doctor`'s `content` row reports the same facts as `tm content status`.
+With nothing installed it reports INFO while `tm` still compiles its content
+in, and WARN once ADR-0064 PHASE_1 removes it.
+
 ## What the bundle holds
 
 `scripts/package_content.sh --version X.Y.Z` writes two files:

@@ -264,6 +264,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Env { action }) = cli.command {
         return commands::env_file::run(action);
     }
+    // #8378 PR-C: `tm content` is daemon-less as well.
+    if let Some(Command::Content { action }) = cli.command {
+        return commands::content::run(action).await;
+    }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
     // tmux pane routes `claude` through so it is spawned with macOS TCC
@@ -615,6 +619,7 @@ async fn main() -> anyhow::Result<()> {
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
         Some(Command::Env { action }) => commands::env_file::run(action),
+        Some(Command::Content { action }) => commands::content::run(action).await,
         Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
             // over STDIO adapter; a plain `tm sm <message>` chats as before.

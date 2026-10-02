@@ -85,6 +85,19 @@ impl<R: Read> Read for CappedReader<'_, R> {
     }
 }
 
+/// The newest bundle `schema_major` this resolver reads (ADR-0064 PHASE_3
+/// (iv)). `scripts/package_content.sh` writes `schema_major = 1`.
+pub const SUPPORTED_SCHEMA_MAJOR: u32 = 1;
+
+/// The only manifest key read before the layout is known to be supported.
+#[derive(Deserialize)]
+struct SchemaProbe {
+    /// `None` when the key is absent, which is refused: a reader cannot tell
+    /// what layout such a bundle uses.
+    schema_major: Option<u32>,
+}
+
+/// The manifest as layout [`SUPPORTED_SCHEMA_MAJOR`] defines it.
 #[derive(Deserialize)]
 struct BundleManifest {
     tag: String,
@@ -108,10 +121,15 @@ enum UnpackError {
 /// What: missing -> `BundleMissing`; unreadable -> `BundleUnreadable`; over a
 /// size, unpacked-size or entry-count cap -> `BundleTooLarge`; digest differs
 /// -> `ChecksumMismatch`; not a gzip tar, an unsafe entry path, a link or
-/// device entry, a duplicate entry or no manifest -> `BundleCorrupt`; manifest
-/// tag differs from the lock -> `TagMismatch`.
+/// device entry, a duplicate entry, no manifest or no `schema_major` ->
+/// `BundleCorrupt`; `schema_major` above [`SUPPORTED_SCHEMA_MAJOR`] ->
+/// `UnsupportedSchema`, checked before the rest of the manifest is parsed;
+/// manifest tag differs from the lock -> `TagMismatch`.
 /// Test: `resolve_refuses_a_bundle_whose_sha256_does_not_match`,
 /// `resolve_refuses_a_bundle_whose_manifest_names_another_tag`,
+/// `resolve_refuses_a_newer_schema_major`,
+/// `a_newer_schema_major_without_a_tag_key_is_unsupported_not_corrupt`,
+/// `resolve_refuses_a_manifest_without_a_schema_major`,
 /// `resolve_refuses_a_bundle_with_a_climbing_entry`,
 /// `resolve_refuses_a_bundle_with_a_duplicate_entry`,
 /// `bundle_over_a_cap_is_too_large`,
@@ -156,6 +174,21 @@ pub(super) fn load_verified_with(
         .ok_or_else(|| corrupt(format!("no {MANIFEST_ENTRY} entry")))?;
     let manifest = std::str::from_utf8(manifest)
         .map_err(|e| corrupt(format!("{MANIFEST_ENTRY} is not UTF-8: {e}")))?;
+    // #8378 PR-C: ADR-0064 PHASE_3 (iv) — refuse a layout newer than this
+    // reader before parsing the rest, so a newer layout that renames a key
+    // reads as UnsupportedSchema, not BundleCorrupt.
+    let probe: SchemaProbe =
+        toml::from_str(manifest).map_err(|e| corrupt(format!("{MANIFEST_ENTRY}: {e}")))?;
+    let schema_major = probe
+        .schema_major
+        .ok_or_else(|| corrupt(format!("{MANIFEST_ENTRY} has no schema_major")))?;
+    if schema_major > SUPPORTED_SCHEMA_MAJOR {
+        return Err(ContentError::UnsupportedSchema {
+            path,
+            bundle: schema_major,
+            supported: SUPPORTED_SCHEMA_MAJOR,
+        });
+    }
     let manifest: BundleManifest =
         toml::from_str(manifest).map_err(|e| corrupt(format!("{MANIFEST_ENTRY}: {e}")))?;
     if manifest.tag != lock.tag() {
