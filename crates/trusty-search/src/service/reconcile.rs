@@ -685,7 +685,7 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// What: for each repo-relative path in `files`, asks
 /// `index_admission::admits` (#8922): an admitted file → `indexer.index_file`
 /// (which refuses sops content); an excluded or deleted file →
-/// `indexer.remove_file` (removes all its chunks); an undetermined answer
+/// `purge_file` (its chunks and content hash); an undetermined answer
 /// touches nothing and counts as failed.
 /// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
 /// reindex requests (which need a write lock) are not blocked for the entire
@@ -768,7 +768,9 @@ pub(super) async fn apply_delta(
                 let _teardown_guard =
                     crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
-                idx.remove_file(rel_path_str).await
+                // #8922: the content hash goes with the chunks, and the graph
+                // is rebuilt once after the loop rather than per file.
+                crate::service::reindex::hash::purge_file(&handle.id, &idx, rel_path_str).await
             };
             match result {
                 Ok(n) if n > 0 => removed += n,
@@ -782,6 +784,12 @@ pub(super) async fn apply_delta(
                 }
             }
         }
+    }
+
+    if removed > 0 {
+        let _teardown_guard =
+            crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
+        handle.indexer.read().await.rebuild_symbol_graph_now().await;
     }
 
     // Only stamp the new HEAD SHA when at least one operation succeeded.

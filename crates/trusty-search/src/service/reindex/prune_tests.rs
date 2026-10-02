@@ -965,3 +965,35 @@ async fn reindex_prunes_a_file_that_became_excluded_and_sops_content() {
     );
     assert!(!corpus_ids_for(&narrowed, "a.rs").await.is_empty());
 }
+
+/// #8922: an embedder-backed incremental reindex whose only changed file
+/// parses to zero chunks — a blank `.json` file, the #8976 `Empty` outcome —
+/// completes. Such a file never reaches the embedder, and the #868
+/// zero-vector gate used to read "one file submitted, zero vectors" as an
+/// embedder failure and fail the run. Fails with the `skipped` increment on
+/// the final-zero-chunk branch in `prepare_batch_payload` removed. (A blank
+/// `__init__.py` is not this case: the Python chunker still emits a chunk.)
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incremental_reindex_of_only_a_chunkless_file_completes() {
+    let (root, handle, _vectors) = colocated_fixture("x8922-empty");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+
+    std::fs::create_dir(root.path().join("config")).unwrap();
+    std::fs::write(root.path().join("config/empty.json"), "  \n").unwrap();
+    let second = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), second.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status.load(),
+        ReindexStatus::Complete,
+        "{:?}",
+        second.events.lock().await
+    );
+}

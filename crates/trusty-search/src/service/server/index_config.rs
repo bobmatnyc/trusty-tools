@@ -215,6 +215,24 @@ pub(super) async fn patch_index_config_handler(
     }
 }
 
+/// Refuse an `exclude_globs` list holding a pattern that does not parse (#8922).
+///
+/// Why: at runtime such a glob excludes every path, so accepting it would purge
+/// the whole index on its next reconcile. `POST /indexes` and this PATCH share it.
+/// What: `400 invalid_exclude_glob` naming the pattern; `None` passes.
+/// Test: `create_and_patch_reject_an_invalid_exclude_glob`.
+pub(crate) fn reject_invalid_globs(
+    globs: Option<&[String]>,
+) -> Result<(), (StatusCode, serde_json::Value)> {
+    let Some(globs) = globs else { return Ok(()) };
+    crate::core::repo_config::validate_exclude_globs(globs).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "invalid_exclude_glob", "message": message }),
+        )
+    })
+}
+
 /// The update `PATCH /indexes/{id}/config` applies, without the transport
 /// (#6285 slice 5.5).
 ///
@@ -246,6 +264,7 @@ pub(crate) async fn patch_index_config_report(
     req: PatchIndexConfigRequest,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
+    reject_invalid_globs(req.exclude_globs.as_deref())?;
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {

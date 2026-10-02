@@ -372,7 +372,14 @@ impl CodeIndexer {
         // #8922: a sops-encrypted file is never indexed, and a file that became
         // one loses the chunks its plaintext left behind.
         if crate::core::sops::is_sops_encrypted(content) {
-            let removed = self.remove_file(file_path).await?;
+            // The hash goes too, or the plaintext's hash would skip the file
+            // when it is decrypted again; the graph is rebuilt only when chunks
+            // actually left.
+            let id = crate::core::registry::IndexId::new(self.index_id.as_str());
+            let removed = crate::service::reindex::hash::purge_file(&id, self, file_path).await?;
+            if removed > 0 && !self.skip_kg {
+                self.rebuild_symbol_graph().await;
+            }
             tracing::warn!(
                 index_id = %self.index_id,
                 file = %file_path,

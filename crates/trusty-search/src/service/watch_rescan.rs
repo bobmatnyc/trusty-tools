@@ -108,7 +108,8 @@ pub struct RescanStats {
     pub files_unchanged: usize,
     /// Files still on disk whose chunks were dropped because the index now
     /// excludes them: the walker's policy no longer admits a tracked file, or
-    /// a walked file's content is sops-encrypted (#8922).
+    /// a walked file's content is sops-encrypted (#8922). A file with no
+    /// chunks to drop is not counted.
     pub files_excluded: usize,
 }
 
@@ -305,10 +306,11 @@ pub(crate) async fn reconcile_with_policy(
             // the content check existed may sit over plaintext chunks. The
             // file stays `live`, so the sweep below never counts it as gone.
             if crate::core::sops::is_sops_encrypted(&content) {
-                drop_file(index_id, indexer, &rel).await?;
+                if drop_file(index_id, indexer, &rel).await? > 0 {
+                    stats.files_excluded += 1;
+                }
                 indexed_files.take(&key).await;
                 live.insert(key);
-                stats.files_excluded += 1;
                 continue;
             }
             // #6570: the file was still read and hashed, so this is a decision
@@ -419,8 +421,11 @@ async fn warm_hashes_from_corpus(
     }
 }
 
-/// Drop one file's chunks, mapping a failure to [`RescanError::Remove`].
+/// Drop one file's chunks and content hash, mapping a failure to
+/// [`RescanError::Remove`].
 ///
+/// Why (#8922): the hash goes with the chunks, or a re-admitted unchanged file
+/// is hash-skipped forever. No per-file graph rebuild: the pass rebuilds once.
 /// Caller obligation (#3049): the same as [`sweep_deleted`]'s — the caller
 /// holds the teardown guard.
 async fn drop_file(
@@ -428,10 +433,8 @@ async fn drop_file(
     indexer: &Arc<RwLock<CodeIndexer>>,
     path: &str,
 ) -> Result<usize, RescanError> {
-    indexer
-        .read()
-        .await
-        .remove_file(path)
+    let idx = indexer.read().await;
+    crate::service::reindex::hash::purge_file(index_id, &idx, path)
         .await
         .map_err(|source| RescanError::Remove {
             index_id: index_id.to_string(),
@@ -463,14 +466,13 @@ struct Swept {
 /// `Excluded` for it; an `Included` or undetermined answer keeps it (#7396),
 /// and with no policy there is nothing to judge it against.
 ///
-/// Caller obligation (#3049): `remove_file` is a durable write and this
-/// function does NOT take the teardown guard — [`reconcile_after_rescan`] holds
+/// Caller obligation (#3049): the purge in [`drop_file`] is a durable write
+/// and this function does NOT take the teardown guard — [`reconcile_after_rescan`] holds
 /// it across the call, and is the only caller. Do not add a second caller
 /// without one, and do not "fix" this by acquiring the guard here: that is the
 /// read side twice on one task, and once a concurrent DELETE queues for the
 /// write side the second read parks behind it while this task still holds the
-/// first, deadlocking the pass. Declared as `CALLER:reconcile_after_rescan` in
-/// `scripts/teardown-guard-manifest.tsv`.
+/// first, deadlocking the pass.
 async fn sweep_deleted(
     index_id: &IndexId,
     canonical_root: &Path,
@@ -492,10 +494,13 @@ async fn sweep_deleted(
         if on_disk && !excluded {
             continue;
         }
-        drop_file(index_id, indexer, &tracked.display().to_string()).await?;
+        let removed = drop_file(index_id, indexer, &tracked.display().to_string()).await?;
         indexed_files.take(&tracked).await;
         if excluded {
-            swept.excluded += 1;
+            // #8922: counted only when chunks actually left.
+            if removed > 0 {
+                swept.excluded += 1;
+            }
         } else {
             swept.deleted += 1;
         }

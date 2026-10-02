@@ -144,12 +144,12 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
     let opts = walk_options(handle);
     // #7396: a root we could not resolve is not evidence that the file left the
     // index, so it downgrades the fall-through answer rather than being skipped.
-    let mut unresolved_root = false;
+    let mut undecided = false;
     for root in roots {
         let root = match root.canonicalize() {
             Ok(root) => root,
             Err(err) => {
-                unresolved_root |= resolve_failure(&root, &err) == Admission::Undetermined;
+                undecided |= resolve_failure(&root, &err) == Admission::Undetermined;
                 continue;
             }
         };
@@ -159,19 +159,47 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
         let target = path.clone();
         let mut builder = walker::configured_builder(&root, &opts);
         builder.filter_entry(move |entry| target.starts_with(entry.path()));
-        if builder
-            .build()
-            .filter_map(Result::ok)
-            .any(|entry| entry.path() == path && entry.file_type().is_some_and(|t| t.is_file()))
-        {
-            return Admission::Included;
+        match walk_verdict(builder.build(), &path) {
+            Some(Admission::Included) => return Admission::Included,
+            // #8922: a walk error along the path is not an exclusion (#7396).
+            Some(_) => undecided = true,
+            None => {}
         }
     }
-    if unresolved_root {
+    if undecided {
         Admission::Undetermined
     } else {
         Admission::Excluded
     }
+}
+
+/// What the targeted walk along `path` says about it.
+///
+/// Why (#8922): the walk used to drop its errors, so an `EACCES` or `ESTALE`
+/// on a directory along the path read as "the walker skips this file" and the
+/// caller purged it — the destructive answer #7396 forbids on an uncertain one.
+/// What: `Included` when the walk yields `path` as a file; `Undetermined` when
+/// it did not but some entry errored; `None` when it finished cleanly without
+/// the file, which is a genuine exclusion.
+/// Test: `a_walk_error_along_the_path_is_undetermined_not_excluded`.
+fn walk_verdict(
+    entries: impl IntoIterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+    path: &Path,
+) -> Option<Admission> {
+    let mut errored = false;
+    for entry in entries {
+        match entry {
+            Ok(e) if e.path() == path && e.file_type().is_some_and(|t| t.is_file()) => {
+                return Some(Admission::Included);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "admission walk error");
+                errored = true;
+            }
+        }
+    }
+    errored.then_some(Admission::Undetermined)
 }
 
 /// Leave the index untouched and ask a rescan to settle this path.
@@ -433,6 +461,20 @@ mod tests {
             .chunk_ids_for_file("notes/maya.md")
             .await
             .is_empty());
+    }
+
+    /// #8922: a walk error along the path answers `Undetermined`, never
+    /// `Excluded`; a clean walk that misses the file is still an exclusion.
+    /// Fails with `walk_verdict` dropping errors as `filter_map(Result::ok)` did.
+    #[test]
+    fn a_walk_error_along_the_path_is_undetermined_not_excluded() {
+        let path = Path::new("/repo/src/lib.rs");
+        let denied = ignore::Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            walk_verdict(vec![Err(denied)], path),
+            Some(Admission::Undetermined)
+        );
+        assert_eq!(walk_verdict(Vec::new(), path), None);
     }
 
     /// Why (#7396): `apply_modified` used to route EVERY negative answer from

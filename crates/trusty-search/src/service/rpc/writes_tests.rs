@@ -977,6 +977,38 @@ async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transpor
     }
 }
 
+/// Why (#8922): an exclude glob that does not parse excludes every path at
+/// runtime, so accepting one at the API would purge the index on its next
+/// reconcile.
+/// What: `POST /indexes` and `PATCH /indexes/{id}/config` each answer
+/// `400 invalid_exclude_glob`, and neither registers nor changes anything.
+/// Fails with `reject_invalid_globs` removed from either handler.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_and_patch_reject_an_invalid_exclude_glob() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let bad = serde_json::json!(["secrets/[unclosed"]);
+
+    let mut create = create_body("bad-glob-8922", tmp.path());
+    create["exclude_globs"] = bad.clone();
+    let (status, body) = http_err(&http, "POST", "/indexes", create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
+    assert!(state.registry.get(&IndexId::new("bad-glob-8922")).is_none());
+
+    let patch = serde_json::json!({ "exclude_globs": bad });
+    let (status, body) = http_err(&http, "PATCH", "/indexes/wf/config", patch).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
+    let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+    assert!(
+        handle.exclude_globs.is_empty(),
+        "a refused PATCH changes nothing"
+    );
+}
+
 // ----------------------------------------------------------------- reindex ---
 
 /// Why: the reindex TRIGGER is this slice's; the SSE progress stream is slice

@@ -243,6 +243,9 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 400** `invalid_exclude_glob` (#8922): an `exclude_globs` entry
+  does not parse. Nothing is registered. `PATCH /indexes/:id/config` refuses
+  the same way.
 - **Response 409** (#8499): the index store would land inside the git work
   tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
   repository (not only under `<root_path>`), or the default data dir under a

@@ -102,3 +102,73 @@ pub(crate) fn hash_content(content: &str) -> String {
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
+
+/// Drop a file's content hash from the in-process cache and the durable corpus.
+///
+/// Why (#8922): a purge that leaves the hash behind makes the next reindex or
+/// rescan hash-skip the file when it is re-admitted unchanged, so it stays
+/// unindexed with nothing to recover it.
+/// What: removes `rel` from [`hashes_for`] and, when the indexer holds a durable
+/// corpus, deletes the persisted row on a blocking worker. A failed delete is an
+/// error: the caller reports the purge as incomplete.
+/// Test: `forget_file_hash_drops_the_cached_and_persisted_hash`.
+pub(crate) async fn forget_file_hash(
+    index_id: &IndexId,
+    indexer: &crate::core::CodeIndexer,
+    rel: &str,
+) -> anyhow::Result<()> {
+    hashes_for(index_id).remove(std::path::Path::new(rel));
+    let Some(corpus) = indexer.corpus_store() else {
+        return Ok(());
+    };
+    let rows = vec![rel.to_string()];
+    tokio::task::spawn_blocking(move || corpus.delete_file_hash_entries(&rows))
+        .await
+        .map_err(|e| anyhow::anyhow!("file-hash delete task did not complete: {e}"))?
+}
+
+/// Purge one file for #8922: its chunks without a symbol-graph rebuild, then
+/// its content hash. Returns the chunks removed; the caller rebuilds the graph
+/// once, and only when something was removed.
+pub(crate) async fn purge_file(
+    index_id: &IndexId,
+    indexer: &crate::core::CodeIndexer,
+    rel: &str,
+) -> anyhow::Result<usize> {
+    let removed = indexer.remove_file_no_kg_rebuild(rel).await?;
+    forget_file_hash(index_id, indexer, rel).await?;
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #8922: both copies of the hash go, so a re-admitted file is re-read.
+    /// Fails with either removal in `forget_file_hash` deleted.
+    #[tokio::test]
+    async fn forget_file_hash_drops_the_cached_and_persisted_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = crate::core::corpus::CorpusStore::open(&dir.path().join("i.redb")).unwrap();
+        corpus
+            .upsert_file_hashes(&[("secrets/prod.yaml", "aa"), ("src/lib.rs", "bb")])
+            .unwrap();
+        let mut indexer = crate::core::CodeIndexer::new("hash-forget-8922", dir.path());
+        indexer.set_corpus_store(Arc::new(corpus));
+        let id = IndexId::new("hash-forget-8922");
+        hashes_for(&id).insert(PathBuf::from("secrets/prod.yaml"), "aa".into());
+
+        forget_file_hash(&id, &indexer, "secrets/prod.yaml")
+            .await
+            .unwrap();
+
+        assert!(hashes_for(&id)
+            .get(&PathBuf::from("secrets/prod.yaml"))
+            .is_none());
+        let persisted = indexer.corpus_store().unwrap().load_file_hashes().unwrap();
+        assert_eq!(
+            persisted,
+            vec![("src/lib.rs".to_string(), "bb".to_string())]
+        );
+    }
+}

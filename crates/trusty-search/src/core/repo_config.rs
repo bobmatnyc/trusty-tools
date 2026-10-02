@@ -223,6 +223,11 @@ impl RepoConfig {
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
         let cfg: Self = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+        // #8922: a bad exclude glob is a load error here, not a runtime purge.
+        for index in &cfg.indexes {
+            validate_exclude_globs(&index.exclude)
+                .map_err(|e| anyhow::anyhow!("{}: index '{}': {e}", path.display(), index.name))?;
+        }
         Ok(Some(cfg))
     }
 
@@ -284,6 +289,34 @@ pub fn language_to_exts(lang: &str) -> &'static [&'static str] {
     }
 }
 
+/// Reject exclude globs that do not parse (#8922).
+///
+/// Why: at runtime an unparsable glob excludes every path (see
+/// [`path_matches_any_glob`]), so one typo would purge a whole index. Callers
+/// that accept globs — repo-config load, `POST /indexes`, the config PATCH —
+/// refuse it up front instead.
+/// What: `Err` naming the first pattern that fails `glob::Pattern::new`.
+/// Test: `an_invalid_exclude_glob_is_rejected_at_load`,
+/// `create_and_patch_reject_an_invalid_exclude_glob`.
+pub fn validate_exclude_globs(globs: &[String]) -> Result<(), String> {
+    for pat in globs {
+        if let Err(e) = glob::Pattern::new(pat) {
+            return Err(format!("invalid exclude glob {pat:?}: {e}"));
+        }
+    }
+    Ok(())
+}
+
+/// Record that `pat` failed to parse; `true` only the first time per process.
+fn first_report_of_invalid_glob(pat: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(pat.to_string()))
+        .unwrap_or(true)
+}
+
 /// Return `true` if any glob in `excludes` matches `path` (relative to root)
 /// or `path` directly. Caller is responsible for choosing a stable form.
 ///
@@ -292,8 +325,10 @@ pub fn language_to_exts(lang: &str) -> &'static [&'static str] {
 /// `Pattern` handles both via the standard glob syntax.
 /// What: parses each pattern once and tests with `Pattern::matches`. A pattern
 /// that fails to parse matches every path (#8922): the exclude config could not
-/// be read, so nothing it might cover is admitted.
-/// Test: `test_glob_match_basic`, `an_unparsable_exclude_glob_excludes_every_path`.
+/// be read, so nothing it might cover is admitted. That error is logged once
+/// per pattern.
+/// Test: `test_glob_match_basic`, `an_unparsable_exclude_glob_excludes_every_path`,
+/// `the_invalid_glob_backstop_logs_once`.
 pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
     if excludes.is_empty() {
         return false;
@@ -331,10 +366,14 @@ pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
             }
             Err(e) => {
                 // #8922: fail closed — skipping the pattern indexed what it
-                // was written to exclude.
-                tracing::error!(
-                    "invalid exclude glob {pat:?}: {e} — excluding every path until it is fixed"
-                );
+                // was written to exclude. Entry points reject such globs, so
+                // this is a backstop for a persisted config; logged once per
+                // pattern, not once per path.
+                if first_report_of_invalid_glob(pat) {
+                    tracing::error!(
+                        "invalid exclude glob {pat:?}: {e} — excluding every path until it is fixed"
+                    );
+                }
                 return true;
             }
         }
@@ -477,6 +516,76 @@ indexes:
             Path::new("/repo/src/lib.rs"),
             &excludes
         ));
+    }
+
+    /// #8922: a repo config whose exclude glob does not parse is a load error,
+    /// so it never reaches the daemon as a purge-everything filter. Fails with
+    /// the validation loop in `RepoConfig::load` removed.
+    #[test]
+    fn an_invalid_exclude_glob_is_rejected_at_load() {
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            "version: 1\nindexes:\n  - name: api\n    exclude: [\"secrets/[unclosed\"]\n",
+        );
+        let err = RepoConfig::load(tmp.path()).expect_err("a bad glob must not load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("secrets/[unclosed") && msg.contains("'api'"),
+            "{msg}"
+        );
+        assert!(validate_exclude_globs(&["**/ok/**".to_string()]).is_ok());
+    }
+
+    /// Counts ERROR events whose message names `needle`.
+    struct CountErrors {
+        needle: &'static str,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountErrors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, _: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    self.0.push_str(&format!("{v:?}"));
+                }
+            }
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            if *event.metadata().level() == tracing::Level::ERROR && message.0.contains(self.needle)
+            {
+                self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// #8922: the runtime backstop still excludes every path, but logs the bad
+    /// pattern once, not once per path checked. Fails with the
+    /// `first_report_of_invalid_glob` check removed (three errors are logged).
+    #[test]
+    fn the_invalid_glob_backstop_logs_once() {
+        use tracing_subscriber::layer::SubscriberExt;
+        const PATTERN: &str = "logs-once-8922/[unclosed";
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountErrors {
+            needle: PATTERN,
+            hits: hits.clone(),
+        });
+        let excludes = vec![PATTERN.to_string()];
+        tracing::subscriber::with_default(subscriber, || {
+            // An earlier test may have cached this callsite as disabled under
+            // the no-op global dispatcher; re-evaluate it under this one.
+            tracing::callsite::rebuild_interest_cache();
+            for path in ["/repo/a.rs", "/repo/b.rs", "/repo/c/d.py"] {
+                assert!(path_matches_any_glob(Path::new(path), &excludes));
+            }
+        });
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

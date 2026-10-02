@@ -581,17 +581,13 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // #8922: sops content is never hash-skipped. A hash recorded before the
         // content check existed may still sit over the file's chunks, and the
         // commit's delete-then-insert below is what removes them; the indexer
-        // then parses the content to zero chunks. It is counted as skipped, so
-        // the zero-vector gate (#868) does not read a batch of only sops files
-        // as an embedder failure.
-        let sops = crate::core::sops::is_sops_encrypted(&content);
-        if sops {
-            ctx.progress.skipped.fetch_add(1, Ordering::Release);
-        } else if ctx
-            .hashes
-            .get(&rel_path)
-            .map(|prev| *prev == h)
-            .unwrap_or(false)
+        // then parses the content to zero chunks.
+        if !crate::core::sops::is_sops_encrypted(&content)
+            && ctx
+                .hashes
+                .get(&rel_path)
+                .map(|prev| *prev == h)
+                .unwrap_or(false)
         {
             emit_skip(ctx, &rel, None).await;
             continue;
@@ -599,9 +595,14 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // Issue #402 — relocation resilience: store file paths RELATIVE to the
         // index root so the corpus is portable when `root_path` is updated.
         let path_str = rel.clone();
-        // #8976: blank content and over-ceiling JSON keep their hash unchunked.
+        // #8976: blank content, over-ceiling JSON and (#8922) sops content keep
+        // their hash unchunked. #8922: they are also counted as skipped — they
+        // never reach the embedder, so the zero-vector gate (#868) must not read
+        // a batch of only such files (a new empty `__init__.py`) as an embedder
+        // failure.
         if IndexFileOutcome::classify(&rel, &content, 0).zero_chunks_is_final() {
             final_chunkless_paths.push(rel.clone());
+            ctx.progress.skipped.fetch_add(1, Ordering::Release);
         }
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());

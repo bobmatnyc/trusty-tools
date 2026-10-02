@@ -105,7 +105,7 @@ pub(crate) async fn gate(
         Admission::Included => Ok(()),
         Admission::Undetermined => Err(refusal(index_id, path, Refusal::Undetermined, 0)),
         Admission::Excluded => {
-            let removed = indexer.remove_file(path).await.map_err(|e| {
+            let removed = purge_pushed(handle, indexer, path).await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     serde_json::json!({
@@ -122,6 +122,27 @@ pub(crate) async fn gate(
             Err(refusal(index_id, path, Refusal::Excluded, removed))
         }
     }
+}
+
+/// Purge an excluded pushed path: chunks, content hash, then one graph rebuild.
+///
+/// Why (#8922): a hash left behind makes a reindex hash-skip the file once the
+/// policy admits it again. The reindex keys hashes by root-relative path, so an
+/// absolute pushed path also forgets its root-relative form.
+async fn purge_pushed(
+    handle: &IndexHandle,
+    indexer: &CodeIndexer,
+    path: &str,
+) -> anyhow::Result<usize> {
+    use crate::service::reindex::hash::{forget_file_hash, purge_file};
+    let removed = purge_file(&handle.id, indexer, path).await?;
+    if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
+        forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
+    }
+    if removed > 0 {
+        indexer.rebuild_symbol_graph_now().await;
+    }
+    Ok(removed)
 }
 
 /// The response a refused pushed write returns on every transport.

@@ -239,3 +239,78 @@ async fn rescan_drops_sops_files_and_files_the_policy_now_excludes() {
     assert_eq!(stats.files_removed, 0, "nothing was deleted from disk");
     only_kept_is_indexed("rescan sweep", &open.indexer).await;
 }
+
+/// Rescan `root` for `id` with the walker's default policy, returning its stats.
+async fn open_rescan(
+    open: &IndexHandle,
+    root: &Path,
+    files: &IndexedFiles,
+) -> crate::service::watch_rescan::RescanStats {
+    reconcile_with_policy(&open.id, root, root, &open.indexer, files, Some(open))
+        .await
+        .unwrap()
+}
+
+/// #8922: every purge arm drops the file's content hash with its chunks, so a
+/// file that is excluded and then admitted again — unchanged — is re-read and
+/// re-indexed instead of hash-skipped forever. One index per arm: the rescan
+/// sweep, boot reconcile's delta, the `index_file` gate, and the rescan's sops
+/// arm. Fails with `forget_file_hash` removed from `purge_file`: the second
+/// open rescan reports the file unchanged and it stays empty.
+#[tokio::test]
+async fn a_purged_file_is_reindexed_once_readmitted() {
+    for arm in ["sweep", "boot", "gate", "sops"] {
+        let (_temp, root) = tree();
+        std::fs::write(root.join(SOPS), PLAIN_YAML).unwrap();
+        let id = format!("x8922-readmit-{arm}");
+        let open = handle(&id, &root, false);
+        let mut narrowed = IndexHandle::bare(open.id.clone(), open.indexer.clone(), root.clone());
+        narrowed.exclude_globs = vec!["**/secrets/**".into()];
+        let files = IndexedFiles::new();
+        open_rescan(&open, &root, &files).await;
+        let rel = if arm == "sops" { SOPS } else { EXCLUDED };
+        assert!(!ids(&open.indexer, rel).await.is_empty(), "{arm}: setup");
+
+        match arm {
+            "sweep" => {
+                reconcile_with_policy(
+                    &open.id,
+                    &root,
+                    &root,
+                    &open.indexer,
+                    &files,
+                    Some(&narrowed),
+                )
+                .await
+                .unwrap();
+            }
+            "boot" => {
+                let narrowed = Arc::new(narrowed);
+                let delta = vec![EXCLUDED.to_string()];
+                super::reconcile::apply_delta(&narrowed, &id, &delta, "sha").await;
+            }
+            "gate" => {
+                let idx = open.indexer.read().await;
+                let refused =
+                    crate::service::write_admission::gate(&narrowed, &idx, EXCLUDED, PLAIN_YAML)
+                        .await;
+                assert!(
+                    refused.is_err(),
+                    "{arm}: the gate refuses the excluded path"
+                );
+            }
+            _ => {
+                std::fs::write(root.join(SOPS), sample_sops_yaml()).unwrap();
+                open_rescan(&open, &root, &files).await;
+                std::fs::write(root.join(SOPS), PLAIN_YAML).unwrap();
+            }
+        }
+        assert!(ids(&open.indexer, rel).await.is_empty(), "{arm}: purged");
+
+        let stats = open_rescan(&open, &root, &files).await;
+        assert!(
+            !ids(&open.indexer, rel).await.is_empty(),
+            "{arm}: a re-admitted, unchanged file must be indexed again: {stats:?}"
+        );
+    }
+}
