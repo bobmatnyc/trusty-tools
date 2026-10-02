@@ -39,7 +39,10 @@ impl SessionManager {
             return Err(refusal(
                 id,
                 record,
-                format!("this record carries no pane id to prove tmux session '{name}' is its own"),
+                format!(
+                    "this record carries no pane id to prove tmux session '{name}' is its own; {}",
+                    recovery(id, name)
+                ),
             ));
         };
         match self.tmux.pane_exists_checked(name, pane_id) {
@@ -72,10 +75,7 @@ impl SessionManager {
             RuntimeOwnership::Unverifiable(why) => Err(refusal(
                 id,
                 record,
-                format!(
-                    "{why}; if that session is this record's, end it yourself and \
-                     resume to recreate it"
-                ),
+                format!("{why}; {}", recovery(id, name)),
             )),
             // `same_server` never answers `Absent`; refuse rather than act.
             RuntimeOwnership::Absent => Err(refusal(
@@ -85,6 +85,17 @@ impl SessionManager {
             )),
         }
     }
+}
+
+/// The recovery an operator runs for a record whose session the gate cannot
+/// prove (#9101): end the session, then let resume recreate it, which
+/// captures the new pane with its server.
+fn recovery(id: &ManagedSessionId, name: &str) -> String {
+    format!(
+        "if that session is this record's, end it with `tmux kill-session -t {}`, \
+         then run `tm session resume {id}` to recreate it",
+        trusty_common::tmux::shell_exact_session_target(name)
+    )
 }
 
 /// The typed refusal for an unproven pane, logged at `warn` (#9101).

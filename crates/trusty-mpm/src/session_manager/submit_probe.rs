@@ -25,6 +25,7 @@
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::ManagedSessionId;
+use crate::core::sm::control::Submit;
 
 /// Number of trailing pane lines the submit probe inspects.
 ///
@@ -121,12 +122,13 @@ impl SessionManager {
     /// worse than no answer. This is the observing wrapper; plain
     /// [`Self::send_input`] is left untouched for the callers (task injection,
     /// the HTTP route, the proxy backend) whose contract is `Result<(), _>`.
-    /// What: delegates the dispatch and every readiness/modal refusal to
-    /// [`Self::send_input`], then re-captures the pane tail through the SAME
-    /// pane-scoped `capture_pane`/`capture` fallback `observe` uses (#2545
-    /// convention) and runs [`classify_submit`] over it. A send that was
-    /// REFUSED never reaches the probe — the `Err` already says nothing was
-    /// typed.
+    /// What: runs [`Self::send_input`]'s readiness/modal refusals, dispatches
+    /// through the same owned-pane gate, then re-captures the tail of the pane
+    /// that gate proved (#9101: never a fresh, ungated lookup) and runs
+    /// [`classify_submit`] over it. A send that was REFUSED never reaches the
+    /// probe — the `Err` already says nothing was typed. A capture error
+    /// yields an empty string, which [`classify_submit`] reads as
+    /// [`SubmitState::Unverified`].
     /// Test: `send_input_observed_reports_unsubmitted_paste`,
     /// `send_input_observed_reports_submitted_on_a_clean_prompt` in
     /// `send_input_gate_tests.rs`.
@@ -135,28 +137,13 @@ impl SessionManager {
         id: &ManagedSessionId,
         text: &str,
     ) -> Result<SubmitState, ManagedError> {
-        self.send_input(id, text).await?;
-        let record = self.get(id).await?;
-        let pane = self.capture_submit_pane(&record.tmux_name, record.pane_id.as_deref());
-        Ok(classify_submit(&pane))
-    }
-
-    /// Capture the pane tail the submit probe classifies.
-    ///
-    /// Why: a one-line helper rather than a direct `capture_readiness_pane`
-    /// call so the probe owns its own line budget — the modal probe's 60 lines
-    /// are more than a prompt-line check needs.
-    /// What: pane-scoped when a `pane_id` is known, session-scoped otherwise
-    /// (matching #2467's legacy-record fallback); a driver error yields an
-    /// empty string, which [`classify_submit`] reads as
-    /// [`SubmitState::Unverified`].
-    /// Test: covered through [`Self::send_input_observed`].
-    fn capture_submit_pane(&self, name: &str, pane_id: Option<&str>) -> String {
-        match pane_id {
-            Some(p) => self.tmux.capture_pane(name, p, SUBMIT_PROBE_LINES),
-            None => self.tmux.capture(name, SUBMIT_PROBE_LINES),
-        }
-        .unwrap_or_default()
+        self.check_send_input_ready(id).await?;
+        let (name, pane) = self.inject_into_owned(id, text, Submit::Enter).await?;
+        let tail = self
+            .tmux
+            .capture_pane(&name, &pane, SUBMIT_PROBE_LINES)
+            .unwrap_or_default();
+        Ok(classify_submit(&tail))
     }
 }
 

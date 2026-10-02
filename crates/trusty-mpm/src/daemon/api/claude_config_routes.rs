@@ -576,8 +576,9 @@ fn select_restart_record<'a>(
 /// What: `Ok(None)` when no live managed record carries the name (an
 /// unmanaged session, restarted session-scoped as before #2468). For a
 /// managed record, `SessionManager::owned_pane`'s pane, or its refusal as
-/// [`DaemonError::Internal`]: a record with no pane id, a pane on another
-/// tmux server, or an identity that cannot be read never gets a restart.
+/// [`DaemonError::SessionNotActive`] (409): a record with no pane id, a pane
+/// on another tmux server, or an identity that cannot be read never gets a
+/// restart.
 /// Test: `a_stale_record_after_a_server_restart_never_gets_a_claude_restart`,
 /// `an_unreadable_pane_identity_refuses_the_claude_restart`.
 async fn restart_pane_for(
@@ -591,7 +592,11 @@ async fn restart_pane_for(
     };
     mgr.owned_pane(&record.id, record).map(Some).map_err(|e| {
         tracing::warn!("restart in {tmux_session} refused: {e}");
-        DaemonError::Internal(format!("restart in {tmux_session} refused: {e}"))
+        // #9101: a 409, as the reactivate route answers an unproven pane.
+        DaemonError::SessionNotActive {
+            id: tmux_session.to_owned(),
+            status: format!("restart refused: {e}"),
+        }
     })
 }
 
@@ -611,8 +616,9 @@ async fn restart_pane_for(
 /// review). `None` (unmanaged/legacy session, or no matching live record)
 /// falls back to the session-scoped restart exactly as before #2468. #9101:
 /// a matched record's pane must pass [`restart_pane_for`]'s ownership gate.
-/// Then calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent,
-/// a confirmed-gone recorded pane, or an unproven one all surface as `500`.
+/// Then calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent
+/// or a confirmed-gone recorded pane surface as `500`; an unproven pane is
+/// `409`.
 /// Test: `restart_claude_code_handles_missing_tmux`;
 /// `ClaudeCodeRestarter::restart_target`'s pane/session decision is
 /// unit-tested directly in `daemon::claude_config::restarter`;
@@ -624,6 +630,7 @@ async fn restart_pane_for(
     request_body = RestartRequest,
     responses(
         (status = 200, description = "Restart command sent"),
+        (status = 409, description = "the recorded pane is not proven the record's own"),
         (status = 500, description = "tmux unavailable or restart failed"),
     )
 )]

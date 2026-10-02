@@ -160,6 +160,9 @@ async fn an_owned_pane_still_receives_keys_capture_and_shutdown() {
             "the owned pane never saw `{verb}`: {calls}"
         );
     }
+    // #9101: the shutdown kills by `$N` session id, never by exact name.
+    assert!(calls.contains("kill-session -t $"), "{calls}");
+    assert!(!calls.contains("kill-session -t ="), "{calls}");
 }
 
 /// Fail open: a shutdown neither signals nor kills a session whose pane

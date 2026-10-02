@@ -141,6 +141,16 @@ impl SessionManager {
             .tmux
             .list_sessions()
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // #9101: ownership is proved from a snapshot before the guard too, for
+        // the same reason; Guard 1 refuses if the record moved since.
+        let snapshot = self.get(id).await?;
+        let name_live = live_names.iter().any(|n| n == &snapshot.tmux_name);
+        let owned_session =
+            if name_live && snapshot.tmux_name != new_name && !snapshot.state.is_terminal() {
+                self.owned_session_id(id, &snapshot)?
+            } else {
+                None
+            };
 
         // ── Guard 1: lookup + collision-check/dedupe (no tmux calls held).
         // NOTE: do not call `self.get`/`self.list`/`self.dedupe_session_name`
@@ -153,6 +163,14 @@ impl SessionManager {
             .find(|r| r.id == *id)
             .cloned()
             .ok_or_else(|| ManagedError::SessionNotFound(id.to_string()))?;
+        if !same_tmux_identity(&record, &snapshot) || record.state != snapshot.state {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                "the record changed while its tmux session was being checked; \
+                 nothing was renamed — retry the rename"
+                    .into(),
+            ));
+        }
         if record.tmux_name == new_name {
             // Renaming to the current name is a no-op — nothing to persist.
             return Ok(record);
@@ -195,10 +213,9 @@ impl SessionManager {
         // #9101: and only on the server the record captured the pane on, so a
         // restarted server's session that reused the name and `%N` keeps its
         // name. Another session's name is renamed record-only, as #3714 did;
-        // an ownership that cannot be proved refuses the whole rename.
-        let name_live = live_names.iter().any(|n| n == &old_name);
-        let tmux_live = name_live && self.owns_live_name(id, &record)?;
-        if name_live && !tmux_live {
+        // an ownership that cannot be proved refuses the whole rename. The
+        // verdict was read before the guard (`owned_session`).
+        if name_live && owned_session.is_none() {
             warn!(
                 id = %id,
                 name = %old_name,
@@ -213,19 +230,27 @@ impl SessionManager {
         updated.tmux_name = new_name.clone();
         updated.last_activity_at = Some(Utc::now());
 
-        if !tmux_live {
+        let Some(session_id) = owned_session else {
             // Stopped path: nothing external to mutate — persist under the
             // SAME guard (#3692 HIGH-3): two concurrent stopped-session
             // renames are fully serialized here, so the second recomputes its
             // ordinal AFTER the first persisted and they can never collide.
             store.upsert(updated.clone()).await?;
             return Ok(updated);
-        }
+        };
         drop(store);
 
         // Live path: rename tmux OUTSIDE any lock (#3698 round-2 HIGH-A) —
         // a slow/hung tmux must never stall the daemon-wide store guard.
-        self.tmux.rename_session(&old_name, &new_name)?;
+        // #9101: by the `$N` id ownership was proved for, never by name.
+        self.tmux
+            .rename_session_id(&old_name, &session_id, &new_name)?;
+        let undo = Rollback {
+            session_id: &session_id,
+            new_name: &new_name,
+            old_name: &old_name,
+            id,
+        };
 
         // ── Guard 2: re-verify, then persist. The lock was released across
         // the tmux call, so both sides of the check-then-act must be
@@ -235,50 +260,51 @@ impl SessionManager {
             Ok(r) => r,
             Err(e) => {
                 drop(store);
-                return Err(self.rollback_rename(&new_name, &old_name, id, &e.to_string()));
+                return Err(self.rollback_rename(&undo, &e.to_string()));
             }
         };
+        // #9101: the pane and server too, so a record re-bound to another
+        // pane while tmux ran is never persisted under the new name.
         let self_unchanged = records
             .iter()
-            .any(|r| r.id == *id && r.tmux_name == old_name && !r.state.is_terminal());
+            .any(|r| r.id == *id && same_tmux_identity(r, &snapshot) && !r.state.is_terminal());
         let name_still_free = !records
             .iter()
             .any(|r| r.id != *id && r.tmux_name == new_name && !r.state.is_terminal());
         if !(self_unchanged && name_still_free) {
             drop(store);
             return Err(self.rollback_rename(
-                &new_name,
-                &old_name,
-                id,
+                &undo,
                 "lost a concurrent rename race while tmux was being renamed — retry the rename",
             ));
         }
         if let Err(e) = store.upsert(updated.clone()).await {
             drop(store);
-            return Err(self.rollback_rename(&new_name, &old_name, id, &e.to_string()));
+            return Err(self.rollback_rename(&undo, &e.to_string()));
         }
         Ok(updated)
     }
 
-    /// Whether the live session named `record.tmux_name` is the record's own,
-    /// so a rename may retitle it (#9101).
+    /// The `$N` id of the live session named `record.tmux_name` when it is
+    /// the record's own, so a rename may retitle it (#9101).
     ///
-    /// What: [`runtime_ownership`]: `Owned` is `true`; `Absent` and `Foreign`
-    /// (the pane is gone, or on another server) are `false`, a record-only
-    /// rename. `Unverifiable` (no pane id, no server identity, an unlistable
-    /// pane set or an unreadable identity) and a failed probe are an `Err`,
-    /// so nothing is renamed.
+    /// What: [`runtime_ownership`]: `Owned` is its session id; `Absent` and
+    /// `Foreign` (the pane is gone, or on another server) are `None`, a
+    /// record-only rename. `Unverifiable` (no pane id, no server identity, an
+    /// unlistable pane set or an unreadable identity) and a failed probe are
+    /// an `Err`, so nothing is renamed. Runs with no store guard held.
     /// Test: `a_stale_record_after_a_server_restart_never_renames_the_live_session`,
     /// `an_unreadable_pane_identity_refuses_the_rename`,
-    /// `rename_never_renames_unrelated_live_session_sharing_a_stale_name`.
-    fn owns_live_name(
+    /// `rename_never_renames_unrelated_live_session_sharing_a_stale_name`,
+    /// `rename_proves_ownership_with_no_store_guard_held`.
+    fn owned_session_id(
         &self,
         id: &ManagedSessionId,
         record: &SessionRecord,
-    ) -> Result<bool, ManagedError> {
+    ) -> Result<Option<String>, ManagedError> {
         match runtime_ownership(record, self.tmux.as_ref())? {
-            RuntimeOwnership::Owned { .. } => Ok(true),
-            RuntimeOwnership::Absent | RuntimeOwnership::Foreign(_) => Ok(false),
+            RuntimeOwnership::Owned { session_id, .. } => Ok(Some(session_id)),
+            RuntimeOwnership::Absent | RuntimeOwnership::Foreign(_) => Ok(None),
             RuntimeOwnership::Unverifiable(why) => Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!("refusing to rename: {why}; nothing was renamed"),
@@ -295,20 +321,20 @@ impl SessionManager {
     /// upsert — leaves the live session and the record desynced unless the
     /// tmux rename is compensated. Centralising the rollback keeps all three
     /// failure paths byte-identical.
-    /// What: renames tmux back; on success returns a retryable
-    /// [`ManagedError::InvalidState`] carrying `cause`; on rollback failure
-    /// returns the explicit manual-recovery error naming the exact
-    /// `tmux rename-session` command to run.
+    /// What: renames the session `undo.session_id` back by id; on success
+    /// returns a retryable [`ManagedError::InvalidState`] carrying `cause`; on
+    /// rollback failure returns the explicit manual-recovery error naming the
+    /// exact `tmux rename-session` command to run.
     /// Test: `rename_rolls_back_tmux_when_store_write_fails` in
     /// `super::rename_tests`.
-    fn rollback_rename(
-        &self,
-        new_name: &str,
-        old_name: &str,
-        id: &ManagedSessionId,
-        cause: &str,
-    ) -> ManagedError {
-        match self.tmux.rename_session(new_name, old_name) {
+    fn rollback_rename(&self, undo: &Rollback<'_>, cause: &str) -> ManagedError {
+        let Rollback {
+            session_id,
+            new_name,
+            old_name,
+            id,
+        } = *undo;
+        match self.tmux.rename_session_id(new_name, session_id, old_name) {
             Ok(()) => ManagedError::InvalidState(
                 id.to_string(),
                 format!("rename aborted and rolled back ({cause}) — retry the rename"),
@@ -319,9 +345,25 @@ impl SessionManager {
                     "rename half-applied: tmux is now '{new_name}' but the store still \
                      records '{old_name}', and the rollback failed ({rollback}) — manually \
                      run `tmux rename-session -t {} {old_name}` (cause: {cause})",
-                    crate::core::tmux::shell_exact_session_target(new_name)
+                    crate::core::tmux::shell_exact_session_target(session_id)
                 ),
             ),
         }
     }
+}
+
+/// The tmux rename [`SessionManager::rollback_rename`] undoes (#9101).
+#[derive(Clone, Copy)]
+struct Rollback<'a> {
+    /// The `$N` id of the renamed session.
+    session_id: &'a str,
+    new_name: &'a str,
+    old_name: &'a str,
+    id: &'a ManagedSessionId,
+}
+
+/// Whether `a` and `b` name the same tmux session and pane on the same
+/// server (#9101): the fields a rename's ownership proof rests on.
+fn same_tmux_identity(a: &SessionRecord, b: &SessionRecord) -> bool {
+    a.tmux_name == b.tmux_name && a.pane_id == b.pane_id && a.tmux_server == b.tmux_server
 }

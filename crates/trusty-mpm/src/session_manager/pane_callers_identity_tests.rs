@@ -81,7 +81,8 @@ async fn a_stale_record_after_a_server_restart_never_gets_a_claude_restart() {
     assert!(restarted.is_err(), "the restart reported success");
 }
 
-/// Fail open: the restart route refuses when the pane identity is unreadable.
+/// Fail open: the restart route refuses when the pane identity is unreadable,
+/// with a 409 as the reactivate route answers, not a 500.
 #[serial_test::serial]
 #[tokio::test]
 async fn an_unreadable_pane_identity_refuses_the_claude_restart() {
@@ -93,7 +94,8 @@ async fn an_unreadable_pane_identity_refuses_the_claude_restart() {
         tmux_session: LIVE.into(),
     };
     let restarted = f.scoped(restart_claude_code_op(&state, request)).await;
-    assert!(restarted.is_err(), "the restart reported success");
+    let status = restarted.err().map(|e| e.status());
+    assert_eq!(status, Some(axum::http::StatusCode::CONFLICT));
     assert_identity_read_and_pane_untouched(&f);
 }
 
@@ -359,4 +361,101 @@ async fn an_unreadable_pane_identity_reaps_the_record_without_reading_the_pane()
     assert_identity_read_and_pane_untouched(&f);
     let calls = f.calls();
     assert!(!calls.contains("set-environment"), "{calls}");
+}
+
+/// What `pane` of session `name` on `server` shows.
+fn screen_of(server: &PrivateTmuxServer, name: &str, pane: &str) -> String {
+    let target = trusty_common::tmux::exact_pane_target(name, pane);
+    server
+        .query(&["capture-pane", "-p", "-t", &target])
+        .unwrap_or_default()
+}
+
+/// #9101 reap backfill, on a real tmux: an Active record with no pane id,
+/// whose name an idle live session holds, is reaped. The reap backfills the
+/// pane id only, so the record stays unverifiable: the resume that follows
+/// refuses, names the recovery, and nothing types into the session. Red on
+/// bac1c1b4cb, whose by-name capture also stored that session's server, so
+/// the resume re-attached and the resume spawn typed into it.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_pane_less_record_reaped_beside_a_live_name_is_never_resumed_into_it() {
+    let Some((server, f)) = live_fixture("9101-backfill").await else {
+        return;
+    };
+    let name = reserved_session_name("9101-backfill");
+    let _idle = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, LIVE_PANE);
+    let (pane, _, _) = live_pane(&server, &name).expect("the idle session is live");
+    let id = f.seed_named(&name, "active", None, None).await;
+
+    let reaped = f.scoped(f.mgr.mark_runtime_exited_stopped(&id)).await;
+    let resumed = f.scoped(f.mgr.resume(&id)).await;
+    let record = f.mgr.get(&id).await.expect("record");
+    let adapter = TypingAdapter::over(&f.mgr);
+    let ws = f.dir.path();
+    let spawned = f
+        .scoped(async { spawn_resume_into_owned_pane(&f.mgr, &adapter, &record, ws, &[]) })
+        .await;
+    // tmux echoes typed keys through the pane's tty asynchronously.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let screen = screen_of(&server, &name, &pane);
+    assert!(
+        !screen.contains(MARK),
+        "the resume spawn typed into the live session: {screen:?}"
+    );
+    assert!(spawned.is_err(), "the resume spawn reported success");
+    assert!(adapter.panes.lock().unwrap().is_empty());
+    let recovery = format!("tmux kill-session -t '={name}'");
+    assert!(
+        matches!(&resumed, Err(ManagedError::InvalidState(_, why))
+            if why.contains(&recovery) && why.contains(&format!("tm session resume {id}"))),
+        "{resumed:?}"
+    );
+    assert_eq!(record.state, ManagedSessionState::Stopped);
+    let reaped = reaped.expect("the record-only reap still runs");
+    assert_eq!(reaped.pane_id.as_deref(), Some(pane.as_str()));
+    assert_eq!(reaped.tmux_server, None, "a by-name read paired a server");
+}
+
+/// #9101 resume create, on a real tmux: the resume's recreate step never
+/// attaches to a session that holds the record's name, which one can take
+/// between the resume's probe and its create. Red on bac1c1b4cb, whose
+/// `new-session -A` attached to it.
+#[serial_test::serial]
+#[tokio::test]
+async fn the_resume_create_never_attaches_to_a_session_holding_the_name() {
+    let Some((server, f)) = live_fixture("9101-create").await else {
+        return;
+    };
+    let name = reserved_session_name("9101-create");
+    let _taken = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, LIVE_PANE);
+    let before = live_pane(&server, &name).expect("the session is live");
+    // The taken session's own directory, so only exclusivity can refuse.
+    let target = trusty_common::tmux::exact_window_target(&name);
+    let cwd = server
+        .query(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{pane_current_path}",
+        ])
+        .expect("pane cwd");
+
+    let created = f
+        .scoped(async {
+            crate::session_manager::resume_workdir::create_and_verify_pane(
+                f.mgr.tmux.as_ref(),
+                &name,
+                cwd.trim(),
+            )
+        })
+        .await;
+
+    assert!(
+        matches!(&created, Err(ManagedError::NameCollision(_))),
+        "{created:?}"
+    );
+    assert_eq!(live_pane(&server, &name), Some(before));
 }

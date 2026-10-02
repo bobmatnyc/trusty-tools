@@ -602,6 +602,17 @@ impl SessionManager {
         text: &str,
         submit: Submit,
     ) -> Result<(), ManagedError> {
+        self.inject_into_owned(id, text, submit).await.map(drop)
+    }
+
+    /// [`Self::inject`], answering the session name and the pane the gate
+    /// proved, so a caller reads back the same pane (#9101).
+    pub(super) async fn inject_into_owned(
+        &self,
+        id: &ManagedSessionId,
+        text: &str,
+        submit: Submit,
+    ) -> Result<(String, String), ManagedError> {
         let mut record = self.get(id).await?;
         if matches!(
             record.state,
@@ -624,8 +635,9 @@ impl SessionManager {
         if matches!(submit, Submit::Enter | Submit::NoSubmit) {
             record.last_activity_at = Some(Utc::now());
         }
+        let name = record.tmux_name.clone();
         self.store.write().await.upsert(record).await?;
-        Ok(())
+        Ok((name, pane))
     }
 
     /// Observe a session's raw surface — LLM-FREE (#1461).
@@ -809,11 +821,11 @@ impl SessionManager {
         // matter — no earlier capture exists to protect), but a
         // known-good id, once captured at spawn/adopt time, is NEVER
         // re-derived here again.
-        // #9004: a known pane id with no server stays serverless; only a
-        // fresh capture may pair a pane with the server it was read on.
+        // #9101: backfill the pane id only. A by-name read reaches whatever
+        // session holds the name now, so it never pairs the pane with a
+        // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
-            (record.pane_id, record.tmux_server) =
-                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
@@ -1005,7 +1017,8 @@ impl SessionManager {
             // #8942: a name the floor cannot clear refuses the whole resume.
             // #9101: no kill by name here. The probe just proved no session
             // carries the name, so a kill could only reach one that took the
-            // name since; a duplicate makes the create below fail instead.
+            // name since. The create below is exclusive, so such a session
+            // fails it instead of being attached to.
             self.kill_gate(&record.tmux_name, "SessionManager::resume")?;
 
             // Create a fresh tmux session rooted at the EXISTING workspace, then

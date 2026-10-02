@@ -135,6 +135,23 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         }
     }
 
+    /// #9101: `rename-session -t $N <new>`; a `session_id` that is not a `$N`
+    /// id is refused before tmux runs, so no name ever reaches the target.
+    fn rename_session_id(
+        &self,
+        name: &str,
+        session_id: &str,
+        new: &str,
+    ) -> Result<(), ManagedError> {
+        if !(session_id.starts_with('$') && trusty_common::tmux::is_immutable_id(session_id)) {
+            return Err(ManagedError::InvalidState(
+                name.to_owned(),
+                format!("{session_id:?} is not a tmux session id; '{name}' was not renamed"),
+            ));
+        }
+        self.rename_session(session_id, new)
+    }
+
     /// Report every tmux session that currently has a client attached, via the
     /// concrete driver's `list-sessions` (`#{session_attached}`).
     fn attached_session_names(&self) -> Vec<String> {

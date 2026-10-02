@@ -123,6 +123,25 @@ pub trait ManagedTmuxDriver: Send + Sync {
         )))
     }
 
+    /// Rename the session whose `$N` id is `session_id`, which carries `name`,
+    /// to `new` (#9101).
+    ///
+    /// Why: a rename by name reaches whichever session holds the name when
+    /// tmux runs; the id names the session ownership was proved for.
+    /// What: the default fails closed, as [`Self::rename_session`] does.
+    /// [`super::real_tmux::RealTmuxDriver`] runs `rename-session -t $N`.
+    /// Test: `rename_renames_live_tmux_session`.
+    fn rename_session_id(
+        &self,
+        name: &str,
+        session_id: &str,
+        new: &str,
+    ) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot rename session {session_id} ('{name}') by id to {new}"
+        )))
+    }
+
     /// Names of tmux sessions with a client currently ATTACHED.
     ///
     /// Why: the `tm ls` list reconciliation distinguishes an ATTACHED session

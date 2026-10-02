@@ -59,6 +59,9 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
 /// #9004: the one tmux server instance [`FakeTmuxDriver`] reports.
 pub const FAKE_TMUX_SERVER: &str = "1:1";
 
+/// #9101: the `$N` id the fake's server gives every session.
+pub const FAKE_SESSION_ID: &str = "$0";
+
 /// A fake tmux driver for unit testing.
 ///
 /// Why: the manager must be testable without a real tmux binary; this
@@ -154,6 +157,11 @@ pub struct FakeTmuxDriver {
     /// reconcile re-asserts tm's server globals on a tmux server it did not
     /// start (a tmux-resurrect restore).
     pub scrollback_option_calls: Mutex<u32>,
+    /// #9101: the store a rename test watches. `pane_identity` records in
+    /// `probed_under_guard` whether that store's lock was held when it ran.
+    pub watched_store: Mutex<Option<Arc<tokio::sync::RwLock<super::store::SessionStore>>>>,
+    /// #9101: whether an ownership probe ran with `watched_store` locked.
+    pub probed_under_guard: Mutex<bool>,
 }
 
 impl FakeTmuxDriver {
@@ -183,6 +191,8 @@ impl FakeTmuxDriver {
             cold_tmux_host: Mutex::new(false),
             list_sessions_should_fail: Mutex::new(false),
             scrollback_option_calls: Mutex::new(0),
+            watched_store: Mutex::new(None),
+            probed_under_guard: Mutex::new(false),
         })
     }
 }
@@ -351,9 +361,14 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         &self,
         pane_id: &str,
     ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        if let Some(store) = self.watched_store.lock().unwrap().as_ref()
+            && store.try_write().is_err()
+        {
+            *self.probed_under_guard.lock().unwrap() = true;
+        }
         Ok(super::pane_identity::PaneIdentity {
             pane_id: pane_id.to_owned(),
-            session_id: "$0".into(),
+            session_id: FAKE_SESSION_ID.into(),
             server: FAKE_TMUX_SERVER.into(),
             session_name: self
                 .pane_session
@@ -364,9 +379,31 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         })
     }
 
-    /// #9004: recorded in `kill_calls` under the session's name.
-    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
-        self.kill_session(name)
+    /// #9004: recorded in `kill_calls` as the `$N` id, never the name
+    /// (#9101), so a test can tell a kill by id from a kill by name.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        self.kill_calls.lock().unwrap().push(session_id.to_owned());
+        self.sessions.lock().unwrap().remove(name);
+        Ok(())
+    }
+
+    /// #9101: recorded in `rename_calls` as `(session_id, new)`; the
+    /// in-memory session `name` moves to `new`.
+    fn rename_session_id(
+        &self,
+        name: &str,
+        session_id: &str,
+        new: &str,
+    ) -> Result<(), ManagedError> {
+        self.rename_calls
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), new.to_owned()));
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(workdir) = sessions.remove(name) {
+            sessions.insert(new.to_owned(), workdir);
+        }
+        Ok(())
     }
 
     /// Records `(name, pane_id, text)` instead of delegating to `send_line`
@@ -728,8 +765,11 @@ async fn manager_stop_keeps_workspace() {
     // State must be Stopped (runtime gone) not Dead (which implied loss).
     assert_eq!(stopped.state, ManagedSessionState::Stopped);
 
-    // tmux session must have been killed.
-    assert!(fake.kill_calls.lock().unwrap().contains(&record.tmux_name));
+    // tmux session must have been killed — #9101: by its session id.
+    assert_eq!(
+        fake.kill_calls.lock().unwrap().as_slice(),
+        [FAKE_SESSION_ID.to_string()]
+    );
 
     // Workspace directory must STILL EXIST on disk.
     assert!(
@@ -1231,9 +1271,10 @@ async fn decommission_full_still_terminates_the_runtime() {
         .await
         .expect("full decommission");
 
+    // #9101: by session id, which the fake records instead of the name.
     assert_eq!(
         *fake.kill_calls.lock().unwrap(),
-        vec![record.tmux_name.clone()],
+        vec![FAKE_SESSION_ID.to_string()],
         "the FULL decommission path must still reclaim the pane (#1975)"
     );
 }
@@ -2963,9 +3004,12 @@ async fn shutdown_stops_an_owned_active_session() {
         [(tmux_name.clone(), "%1".to_string())],
         "shutdown signals the owned pane once"
     );
-    assert!(
-        fake.kill_calls.lock().unwrap().contains(&tmux_name),
-        "shutdown must kill every owned Active session"
+    // #9101: the fake records a kill by id as the id, a kill by name as the
+    // name, so this tells the two apart.
+    assert_eq!(
+        fake.kill_calls.lock().unwrap().as_slice(),
+        [FAKE_SESSION_ID.to_string()],
+        "shutdown must kill every owned Active session by its session id"
     );
 }
 
