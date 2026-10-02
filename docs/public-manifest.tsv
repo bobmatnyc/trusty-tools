@@ -117,6 +117,7 @@ PAGE	tools	docs/trusty-console/secrets.md	/tools/trusty-console/secrets	Console 
 
 SECTION	roadmap	Roadmap
 PAGE	roadmap	docs/roadmap/trusty-tools.md	/roadmap	trusty-tools roadmap
+PAGE	roadmap	docs/roadmap/trusty-mpm.md	/roadmap/trusty-mpm	trusty-mpm roadmap (moved)
 
 SECTION	guides	User Guides
 PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
