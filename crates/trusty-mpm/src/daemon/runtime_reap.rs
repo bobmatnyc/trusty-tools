@@ -279,6 +279,17 @@ mod tests {
             ));
             Ok(())
         }
+        /// #9101: the reaper publishes the id only into a pane the record
+        /// owns, so the created pane names its session.
+        fn get_pane_id(&self, name: &str) -> Option<String> {
+            Some(crate::test_support::self_describing_pane(name))
+        }
+        fn pane_identity(
+            &self,
+            pane_id: &str,
+        ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+            Ok(crate::test_support::self_describing_identity(pane_id))
+        }
     }
 
     /// A probe that always reports a live child — forces the belt-and-braces gate

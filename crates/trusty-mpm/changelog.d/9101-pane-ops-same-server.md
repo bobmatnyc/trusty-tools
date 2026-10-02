@@ -17,3 +17,13 @@ Fixed
   (#9101).
 - `tm session resume` no longer kills a session by name before it recreates
   the pane (#9101).
+- `POST /claude-config/restart`, the `--task` injection readiness poll, and
+  both resume spawns (`tm session resume` and the auto-resume relaunch) now
+  act on a record's pane only once it is proven on the live tmux server. Any
+  other answer refuses and touches no pane (#9101).
+- `tm session rename` renames only the record when the live session with its
+  name is on a restarted tmux server, and refuses when ownership cannot be
+  proved, including for a record with no pane id (#9101).
+- The bare-`tm` in-place relaunch no longer reactivates a stale record whose
+  pane id the current pane reuses after a tmux server restart; the daemon's
+  reactivate answers 409 (#9101).

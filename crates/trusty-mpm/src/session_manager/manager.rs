@@ -709,8 +709,12 @@ impl SessionManager {
     /// does (best-effort — the pane usually still exists, it is just an idle
     /// shell), sets `state = Stopped`, and persists. Deliberately never calls
     /// [`Self::graceful_terminate_runtime`] or `kill_session` — the tmux
-    /// session and its pane are left exactly as they are.
-    /// Test: `stop_runtime_exited_transitions_active_to_stopped` (in
+    /// session and its pane are left exactly as they are. #9101: the snapshot
+    /// and the `TM_MANAGED_SESSION_ID` publish run only on a pane
+    /// [`Self::owned_pane`] proves.
+    /// Test: `a_stale_record_after_a_server_restart_never_publishes_its_id_on_reap`,
+    /// `an_unreadable_pane_identity_reaps_the_record_without_reading_the_pane`,
+    /// `stop_runtime_exited_transitions_active_to_stopped` (in
     /// `daemon::runtime_reap`) asserts the record becomes `Stopped`;
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
     /// `kill_session` is never invoked on the fake driver;
@@ -774,7 +778,13 @@ impl SessionManager {
                 ),
             ));
         }
-        super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #9101: the scrollback read and the id publish below reach the pane
+        // only when it is proven this record's; the Stopped transition is
+        // record-only and runs either way.
+        let owned = self.owned_pane(id, &record).ok();
+        if let Some(pane) = owned.as_deref() {
+            super::snapshot::capture_into_pane(&mut record, &*self.tmux, Some(pane)).await;
+        }
         // #2453 review finding 1 (round 3 — round 2's re-derive-on-every-call
         // approach was proven UNSOUND): `get_pane_id` shells out to `tmux
         // display-message -t <SESSION_NAME> -p '#{pane_id}'`, which is
@@ -829,10 +839,14 @@ impl SessionManager {
         // pre-#2157 build, or whose set-environment call failed at spawn), so a
         // LATER bare `tm` run inside this pane can still resolve the id via
         // `tmux show-environment` even though the process-env export never
-        // landed. Best-effort — never fails the reap.
-        if let Err(e) =
-            self.tmux
-                .set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
+        // landed. Best-effort — never fails the reap. #9101: never into a
+        // session whose pane is not proven this record's.
+        if owned.is_some()
+            && let Err(e) = self.tmux.set_environment(
+                &record.tmux_name,
+                "TM_MANAGED_SESSION_ID",
+                &id.to_string(),
+            )
         {
             warn!(
                 id = %id,

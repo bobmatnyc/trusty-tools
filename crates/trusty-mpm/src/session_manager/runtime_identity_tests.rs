@@ -87,6 +87,31 @@ fn echo_rows(rows: &str) -> String {
         .join("; ")
 }
 
+/// Seed `mgr` with a record named `name` in `state`, bound to `pane_id`
+/// captured on tmux server `server` (#9101: also seeds a daemon's manager).
+async fn seed_named_into(
+    mgr: &SessionManager,
+    name: &str,
+    state: &str,
+    pane_id: Option<&str>,
+    server: Option<&str>,
+) -> ManagedSessionId {
+    let id = ManagedSessionId::new();
+    let mut raw = serde_json::json!({
+        "id": id.to_string(), "task": "t", "tmux_name": name, "cwd": "/tmp",
+        "state": state, "created_at": "2026-09-22T19:41:12Z",
+    });
+    if let Some(pane) = pane_id {
+        raw["pane_id"] = serde_json::json!(pane);
+    }
+    if let Some(server) = server {
+        raw["tmux_server"] = serde_json::json!(server);
+    }
+    let record: SessionRecord = serde_json::from_value(raw).expect("record");
+    mgr.store.write().await.upsert(record).await.expect("seed");
+    id
+}
+
 /// A scratch framework root, a fake tmux and a manager over both.
 struct Fixture {
     dir: tempfile::TempDir,
@@ -183,26 +208,7 @@ impl Fixture {
         pane_id: Option<&str>,
         server: Option<&str>,
     ) -> ManagedSessionId {
-        let id = ManagedSessionId::new();
-        let mut raw = serde_json::json!({
-            "id": id.to_string(), "task": "t", "tmux_name": name, "cwd": "/tmp",
-            "state": state, "created_at": "2026-09-22T19:41:12Z",
-        });
-        if let Some(pane) = pane_id {
-            raw["pane_id"] = serde_json::json!(pane);
-        }
-        if let Some(server) = server {
-            raw["tmux_server"] = serde_json::json!(server);
-        }
-        let record: SessionRecord = serde_json::from_value(raw).expect("record");
-        self.mgr
-            .store
-            .write()
-            .await
-            .upsert(record)
-            .await
-            .expect("seed");
-        id
+        seed_named_into(&self.mgr, name, state, pane_id, server).await
     }
 
     /// Give `id`'s record an owned workspace under a scratch managed root,

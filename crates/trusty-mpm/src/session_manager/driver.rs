@@ -601,6 +601,15 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// and calling this if a grace window is desired.
     /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
     /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
+    ///
+    /// #9101: deprecated, not removed, because the trait is public API. It
+    /// signals and kills by the reusable session NAME, so it can reach a
+    /// session that took a stale record's name. No production path calls it;
+    /// a teardown classifies with `runtime_ownership` and kills by `$N` id.
+    #[deprecated(
+        note = "#9101: kills by session name; prove ownership with runtime_ownership and \
+                kill with kill_session_id"
+    )]
     fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
         self.signal_terminate(name, claude_pid);
         self.kill_session(name)

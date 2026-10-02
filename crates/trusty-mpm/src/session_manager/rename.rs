@@ -20,6 +20,7 @@ use tracing::warn;
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, SessionRecord};
+use super::runtime_identity::{RuntimeOwnership, runtime_ownership};
 
 /// Validate a proposed session name, returning the trimmed value or a message.
 ///
@@ -112,7 +113,9 @@ impl SessionManager {
     /// rename physically retarget an UNRELATED live session that happens to
     /// hold the same name; when that mismatch is detected, only the DB record
     /// is renamed (with a `warn!` notice) and the live tmux entity is left
-    /// untouched.
+    /// untouched. #9101: [`Self::owns_live_name`] also requires the pane to be
+    /// on the server the record captured it on, and refuses the rename when
+    /// ownership cannot be proved.
     /// Test: `rename_updates_name_and_persists`,
     /// `rename_same_name_is_noop`, `rename_suffixes_collision_with_record`,
     /// `rename_suffixes_collision_with_live_tmux`,
@@ -188,14 +191,13 @@ impl SessionManager {
         // captured `pane_id`, liveness is only trusted once the driver
         // confirms THAT SPECIFIC pane still lives inside a session named
         // `old_name` (`pane_exists` is pane-scoped, never a name-string
-        // match) — tying the check to this record's OWN tmux identity. A
-        // legacy record with no captured `pane_id` (pre-#2453) falls back to
-        // the prior name-only check; no stronger signal exists for it.
+        // match) — tying the check to this record's OWN tmux identity.
+        // #9101: and only on the server the record captured the pane on, so a
+        // restarted server's session that reused the name and `%N` keeps its
+        // name. Another session's name is renamed record-only, as #3714 did;
+        // an ownership that cannot be proved refuses the whole rename.
         let name_live = live_names.iter().any(|n| n == &old_name);
-        let tmux_live = match record.pane_id.as_deref() {
-            Some(pane_id) => name_live && self.tmux.pane_exists(&old_name, pane_id),
-            None => name_live,
-        };
+        let tmux_live = name_live && self.owns_live_name(id, &record)?;
         if name_live && !tmux_live {
             warn!(
                 id = %id,
@@ -256,6 +258,32 @@ impl SessionManager {
             return Err(self.rollback_rename(&new_name, &old_name, id, &e.to_string()));
         }
         Ok(updated)
+    }
+
+    /// Whether the live session named `record.tmux_name` is the record's own,
+    /// so a rename may retitle it (#9101).
+    ///
+    /// What: [`runtime_ownership`]: `Owned` is `true`; `Absent` and `Foreign`
+    /// (the pane is gone, or on another server) are `false`, a record-only
+    /// rename. `Unverifiable` (no pane id, no server identity, an unlistable
+    /// pane set or an unreadable identity) and a failed probe are an `Err`,
+    /// so nothing is renamed.
+    /// Test: `a_stale_record_after_a_server_restart_never_renames_the_live_session`,
+    /// `an_unreadable_pane_identity_refuses_the_rename`,
+    /// `rename_never_renames_unrelated_live_session_sharing_a_stale_name`.
+    fn owns_live_name(
+        &self,
+        id: &ManagedSessionId,
+        record: &SessionRecord,
+    ) -> Result<bool, ManagedError> {
+        match runtime_ownership(record, self.tmux.as_ref())? {
+            RuntimeOwnership::Owned { .. } => Ok(true),
+            RuntimeOwnership::Absent | RuntimeOwnership::Foreign(_) => Ok(false),
+            RuntimeOwnership::Unverifiable(why) => Err(ManagedError::InvalidState(
+                id.to_string(),
+                format!("refusing to rename: {why}; nothing was renamed"),
+            )),
+        }
     }
 
     /// Roll a half-applied tmux rename back (`new` → `old`) and build the

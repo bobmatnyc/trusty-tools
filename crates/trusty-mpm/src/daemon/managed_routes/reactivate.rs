@@ -116,6 +116,8 @@ pub async fn reactivate_managed_session(
 /// The transport-neutral body of `POST .../{id}/reactivate` (#6288), served
 /// over the socket as `mpm.managed.reactivate`.
 ///
+/// #9101: [`caller_pane_refusal`] answers 409 first, so a caller in a pane
+/// that only looks like the record's never gets the record reactivated.
 /// Test: `managed_reactivate_parity` in `daemon::rpc::managed_tests`.
 pub(crate) async fn reactivate_core(
     state: &Arc<DaemonState>,
@@ -127,6 +129,9 @@ pub(crate) async fn reactivate_core(
         Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
+    if let Some(why) = caller_pane_refusal(&mgr, &id, params.caller_pane_id.as_deref()).await {
+        return RouteOutcome::text(409, why);
+    }
     match mgr.mark_reactivated(&id).await {
         Ok(record) => RouteOutcome::ok(&record_to_summary(&record)),
         Err(ManagedError::SessionNotFound(_)) => {
@@ -145,6 +150,33 @@ pub(crate) async fn reactivate_core(
         },
         Err(e) => RouteOutcome::text(500, e.to_string()),
     }
+}
+
+/// Why a caller claiming `id`'s own pane may not reactivate it, or `None`
+/// (#9101).
+///
+/// Why: `bin/tm`'s in-place relaunch proves it runs in the record's pane by
+/// comparing `%N` ids only, and it then execs `claude` into that pane. A
+/// restarted tmux server reuses `%N` ids, so a stale record's id can match
+/// the caller's pane in an unrelated session. The client summary carries no
+/// server identity, so the daemon, which holds the record, decides.
+/// What: `None` when no `caller_pane_id` was sent, the record cannot be read
+/// (`mark_reactivated` answers that), or the caller names another pane than
+/// `record.pane_id`. Otherwise `SessionManager::owned_pane`'s refusal text,
+/// or `None` when it proves the pane is the record's on the live server.
+/// Test: `a_stale_record_after_a_server_restart_is_never_reactivated_in_place`,
+/// `an_unreadable_pane_identity_refuses_the_in_place_reactivate`.
+async fn caller_pane_refusal(
+    mgr: &SessionManager,
+    id: &ManagedSessionId,
+    caller_pane_id: Option<&str>,
+) -> Option<String> {
+    let caller = caller_pane_id.filter(|p| !p.is_empty())?;
+    let record = mgr.get(id).await.ok()?;
+    if record.pane_id.as_deref() != Some(caller) {
+        return None;
+    }
+    mgr.owned_pane(id, &record).err().map(|e| e.to_string())
 }
 
 /// #2453: reconcile a stale-`Active` record before refusing a reactivate.

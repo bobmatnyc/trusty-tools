@@ -540,8 +540,46 @@ pub(crate) fn enable_event_capture() {
     );
 }
 
+/// The one tmux server a self-describing fake pane reports (#9101).
+pub(crate) const FAKE_PANE_SERVER: &str = "1:1";
+
+/// A fake tmux pane id that names its session: `%<name>` (#9101).
+///
+/// Why: a fake driver must answer `pane_identity` with the session that holds
+/// the pane, or `same_server` refuses every pane operation. A pane id that
+/// carries its session name lets the fake compute that from the id alone.
+/// Test: `a_self_describing_pane_names_its_own_session`.
+pub(crate) fn self_describing_pane(name: &str) -> String {
+    format!("%{name}")
+}
+
+/// The identity of a [`self_describing_pane`]: its session is the one the id
+/// names, on [`FAKE_PANE_SERVER`] (#9101).
+/// Test: `a_self_describing_pane_names_its_own_session`.
+pub(crate) fn self_describing_identity(
+    pane_id: &str,
+) -> crate::session_manager::pane_identity::PaneIdentity {
+    crate::session_manager::pane_identity::PaneIdentity {
+        pane_id: pane_id.to_owned(),
+        session_id: "$0".into(),
+        server: FAKE_PANE_SERVER.into(),
+        session_name: pane_id.trim_start_matches('%').to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// #9101: the identity the fake derives names the session the pane id
+    /// was minted for, on the one fake server.
+    #[test]
+    fn a_self_describing_pane_names_its_own_session() {
+        let pane = super::self_describing_pane("tmpm-test-9101");
+        let identity = super::self_describing_identity(&pane);
+        assert_eq!(identity.pane_id, "%tmpm-test-9101");
+        assert_eq!(identity.session_name, "tmpm-test-9101");
+        assert_eq!(identity.server, super::FAKE_PANE_SERVER);
+    }
+
     use super::*;
     use std::time::UNIX_EPOCH;
 

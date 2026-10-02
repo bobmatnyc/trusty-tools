@@ -156,6 +156,7 @@ impl ManagedTmuxDriver for DefaultGsDriver {
 /// child on any early exit so the test never leaks a process.
 /// Test: this is the test.
 #[cfg(unix)]
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[test]
 fn default_graceful_stop_sends_sigterm() {
     use std::process::{Child, Command};

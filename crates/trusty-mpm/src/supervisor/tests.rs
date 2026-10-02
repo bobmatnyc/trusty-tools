@@ -104,12 +104,7 @@ impl ManagedTmuxDriver for FakeTmux {
         &self,
         pane_id: &str,
     ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
-        Ok(crate::session_manager::pane_identity::PaneIdentity {
-            pane_id: pane_id.to_owned(),
-            session_id: "$0".into(),
-            server: FAKE_SERVER.into(),
-            session_name: pane_id.trim_start_matches('%').to_owned(),
-        })
+        Ok(crate::test_support::self_describing_identity(pane_id))
     }
 
     fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
@@ -117,13 +112,8 @@ impl ManagedTmuxDriver for FakeTmux {
     }
 }
 
-/// #9101: the one tmux server [`FakeTmux`] reports.
-const FAKE_SERVER: &str = "1:1";
-
-/// #9101: the pane id [`FakeTmux`] gives session `name`.
-fn fake_pane(name: &str) -> String {
-    format!("%{name}")
-}
+// #9101: the shared self-describing fake pane and its one server.
+use crate::test_support::{FAKE_PANE_SERVER as FAKE_SERVER, self_describing_pane as fake_pane};
 
 /// A stub LLM classifier that never touches the network.
 ///

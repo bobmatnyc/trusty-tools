@@ -2841,6 +2841,7 @@ async fn workspace_owned_flag_round_trips_via_set() {
 /// What: creates a session, calls `graceful_stop` with a dummy PID, then
 /// asserts the name appears in `kill_calls` and `graceful_stop_calls`.
 /// Test: this is the test.
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[tokio::test]
 async fn fake_driver_graceful_stop_with_pid() {
     let dir = crate::test_support::hermetic_temp_dir();
@@ -2884,6 +2885,7 @@ async fn fake_driver_graceful_stop_with_pid() {
 /// What: calls `graceful_stop(name, None)` on the fake and asserts that
 /// `kill_calls` contains the name and `graceful_stop_calls` records `None`.
 /// Test: this is the test.
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[tokio::test]
 async fn fake_driver_graceful_stop_without_pid() {
     let dir = crate::test_support::hermetic_temp_dir();

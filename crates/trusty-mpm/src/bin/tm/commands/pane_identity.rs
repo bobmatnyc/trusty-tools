@@ -56,6 +56,11 @@
 /// never had a `pane_id` captured, or a tmux query failure) OR they differ —
 /// fails CLOSED in every ambiguous case, meaning the caller must refuse (or
 /// fall back to a weaker, explicit confirmation) rather than proceed.
+/// #9101: equal ids are necessary, not sufficient — a restarted tmux server
+/// reuses `%N`, and the client summary carries no server identity. The
+/// in-place relaunch sends this pane id to the daemon's reactivate, which
+/// refuses unless the record's pane is on the live server
+/// (`daemon::managed_routes::reactivate::caller_pane_refusal`).
 /// Test: `pane_identity_confirmed_true_when_pane_id_matches_record`,
 /// `pane_identity_confirmed_false_when_current_pane_id_absent`,
 /// `pane_identity_confirmed_false_when_record_pane_id_absent`,

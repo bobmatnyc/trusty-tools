@@ -395,3 +395,8 @@ async fn a_resume_that_recreates_the_pane_makes_the_record_ownable() {
         .await
         .expect("the resumed record's pane takes keys");
 }
+
+// #9101: the callers outside `SessionManager`'s own pane operations reuse the
+// restarted-server fixture above, so they live in a child module.
+#[path = "pane_callers_identity_tests.rs"]
+mod callers;

@@ -670,19 +670,14 @@ mod tests {
 
         /// #9101: a pane id naming its session, so the record owns its pane.
         fn get_pane_id(&self, name: &str) -> Option<String> {
-            Some(format!("%{name}"))
+            Some(crate::test_support::self_describing_pane(name))
         }
 
         fn pane_identity(
             &self,
             pane_id: &str,
         ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
-            Ok(crate::session_manager::pane_identity::PaneIdentity {
-                pane_id: pane_id.to_owned(),
-                session_id: "$0".into(),
-                server: "1:1".into(),
-                session_name: pane_id.trim_start_matches('%').to_owned(),
-            })
+            Ok(crate::test_support::self_describing_identity(pane_id))
         }
 
         fn capture_pane(&self, name: &str, _p: &str, lines: usize) -> Result<String, ManagedError> {
