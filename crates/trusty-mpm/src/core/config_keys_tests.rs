@@ -172,3 +172,12 @@ fn an_unknown_key_warns_once_per_process_across_repeated_loads() {
     assert!(warnings[0].contains("modles"), "{warnings:#?}");
     assert!(!warnings[0].contains("supervisor.session"), "{warnings:#?}");
 }
+
+/// #9091: `[accounts]` is read by `core::gh_org_accounts`, so it is known.
+#[test]
+fn accounts_table_is_not_reported() {
+    assert_eq!(
+        mpm_unknown("[accounts]\nduettoresearch = \"bob-duetto\"\n\n[acounts]\nx = \"y\"\n"),
+        vec!["acounts".to_string()]
+    );
+}

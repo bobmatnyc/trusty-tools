@@ -197,6 +197,22 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     fn get_pane_id(&self, _name: &str) -> Option<String> {
         Some("%1".to_owned())
     }
+    /// #9004: the pane on one server, in the first live session.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<trusty_mpm::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        let name = self.live.lock().unwrap().iter().next().cloned();
+        Ok(trusty_mpm::session_manager::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: "1:1".into(),
+            session_name: name.unwrap_or_default(),
+        })
+    }
+    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
+        self.kill_session(name)
+    }
 }
 
 /// A live pane whose SHELL works and whose runtime never comes up (#8233).

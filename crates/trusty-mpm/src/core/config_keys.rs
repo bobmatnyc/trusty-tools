@@ -93,6 +93,9 @@ pub fn unknown_key_paths<T: Serialize>(raw: &Value, parsed: &T) -> Vec<String> {
     out.retain(|path| !crate::core::build_lease::config::LEASE_KEYS.contains(&path.as_str()));
     // #9097: `supervisor.session` is written and read by `tm fleet`, not serde.
     out.retain(|path| !KEYS_READ_ELSEWHERE.contains(&path.as_str()));
+    // #9091: `[accounts]` is read strictly by `core::gh_org_accounts`, not by
+    // `MpmConfig`, so a broken table is an error there instead of a reset here.
+    out.retain(|path| path != "accounts");
     out
 }
 

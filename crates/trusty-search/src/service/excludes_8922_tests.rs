@@ -329,9 +329,10 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
 
 /// #8922 fail-open check on persisted state: an index restored with an exclude
 /// glob that does not parse (`**.min.js`, persisted before entry validation)
-/// keeps its chunks through the next rescan, and `GET /indexes/{id}/config`
-/// reports the glob as invalid. Fails against cfa841fc78, where that glob
-/// matched every path and the rescan purged the whole index.
+/// keeps its chunks through the next rescan (#9059: which it now refuses), and
+/// `GET /indexes/{id}/config` reports the glob as invalid. Fails against
+/// cfa841fc78, where that glob matched every path and the rescan purged the
+/// whole index.
 #[tokio::test]
 async fn a_restored_invalid_glob_neither_purges_nor_hides() {
     use crate::core::embed::{Embedder, MockEmbedder};
@@ -363,11 +364,20 @@ async fn a_restored_invalid_glob_neither_purges_nor_hides() {
         .await;
     assert!(!ids(&restored.indexer, KEPT).await.is_empty(), "setup");
 
-    let stats = open_rescan(&restored, &root, &files).await;
-    assert_eq!(stats.files_excluded, 0, "{stats:?}");
+    // #9059: the index is held, so the rescan is refused and purges nothing.
+    let outcome = reconcile_with_policy(
+        &restored.id,
+        &root,
+        &root,
+        &restored.indexer,
+        &files,
+        Some(&restored),
+    )
+    .await;
+    assert!(outcome.is_err(), "a held index must refuse the rescan");
     assert!(
         !ids(&restored.indexer, KEPT).await.is_empty(),
-        "an invalid restored glob must not purge the index: {stats:?}"
+        "an invalid restored glob must not purge the index: {outcome:?}"
     );
 
     let view = crate::service::server::index_config_report(&state, ID).expect("config");

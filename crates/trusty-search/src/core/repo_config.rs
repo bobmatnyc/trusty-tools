@@ -323,8 +323,8 @@ pub fn invalid_exclude_globs(globs: &[String]) -> Vec<String> {
 
 /// Log each restored exclude glob that does not parse, naming the index.
 ///
-/// Why (#8922): an index persisted with such a glob keeps loading. The glob is
-/// skipped at match time, so the operator must learn that it widens the index.
+/// Why (#8922): an index persisted with such a glob keeps loading and keeps
+/// serving reads, but (#9059) it is held: nothing is indexed until it is fixed.
 /// What: one ERROR per invalid pattern; `GET /indexes/{id}/config` reports the
 /// same patterns as `invalid_exclude_globs`.
 /// Test: `a_restored_invalid_glob_neither_purges_nor_hides`.
@@ -333,9 +333,8 @@ pub fn report_invalid_restored_globs(index_id: &str, globs: &[String]) {
         tracing::error!(
             index_id,
             pattern = %pat,
-            "restored exclude glob does not parse; it is skipped, so the paths it \
-             was meant to exclude are indexed. Fix it with PATCH \
-             /indexes/{index_id}/config (#8922)"
+            "restored exclude glob does not parse; the index is HELD and indexes \
+             nothing until PATCH /indexes/{index_id}/config sets valid globs (#9059)"
         );
     }
 }
@@ -399,7 +398,8 @@ pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
             }
             Err(e) => {
                 // #8922: skip, never match everything — that purged the whole
-                // index. Only a persisted glob gets here; restore reports it.
+                // index. Only a persisted glob gets here; restore reports it,
+                // and every ingest path holds the index first (#9059).
                 if first_report_of_invalid_glob(pat) {
                     tracing::error!(
                         "invalid exclude glob {pat:?}: {e} — skipped until it is fixed"

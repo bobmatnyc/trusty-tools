@@ -71,6 +71,7 @@ fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionR
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

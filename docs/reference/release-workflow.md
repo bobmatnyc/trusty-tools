@@ -1063,6 +1063,11 @@ xcrun stapler staple ~/.cargo/bin/trusty-search
 > (your own machine), notarization adds no benefit; Developer ID signing alone
 > is sufficient for FDA persistence.
 
+> Installing an unreleased trusty-mpm build on a machine with live sessions
+> follows [install-checkpoint.md](install-checkpoint.md): checkpoint every
+> session, install from a pinned rev, restart the daemon, relaunch sessions,
+> roll back (#9032).
+
 ## Connection-Safe Daemon Restart (issue #534)
 
 As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,

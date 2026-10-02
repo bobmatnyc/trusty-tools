@@ -627,7 +627,7 @@ enum Commands {
     /// Manage the macOS launchd service (install/uninstall/status/logs)
     ///
     /// Installs a LaunchAgent plist at
-    /// `~/Library/LaunchAgents/com.trusty.trusty-search.plist` that runs the
+    /// `~/Library/LaunchAgents/com.trusty.search.plist` (#8253) that runs the
     /// daemon in the foreground under launchd supervision. Not supported on
     /// Linux / Windows — the subcommand exits 1 with a clear message.
     ///
