@@ -626,3 +626,26 @@ fn launchd_env_pairs_keeps_an_operator_rust_log() {
         "an exported RUST_LOG must win over the INFO default; got {from_shell:?}"
     );
 }
+
+/// Why: #8253 — the `service` clap doc comment (printed by `trusty-search
+/// service --help`) named `com.trusty.trusty-search.plist`, a unit launchd
+/// never had loaded; an operator following it bootouts nothing.
+/// What: reads `main.rs` and requires its `Service` help text to name
+/// `<launchd_labels::SEARCH>.plist` and never the pre-#4868 label.
+/// Test: pure string check on the embedded source, no fs side effects.
+#[test]
+fn service_help_names_the_registry_plist() {
+    let main_rs = include_str!("../main.rs");
+    let want = format!(
+        "~/Library/LaunchAgents/{}.plist",
+        trusty_common::launchd_labels::SEARCH
+    );
+    assert!(
+        main_rs.contains(&want),
+        "`service --help` must name {want}, the live unit's plist"
+    );
+    assert!(
+        !main_rs.contains("com.trusty.trusty-search.plist"),
+        "`service --help` names the pre-#4868 plist launchd never loaded"
+    );
+}

@@ -127,7 +127,7 @@ pub enum Commands {
     Config(trusty_common::inference::config::ConfigCommand),
     /// Manage the macOS launchd LaunchAgent for the console daemon (#2557).
     ///
-    /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-console.plist`
+    /// `install` writes `~/Library/LaunchAgents/com.trusty.console.plist` (#8253)
     /// (running `trusty-console serve`) and bootstraps it; `uninstall` unloads
     /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
     /// `tctl install` / `tctl start` call `install` on the operator's behalf.
@@ -872,5 +872,27 @@ mod tests {
             std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
         }
         assert!(result.is_ok(), "run_port(port --json) should succeed");
+    }
+
+    /// Why: #8253 — the `service` clap doc comment (printed by `trusty-console
+    /// service --help`) named a plist launchd never loaded, so an operator
+    /// following it acted on a nonexistent unit.
+    /// What: requires lib.rs's `Service` help text to name
+    /// `<launchd_labels::CONSOLE>.plist` and never the pre-#4868 name.
+    /// Test: pure string check on the embedded source, no fs side effects.
+    #[test]
+    fn service_help_names_the_registry_plist() {
+        let src = include_str!("lib.rs");
+        let want = format!(
+            "~/Library/LaunchAgents/{}.plist",
+            trusty_common::launchd_labels::CONSOLE
+        );
+        // Built piecewise so this test's own text never matches itself.
+        let stale = format!("com.trusty.{}.plist", "trusty-console");
+        assert!(src.contains(&want), "`service --help` must name {want}");
+        assert!(
+            !src.contains(&stale),
+            "`service --help` names {stale}, a unit launchd never loaded"
+        );
     }
 }
