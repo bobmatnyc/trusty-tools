@@ -49,6 +49,8 @@ pub(crate) mod byte_cap;
 pub(crate) mod compact;
 pub(crate) mod descriptors;
 pub(crate) mod health;
+// #9059: the pure verdict helpers split out of `health` for the SLOC cap.
+mod health_verdicts;
 pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod index_directory;
@@ -425,6 +427,9 @@ mod tests_unavailable;
 // #5264: structured `search_health` diagnostics.
 #[cfg(test)]
 mod tests_health;
+// #8229: the cwd fallback resolves by root, not by the bare basename id.
+#[cfg(test)]
+mod tests_health_cwd_8229;
 // #6317: the NO_INDEX_RESOLVED directory answer, and the write tools it spares.
 #[cfg(test)]
 mod tests_index_directory;

@@ -1,20 +1,19 @@
 //! Regression proof for #5784: a daemon under a throwaway `$HOME` spawns no
 //! tmux process during startup auto-discovery.
 //!
-//! Why its own test binary: the proof narrows `$PATH` to a single directory
+//! Why the `env_serial` target: the proof narrows `$PATH` to a single directory
 //! holding a fake `tmux`, and `$PATH` is process-global. Inside the lib test
 //! binary that narrowing raced unrelated tests — three `doctor_scaffold_tracking`
 //! tests failed with `failed to spawn git: No such file or directory` — and
 //! `#[serial_test::serial]` could not help, since it only orders tests that
-//! carry the attribute. A dedicated integration binary is its own process, and
-//! this file holds exactly ONE test, so nothing else can observe the narrowed
-//! `$PATH`.
+//! carry the attribute. `env_serial` runs one test at a time (#8345), so
+//! nothing else can observe the narrowed `$PATH`.
 //!
 //! What: writes an executable `tmux` that records every invocation, points
 //! `$PATH` at only that directory, reassigns `$HOME` to a scratch dir, and runs
 //! the startup pane scan twice — once gated, once with the opt-in.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test scratch_home_tmux_gate`.
+//! `cargo test -p trusty-mpm --test env_serial scratch_home_tmux_gate::`.
 
 #![cfg(feature = "daemon")]
 
@@ -39,8 +38,8 @@ struct EnvOverride {
 impl EnvOverride {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
-        // SAFETY: this binary holds exactly one test, so no other thread reads
-        // or writes the environment while this runs.
+        // SAFETY: `env_serial` runs one test at a time, so no other thread
+        // reads or writes the environment while this runs.
         unsafe { std::env::set_var(key, value) };
         Self { key, prev }
     }
@@ -48,7 +47,7 @@ impl EnvOverride {
 
 impl Drop for EnvOverride {
     fn drop(&mut self) {
-        // SAFETY: as in `set` — single-test binary.
+        // SAFETY: as in `set` — one test at a time.
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(self.key, v) },
             None => unsafe { std::env::remove_var(self.key) },
@@ -176,7 +175,7 @@ fn scratch_home_daemon_does_not_spawn_tmux() {
     // environment, and fails toward leaving shared state alone.
     {
         let prev_home = std::env::var_os("HOME");
-        // SAFETY: single-test binary.
+        // SAFETY: `env_serial` runs one test at a time.
         unsafe { std::env::remove_var("HOME") };
         let unclassifiable = discover_claude_sessions(&state);
         // SAFETY: as above.

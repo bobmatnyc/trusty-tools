@@ -161,6 +161,7 @@ pub(crate) async fn run(
     task: Option<String>,
     root: Option<String>,
     account: Option<String>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
     // `--task` is not implemented on either arm. Per DOC-24 autonomous/task
     // dispatch is the session-manager layer's concern; warn rather than drop
@@ -190,7 +191,17 @@ pub(crate) async fn run(
                      location comes from TRUSTY_MPM_REPOS_ROOT / TRUSTY_MPM_WORKSPACE_ROOT."
                 );
             }
-            run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await
+            let account = account.as_deref();
+            run_managed(
+                client,
+                url,
+                &owner,
+                &repo,
+                &clone_url,
+                account,
+                account_token,
+            )
+            .await
         }
     }
 }
@@ -271,27 +282,31 @@ pub(crate) async fn run_external(
     argv: &[String],
     help: &trusty_common::help::HelpConfig,
     account: Option<String>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
-    let token = tokens.first().map(String::as_str).unwrap_or_default();
-    let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
+    let Some(target) = resolve_external(tokens, account)? else {
         reject_unknown_subcommand(argv, help);
     };
 
-    if tokens.len() > 1 {
-        anyhow::bail!(
-            "tm {token} takes no further arguments (got {extra:?}). \
-             Use `tm run {token}` for the flag-bearing form.",
-            extra = &tokens[1..]
-        );
-    }
-
-    match classified? {
+    match target {
         RunTarget::Repo {
             owner,
             repo,
             clone_url,
             account,
-        } => run_managed(client, url, &owner, &repo, &clone_url, account.as_deref()).await,
+        } => {
+            let account = account.as_deref();
+            run_managed(
+                client,
+                url,
+                &owner,
+                &repo,
+                &clone_url,
+                account,
+                account_token,
+            )
+            .await
+        }
         // `classify_bare` returns `None` rather than an alias, so this is
         // unreachable; routing it to the same cold start keeps the arm total.
         RunTarget::Alias(alias) => Err(super::register_args::rejection(&alias)),
@@ -399,7 +414,10 @@ async fn run_managed(
     repo: &str,
     clone_url: &str,
     account: Option<&str>,
+    account_token: Option<&str>,
 ) -> anyhow::Result<()> {
+    // #9091: a broken `[accounts]` table refuses here, before anything is touched.
+    accounts_preflight(account, clone_url)?;
     let checkout =
         trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout(
             owner, repo, clone_url, account,
@@ -411,34 +429,19 @@ async fn run_managed(
     // performs — so later spawns, fetches, pushes, and `gh` calls made from
     // inside the session reuse it (`resolve_gh_account_env_for_registry`
     // already reads `Project::gh_account` at every spawn/relaunch; this is
-    // the one new write path, not a new read path). Best-effort: the
-    // checkout itself already succeeded, so a registry hiccup here is
-    // reported but never turns a working clone into a failed command.
+    // the one new write path, not a new read path).
     if let Some(account) = account {
-        // #7166: the SAME derivation the daemon's own implicit
-        // auto-registration uses (`ProjectRegistry::register_from_session` →
-        // `derive_name_from_url`) — NOT `register_args`' hyphenated
-        // `owner-repo` alias scheme, which is a different registry
-        // (`~/.trusty-mpm/registry.json`) with a different naming
-        // convention. Landing on the same key means the auto-registration
-        // that fires when `launch()` below creates the session sees this
-        // project ALREADY registered and skips — this entry, gh_account and
-        // all, stays authoritative rather than sitting beside a duplicate.
-        let name = trusty_mpm::project::derive_name_from_url(clone_url)
-            .unwrap_or_else(|| format!("{owner}-{repo}"));
-        // #7166 review follow-up CRITICAL/HIGH: shared with `tm register
-        // --account`'s handler — builds/reuses the per-account gh config dir
-        // and preserves the project's current default_branch, rather than
-        // discarding both on every auto-persist call.
-        super::projects::registry::auto_persist_account_selection(
-            client,
-            url,
-            name,
-            clone_url.to_string(),
+        // #8914: the same gate `tm sessions new --account` runs — prove the
+        // account, then pin it — and a failure refuses the run instead of
+        // warning and spawning as the machine's active account.
+        let base = &checkout.base_path;
+        super::session_account::pin_account_for_dir(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+            base,
             account,
-            &format!("cloned as {account}"),
+            account_token,
         )
-        .await;
+        .await?;
     }
 
     if checkout.reused {
@@ -476,8 +479,169 @@ async fn run_managed(
         None,
         false,
         super::managed_workspace::LaunchDir::CallerResolved,
+        dirs::home_dir().as_deref(),
+        false, // #8878: twin mode is armed only by `tm launch --twin`.
     )
     .await
+}
+
+/// Refuse a launch whose `gh` account cannot be chosen (#9091).
+///
+/// Why: a malformed `[accounts]` table used to surface only in the daemon log,
+/// while the session's `gh` silently authenticated as nobody.
+/// What: [`trusty_mpm::core::gh_org_accounts::resolve_gh_account`] — the rule
+/// the clone and the spawn use — and [`preflight_verdict`] on its result.
+/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`.
+pub(crate) fn accounts_preflight(explicit: Option<&str>, origin: &str) -> anyhow::Result<()> {
+    let resolved = trusty_mpm::core::gh_org_accounts::resolve_gh_account(explicit, origin);
+    preflight_verdict(origin, resolved)
+}
+
+/// `Ok` for a chosen (or ambient) account; an operator-facing refusal naming
+/// the resolver's error — for a broken table, the file and the parse error.
+/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`.
+pub(crate) fn preflight_verdict(
+    origin: &str,
+    resolved: Result<Option<trusty_mpm::core::gh_org_accounts::ResolvedAccount>, String>,
+) -> anyhow::Result<()> {
+    resolved.map(drop).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot choose the gh account for {origin}: {e}\n\
+             No session was started. `tm doctor` reports the [accounts] table."
+        )
+    })
+}
+
+/// Resolve the bare form's raw tokens into a [`RunTarget`], before any I/O.
+///
+/// Why (#5850): clap stops applying global flags once it starts COLLECTING an
+/// external subcommand's argv, so `tm <url> --user <login>` arrives as three
+/// raw tokens. Keeping the lift, the account reconciliation, and the
+/// extra-argument refusal in one pure function is what lets a test drive the
+/// real parse output through to the target.
+/// What: `Ok(None)` when the first token is not repo-shaped (the caller prints
+/// clap's usage error); `Err` for a bad account flag, conflicting accounts, or
+/// extra arguments; otherwise the classified target.
+/// Test: `bare_form_trailing_user_reaches_the_repo_target`.
+pub(crate) fn resolve_external(
+    tokens: &[String],
+    account: Option<String>,
+) -> anyhow::Result<Option<RunTarget>> {
+    let (tokens, trailing) = split_trailing_account(tokens)?;
+    let account = reconcile_bare_account(account, trailing)?;
+    let token = tokens.first().map(String::as_str).unwrap_or_default();
+    let Some(classified) = classify_bare_with_account(token, account.as_deref()) else {
+        return Ok(None);
+    };
+    if tokens.len() > 1 {
+        anyhow::bail!(
+            "tm {token} takes no further arguments (got {extra:?}). \
+             Use `tm run {token}` for the flag-bearing form.",
+            extra = &tokens[1..]
+        );
+    }
+    classified.map(Some)
+}
+
+/// Lift an `--account`/`--user`/`--u <login>` out of an external subcommand's
+/// raw tokens (#5850, #9090).
+///
+/// Why: the bare form `tm <url>` reaches clap's `External` catch-all, and clap
+/// applies no global flag to the argv it collects there — so the owner's
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto` was
+/// refused with "takes no further arguments" while the identical invocation
+/// with the flag FIRST worked. The flag has no other meaning in this position,
+/// so lifting it is a rewrite of nothing.
+/// What: returns the tokens with the flag and its value removed, plus the
+/// login. Every spelling is accepted in both `--user <login>` and
+/// `--user=<login>` forms; a flag with no value is an error rather than a
+/// silent drop, and so is a blank value (`--user=`), which `resolve_account`
+/// would otherwise read as absent. Two occurrences naming DIFFERENT logins are
+/// refused rather than resolved by position. The login is not validated here —
+/// [`super::register_args::resolve_account`] owns that and runs on this value
+/// downstream, so the two spellings cannot diverge.
+/// Test: `bare_form_lifts_a_trailing_user_flag`,
+/// `bare_form_lifts_a_trailing_u_flag`,
+/// `bare_form_lifts_an_inline_account_value`,
+/// `bare_form_rejects_a_trailing_flag_with_no_value`,
+/// `bare_form_rejects_an_empty_account_value`,
+/// `bare_form_leaves_unrelated_tokens_alone`.
+pub(crate) fn split_trailing_account(
+    tokens: &[String],
+) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    let mut rest = Vec::new();
+    let mut account: Option<String> = None;
+    let mut it = tokens.iter();
+    while let Some(token) = it.next() {
+        let Some(inline) = account_flag_value(token) else {
+            rest.push(token.clone());
+            continue;
+        };
+        let login = match inline {
+            Some(value) => Some(value.to_string()),
+            None => it.next().cloned(),
+        };
+        // #5850: a blank value (`--user=`, `--user ""`) must refuse here —
+        // `resolve_account` treats a blank flag as absent, which would clone
+        // as the global account the operator meant to override.
+        let Some(login) = login.filter(|l| !l.trim().is_empty()) else {
+            anyhow::bail!("'{token}' needs a gh login — e.g. `--user bob-duetto`.");
+        };
+        if let Some(existing) = account.as_deref()
+            && existing != login
+        {
+            anyhow::bail!(
+                "conflicting account selection: '{existing}' and '{login}'. Pass just one."
+            );
+        }
+        account = Some(login);
+    }
+    Ok((rest, account))
+}
+
+/// Is `token` the account flag, and does it carry its value inline?
+///
+/// Why: six spellings (`--account`, `--user`, `--u`, each with or without
+/// `=value`) decided in one place, so [`split_trailing_account`] stays a loop
+/// rather than a nest of string tests.
+/// What: `None` when `token` is not the flag; `Some(None)` for the bare flag
+/// (its value is the next token); `Some(Some(v))` for the `=` form.
+/// Test: `bare_form_lifts_an_inline_account_value`.
+fn account_flag_value(token: &str) -> Option<Option<&str>> {
+    // #9090: `--u` is the third spelling; `--user` is tested first, and
+    // `--user=x` cannot match `--u` because `ser=x` has no leading `=`.
+    ["--account", "--user", "--u"].into_iter().find_map(|flag| {
+        if token == flag {
+            return Some(None);
+        }
+        token
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(Some)
+    })
+}
+
+/// Reconcile an account named BEFORE the repository with one named after it.
+///
+/// Why: `tm --user a <url> --user b` reaches [`run_external`] with both, and
+/// picking one by position would silently clone as an account the operator did
+/// not mean — the same posture
+/// [`super::register_args::resolve_account`] takes for the flag versus the
+/// embedded `<login>@owner/repo` selector.
+/// What: agreeing values collapse; disagreeing ones are refused.
+/// Test: `bare_form_refuses_two_different_accounts_around_the_repository`.
+fn reconcile_bare_account(
+    before: Option<String>,
+    after: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match (before, after) {
+        (Some(before), Some(after)) if before != after => anyhow::bail!(
+            "conflicting account selection: '{before}' before the repository and \
+             '{after}' after it. Pass just one."
+        ),
+        (Some(value), _) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
 }
 
 #[cfg(test)]

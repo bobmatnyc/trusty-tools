@@ -59,8 +59,9 @@ Changed
   15-second call budget, and the background reconnect gives up after the same
   five attempts the per-turn tail uses instead of re-dialling a dead daemon for
   the life of the process.
-- **The TUI's connect line states which agent runs and where its file tools are
-  rooted (#8184).** It now reads `… (session <id>; solo agent (no delegation),
-  file tools rooted at <root>)`, or `… projectless — file tools rooted at a
-  scratch workspace` for a session with no `--project`, whose run works in an
-  ephemeral scratch root rather than the directory the TUI was launched from.
+- **The TUI's connect line states which agent runs (#8184).** It names the
+  session's shape — `solo agent (no delegation)` or `delegating PM` — so the
+  interactive default is visible at launch. #8164 then settled the line's
+  wording, `… — home <root>, workstream <ws>, <shape>`; a session with no
+  `--project` reads `home projectless`, and its run works in an ephemeral
+  scratch root rather than the directory the TUI was launched from.

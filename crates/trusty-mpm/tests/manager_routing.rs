@@ -20,7 +20,7 @@
 //! after exactly one intervening turn (next-turn-only TTL), and a plain message
 //! never triggers execution.
 //! What: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test manager_routing`.
+//! `cargo test -p trusty-mpm --test integration manager_routing::`.
 
 use std::future::IntoFuture;
 use std::sync::Arc;

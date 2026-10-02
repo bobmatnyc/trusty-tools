@@ -87,7 +87,66 @@ name = "trusty-mpm"
 # expect to find on crates.io. Patch: trusty-mpm is excluded from the semver
 # gate (binary-only consumer surface, no library dependents), and the changes
 # folded in here are fixes plus additive skill/agent assets.
-version = "1.6.4"
+# 1.7.1 (milestone #92, Refs #5850): patch — 1.7.0 is already published on
+# crates.io and this PR edits `src/**` (gh-account registry lookups), so the
+# "PR version bump vs crates.io" check (#4421) requires the bump. Patch:
+# trusty-mpm is excluded from the semver gate (binary-only consumer surface,
+# no library dependents), and the change is a bug fix with no signature break.
+# 1.7.2 (Refs #4421): patch — 1.7.1 is already published on crates.io (at
+# 4c2f99bff) and main has since gained further src/** changes (batch B #8487,
+# batch G #8481, #8465, #8488), so the "PR version bump vs crates.io" check
+# requires the bump. Patch: trusty-mpm is excluded from the semver gate
+# (binary-only consumer surface, no library dependents); changes are fixes
+# plus docs/changelog assembly, no signature break.
+# 1.7.3 (Refs #8439): patch — 1.7.2 is already published on crates.io (at
+# cfb3cf0f6) and this PR edits `src/**` (`tm hook --pm-guard` read-only
+# dispatch allowlist), so the "PR version bump vs crates.io" check requires
+# the bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
+# consumer surface, no library dependents); the change is a security-hardening
+# fix with no signature break.
+# 1.7.4 (Refs #8563): patch — 1.7.3 is already published on crates.io and
+# this PR edits `src/**` (scoped launchd secrets fix), so the "PR version
+# bump vs crates.io" check requires the bump. Patch: trusty-mpm is excluded
+# from the semver gate (binary-only consumer surface, no library
+# dependents); the change is a security-hardening fix with no signature
+# break. Ships alone per owner ruling.
+# 1.7.5 (Refs #8482): patch — 1.7.4 was published to crates.io at
+# 2026-09-24T22:37:43Z and this PR edits `src/**` (tm doctor bundled-asset-lag
+# detection), so the "PR version bump vs crates.io" check requires the bump.
+# Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
+# surface, no library dependents); the change is a new doctor check with no
+# signature break.
+# 1.7.6 (Refs #8638): patch — 1.7.5 is published on crates.io and this PR
+# edits `src/**` (`tm pr queue-check`/`tm wait` rollup: per-GraphQL-type
+# deciding-run selection, an allow-list `failed()` check, and an
+# `is_unfinished = !settled()` fix), so the "PR version bump vs crates.io"
+# check requires the bump. Patch: trusty-mpm is excluded from the semver
+# gate (binary-only consumer surface, no library dependents); the change is
+# a bug fix with no signature break.
+# 1.7.8 (Refs #8670): patch — 1.7.7 is published on crates.io and this PR
+# edits `src/**` (queue-check reads mergeable/mergeStateStatus and fails
+# closed), so the "PR version bump vs crates.io" check requires the bump.
+# Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
+# surface, no library dependents); the change is a bug fix with no
+# signature break.
+# 1.7.9 (Refs #8696): patch — 1.7.8 already landed on `origin/main` ahead of
+# crates.io (max_version still 1.7.7 there) and this PR edits `src/**`
+# (epic-state cell model), so bumping past 1.7.8 keeps this PR's "PR version
+# bump vs crates.io" check from colliding with the in-flight 1.7.8 bump.
+# Patch: trusty-mpm is excluded from the semver gate (binary-only consumer
+# surface, no library dependents); the change has no signature break.
+# 1.7.8 release cut: 1.7.8 was never published (crates.io max 1.7.7), so the
+# release ships as 1.7.8 per the owner's plan and milestone "trusty-mpm 1.7.8
+# · bugfix"; the 1.7.9 number above is unused.
+# 1.7.9 (issue #4421): patch — 1.7.8 is published on crates.io and this PR
+# edits `src/**`, so the "PR version bump vs crates.io" check requires the
+# bump. Patch: trusty-mpm is excluded from the semver gate (binary-only
+# consumer surface, no library dependents); no signature break.
+# 1.7.10 (Refs #8261, #8736): patch — release-opening bump carrying over the
+# build-lease accepted break declared in
+# scripts/semver-accepted-breaks/trusty-mpm-1.7.10.txt. No source change in
+# this commit.
+version = "1.7.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -98,6 +157,11 @@ homepage = "https://trustytools.dev"
 keywords = ["orchestration", "multi-agent", "cli", "daemon", "mcp"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.claude/", "/.trusty-mpm/", "/CLAUDE.md"]
+# #8345: every `tests/*.rs` file is a module of one of the two `[[test]]`
+# targets declared below, not a binary of its own — linking ~60 test binaries
+# dominated this crate's CI shard. `every_integration_target_arms_the_home_write_fence`
+# fails if a file under `tests/` is mounted by neither target.
+autotests = false
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 #
@@ -190,17 +254,6 @@ sm-memory = ["trusty-common/memory-core"]
 # `cargo test --features manager-memory` runs without the ONNX model.
 manager-memory = ["trusty-common/memory-core"]
 
-# `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
-# is ALWAYS available; this flag exists only so the subcommand can optionally
-# advertise itself. The Tauri GUI lives in the separate, publish=false
-# `trusty-mpm-gui` crate (it owns `build.rs` + `tauri.conf.json` which cannot be
-# published cleanly to crates.io). Rather than pull that unpublishable crate in
-# as an optional Cargo dependency — which blocks `cargo publish` for trusty-mpm,
-# because cargo requires even optional deps to resolve on crates.io — `tm gui`
-# shells out to a separately-installed `trusty-mpm-gui` binary (Single-Install
-# convention: `cargo install trusty-mpm-gui`). See src/bin/tm/main.rs.
-gui = []
-
 # ── Library ────────────────────────────────────────────────────────────────────
 [lib]
 name = "trusty_mpm"
@@ -213,10 +266,13 @@ name = "tm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
+# Compatibility alias, not a second CLI build: a std-only shim that execs the
+# `tm` beside it, kept because installed plists and hooks name `trusty-mpm`.
 [[bin]]
 name = "trusty-mpm"
-path = "src/bin/tm/main.rs"
+path = "src/bin/trusty-mpm.rs"
 required-features = ["cli"]
+test = false
 
 # Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
 # Single-owner-per-binary — the standalone `trusty-console` crate is now the
@@ -225,21 +281,18 @@ required-features = ["cli"]
 # console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 # ── Integration tests ─────────────────────────────────────────────────────────
+# #8345: two targets, not one per file. `integration` holds every module that
+# leaves process-global state alone and runs them in parallel; `env_serial`
+# holds the modules that rewrite `$HOME`, `$PATH`, other env vars or the cwd,
+# and runs one test at a time. Select one file's tests with a module filter:
+# `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 [[test]]
-name = "e2e"
-path = "tests/e2e/main.rs"
-required-features = ["daemon"]
+name = "integration"
+path = "tests/integration.rs"
 
-# Services discovery integration test (gated #[ignore]; run with --include-ignored).
 [[test]]
-name = "services_integration"
-path = "tests/services_integration.rs"
-
-# WI-7: isolation-invariant integration tests for the standalone managed driver.
-# No special features required — uses only the always-on `core::standalone` module.
-[[test]]
-name = "standalone_isolation"
-path = "tests/standalone_isolation.rs"
+name = "env_serial"
+path = "tests/env_serial.rs"
 
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
@@ -271,6 +324,9 @@ trusty-common = { workspace = true, features = [
     # builder capacity formula reads. `host-metrics` above cannot answer it;
     # its CPU figure is an instantaneous sample, not a sustained one.
     "load-average",
+    # #8261: `memory_pressure::read_memory_pressure` — the kernel pressure
+    # verdict `tm build-lease` admits new builds against.
+    "memory-pressure",
     "intent-source",
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
@@ -318,6 +374,10 @@ trusty-common = { workspace = true, features = [
     # sizing input trusty-search and trusty-memory already read, so the three
     # daemons agree about the machine they share.
     "machine-tier",
+    # #8378 PR-C (ADR-0064): `content::resolve` and `integrity::Sha256Digest`
+    # back `tm content install|update|status` and the doctor `content` row.
+    # Adds `tar`, already in the lockfile.
+    "content-resolver",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
@@ -330,6 +390,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 toml.workspace = true
+# #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
+# unrelated keys; already in this crate's graph through trusty-common.
+toml_edit.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -421,12 +484,6 @@ tokio-util = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
-# NOTE: trusty-mpm-gui is deliberately NOT a Cargo dependency. It is a
-# publish=false Tauri crate that cannot resolve on crates.io, so declaring it
-# (even as an optional dep) blocks `cargo publish` for trusty-mpm. The `tm gui`
-# subcommand shells out to a separately-installed `trusty-mpm-gui` binary
-# instead — see the `gui` feature comment above and src/bin/tm/main.rs.
-
 # ── Platform-specific always-on deps ─────────────────────────────────────────
 [target.'cfg(unix)'.dependencies]
 # `user` (#5784): `getpwuid` for the current uid, the signal that tells a
@@ -439,10 +496,11 @@ nix = { version = "0.29", features = ["signal", "user"] }
 # merges dev-dependency features ONLY for test/bench/example builds, so this
 # turns on the mock-embedder seam (`seed_shared_embedder_with_mock`) for
 # `cargo test --features sm-memory` WITHOUT leaking it into a production
-# `cargo build --features sm-memory`. `memory-core` is repeated so the unified
-# feature set still includes the palace storage engine the SM-4 tests exercise.
+# `cargo build --features sm-memory`. `memory-core` is NOT listed: it pulls
+# ONNX (ort/ort-sys), and a default `cargo test -p trusty-mpm` must not compile
+# it (owner ruling 2026-09-27). `embedder-test-support` alone compiles nothing;
+# the mock appears only once `sm-memory` / `manager-memory` add memory-core.
 trusty-common = { workspace = true, features = [
-    "memory-core",
     "embedder-test-support",
     # #2584 (DOC-36 §4): the hermetic manager CI suite drives the digest/chat
     # routes with `ScriptedAdapter` and, for real HTTP-client mechanics,
@@ -462,11 +520,19 @@ trusty-common = { workspace = true, features = [
 # --all-targets`, in every worktree — which is the cost that mattered.
 # `scripts/check_dev_dep_edges.sh` refuses a new edge of this shape.
 tempfile.workspace = true
+# #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
+# Both are already in this crate's normal graph through
+# `trusty-common/content-resolver`.
+flate2.workspace = true
+tar.workspace = true
 axum.workspace = true
 http-body-util.workspace = true
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel Rust test threads (used by bug-report token resolution tests).
 serial_test.workspace = true
+# #8545: the `tm` bin target arms `core::home_write_fence` before `main`, so no
+# test can write the operator's home config paths (see its `test_support`).
+ctor.workspace = true
 # test-util enables tokio's paused-clock (`tokio::time::pause` / `start_paused = true`)
 # used by the deterministic auth-timeout tests in actor_tests.rs (#1649) and by
 # `telegram::supervisor_tests::healthy_run_resets_transient_backoff` (#4306).

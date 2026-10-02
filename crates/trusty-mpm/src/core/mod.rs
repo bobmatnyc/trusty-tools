@@ -54,6 +54,12 @@ pub mod budget;
 // row reports and its `--fix` arm seeds.
 pub mod build_env;
 pub mod build_env_repair;
+// #8261 increment two: the build-command lease — a machine-wide flock slot per
+// heavy build, admitted against memory pressure, load and the process census.
+pub mod build_lease;
+// #8297 (absorbed into #8261): what is actually compiling on this host — the
+// process-table census that counts builds holding no lease.
+pub mod build_probe;
 // #7822: the build fingerprint `tm doctor` compares when two semvers agree —
 // a same-version daemon started before the installed binary was written is
 // still stale, and semver alone cannot say so.
@@ -109,11 +115,6 @@ pub mod claude_mpm_session;
 // the memory-tier default table, and the one host-root resolution site.
 pub mod builders;
 
-// #8261: the capacity formula that replaces the cap's fixed number — measured
-// 1-minute load average and free memory against the operator's ceiling, with
-// the fail-closed and never-revoke invariants.
-pub mod builder_capacity;
-
 // #8261: the pool of persistent per-slot `CARGO_TARGET_DIR` directories a
 // leased builder compiles into, so concurrent builds stop serialising on one
 // shared cargo build-directory lock.
@@ -148,14 +149,30 @@ pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+// #8510: the gh config dirs an account-only pin may ask for a candidate token.
+pub(crate) mod gh_account_dir;
+// #8510: proves a candidate token is the pinned account's with `GET /user`.
+pub(crate) mod gh_account_proof;
+// #5850: the ProjectRegistry half of `gh_account`, read synchronously for a
+// daemon-side checkout. `pub(crate)` throughout — nothing outside this crate
+// resolves a pin from a bare directory.
+pub(crate) mod gh_account_registry;
 pub mod gh_identity;
+// #9091: `[accounts]` org → gh account map and the one account resolver.
+pub mod gh_org_accounts;
+// #8914: `--account` sessions run gh and HTTPS git as the account named.
+pub mod gh_session_account;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
 pub mod gh_scoped_stub;
 pub mod git_identity;
+// #8511: keep the harness's own files out of every registered project's `git status`.
+pub(crate) mod harness_exclude;
 pub mod harness_root;
 pub mod home_trust_seed;
+// #8545: a test binary's fence around the operator's home config paths.
+pub mod home_write_fence;
 pub mod hook;
 pub mod host_state_gate;
 pub mod idle_nudge;
@@ -168,6 +185,9 @@ pub mod instruction_overrides;
 // + validation only; `bundled_pm_package` is its first composing call site.
 pub mod instruction_package;
 pub mod instruction_pipeline;
+// Issue #8533: the one enumeration of the prompt content no project override
+// can remove.
+pub mod instruction_safety_core;
 // Epic #4183: committed snapshots of the fully composed PM prompt. The
 // delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;
@@ -267,6 +287,8 @@ pub mod install_freshness;
 // the remote's tip — the pre-push credential scan's base, fail-closed.
 pub mod base_ref_freshness;
 pub mod reinstall;
+// #8934: the one "has an origin remote / local-only" predicate and the no-gh pin.
+pub mod remote_mode;
 // #6958: the per-session token-savings ledger every producer appends to, and
 // the instruction/language-compression producer that writes the first row.
 pub mod savings;
@@ -293,6 +315,8 @@ pub mod session_mcp_scope;
 // #6972: which model the parent session runs, remembered by the statusline hook
 // so the divert producer prices its rows at the parent's real rate.
 pub mod session_model;
+// #8453: the PM or supervisor instruction profile a session runs.
+pub mod session_profile;
 // #7282: a pause snapshot reaches `origin/main` through its own branch and PR,
 // never as a commit on whatever branch the main checkout happens to be on.
 pub mod session_pause_pr;
@@ -344,13 +368,33 @@ pub mod stop_spool;
 pub mod statusline_settings;
 pub mod stray_mcp;
 pub mod tmux;
+// #6542: each test binary's private default tmux server; test support only.
+#[doc(hidden)]
+pub mod tmux_test_isolation;
 pub mod transcript_usage;
 pub mod trusty_tools_config;
+// #8878: the supervisor-twin identity (D1) and its arming record.
+pub mod twin_arming;
+// #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
+pub mod architect_launch;
+// #8878 R1: the Architect's tmux session name, recorded at launch.
+pub mod architect_session;
+// #8942 ruling 2: `tm fleet init` prunes a sidecar only for a proven-dead launch.
+pub mod architect_sidecar_prune;
+pub mod twin_identity;
+// #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
+pub mod uncommitted_changes;
 pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+// #7889: route (c) of the landing admission — HEAD inside a merged PR's history.
+pub mod worktree_carried_by_pr;
 pub mod worktree_index;
+// #7889: the landed-content admission both reclaim ladders share.
+pub mod worktree_landed_content;
+// #8633: the merge-into-base question, including a base that moved on.
+pub mod worktree_landed_history;
 pub mod worktree_naming;
 // See ADR-0057 — the facts the pm-guard's removal re-checks ask git and GitHub.
 pub mod worktree_removal_facts;

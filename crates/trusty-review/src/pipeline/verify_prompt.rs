@@ -30,7 +30,7 @@ use crate::{
 /// token across paraphrases; the role default (spec REV-310) is 1.0.  The
 /// caller passes the resolved role temperature, so this is only the fallback.
 /// What: matches the verifier `RoleConfig` default temperature (1.0).
-const VERIFY_TEMPERATURE: f32 = 1.0;
+pub(crate) const VERIFY_TEMPERATURE: f32 = 1.0;
 
 /// Maximum output tokens for a verification call.
 ///
@@ -41,7 +41,7 @@ const VERIFY_TEMPERATURE: f32 = 1.0;
 /// response mid-JSON, making it unparseable and forcing a conservative
 /// TruncationRefuted outcome on every call (#726).
 /// What: 128 tokens is ample for the forced-schema JSON object.
-const VERIFY_MAX_TOKENS: u32 = 128;
+pub(crate) const VERIFY_MAX_TOKENS: u32 = 128;
 
 /// Name used for the verifier's forced-output tool / json_schema.
 ///
@@ -189,55 +189,89 @@ pub fn build_verify_request(
     max_tokens: Option<u32>,
     author_rationale: Option<&str>,
 ) -> LlmRequest {
-    let line = finding
+    let line = line_label(finding);
+    let user_message = format!(
+        "{head}## Finding to verify\n\
+         {fields}\n\
+         Decide CONFIRMED, REFUTED, or UNVERIFIABLE per the rules in the system prompt. \
+         If `{file}` or line {line} does not appear in the diff above, answer REFUTED. \
+         If the evidence this finding rests on is outside the diff above — a signature, \
+         a declaration, a caller, a configuration file — answer UNVERIFIABLE, not CONFIRMED.",
+        head = diff_and_rationale(diff, author_rationale),
+        fields = finding_fields(finding),
+        file = finding.file,
+    );
+    verifier_request(
+        verifier_model,
+        verifier_system_prompt().to_string(),
+        user_message,
+        temperature.unwrap_or(VERIFY_TEMPERATURE),
+        max_tokens.unwrap_or(VERIFY_MAX_TOKENS),
+        verify_response_schema(),
+    )
+}
+
+/// A finding's line number, or `(unspecified)`.
+pub(crate) fn line_label(finding: &Finding) -> String {
+    finding
         .line
         .map(|l| l.to_string())
-        .unwrap_or_else(|| "(unspecified)".to_string());
+        .unwrap_or_else(|| "(unspecified)".to_string())
+}
 
-    // Render the author-rationale block only when present and non-empty (#1618),
-    // so existing callers (no rationale) get a byte-for-byte unchanged message.
+/// The diff block plus the author-rationale block, shared by the single and
+/// batched requests (#8904).
+///
+/// What: the rationale renders only when present and non-empty (#1618), so a
+/// caller with no rationale gets a byte-for-byte unchanged message.
+pub(crate) fn diff_and_rationale(diff: &str, author_rationale: Option<&str>) -> String {
     let rationale_block = author_rationale
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .map(|r| format!("{r}\n\n"))
         .unwrap_or_default();
+    format!("## Unified diff\n\n```diff\n{diff}\n```\n\n{rationale_block}")
+}
 
-    let user_message = format!(
-        "## Unified diff\n\n```diff\n{diff}\n```\n\n\
-         {rationale_block}\
-         ## Finding to verify\n\
-         - file: `{file}`\n\
-         - line: {line}\n\
-         - kind: {kind}\n\
-         - description: {description}\n\
-         - proposed fix: {suggestion}\n\n\
-         Decide CONFIRMED, REFUTED, or UNVERIFIABLE per the rules in the system prompt. \
-         If `{file}` or line {line} does not appear in the diff above, answer REFUTED. \
-         If the evidence this finding rests on is outside the diff above — a signature, \
-         a declaration, a caller, a configuration file — answer UNVERIFIABLE, not CONFIRMED.",
-        diff = diff,
-        rationale_block = rationale_block,
+/// The five `- key: value` lines that describe one finding to the verifier,
+/// shared by the single and batched requests (#8904).
+pub(crate) fn finding_fields(finding: &Finding) -> String {
+    let suggestion = if finding.suggestion.is_empty() {
+        "(none)"
+    } else {
+        &finding.suggestion
+    };
+    format!(
+        "- file: `{file}`\n- line: {line}\n- kind: {kind}\n- description: {description}\n\
+         - proposed fix: {suggestion}\n",
         file = finding.file,
-        line = line,
+        line = line_label(finding),
         kind = finding.kind,
         description = finding.description,
-        suggestion = if finding.suggestion.is_empty() {
-            "(none)"
-        } else {
-            &finding.suggestion
-        },
-    );
+    )
+}
 
+/// Assemble a verifier `LlmRequest` (#8904: shared with the batched request).
+///
+/// What: strips any `bedrock/`/`openrouter/` routing prefix from the model id.
+pub(crate) fn verifier_request(
+    verifier_model: &str,
+    system: String,
+    user_message: String,
+    temperature: f32,
+    max_tokens: u32,
+    schema: ResponseSchema,
+) -> LlmRequest {
     LlmRequest {
         model: strip_provider_prefix(verifier_model).to_string(),
-        system: verifier_system_prompt().to_string(),
+        system,
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: user_message,
         }],
-        temperature: temperature.unwrap_or(VERIFY_TEMPERATURE),
-        max_tokens: max_tokens.unwrap_or(VERIFY_MAX_TOKENS),
-        response_schema: Some(verify_response_schema()),
+        temperature,
+        max_tokens,
+        response_schema: Some(schema),
     }
 }
 

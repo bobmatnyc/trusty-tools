@@ -13,8 +13,8 @@
 //! component re-enable path in `service::server::components`.
 //! 1. Acquires the background reindex semaphore (serialises against concurrent
 //!    reindexes on the same handle) — `spawn_deferred_embed_pass` only.
-//! 2. Calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ lock
-//!    (no write lock held during embedding — the long operation).
+//! 2. Snapshots the owed chunks under the indexer's READ lock, embeds with NO
+//!    indexer lock held, then commits under a fresh READ lock (#8600).
 //! 3. On success: forces an HNSW snapshot and marks semantic `Ready`.
 //! 4. On failure: marks semantic `Failed` with the error reason (issue #928).
 //!
@@ -69,8 +69,8 @@ pub(crate) fn spawn_deferred_embed_pass(
 /// concurrency guard — this function does NOT acquire the background
 /// semaphore itself, so a caller that already holds a permit (the runtime
 /// toggle path) can call this directly without a nested-acquire deadlock.
-/// What: calls `CodeIndexer::embed_deferred_chunks` under the indexer's READ
-/// lock (the embed step holds no write lock), forces an HNSW snapshot, then
+/// What: plans under the indexer READ lock, embeds with no indexer lock held,
+/// commits under a fresh READ lock (#8600), forces an HNSW snapshot, then
 /// marks semantic `Ready` (or `Failed` when embedding errors, issue #928).
 /// Idempotent: re-running after a partial failure re-embeds all not-yet-embedded
 /// chunks (HNSW upsert is idempotent).
@@ -79,6 +79,16 @@ pub(crate) fn spawn_deferred_embed_pass(
 /// `spawn_deferred_embed_pass`, which is a thin wrapper over this function).
 pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>) {
     let index_id = handle.id.clone();
+    // #8600: a pass that reaches its turn after shutdown began must not start.
+    // The stage and the durable pending marker are left as they are, so the
+    // next boot re-arms the work instead of this process opening new writes.
+    if handle.embedding_pause.is_drained() {
+        tracing::info!(
+            "deferred_embed[{}]: daemon is shutting down — not starting (#8600)",
+            index_id.0
+        );
+        return;
+    }
     let total_chunks = {
         let indexer = handle.indexer.read().await;
         indexer.chunk_count()
@@ -125,15 +135,26 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
         }
     });
 
-    let result = {
-        let indexer = handle.indexer.read().await;
-        // #6524: the pass stops at the next wave boundary while embedding is
-        // paused. It does not park here — this task holds the one background
-        // permit, this index's permit and its teardown read-guard, so a park
-        // would stall every other index's catch-up and any DELETE on this one.
-        indexer
-            .embed_deferred_chunks_gated(Some(&progress_tx), Some(&handle.embedding_pause))
-            .await
+    // #8600: the indexer read guard is held to snapshot and to commit, never
+    // across embedding — a writer queued behind a long-held guard blocked
+    // every later reader, `GET /indexes/{id}/status` included. The per-index
+    // permit and the teardown read-guard still exclude a reindex and a DELETE.
+    let plan = handle.indexer.read().await.plan_deferred_embed().await;
+    // #6524: the pass stops at the next wave boundary while embedding is
+    // paused. It does not park here — this task holds the one background
+    // permit, this index's permit and its teardown read-guard, so a park
+    // would stall every other index's catch-up and any DELETE on this one.
+    let result = match plan
+        .embed(Some(&progress_tx), Some(&handle.embedding_pause))
+        .await
+    {
+        // #8600: a stalled run still commits its completed waves here; the
+        // stall then comes back as the `Err` that settles `Failed` below.
+        Ok(run) => {
+            let indexer = handle.indexer.read().await;
+            indexer.commit_deferred_embed(plan, run).await
+        }
+        Err(e) => Err(e),
     };
     // Drop the sender so the updater task's recv loop terminates.
     drop(progress_tx);
@@ -172,6 +193,13 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                     "embedded": embedded,
                 }))
                 .await;
+            // #8600: a drain stops the pass the same way a pause does, but
+            // nothing will resume it in this process. Re-queueing would hand the
+            // queue a job that holds this handle — and its corpus — open through
+            // shutdown; the kept marker re-arms it on the next boot instead.
+            if handle.embedding_pause.is_drained() {
+                return;
+            }
             let pending = handle.indexer.read().await.pending_embed_count().await;
             spawn_deferred_embed_pass(handle, progress, pending);
         }
@@ -210,7 +238,12 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             // that finishes with the live store still empty must publish
             // `Failed`, not `Ready`. Gathered before the stages write lock so
             // the indexer lock is never nested inside it.
-            let broken = super::stages::semantic_health_reason(&handle).await;
+            use crate::service::vector_gap::{gap_after_embed_pass, PassCoverage};
+            let coverage = match super::stages::semantic_health_reason(&handle).await {
+                Some(reason) => PassCoverage::Short(reason),
+                // #8884: a pass that left corpus chunks without a vector is not `Ready`.
+                None => gap_after_embed_pass(&handle, &outcome.rejected).await,
+            };
             // #4390: clear the durable pending marker only when this pass
             // reached a state that owes no further work — `Ready` (the vectors
             // are committed and snapshotted) or `Skipped` (the vector lane was
@@ -230,15 +263,29 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                          Ready, issue #2984 Phase 1 finding 4)",
                         index_id.0,
                     );
-                } else if let Some(reason) = broken {
-                    tracing::error!("deferred_embed[{}]: {reason}", index_id.0);
-                    stages.semantic = StageState::failed(&reason);
                 } else {
-                    stages.semantic.status = StageStatus::Ready;
-                    stages.semantic.completed_at = Some(now_rfc3339());
-                    stages.semantic.embedded = Some(embedded);
-                    stages.semantic.total = Some(total);
-                    settled = true;
+                    match coverage {
+                        PassCoverage::Short(reason) => {
+                            tracing::error!("deferred_embed[{}]: {reason}", index_id.0);
+                            stages.semantic = StageState::failed(&reason);
+                        }
+                        PassCoverage::Covered { rejected } => {
+                            if rejected > 0 {
+                                // #8884: named on the stage, never a gap (#764).
+                                tracing::warn!(
+                                    "deferred_embed[{}]: {rejected} chunk(s) have no vector: \
+                                     the store refused their NaN or all-zero embedding",
+                                    index_id.0,
+                                );
+                            }
+                            stages.semantic.status = StageStatus::Ready;
+                            stages.semantic.completed_at = Some(now_rfc3339());
+                            stages.semantic.embedded = Some(embedded);
+                            stages.semantic.total = Some(total);
+                            stages.semantic.vectors_rejected = (rejected > 0).then_some(rejected);
+                            settled = true;
+                        }
+                    }
                 }
             }
             if settled {
@@ -296,12 +343,11 @@ mod tests {
     /// Wait until the job this test enqueued has left the process-global queue.
     ///
     /// Why (#6574): `defer_embed_queue::enqueue` increments `QUEUE_DEPTH` inline
-    /// but spawns `wait_for_turn` — which owns the ONLY decrement — onto the
-    /// CALLING runtime. Each test below returns as soon as a `stages` field
-    /// flips, and `run_embed_catch_up` writes those fields before that decrement
-    /// runs, so `#[tokio::test]` drops the runtime with the task still in flight
-    /// and the job's depth is never given back. The phantom is permanent,
-    /// process-global, and invisible to the test that created it; it is what made
+    /// and spawns `wait_for_turn` onto the CALLING runtime. Each test below
+    /// returns as soon as a `stages` field flips, and `run_embed_catch_up`
+    /// writes those fields before the decrement runs, so `#[tokio::test]` would
+    /// drop the runtime with the task still in flight. Before #8770 that job's
+    /// depth was never given back, which made
     /// `embed_pause_tests::shutdown_drain_releases_a_parked_embed_pass` fail its
     /// entry guard with "depth is 1". These tests are also `#[serial_test::serial]`
     /// so nothing else is adding while this waits.
@@ -609,3 +655,8 @@ mod tests {
         );
     }
 }
+
+// #8600: shutdown drain and no-progress abort of an in-flight pass.
+#[cfg(test)]
+#[path = "defer_embed_8600_tests.rs"]
+mod tests_8600;

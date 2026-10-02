@@ -23,7 +23,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Paragraph;
 
 use crate::app::ReplApp;
-use crate::widgets::banner::banner_lines;
 use crate::widgets::input_composer::draw_input;
 use crate::widgets::permission_prompt::{draw_permission_prompt, prompt_height};
 use crate::widgets::scrollback::{chat_line_count, draw_chat};
@@ -59,14 +58,21 @@ pub fn draw_separator(f: &mut ratatui::Frame, area: Rect) {
 /// [`crate::widgets::scrollback::chat_line_count`]'s own tests; the full
 /// `Frame` composition is exercised via `ratatui::backend::TestBackend` in
 /// `tests::draw_renders_without_panicking`, which is a smoke test (no
-/// TTY, no assertions on cell contents — see that test's doc comment).
+/// TTY, no assertions on cell contents — see that test's doc comment), and
+/// the banner branch's own sizing in
+/// `wrapped_row_geometry::the_banner_renders_whole_below_its_build_width`.
 pub fn draw(f: &mut ratatui::Frame, app: &ReplApp) {
     let area = f.area();
 
+    // #8205: one measurement for every branch, and it measures exactly what
+    // `draw_chat` will draw. The banner used to be sized by
+    // `banner_lines(..).len()`, which is wrong twice: `banner_lines` builds at
+    // `width.max(40)`, so below 40 columns every row wraps and the count is
+    // half what the banner needs, and it omits the blank row `build_chat_lines`
+    // appends after the banner, which cost the pane its top rule to a one-row
+    // scroll.
     let content_h = if app.chat.is_empty() && !app.show_banner {
         0
-    } else if app.chat.is_empty() && app.show_banner {
-        banner_lines(app, area.width as usize).len()
     } else {
         chat_line_count(app, area.width as usize).max(1)
     };
@@ -148,5 +154,94 @@ mod tests {
                 .draw(|f| draw(f, &app))
                 .expect("draw app with a pending permission prompt");
         }
+    }
+
+    /// Every row of the rendered frame, as plain text.
+    fn rendered_rows(app: &ReplApp, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("construct terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// #8205 regression, at the 80x24 the defect was reported on: the connect
+    /// line's `home <path>` must be RENDERED, not merely assembled. The chat
+    /// pane used to be sized by logical line count while the pane wraps, so
+    /// the status line's continuation row fell outside the pane and the home
+    /// path — the fact the owner ruled must be named — never reached a cell.
+    ///
+    /// The three shapes are the ones `tui_client::splash::connect_line`
+    /// produces: a short bound path, a long worktree path (pre-elided at that
+    /// function's 60-column path budget), and projectless with a workstream.
+    #[test]
+    fn draw_keeps_the_connect_line_home_segment_at_80_columns() {
+        // A neutral home directory of the same length as the reported one, so
+        // the wrap arithmetic this test exists for is unchanged (#8205).
+        let socket = "/Users/dev0/Library/Application Support/tcode/tcode.sock";
+        let worktree = crate::text::elide_middle(
+            "/private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef",
+            60,
+        );
+        let cases: [(&str, &str); 3] = [
+            ("/private/tmp/q8230/repoA", ""),
+            (&worktree, ""),
+            (
+                "projectless",
+                ", workstream bobmatnyc/bakeoff-l1 (548f2143)",
+            ),
+        ];
+
+        for (home, workstream) in cases {
+            let mut app = ReplApp::new("demo", "bob");
+            app.show_banner = false;
+            app.push_status(format!(
+                "connected to tcode daemon at {socket} — home {home}{workstream}, \
+                 solo agent (no delegation)"
+            ));
+            let rows = rendered_rows(&app, 80, 24);
+
+            assert!(
+                rows.iter().any(|r| r.contains(home)),
+                "the home segment must reach a cell: {home:?} missing from {rows:#?}"
+            );
+            assert!(
+                rows.iter().any(|r| r.contains("home")),
+                "the `home` label must render: {rows:#?}"
+            );
+            if !workstream.is_empty() {
+                assert!(
+                    rows.iter().any(|r| r.contains("bobmatnyc/bakeoff-l1")),
+                    "a bound workstream must render: {rows:#?}"
+                );
+            }
+        }
+    }
+
+    /// #8205: the repository name is what the banner's `project` row is read
+    /// for, and it used to be the first thing elided away at 80 columns.
+    #[test]
+    fn draw_keeps_the_repository_name_on_the_banner_project_row() {
+        let mut app = ReplApp::new("demo", "bob");
+        app.splash = vec![
+            "🤖🤖🤖 tcode v0.7.0".to_string(),
+            "project /private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef"
+                .to_string(),
+        ];
+        let rows = rendered_rows(&app, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("trusty-tools-demo")),
+            "the repository name must render: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("agent-0123456789abcdef")),
+            "the worktree name must render: {rows:#?}"
+        );
     }
 }

@@ -9,6 +9,7 @@
 use super::*;
 use crate::core::agent::DelegationId;
 use crate::core::session::SessionId;
+use crate::session_manager::decommission::WORKTREE_SENTINEL_FILE;
 use crate::session_manager::worktree_ownership::AgentWorktreeOwner;
 use chrono::Utc;
 

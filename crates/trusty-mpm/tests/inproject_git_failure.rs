@@ -88,8 +88,8 @@ fn try_inproject_spawn_errors_when_git_cannot_be_executed() {
     let empty = tempfile::TempDir::new().expect("empty PATH dir");
     let previous = std::env::var_os("PATH");
 
-    // SAFETY: `#[serial]` keeps every other test in this binary off the CPU for
-    // the duration, and the binary contains only these two tests.
+    // SAFETY: `env_serial` runs one test at a time (#8345), so no other test
+    // spawns a process while `$PATH` is empty.
     unsafe { std::env::set_var("PATH", empty.path()) };
     let result = try_inproject_spawn(dir);
     unsafe {

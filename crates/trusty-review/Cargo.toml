@@ -114,7 +114,20 @@ name        = "trusty-review"
 # `0.y.z` crate the breaking bump is the MINOR position. `#[non_exhaustive]` is
 # the same choice made at 0.18.0 for the three report types: field additions
 # stay non-breaking from here on, so the next one costs no bump.
-version     = "0.36.0"
+#
+# 0.36.2 (#8411) was never published. #8411 added only
+# `index_resolver::main_checkout_root`, but #8904 and #8905 then landed on the
+# same unreleased version with breaking library changes.
+#
+# 0.37.0 (#8904, #8905): MINOR, the breaking position for a `0.y.z` crate.
+# `Finding`, `ReviewResult`, `VerificationConfig`, `VerificationFileConfig` and
+# `VerifyPolicy` gain public fields and none is `#[non_exhaustive]`;
+# `VERIFY_CANDIDATE_MIN_CONFIDENCE` is removed; `select_candidates`,
+# `maybe_verify` and `run_verification_round_with_policy` change signature.
+# `cargo-semver-checks` flags three lints against 0.36.1. CHANGELOG.md [0.37.0]
+# lists every break and the caller's fix. The root
+# `[workspace.dependencies]` row is widened to `version = "0.37"`.
+version     = "0.38.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

@@ -105,6 +105,12 @@ mod tests {
     /// Test: this test.
     #[test]
     fn resolve_fastembed_cache_dir_prefers_env_vars() {
+        // #5937: the fallback arm reads HOME, which tests outside `embedder`
+        // set under the crate-wide lock. Lock order: crate-wide, then
+        // `env_lock()`; no test takes them the other way round.
+        let _home = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _g = env_lock();
 
         let prev_dir = std::env::var("FASTEMBED_CACHE_DIR").ok();

@@ -280,6 +280,28 @@ pub(super) fn interpret_health_body(
     status: u16,
     body: Option<&serde_json::Value>,
 ) -> CheckResult {
+    // #8751: doctor's own stall line, read from env like the wedge threshold.
+    let stall = super::lock_stall::lock_stall_threshold();
+    interpret_health_body_with_stall(label, url, status, body, stall)
+}
+
+/// [`interpret_health_body`] with the palace-lock stall threshold supplied.
+///
+/// Why (#8751): the lock age arrives in the body, so a test drives the
+/// threshold crossing deterministically by pairing a body with a threshold.
+/// What: the same chain, plus a `Warn` naming the palace and age once the
+/// daemon's `stalled_lock` is held past `stall` (see
+/// [`super::lock_stall::stalled_lock_verdict`]), checked after the stall
+/// detector has vouched for itself and before the warming and degraded rows.
+/// Test: `a_lock_held_past_the_threshold_warns_with_palace_and_age`,
+/// `a_lock_held_up_to_the_threshold_keeps_the_pass_line`.
+pub(super) fn interpret_health_body_with_stall(
+    label: String,
+    url: &str,
+    status: u16,
+    body: Option<&serde_json::Value>,
+    stall: Duration,
+) -> CheckResult {
     let Some(body) = body else {
         return CheckResult::unknown(
             label,
@@ -399,6 +421,15 @@ pub(super) fn interpret_health_body(
         }
     }
 
+    // #8751: a lock held past doctor's stall line, below the daemon's wedge
+    // line, is named here instead of reading as "workers progressing".
+    let prefix = format!("{url} → {status}");
+    if let Some(verdict) =
+        super::lock_stall::stalled_lock_verdict(&label, &prefix, stalled_lock, stall)
+    {
+        return verdict;
+    }
+
     let daemon_state = body.get("daemon_state").and_then(|v| v.as_str());
     let reported = body.get("status").and_then(|v| v.as_str());
 
@@ -479,51 +510,6 @@ pub(super) fn summarize(results: &[CheckResult]) -> DoctorSummary {
 #[cfg(test)]
 #[path = "checks_tests.rs"]
 mod checks_tests;
-
-/// Scan the data directory for stray `*.lock` files left over from a
-/// crashed daemon.
-///
-/// Why: redb leaves a sidecar lock file when a previous owner exits
-/// uncleanly; opening the palace from a fresh daemon then fails until the
-/// stale lock is removed. Surfacing this in `doctor` saves users from a
-/// confusing "palace won't load" symptom that has nothing to do with the
-/// palace itself.
-/// What: walks the trusty-memory data dir (one level deep into each palace
-/// directory) and lists any `*.lock` file. `Pass` when none found, `Warn`
-/// when at least one is present (the daemon may be running and using it,
-/// so we can't safely call this a `Fail`).
-/// Test: `stale_lock_check_warns_when_lock_present`.
-pub fn check_stale_palace_locks() -> CheckResult {
-    let label = "palace locks".to_string();
-    let data_dir = match trusty_common::resolve_data_dir("trusty-memory") {
-        Ok(d) => d,
-        Err(e) => return CheckResult::fail(label, format!("could not resolve data dir: {e}")),
-    };
-    let root = crate::resolve_palace_registry_dir(data_dir);
-    let locks = find_lock_files(&root);
-    if locks.is_empty() {
-        CheckResult::pass(label, format!("{} clean", root.display()))
-    } else {
-        let preview = locks
-            .iter()
-            .take(3)
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if locks.len() > 3 {
-            format!(" (+{} more)", locks.len() - 3)
-        } else {
-            String::new()
-        };
-        CheckResult::warn(
-            label,
-            format!(
-                "{} lock file(s) found: {preview}{suffix} — if the daemon is stopped, these can be removed",
-                locks.len()
-            ),
-        )
-    }
-}
 
 /// Collect `*.lock` files one level deep beneath `root`.
 ///

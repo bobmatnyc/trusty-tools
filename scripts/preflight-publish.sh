@@ -58,35 +58,45 @@
 #   CHECK 5 (public-API SemVer, #5149): runs `scripts/check_semver.sh --crate
 #     <pkg>`, which compares this crate's public API against its PREVIOUS
 #     crates.io release — the greatest non-yanked version below the one about to
-#     be published (#5296) — and fails when a breaking change is not carried by a
-#     breaking version bump (Cargo's 0.x rule: for 0.y.z the MINOR position is
-#     the breaking one). When the bump is already breaking there is no
-#     requirement left to violate, and the run becomes an advisory INVENTORY of
-#     what the release breaks (#5297); it reports, and cannot fail this check.
+#     be published (#5296). This workspace follows an internal numbering
+#     scheme, not Cargo SemVer's break-forces-major rule (owner ruling
+#     2026-09-26): a feature bumps the minor version, a fix bumps the patch, and
+#     a public-API break never forces a major bump on its own — see
+#     docs/reference/semver-gate.md. So CHECK 5 REPORTS a computed break: it
+#     still runs the comparison, prints every break it finds, and records them
+#     (`semver_record_break` below), but a computed break never fails this check
+#     and never chooses or changes a version.
 #
-#     WHY IT LIVES HERE, and not only in CI: this script is the LAST thing that
-#     runs before `cargo publish`, and its nonzero exit is the documented
-#     absolute stop — so a break caught here is caught while the upload can
-#     still be prevented. A crates.io publish is irreversible except by yank, so
-#     a gate that only reports AFTER the upload has no way to undo the damage:
-#     that is exactly #4088, where trusty-common 0.22.5 shipped a required new
-#     public field on a patch bump and cost trusty-analyze 0.7.3 a yank.
-#     `.github/workflows/semver-checks.yml` runs the same command on the tag
-#     push, but a CI job cannot stop a `cargo publish` a human runs locally —
-#     it reports, this blocks.
+#     WHY IT STILL LIVES HERE, and not only in CI: this script is the LAST thing
+#     that runs before `cargo publish`, so a break caught here is caught while a
+#     human still has eyes on the release, before the upload is irreversible
+#     (crates.io permits only a yank, never a retraction). That is exactly
+#     #4088, where trusty-common 0.22.5 shipped a required new public field on a
+#     patch bump and cost trusty-analyze 0.7.3 a yank — CHECK 5 makes the break
+#     visible, and the owner ruling is that visibility, not a red exit, is what
+#     a break earns.
 #
-#     A BREAK HAS NO OVERRIDE, and none is needed: the correct response to a
-#     firing gate is to bump the breaking position, which the gate then records
-#     as an already-breaking release and inventories. A false positive and a
-#     real break have the same safe remedy.
+#     THE RECORD NEVER TOUCHES THE WORKING TREE (#8699). A file written into
+#     the checkout would fail CHECK 3 and CHECK 9 on the next run and dirty the
+#     tree `cargo publish` packages. `semver_record_break` prints the record to
+#     stdout and writes it under PREFLIGHT_SEMVER_RECORD_DIR (default
+#     `${XDG_STATE_HOME:-$HOME/.local/state}/trusty-tools/semver-breaks`), which
+#     must resolve outside this repository; the operator lands it in the
+#     post-release PR. A committed `scripts/semver-accepted-breaks/` declaration
+#     is only read and reported on, never written.
 #
-#     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
-#     it computed a verdict that says break, and 3 when it could not compute one
-#     at all (rustdoc build failure, a run that executed ZERO checks (#5440),
-#     unreachable registry, missing tool). Both
-#     stop the publish; only the first is reported as "your API changed". The
-#     remedy above applies to exit 1 — for exit 3 the remedy is to fix the gate
-#     and re-run, never to bump a version on evidence that does not exist.
+#     A BREAK IS A VERDICT THE GATE PRINTED, NOT AN EXIT STATUS. Exit 1 counts
+#     as a break only when the log carries `VERDICT: BREAK` and its break list
+#     parses completely (no NO VERDICT line, one failure block per failed lint);
+#     any other exit 1 is a gate malfunction and stops the publish. So does a
+#     record that could not be written.
+#
+#     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 3 when it
+#     could not compute a verdict at all (rustdoc build failure, a run that
+#     executed ZERO checks (#5440), unreachable registry, missing tool). Exit 3
+#     is an INFRASTRUCTURE fault, not a break, and still stops the publish;
+#     the remedy there is to fix the gate and re-run, never to bump a version on
+#     evidence that does not exist.
 #
 #     NEITHER IS EXIT 0 (#5620). The gate exits 0 on an ADVISORY run it could
 #     not compute — an already-breaking release is permitted by its version
@@ -233,37 +243,6 @@
 #     the assembler for you, or assemble directly at the version you intend to
 #     ship (`scripts/assemble-changelog.sh <crate-dir> <version>`).
 #
-#   CHECK 10 (the engagement template's sibling pins, #6772): trusty-audit only.
-#     Runs `scripts/refresh-engagement-pins.sh --check`, which compares each
-#     `[tools]` pin in `crates/trusty-audit/templates/engagement.template.toml`
-#     with that package's current workspace version, then decides per stale pin
-#     by asking crates.io whether the workspace version is published.
-#
-#     THE RULE: a pin must equal the sibling's current workspace version when
-#     that version is NOT yet on crates.io — the sibling is shipping in this
-#     same release train, so the pin is stale the moment the binary is built.
-#     When the sibling's workspace version IS already published, the sibling is
-#     not part of this train and a pin naming an older published version is a
-#     legitimate engagement choice: reported as a WARN, never a block.
-#
-#     WHY THIS IS NOT ALREADY COVERED: the template is `include_str!`-ed into
-#     `instructions::ENGAGEMENT_TEMPLATE` and written out verbatim by `taudit
-#     distribute`, so the packaged copy is only as fresh as the binary — and
-#     nothing in checks 1-9 reads it. At 7cfeda52d the template pinned tga
-#     6.0.0 / trusty-analyze 0.12.5 / trusty-review 0.33.0 while that same train
-#     published tga 7.0.0 / 0.12.6 / 0.33.1, with every other check green
-#     (#6772; PR #6723 was the previous instance).
-#
-#     FAILS CLOSED ON A RESULT IT CANNOT READ. Any exit but 0 or 1 means the
-#     pins could not be read at all. Exit 1 means stale pins EXIST, so at least
-#     one `STALE <pkg> pinned=<x> workspace=<y>` line must parse out of the
-#     output; if none does, the two scripts disagree about that line's format
-#     and this check has no idea which pins are stale — a FAIL, not the WARN the
-#     empty-list path used to reach.
-#
-#     No override flag. The remedy is one command:
-#     `scripts/refresh-engagement-pins.sh`, then commit the template.
-#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -273,12 +252,12 @@
 #   `scripts/preflight-publish.sh trusty-mpm`. An explicit version argument is
 #   still accepted for diagnostics/dry-run against a hypothetical version
 #   (e.g. checking availability before bumping). <crate-name-or-dir> accepts
-#   either the crates.io package name (e.g. `tga`) or the crates/ directory
-#   name (e.g. `trusty-git-analytics`), resolved the same way
+#   either the crates.io package name or the crates/ directory name, resolved
+#   the same way
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 10 checks unconditionally (never short-circuits)
+#   --check-only     run all 9 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -288,8 +267,11 @@
 # Exit codes: 0 = all checks passed, or were downgraded by an override that
 #   named itself in the output (PREFLIGHT_ALLOW_DETACHED for check 1,
 #   PREFLIGHT_SEMVER_UNVERIFIED for check 5) — safe to `cargo publish`, with
-#   whatever the WARN lines disclosed. Nonzero = at least one check failed —
-#   DO NOT PUBLISH. 2 = usage error (bad arguments).
+#   whatever the WARN lines disclosed. Exit 0 is also returned when check 5
+#   recorded a computed break: the publish is PERMITTED, not called safe, and
+#   the final summary lists every break entry. Nonzero = at least one check
+#   failed — DO NOT PUBLISH. 2 = usage error (bad arguments), or the crate
+#   is `publish = false` and is not published from this repository.
 #
 # Test: checks 1-4 are exercised manually — they are bound to the network, the
 #   real crates.io registry, and the logged-in gh account, none of which a
@@ -299,12 +281,7 @@
 #   half a four-minute rustdoc run had kept untested. Check 6 has
 #   scripts/check-tag-publish-parity-selftest.sh and check 7 has
 #   scripts/check-ui-bundle-freshness-selftest.sh; both drive every failure
-#   branch of the delegated script against fixtures. Check 10 has TWO, for the
-#   same reason check 5 does: scripts/refresh-engagement-pins-selftest.sh drives
-#   the delegated comparison over synthetic workspaces, and
-#   scripts/preflight-check10-selftest.sh drives THIS script's decision over
-#   that comparison's output — every arm including the fail-closed one, with a
-#   stub gate on REPO_ROOT and a stub curl standing in for crates.io.
+#   branch of the delegated script against fixtures.
 #   Verified by construction:
 #     (a) FAIL mode — run from an unmerged feature branch (HEAD != origin/main)
 #         to demonstrate check 1 failing.
@@ -372,6 +349,12 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# CHECK 5 reads a committed accepted-breaks declaration only to report whether
+# it covers a computed break, and never writes one (#8699). It also reuses the
+# library's break-list parser.
+# shellcheck source=lib/semver_accepted_breaks.sh
+. "${REPO_ROOT}/scripts/lib/semver_accepted_breaks.sh"
 
 CRATE_UA="trusty-tools-preflight-publish (github.com/bobmatnyc/trusty-tools)"
 
@@ -449,11 +432,24 @@ if [ -z "$PKG_NAME" ]; then
   exit 2
 fi
 
+# A `publish = false` crate never reaches crates.io from this workspace, so no
+# check below has anything to guard. Refuse up front rather than report a
+# green preflight that `cargo publish` then rejects. Same predicate as
+# release.yml's `preflight` job.
+if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "$MANIFEST"; then
+  echo "preflight-publish: ERROR: ${PKG_NAME} is publish = false in ${MANIFEST}" >&2
+  echo "  — it is not published from this repository." >&2
+  exit 2
+fi
+
+# The version `cargo publish` ships and check_semver.sh compares. Read even
+# when a version argument is given, so full mode can refuse a mismatch.
+MANIFEST_VERSION="$(grep -m1 -E '^version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$MANIFEST" \
+  | sed -E 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/' || true)"
 if [ -n "$VERSION_ARG" ]; then
   VERSION="$VERSION_ARG"
 else
-  VERSION="$(grep -m1 -E '^version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"' "$MANIFEST" \
-    | sed -E 's/^version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+  VERSION="$MANIFEST_VERSION"
   if [ -z "$VERSION" ]; then
     echo "preflight-publish: ERROR: could not find version = \"X.Y.Z\" in ${MANIFEST}" >&2
     echo "  (pass an explicit version argument instead: scripts/preflight-publish.sh ${CRATE_INPUT} <version>)" >&2
@@ -808,8 +804,9 @@ semver_types_decide() {
 #
 # THE INVARIANT: `0 compared` and `[PASS]` are unreachable together. A pass
 #   states how many crates it actually compared and refuses to print PASS when
-#   that number is zero. Four outcomes, four labels, so a reader can always tell
-#   "nothing was wrong" from "nothing was examined":
+#   that number is zero. Outcomes and labels, so a reader can always tell
+#   "nothing was wrong" from "nothing was examined" from "something broke, and
+#   it was recorded":
 #
 #     [PASS] >= 1 crate compared, and every lint that RAN passed. Narrower than
 #            it reads, and the line says so: cargo-semver-checks 0.50.0 checks
@@ -829,9 +826,16 @@ semver_types_decide() {
 #            recorded in a reviewable file, so it permits without an override.
 #            It is not a statement that the API is unchanged.
 #     [WARN] 0 compared because the gate was BLIND, and PREFLIGHT_SEMVER_UNVERIFIED
-#            named a reason to accept that. Permits; never prints PASS.
-#     [FAIL] a computed break, a blind gate with no override, or a gate that
-#            malfunctioned.
+#            named a reason to accept that. Permits; never prints PASS. This is
+#            an INFRASTRUCTURE fault arm — the comparison itself could not run —
+#            and is the only 0-compared arm that still stops without the reason.
+#     [WARN] RECORDED BREAK (owner ruling 2026-09-26): a computed break — exit
+#            1, `VERDICT: BREAK`, and a break list that parses. Permits once
+#            semver_record_break has printed the record and written it outside
+#            the working tree. Never prints PASS.
+#     [FAIL] a blind gate with no override, a gate that malfunctioned (any exit
+#            1 that is not a computed break included), or a computed break
+#            whose record could not be written.
 #
 # THE OVERRIDE IS FOR SITUATIONAL BLINDNESS ONLY, and it takes a REASON, not a
 #   boolean:
@@ -853,9 +857,11 @@ semver_types_decide() {
 #   scrolls past every publish. An override that is always set is not an
 #   override.
 #
-# A COMPUTED BREAK IS NEVER OVERRIDE-ABLE. The override answers "the gate could
-#   not run"; exit 1 is the gate running and saying no. Its remedy is unchanged
-#   and is not a variable.
+# A COMPUTED BREAK NEVER NEEDS THIS VARIABLE (owner ruling 2026-09-26). It
+#   answers "the gate could not run"; a computed break is the gate running and
+#   having an answer, which `semver_record_break` records and permits —
+#   setting the override alongside a break changes nothing, see the
+#   self-test's override-irrelevance case.
 #
 # Test: scripts/preflight-check5-selftest.sh.
 # ---------------------------------------------------------------------------
@@ -871,20 +877,232 @@ SEMVER_TYPES_ADVISORY=""
 # Starts at 0 so a semver_decide that never reached the count leaves it refusing.
 SEMVER_GATE_COMPARED=0
 
+# Set by semver_record_break once a computed break is recorded; read by
+# preflight_ok_summary so the final line lists the breaks (#8699).
+SEMVER_RECORDED_BREAKS=""
+SEMVER_RECORDED_LIST=""
+
+# ---------------------------------------------------------------------------
+# semver_record_root — where break records go. PREFLIGHT_SEMVER_RECORD_DIR
+# overrides the default; either way it must resolve outside the working tree.
+# ---------------------------------------------------------------------------
+semver_record_root() {
+  printf '%s' "${PREFLIGHT_SEMVER_RECORD_DIR:-${XDG_STATE_HOME:-${HOME:-}/.local/state}/trusty-tools/semver-breaks}"
+}
+
+# ---------------------------------------------------------------------------
+# semver_record_outside_repo <path> — true when <path> is absolute, has no `..`
+# component, and resolves outside REPO_ROOT. The nearest existing ancestor is
+# resolved physically, so a symlink into the checkout is caught. See #8699.
+# ---------------------------------------------------------------------------
+semver_record_outside_repo() {
+  local path="$1" probe rest="" top real
+  case "$path" in /*) ;; *) return 1 ;; esac
+  case "${path}/" in */../*) return 1 ;; esac
+  top="$(cd "$REPO_ROOT" 2> /dev/null && pwd -P)" || return 1
+  probe="$path"
+  while [ ! -d "$probe" ]; do
+    rest="/$(basename "$probe")${rest}"
+    probe="$(dirname "$probe")"
+  done
+  real="$(cd "$probe" 2> /dev/null && pwd -P)" || return 1
+  real="${real%/}${rest}"
+  case "${real}/" in "${top}/"*) return 1 ;; esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# semver_record_write <path> <content> — write <content> to <path> through a
+# sibling .new file, leaving identical bytes untouched. Returns 1 when any step
+# fails: the check loop runs under `set +e`, so nothing else would notice.
+# ---------------------------------------------------------------------------
+semver_record_write() {
+  local path="$1" content="$2"
+  mkdir -p "$(dirname "$path")" || return 1
+  printf '%s\n' "$content" > "${path}.new" || return 1
+  if [ -f "$path" ] && cmp -s "$path" "${path}.new"; then
+    rm -f "${path}.new"
+    return 0
+  fi
+  mv -f "${path}.new" "$path" || return 1
+}
+
+# ---------------------------------------------------------------------------
+# semver_record_declaration_note <package> <version> <entries> — when a
+# scripts/semver-accepted-breaks/<package>-<version>.txt declaration exists,
+# report whether it covers the computed break. Reads it only; never writes it
+# (#8699). Informational: always returns 0.
+# ---------------------------------------------------------------------------
+semver_record_declaration_note() {
+  local pkg="$1" version="$2" entries="$3" rel work
+  rel="$(semver_accept_rel "$pkg" "$version")"
+  semver_accept_present "$rel" || return 0
+  if ! work="$(mktemp -d "${TMPDIR:-/tmp}/preflight-decl.XXXXXX")"; then
+    echo "       ${rel} exists; could not create a temp dir to compare it (left untouched)." >&2
+    return 0
+  fi
+  printf '%s\n' "$entries" > "${work}/entries"
+  : > "${work}/err"
+  if ! semver_accept_source "$rel" "${work}/decl" "${work}/err"; then
+    echo "       Committed declaration ${rel} is not usable (left untouched):" >&2
+    sed 's/^/         /' "${work}/err" >&2
+  else
+    semver_accept_parse "${work}/decl" "$pkg" "$version" "${work}/accept" "${work}/err"
+    if [ -s "${work}/err" ]; then
+      echo "       Committed declaration ${rel} is not valid (left untouched):" >&2
+      sed 's/^/         /' "${work}/err" >&2
+    else
+      semver_accept_match "${work}/accept" "${work}/entries" > "${work}/match"
+      if grep -q '^UNCOVERED' "${work}/match"; then
+        echo "       Committed declaration ${rel} does NOT cover these computed entries" >&2
+        echo "       (left untouched; the record above lists every entry):" >&2
+        grep '^UNCOVERED' "${work}/match" | cut -f2- | sed "s/$(printf '\t')/: /; s/^/         /" >&2
+      else
+        echo "       Committed declaration ${rel} covers every computed entry (left untouched)." >&2
+      fi
+    fi
+  fi
+  rm -rf "$work"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# semver_record_break <gate-log> <package> <version> — CHECK 5's owner-ruling
+# 2026-09-26 arm. semver_decide calls it only for a computed break: exit 1,
+# `VERDICT: BREAK`, and a break list semver_break_entries parses with no ERROR
+# row. Returns 0 once the record is printed and written, 1 when it could not be
+# written.
+#
+# Why: the internal numbering policy (owner ruling 2026-09-26; see
+#   docs/reference/semver-gate.md) makes a public-API break something this gate
+#   REPORTS. A report only printed to a terminal is lost, so it also leaves a
+#   file. That file must not land in the working tree: a stranded changelog.d/
+#   fragment fails CHECK 9, any new file fails CHECK 3, and a dirty tree breaks
+#   `cargo publish` and a preflight re-run (#8699).
+# What: prints the record to stdout FIRST, so it survives a failed write, then
+#   writes it under `semver_record_root`/<package>-<version>/, laid out by the
+#   repository path each file lands at in the post-release PR:
+#     scripts/semver-accepted-breaks/<package>-<version>.txt   (README row format)
+#     crates/<dir>/changelog.d/8699-semver-break-<version>.md  (Breaking; only
+#       when MANIFEST resolves to crates/<dir>/Cargo.toml)
+#   Files are regenerated from this run's gate output, never appended, and left
+#   alone when the bytes match, so a re-run is byte-identical. A destination
+#   that is relative, holds `..`, or resolves inside REPO_ROOT is refused, as is
+#   any failed mkdir, redirect or mv: each prints
+#   `[FAIL] semver: break computed but record could not be written`. A committed
+#   declaration is reported on (semver_record_declaration_note), never written.
+#
+# Test: scripts/preflight-check5-selftest.sh, the "record break" cases (r1)-(r7).
+# ---------------------------------------------------------------------------
+semver_record_break() {
+  local log="$1" pkg="$2" version="$3"
+  local tab entries n lints reason rel crate_dir frag_rel record frag root dir why
+  tab="$(printf '\t')"
+
+  entries="$(semver_break_entries "$log" "$pkg" 2> /dev/null | LC_ALL=C sort -u)"
+  n="$(printf '%s\n' "$entries" | grep -c .)"
+  lints="$(printf '%s\n' "$entries" | cut -f1 | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//; s/ /, /g')"
+
+  reason="Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26):"
+  reason="${reason} trusty-tools' internal numbering policy — a public-API break"
+  reason="${reason} never forces a major version. See docs/reference/semver-gate.md."
+  rel="$(semver_accept_rel "$pkg" "$version")"
+  record="$(
+    printf 'crate   %s\n' "$pkg"
+    printf 'version %s\n' "$version"
+    printf 'reason  %s\n' "$reason"
+    printf '%s\n' "$entries" | while IFS="$tab" read -r lint item; do
+      printf 'accept  %s %s\n' "$lint" "$item"
+    done
+  )"
+
+  # crates/<dir>/Cargo.toml -> <dir>, from an absolute or relative MANIFEST.
+  crate_dir="$(printf '%s' "${MANIFEST:-}" | sed -nE 's#.*/?crates/([^/]+)/Cargo\.toml$#\1#p')"
+  frag_rel=""
+  frag=""
+  if [ -n "$crate_dir" ]; then
+    frag_rel="crates/${crate_dir}/changelog.d/8699-semver-break-${version}.md"
+    frag="$(
+      echo "Breaking"
+      echo
+      echo "- ${pkg} ${version} ships a public-API break under the internal numbering"
+      echo "  policy (owner ruling 2026-09-26); recorded in \`${rel}\` (Refs #8699)."
+    )"
+  fi
+
+  # stdout first: the record must survive a write that fails below.
+  echo "--- semver break record: ${pkg} ${version} (lands as ${rel}) ---"
+  printf '%s\n' "$record"
+  if [ -n "$frag_rel" ]; then
+    echo "--- proposed changelog fragment (lands as ${frag_rel}) ---"
+    printf '%s\n' "$frag"
+  fi
+  echo "--- end semver break record ---"
+
+  root="$(semver_record_root)"
+  dir="${root%/}/${pkg}-${version}"
+  why=""
+  if ! semver_record_outside_repo "$dir"; then
+    why="${dir} is not an absolute path outside the working tree ${REPO_ROOT}"
+  elif ! semver_record_write "${dir}/${rel}" "$record"; then
+    why="writing ${dir}/${rel} failed"
+  elif [ -n "$frag_rel" ] && ! semver_record_write "${dir}/${frag_rel}" "$frag"; then
+    why="writing ${dir}/${frag_rel} failed"
+  fi
+  if [ -n "$why" ]; then
+    echo "[FAIL] semver: break computed but record could not be written" >&2
+    echo "       ${pkg} ${version}: ${why}." >&2
+    echo "       The record is printed on stdout above. Set PREFLIGHT_SEMVER_RECORD_DIR" >&2
+    echo "       to a writable absolute directory outside this repository and re-run." >&2
+    return 1
+  fi
+
+  SEMVER_RECORDED_BREAKS="${n} break entry(ies) in ${lints}; record at ${dir}"
+  SEMVER_RECORDED_LIST="$(printf '%s\n' "$entries" | sed "s/${tab}/: /")"
+  echo "[WARN] semver: RECORDED BREAK — ${pkg} ${version} ships a public-API break." >&2
+  echo "       Owner ruling 2026-09-26: a break is reported, never a reason to fail" >&2
+  echo "       this gate or to force a version bump. Never prints [PASS]." >&2
+  echo "       Record written OUTSIDE the working tree: ${dir}" >&2
+  echo "       Land it in the post-release PR; its files mirror their repo paths:" >&2
+  echo "         ${rel}" >&2
+  echo "         ${frag_rel:-(no changelog fragment — MANIFEST did not resolve to crates/<dir>/Cargo.toml)}" >&2
+  echo "       ${n} break entry(ies):" >&2
+  printf '%s\n' "$SEMVER_RECORDED_LIST" | sed 's/^/         /' >&2
+  semver_record_declaration_note "$pkg" "$version" "$entries"
+  return 0
+}
+
 semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
-  local summary checked skipped inventoried blind compared blind_why
+  local summary checked skipped inventoried blind compared blind_why entries err_line
 
-  # --- A COMPUTED VERDICT THAT SAYS BREAK. Not override-able.
+  # --- EXIT 1. Owner ruling 2026-09-26: a computed public-API break never forces
+  #     a major version and never blocks a publish — it is recorded instead.
+  #     But exit 1 is only a break when the gate printed that verdict AND its
+  #     break list reads completely (#8699); anything else is the gate
+  #     malfunctioning and stops, like every other status it did not document.
+  #     PREFLIGHT_SEMVER_UNVERIFIED plays no role either way.
   if [ "$rc" -eq 1 ]; then
-    echo "[FAIL] semver: public-API check failed for ${pkg} ${version}:" >&2
+    entries="$(semver_break_entries "$log" "$pkg" 2> /dev/null)"
+    if ! grep -q '^VERDICT: BREAK' "$log"; then
+      blind_why="its output carries no 'VERDICT: BREAK' line"
+    # Here-string, and a parameter expansion in place of `| head -1`: under
+    # `set -euo pipefail` a large `$entries` (up to 25 break entries) can
+    # make `grep -q`/`head` exit before the writer finishes, taking SIGPIPE
+    # and reporting a false parse failure (#8716).
+    elif [ -z "$entries" ] || grep -q '^ERROR' <<<"$entries"; then
+      err_line="$(grep '^ERROR' <<<"$entries" | cut -f2-)"
+      blind_why="its break list does not parse: ${err_line%%$'\n'*}"
+    else
+      SEMVER_GATE_COMPARED=1
+      semver_record_break "$log" "$pkg" "$version"
+      return
+    fi
+    echo "[FAIL] semver: check_semver.sh exited 1 for ${pkg} ${version}, but ${blind_why}." >&2
+    echo "       That is a gate malfunction, not a computed break, so nothing is" >&2
+    echo "       recorded and the publish stops:" >&2
     sed 's/^/       /' "$log" >&2
-    echo "       Publishing this would ship a breaking change without a breaking" >&2
-    echo "       version bump — the #4088 shape that yanked trusty-analyze 0.7.3." >&2
-    echo "       Bump the breaking position in ${MANIFEST:-the crate manifest}," >&2
-    echo "       or make the change non-breaking (#[non_exhaustive] on public" >&2
-    echo "       structs and enums). PREFLIGHT_SEMVER_UNVERIFIED does not apply to" >&2
-    echo "       a verdict — it covers a gate that could not run, not one that ran." >&2
+    echo "       Fix the gate or this script's parser, then re-run." >&2
     return 1
   fi
 
@@ -966,7 +1184,9 @@ semver_decide() {
     blind_why="check_semver.sh reported on no crate at all — ${summary}"
   fi
 
-  # --- BLIND. Stop, unless an explicit reason says to accept it.
+  # --- BLIND. Stop, unless an explicit reason says to accept it. An
+  #     accepted-breaks declaration is never that reason; say so if one exists.
+  semver_accept_blind_note "$pkg" "$version"
   if [ -n "${PREFLIGHT_SEMVER_UNVERIFIED+x}" ]; then
     if [ -z "$(printf '%s' "${PREFLIGHT_SEMVER_UNVERIFIED}" | tr -d '[:space:]')" ]; then
       echo "[FAIL] semver: PREFLIGHT_SEMVER_UNVERIFIED is set but empty." >&2
@@ -1024,6 +1244,22 @@ semver_decide() {
 #   full mode a [FAIL] and the exact remedy, the same as any other check. A
 #   no-op in --check-only mode, and a no-op once the tag has actually been
 #   created — the corrected sequence never trips it.
+# full_mode_version_is_manifest — a full run publishes the MANIFEST version, so
+# a <version> argument naming anything else would certify one release while
+# `cargo publish` ships another; CHECK 5's gate compares the manifest version
+# too. --check-only keeps the hypothetical-version preview. A no-op when the
+# argument is omitted or equal. Test: preflight-check5-selftest.sh case (i).
+full_mode_version_is_manifest() {
+  [ "$CHECK_ONLY" -eq 1 ] && return 0
+  [ -n "$MANIFEST_VERSION" ] && [ "$VERSION" = "$MANIFEST_VERSION" ] && return 0
+  echo "[FAIL] version-arg: full mode was asked to certify ${PKG_NAME} ${VERSION}, but" >&2
+  echo "       ${MANIFEST:-the crate manifest} declares version '${MANIFEST_VERSION:-<unreadable>}'," >&2
+  echo "       and that is what 'cargo publish' ships and what CHECK 5 compared." >&2
+  echo "       Bump the manifest (scripts/bump-version.sh), or drop the version" >&2
+  echo "       argument. A hypothetical version belongs in --check-only." >&2
+  return 1
+}
+
 full_mode_requires_tag() {
   [ "$CHECK_ONLY" -eq 1 ] && return 0
   local candidates="${CRATE_DIR}-v${VERSION}" tag
@@ -1548,104 +1784,40 @@ check9_changelog_assembled() {
   return 1
 }
 
-# ===========================================================================
-# CHECK 10 — the engagement template's sibling pins (#6772), trusty-audit only
-# ===========================================================================
-# The comparison is delegated to scripts/refresh-engagement-pins.sh, which has
-# its own self-test; what lives HERE is the one judgement that needs the
-# network — whether a stale pin names a sibling that is shipping in this same
-# release train. See the header comment for the rule and the #6772 history.
-check10_engagement_pins() {
-  if [ "$PKG_NAME" != "trusty-audit" ]; then
-    echo "[PASS] engagement-pins: n/a — only trusty-audit compiles the engagement template." >&2
-    return 0
+# ---------------------------------------------------------------------------
+# preflight_ok_summary — the final OK lines, printed only when no check failed.
+# A recorded break lists every entry and never reads "Safe to publish"
+# (ruling 2026-09-22, kept by #8699).
+# Test: preflight-check5-selftest.sh, case (r5) "check 5 + check 9".
+# ---------------------------------------------------------------------------
+preflight_ok_summary() {
+  if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
+    # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
+    # nothing. The same distinction the check line draws, drawn again at the line
+    # an operator is most likely to read on its own.
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but the" >&2
+    echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
+  elif [ -n "${SEMVER_RECORDED_BREAKS:-}" ]; then
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks, but it SHIPS" >&2
+    echo "  A PUBLIC-API BREAK: ${SEMVER_RECORDED_BREAKS}." >&2
+    printf '%s\n' "${SEMVER_RECORDED_LIST:-}" | sed 's/^/    /' >&2
+    echo "  Land the record in the post-release PR. See the check 5 line above." >&2
+    if [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
+      echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
+    fi
+  elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
+    # The type differ blocks nothing, so without this the summary would say
+    # "safe to publish" over a listed set of type changes nobody has confirmed.
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks." >&2
+    echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
+  else
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 9 checks. Safe to publish." >&2
   fi
-
-  local log="${TMP_PINS}" rc=0
-  bash "${REPO_ROOT}/scripts/refresh-engagement-pins.sh" --check > "$log" 2>&1 || rc=$?
-
-  if [ "$rc" -eq 0 ]; then
-    echo "[PASS] engagement-pins: every [tools] pin names its crate's workspace version." >&2
-    return 0
+  if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
+    # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 9 checks"
+    # must not absorb a check-8 outcome that read nothing.
+    echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
   fi
-
-  # Any exit but 1 means the gate could not READ the pins (missing template,
-  # unreadable [tools] table, cargo metadata failure). Fail closed — an
-  # unreadable table is exactly the state a silent pass would hide.
-  if [ "$rc" -ne 1 ]; then
-    echo "[FAIL] engagement-pins: could not read the template's [tools] pins (rc=${rc}):" >&2
-    sed 's/^/       /' "$log" >&2
-    return 1
-  fi
-
-  local blocking="" lagging="" unverified=""
-  local name pinned wanted http url
-  while read -r _tag name pinned_kv wanted_kv; do
-    pinned="${pinned_kv#pinned=}"
-    wanted="${wanted_kv#workspace=}"
-    url="https://crates.io/api/v1/crates/${name}/${wanted}"
-    http="$(curl -sS -A "$CRATE_UA" -o "$TMP_PIN_BODY" -w "%{http_code}" "$url")" || http="000"
-    case "$http" in
-      404)
-        blocking="${blocking}         ${name}: pinned ${pinned}, workspace ${wanted} — ${wanted} is NOT published, so it ships with this train"$'\n'
-        ;;
-      200)
-        lagging="${lagging}         ${name}: pinned ${pinned}, workspace ${wanted} — ${wanted} is already published, so this pin may lag"$'\n'
-        ;;
-      *)
-        unverified="${unverified}         ${name}: HTTP ${http} from ${url}"$'\n'
-        ;;
-    esac
-  done < <(grep '^STALE ' "$log" || true)
-
-  # #6772: rc=1 is refresh-engagement-pins.sh saying "stale pins exist", so at
-  # least one STALE line MUST have parsed. All three buckets empty means the
-  # grep matched nothing — the two scripts disagree about that line's format —
-  # and every guard below is skipped, landing on the unconditional WARN with an
-  # empty list. Fail closed instead: a stale-pins result must never pass.
-  if [ -z "$blocking" ] && [ -z "$lagging" ] && [ -z "$unverified" ]; then
-    echo "[FAIL] engagement-pins: refresh-engagement-pins.sh --check reported stale" >&2
-    echo "       pins (exit 1), but no 'STALE <pkg> pinned=<x> workspace=<y>' line" >&2
-    echo "       parsed out of its output, so this gate cannot say WHICH pins are" >&2
-    echo "       stale or whether their siblings ship in this train." >&2
-    echo "       The two scripts disagree about that line's format. Full output" >&2
-    echo "       (${log}):" >&2
-    sed 's/^/       /' "$log" >&2
-    return 1
-  fi
-
-  if [ -n "$unverified" ]; then
-    echo "[FAIL] engagement-pins: crates.io would not say whether a stale pin's sibling" >&2
-    echo "       is shipping in this train:" >&2
-    printf '%s' "$unverified" >&2
-    echo "       Cannot verify pin freshness — refusing to pass this check." >&2
-    return 1
-  fi
-
-  if [ -n "$blocking" ]; then
-    echo "[FAIL] engagement-pins: crates/trusty-audit/templates/engagement.template.toml" >&2
-    echo "       pins a sibling BEHIND the version shipping in this same release train:" >&2
-    printf '%s' "$blocking" >&2
-    echo "       THE RULE: a [tools] pin must equal the sibling's current workspace" >&2
-    echo "       version when that version is not yet on crates.io — the sibling is" >&2
-    echo "       about to ship beside this publish, so the pin is stale the moment the" >&2
-    echo "       binary is built. When the sibling's workspace version IS already" >&2
-    echo "       published it is not part of this train, and a pin naming an older" >&2
-    echo "       published version is a legitimate engagement choice (WARN, not FAIL)." >&2
-    echo "       This matters because the template is include_str!-ed into" >&2
-    echo "       instructions::ENGAGEMENT_TEMPLATE and written out verbatim by" >&2
-    echo "       'taudit distribute', so a stale pin ships inside the binary (#6772)." >&2
-    echo "       Fix: scripts/refresh-engagement-pins.sh, then commit the template and" >&2
-    echo "       rebuild." >&2
-    return 1
-  fi
-
-  echo "[WARN] engagement-pins: pin(s) lag a sibling that is NOT in this release train:" >&2
-  printf '%s' "$lagging" >&2
-  echo "       Permitted — each named version is already published, so the pin is a" >&2
-  echo "       deliberate engagement choice rather than release drift. Run" >&2
-  echo "       scripts/refresh-engagement-pins.sh if you meant to track the workspace." >&2
-  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1658,12 +1830,10 @@ TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
 TMP_PARITY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.parity.XXXXXX")"
 TMP_UIBUNDLE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.uibundle.XXXXXX")"
 TMP_CHANGELOG="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.changelog.XXXXXX")"
-TMP_PINS="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.pins.XXXXXX")"
-TMP_PIN_BODY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.pinbody.XXXXXX")"
-trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG" "$TMP_PINS" "$TMP_PIN_BODY"' EXIT
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 10 checks. Always run every check (rather than short-circuiting) so
+# Run all 9 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -1673,12 +1843,12 @@ check2_identity;            [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check3_clean_tree;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check4_version_not_live;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check5_semver;              [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+full_mode_version_is_manifest || FAILURES=$((FAILURES + 1))
 full_mode_requires_tag;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check6_tag_parity;          [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check9_changelog_assembled; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
-check10_engagement_pins;    [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -1686,25 +1856,7 @@ if [ "$FAILURES" -gt 0 ]; then
   exit 1
 fi
 
-if [ -n "${SEMVER_NOT_VERIFIED:-}" ]; then
-  # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
-  # nothing. The same distinction the check line draws, drawn again at the line
-  # an operator is most likely to read on its own.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but the" >&2
-  echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
-elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
-  # The type differ blocks nothing, so without this the summary would say
-  # "safe to publish" over a listed set of type changes nobody has confirmed.
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks." >&2
-  echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
-else
-  echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks. Safe to publish." >&2
-fi
-if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
-  # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 10 checks"
-  # must not absorb a check-8 outcome that read nothing.
-  echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
-fi
+preflight_ok_summary
 echo "preflight-publish: after 'cargo publish', confirm what cargo actually recorded:" >&2
 echo "  scripts/check-tag-publish-parity.sh --vcs-info auto ${PKG_NAME} ${VERSION}" >&2
 exit 0

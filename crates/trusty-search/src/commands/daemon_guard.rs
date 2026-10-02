@@ -28,6 +28,7 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::time::Duration;
 use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Total wall-clock budget for the daemon to become ready after we spawn it.
 ///
@@ -54,7 +55,7 @@ async fn probe_health(base: &str) -> bool {
 /// currently-running executable so a `cargo run` session boots its own debug
 /// daemon and a production install boots the production binary. The
 /// `--foreground` flag prevents recursive self-spawning.
-/// What: delegates to `trusty_common::daemon_guard::spawn_current_exe`.
+/// What: delegates to `spawn_daemon_with_device(None)`.
 #[allow(dead_code)]
 pub(crate) fn spawn_daemon() -> Result<u32> {
     spawn_daemon_with_device(None)
@@ -68,8 +69,9 @@ pub(crate) fn spawn_daemon() -> Result<u32> {
 /// inference runs. Auto-spawning the daemon with `--device cpu` sidesteps
 /// CoreML init entirely for the indexing path.
 /// What: invokes `<exe> start --foreground` and, when `device` is `Some`,
-/// appends `--device <device>`. Delegates to `spawn_current_exe`.
-/// Test: `cargo check -p trusty-search` plus manual live testing.
+/// appends `--device <device>`. Delegates to
+/// `spawn_current_exe_forwarding_parent_link`.
+/// Test: `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`.
 pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
     let mut args = vec!["start", "--foreground"];
     let device_str;
@@ -78,7 +80,10 @@ pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
         device_str = dev.to_string();
         args.push(&device_str);
     }
-    trusty_common::daemon_guard::spawn_current_exe(&args)
+    // #8900: forward a parent-death stamp, so a daemon a stamped CLI (a test)
+    // auto-starts dies with that test rather than outliving the run. No stamp
+    // in the environment — every production invocation — forwards nothing.
+    trusty_common::daemon_guard::spawn_current_exe_forwarding_parent_link(&args)
         .map_err(|e| anyhow!("trusty-search daemon spawn failed: {e}"))
 }
 
@@ -141,6 +146,57 @@ pub async fn ensure_daemon_running_with_device(base: &str, device: Option<&str>)
         timeout_hint: "try `trusty-search start` manually to see the error".to_string(),
     };
     spin_until_ready(&cfg).await
+}
+
+/// Ensure the daemon answers `search.health` on `client`'s socket, starting it
+/// when no daemon process is running (#6285).
+///
+/// Why: the socket twin of [`ensure_daemon_running`]. A subcommand that has
+/// moved onto the socket must also wait on the socket — a daemon can bind TCP
+/// before its socket, and the HTTP listener is being retired.
+/// What: fast path on one probe; otherwise spawn `trusty-search start` unless a
+/// daemon process already holds the lockfile, then probe every 500 ms for up to
+/// [`READY_TIMEOUT`]. It never dials TCP.
+///
+/// # Errors
+///
+/// When the spawn fails, or the socket still does not answer at the deadline —
+/// the error names the socket path.
+///
+/// Test: `ensure_daemon_up_names_the_socket_when_it_never_answers`.
+pub async fn ensure_daemon_up(client: &DaemonClient) -> Result<()> {
+    if client.is_up().await {
+        return Ok(());
+    }
+    if crate::service::running_daemon_pid().is_some() {
+        eprintln!(
+            "{} trusty-search daemon already running, waiting for its socket…",
+            "◉".cyan()
+        );
+    } else {
+        eprintln!("{} Starting trusty-search daemon…", "◉".cyan());
+        spawn_daemon_with_device(None)?;
+    }
+    wait_for_socket(client, READY_TIMEOUT).await
+}
+
+/// Probe `client`'s socket until it answers or `budget` elapses.
+async fn wait_for_socket(client: &DaemonClient, budget: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if client.is_up().await {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "trusty-search daemon did not answer on socket {} within {}s; \
+                 try `trusty-search start` manually to see the error",
+                client.socket().display(),
+                budget.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Convenience wrapper: returns a contextualized error on failure.
@@ -229,8 +285,20 @@ mod tests {
         );
     }
 
-    use std::sync::Mutex;
-    static INDEX_DEVICE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// #6285: the socket wait fails closed on a scratch socket nothing serves,
+    /// names that socket, and never falls back to TCP.
+    #[tokio::test]
+    async fn ensure_daemon_up_names_the_socket_when_it_never_answers() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let client = DaemonClient::at(&socket);
+        let err = wait_for_socket(&client, Duration::from_millis(600))
+            .await
+            .expect_err("nothing answers the scratch socket");
+        let text = err.to_string();
+        assert!(text.contains(&socket.display().to_string()), "{text}");
+        assert!(!text.contains("http://"), "{text}");
+    }
 
     /// Why: as of trusty-search 0.3.55 the indexing flow defaults to `auto`
     /// because the embedder now registers CoreML with
@@ -240,10 +308,10 @@ mod tests {
     /// asserts it returns `"auto"`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn resolve_indexing_device_defaults_to_auto() {
-        let _guard = INDEX_DEVICE_ENV_LOCK.lock().unwrap();
         let prev = std::env::var("TRUSTY_INDEX_DEVICE").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
+        // SAFETY: serialised by `#[serial]`.
         unsafe { std::env::remove_var("TRUSTY_INDEX_DEVICE") };
         assert_eq!(resolve_indexing_device(), "auto");
         unsafe {
@@ -260,10 +328,10 @@ mod tests {
     /// lowercased value is echoed.
     /// Test: this test.
     #[test]
+    #[serial_test::serial] // #5937: the crate's one env group
     fn resolve_indexing_device_honours_env_override() {
-        let _guard = INDEX_DEVICE_ENV_LOCK.lock().unwrap();
         let prev = std::env::var("TRUSTY_INDEX_DEVICE").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
+        // SAFETY: serialised by `#[serial]`.
         unsafe { std::env::set_var("TRUSTY_INDEX_DEVICE", "GPU") };
         assert_eq!(resolve_indexing_device(), "gpu");
         unsafe { std::env::set_var("TRUSTY_INDEX_DEVICE", "auto") };

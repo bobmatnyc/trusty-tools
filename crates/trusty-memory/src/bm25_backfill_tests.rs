@@ -313,6 +313,8 @@ fn palace_docs_reads_the_drawer_table() {
 /// Test: this test itself.
 #[test]
 fn startup_backfill_respects_the_opt_out() {
+    // #5937: mutates TRUSTY_BM25_NO_BACKFILL; serialise on the crate-wide env lock.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     assert_eq!(ENV_NO_BACKFILL, "TRUSTY_BM25_NO_BACKFILL");
     let prev = std::env::var(ENV_NO_BACKFILL).ok();
 

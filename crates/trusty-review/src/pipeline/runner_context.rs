@@ -97,7 +97,8 @@ pub(crate) async fn gather_context(
     let query = query_parts.join(" ");
 
     let search_fut = async {
-        if query.is_empty() {
+        // #8411: an empty index is "no index" — the gate already labelled the review.
+        if query.is_empty() || config.search_index.is_empty() {
             return Ok(Vec::new());
         }
         match deps
@@ -127,6 +128,9 @@ pub(crate) async fn gather_context(
         let Some(ref analyze) = deps.analyze else {
             return (Vec::new(), Vec::new());
         };
+        if config.search_index.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
         if !analyze.has_analysis(&config.search_index).await {
             debug!("trusty-analyze not available or has no index — skipping");
             return (Vec::new(), Vec::new());

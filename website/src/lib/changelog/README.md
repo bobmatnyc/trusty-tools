@@ -15,12 +15,12 @@ and organised.** Nothing here writes to, generates, or edits a
 
 Exactly the crates in `RELEASED_FLAGSHIPS` (`../site.ts`, the `FLAGSHIPS`
 entries whose `Tool.released` is true): `trusty-search`, `trusty-memory`,
-`trusty-mpm`, `trusty-analyze`, `trusty-review`, `trusty-git-analytics`.
-`trusty-audit` is a flagship with a page and a card and is deliberately absent:
-it has no release yet, and a section for it would render empty — which is the
-exact state the `CHANGELOG-NO-RELEASES` gate exists to stop. The other crates'
-changelogs are read in the repository by the people who need them; `/whats-new`
-links to `crates/` and stops there.
+`trusty-mpm`, `trusty-analyze`, `trusty-review`. A flagship with no release
+yet is deliberately absent — a section for it would render empty, which is
+the exact state the `CHANGELOG-NO-RELEASES` gate exists to stop. `tga` and
+`trusty-audit` moved to their own site in #8507 and, with them, out of
+`FLAGSHIPS` entirely. The other crates' changelogs are read in the repository
+by the people who need them; `/whats-new` links to `crates/` and stops there.
 
 ## Modules
 

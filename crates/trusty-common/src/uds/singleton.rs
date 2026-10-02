@@ -39,13 +39,31 @@
 //! server with a wrong-mode socket would be misread as a corpse and unlinked
 //! out from under itself.
 //!
+//! 🔴 Invariant (#8759): every caller runs its whole lstat → probe → unlink →
+//! bind → listen sequence while holding an exclusive, non-blocking `flock` on
+//! `<socket>.lock`. Without it, two starters could both prove the same corpse
+//! dead and both unlink and bind — the second unlinking the first's fresh
+//! socket — or one could probe the other's socket in the gap between `bind`
+//! and `listen`, where a connect is refused, and read it as a corpse. Either
+//! way both returned `Ok` and both served. Under the lock, a binder sees only a
+//! socket another binder finished listening on, so the probe refuses it; a
+//! binder that finds the lock held refuses with
+//! [`UdsSecurityError::BindInProgress`]; and one that cannot take the lock at
+//! all refuses with [`UdsSecurityError::BindLock`] instead of binding unlocked.
+//! The lock file is never removed: unlinking it while another process has it
+//! open would let a third lock a fresh inode alongside. Like the socket path,
+//! the lock path is never followed through a symlink, and anything but a
+//! regular file there refuses with [`UdsSecurityError::BindLock`].
+//!
 //! `trusty-agents`' `CtrlSocket::bind_singleton` predates this and still carries
 //! its own copy; migrating it is a separate change, not a side effect of one
 //! that adds two new bind sites.
 //!
 //! Test: `tests.rs` — `bind_singleton_*` and `takeover_verdict_*`.
 
-use std::path::Path;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::net::UnixListener;
@@ -124,15 +142,49 @@ pub(crate) fn classify_takeover(
 /// because two listeners on one socket means every delivery goes to whichever
 /// the kernel picks. [`UdsSecurityError::NotASocketFile`] when the path holds
 /// something that is not a socket, which this function refuses rather than
-/// deletes (#7312). Otherwise any [`super::bind_hardened`] error.
+/// deletes (#7312). [`UdsSecurityError::BindInProgress`] when another process
+/// holds the bind lock, and [`UdsSecurityError::BindLock`] when the lock cannot
+/// be taken at all (#8759). Otherwise any [`super::bind_hardened`] error.
 ///
 /// Test: `bind_singleton_takes_over_a_stale_socket_file`,
+/// `bind_singleton_racing_takeover_leaves_exactly_one_owner`,
+/// `bind_singleton_refuses_while_another_binder_holds_the_lock`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
+/// `bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path`,
+/// `bind_singleton_releases_the_bind_lock_when_it_returns`,
 /// `bind_singleton_refuses_a_socket_someone_is_serving`,
 /// `bind_singleton_refuses_a_regular_file_and_leaves_it_on_disk`,
 /// `bind_singleton_hardened_refuses_a_symlink_to_a_dead_socket`,
 /// `bind_singleton_hardened_refuses_a_symlink_to_a_live_socket`,
 /// `bind_singleton_binds_a_fresh_path`.
 pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
+    bind_singleton_with(path, || async {}).await
+}
+
+/// [`bind_singleton_hardened`]'s body, with a hook run after the takeover
+/// decision and before the unlink.
+///
+/// Why: the #8759 race lives between "the probe proved this socket dead" and
+/// "unlink it and bind"; a test forces a second binder into exactly that gap
+/// by running it inside `before_takeover`, with no sleep standing in for the
+/// interleaving.
+/// What: identical to [`bind_singleton_hardened`]; `before_takeover` runs only
+/// on the [`TakeoverVerdict::TakeOver`] arm.
+/// Test: `bind_singleton_racing_takeover_leaves_exactly_one_owner`.
+pub(crate) async fn bind_singleton_with<F, Fut>(
+    path: &Path,
+    before_takeover: F,
+) -> Result<UnixListener, UdsSecurityError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    // #8759: the lock lives beside the socket, so the directory is hardened
+    // first; the guard is held to the end of this function, past `listen`.
+    super::check_sun_path_budget(path)?;
+    super::prepare_socket_dir(super::socket_parent(path)?)?;
+    let _bind_lock = lock_for_bind(path)?;
+
     // #7312: `lstat`, not `Path::exists` — the latter follows a symlink and
     // answers only "is something there", which is one of the two inputs the
     // decision below needs. A stat that fails for any other reason is left to
@@ -156,6 +208,7 @@ pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSec
         };
         match classify_takeover(is_socket, verdict) {
             TakeoverVerdict::TakeOver => {
+                before_takeover().await;
                 // A corpse from a child that died without cleaning up. Removing
                 // it is the whole point of this function; a failure to remove it
                 // is reported by the bind that follows.
@@ -186,4 +239,93 @@ pub async fn bind_singleton_hardened(path: &Path) -> Result<UnixListener, UdsSec
         }
     }
     bind_hardened(path)
+}
+
+/// Take the exclusive, non-blocking bind lock beside `path`.
+///
+/// Why: #8759 — see the invariant in the module doc. Like every other path
+/// this module touches (#7312), the lock path must never be followed through a
+/// symlink: a followed link would create and lock the link's target instead.
+/// What: opens `<path>.lock` with `O_NOFOLLOW` (created `0600`, never
+/// truncated, never removed), refuses the descriptor unless `fstat` says it is
+/// a regular file, then `try_lock`s it. Contention is
+/// [`UdsSecurityError::BindInProgress`]; a symlink, a non-regular file, or any
+/// I/O failure is [`UdsSecurityError::BindLock`] naming the lock path. The
+/// returned file holds the lock until dropped.
+/// Test: `bind_singleton_refuses_while_another_binder_holds_the_lock`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`,
+/// `bind_singleton_refuses_a_symlink_to_a_file_at_the_lock_path`,
+/// `bind_singleton_refuses_a_dangling_symlink_at_the_lock_path`,
+/// `bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path`,
+/// `bind_singleton_refuses_a_fifo_at_the_lock_path`,
+/// `bind_singleton_releases_the_bind_lock_when_it_returns`.
+fn lock_for_bind(path: &Path) -> Result<File, UdsSecurityError> {
+    let lock_path = bind_lock_path(path);
+    let refuse = |source| UdsSecurityError::BindLock {
+        path: lock_path.clone(),
+        source,
+    };
+    // #8759 review: `O_NOFOLLOW` makes the kernel refuse a symlink in the final
+    // component inside the same `open` that creates the file, so there is no
+    // lstat-then-open window. `O_NONBLOCK` keeps a planted FIFO from parking
+    // the open; the descriptor is only ever `flock`ed, never read.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&lock_path)
+        .map_err(|err| refuse(explain_lock_open_failure(&lock_path, err)))?;
+    // #8759 review: `fstat` on the opened descriptor, not a path stat, so the
+    // file checked is the file locked.
+    let file_type = file.metadata().map_err(refuse)?.file_type();
+    if !file_type.is_file() {
+        return Err(refuse(not_a_regular_file(&file_type)));
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(UdsSecurityError::BindInProgress {
+            path: path.to_path_buf(),
+        }),
+        Err(TryLockError::Error(source)) => Err(refuse(source)),
+    }
+}
+
+/// Reword a failed lock-file `open` by what occupies the lock path.
+///
+/// Why: `O_NOFOLLOW` reports a symlink as `ELOOP` (`EMLINK` on FreeBSD) and a
+/// directory as `EISDIR`, neither of which says why the bind was refused.
+/// What: an `lstat` of `lock_path` picks the message — a symlink or any other
+/// non-regular file gets a named reason; anything else keeps the OS error. The
+/// `open` already refused; this stat decides only the wording, never the
+/// outcome.
+/// Test: `bind_singleton_refuses_a_symlink_to_a_directory_at_the_lock_path`,
+/// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_opened`.
+fn explain_lock_open_failure(lock_path: &Path, err: std::io::Error) -> std::io::Error {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::io::Error::new(
+            err.kind(),
+            format!("is a symlink; refusing to follow it ({err})"),
+        ),
+        Ok(meta) if !meta.file_type().is_file() => not_a_regular_file(&meta.file_type()),
+        _ => err,
+    }
+}
+
+/// The error for a lock path held by something other than a regular file.
+fn not_a_regular_file(file_type: &std::fs::FileType) -> std::io::Error {
+    let found = super::dir::describe_file_type(file_type);
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("exists and is a {found}, not a regular file"),
+    )
+}
+
+/// `<path>.lock`: the bind lock's file, beside the socket it guards.
+pub(crate) fn bind_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }

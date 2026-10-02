@@ -600,6 +600,12 @@ pub struct ManagedSessionSummary {
     /// `commands::managed_tests`.
     #[serde(default)]
     pub auto_resume_parked: Option<String>,
+    /// The record's fleet role (#8942), mirroring
+    /// `daemon::managed_routes::SessionSummary::kind`. `None` from a
+    /// pre-#8942 daemon, which never sends it.
+    /// Test: `managed_session_summary_carries_the_kind`.
+    #[serde(default)]
+    pub kind: Option<crate::session_manager::SessionKind>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).
@@ -663,6 +669,8 @@ pub struct ManagedStoreHealth {
 /// Test: `decommission_outcome_round_trips_daemon_response`,
 /// `decommission_outcome_keeps_unmodelled_daemon_fields`.
 #[derive(Debug, Clone, Deserialize)]
+// #7660 owner ruling 2026-09-24: a later field is not a semver break.
+#[non_exhaustive]
 pub struct ManagedDecommissionOutcome {
     /// The post-tombstone session summary (`state = decommissioned`,
     /// `workspace_path = None`).
@@ -684,6 +692,16 @@ pub struct ManagedDecommissionOutcome {
     /// `git worktree prune`; `None` for adopted/local-path sessions.
     #[serde(default)]
     pub workspace_path_was: Option<String>,
+    /// #7660: why the daemon kept a workspace — a tm tree it declined to
+    /// remove, or, under `--force`, a workspace tm never removes (such as a
+    /// main checkout). `Some` means the decommission declined, and the CLI
+    /// exits non-zero.
+    #[serde(default)]
+    pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes;
+    /// informational, never a failure.
+    #[serde(default)]
+    pub workspace_kept_by_design: Option<String>,
     /// Every response key this client does not model yet.
     ///
     /// Why: an unmodelled key is the exact shape of #5899 — the daemon sends

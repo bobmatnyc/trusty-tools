@@ -90,6 +90,8 @@ pub async fn remove_account(client: &BaseClient, args: Value) -> Result<Value> {
     Ok(json!({
         "removed": outcome.removed,
         "reassigned_default": outcome.reassigned_default,
+        // #8539: a kept user-level entry for another account now serves `name`.
+        "user_entry_remains": outcome.user_entry_remains,
         "accounts": accounts_json(client)?,
     }))
 }

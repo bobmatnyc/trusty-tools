@@ -1,17 +1,20 @@
-//! The combined-PR proof for #6287: one live socket, four consumers agree.
+//! The combined-PR proof for #6287: one live socket, every consumer agrees.
 //!
 //! Why: the design review made this daemon's transport swap and every crate
 //! that dialled its port ONE pull request, because a gap between them on `main`
 //! is the #4246 false-`down` class — `tctl` reads a healthy daemon as down,
 //! `verify_tail::needs_kickstart` turns that into `launchctl kickstart -k`, and
-//! every `tctl install` hard-restarts a daemon that was working. Four crates
-//! each testing their own half cannot catch that: the gap IS the disagreement
+//! every `tctl install` hard-restarts a daemon that was working. Crates each
+//! testing their own half cannot catch that: the gap IS the disagreement
 //! between them.
 //!
-//! Four consumers dial `analyze.health` by literal, none with a Cargo edge on
-//! this crate — `trusty-console`'s `AnalyzeConnector`, `tctl`'s health probe,
-//! `tga`'s audit guard, and `trusty-audit`'s grounding guard. Each names the
-//! method in a private constant whose doc comment points here. So this test
+//! Two in-tree consumers dial `analyze.health` by literal, neither with a Cargo
+//! edge on this crate — `trusty-console`'s `AnalyzeConnector` and `tctl`'s
+//! health probe. Each names the method in a private constant whose doc comment
+//! points here. (`tga`'s audit guard and `trusty-audit`'s grounding guard were
+//! the other two; both crates moved to bobmatnyc/trusty-git-analytics, owner
+//! ruling 2026-09-28, and are checked against the published trusty-analyze
+//! there.) So this test
 //! binds the real `service::rpc` router on the derived path and asks each
 //! consumer's own public entry point what it sees. A literal that drifted from
 //! [`trusty_analyze::service::METHOD_HEALTH`] answers `method_not_found`, which
@@ -19,15 +22,15 @@
 //! catch.
 //!
 //! Path resolution runs through `TRUSTY_DATA_DIR_OVERRIDE`, deliberately: the
-//! point is that all five sides derive the SAME path from the SAME entry point.
+//! point is that every side derives the SAME path from the SAME entry point.
 //! Pointing each at a socket by hand would prove the wire format and silently
 //! skip the thing most likely to drift.
 //!
 //! #8341: this file used to be `crates/trusty-analyze/tests/uds_consumer_contract.rs`,
-//! and the four consumers were `[dev-dependencies]` of trusty-analyze — about
+//! and the consumers were `[dev-dependencies]` of trusty-analyze — about
 //! 135 crates added to every `cargo test -p trusty-analyze` and every
-//! `cargo clippy -p trusty-analyze --all-targets`, in every worktree. Here all
-//! five crates are NORMAL dependencies, so the contract is proven at the same
+//! `cargo clippy -p trusty-analyze --all-targets`, in every worktree. Here
+//! every crate is a NORMAL dependency, so the contract is proven at the same
 //! cost to whoever runs it and at none to anyone else.
 //!
 //! Test: `every_consumer_sees_a_live_uds_daemon_as_healthy`,
@@ -49,22 +52,7 @@ use trusty_installer::commands::probe_http::{ProbeOutcome, probe_daemon_http};
 // `#[serial]`. A `std::sync::Mutex` guard would be held across an `.await`,
 // which clippy refuses and which can deadlock a current-thread runtime.
 
-/// The socket overrides each consumer reads before falling back to the derived
-/// path.
-///
-/// Why they are CLEARED rather than set: a developer with either exported
-/// points that consumer at their own running daemon, and the test would then
-/// assert against a socket it never bound. Clearing them is what makes every
-/// side fall through to `TRUSTY_DATA_DIR_OVERRIDE`, which is the agreement
-/// under test.
-const SOCKET_OVERRIDES: [&str; 2] = [
-    // tga's `audit::AnalyzeGuard`.
-    "PR_INTELLIGENCE_ANALYZER_SOCKET",
-    // trusty-audit's `grounding::daemons`.
-    "TRUSTY_ANALYZE_SOCKET",
-];
-
-/// Restores `PATH` and clears the data-dir and socket overrides when dropped.
+/// Restores `PATH` and clears the data-dir override when dropped.
 ///
 /// Why `Drop` rather than cleanup at the end of the test body: the body only
 /// reaches its end when every assertion passed — exactly the case where cleanup
@@ -83,10 +71,7 @@ impl EnvGuard {
     ///
     /// Why the stub: `AnalyzeConnector::detect` short-circuits to `Absent` when
     /// the binary is not installed, which on a CI runner it is not. Nothing
-    /// executes it — only `which` looks at it on the healthy path — so an inert
-    /// script is enough. `tga` and `trusty-audit` would spawn it if the daemon
-    /// were absent, which is why the absent-daemon test below does not call
-    /// them.
+    /// executes it — only `which` looks at it — so an inert script is enough.
     fn point_at(root: &Path) -> Self {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).expect("create stub bin dir");
@@ -107,9 +92,6 @@ impl EnvGuard {
                 format!("{}:{}", bin.display(), original_path.to_string_lossy()),
             );
             std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", root);
-            for var in SOCKET_OVERRIDES {
-                std::env::remove_var(var);
-            }
         }
         Self { original_path }
     }
@@ -138,10 +120,9 @@ impl Drop for SocketGuard {
 /// A loopback stub answering `GET /health` with 200.
 ///
 /// Why: `analyze.health` reports `status: "ok"` only when its own trusty-search
-/// dependency is reachable, and both `tga` and `trusty-audit` refuse anything
-/// short of `"ok"` — a degraded daemon serves an empty hotspot list, which
-/// reads as "nothing complex" rather than as an outage. So the contract cannot
-/// be asserted at all without a reachable search daemon.
+/// dependency is reachable, and the consumers read anything short of `"ok"`
+/// as not healthy. So the contract cannot be asserted at all without a
+/// reachable search daemon.
 /// What: serves `GET /health` from axum on `127.0.0.1:0`. axum rather than a
 /// hand-written response because `TrustySearchClient` dials with
 /// `http2_prior_knowledge()` — a raw HTTP/1.1 reply is never read, and the
@@ -212,8 +193,8 @@ async fn wait_until_serving(socket: &Path) {
     panic!("nothing came up on {}", socket.display());
 }
 
-/// REGRESSION (#6287, #4246): with trusty-analyze serving its socket, all four
-/// consumers must report it healthy.
+/// REGRESSION (#6287, #4246): with trusty-analyze serving its socket, every
+/// consumer must report it healthy.
 ///
 /// Why: this is the assertion the combined PR exists to make. A consumer left
 /// on the retired TCP port 7879 reads `Refused` — one of the two variants
@@ -287,34 +268,6 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
          `launchctl kickstart -k` (#4246)"
     );
 
-    // ── Consumer 3: tga's audit guard ────────────────────────────────────────
-    // A healthy probe returns before the guard spawns anything, which is the
-    // whole assertion: a drifted literal would send it spawning a second daemon
-    // on top of the one already serving.
-    let guard = tga::audit::AnalyzeGuard::from_env().expect("resolve the guard");
-    assert_eq!(guard.socket, socket, "tga must derive the same path");
-    tga::audit::ensure_analyze_daemon_with(&guard)
-        .await
-        .expect("tga must accept a live, search-reachable daemon");
-
-    // ── Consumer 4: trusty-audit's grounding guard ───────────────────────────
-    let mut tools = trusty_audit::grounding::Tools::pinned(
-        PathBuf::from("trusty-search"),
-        PathBuf::from("trusty-analyze"),
-    );
-    // #6285: trusty-audit reaches trusty-search over a socket now, and this
-    // case exercises its ANALYZE guard alone. Point the search half at a path
-    // nothing binds, so a future edit that made ensure_analyze dial it fails
-    // here rather than reaching whatever daemon the machine happens to run.
-    tools.search_socket = tmp.path().join("absent-search.sock");
-    assert_eq!(
-        tools.analyze_socket, socket,
-        "trusty-audit must derive the same path"
-    );
-    trusty_audit::grounding::daemons::ensure_analyze(&tools)
-        .await
-        .expect("trusty-audit must accept a live, search-reachable daemon");
-
     let _ = shutdown_tx.send(());
     serving.await.expect("join").expect("serve cleanly");
     // `SocketGuard` and `EnvGuard` clean up on the way out, panic or not.
@@ -325,13 +278,6 @@ async fn every_consumer_sees_a_live_uds_daemon_as_healthy() {
 /// one fails it. It also pins the asymmetry `tctl` depends on — an absent
 /// socket IS confirmed-down, because nothing accepted the connection, which is
 /// the only observation that may authorise a repair.
-///
-/// `tga` and `trusty-audit` are deliberately not called here: both answer an
-/// absent daemon by SPAWNING one, and the binary on `PATH` in this test is an
-/// inert stub. Their absent-daemon arms are covered in their own crates, by
-/// `tga::audit::tests::an_analyze_daemon_that_never_comes_up_refuses_the_audit`
-/// and `trusty_audit::grounding::grounding_tests::
-/// an_analyze_daemon_that_will_not_start_is_a_named_gap`.
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]

@@ -679,9 +679,11 @@ fn a_branchless_worktree_contained_in_a_remote_is_stale() {
     assert_eq!(row.branch, None, "{row:#?}");
     assert_eq!(row.tier, WorktreeTier::Stale, "{row:#?}");
     assert_eq!(row.reasons[0].code, ReasonCode::ContainedInMainline);
+    // #7771 (f): every commit is on an origin ref, so the delete path now
+    // agrees with the view.
     assert!(
-        !row.reclaimable,
-        "the DELETE path still refuses a branchless worktree — only the view is wider"
+        row.reclaimable,
+        "a clean branchless worktree whose commits are all on origin is reclaimable"
     );
 }
 

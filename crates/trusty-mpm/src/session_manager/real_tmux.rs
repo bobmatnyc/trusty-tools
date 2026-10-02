@@ -20,6 +20,7 @@ use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::{ExclusiveCreate, TmuxDriver};
 
 use super::manager::{ManagedError, ManagedTmuxDriver};
+use super::supervisor_floor::SupervisorFloor;
 
 /// Adapter exposing the daemon's [`TmuxDriver`] as a [`ManagedTmuxDriver`].
 ///
@@ -46,9 +47,20 @@ impl RealTmuxDriver {
             TmuxDriver::discover().map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         Ok(Self { driver })
     }
+
+    /// Wrap an already-built driver — tests only, for a scripted fake tmux.
+    #[cfg(test)]
+    pub(crate) fn from_driver_for_test(driver: TmuxDriver) -> Self {
+        Self { driver }
+    }
 }
 
 impl ManagedTmuxDriver for RealTmuxDriver {
+    /// #8942: signal under the same floor the wrapped driver kills under.
+    fn supervisor_floor(&self) -> SupervisorFloor {
+        self.driver.supervisor_floor().clone()
+    }
+
     /// Overrides the trait's no-op default so the production path actually
     /// starts the tmux server when it is not yet running (#3823).
     fn ensure_server_up(&self) -> Result<(), ManagedError> {
@@ -92,7 +104,13 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.apply_scrollback_options();
     }
 
+    /// #8942: the floor's refusal comes back typed, as
+    /// [`ManagedError::KillRefused`], so a teardown aborts on it.
     fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        let floor = self.driver.supervisor_floor();
+        if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session") {
+            return Err(ManagedError::KillRefused(why));
+        }
         self.driver
             .kill_session(name)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
@@ -244,6 +262,31 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_id(name)
     }
 
+    /// #9004: one `display-message -t %N`, parsed strictly — a missing pane
+    /// answers exit 0 with empty fields, which parses as `Err`.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        let line = self
+            .driver
+            .pane_identity_line(pane_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        super::pane_identity::PaneIdentity::parse(pane_id, &line)
+            .map_err(ManagedError::TmuxUnavailable)
+    }
+
+    /// #9004: `kill-session -t $N`, after the floor answers for `name`.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        let floor = self.driver.supervisor_floor();
+        if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session_id") {
+            return Err(ManagedError::KillRefused(why));
+        }
+        self.driver
+            .kill_session_id(name, session_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// Report the runtime ready when the `claude` child PID has appeared under
     /// the pane shell (overrides the trait's weaker `session_exists` default;
     /// issue #1903 / #1299).
@@ -260,6 +303,11 @@ impl ManagedTmuxDriver for RealTmuxDriver {
     /// `tmux` + `claude`); the pure retry loop is unit-tested against the fake.
     fn runtime_ready(&self, name: &str) -> bool {
         crate::core::process::find_claude_pid_in_tmux(name, 1, std::time::Duration::ZERO).is_some()
+    }
+
+    /// #8942: the tri-state probe, pane process included.
+    fn pane_claude(&self, name: &str) -> crate::core::process::PaneClaude {
+        crate::core::process::pane_claude(name)
     }
 
     /// Overrides the no-op trait default so the production path actually calls

@@ -564,6 +564,8 @@ mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
 mod last_used_tests;
+// #8733: the maintenance tools refuse without the maintenance lease.
+mod lease_refusal_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.
 mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
@@ -1067,14 +1069,12 @@ async fn dispatch_discover_aliases_inserts_new_and_dedupes() {
         .await
         .expect("palace_create");
 
-    // Use the live workspace root so the discovery actually finds
-    // something. CARGO_MANIFEST_DIR points at the crate dir; walk up
-    // twice to the workspace root.
-    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .to_path_buf();
+    // A self-contained workspace fixture carrying the `tga` package alias
+    // (tga left this workspace, PR #8824). Separate from `_tmp`, which holds
+    // the palace data.
+    let fixture = tempfile::tempdir().expect("fixture tempdir");
+    crate::discovery::write_tga_workspace_fixture(fixture.path());
+    let workspace_root = fixture.path().to_path_buf();
 
     let first = dispatch_tool(
         &state,
@@ -3694,37 +3694,44 @@ async fn chat_kg_assert_tool_allows_cold_predicates_at_cap() {
     assert_eq!(res["status"], "asserted", "{res}");
 }
 
-/// Why (#4888): `kuzu-migrate` imports `relation_type` verbatim from a legacy
-/// file, so a legacy vocabulary colliding with a hot predicate would land on
-/// the always-injected surface. A bulk legacy import is not a deliberate act
-/// of authoring a standing rule (ADR-0028 D8 point 3), so that path refuses
-/// hot predicates outright rather than counting free slots — which leaves no
-/// cap arithmetic to get wrong, and no enumeration that could fail open.
-/// Cold relation types, which is every one in practice, still import
-/// regardless of length.
+/// Why (#4888, #277): the kuzu-memory importer copies relationship types from
+/// a legacy store, and a type colliding with a hot predicate would land on the
+/// always-injected surface. A bulk import is not a deliberate act of authoring
+/// a standing rule (ADR-0028 D8 point 3), so no predicate it writes may be hot.
+/// What: `commands::kuzu_import` writes only `has_name`, `entity_type`,
+/// `mentions` and `relates_to[:<type>]`; the fixed prefix keeps even a store
+/// type spelled exactly like a hot predicate cold.
+/// Test: itself.
 #[test]
-fn kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones() {
-    use crate::prompt_facts::is_hot_predicate;
+fn kuzu_import_never_writes_a_hot_predicate() {
+    use crate::commands::kuzu_import::bridge::KuzuEntityRow;
+    use crate::commands::kuzu_import::mapping::{entity_triples, relates_to_predicate};
+    use crate::prompt_facts::{is_hot_predicate, HOT_PREDICATES};
 
-    // The importer's guard is exactly `is_hot_predicate`, so every Tier S
-    // predicate is refused.
-    for p in crate::prompt_facts::HOT_PREDICATES {
-        assert!(is_hot_predicate(p), "{p} must be refused by kuzu-migrate");
+    let entity = KuzuEntityRow {
+        id: Some("e0".to_string()),
+        name: Some("Widget".to_string()),
+        entity_type: Some("thing".to_string()),
+    };
+    let mut written: Vec<String> = entity_triples(&entity)
+        .0
+        .into_iter()
+        .map(|t| t.predicate)
+        .collect();
+    assert_eq!(written, ["has_name", "entity_type"]);
+    written.push("mentions".to_string());
+    written.push(relates_to_predicate(None));
+    // `alias_of` is the near-miss: it reads like the hot `is_alias_for`.
+    for kind in ["follows", "alias_of", "not a token!"] {
+        written.push(relates_to_predicate(Some(kind)));
     }
-
-    // Relation types a legacy kuzu-memory store actually carries are cold, so
-    // ordinary imports are unaffected. `alias_of` is the near-miss worth
-    // pinning: it reads like an alias but is not the hot `is_alias_for`.
-    for p in [
-        "relates_to",
-        "mentions",
-        "derived_from",
-        "part_of",
-        "alias_of",
-    ] {
+    for hot in HOT_PREDICATES {
+        written.push(relates_to_predicate(Some(hot)));
+    }
+    for p in &written {
         assert!(
             !is_hot_predicate(p),
-            "{p} is an ordinary relation type and must still import",
+            "kuzu import would write hot predicate {p}"
         );
     }
 }

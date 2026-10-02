@@ -422,7 +422,9 @@ pub fn socket_path() -> Result<PathBuf> {
 ///
 /// When the socket cannot be bound — including
 /// `UdsSecurityError::AlreadyServing`, which means another trusty-memory is
-/// live on this path and this process must not start.
+/// live on this path and this process must not start. #8759: likewise
+/// `BindInProgress` (a concurrent starter holds the bind lock) and `BindLock`
+/// (the lock could not be taken); none of the three is downgraded to a warning.
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
@@ -434,7 +436,12 @@ pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
     // part of serving.
     remove_retired_discovery_files();
 
-    serve_with_shutdown(state, socket, trusty_common::shutdown_signal()).await
+    // #8314: teardown's bound counts the grace window from the signal.
+    let shutdown = async {
+        trusty_common::shutdown_signal().await;
+        crate::exit_runtime::note_shutdown_requested();
+    };
+    serve_with_shutdown(state, socket, shutdown).await
 }
 
 /// [`serve`]'s body, with the shutdown future supplied by the caller.

@@ -36,6 +36,7 @@ use crate::memory_core::store::concurrent_open::{
 };
 use crate::memory_core::store::hnsw_store::HnswStore;
 use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
+use crate::memory_core::store::write_deadline::palace_label;
 
 /// Bundle of state shared between every `UsearchStore` clone that points
 /// at the same canonical path.
@@ -343,7 +344,9 @@ impl UsearchStore {
         let read_only = db_state.mode.is_read_only();
         let inner = Arc::new(
             HnswStore::open_with_mode(db_state.db.clone(), dim, read_only)
-                .with_context(|| format!("open HnswStore at {}", redb_path.display()))?,
+                .with_context(|| format!("open HnswStore at {}", redb_path.display()))?
+                // #8749: a deadline abort on this store names its palace.
+                .with_palace(palace_label(&redb_path)),
         );
 
         // One-shot migration from the legacy `.usearch` file, if any. The

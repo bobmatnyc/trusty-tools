@@ -52,8 +52,7 @@ use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 /// `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
 /// in `start_tests.rs`.
 pub(crate) async fn start_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dir: Option<String>,
 ) -> anyhow::Result<()> {
     let path = resolve_dir(dir)?;
@@ -76,7 +75,7 @@ pub(crate) async fn start_session(
             // `session start` has no `--deliverable` surface of its own (#2379).
             deliverable: None,
         };
-        crate::commands::managed_route::run(client, url, &new_action).await?;
+        crate::commands::managed_route::run(daemon, &new_action).await?;
         return Ok(());
     }
 
@@ -92,7 +91,29 @@ pub(crate) async fn start_session(
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    start_session_in_place(client, url, &path, &fw, dirs::home_dir().as_deref()).await
+    start_session_in_place(daemon, &path, &fw, dirs::home_dir().as_deref()).await
+}
+
+/// The launch spec `tm session start` starts its in-place pane with (#8405,
+/// #8308).
+///
+/// Why: the one seam where the in-place start turns the config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`trusty_mpm::runtime::cli_launch::inplace_spec`] rooted at `cwd`,
+/// carrying `prompt_file` as `--append-system-prompt-file` (#8286), with
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
+/// Test: `inplace_session_spec_follows_the_configured_renderer`,
+/// `inplace_session_spec_carries_the_prompt_file`.
+pub(crate) fn inplace_session_spec(
+    cwd: &std::path::Path,
+    config_root: &std::path::Path,
+    prompt_file: &std::path::Path,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    trusty_mpm::runtime::cli_launch::inplace_spec(
+        cwd,
+        prompt_file,
+        trusty_mpm::core::alt_screen::configured_alternate_screen_at(config_root),
+    )
 }
 
 /// Refuse a launch from a directory that belongs to no git project (#4832).
@@ -139,17 +160,17 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// production behavior is unchanged.
 /// What: runs `prepare_session` (deploys agents AND skills — printing both
 /// `deploy_summary_line` counts, #1917 — merges CLAUDE.md, prints the
-/// catch-up digest), writes the PM prompt file and builds the launch line
-/// ([`inplace_launch_line`], #8286 — a write failure refuses the launch before
-/// anything is registered), registers via `POST /sessions`, then creates a
-/// detached tmux session rooted at `path` and starts `claude` in it.
+/// catch-up digest), writes the PM prompt file ([`inplace_prompt_file`],
+/// #8286 — a write failure refuses the launch before anything is registered),
+/// registers via `POST /sessions`, then creates a detached tmux session rooted
+/// at `path` and starts `claude` in it from [`inplace_session_spec`], which
+/// carries that file as `--append-system-prompt-file`.
 /// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
 /// in `start_tests.rs` covers the routing decision hermetically; the tmux/daemon
 /// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
 /// this function inherited unchanged.
 async fn start_session_in_place(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     path: &std::path::Path,
     fw: &trusty_mpm::core::paths::FrameworkPaths,
     // #5544: the USER-GLOBAL home `prepare_session` seeds `~/.claude.json` and
@@ -236,7 +257,7 @@ async fn start_session_in_place(
     // #8286: the PM prompt goes to `claude` as `--append-system-prompt-file`,
     // like every other PM launch mode. Built before `POST /sessions`, so a
     // prompt that cannot be written refuses the launch with nothing registered.
-    let claude_cmd = inplace_launch_line(
+    let prompt_file = inplace_prompt_file(
         path,
         native,
         trusty_mpm::core::model_inject::write_prompt_file,
@@ -247,8 +268,8 @@ async fn start_session_in_place(
         #[serde(default)]
         name: String,
     }
-    let body: Body = client
-        .post(format!("{url}/sessions"))
+    let body: Body = daemon
+        .post("/sessions")
         .json(&serde_json::json!({
             "project": path,
             "project_path": path,
@@ -281,20 +302,28 @@ async fn start_session_in_place(
                     body.name
                 );
             }
-            // `claude_cmd` was built by `inplace_launch_line` above (#8286).
-            let send = trusty_mpm::core::tmux::send_line(
-                None,
-                &trusty_mpm::core::tmux::TmuxTarget::session(&body.name),
-                &claude_cmd,
-            )
-            .map(|output| output.status);
-            match send {
-                Ok(s) if s.success() => {
+            // #2997: disclaim the pane's `claude` off the shared tmux server
+            // (same wrapper the daemon + `tm launch`/`connect` paths use).
+            // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
+            // #4467: the launch line itself is built in the LIBRARY
+            // (`model_inject::build_inplace_session_command`) so it carries the
+            // shared inherited-marker scrub and is readable by the
+            // `transcript_saving` doctor check. It used to be hand-built here as
+            // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
+            // launch line that silently saved no transcript.
+            // #8308: the launch travels in a spec under this launch's named root.
+            let root = fw.crate_config_root();
+            // #8405: the config under this launch's named root decides the renderer.
+            // #8286: `prompt_file` was written by `inplace_prompt_file` above.
+            let spec = inplace_session_spec(path, &root, &prompt_file);
+            let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
+            match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
+                Ok(()) => {
                     println!("started session {} (tmux + claude)", body.name);
                 }
-                Ok(_) | Err(_) => {
+                Err(e) => {
                     eprintln!(
-                        "warning: tmux session {} created but failed to start claude",
+                        "warning: tmux session {} created but failed to start claude: {e}",
                         body.name
                     );
                     println!("started session {}", body.name);
@@ -312,46 +341,41 @@ async fn start_session_in_place(
     Ok(())
 }
 
-/// The in-place pane's `claude` line, carrying this project's PM prompt as
-/// `--append-system-prompt-file` (#8286).
+/// Write this project's PM prompt to the file the in-place pane hands
+/// `claude` as `--append-system-prompt-file` (#8286).
 ///
-/// Why: this was the one PM launch mode with no prompt carrier — its line had
-/// no prompt flag, so the session ran on the project `CLAUDE.md` alone. It now
-/// composes the prompt through the same seam the managed spawn and the guided
-/// relaunch use, so the in-place session receives the same instructions. A
-/// prompt that cannot be written refuses the launch, matching #4752's rule that
-/// a session never starts without its compiled instructions; launching without
-/// the flag would silently repeat the defect.
+/// Why: the in-place start was the one PM launch mode with no prompt carrier —
+/// its launch carried no prompt flag, so the session ran on the project
+/// `CLAUDE.md` alone. It now composes the prompt through the same seam the
+/// guided relaunch uses, so the in-place session receives the same
+/// instructions. A prompt that cannot be written refuses the launch, matching
+/// #4752's rule that a session never starts without its compiled instructions;
+/// launching without the flag would silently repeat the defect.
 /// What: composes the prompt with
 /// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
 /// for `path` (no explicit style, the caller's `native` probe), hands it to
 /// `write` (production: [`trusty_mpm::core::model_inject::write_prompt_file`]),
-/// and returns [`trusty_mpm::core::model_inject::build_inplace_session_command`]
-/// for the written path wrapped by
-/// [`trusty_mpm::core::spawn_disclaim::disclaim_pane_command`] (#2997). `Err`
-/// when `write` returns `None`.
-/// Test: `inplace_launch_line_carries_the_written_prompt_file`,
-/// `inplace_launch_line_refuses_when_the_prompt_file_cannot_be_written` in
+/// and returns the written path for [`inplace_session_spec`]. `Err` when
+/// `write` returns `None`.
+/// Test: `inplace_prompt_file_returns_the_written_prompt_file`,
+/// `inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written` in
 /// `start_tests.rs`.
-fn inplace_launch_line(
+fn inplace_prompt_file(
     path: &std::path::Path,
     native: bool,
     write: impl FnOnce(&str) -> Option<std::path::PathBuf>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<std::path::PathBuf> {
     let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
         path, None, native,
     );
-    let Some(prompt_file) = write(&prompt) else {
-        anyhow::bail!(
+    write(&prompt).ok_or_else(|| {
+        anyhow::anyhow!(
             "could not write the PM system-prompt file for {}; refusing to start a \
              session without its instructions (#8286). Check that the temp directory \
              is writable and retry.",
             path.display()
-        );
-    };
-    Ok(trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-        &trusty_mpm::core::model_inject::build_inplace_session_command(&prompt_file),
-    ))
+        )
+    })
 }
 
 // Unit tests live in session/start_tests.rs (test-file budget: 1500 SLOC).

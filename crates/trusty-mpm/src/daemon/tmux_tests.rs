@@ -319,29 +319,40 @@ fn sanitized_pane_row_is_dropped_not_coerced() {
     );
 }
 
-/// The live listing against this host's real tmux server (#6529).
+/// The live listing against a real tmux server (#6529).
 ///
 /// Why: the parse tests above prove the pure function; only a real listing
 /// proves the SPAWN asks tmux for — and receives — the columns, which is where
-/// #6529 actually broke. Read-only: `list-panes` creates and kills nothing.
-/// What: lists every pane on the operator's server and asserts each row carries
-/// a non-empty command and a `%`-prefixed pane id, i.e. that the delimiters
-/// survived. Skips cleanly when no tmux binary or no server is present.
-/// Test: this is the test. `#[ignore]` because it needs the operator's server.
+/// #6529 actually broke.
+/// What: spawns one session on a private server, lists every pane on it and
+/// asserts each row carries a non-empty command and a `%`-prefixed pane id,
+/// i.e. that the delimiters survived. Skips cleanly when no tmux binary runs.
+/// #6542: this listed the operator's own server, and skipped when none ran; a
+/// `PrivateTmuxServer` never reads host state and always holds a row.
+/// Test: this is the test. `#[ignore]` because it needs a live tmux binary.
 #[test]
-#[ignore = "needs the host's live tmux server"]
+#[ignore = "needs a live tmux binary"]
 fn live_listing_keeps_its_columns() {
-    let Ok(driver) = TmuxDriver::discover() else {
+    use crate::test_support::tmux_session::{
+        PrivateTmuxServer, ScratchTmuxSession, reserved_session_name,
+    };
+    let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+    if !ScratchTmuxSession::tmux_available(&tmux_bin) {
         eprintln!("no tmux binary — skipping");
         return;
-    };
+    }
+    let server = PrivateTmuxServer::new(&tmux_bin, "listing");
+    let _session = ScratchTmuxSession::spawn_on_socket(
+        &tmux_bin,
+        Some(server.name()),
+        &reserved_session_name("listing"),
+        "sleep 300",
+    );
+    let driver = TmuxDriver::with_tmux_path_for_test(server.shim_bin());
     let panes = driver
         .list_managed_panes()
         .expect("list_managed_panes must not error against a live server");
-    if panes.is_empty() {
-        eprintln!("no tmux server running — skipping");
-        return;
-    }
+    assert!(!panes.is_empty(), "the private server holds one session");
     for pane in &panes {
         assert!(
             !pane.pane_current_command.is_empty(),
@@ -409,7 +420,7 @@ fn ensure_server_up_issues_start_server_on_a_fresh_socket() {
         log = log.display()
     );
     let bin = write_fake_tmux(dir.path(), "fake-tmux-fresh-socket", &script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     driver
         .ensure_server_up()
@@ -434,7 +445,7 @@ fn ensure_server_up_fails_loudly_when_the_server_never_comes_up() {
     let dir = tempfile::tempdir().unwrap();
     let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-502/default (No such file or directory)' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-always-fails", script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     let err = driver
         .ensure_server_up()
@@ -505,7 +516,7 @@ fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
     let dir = tempfile::tempdir().unwrap();
     let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-501/default (No such file or directory)' >&2\nexit 1\n";
     let bin = write_fake_tmux(dir.path(), "fake-tmux-no-server", script);
-    let driver = TmuxDriver { tmux_path: bin };
+    let driver = TmuxDriver::with_tmux_path_for_test(bin);
 
     let err = driver
         .list_sessions()
@@ -522,9 +533,7 @@ fn list_sessions_errors_on_a_host_whose_tmux_server_never_ran() {
 /// the two cases are distinguishable.
 #[test]
 fn driver_send_command_line_refuses_an_oversized_line() {
-    let driver = TmuxDriver {
-        tmux_path: "/nonexistent/definitely-not-tmux".to_owned(),
-    };
+    let driver = TmuxDriver::with_tmux_path_for_test("/nonexistent/definitely-not-tmux");
     let target = crate::core::tmux::TmuxTarget::session("tm-sess");
 
     let too_long = "x".repeat(crate::core::tmux::MAX_PANE_COMMAND_BYTES + 1);

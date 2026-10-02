@@ -37,7 +37,11 @@ name = "trusty-agents-common"
 # the 0.7.0 baseline (alongside `provenance` and an added enum variant, both
 # already accumulated at 0.7.2 and unpublished). The gate is never advisory
 # (#5050), so this lands where the gate names.
-version = "0.8.2"
+# 0.8.4 -> 0.8.5 (issue #4421): patch — 0.8.4 is already live on crates.io and
+# open PR #8259 changes `src/**`, so this branch opens the next patch version
+# ahead of that PR's rebase. No public item added, removed, or changed shape
+# on main as of this bump.
+version = "0.8.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

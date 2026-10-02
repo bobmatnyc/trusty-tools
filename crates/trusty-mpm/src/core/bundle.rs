@@ -310,12 +310,13 @@ pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str =
 #[path = "bundle_tm_skills.rs"]
 mod tm_skills_inner;
 pub use tm_skills_inner::{
-    TM_ADR, TM_AGENT_ARCHITECTURE, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER, TM_CLI_OPERATIONS,
-    TM_DELEGATION_PATTERNS, TM_DOCTOR, TM_GIT_FILE_TRACKING, TM_INIT, TM_ISSUES_PRUNE, TM_OVERVIEW,
-    TM_POSTMORTEM, TM_PROSE_STYLE, TM_SECRETS, TM_SESSION_MANAGEMENT, TM_SESSION_PAUSE,
-    TM_SESSION_RESUME, TM_SLACK, TM_TEACHING_TEMPLATES, TM_TICKETING,
-    TM_TICKETING_REFERENCES_README, TM_TOOL_USAGE_GUIDE, TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW,
-    TM_WORKFLOW_REFERENCES_README,
+    TM_ADR, TM_AGENT_ARCHITECTURE, TM_ARCHITECT_SETUP, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER,
+    TM_CLI_OPERATIONS, TM_DELEGATION_PATTERNS, TM_DOCTOR, TM_EPIC, TM_EPIC_ANTI_PATTERNS,
+    TM_EPIC_MANUAL_PROCEDURE, TM_EPIC_PHASE_TEMPLATE, TM_EPIC_TRACKER_TEMPLATE,
+    TM_GIT_FILE_TRACKING, TM_INIT, TM_ISSUES_PRUNE, TM_OVERVIEW, TM_POSTMORTEM, TM_PROSE_STYLE,
+    TM_SECRETS, TM_SESSION_MANAGEMENT, TM_SESSION_PAUSE, TM_SESSION_RESUME, TM_SLACK,
+    TM_TEACHING_TEMPLATES, TM_TICKETING, TM_TICKETING_REFERENCES_README, TM_TOOL_USAGE_GUIDE,
+    TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW, TM_WORKFLOW_REFERENCES_README,
 };
 
 // --- tm-capabilities: auto-generated harness capability catalog (issue
@@ -353,6 +354,16 @@ pub const OUTPUT_STYLE_TEACHER: &str =
 pub const OUTPUT_STYLE_RESEARCH: &str =
     include_str!("../assets/output-styles/trusty-mpm-research.md");
 
+/// Fleet-supervisor Claude Code output style (id `trusty-mpm-supervisor`, #8453).
+///
+/// Why: the supervisor acts directly, so it cannot run on a style whose floor
+/// forbids direct work, and CLAUDE.md cannot override an output style. It
+/// carries the "Communication — Write Plainly" section verbatim and no
+/// delegation directive. Selected by the supervisor profile
+/// ([`crate::core::session_profile`]) and refused under the PM profile.
+pub const OUTPUT_STYLE_SUPERVISOR: &str =
+    include_str!("../assets/output-styles/trusty-mpm-supervisor.md");
+
 /// The default output-style id used when none is configured/selected.
 ///
 /// Why: callers (config resolution, settings writer) need a single source of
@@ -386,8 +397,10 @@ pub struct BundledStyle {
 /// up a configured/selected id against this table; a single ordered slice keeps
 /// both behaviours consistent.
 /// What: the professional (`trusty-mpm`), teaching (`trusty-mpm-teacher`), and
-/// research (`trusty-mpm-research`) styles.
-/// Test: `bundle_tests::output_style_registry_has_three_distinct_ids`.
+/// research (`trusty-mpm-research`) PM styles, then the fleet-supervisor style
+/// (`trusty-mpm-supervisor`, #8453). Deploying and `tm doctor` cover all four;
+/// only a supervisor session may select the last.
+/// Test: `bundle_tests::output_style_registry_has_four_distinct_ids`.
 pub const OUTPUT_STYLES: &[BundledStyle] = &[
     BundledStyle {
         id: DEFAULT_OUTPUT_STYLE_ID,
@@ -404,7 +417,24 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
         file_name: "trusty-mpm-research.md",
         content: OUTPUT_STYLE_RESEARCH,
     },
+    BundledStyle {
+        id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
+        file_name: "trusty-mpm-supervisor.md",
+        content: OUTPUT_STYLE_SUPERVISOR,
+    },
 ];
+
+/// The bundled PM output styles: [`OUTPUT_STYLES`] without the supervisor style.
+///
+/// Why (#8453): the PM invariants — the mandatory-delegation floor, the
+/// identity protocol, the TodoWrite section — hold for every style a PM session
+/// can select, and the supervisor style deliberately carries none of them.
+/// Test: `the_pm_styles_are_every_style_but_the_supervisor_style`.
+pub fn pm_output_styles() -> impl Iterator<Item = &'static BundledStyle> {
+    OUTPUT_STYLES
+        .iter()
+        .filter(|s| s.id != crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+}
 
 // BundledArtifact, InstallPolicy, and ALL are defined in bundle_all.rs.
 // They are included here so they can access the constants above via `use super::*`.

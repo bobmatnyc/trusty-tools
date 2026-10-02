@@ -14,7 +14,14 @@
 //!   2. a hold label (`do-not-merge*`, `hold`)
 //!   3. `reviewDecision: CHANGES_REQUESTED`
 //!   4. an unresolved `code-critic` BLOCK in the PR comments
-//!   5. a required status context missing, or not `SUCCESS`, on the head SHA
+//!   5. `mergeable: CONFLICTING` or `mergeStateStatus: DIRTY` — a real
+//!      conflict GitHub already detected; `UNKNOWN` on either field, or
+//!      either field missing from the payload, is pending (GitHub has not
+//!      finished computing it, or the response shape changed) and NEVER
+//!      reads as mergeable (#8670)
+//!   6. a required status context missing, pending, or not `SUCCESS` on the
+//!      head SHA — pending while any run has no result, else judged on its
+//!      latest run (#8638)
 //!
 //! Order matters: the required contexts are the LAST gate, not the first, so a
 //! draft PR reports "draft" rather than "checks pending". Required contexts
@@ -26,6 +33,8 @@
 
 use serde::{Deserialize, Serialize};
 
+// #8638: one rollup entry shape and one latest-run rule, shared with `tm wait`.
+use super::rollup::{RollupEntry, deciding_runs};
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -71,49 +80,6 @@ struct Label {
     name: String,
 }
 
-/// One entry of `statusCheckRollup`.
-///
-/// Why: the rollup mixes two GraphQL types. A `CheckRun` carries `name` +
-/// `status` + `conclusion`; a `StatusContext` carries `context` + `state`.
-/// Deserializing both permissively into one struct keeps the matcher single.
-/// What: every field optional; [`RollupEntry::label`] and
-/// [`RollupEntry::is_success`] normalize across the two shapes.
-/// Test: `queue_required_context_not_success`, `queue_accepts_status_context`.
-#[derive(Debug, Deserialize)]
-struct RollupEntry {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    context: Option<String>,
-    #[serde(default)]
-    conclusion: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-}
-
-impl RollupEntry {
-    /// The context name this entry reports under.
-    fn label(&self) -> Option<&str> {
-        self.name
-            .as_deref()
-            .or(self.context.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Did this check pass?
-    ///
-    /// Why: `SUCCESS` only. `NEUTRAL` and `SKIPPED` are not success, and a
-    /// required context that skipped has not proven anything.
-    /// What: `conclusion == SUCCESS` (CheckRun) or `state == SUCCESS`
-    /// (StatusContext).
-    /// Test: `queue_required_context_not_success`.
-    fn is_success(&self) -> bool {
-        let v = self.conclusion.as_deref().or(self.state.as_deref());
-        v.is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
-    }
-}
-
 /// One PR comment.
 #[derive(Debug, Deserialize)]
 struct Comment {
@@ -132,6 +98,19 @@ struct PrView {
     #[serde(default)]
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    /// `MergeableState`: `MERGEABLE`, `CONFLICTING`, `UNKNOWN`, or absent.
+    ///
+    /// Why (#8670): never requesting this field is how queue-check reported
+    /// MERGEABLE for a PR GitHub itself already marked CONFLICTING.
+    /// `CONFLICTING` lives HERE, never in `mergeStateStatus` — the two enums
+    /// are disjoint, mirroring `tm pr merge`'s `conflict_field` (#6808).
+    #[serde(default)]
+    mergeable: Option<String>,
+    /// `MergeStateStatus`: `DIRTY`, `UNKNOWN`, `BLOCKED`, `BEHIND`,
+    /// `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, or absent. `DIRTY` is the conflict.
+    #[serde(default)]
+    #[serde(rename = "mergeStateStatus")]
+    merge_state_status: Option<String>,
     #[serde(default)]
     #[serde(rename = "statusCheckRollup")]
     rollup: Vec<RollupEntry>,
@@ -148,7 +127,17 @@ struct PrView {
 /// Test: `queue_stop_order_prefers_draft`, `queue_stop_order_prefers_hold`,
 /// `queue_stop_order_prefers_changes_requested`,
 /// `queue_stop_order_prefers_critic_block`,
-/// `queue_required_context_missing`, `queue_required_context_not_success`.
+/// `queue_required_context_missing`, `queue_required_context_not_success`,
+/// `queue_duplicate_cancelled_then_success_is_mergeable`,
+/// `queue_duplicate_success_then_failure_is_blocked`,
+/// `queue_duplicate_success_then_running_is_pending`,
+/// `queue_duplicate_success_then_queued_is_pending`,
+/// `queue_check_and_status_same_name_both_required`,
+/// `queue_mergeable_conflicting_is_blocked`, `queue_merge_state_dirty_is_blocked`,
+/// `queue_mergeable_unknown_is_pending`, `queue_merge_state_unknown_is_pending`,
+/// `queue_mergeable_field_missing_is_pending`,
+/// `queue_merge_state_field_missing_is_pending`,
+/// `queue_mergeable_clean_happy_path_is_admitted`.
 fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if view.is_draft {
         return Some("draft".to_string());
@@ -166,21 +155,26 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     if latest_critic_verdict(&view.comments) == Some(CriticVerdict::Block) {
         return Some("unresolved code-critic BLOCK in the PR comments".to_string());
     }
+    if let Some(reason) = mergeability_reason(view) {
+        return Some(reason);
+    }
     for context in required {
-        match view
-            .rollup
-            .iter()
-            .find(|e| e.label() == Some(context.as_str()))
-        {
-            None => {
-                return Some(format!(
-                    "required context `{context}` is missing on the head SHA"
-                ));
-            }
-            Some(e) if !e.is_success() => {
-                return Some(format!("required context `{context}` is not SUCCESS"));
-            }
-            Some(_) => {}
+        // #8638: the latest run decides, never the first listed, and a
+        // CheckRun and a StatusContext sharing the name must BOTH pass.
+        let runs = deciding_runs(&view.rollup, context);
+        if runs.is_empty() {
+            return Some(format!(
+                "required context `{context}` is missing on the head SHA"
+            ));
+        }
+        if runs.iter().any(|e| e.settled() && !e.is_success()) {
+            return Some(format!("required context `{context}` is not SUCCESS"));
+        }
+        if let Some(e) = runs.iter().find(|e| e.is_unfinished()) {
+            return Some(format!(
+                "required context `{context}` is pending: a run has no result yet {}",
+                e.run_summary()
+            ));
         }
     }
     None
@@ -192,6 +186,61 @@ fn is_hold_label(name: &str) -> bool {
     HOLD_LABELS.iter().any(|h| {
         lower == *h || lower.starts_with(&format!("{h}/")) || lower.starts_with(&format!("{h}:"))
     })
+}
+
+/// Whether GitHub's own `mergeable`/`mergeStateStatus` fields stop this PR.
+///
+/// Why (#8670): queue-check never requested either field, so a PR GitHub
+/// already marked CONFLICTING or DIRTY still reported MERGEABLE — a caller
+/// trusting queue-check alone could attempt, and waste, a doomed merge. `tm
+/// pr merge`'s own `conflict_field` (#6808) is the model for reading the
+/// conflict: `CONFLICTING` lives in `mergeable`, `DIRTY` in
+/// `mergeStateStatus`, and the two enums are disjoint.
+/// What: a real conflict returns a reason naming the field. `UNKNOWN` on
+/// either field, or either field absent from the payload (an unparseable
+/// shape or a truncated response), also returns a reason — GitHub has not
+/// finished computing mergeability, or the field never arrived — so both
+/// fail CLOSED rather than defaulting to mergeable. Only `mergeable:
+/// MERGEABLE` together with `mergeStateStatus` outside `{DIRTY, UNKNOWN}`
+/// (e.g. `CLEAN`) returns `None`.
+/// Test: `queue_mergeable_conflicting_is_blocked`,
+/// `queue_merge_state_dirty_is_blocked`, `queue_mergeable_unknown_is_pending`,
+/// `queue_merge_state_unknown_is_pending`,
+/// `queue_mergeable_field_missing_is_pending`,
+/// `queue_merge_state_field_missing_is_pending`,
+/// `queue_mergeable_clean_happy_path_is_admitted`.
+fn mergeability_reason(view: &PrView) -> Option<String> {
+    let mergeable = view.mergeable.as_deref();
+    let merge_state = view.merge_state_status.as_deref();
+
+    if mergeable.is_some_and(|m| m.eq_ignore_ascii_case("CONFLICTING")) {
+        return Some("mergeable CONFLICTING — resolve with `gh pr update-branch`".to_string());
+    }
+    if merge_state.is_some_and(|s| s.eq_ignore_ascii_case("DIRTY")) {
+        return Some("mergeStateStatus DIRTY — resolve with `gh pr update-branch`".to_string());
+    }
+
+    match mergeable {
+        None => {
+            return Some("mergeable field is missing on the head SHA".to_string());
+        }
+        Some(m) if m.eq_ignore_ascii_case("UNKNOWN") => {
+            return Some("mergeable is UNKNOWN — GitHub is still computing it; retry".to_string());
+        }
+        _ => {}
+    }
+    match merge_state {
+        None => {
+            return Some("mergeStateStatus field is missing on the head SHA".to_string());
+        }
+        Some(s) if s.eq_ignore_ascii_case("UNKNOWN") => {
+            return Some(
+                "mergeStateStatus is UNKNOWN — GitHub is still computing it; retry".to_string(),
+            );
+        }
+        _ => {}
+    }
+    None
 }
 
 /// A `code-critic` verdict.
@@ -356,6 +405,10 @@ fn list_open_prs<R: GhRunner>(gh: &R, slug: &str, base: &str) -> anyhow::Result<
 }
 
 /// One PR's stop-condition inputs, in a single `gh pr view` call.
+///
+/// #8670: `mergeable,mergeStateStatus` join the requested fields so
+/// [`mergeability_reason`] has something to read; a prior version of this
+/// call omitted them entirely.
 fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
     let n = pr.to_string();
     let a = argv(&[
@@ -365,7 +418,7 @@ fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
         "--repo",
         slug,
         "--json",
-        "isDraft,labels,reviewDecision,statusCheckRollup,comments",
+        "isDraft,labels,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,comments",
     ]);
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
     serde_json::from_str(&stdout)

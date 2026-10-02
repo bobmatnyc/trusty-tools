@@ -14,7 +14,7 @@
 //! ALLOW). The daemon URL is pointed at an unreachable address so the
 //! best-effort audit POST on the deny path fails fast without a real daemon —
 //! proving the deny still emits regardless.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
 //!
 //! Note: the deny JSON shape asserted below
 //! (`hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason}`)
@@ -34,7 +34,7 @@
 //! share (and race on) the same counter file, and would also pollute the
 //! real developer `$HOME`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -44,17 +44,6 @@ use std::process::{Command, Stdio};
 /// required (shared/racy counter file otherwise).
 fn isolated_home() -> tempfile::TempDir {
     tempfile::tempdir().expect("tempdir")
-}
-
-/// Write `disk.max_usage_pct: <pct>` into `home` (#7497).
-fn write_disk_threshold(home: &std::path::Path, pct: u8) {
-    let dir = home.join(".trusty-tools").join("trusty-mpm");
-    std::fs::create_dir_all(&dir).expect("create config dir");
-    std::fs::write(
-        dir.join("config.yaml"),
-        format!("disk:\n  max_usage_pct: {pct}\n"),
-    )
-    .expect("write config");
 }
 
 /// The `$HOME` every spawned guard child gets unless its caller names one
@@ -78,7 +67,7 @@ fn default_hook_home() -> &'static std::path::Path {
             .tempdir_in("/tmp")
             .expect("create hook scratch $HOME")
             .keep();
-        write_disk_threshold(&dir, 100);
+        common::write_disk_threshold(&dir, 100);
         dir
     })
     .as_path()
@@ -171,7 +160,8 @@ fn spawn_pm_guard(
 }
 
 /// Collect a child started by [`spawn_pm_guard`], asserting the fail-open
-/// contract (`exit 0`, always) and returning its stdout.
+/// contract (`exit 0`, always) and that any refusal carries the `tm pm-guard:`
+/// prefix (#8546), and returning its stdout.
 fn finish_pm_guard(child: std::process::Child) -> String {
     let output = child
         .wait_with_output()
@@ -182,7 +172,9 @@ fn finish_pm_guard(child: std::process::Child) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// Parse the stdout into a JSON value and assert it is a `deny` decision.
@@ -744,7 +736,7 @@ fn in_project_worktree_add_payload(agent_id: Option<&str>) -> String {
 /// absent-key default is disabled under a test harness on purpose.
 fn disk_threshold_home(max_usage_pct: u8) -> tempfile::TempDir {
     let home = isolated_home();
-    write_disk_threshold(home.path(), max_usage_pct);
+    common::write_disk_threshold(home.path(), max_usage_pct);
     home
 }
 
@@ -968,7 +960,6 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
         "git worktree remove /tmp/wt-x",
         "git worktree prune",
         "mktemp -d",
-        "cargo build --target-dir /tmp/build-cache",
     ] {
         let payload = format!(
             r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
@@ -979,6 +970,15 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
             "expected allow for: {command}"
         );
     }
+    // #8261: a heavy build is still allowed — rewritten to run under
+    // `tm build-lease`, never denied.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build --target-dir /tmp/build-cache"}}"#;
+    let stdout = run_pm_guard(payload, &[]);
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- cargo build --target-dir /tmp/build-cache"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1021,6 +1021,29 @@ fn pm_guard_denies_destructive_delete_of_repo_root_and_dot_git() {
 fn pm_guard_denies_destructive_delete_of_a_worktree_root() {
     let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /projects/example-repo/.claude/worktrees/agent-x"}}"#;
     assert_denied(&run_pm_guard(payload, &[]));
+}
+
+/// #8735: a delete inside a command substitution or backticks reaches the
+/// universal floor end to end, for a dispatched agent too.
+#[test]
+fn pm_guard_denies_a_destructive_delete_inside_a_substitution() {
+    for command in [
+        "echo \"$(rm -rf /)\"",
+        "echo `rm -rf /root`",
+        // #8735 round 2: a `-c` string behind a wrapper, and a split body
+        // run from the directory its segment reached.
+        "timeout 60 bash -c 'rm -rf ~'",
+        "cd / && x=$(true; rm -rf Users)",
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "agent_id": "agent-8735",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+        })
+        .to_string();
+        assert_denied(&run_pm_guard(&payload, &[]));
+    }
 }
 
 #[test]
@@ -1384,8 +1407,8 @@ fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
     // the PM halts orchestration; a false allow reproduces prior behaviour.
     //
     // #5708: pinned outside any checkout because these payloads carry no
-    // `subagent_type` and are therefore also UNTYPED dispatches, which ADR-0048
-    // deliberately isolates in a main checkout rather than failing open. The two
+    // `subagent_type` and are therefore also UNTYPED dispatches, which a main
+    // checkout refuses rather than failing open (ADR-0048, #8547). The two
     // rules disagree by design; this one is asserted where only it can fire.
     for payload in [
         r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
@@ -1451,7 +1474,7 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
 // reaches the agent in the documented deny shape.
 // ---------------------------------------------------------------------------
 
-/// Assert the printed deny names the ruling and the command that replaces it.
+/// Assert the printed deny names the ruling and the hand-back that replaces it.
 fn assert_worktree_remove_denied(stdout: &str) {
     assert_denied(stdout);
     let parsed: serde_json::Value =
@@ -1459,9 +1482,10 @@ fn assert_worktree_remove_denied(stdout: &str) {
     let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .expect("reason is a string");
+    // #8577: the remedy is a hand-back to the PM, never a `--force` sweep.
     assert!(
-        reason.contains("#5791") && reason.contains("tm session prune-worktrees"),
-        "the worktree-removal deny must name the ruling and the PM's command, got: {reason}"
+        reason.contains("#5791") && reason.contains("hand it back") && !reason.contains("--force"),
+        "the worktree-removal deny must name the ruling and the hand-back, got: {reason}"
     );
 }
 
@@ -1832,7 +1856,7 @@ fn spawn_capturing_writers_mock(body: &'static str) -> (String, CapturedRequest)
     spawn_routed_mock(MockAnswer::Http("200 OK", body))
 }
 
-/// How a routed mock answers a request that is NOT the builder-slot claim.
+/// How a routed mock answers a request.
 #[derive(Clone, Copy)]
 enum MockAnswer {
     /// Answer with this status line and body.
@@ -1841,44 +1865,15 @@ enum MockAnswer {
     Silent,
 }
 
-/// The builder-slot answer every mock in this file serves (#6892).
+/// One HTTP mock that serves connections in a loop.
 ///
-/// Why: `tm hook --pm-guard` claims a machine-wide builder slot BEFORE it asks
-/// any shared-tree question, and it DENIES when that claim goes unanswered. A
-/// mock serving only the shared-tree route therefore denies every engineer
-/// dispatch on the builder gate, and no test below ever reaches the rule it is
-/// about. Admitting is the neutral answer: it restores the guard to the state
-/// each of these tests was written against.
-/// What: `claimed: true` on a machine with room. The builder cap's own
-/// behaviour is covered where it lives, in `commands::pm_guard_builder_cap`.
-const BUILDER_SLOT_ADMITS: &str = r#"{"claimed":true,"cap":4,"holders":[]}"#;
-
-/// One HTTP mock that answers the builder-slot claim and one other route.
-///
-/// Why: the guard makes TWO daemon calls per engineer dispatch since #6892, so
-/// a one-shot listener can no longer stand in for the daemon — the first call
-/// consumed it and the second found a closed socket. This serves connections in
-/// a loop and routes by path, which is what a daemon does.
-/// What: binds an ephemeral port; answers any request whose path names the
-/// builder-slot route with [`BUILDER_SLOT_ADMITS`]; answers everything else per
-/// `answer`, after publishing its body on the capture channel. The accept loop
-/// runs on a detached thread and ends with the test binary.
+/// Why: a one-shot listener is consumed by the first call; this serves every
+/// connection, which is what a daemon does.
+/// What: binds an ephemeral port; answers every request per `answer`, after
+/// publishing its body on the capture channel. The accept loop runs on a
+/// detached thread and ends with the test binary.
+// #8261: round 4 — the builder-slot branch is gone; the guard never asks it.
 fn spawn_routed_mock(answer: MockAnswer) -> (String, CapturedRequest) {
-    spawn_routed_mock_with_builder(answer, BUILDER_SLOT_ADMITS)
-}
-
-/// [`spawn_routed_mock`] with the builder-slot answer supplied (#6892).
-///
-/// Why: one case below is ABOUT the builder cap end to end, and it needs the
-/// daemon to say the machine is full. Every other case wants the neutral
-/// [`BUILDER_SLOT_ADMITS`], so the parameter lives here rather than at every
-/// call site.
-/// What: as [`spawn_routed_mock`], with `builder` served for the builder-slot
-/// route.
-fn spawn_routed_mock_with_builder(
-    answer: MockAnswer,
-    builder: &'static str,
-) -> (String, CapturedRequest) {
     use std::io::Read;
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -1913,19 +1908,9 @@ fn spawn_routed_mock_with_builder(
                     break Some((head.to_string(), rest.to_string()));
                 }
             };
-            let Some((head, posted)) = request else {
+            let Some((_head, posted)) = request else {
                 continue;
             };
-            // #6892: every mock answers the builder-slot claim, so the rule each
-            // test is about is the one that decides its verdict.
-            if head
-                .lines()
-                .next()
-                .is_some_and(|l| l.contains("/builder-slot"))
-            {
-                let _ = socket.write_all(http_response("200 OK", builder).as_bytes());
-                continue;
-            }
             let _ = tx.send(posted);
             match answer {
                 MockAnswer::Http(status_line, body) => {
@@ -2030,8 +2015,7 @@ fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
 /// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
 /// it cannot drive the guard's malformed-response branch.
 /// What: as [`spawn_writers_mock`], but the caller supplies the status line
-/// (e.g. `"500 Internal Server Error"`) and the raw body bytes. The
-/// builder-slot claim is still answered normally — see [`BUILDER_SLOT_ADMITS`].
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
 fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
     spawn_routed_mock(MockAnswer::Http(status_line, body)).0
 }
@@ -2044,8 +2028,7 @@ fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> Str
 /// connection and went quiet. Only a real accepted-then-silent listener
 /// exercises the arm.
 /// What: reads the shared-tree request and holds the socket open past the
-/// guard's 2 s total budget. The builder-slot claim is answered normally, so the
-/// silence is the shared-tree route's alone (#6892).
+/// guard's 2 s total budget.
 fn spawn_silent_mock() -> String {
     spawn_routed_mock(MockAnswer::Silent).0
 }
@@ -2180,13 +2163,14 @@ fn pm_guard_warns_when_no_daemon_answers_the_claim() {
 /// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
 /// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
 /// immediately instead of waiting on a barrier no one else will reach. Returns
-/// the base URL and the temp dir backing the hermetic state.
+/// the base URL and the temp dir backing the hermetic state. An `expected` of 1
+/// releases every request on arrival: the same router with no race held open.
 fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
     use std::future::IntoFuture;
     use std::sync::Arc;
 
     use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::daemon::{builder_slot_routes, delegation_routes, state::DaemonState};
+    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
@@ -2206,13 +2190,6 @@ fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfil
                 }
             },
         ))
-        // #6892: the builder-slot claim precedes the shared-tree claim on every
-        // engineer dispatch, so the daemon under test has to serve it or the
-        // guard denies before the race this harness exists to drive. Merged
-        // AFTER the barrier layer, deliberately: `route_layer` applies only to
-        // the routes already on the router, so the builder claims pass straight
-        // through and the barrier still holds exactly the shared-tree calls.
-        .merge(builder_slot_routes::router())
         .with_state(state);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2253,7 +2230,7 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // reach the daemon before either is recorded. Pre-fix the daemon only
     // ANSWERED, so both saw an empty set and both were ALLOWED, which is the
     // collision the guard exists to prevent. The claim is now taken inside the
-    // same critical section that produced the answer, so exactly one is
+    // same critical section that produced the answer, so at most one is
     // admitted.
     //
     // The interleaving is forced, not timed: the barrier holds both claims until
@@ -2273,18 +2250,14 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // through `claim_shared_tree_dispatch` directly with no scheduler in the
     // way. Treat the two as a pair: this one proves the wiring, that one proves
     // the mutual exclusion.
-    // #5914: the barrier holds the FIRST child's HTTP request open until the
-    // SECOND child's arrives, and `post_shared_tree` gives up after 2 s and
-    // fails OPEN. So the whole of the second child's process startup sits
-    // inside a 2 s budget. A COLD first exec of `tm` measured 1.5 s on this
-    // machine against 40 ms warm, and under a parallel `cargo build` it crossed
-    // the budget: the held request timed out, its guard read the timeout as
-    // "nobody else is here", and BOTH dispatches were admitted — the reported
-    // `got: ["", ""]`. Two changes take startup out of the window, neither of
-    // them a tuned delay: `prewarm_pm_guard_binary` pays the cold-exec cost
-    // before the barrier is armed, and both children are forked back to back
-    // from this one thread, so what remains between their arrivals is two warm
-    // execs, not a thread hand-off plus a page-in.
+    // #5914: the barrier holds the FIRST child's request open until the SECOND
+    // child's arrives, and `post_shared_tree` gives up after 2 s. Since #5923 a
+    // timed-out claim DENIES, so under load both children can be refused — the
+    // correct fail-closed result, not a regression. The invariant is therefore
+    // "never both admitted", and a lone claim against a second daemon proves the
+    // guard still admits at all, so a guard that denies everything cannot pass.
+    // `prewarm_pm_guard_binary` and forking both children back to back keep the
+    // race itself exercised on an idle machine, where exactly one is admitted.
     let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
     let cwd = tempfile::tempdir().expect("tempdir");
     prewarm_pm_guard_binary();
@@ -2331,26 +2304,53 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
         .filter(|(_, d)| d.as_deref() == Some("deny"))
         .map(|(v, _)| v)
         .collect();
-    assert_eq!(
-        allowed, 1,
-        "exactly one of two simultaneous dispatches may be admitted (a `deny` \
-         permissionDecision marks the other, not merely non-empty stdout), got \
-         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
-         {elapsed:?}; at or past the guard's 2 s client budget in \
-         `post_shared_tree` the held request timed out and failed open — that is the \
-         machine, not this rule regressing, see #5914)"
-    );
-    assert_eq!(denied.len(), 1, "and exactly one must be denied");
-    assert_denied(denied[0]);
-    let reason: serde_json::Value =
-        serde_json::from_str(denied[0]).expect("deny stdout must be valid JSON");
-    let reason = reason["hookSpecificOutput"]["permissionDecisionReason"]
-        .as_str()
-        .expect("reason is a string");
+    // The safety invariant: two simultaneous dispatches are never both admitted.
     assert!(
-        reason.contains("#4480") && reason.contains("rust-engineer"),
-        "the deny must name the rule and the sibling already in the tree, got: {reason}"
+        allowed <= 1,
+        "two simultaneous dispatches must never both be admitted (a `deny` \
+         permissionDecision marks a refusal, not merely non-empty stdout), got \
+         verdicts: {verdicts:?} decisions: {decisions:?} (both children ran in \
+         {elapsed:?})"
     );
+
+    // #5914: a lone claim against a second daemon and router, sharing no barrier
+    // or state with the race, is admitted — so its verdict cannot depend on how
+    // many race children reached the barrier. `documentation` takes the same
+    // shared-tree claim path but no builder slot, so the load-throttled builder
+    // cap (#8261) cannot refuse it either.
+    let (lone_url, _lone_dir) = serve_delegation_router_behind_a_barrier(1);
+    let lone_cwd = tempfile::tempdir().expect("tempdir");
+    let lone = finish_pm_guard(spawn_pm_guard(
+        UNISOLATED_DOCUMENTATION_DISPATCH,
+        &lone_url,
+        Some(lone_cwd.path()),
+        &[],
+        &[],
+    ));
+    assert_ne!(
+        decision(lone.trim()).as_deref(),
+        Some("deny"),
+        "a lone claim must be admitted, or the guard denies everything and the \
+         invariant above proves nothing, got: {lone}"
+    );
+
+    // Every refusal is a well-formed deny naming a rule that may refuse here:
+    // the shared-tree collision (#4480), an unanswered claim (#5923), or the
+    // builder cap (#6892).
+    for deny in denied {
+        assert_denied(deny);
+        let parsed: serde_json::Value =
+            serde_json::from_str(deny).expect("deny stdout must be valid JSON");
+        let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .expect("reason is a string");
+        assert!(
+            ["#4480", "#5923", "#6892"]
+                .iter()
+                .any(|r| reason.contains(r)),
+            "a deny must name the collision, timeout or builder-cap rule, got: {reason}"
+        );
+    }
 }
 
 // ── Main-checkout destructive-git guard (ADR-0037) ──────────────────────────
@@ -2956,7 +2956,6 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
         "grep -rn TODO --include=*.toml .",
         "echo \"no secrets here\"",
         "grep -rn credentials src/",
-        "cargo build 2>&1 | grep error",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, ""),
@@ -2968,6 +2967,17 @@ fn pm_guard_still_allows_ordinary_reads_and_non_operand_mentions() {
             "`{command}` must be allowed (empty stdout), got: {stdout}"
         );
     }
+    // #8261: a heavy build is allowed as a `tm build-lease` rewrite, not denied.
+    let stdout = run_pm_guard_at(
+        &bash_payload_at("cargo build 2>&1 | grep error", &repo, ""),
+        UNREACHABLE_DAEMON,
+        &repo,
+    );
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- cargo build 2>&1 | grep error"),
+        "{stdout}"
+    );
     let readme = format!(r#"{{"file_path":"{}"}}"#, repo.join("README.md").display());
     let stdout = run_pm_guard_at(
         &tool_payload_at("Read", &readme, &repo, ""),
@@ -3519,6 +3529,37 @@ fn pm_guard_allows_a_git_ref_name_and_a_text_payload() {
             &repo,
         );
         assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_allows_issue_prose_a_printf_writes_to_a_file() {
+    // #8723, through the real binary: a subagent writing issue prose that
+    // quotes this guard's deny text into a scratch file DENIED on 62b6f29e1
+    // as "naming `.env` in a `printf` command".
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("mpm8723-body.md");
+    let out = out.display();
+    let subagent = r#""agent_id":"agt_8723","#;
+    let run = |command: &str| {
+        run_pm_guard_at(
+            &bash_payload_at(command, dir.path(), subagent),
+            UNREACHABLE_DAEMON,
+            dir.path(),
+        )
+    };
+    let prose = format!(
+        "printf '%s' '> naming `.env` in a `printf` command is refused (issue #7266)' > {out}"
+    );
+    let stdout = run(&prose);
+    assert!(stdout.trim().is_empty(), "prose must allow: {stdout}");
+    // The negative bound in the same binary: a pipe to a reader, and a real
+    // read of the secret-bearing file, keep the pre-fix answer.
+    for command in [
+        "echo .env | xargs cat".to_string(),
+        format!("cat .env > {out}"),
+    ] {
+        assert_denied(&run(&command));
     }
 }
 
@@ -4449,21 +4490,72 @@ fn pm_guard_warns_when_a_granted_worktree_is_not_recorded() {
 }
 
 #[test]
-fn pm_guard_grants_a_worktree_to_an_unknown_agent_in_a_main_checkout() {
+fn pm_guard_refuses_an_untyped_or_unknown_dispatch_in_a_main_checkout() {
     // The deliberate divergence from #4480's fail-open: a custom or renamed
-    // agent is indeterminate, and in a main checkout indeterminate resolves
-    // toward isolation. This is the agent that kept writing to the shared tree.
+    // agent is indeterminate, and in a main checkout indeterminate is REFUSED
+    // (#8547) — neither admitted nor isolated on a guess.
     let (_dir, repo) = main_checkout_fixture();
-    for input in [
-        r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
-        r#"{"prompt":"an untyped dispatch"}"#,
+    for (input, names) in [
+        (
+            r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
+            "`some-project-custom-agent`",
+        ),
+        (r#"{"prompt":"an untyped dispatch"}"#, "no `subagent_type`"),
+        (r#"{"subagent_type":7,"prompt":"x"}"#, "not an agent name"),
     ] {
         let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+        assert_denied(&stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with("tm pm-guard: Dispatch refused in a main checkout (#8547)"),
+            "{input}: {reason}"
+        );
+        assert!(reason.contains(names), "{input} must be named: {reason}");
+    }
+}
+
+#[test]
+fn pm_guard_grants_a_worktree_to_a_deployed_agent_it_does_not_bundle() {
+    // #8547 review: a name deployed into a roster tier is known, so the real
+    // binary isolates it rather than refusing it as unknown.
+    let (_dir, repo) = main_checkout_fixture();
+    let agents = repo.join(".claude/agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::fs::write(
+        agents.join("fixture-deployed-ops.md"),
+        "---\nname: fixture-deployed-ops\nrole: ops\n---\n\n# Ops\n",
+    )
+    .expect("write agent");
+    let input = r#"{"subagent_type":"fixture-deployed-ops","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
+        "{stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_never_refuses_a_harness_builtin_agent() {
+    // #8547 review: Claude Code's built-ins ship in no bundle and no tier. The
+    // reader runs in place; the writers are isolated; none is refused.
+    let (_dir, repo) = main_checkout_fixture();
+    let reader = r#"{"subagent_type":"claude-code-guide","prompt":"go"}"#;
+    let stdout = run_pm_guard(&tool_payload_at("Agent", reader, &repo, ""), &[]);
+    assert_eq!(stdout.trim(), "", "claude-code-guide only reads: {stdout}");
+    for agent in ["general-purpose", "claude", "statusline-setup"] {
+        let input = format!(r#"{{"subagent_type":"{agent}","prompt":"go"}}"#);
+        let stdout = run_pm_guard(&tool_payload_at("Agent", &input, &repo, ""), &[]);
         let value: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
         assert_eq!(
             value["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",
-            "{input} must be isolated rather than trusted"
+            "{agent}: {stdout}"
         );
     }
 }
@@ -4729,11 +4821,15 @@ fn pm_guard_allows_a_merge_in_a_main_checkout_nobody_else_is_writing_in() {
 
 #[test]
 fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
-    // A worktree's HEAD belongs to the one session that owns it, so a merge
-    // there races nothing — this is where delegated work happens and it must
-    // stay unrestricted. The mock is deliberately never consumed: the
-    // classification returns before any daemon call.
-    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    // A worktree's HEAD belongs to the agent working in it, so its own merge
+    // races nothing — this is where delegated work happens and it must stay
+    // unrestricted. The agent's own runs return before any daemon call. #8161:
+    // the PM moving a `.claude/worktrees/` tree's HEAD now asks who stands
+    // there and is denied beside a live writer; a tree outside that layout is
+    // not this rule's, so the PM stays allowed there.
+    let url = spawn_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1,"tree_holders":true}"#,
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
     std::fs::create_dir_all(claude_wt.join(".git")).expect("mkdir worktree");
@@ -4741,20 +4837,30 @@ fn pm_guard_allows_a_head_move_inside_a_worktree_beside_a_live_writer() {
     std::fs::create_dir_all(&linked_wt).expect("mkdir linked");
     std::fs::write(linked_wt.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write .git");
 
-    for cwd in [&claude_wt, &linked_wt] {
+    let agent = r#""agent_id":"agent-wt-x","#;
+    for (cwd, extra) in [(&claude_wt, agent), (&linked_wt, agent), (&linked_wt, "")] {
         for command in [
             "git pull",
             "git merge origin/main",
             "git rebase origin/main",
         ] {
-            let stdout = run_pm_guard_at(&head_move_payload(command, cwd, ""), &url, cwd);
+            let stdout = run_pm_guard_at(&head_move_payload(command, cwd, extra), &url, cwd);
             assert_eq!(
                 stdout.trim(),
                 "",
-                "`{command}` must be allowed in {}, got: {stdout}",
+                "`{command}` must be allowed in {} (caller {extra:?}), got: {stdout}",
                 cwd.display()
             );
         }
+    }
+    for command in ["git merge origin/main", "git rebase origin/main"] {
+        let stdout = run_pm_guard_at(
+            &head_move_payload(command, &claude_wt, ""),
+            &url,
+            &claude_wt,
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("#8161"), "{stdout}");
     }
 }
 
@@ -5009,7 +5115,6 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
     for command in [
         "sh -c 'git status --porcelain'",
         r#"bash -c "git log --oneline -5""#,
-        "sh -c 'cargo build'",
         "xargs git add",
         "echo $HOME",
     ] {
@@ -5019,20 +5124,29 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
             "expected allow for: {command}"
         );
     }
+    // #8261: a wrapped heavy build is still allowed — rewritten to run the
+    // whole wrapper under `tm build-lease`, never denied.
+    let stdout = run_pm_guard(&subagent_bash_payload("sh -c 'cargo build'"), &[]);
+    assert!(!stdout.contains("\"deny\""), "{stdout}");
+    assert!(
+        stdout.contains("build-lease --wait-secs 60 -- sh -c 'cargo build'"),
+        "{stdout}"
+    );
 }
 
-/// Criterion 5, through the real binary. Nothing is listening, so the machine's
-/// builder count is unknowable — and this guard DENIES on that, which is the
-/// opposite of the shared-worktree guard's policy on the identical failure.
-/// A copy-paste of #4480's allow-on-unreachable prints nothing here.
+/// #8261 increment two (option D), through the real binary: with nothing
+/// listening, a builder-typed dispatch is ALLOWED. Dispatch takes no builder
+/// slot any more — the cap is enforced at the build command — so the #6892
+/// fail-closed deny on an unverifiable count is gone with it.
 #[test]
-fn pm_guard_denies_a_builder_when_the_daemon_cannot_be_asked() {
+fn pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked() {
     let cwd = tempfile::tempdir().expect("tempdir");
     let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, UNREACHABLE_DAEMON, cwd.path());
     assert!(
-        verdict.contains("Builder cap unverifiable (#6892)"),
-        "an unverifiable cap must deny a builder, got: {verdict:?}"
+        !verdict.to_lowercase().contains("builder cap"),
+        "dispatch must not meet a builder cap, got: {verdict:?}"
     );
+    assert!(!verdict.contains("\"deny\""), "got: {verdict:?}");
 }
 
 /// Criterion 6, through the real binary. Same dead daemon, same turn: a
@@ -5053,77 +5167,6 @@ fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
             "{agent} must not be denied by the builder cap"
         );
     }
-}
-
-/// Criterion 1, through the real binary: over the cap, the deny names every
-/// holder with its session and elapsed time, the cap, and the config key that
-/// sets it — not a generic string.
-#[test]
-fn pm_guard_denies_a_builder_when_the_machine_is_full() {
-    let (url, _captured) = spawn_routed_mock_with_builder(
-        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
-        r#"{"claimed":false,"cap":2,"holders":[
-            {"agent":"rust-engineer","session":"11111111-1111-1111-1111-111111111111","elapsed_secs":754},
-            {"agent":"local-ops","session":"22222222-2222-2222-2222-222222222222","elapsed_secs":61}]}"#,
-    );
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
-    assert!(
-        verdict.contains("Machine-wide builder cap reached"),
-        "{verdict}"
-    );
-    assert!(verdict.contains("rust-engineer"), "{verdict}");
-    assert!(
-        verdict.contains("11111111-1111-1111-1111-111111111111"),
-        "{verdict}"
-    );
-    assert!(verdict.contains("running 12m"), "{verdict}");
-    assert!(verdict.contains("local-ops"), "{verdict}");
-    assert!(verdict.contains("capped at 2"), "{verdict}");
-    assert!(verdict.contains("builders.max_concurrent"), "{verdict}");
-}
-
-/// #8261, through the real binary: an ADMITTED builder must be told the slot
-/// directory the daemon just granted it.
-///
-/// Why this dispatch and this cwd: a tempdir is no main checkout, so the
-/// ADR-0048 worktree grant does not fire and the call reaches the plain
-/// builder-cap exit — the one with no rewrite object for the notice to ride.
-/// That exit matched only the DENY arm and dropped `Allow(Some(notice))` on the
-/// floor, so the daemon recorded a private `CARGO_TARGET_DIR` that the engineer
-/// never heard about and built in the shared one regardless. Before the fix this
-/// FAILS at the parse: stdout was empty.
-///
-/// The absent `permissionDecision` is the second half of the contract — with
-/// one, the object would approve the dispatch and bypass the permission flow.
-#[test]
-fn pm_guard_tells_an_admitted_builder_its_slot_directory() {
-    let (url, _captured) = spawn_routed_mock_with_builder(
-        MockAnswer::Http("200 OK", r#"{"agents":[],"total":0}"#),
-        r#"{"claimed":true,"cap":4,"holders":[],"slot_path":"/tmp/trusty-build-slots/slot-3"}"#,
-    );
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let stdout = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &url, cwd.path());
-    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("an admitted builder must be told its slot on stdout: {e}: {stdout:?}")
-    });
-    let context = parsed["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap_or_else(|| panic!("the notice rides `additionalContext`, got: {stdout}"));
-    assert!(
-        context.contains("/tmp/trusty-build-slots/slot-3"),
-        "the notice must name the directory itself, got: {context}"
-    );
-    assert!(
-        context.contains("CARGO_TARGET_DIR"),
-        "the notice must name the variable to prefix, got: {context}"
-    );
-    assert!(
-        parsed["hookSpecificOutput"]
-            .get("permissionDecision")
-            .is_none(),
-        "an explicit decision here would bypass the permission flow: {stdout}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5197,4 +5240,126 @@ fn pm_guard_allows_enter_worktree_from_the_pm() {
     // No `agent_id` — the PM's own worktree moves are untouched.
     let payload = r#"{"hook_event_name":"PreToolUse","cwd":"/repo/.claude/worktrees/agent-a","tool_name":"EnterWorktree","tool_input":{"path":"/repo/.claude/worktrees/agent-b"}}"#;
     assert_eq!(run_pm_guard(payload, &[]).trim(), "");
+}
+
+#[test]
+fn pm_guard_denies_a_reset_keep_into_a_live_agents_worktree() {
+    // #8161: the consolidation step into a parked worktree a live agent still
+    // stands in. Before the fix nothing classified it — the main-checkout rules
+    // stop at `main_checkout_root` — so it was allowed with no daemon query.
+    let (_dir, repo) = main_checkout_fixture();
+    let parked = repo.join(".claude/worktrees/agent-parked");
+    std::fs::create_dir_all(&parked).expect("parked tree");
+    let command = format!(
+        "git -C {p} fetch {r} fix/x && git -C {p} reset --keep FETCH_HEAD",
+        p = parked.display(),
+        r = repo.display()
+    );
+    let (url, captured) = spawn_capturing_writers_mock(
+        r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#,
+    );
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_denied(&stdout);
+    assert!(stdout.contains("#8161"), "{stdout}");
+    let posted = captured
+        .posted()
+        .expect("the guard must ask who holds the tree");
+    assert_eq!(posted["cwd"], parked.display().to_string());
+    assert_eq!(
+        posted["tree_holders"], true,
+        "the query must count the caller's own agents"
+    );
+
+    // The idle half: an empty answer lets the consolidation through.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0,"tree_holders":true}"#);
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "an idle parked worktree must be consolidatable"
+    );
+
+    // Critic round: a daemon older than #8161 answers "idle" without the echo,
+    // having scoped the answer to other sessions — that is not an idle tree.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let stdout = run_pm_guard_at(&head_move_payload(&command, &repo, ""), &url, &repo);
+    assert_denied(&stdout);
+    assert!(stdout.contains("tm restart"), "{stdout}");
+}
+
+/// A PM `SendMessage` resuming agent `a8004feed` from a session whose harness
+/// record for that agent is `meta` (#8004). Returns the session root and the
+/// payload.
+fn resume_fixture(meta: &str) -> (tempfile::TempDir, serde_json::Value) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let subagents = dir.path().join("sess-8004/subagents");
+    std::fs::create_dir_all(&subagents).expect("mkdir subagents");
+    std::fs::write(subagents.join("agent-a8004feed.meta.json"), meta).expect("write record");
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "sess-8004",
+        "transcript_path": dir.path().join("sess-8004.jsonl"),
+        "tool_name": "SendMessage",
+        "tool_input": {"to": "a8004feed", "message": "owner ruled: continue"},
+    });
+    (dir, payload)
+}
+
+#[test]
+fn pm_guard_refuses_resuming_an_agent_whose_worktree_was_reclaimed_8004() {
+    // #8004: the reported scenario. The agent stopped with no changes, the
+    // harness removed its worktree and rewrote its record, and the PM's
+    // SendMessage would resume it in the main checkout.
+    let (dir, payload) =
+        resume_fixture(r#"{"agentType":"rust-engineer","worktreeCleanlyRemoved":true}"#);
+    let tree = dir.path().join(".claude/worktrees/agent-a8004feed");
+    let first = serde_json::json!({"agentId": "a8004feed", "cwd": tree});
+    let transcript = dir.path().join("sess-8004/subagents/agent-a8004feed.jsonl");
+    std::fs::write(transcript, format!("{first}\n")).expect("write transcript");
+    let reason = deny_reason_of(&run_pm_guard_outside_a_checkout(&payload.to_string()));
+    assert!(
+        reason.contains(&tree.display().to_string()),
+        "names the tree: {reason}"
+    );
+    assert!(
+        reason.contains("worktree-agent-a8004feed"),
+        "names the branch: {reason}"
+    );
+    assert!(reason.contains("re-dispatch fresh"), "{reason}");
+}
+
+#[test]
+fn pm_guard_refuses_a_resume_when_the_worktree_probe_errors_8004() {
+    // #8004 fail-closed: a recorded tree whose probe errors (ENOTDIR here) is
+    // not confirmed present, so the resume is refused, never allowed.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let file = scratch.path().join("plain-file");
+    std::fs::write(&file, "x").expect("write file");
+    let meta = serde_json::json!({"worktreePath": file.join("tree"), "spawnedWithWorktree": true});
+    let (_dir, payload) = resume_fixture(&meta.to_string());
+    let reason = deny_reason_of(&run_pm_guard_outside_a_checkout(&payload.to_string()));
+    assert!(reason.contains("cannot be confirmed"), "{reason}");
+}
+
+#[test]
+fn pm_guard_allows_resuming_an_agent_whose_worktree_is_live_8004() {
+    // Control: a live linked worktree resumes normally, and a subagent's own
+    // SendMessage (its report-back channel) is never evaluated.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let tree = scratch.path().join(".claude/worktrees/agent-a8004feed");
+    let gitdir = scratch.path().join(".git/worktrees/agent-a8004feed");
+    std::fs::create_dir_all(&tree).expect("mkdir tree");
+    std::fs::create_dir_all(&gitdir).expect("mkdir gitdir");
+    std::fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).expect(".git");
+    let (_dir, payload) = resume_fixture(&serde_json::json!({"worktreePath": tree}).to_string());
+    assert_eq!(
+        run_pm_guard_outside_a_checkout(&payload.to_string()).trim(),
+        ""
+    );
+    let (_gone, mut removed) = resume_fixture(r#"{"worktreeCleanlyRemoved":true}"#);
+    removed["agent_id"] = serde_json::json!("agent-sub1");
+    assert_eq!(
+        run_pm_guard_outside_a_checkout(&removed.to_string()).trim(),
+        ""
+    );
 }

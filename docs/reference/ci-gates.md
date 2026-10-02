@@ -22,10 +22,10 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
 
 - Every required job triggers unconditionally (no `paths:` filters) and
   short-circuits on the `docs_only` boolean from the `changes` job.
-- 🟡 **The four Tauri UI clippy jobs short-circuit on a second boolean (#7063).**
+- 🟡 **The Tauri UI clippy jobs short-circuit on a second boolean (#7063).**
   The `changes` job also emits `<crate>_relevant` per UI crate, computed by
   `scripts/ci-crate-relevance.sh` from the crate's transitive workspace
-  dependency closure, so a PR that cannot reach `trusty-mpm-gui` no longer pays
+  dependency closure, so a PR that cannot reach a UI crate no longer pays
   for its WebKit2GTK apt chain and cargo clippy. The jobs still run and report —
   they are required contexts (#5929, #5935) — and every failure arm of the
   detector answers `true`, so a broken classifier costs a full build.
@@ -36,6 +36,104 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   stay *required* to be gates
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
+
+## `CI gate` stands in for its covered contexts (#8378)
+
+🔴 **`CI gate` (`ci.yml`, job `ci-gate`) fails whenever any context it covers
+fails.** The covered list is the `CONTEXTS` table in
+`scripts/ci-gate-verdict.sh` — Format check, Clippy, MSRV check, Rust tests
+(affected crates), the four Tauri UI clippies, the daemon smoke test, the
+teardown guard, the tmux exact-target gate, the three release-decision
+selftests, Website content corpus, and Per-PR changelog fragment (the
+fragment gate and the #8388 content gates; owner ruling 407). That job has no
+`changes` dependency and no skip, so a docs or content PR runs it; its steps run
+on a `pull_request` and on a `workflow_dispatch` off main (diffing against
+main). `scripts/ci-gate-selftest.sh` holds that table equal to the job's
+`needs:`. The job runs under `if: always()` and goes
+red on a failed or cancelled need, a failed `changes` classifier, a job
+missing from `needs:`, or a skip the classifier did not order.
+
+- **Why the covered jobs live in `ci.yml`.** `needs:` cannot name a job in
+  another workflow file, so #8378 moved the teardown guard, the tmux gate, the
+  three `Tag/publish parity` selftests and `Website content corpus` into
+  `ci.yml`. Every check name is unchanged.
+- **Job-level path filters.** `Durable writes hold the teardown guard` and
+  `Every tmux -t target is exact` skip at the job level when
+  `scripts/ci-gate-relevance.sh` says the diff reaches none of their inputs. A
+  job skipped by `if:` still reports, and branch protection counts the skip as
+  passing; a `paths:` trigger filter reports nothing. Every error arm of the
+  classifier answers `true`.
+- **`vmtest harness` is path-filtered at the trigger** on both `push` and
+  `pull_request`: `vmtest-harness/**` and its own workflow file. It is not a
+  required context, so a missing check run blocks nothing.
+
+## Instruction content is Cargo-inert when added or modified (#8378)
+
+🔴 **Owner ruling 2026-09-27 (ADR-0064).** An ADDED or MODIFIED `.md` under
+`crates/trusty-mpm/src/assets/**` or `crates/trusty-agents-common/src/assets/**`,
+or any added or modified file under `content/**`, is Cargo-inert:
+`scripts/detect-docs-only.sh` reports `docs_only=true`, and clippy, fmt, MSRV,
+the Rust tests, the GUI clippies and the daemon smoke test report success
+without building. A DELETE, a rename (a delete plus an add under
+`--no-renames`) or a type change is code, because it removes a path an
+`include_str!` names. A non-`.md` file under the asset roots is code.
+
+What still runs for such a diff: `tm-capabilities generated-skill drift check`
+(both roots are in trusty-mpm's build closure, so the job builds, which also
+proves every `include_str!` still compiles), its resident-budget tests, and —
+for a Cargo-inert diff that touches an instruction root — the
+`Asset-content tests (filtered list, …)` step. It runs exactly the rows of
+`scripts/asset-content-tests.tsv`: every test, in any crate and target, that
+reads Cargo-inert instruction content — the paths
+`scripts/detect-docs-only.sh --instruction-assets` accepts, the same predicate
+that routes the diff to this step. A reader of any other asset (a hook script,
+a TOML or JSON file, trusty-code's own compiled-in `.md`) is not listed: an
+edit to that asset is code, so the affected-crates job runs its crate. One
+`cargo test` runs per crate + target with the rows' name filters, and the step
+fails on a failing test or on a row that selects no test. The job runs on the
+push to main as well, so the merge of an asset-only PR runs the same list
+there, where the test shards skip it. The tmux gate also scans
+`crates/*/src/assets/**/*.md`, so it runs too.
+
+🔴 **A new test that reads instruction `.md` joins the list in the same PR.**
+The same job runs `scripts/check_asset_test_filter.py check` on every diff. It
+fails when test code reads such a file outside the list: an `include_str!` of
+it or of its directory, a `src/assets` literal naming it, a manifest asset that
+names it by path (the PM instruction package), or an asset constant or loader
+it derives by search. Add a row naming the test, or its module; `check
+--verbose` prints what it found. A test that reaches the `.md` only through a
+run-time lookup is invisible to the guard; its row carries a `runtime:` reason.
+
+🔴 **Cargo-inert is not gate-free (#8388).** A change under
+`content/{instructions,agents,skills}/` still owes three content gates, run by
+the `Per-PR changelog fragment` job of `ci.yml` (required through `CI gate`,
+owner ruling 407): a `content/changelog.d/` fragment,
+`python3 scripts/check_content.py tree` (manifest and member versions), and
+`python3 scripts/check_content.py bump` (a bundle version no `content-v*` tag
+has used). Rules and failure cases:
+[content-release.md](content-release.md#versioning-and-changelog-8388).
+
+## The agent resident-budget tests gate merge through the drift check
+
+🔴 **The required `tm-capabilities generated-skill drift check` job also runs
+the step `Agent resident-budget tests (reuse the build above)`** (#8700). It
+runs the three `*_stays_within_its_resident_budget` tests and the #7915 ledger test in
+`crates/trusty-mpm/src/core/bundle_tests.rs`, named in full under `--exact`.
+The step fails unless exactly those four run, so renaming one fails it;
+`scripts/check_test_count.sh` also refuses a zero-test run, and an edit to that
+script makes the step run. Before
+this, they ran only in the non-required pre-publish shards, and PR #8695 grew
+`BASE-AGENT.md` past two budgets and still merged. A PR that pushes a bundled
+agent body or the default output style over its budget now fails a required
+context. The job's relevance step decides whether the step runs: any change in
+trusty-mpm's dependency closure, which includes `trusty-agents-common` and its
+agent assets, runs it.
+
+The job builds once. `cargo test -p trusty-mpm --lib --test env_serial
+--no-run` builds the lib test harness and the `tm` binary from one dependency
+graph; the drift check runs that `tm`, and the budget step compiles nothing.
+This replaced a release `cargo install`: the lib tests need trusty-mpm's
+dev-dependency features, so a release `tm` shared no build units with them.
 
 ## A documentation change owes content gates, never a code test suite
 
@@ -54,7 +152,7 @@ gate and keeps running.
 **DOCS-ONLY** means every changed path matches one of `docs/**`, a repo-root
 `*.md`, `crates/*/changelog.d/**`, `crates/*/README.md`, `crates/*/CHANGELOG.md`,
 or `website/src/content/**`. Three path classes are **not** docs-only by
-design: anything under `crates/*/src/**` **even when it ends in `.md`** —
+design: anything under `crates/*/src/**` **even when it ends in `.md`**, except the instruction-content case in the #8378 section above —
 bundled agent and skill assets are compiled into binaries with `include_str!`
 and tests assert on their text — plus `.github/**` and `scripts/**`.
 `scripts/detect-docs-only.sh` is the Cargo-side classifier;
@@ -68,7 +166,7 @@ run on every PR, and the job still reports. The documentation gates —
 path-citation lint, the public-docs allowlist — are deliberately NOT gated
 this way: they are what a docs change owes.
 
-🟡 **New check name: `Website content corpus`** (`website-tests.yml`). Every
+🟡 **New check name: `Website content corpus`** (`ci.yml` since #8378). Every
 website test that reads real repository content — the six-crate changelog
 parse, the 27-page docs corpus, the flagship pages, the landing-page claims
 grounded in `crates/**` — now lives in `*.corpus.test.ts` files and the vitest
@@ -99,9 +197,76 @@ processes (a fixed path, a fixed port, one real file): use
 `#[serial_test::file_serial]` for those, and keep redirecting `$HOME` per test.
 Measurements: [test-ladder-baseline.md](test-ladder-baseline.md).
 
-🟡 A PR proves every test target COMPILES; test EXECUTION defers to `main`, so
-run the ladder rung your change earns before merging. Full suite on a branch:
+🟡 A PR proves every test target COMPILES, and executes the tests of the crates
+it affects (next section); the full workspace suite defers to `main`, so run
+the ladder rung your change earns before merging. Full suite on a branch:
 Actions → CI → "Run workflow".
+
+## `Rust tests (affected crates)` runs on every PR
+
+🟡 **Owner ruling 2026-09-23.** `ci.yml` runs `cargo test --no-fail-fast` on
+every pull request for the crates the PR touches plus their dependents. It is
+meant to become a required context once the owner confirms the
+branch-protection change; until then it is not required. Check the live list
+above.
+
+- **Crate set.** The `affected-plan` job resolves the merge-base of the PR's
+  merge commit with the refreshed base branch, then runs
+  `scripts/ci-affected-test-plan.sh`, a thin wrapper over
+  `scripts/select-test-crates.sh --range <merge-base>..HEAD`. The selector
+  returns each crate that owns a changed file, plus that crate's transitive
+  reverse-dependency closure (normal, dev and build edges). The wrapper adds
+  three rules. A `docs_only=true` verdict from the `changes` job selects
+  nothing. The four Tauri UI crates are dropped, because their own jobs test
+  them. What is left is split into at most 8 legs, largest test suite first.
+- **Workspace-wide inputs select every crate.** A change to the root
+  `Cargo.toml` or `Cargo.lock`, `rust-toolchain*`, `.cargo/**`, `clippy.toml`,
+  `rustfmt.toml` or `deny.toml` selects every headless crate, and so does any
+  path the selector cannot classify.
+- **`scripts/**` and `.github/**` select narrowly** (owner ruling 2026-09-23,
+  #7777). A change to `ci.yml`, `select-test-crates.sh`,
+  `ci-affected-test-plan.sh`, their selftests, or the job's helpers
+  `ci-create-local-main.sh`, `ci-free-disk-space.sh` and `ci-apt-install.sh`
+  selects the canary
+  `trusty-common` + `trusty-mpm`, plus each Tauri UI crate
+  `ci-crate-relevance.sh` marks relevant (the wrapper then drops those). Any
+  other such path selects the crates whose `*.rs` source names it literally
+  on a non-comment line, found by `git grep` at plan time — for example
+  `scripts/check-ui-bundle-freshness.sh` selects `trusty-search` and
+  `trusty-console` through their `build.rs`. A literal counts only when the
+  file exists, or existed at the diff's base (a deleted or renamed script),
+  so a test fixture string such as `"scripts/go.sh"` selects nothing. A
+  `./`, `../`, `{root}/` or absolute prefix still names the path. Most
+  script and workflow PRs therefore select zero crates. A canary crate
+  missing from the workspace selects every crate.
+- **Codesign scripts select `trusty-common`.** A changed `scripts/<name>.sh`
+  directly in `scripts/` (no subdirectory) whose content contains
+  `codesign`, on disk or at the diff's base, selects `trusty-common`. The
+  rule mirrors the `codesign_scripts` directory scan in
+  `crates/trusty-common/src/launchd_labels/tests.rs`, which
+  `codesign_scripts_name_identifiers_by_convention` reads; change the two
+  together.
+- **Nothing to test still reports.** A docs-only PR, a push to `main` and a
+  `workflow_dispatch` plan zero crates. The matrix is skipped, and the roll-up
+  job, named exactly `Rust tests (affected crates)`, reports success with a
+  "no affected crates" line. The roll-up reads the plan's result, never the
+  skipped matrix, so a failed plan turns it red.
+- **Each leg matches `test-shard`**: the stable toolchain, the same apt
+  packages, the .NET SDK, `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, and a
+  read of the shared `test` rust-cache and the fastembed model cache. Nothing
+  is filtered: no `--lib`, no `--skip`, no `continue-on-error`, and no flake
+  list.
+- 🟡 **Feature coverage is a subset of the shards'.** Each leg is its own
+  `cargo test -p …` invocation, so it resolves features only across that leg's
+  crates.
+- 🔴 **`trusty-common` never lands in a leg.** No single `--features` set
+  covers it (#4901), so the plan reports it as `trusty_common=true` and the
+  `trusty-common coverage lanes` job runs
+  `./scripts/test_trusty_common_lanes.sh`: every lane in its Cargo.toml's
+  `[package.metadata.trusty-test-coverage]`, one after another, with `CI`
+  unset so `update::tests::cache_fresh_returns_some_when_newer` runs too. The
+  job always reports; when the plan did not select trusty-common its steps
+  no-op. A push or dispatch run always runs the lanes. `CI gate` covers it.
 
 ## A red `main` files an issue
 
@@ -149,35 +314,37 @@ merge-base, in `trusty-mpm`'s `guided.rs`.
 contexts** (verified 2026-09-07 against the protection API) — a red run there
 never blocks merge. PR #6981 merged with `Public API / SemVer` and its own
 break self-test failing; #6981 and #6978 both merged with `Rustdoc intra-doc
-links` failing. The one actual stop for a public-API break is
-`preflight-publish.sh` CHECK 5 at release, run by `local-ops`.
+links` failing. `preflight-publish.sh` CHECK 5 never blocks on a computed
+break; an infrastructure fault still stops it — owner ruling 2026-09-26.
 
 ## Running CI's clippy locally
 
 🔴 **A crate-scoped local `cargo clippy -p <crate>` exit 0 is not CI
 evidence.** The `clippy` job in
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) is the source of
-truth for the pin, and today it installs `dtolnay/rust-toolchain@stable` — a
-floating pin, not a version literal — then lints the whole workspace. A local
+truth for the pin, and today it installs `dtolnay/rust-toolchain@1.98.1` — a
+version literal (owner ruling 306) — then lints the whole workspace. A local
 pass over one crate, or on a different rustc, proves neither half. PR #5488 is
 the incident: local clippy green, CI clippy red.
 
-The local `cargo` resolves to the MSRV toolchain, not CI's. On this machine
-`RUSTUP_TOOLCHAIN=1.94.1` is exported into the shell, and both the rustup
-proxy at `~/.cargo/bin/cargo` and the mise-shimmed `cargo` land on MSRV
-regardless of `rustup default`. `rustup run <pin>` is what overrides it.
+The local `cargo` may not resolve to CI's toolchain. A mise shim in this repo
+injects `RUSTUP_TOOLCHAIN=1.94.1` (the MSRV, from `mise.toml`), and a shell
+that exports it sends the rustup proxy at `~/.cargo/bin/cargo` to MSRV too.
+Since #8583 a tm-managed session no longer inherits that variable from the
+`tm` that launched it, so its proxy follows the project's pin file or
+`rustup default`. Check with `rustup show active-toolchain`; `rustup run
+<pin>` overrides every case.
 
 ```bash
-# Confirm which clippy you are about to run. 2026-09-16: clippy 0.1.98.
-rustup run stable cargo clippy --version
+# Confirm which clippy you are about to run. CI pins 1.98.1 (clippy 0.1.98).
+rustup run 1.98.1 cargo clippy --version
 
 # The CI job's own invocation, copied from ci.yml's clippy step.
-rustup run stable cargo clippy --workspace --all-targets \
-  --exclude trusty-mpm-gui --exclude trusty-code-gui \
-  --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
+rustup run 1.98.1 cargo clippy --workspace --all-targets \
+  --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 ```
 
 Re-read the pin from `ci.yml` each time rather than trusting this snippet:
-`@stable` moves on its own, and the exclude list grows with each new Tauri UI
-crate (four today). If the job is ever pinned to a literal, substitute it —
-`rustup run 1.97.1 cargo clippy …`.
+the pin is bumped deliberately in its own PR, and the exclude list grows with
+each new Tauri UI crate (four today). Use the literal —
+`rustup run 1.98.1 cargo clippy …`.

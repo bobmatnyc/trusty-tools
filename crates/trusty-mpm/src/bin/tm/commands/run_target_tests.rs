@@ -369,3 +369,245 @@ fn classify_bare_with_no_account_is_unchanged() {
     let bare = classify_bare("bobmatnyc/trusty-tools").unwrap().unwrap();
     assert!(matches!(bare, RunTarget::Repo { account: None, .. }));
 }
+
+/// Turn a `&str` list into the owned tokens clap hands the external arm.
+fn toks(items: &[&str]) -> Vec<String> {
+    items.iter().map(ToString::to_string).collect()
+}
+
+/// 🔴 #5850 REGRESSION: `tm <url> --user <login>` must reach the managed run.
+///
+/// Why this is the assertion: the owner's invocation put the flag AFTER the
+/// repository. clap collected it into the external subcommand's argv instead
+/// of the global `--account` field, so `run_external` saw two extra tokens and
+/// bailed with "takes no further arguments" — the flag never reached
+/// `classify_bare_with_account` at all.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_a_trailing_user_flag() {
+    let (rest, account) = split_trailing_account(&toks(&[
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ]))
+    .expect("a trailing --user must be lifted, not refused");
+    assert_eq!(
+        rest,
+        toks(&["https://github.com/duettoresearch/jev-matching"])
+    );
+    assert_eq!(account.as_deref(), Some("bob-duetto"));
+}
+
+/// The `=` form and the `--account` spelling behave identically.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_an_inline_account_value() {
+    let (rest, account) =
+        split_trailing_account(&toks(&["acme/widget", "--account=bobmatnyc"])).expect("lifted");
+    assert_eq!(rest, toks(&["acme/widget"]));
+    assert_eq!(account.as_deref(), Some("bobmatnyc"));
+}
+
+/// A flag with no value is an ERROR, never a silent drop.
+///
+/// Why: dropping it would clone as the machine's global account while the
+/// operator believed they had selected one — the #5850 substitution, arrived
+/// at from the other direction.
+/// Test: itself.
+#[test]
+fn bare_form_rejects_a_trailing_flag_with_no_value() {
+    let err = split_trailing_account(&toks(&["acme/widget", "--user"]))
+        .expect_err("a valueless flag must refuse");
+    assert!(err.to_string().contains("needs a gh login"), "{err}");
+}
+
+/// Every other token survives untouched, so the "takes no further arguments"
+/// bail still fires for genuine extra arguments.
+/// Test: itself.
+#[test]
+fn bare_form_leaves_unrelated_tokens_alone() {
+    let (rest, account) =
+        split_trailing_account(&toks(&["acme/widget", "extra"])).expect("no flag present");
+    assert_eq!(rest, toks(&["acme/widget", "extra"]));
+    assert_eq!(account, None);
+}
+
+/// Two DIFFERENT accounts around the repository are refused, not resolved by
+/// position.
+/// Test: itself.
+#[test]
+fn bare_form_refuses_two_different_accounts_around_the_repository() {
+    let err = reconcile_bare_account(Some("bobmatnyc".into()), Some("bob-duetto".into()))
+        .expect_err("a conflict must refuse");
+    assert!(err.to_string().contains("conflicting account"), "{err}");
+    assert_eq!(
+        reconcile_bare_account(Some("bob-duetto".into()), Some("bob-duetto".into()))
+            .expect("agreeing values collapse")
+            .as_deref(),
+        Some("bob-duetto")
+    );
+}
+
+/// 🔴 #5850 REGRESSION (fail-open): an EMPTY account value is refused at the
+/// lift, never carried downstream.
+///
+/// Why this is the assertion: `--user=` used to lift as `Some("")`, and
+/// `resolve_account` treats a blank flag as absent — so the clone ran as the
+/// machine's global account while the operator believed they had pinned one.
+/// Covers the inline `=` form and a blank separate value, for both spellings.
+/// Test: itself.
+#[test]
+fn bare_form_rejects_an_empty_account_value() {
+    for tokens in [
+        &["acme/widget", "--user="][..],
+        &["acme/widget", "--account="][..],
+        &["acme/widget", "--user", ""][..],
+        &["acme/widget", "--account", "   "][..],
+        &["acme/widget", "--user=  "][..],
+    ] {
+        let err = split_trailing_account(&toks(tokens))
+            .expect_err("an empty account value must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{tokens:?}: {err}"
+        );
+    }
+}
+
+/// 🔴 #5850 REGRESSION (wiring): the real parse of `tm <url> --user <login>`
+/// reaches a `RunTarget::Repo` carrying that login.
+///
+/// Why this is the assertion: the lift's unit tests stay green if
+/// `resolve_external` stops calling it. Driving clap's own output through the
+/// resolver fails the moment the lift is unwired, because the trailing tokens
+/// then hit the "takes no further arguments" refusal.
+/// Test: itself.
+#[test]
+fn bare_form_trailing_user_reaches_the_repo_target() {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from([
+        "tm",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
+    ])
+    .expect("the bare form parses");
+    let Some(crate::cli::Command::External(tokens)) = cli.command else {
+        panic!("the bare form must reach the external catch-all");
+    };
+    let target = resolve_external(&tokens, cli.account)
+        .expect("a trailing --user must resolve, not refuse")
+        .expect("a repository URL is repo-shaped");
+    let RunTarget::Repo {
+        owner,
+        repo,
+        account,
+        ..
+    } = target
+    else {
+        panic!("expected a repository target, got {target:?}");
+    };
+    assert_eq!(
+        (owner.as_str(), repo.as_str()),
+        ("duettoresearch", "jev-matching")
+    );
+    assert_eq!(account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #9090 REGRESSION: a trailing `--u <login>` is lifted like `--user`.
+///
+/// Why this is the assertion: the owner's
+/// `tm duettoresearch/duetto-blast-mfes --u bob-duetto` was refused with
+/// "takes no further arguments", because `--u` was not an account spelling.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_a_trailing_u_flag() {
+    for tokens in [
+        &["duettoresearch/duetto-blast-mfes", "--u", "bob-duetto"][..],
+        &["duettoresearch/duetto-blast-mfes", "--u=bob-duetto"][..],
+    ] {
+        let (rest, account) = split_trailing_account(&toks(tokens)).expect("lifted");
+        assert_eq!(
+            rest,
+            toks(&["duettoresearch/duetto-blast-mfes"]),
+            "{tokens:?}"
+        );
+        assert_eq!(account.as_deref(), Some("bob-duetto"), "{tokens:?}");
+    }
+}
+
+/// The account a parsed invocation selects, read the way `main` reads it: the
+/// global field, plus — for the bare form — the trailing-token lift.
+fn selected_account(argv: &[&str]) -> Option<String> {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from(argv)
+        .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+    match cli.command {
+        Some(crate::cli::Command::External(tokens)) => {
+            match resolve_external(&tokens, cli.account)
+                .unwrap_or_else(|e| panic!("{argv:?} must resolve: {e}"))
+            {
+                Some(RunTarget::Repo { account, .. }) => account,
+                other => panic!("{argv:?}: expected a repository target, got {other:?}"),
+            }
+        }
+        Some(crate::cli::Command::Run { .. } | crate::cli::Command::Register { .. }) => cli.account,
+        other => panic!("{argv:?}: unexpected command {other:?}"),
+    }
+}
+
+/// 🔴 #9090 REGRESSION: every account spelling selects the account in the bare
+/// form, `tm run` and `tm register`, before the repository and after it.
+///
+/// Why this is the assertion: the closure condition is the whole matrix, and a
+/// spelling that works in one cell but not another is the #5850 / #9090 shape.
+/// `--account` and `--user` rows prove those spellings are unchanged.
+/// Test: itself.
+#[test]
+fn every_account_spelling_selects_the_account_in_every_form_and_position() {
+    const REPO: &str = "duettoresearch/duetto-blast-mfes";
+    for flag in ["--account", "--user", "--u"] {
+        let cases: [Vec<&str>; 6] = [
+            vec!["tm", flag, "bob-duetto", REPO],
+            vec!["tm", REPO, flag, "bob-duetto"],
+            vec!["tm", "run", flag, "bob-duetto", REPO],
+            vec!["tm", "run", REPO, flag, "bob-duetto"],
+            vec!["tm", "register", flag, "bob-duetto", REPO],
+            vec!["tm", "register", REPO, flag, "bob-duetto"],
+        ];
+        for argv in cases {
+            assert_eq!(
+                selected_account(&argv).as_deref(),
+                Some("bob-duetto"),
+                "{argv:?}"
+            );
+        }
+    }
+}
+
+/// 🔴 #9091: a launch whose `[accounts]` table cannot be read is refused with
+/// the file and the parse error, before anything is cloned or spawned; a
+/// chosen or ambient account passes.
+#[test]
+fn preflight_refuses_a_broken_accounts_table_naming_the_file() {
+    use trusty_mpm::core::gh_org_accounts::{AccountSource, OrgAccounts, ResolvedAccount};
+    let path = std::path::Path::new("/home/u/.trusty-mpm/config.toml");
+    let broken = OrgAccounts::from_toml("[accounts]\nduettoresearch = bob-duetto\n", path)
+        .expect_err("an unquoted login is a syntax error");
+    let origin = "https://github.com/duettoresearch/jev.git";
+
+    let err = preflight_verdict(origin, Err(broken.to_string()))
+        .expect_err("a broken table refuses the launch")
+        .to_string();
+    for needle in [origin, "/home/u/.trusty-mpm/config.toml", "not valid TOML"] {
+        assert!(err.contains(needle), "{needle}: {err}");
+    }
+    assert!(err.contains("No session was started"), "{err}");
+
+    let chosen = ResolvedAccount {
+        login: "bob-duetto".into(),
+        source: AccountSource::OrgMap,
+    };
+    preflight_verdict(origin, Ok(Some(chosen))).expect("a mapped account launches");
+    preflight_verdict(origin, Ok(None)).expect("the ambient identity launches");
+}

@@ -11,10 +11,16 @@
 pub mod adopt;
 pub mod create;
 pub mod decommission;
+// #7660: the in-project removal step, `--force` policy and kept reason.
+pub mod decommission_force;
+// #8663: the content gates on decommission's two `remove_dir_all` routes.
+mod decommission_owned;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #8663 critic round 1: what tm's provisioning wrote, kept in the git admin dir.
+pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
 pub mod injection_status;
@@ -25,6 +31,7 @@ mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;
+pub mod pane_identity;
 pub mod prune;
 pub mod reactivate;
 mod reconcile;
@@ -40,11 +47,19 @@ pub(crate) mod resume_in_flight;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;
+/// #8935: whether a live tmux session is a record's own, by its `%N` pane.
+pub mod runtime_identity;
 pub mod search_gc;
 pub mod session_guard;
+pub mod session_kind;
 pub mod setters;
 pub mod slots;
 pub mod snapshot;
+// #8942: the lifecycle paths' refusals for the Architect's sessions.
+pub mod supervisor;
+pub mod supervisor_floor;
+// #8942: `tm fleet init`'s registration of the Architect's sessions.
+pub mod supervisor_register;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
 pub mod stop;
 pub mod store;
@@ -62,14 +77,26 @@ pub mod workspace_guard;
 // #6497: the explicit ownership transfer for a tree whose owner is provably
 // dead — the compliant alternative to rebuilding the branch by hand.
 pub(crate) mod worktree_adopt;
+// #8318: frees an adopted tree's branch and a dead agent's harness lock.
+pub(crate) mod worktree_adopt_release;
+// #8534 critic round 3: which gitignored agent and skill files tm deployed.
+mod worktree_deployed_assets;
+// #8534: gitignored run output that `git worktree remove` would delete. `pub`
+// for the `tm pr cleanup` probe the binary wires in.
+pub mod worktree_ignored_output;
 // #4311: the OS-level "is a process standing in here?" gate — the one removal
 // check that does not read a registry trusty-mpm or git wrote.
 pub(crate) mod worktree_liveness;
 // #6927: the operator's standing "never propose these" list, applied as
 // `worktree_reclaim::classify`'s first gate.
 pub(crate) mod worktree_keep_list;
-mod worktree_nested;
+pub(crate) mod worktree_nested;
+// #7771, #8301: the session-safe ownership rule prune and `tm pr cleanup` share.
+pub(crate) mod worktree_owner_gate;
 pub(crate) mod worktree_ownership;
+// #8511: the marker's git-admin-dir location, its migration, and the fleet pass.
+pub mod worktree_marker_migration;
+pub(crate) mod worktree_ownership_location;
 // #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
 pub(crate) mod worktree_reclaim;
 // #6561: the `gh` runner `worktree_reclaim` calls, which reports WHY a lookup
@@ -91,6 +118,12 @@ pub(crate) mod worktree_reclaim_launch;
 pub(crate) mod worktree_reclaim_claim;
 // #7652: gate 4 — whether the agent or session a sentinel names has ended.
 pub(crate) mod worktree_reclaim_ownership;
+// #7771: Claude Code's per-process session registry, the proof that an owner
+// session no record names has ended.
+pub(crate) mod worktree_claude_registry;
+// #7771: which running processes are Claude Code, so an unregistered one
+// keeps the registry's proof incomplete.
+pub(crate) mod worktree_claude_processes;
 // #7232: the ONE place a claim set is built from the store, so the liveness
 // probe that keeps a tombstoned record from blocking reclaim cannot be omitted
 // by a call site.
@@ -99,11 +132,25 @@ pub(crate) mod worktree_claim_source;
 #[cfg(test)]
 #[path = "worktree_reclaim_owner_liveness_tests.rs"]
 mod worktree_reclaim_owner_liveness_tests;
+// #7771: end-to-end coverage for an agent tree whose dispatching Claude session
+// a restart or `/clear` replaced.
+#[cfg(test)]
+#[path = "worktree_reclaim_superseded_owner_tests.rs"]
+mod worktree_reclaim_superseded_owner_tests;
+// #7771: end-to-end coverage for an owner session no record proves ended.
+#[cfg(test)]
+#[path = "worktree_reclaim_unrecorded_owner_tests.rs"]
+mod worktree_reclaim_unrecorded_owner_tests;
 // #4732: the tri-state "does git still hold state here?" classifier that gates
 // every raw directory removal on the worktree teardown path.
 mod worktree_protection;
 // #2919: the survey and the fresh-recheck delete loop that acts on it.
 pub(crate) mod worktree_reclaim_sweep;
+// #7889: gate 5's landed-content admission and its pre-delete re-check.
+pub(crate) mod worktree_reclaim_landed;
+// #8109: a branch with no pull request of its own needs the landed proof, and a
+// reclaimed tree's branch is deleted on that proof.
+pub(crate) mod worktree_reclaim_branch;
 // #7889: the bounded `git fetch` that makes gate 6's landing refs current, so a
 // squash-merged branch is not misread as holding unsaved work.
 pub(crate) mod worktree_landing_refresh;
@@ -111,13 +158,21 @@ pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
 // #7885: the one audit line every removal route writes before it deletes.
 pub(crate) mod worktree_removal_audit;
+// #8782: the path-identity refusal and the partial-delete report every removal shares.
+pub(crate) mod worktree_removal_integrity;
 // #7196: the machine an SSH config `Host` alias names, so an aliased origin
 // resolves to a real GitHub host before it becomes a `--repo` slug.
 pub(crate) mod ssh_host_alias;
 // #7057: WHICH GitHub repository a directory's pull-request lookups belong to,
 // read from that directory's own `origin` rather than inferred by `gh`.
 pub(crate) mod worktree_repo_slug;
+// #8306: the kill-on-timeout ceiling on every git call the worktree sweeps make.
+pub(crate) mod git_ceiling;
 pub mod worktree_safety;
+// #8782: the project/path bounds of one prune-worktrees pass.
+pub mod worktree_scope;
+// #8782: the per-path preview rows the prune route returns.
+pub(crate) mod worktree_reclaim_preview;
 
 // #7259: `pub(crate)` so the doctor's own tests can drive a manager against
 // `FakeTmuxDriver` — the doctor probe's claim set now comes from the store, so
@@ -145,6 +200,30 @@ mod decommission_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+// #8663: the owned-workspace and unclaimed-directory content gates.
+#[cfg(test)]
+mod decommission_owned_tests;
+
+// #8663 critic round 1: the provisioning ledger, lock and force gates.
+#[cfg(test)]
+mod decommission_owned_ledger_tests;
+
+// #8540: a FIFO provisioning file never blocks a launch or a decommission.
+#[cfg(test)]
+mod provisioning_ledger_fifo_tests;
+
+// #8534 critic round 2: the gitignored-output gate, route by route.
+#[cfg(test)]
+mod worktree_ignored_output_route_tests;
+
+// #8534 critic round 3: user agents and skills versus tm's deployed ones.
+#[cfg(test)]
+mod worktree_ignored_output_asset_tests;
+
+// #8511: the marker-location behaviour, through the pre-existing ownership API.
+#[cfg(test)]
+mod worktree_marker_behaviour_tests;
 
 #[cfg(test)]
 mod delete_tests;
@@ -207,6 +286,10 @@ mod send_input_gate_tests;
 #[cfg(test)]
 mod stop_cause_tests;
 
+// #8935: a stale record never tears down a live session that reused its name.
+#[cfg(test)]
+mod runtime_identity_tests;
+
 /// Shared real-git fixtures for the #4091 dirty-worktree-guard tests, used by
 /// both `worktree_safety::worktree_safety_tests` and `prune::orphan_tests`.
 #[cfg(test)]
@@ -225,11 +308,19 @@ pub use retention::{
     RetentionDebounce, RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS,
     retention_verdict,
 };
+pub use runtime_identity::RuntimeTeardown;
 pub use session_guard::TmuxSessionGuard;
+pub use session_kind::SessionKind;
 pub use slots::{NumberedSlot, SlotRegistry};
+pub use stop::StopReport;
 pub use store::{SessionStore, StoreDegradation, StoreError};
 pub use submit_probe::{SubmitState, classify_submit};
+pub use supervisor_floor::{KillVerdict, SidecarRole, SupervisorFloor};
+pub use supervisor_register::{
+    BindingVerifier, RegisterError, RegisteredSession, RegistrationReport, SupervisorRegistration,
+};
 pub use task_inject::should_inject_task;
+pub use worktree_claude_registry::host_claude_config_roots;
 pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};
 
 #[cfg(feature = "daemon")]

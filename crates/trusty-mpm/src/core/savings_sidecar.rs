@@ -200,6 +200,7 @@ pub fn stage_row(root: &Path, compiled_prompt: &Path, row: &SavingsRow) {
     use std::io::Write as _;
 
     let path = pending_row_path_in(root, compiled_prompt);
+    crate::core::home_write_fence::check(&path); // #8545
     let staged = (|| -> Option<()> {
         let dir = path.parent()?;
         std::fs::create_dir_all(dir).ok()?;

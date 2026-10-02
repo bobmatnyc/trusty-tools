@@ -206,14 +206,15 @@ If the resumed session's `tmux_window` field is non-null (recorded at pause
 time as `session_name:window_index:window_id`, e.g. `main:2:@7`), realign to
 the originating window so resumed work lands where it left off. This is a PM
 bash step — only the PM's own shell has tmux client access, the MCP tool
-never touches tmux. Parse the string on `:` and use only the `session_name`
-and `window_index`:
+never touches tmux. Parse the string on `:` and target the `window_id` (the
+third field, e.g. `@7`) — an immutable id, so it can never match another
+session's window the way a bare `session:index` target can (#8443):
 
 ```bash
 # tmux_window field value: main:2:@7
 if [ -n "$TMUX" ]; then
   # inside tmux → select the recorded window (idempotent no-op if already there)
-  tmux select-window -t 'main:2'   # <session_name>:<window_index> from the field
+  tmux select-window -t '@7'   # <window_id> from the field
 else
   # not inside tmux → just report it; do not attempt to attach
   echo "Recorded tmux window: main:2:@7 (start tmux to re-align)"

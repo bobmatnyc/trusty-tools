@@ -280,10 +280,13 @@ pub(crate) fn embedded_account(s: &str) -> Option<&str> {
 /// reach `gh auth token -u <value>` unvalidated, where a shell metacharacter
 /// or a space would have failed with a confusing `gh` error instead of this
 /// module's own, actionable one).
+/// A blank `flag` reads as absent. Both CLI sources refuse a blank value before
+/// it gets here (#5850), so that arm is reachable only from a direct caller.
 /// Test: `resolve_account_flag_only`, `resolve_account_embedded_only`,
 /// `resolve_account_agreeing_flag_and_embedded`,
 /// `resolve_account_conflicting_flag_and_embedded_errors`,
-/// `resolve_account_rejects_a_malformed_flag_value`.
+/// `resolve_account_rejects_a_malformed_flag_value`,
+/// `resolve_account_blank_flag_is_treated_as_absent`.
 pub(crate) fn resolve_account(
     flag: Option<&str>,
     embedded: Option<&str>,

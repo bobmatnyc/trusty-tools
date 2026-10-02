@@ -88,8 +88,9 @@ pub(crate) struct RelocateIndexRequest {
 /// non-colocated legacy indexes). Emits `IndexRegistered` so connected UIs
 /// refresh.
 ///
-/// Returns 404 when `id` is not in the registry, 400 for an invalid path, 500
-/// on internal rebuild failure. On success returns
+/// Returns 404 when `id` is not in the registry, 400 for an invalid path, 409
+/// while a reindex holds the index's permit or when the new root would contain
+/// a data-dir store (#8499), 500 on internal rebuild failure. On success returns
 /// `{ "id": "…", "relocated": true, "new_root_path": "…" }`.
 ///
 /// Test: `relocate_index_updates_root_path` in `tests_index.rs`.
@@ -163,6 +164,17 @@ pub(crate) async fn relocate_index_report(
         }));
     }
 
+    // #8499: a reindex, deferred-embed pass or component catch-up holds this
+    // permit for its whole run and reads the root as it goes. Rebinding under
+    // it splits the handle root from the indexer root (#4951) mid-walk, so
+    // refuse instead; the permit is held to the end, so no reindex can start
+    // against a half-applied relocate either.
+    let Ok(_index_permit) = crate::service::reindex::index_semaphore(&index_id).try_acquire_owned()
+    else {
+        tracing::warn!("relocate[{id}]: refused — a reindex is running on this index (#8499)");
+        return Err(relocate_busy_response(id));
+    };
+
     // Issue #2336: reject relocating onto a root_path already owned by a
     // DIFFERENT registered index. Same hazard as `create_index_handler`: two
     // live registrations sharing one colocated root resolve to the SAME
@@ -173,6 +185,11 @@ pub(crate) async fn relocate_index_report(
     // `state.cold_store` — relocating onto a cold entry's parked root is the
     // same root-theft as `create_index_handler`'s cold blind spot, just via
     // the PATCH path instead. One shared primitive, one shared fix.
+    //
+    // #8499: held to the registry swap, so a create or relocate into an equal
+    // or nested root waits here and then sees this one's handle — the same
+    // claim `POST /indexes` holds (#2336 check-then-act).
+    let _claim = super::create_layout::claim_registration(id, &new_root).await;
     let handles = state.registry.list_handles();
     let cold_entries = state.cold_store.snapshot();
     if let Some(existing_id) =
@@ -185,6 +202,26 @@ pub(crate) async fn relocate_index_report(
             existing_id,
         );
         return Err(root_path_collision_response(&existing_id, &new_root));
+    }
+    // #8499: nested roots, as `POST /indexes` checks them (#4289).
+    match super::root_overlap::find_root_overlap(
+        &handles,
+        &cold_entries,
+        &new_root,
+        Some(&index_id),
+    ) {
+        Ok(None) => {}
+        Ok(Some(conflict)) => {
+            tracing::warn!(
+                "relocate[{id}]: refusing to relocate to {} — overlaps index '{}' (#4289)",
+                new_root.display(),
+                conflict.index_id,
+            );
+            return Err(super::root_overlap::root_overlap_response(
+                &conflict, &new_root,
+            ));
+        }
+        Err(failure) => return Err(super::root_overlap::overlap_check_failed_response(&failure)),
     }
 
     // Require an embedder so we can rebuild the indexer (it needs to open
@@ -217,6 +254,21 @@ pub(crate) async fn relocate_index_report(
         .and_then(|entries| entries.into_iter().find(|e| e.id == id));
 
     let on_disk_colocated = on_disk.as_ref().map(|e| e.colocated).unwrap_or(false);
+    // #8499: a data-dir store stays put while the root moves; refuse a new
+    // root whose work tree would then contain it.
+    if !on_disk_colocated {
+        if let Err(e) =
+            crate::service::storage_layout::refuse_data_dir_store_in_work_tree(id, &new_root)
+        {
+            let status = if crate::service::storage_layout::is_write_refusal(&e) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::error!("relocate[{id}]: {e:#}");
+            return Err((status, serde_json::json!({ "error": format!("{e:#}") })));
+        }
+    }
     let on_disk_last_queried = on_disk.as_ref().and_then(|e| e.last_queried_unix);
     let on_disk_last_indexed = on_disk.as_ref().and_then(|e| e.last_indexed_unix);
 
@@ -281,51 +333,65 @@ pub(crate) async fn relocate_index_report(
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
     // the new root are opened (or created if missing — the directory existed
     // per validate_root_path above).
-    let mut new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
-        &existing_entry,
-        &embedder,
-    )
-    .await
-    {
-        Ok(idx) => idx,
-        Err(e) => {
+    //
+    // #8499: a data-dir store (every new index's layout) does not move with
+    // the root, and the live handle holds its redb open, so a rebuild fails on
+    // the second open. Rebind the live indexer to the new root instead.
+    let indexer = if !on_disk_colocated {
+        existing
+            .indexer
+            .write()
+            .await
+            .set_root_path(new_root.clone());
+        Arc::clone(&existing.indexer)
+    } else {
+        let mut new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
+            &existing_entry,
+            &embedder,
+        )
+        .await
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::error!(
+                    "relocate[{id}]: failed to rebuild indexer at {}: {e}",
+                    new_root.display()
+                );
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": format!("indexer rebuild failed: {e}") }),
+                ));
+            }
+        };
+        // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
+        // index's query + catch-up embeds route through Interactive/Background
+        // lanes instead of the raw embedder. Registers the daemon's own slot so
+        // a boot-race window self-heals (PR #3784 review finding 1).
+        new_indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
+
+        // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
+        // for a broken redb open (a raced collision, or an unrelated open
+        // error) — it must not be silently rebound to as a healthy
+        // `200 {"relocated": true}` handle.
+        if new_indexer.corpus_open_failed {
             tracing::error!(
-                "relocate[{id}]: failed to rebuild indexer at {}: {e}",
+                "relocate[{id}]: corpus open failed at {} — refusing to relocate to a broken \
+             index handle (issue #2336)",
                 new_root.display()
             );
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({ "error": format!("indexer rebuild failed: {e}") }),
+                serde_json::json!({
+                    "error": format!(
+                        "corpus open failed for root_path {:?}; refusing to relocate to a broken \
+                         index handle",
+                        new_root.display()
+                    )
+                }),
             ));
         }
+        Arc::new(tokio::sync::RwLock::new(new_indexer))
     };
-    // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
-    // index's query + catch-up embeds route through Interactive/Background
-    // lanes instead of the raw embedder. Registers the daemon's own slot so
-    // a boot-race window self-heals (PR #3784 review finding 1).
-    new_indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
-
-    // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
-    // for a broken redb open (a raced collision, or an unrelated open
-    // error) — it must not be silently rebound to as a healthy
-    // `200 {"relocated": true}` handle.
-    if new_indexer.corpus_open_failed {
-        tracing::error!(
-            "relocate[{id}]: corpus open failed at {} — refusing to relocate to a broken \
-             index handle (issue #2336)",
-            new_root.display()
-        );
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "corpus open failed for root_path {:?}; refusing to relocate to a broken \
-                     index handle",
-                    new_root.display()
-                )
-            }),
-        ));
-    }
 
     // Persist the updated entry to indexes.toml BEFORE replacing the handle,
     // so a daemon restart sees the new root even if the in-memory swap below
@@ -344,7 +410,7 @@ pub(crate) async fn relocate_index_report(
     // the existing handle (stage states, context embedding, …).
     let new_handle = IndexHandle {
         id: index_id.clone(),
-        indexer: Arc::new(tokio::sync::RwLock::new(new_indexer)),
+        indexer,
         root_path: new_root.clone(),
         include_paths: existing.include_paths.clone(),
         exclude_globs: existing.exclude_globs.clone(),
@@ -431,4 +497,23 @@ pub(crate) async fn relocate_index_report(
         "relocated": true,
         "new_root_path": new_root.to_string_lossy(),
     }))
+}
+
+/// `409` for a relocate refused because a reindex holds the per-index permit.
+///
+/// Why (#8499): relocate must not rebind a root a running reindex is walking.
+/// What: `409 { error, index_id }`; the error names the running reindex and
+/// says to retry — mirrors `PATCH /indexes/:id/config`'s busy answer.
+/// Test: `relocate_is_refused_while_a_reindex_is_in_flight`.
+fn relocate_busy_response(id: &str) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": format!(
+                "a reindex, deferred-embed pass or component catch-up is running on index \
+                 '{id}' — relocate refused; retry once it completes (#8499)"
+            ),
+            "index_id": id,
+        }),
+    )
 }

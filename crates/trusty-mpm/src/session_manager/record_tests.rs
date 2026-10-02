@@ -55,10 +55,12 @@ fn record_serde_round_trip() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -94,10 +96,12 @@ fn stopped_state_survives_serde() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -131,10 +135,12 @@ fn decommissioned_state_survives_serde() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -193,10 +199,12 @@ fn record_round_trips_tcode_runtime() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     record.runtime = crate::runtime::RuntimeKind::Tcode;
     let json = serde_json::to_string(&record).expect("serialize");
@@ -259,10 +267,12 @@ fn record_round_trips_ephemeral_true() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -355,10 +365,12 @@ fn record_round_trips_scrollback_fields() {
         last_cwd: Some(PathBuf::from("/managed/ws/src")),
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -396,10 +408,12 @@ fn record_round_trips_workspace_owned_true() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -465,10 +479,12 @@ fn record_round_trips_deliverable_id() {
         last_cwd: None,
         deliverable_id: Some(did),
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -531,10 +547,12 @@ fn record_round_trips_worktree_owner() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: Some(owner),
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -671,10 +689,12 @@ fn terminal_fixture() -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

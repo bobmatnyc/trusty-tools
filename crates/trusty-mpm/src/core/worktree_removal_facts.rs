@@ -70,7 +70,7 @@
 //! are safe, so the merged-PR re-check still has to supply that evidence.
 //!
 //! **Content-equivalence is never landing evidence on its own (#7275 round
-//! 2).** [`WorktreeRemovalProbe::merge_into_base_is_a_noop`] answers "would
+//! 2).** [`WorktreeRemovalProbe::content_on_base`] answers "would
 //! landing this branch change anything", and a branch that was never pushed —
 //! holding one empty or self-reverting commit — answers it exactly the way a
 //! merged branch does. The policy therefore asks it only once a MERGED pull
@@ -115,7 +115,26 @@
 //! a stale `@{upstream}` reporting `Ahead(4)` pushed the decision onto a
 //! merge-tree comparison that reported residue for a tree holding none.
 //!
+//! **Landed content is landing evidence of its own (#7889).** A donor branch
+//! fast-forwarded onto a sibling's head and squash-merged under THAT name
+//! leaves GitHub with no pull request carrying the donor's own name, forever.
+//! [`WorktreeRemovalProbe::landing_admission`] answers the two questions that
+//! ruling (owner, 2026-09-22) turns on instead — (b) would merging this HEAD
+//! into the landing base change any file, and (c) is HEAD inside the history
+//! of a merged pull request's head — through
+//! [`crate::core::worktree_landed_content`], which the reclaim sweep's gate 5
+//! also calls. It is a RELAXATION, so only an affirmative answer admits. The
+//! only ancestry consulted is (c)'s one direction; ancestry against the squash
+//! commit is never evidence.
+//!
+//! **A HEAD behind its merged pull request's head is inside what merged
+//! (#8849).** [`WorktreeRemovalProbe::is_ancestor`] and
+//! [`MergedPrLookup::merge_commit`] are the two facts the guard's ancestry
+//! route needs: HEAD ⊑ the pull request's `headRefOid`, and the merge commit on
+//! the refreshed base.
+//!
 //! Test: `merged_pull_request_argv_asks_github_for_the_branch`,
+//! `is_ancestor_refuses_an_option_shaped_argument`,
 //! `detached_head_is_not_a_branch`,
 //! `local_only_commits_counts_only_what_no_origin_ref_has`,
 //! `local_only_commits_reprunes_a_branch_deleted_behind_this_worktrees_back`,
@@ -133,12 +152,16 @@
 
 use std::path::Path;
 
+use crate::core::worktree_landed_content::{
+    LandedContent, LandingAdmission, landing_admission, landing_admission_on_fetched_refs,
+};
+use crate::core::worktree_landed_history::ContentOnBase;
 use crate::session_manager::worktree_landing_refresh::refresh_landing_refs_within;
 use crate::session_manager::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env,
 };
 use crate::session_manager::worktree_repo_slug::{
-    DEFAULT_REMOTE, push_remote_for_branch, repo_slug_for, repo_slug_for_remote,
+    first_merged, merged_pr_search_repos, repo_slug_for,
 };
 use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 
@@ -158,11 +181,13 @@ use crate::session_manager::worktree_safety::{count_dirty_files, git_stdout};
 /// #7958: `headRefOid` rides along too. A worktree sitting on exactly the commit
 /// the pull request merged has the strongest landing evidence there is, and the
 /// policy could not see it because nothing carried the pull request's own head.
+/// #8849: `mergeCommit` rides along, so the ancestry route can prove the squash
+/// is on the refreshed base before a HEAD behind the pull request's head grants.
 const MERGED_PR_ARGS: &[&str] = &[
     "--state",
     "merged",
     "--json",
-    "number,baseRefName,headRefOid",
+    "number,baseRefName,headRefOid,mergeCommit",
     "--limit",
     "1",
 ];
@@ -206,6 +231,10 @@ pub struct MergedPrLookup {
     /// — also when GitHub reported a pull request without one, in which case
     /// the policy never grants on this route.
     pub head_sha: String,
+    /// The squash (or merge) commit GitHub recorded for that pull request
+    /// (#8849). Empty when GitHub named none, which never grants on the
+    /// ancestry route.
+    pub merge_commit: String,
 }
 
 impl MergedPrLookup {
@@ -223,7 +252,20 @@ impl MergedPrLookup {
             repo: repo.into(),
             base_ref: base_ref.into(),
             head_sha: String::new(),
+            merge_commit: String::new(),
         }
+    }
+
+    /// The same answer, carrying the merged pull request's merge commit
+    /// (#8849).
+    ///
+    /// Test: `worktree_8849_a_head_behind_the_merged_prs_head_is_reclaimable`,
+    /// `worktree_8849_a_merge_commit_not_on_the_base_denies` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove_ancestry_tests`.
+    #[must_use]
+    pub fn with_merge_commit(mut self, merge_commit: impl Into<String>) -> Self {
+        self.merge_commit = merge_commit.into();
+        self
     }
 
     /// The same answer, carrying the merged pull request's own head commit
@@ -264,7 +306,7 @@ const NOT_IMPLEMENTED: &str =
 /// What: `git rev-list --count HEAD --not --remotes=origin`.
 /// Test: `local_only_commits_counts_only_what_no_origin_ref_has` in
 /// `crate::session_manager::worktree_safety_tests`.
-const LOCAL_ONLY_COMMITS_ARGS: &[&str] =
+pub(crate) const LOCAL_ONLY_COMMITS_ARGS: &[&str] =
     &["rev-list", "--count", "HEAD", "--not", "--remotes=origin"];
 
 /// How long the admission's `git fetch --prune` may run (#7914, critic round 1).
@@ -416,6 +458,54 @@ pub trait WorktreeRemovalProbe {
     /// `bin/tm/commands/pm_guard_bash/worktree_remove`.
     fn local_only_commits(&self, dir: &Path) -> Result<usize, String>;
 
+    /// Commits reachable from `HEAD` that neither the merged pull request's
+    /// head `pr_head` nor any `origin` remote-tracking ref has (#8665).
+    ///
+    /// Why: a branch whose own pull request merged had its remote branch
+    /// deleted by the merge, so a commit made in the worktree AFTER that merge
+    /// is on no remote at all — and "own PR merged, no upstream" granted the
+    /// removal without asking. This names those commits, so the guard can
+    /// require their content to be proven landed.
+    /// What: `git rev-list --abbrev-commit HEAD --not <pr_head> --remotes=origin`,
+    /// one abbreviated id per commit, newest first. `Ok(vec![])` means nothing
+    /// here post-dates the merged head or is off `origin`. `pr_head` must be a
+    /// hex object id; anything else, a head git does not have, or a failed
+    /// `rev-list` is `Err`. It does NOT refresh `origin`: the caller asks only
+    /// after [`local_only_commits`](Self::local_only_commits) answered, which
+    /// the production probe does only after its own fetch succeeded. Defaulted,
+    /// with the fail-closed default, for the reason [`head_sha`](Self::head_sha)
+    /// is.
+    /// Test: `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
+    /// `worktree_8665_the_merged_head_itself_is_still_reclaimable` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove_rechecks_tests`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`,
+    /// `commits_after_merged_head_refuses_a_head_that_is_not_hex`.
+    fn commits_after_merged_head(
+        &self,
+        _dir: &Path,
+        _pr_head: &str,
+    ) -> Result<Vec<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
+
+    /// Is `ancestor` the same commit as `descendant`, or one of its ancestors
+    /// (#8849)?
+    ///
+    /// Why: a review round's last commits land on a renamed `-rN` branch, so a
+    /// worktree still on the earlier round sits BEHIND its merged pull
+    /// request's head, and the merge-tree comparison reads the later rounds'
+    /// edits as work this tree undid. Ancestry tells "behind" from "undone".
+    /// What: `git merge-base --is-ancestor`. `Ok(false)` only when git answered
+    /// no; an argument git could read as an option, a commit git does not have,
+    /// or any other failure is `Err`. Defaulted, with the fail-closed default,
+    /// for the reason [`head_sha`](Self::head_sha) is.
+    /// Test: `worktree_8849_a_merged_head_git_does_not_have_denies`,
+    /// `is_ancestor_refuses_an_option_shaped_argument`,
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    fn is_ancestor(&self, _dir: &Path, _ancestor: &str, _descendant: &str) -> Result<bool, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
+
     /// How many MERGED pull requests GitHub has for `branch`, and in WHICH
     /// repository the question was asked (#7057).
     ///
@@ -440,10 +530,69 @@ pub trait WorktreeRemovalProbe {
     /// `worktree_remove_rechecks::landing_evidence`.
     /// What: `base_ref` is the full ref the pull request merged into
     /// (`origin/<baseRefName>`), supplied by the caller rather than guessed
-    /// here. `Ok(true)` when the merge would be a no-op, `Ok(false)` when it
-    /// would change files or conflict, `Err` when git could not be asked —
-    /// which denies, like every other undeterminable answer here.
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String>;
+    /// here. `Ok` carries the verdict — landed at the tip or at an earlier
+    /// base commit (#8633), residue, or a conflict — and its description;
+    /// `Err` when git could not be asked, which denies, like every other
+    /// undeterminable answer here.
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String>;
+
+    /// Is this tree's content landed, or its HEAD inside a merged pull
+    /// request's history (#7889)?
+    ///
+    /// Why: the admission for the one shape no pull request can ever vouch
+    /// for by name — a parked branch fast-forwarded onto a sibling `-r2` head
+    /// that squash-merged under THAT name. Nineteen such trees were refused
+    /// across 2026-09-21 and 2026-09-22 while holding nothing `origin/main`
+    /// lacked. Owner ruling 2026-09-22 admits routes (b) and (c).
+    /// What: delegates to
+    /// [`landing_admission`](crate::core::worktree_landed_content::landing_admission)
+    /// under [`ADMISSION_FETCH_TIMEOUT`], so this ladder and the reclaim
+    /// sweep's gate 5 run one predicate rather than two. The default
+    /// implementation establishes nothing, which never grants.
+    /// Test: `worktree_7889_a_landed_tree_with_no_merged_pr_is_reclaimable`,
+    /// `worktree_7889_a_residual_path_denies_and_names_it`,
+    /// `worktree_7889_an_unestablished_landed_content_answer_never_grants`,
+    /// `worktree_7889_a_head_carried_by_a_merged_pr_is_reclaimable` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `an_unoverridden_probe_establishes_neither_new_fact`.
+    fn landing_admission(&self, _dir: &Path) -> LandingAdmission {
+        LandedContent::unavailable(NOT_IMPLEMENTED).into()
+    }
+
+    /// [`landing_admission`](Self::landing_admission), trusting a refresh
+    /// [`local_only_commits`](Self::local_only_commits) completed in this same
+    /// evaluation (#7889).
+    ///
+    /// Why: the guard runs inside a 5 s hook, and a second `git fetch` of up
+    /// to 3 s is the difference between a decision and none. The policy calls
+    /// this only after `local_only_commits` answered `Ok`, which the production
+    /// probe returns only once its fetch succeeded.
+    /// What: the default delegates to the fetching method, so an implementor
+    /// that does not override it loses time, never safety.
+    /// Test: `worktree_7889_the_admission_reuses_the_local_only_fetch_only_when_it_succeeded`
+    /// in `bin/tm/commands/pm_guard_bash/worktree_remove`.
+    fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
+        self.landing_admission(dir)
+    }
+
+    /// Work `git status` cannot see: a nested repository holding unsaved work,
+    /// or a high-value gitignored file (#7889 critic round 2).
+    ///
+    /// Why: `git worktree remove --force` deletes ignored content, so a clone
+    /// with unpushed commits under an ignored directory dies with the tree.
+    /// The sweep already refuses it; every guard grant now asks the same scan.
+    /// What: `Ok(None)` when there is none, `Ok(Some(reason))` naming the first
+    /// nested path, `Err` when the scan could not run. The default is `Err`,
+    /// which refuses: an implementor that has not overridden it establishes
+    /// nothing.
+    /// Test: `worktree_7889_nested_dirt_denies_a_landed_grant`,
+    /// `worktree_7889_nested_dirt_denies_a_merged_pr_grant`,
+    /// `worktree_7889_an_unanswerable_nested_scan_denies` in
+    /// `bin/tm/commands/pm_guard_bash/worktree_remove`;
+    /// `nested_dirt_finds_an_ignored_clone_with_an_unpushed_commit`.
+    fn nested_dirt(&self, _dir: &Path) -> Result<Option<String>, String> {
+        Err(NOT_IMPLEMENTED.to_string())
+    }
 }
 
 /// The row, if any, whose pull request was opened from exactly `sha` (#7832).
@@ -585,6 +734,50 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         })
     }
 
+    fn commits_after_merged_head(&self, dir: &Path, pr_head: &str) -> Result<Vec<String>, String> {
+        // #8665: the id comes from GitHub and lands in argv, so only a bare hex
+        // object id is passed — never something git could read as an option.
+        let pr_head = pr_head.trim();
+        if pr_head.is_empty() || !pr_head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "the merged pull request's head `{pr_head}` is not a commit id git can be asked \
+                 about"
+            ));
+        }
+        let args = [
+            "rev-list",
+            "--abbrev-commit",
+            "HEAD",
+            "--not",
+            pr_head,
+            "--remotes=origin",
+        ];
+        let out = git_stdout(dir, &args)?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn is_ancestor(&self, dir: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+        // #8849: both ids can come from GitHub and land in argv, so nothing git
+        // could read as an option is passed. The exit-code probe is the
+        // sweep's own.
+        for arg in [ancestor, descendant] {
+            if arg.is_empty() || arg.starts_with('-') || arg.contains(char::is_whitespace) {
+                return Err(format!("`{arg}` is not a commit git can be asked about"));
+            }
+        }
+        crate::session_manager::worktree_reclaim_pr_match::LandingProbe::is_ancestor(
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+            dir,
+            ancestor,
+            descendant,
+        )
+    }
+
     fn merged_pull_requests(&self, dir: &Path, branch: &str) -> Result<MergedPrLookup, String> {
         // #7057: the repository — and its host, when that is not github.com —
         // comes from THIS worktree's own remote, not from whatever `gh` would
@@ -597,58 +790,19 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // merged. `None` — nothing configured, or git could not be asked —
         // means `origin`, so every failure branch here lands on the pre-#7850
         // verdict rather than on a guess.
-        let remote = push_remote_for_branch(dir, branch);
-        let repo = repo_slug_for_remote(dir, remote.as_deref().unwrap_or(DEFAULT_REMOTE))?;
-        // #6623: the same per-project `github:` binding an interactive `tm`
-        // resolves. The hook inherits the operator's shell environment in the
-        // common case, but not when Claude Code is launched from a GUI, and a
-        // lookup that fails auth must not read as "no merged PR".
-        // #6867: through the same gate the reclaim survey uses — this call has
-        // the identical hang shape, and a `dir` whose `gh` has wedged must stop
-        // being polled here too. Its own key: the argv asks a DIFFERENT
-        // question (merged only) from `pr_state_for_branch`'s, so the two must
-        // never share a reply. #7057: the repository is part of that key —
-        // two directories resolving to different repositories do not have the
-        // same answer for the same branch name.
-        let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
-            .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
-                let mut cmd = gh_pr_list_command(dir, &resolve_daemon_gh_env(dir), &repo);
-                cmd.arg("--head").arg(branch);
-                cmd.args(MERGED_PR_ARGS);
-                crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
-            })
-            .map_err(|f| format!("{f} (repository searched: {repo})"))?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
-            format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
-        })?;
-        // #7275 round 2: the first row's base is the one the policy judges this
-        // worktree's content against. A row without one leaves it empty, which
-        // denies at the call site rather than falling back to a guess.
-        let base_ref = rows
-            .first()
-            .and_then(|r| r.get("baseRefName"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        // #7958: the same row's own head commit. Absent leaves it empty, which
-        // denies on that route rather than matching a HEAD against nothing.
-        let head_sha = rows
-            .first()
-            .and_then(|r| r.get("headRefOid"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        Ok(MergedPrLookup {
-            count: rows.len(),
-            repo,
-            base_ref,
-            head_sha,
-        })
+        // #8403: `origin` first — repository identity comes from its URL —
+        // then the push remote as a second place to look, never instead.
+        // Either URL unreadable denies; see `merged_pr_search_repos_with`.
+        let repos = merged_pr_search_repos(dir, branch)?;
+        let pin_origin = repos.first().cloned().unwrap_or_default();
+        first_merged(
+            &repos,
+            |repo| merged_pull_requests_in(dir, branch, repo, &pin_origin),
+            |lookup: &MergedPrLookup| lookup.count > 0,
+        )
     }
 
-    fn merge_into_base_is_a_noop(&self, dir: &Path, base_ref: &str) -> Result<bool, String> {
+    fn content_on_base(&self, dir: &Path, base_ref: &str) -> Result<ContentOnBase, String> {
         // #7275, owner correction 2026-09-09: NOT `git cherry`. Every merge here
         // is a squash, so its per-commit patch-id comparison reports `+` for
         // content that IS on the base — observed on #7258. Merging into the base
@@ -656,23 +810,111 @@ impl WorktreeRemovalProbe for GitAndGhProbe {
         // #7275 round 2: the base is the merged pull request's own, passed in.
         // Resolving `origin/HEAD` here judged every branch against the default
         // branch, which is wrong for anything that merged elsewhere.
-        let base = base_ref.trim();
-        if base.is_empty() {
-            return Err("no base ref was supplied to judge this worktree's content against".into());
-        }
-        let tree = git_stdout(dir, &["merge-tree", "--write-tree", base, "HEAD"])
-            .map_err(|e| format!("`git merge-tree --write-tree {base} HEAD` failed: {e}"))?;
-        let Some(tree) = tree.lines().next().map(str::trim).filter(|t| !t.is_empty()) else {
-            return Err(format!(
-                "`git merge-tree --write-tree {base} HEAD` named no tree"
-            ));
-        };
-        // `git diff --name-only` rather than `--quiet`: an empty answer is the
-        // no-op, and a non-empty one names the residue for the deny message.
-        let residue = git_stdout(dir, &["diff", "--name-only", base, tree])
-            .map_err(|e| format!("`git diff --name-only {base} <merged tree>` failed: {e}"))?;
-        Ok(residue.trim().is_empty())
+        // #7889: the two commands now live in `core::worktree_landed_content`,
+        // so this check and the landed-content admission cannot drift apart.
+        // #8633: a squash whose files `main` later edited is found in the
+        // base's history instead of being read as a failed merge.
+        crate::core::worktree_landed_history::content_on_base(dir, base_ref)
     }
+
+    fn landing_admission(&self, dir: &Path) -> LandingAdmission {
+        // #7889: the same 3 s bound the #7914 admission's fetch runs under —
+        // this also executes inside the `PreToolUse` hook, whose own 5 s
+        // timeout kills a decision that has not been printed yet. Route (c)
+        // reuses the sweep's `gh` commit search and `git` ancestry probe.
+        landing_admission(
+            dir,
+            ADMISSION_FETCH_TIMEOUT,
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+        )
+    }
+
+    fn nested_dirt(&self, dir: &Path) -> Result<Option<String>, String> {
+        // #7889 critic round 2: the sweep's own scan. It fails toward dirty —
+        // an unreadable candidate or a failed walk is reported as dirt.
+        Ok(crate::session_manager::worktree_nested::nested_dirt(dir).map(|d| d.reason))
+    }
+
+    fn landing_admission_on_fetched_refs(&self, dir: &Path) -> LandingAdmission {
+        // #7889: `local_only_commits` fetched `origin` in this evaluation and
+        // answered `Ok` only because that fetch succeeded — see the trait doc.
+        landing_admission_on_fetched_refs(
+            dir,
+            &crate::session_manager::worktree_reclaim_pr_match::GhLandingProbe,
+        )
+    }
+}
+
+/// One repository's MERGED pull requests for `branch` (#8403: split out so
+/// the caller can search `origin` and the push remote in turn).
+fn merged_pull_requests_in(
+    dir: &Path,
+    branch: &str,
+    repo: &str,
+    pin_origin: &str,
+) -> Result<MergedPrLookup, String> {
+    let repo = repo.to_string();
+    // #6623: the same per-project `github:` binding an interactive `tm`
+    // resolves. The hook inherits the operator's shell environment in the
+    // common case, but not when Claude Code is launched from a GUI, and a
+    // lookup that fails auth must not read as "no merged PR".
+    // #6867: through the same gate the reclaim survey uses — this call has
+    // the identical hang shape, and a `dir` whose `gh` has wedged must stop
+    // being polled here too. Its own key: the argv asks a DIFFERENT
+    // question (merged only) from `pr_state_for_branch`'s, so the two must
+    // never share a reply. #7057: the repository is part of that key —
+    // two directories resolving to different repositories do not have the
+    // same answer for the same branch name.
+    let stdout = crate::session_manager::worktree_reclaim_gh_gate::shared()
+        .poll(dir, &format!("merged-count:{repo}:{branch}"), || {
+            // #5850: a registry pin this process cannot honour is a REFUSAL,
+            // not a licence to ask GitHub as the machine's global account.
+            let gh_env = resolve_daemon_gh_env(dir, pin_origin)?;
+            let mut cmd = gh_pr_list_command(dir, &gh_env, &repo);
+            cmd.arg("--head").arg(branch);
+            cmd.args(MERGED_PR_ARGS);
+            crate::session_manager::worktree_reclaim_gh::run_with_timeout(cmd, GH_TIMEOUT)
+        })
+        .map_err(|f| format!("{f} (repository searched: {repo})"))?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout).map_err(|e| {
+        format!("`gh pr list --repo {repo} --head {branch}` JSON did not parse: {e}")
+    })?;
+    // #7275 round 2: the first row's base is the one the policy judges this
+    // worktree's content against. A row without one leaves it empty, which
+    // denies at the call site rather than falling back to a guess.
+    let base_ref = rows
+        .first()
+        .and_then(|r| r.get("baseRefName"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // #7958: the same row's own head commit. Absent leaves it empty, which
+    // denies on that route rather than matching a HEAD against nothing.
+    let head_sha = rows
+        .first()
+        .and_then(|r| r.get("headRefOid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // #8849: `mergeCommit` is an object (`{"oid": …}`) or null; either absence
+    // leaves it empty, which never grants on the ancestry route.
+    let merge_commit = rows
+        .first()
+        .and_then(|r| r.get("mergeCommit"))
+        .and_then(|m| m.get("oid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Ok(MergedPrLookup {
+        count: rows.len(),
+        repo,
+        base_ref,
+        head_sha,
+        merge_commit,
+    })
 }
 
 // #7275 round 2: `base_ref_for` is gone. It resolved `origin/HEAD` (falling back
@@ -728,6 +970,11 @@ mod tests {
             MERGED_PR_ARGS
                 .iter()
                 .any(|a| a.contains("headRefOid") && a.contains("baseRefName")),
+            "{MERGED_PR_ARGS:?}"
+        );
+        // #8849: the merge commit, which the ancestry route proves is on the base.
+        assert!(
+            MERGED_PR_ARGS.iter().any(|a| a.contains("mergeCommit")),
             "{MERGED_PR_ARGS:?}"
         );
     }
@@ -834,8 +1081,12 @@ mod tests {
         fn merged_pull_requests(&self, _dir: &Path, _b: &str) -> Result<MergedPrLookup, String> {
             Ok(MergedPrLookup::new(0, "o/r", ""))
         }
-        fn merge_into_base_is_a_noop(&self, _dir: &Path, _base: &str) -> Result<bool, String> {
-            Ok(false)
+        fn content_on_base(&self, _dir: &Path, _base: &str) -> Result<ContentOnBase, String> {
+            Ok(ContentOnBase::Residual {
+                paths: vec!["x".into()],
+                searched: 0,
+                candidates: 0,
+            })
         }
     }
 
@@ -852,6 +1103,53 @@ mod tests {
                 .merged_pull_request_for_commit(dir, "deadbeef")
                 .is_err()
         );
+        // #7889: the admission's default is the same — establishing nothing,
+        // which never grants.
+        assert!(!UnoverriddenProbe.landing_admission(dir).admits());
+        // #7889 critic round 2: an unoverridden nested scan is unanswerable.
+        assert!(UnoverriddenProbe.nested_dirt(dir).is_err());
+        // #8665: so is the post-merge commit list, which then never admits.
+        assert!(
+            UnoverriddenProbe
+                .commits_after_merged_head(dir, "deadbeef")
+                .is_err()
+        );
+        // #8849: and so is ancestry, which then never admits.
+        assert!(UnoverriddenProbe.is_ancestor(dir, "a", "b").is_err());
+    }
+
+    /// 🔴 #8849: an option-shaped id from GitHub never reaches git — unguarded,
+    /// `--all` would make `merge-base` answer a different question.
+    #[test]
+    fn is_ancestor_refuses_an_option_shaped_argument() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        for (a, d) in [
+            ("--all", "HEAD"),
+            ("HEAD", "-x"),
+            ("", "HEAD"),
+            ("HEAD", "a b"),
+        ] {
+            let err = GitAndGhProbe
+                .is_ancestor(&repo, a, d)
+                .expect_err("an unaskable argument must be refused");
+            assert!(err.contains("is not a commit"), "{err}");
+        }
+        assert_eq!(GitAndGhProbe.is_ancestor(&repo, "HEAD", "HEAD"), Ok(true));
+    }
+
+    /// 🔴 #8665: the merged head comes from GitHub and lands in argv, so a
+    /// value git would read as an option is refused before git runs. Unguarded,
+    /// `--all` turns the query into `HEAD --not --all`, which lists nothing and
+    /// would read as "no commit after the merge".
+    #[test]
+    fn commits_after_merged_head_refuses_a_head_that_is_not_hex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = checkout(tmp.path());
+        let err = GitAndGhProbe
+            .commits_after_merged_head(&repo, "--all")
+            .expect_err("an option-shaped head must never reach git");
+        assert!(err.contains("--all"), "{err}");
     }
 
     /// Run `git -C <dir> <args>`, panicking with git's own stderr on failure.
@@ -983,5 +1281,43 @@ mod tests {
             GitAndGhProbe.dirty_entries(&repo).expect("status readable"),
             1
         );
+    }
+
+    /// 🔴 REGRESSION (#7889 critic round 2): a clone under an IGNORED directory,
+    /// holding a commit on no remote, is invisible to `git status` and would be
+    /// deleted by `git worktree remove --force`. The guard's probe finds it and
+    /// names its path. The ignore rule lives in `info/exclude`, so HEAD — and
+    /// with it any landed-content answer — is untouched.
+    #[test]
+    fn nested_dirt_finds_an_ignored_clone_with_an_unpushed_commit() {
+        let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+        let wt = fx.add_worktree("nested-clone-7889");
+        assert_eq!(
+            GitAndGhProbe.nested_dirt(&wt).expect("scan runs"),
+            None,
+            "premise: a fresh tree holds no nested work"
+        );
+        let exclude = fx.repo.join(".git").join("info").join("exclude");
+        std::fs::create_dir_all(exclude.parent().expect("parent")).expect("mkdir info");
+        std::fs::write(&exclude, "scratch/\n").expect("write exclude");
+        let inner = wt.join("scratch").join("side-project");
+        std::fs::create_dir_all(&inner).expect("mkdir inner");
+        git_ok(&inner, &["init", "--initial-branch=main"]);
+        git_ok(&inner, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&inner, &["config", "user.name", "CI"]);
+        git_ok(&inner, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(inner.join("work.rs"), "// only copy\n").expect("write work");
+        git_ok(&inner, &["add", "work.rs"]);
+        git_ok(&inner, &["commit", "-m", "only copy"]);
+        assert_eq!(
+            GitAndGhProbe.dirty_entries(&wt).expect("status readable"),
+            0,
+            "premise: git status cannot see the ignored clone"
+        );
+        let reason = GitAndGhProbe
+            .nested_dirt(&wt)
+            .expect("scan runs")
+            .expect("the ignored clone's unpushed commit must be reported");
+        assert!(reason.contains("scratch/side-project"), "{reason}");
     }
 }

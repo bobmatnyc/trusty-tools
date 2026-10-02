@@ -21,6 +21,7 @@
 //! | `search.index.file.remove` | `POST /indexes/{id}/remove-file` | bulk |
 //! | `search.index.reindex` | `POST /indexes/{id}/reindex` | bulk |
 //! | `search.graph.ingest` | `POST /indexes/{id}/graph` | bulk |
+//! | `search.index.quantize` | `POST /indexes/{id}/quantize` | bulk |
 //!
 //! The reindex TRIGGER is here; `GET /indexes/{id}/reindex/stream` and the other
 //! SSE routes are slice 5's.
@@ -83,8 +84,8 @@ use serde::Deserialize;
 use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::service::server::{
-    CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest, ReindexRequest,
-    RelocateIndexRequest, RemoveFileRequest, SearchAppState,
+    CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest, QuantizeRequest,
+    ReindexRequest, RelocateIndexRequest, RemoveFileRequest, SearchAppState,
 };
 
 use super::as_http_body;
@@ -113,6 +114,11 @@ pub const METHOD_GRAPH_INGEST: &str = "search.graph.ingest";
 pub const METHOD_INDEX_PAUSE_EMBEDDING: &str = "search.index.pause_embedding";
 /// Let this index's embedding stage continue (#6524). Socket-only.
 pub const METHOD_INDEX_RESUME_EMBEDDING: &str = "search.index.resume_embedding";
+/// `POST /indexes/{id}/quantize` — the scalar-precision backfill (#6822).
+///
+/// Added by the #6285 consumer move: it was the one route the CLI dialled
+/// that had no socket twin.
+pub const METHOD_INDEX_QUANTIZE: &str = "search.index.quantize";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -134,6 +140,8 @@ pub const METHODS: &[&str] = &[
     // #6524 — the embedding pause pair.
     METHOD_INDEX_PAUSE_EMBEDDING,
     METHOD_INDEX_RESUME_EMBEDDING,
+    // #6285 consumer move — the quantize backfill.
+    METHOD_INDEX_QUANTIZE,
 ];
 
 /// An index-scoped write whose HTTP form takes a request BODY.
@@ -194,6 +202,22 @@ pub struct ReindexParams {
     /// The optional request body, exactly as the HTTP route takes it.
     #[serde(default)]
     pub body: Option<ReindexRequest>,
+}
+
+/// The params of `search.index.quantize`.
+///
+/// Why the body is optional: `POST /indexes/{id}/quantize` accepts an empty
+/// body and reads it as "convert to the current default, for real"; a caller
+/// that sends no `body` here reaches the same arm.
+/// What: `{"index_id": "x", "body": {"quant": "f16", "dry_run": true}}`.
+/// Test: `quantize_over_the_socket_matches_the_http_body`.
+#[derive(Deserialize)]
+pub struct QuantizeParams {
+    /// The index to convert — the `{id}` path segment on HTTP.
+    pub index_id: String,
+    /// The optional request body, exactly as the HTTP route takes it.
+    #[serde(default)]
+    pub body: Option<QuantizeRequest>,
 }
 
 /// Run one write body behind the admission limiter, with NO query deadline.
@@ -276,8 +300,8 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     use super::reads::IndexRef;
     use crate::service::server::{
         create_index_report, delete_index_report, index_file_report, ingest_graph_report,
-        pause_embedding_report, reindex_report, relocate_index_report, remove_file_report,
-        resume_embedding_report,
+        pause_embedding_report, quantize_report, reindex_report, relocate_index_report,
+        remove_file_report, resume_embedding_report,
     };
 
     let r = router;
@@ -321,6 +345,11 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     // ---- reindex trigger (the SSE stream is slice 5) ------------------------
     let r = bulk_write!(r, METHOD_INDEX_REINDEX, ReindexParams, |s, p| {
         reindex_report(&s, &p.index_id, p.body).await
+    });
+
+    // ---- quantize backfill (#6822), the bulk lane its HTTP route takes -------
+    let r = bulk_write!(r, METHOD_INDEX_QUANTIZE, QuantizeParams, |s, p| {
+        quantize_report(&s, &p.index_id, p.body).await
     });
 
     // ---- embedding pause/resume (#6524) -------------------------------------

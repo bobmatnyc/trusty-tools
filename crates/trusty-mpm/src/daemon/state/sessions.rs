@@ -91,45 +91,6 @@ pub(crate) const DELEGATION_RETENTION_SECS: i64 = 60 * 60;
 /// `a_stale_delegation_is_eventually_evicted`.
 pub(crate) const STALE_RETENTION_SECS: i64 = 24 * 60 * 60;
 
-/// Has this agent positively reported a working tree other than `cwd` (#6556)?
-///
-/// Why: [`DaemonState::live_shared_tree_writers`] answers "who is writing in
-/// this directory", and it used to answer it from the DECLARED `isolation`
-/// alone. That field records an intention read off one hook payload, and it is
-/// absent whenever the declaration did not reach the tracker — after which a
-/// worktree-isolated agent is named as a shared-checkout writer for the six
-/// hours of [`RUNNING_STALE_AFTER_SECS`]. `worktree_path` is the opposite kind
-/// of fact: the subagent's own hook cwd, written only after the delegation
-/// tracker's four ownership claims and a successful sentinel write, and only
-/// when it differs from the dispatcher's `cwd`. So a recorded path that is not
-/// `cwd` is positive evidence of a separate tree, which is what ADR-0045 asks
-/// reconciliation to run on.
-/// What: `true` only when the agent's granted tree ([`Delegation::worktree_path`])
-/// is recorded, is not `cwd`, and is where the agent's LAST hook event ran
-/// ([`Delegation::last_agent_cwd`]). `None` in either field is not evidence of
-/// anything — the agent may not have made a tool call yet — so it answers
-/// `false` and the isolation test still decides.
-///
-/// **Both fields, because `worktree_path` is a latch (#6556 critic round).**
-/// That field never reverts: the tree stays this delegation's to own even after
-/// the agent walks out of it, which is what the reap needs. An agent CAN walk
-/// out — `EnterWorktree` then `ExitWorktree` with `action: "keep"` puts it back
-/// in the dispatcher's checkout — and the latch alone excluded it from this
-/// count for the rest of its life. Requiring the last observed cwd to BE the
-/// granted tree turns a historical grant into a statement about the present,
-/// which is the only thing this guard may act on.
-/// Test: `a_recorded_worktree_outranks_a_missing_isolation_declaration`,
-/// `an_unrecorded_worktree_leaves_the_isolation_test_deciding`,
-/// `an_agent_that_leaves_its_worktree_blocks_the_shared_tree_again`.
-fn holds_its_own_tree(d: &Delegation, cwd: &std::path::Path) -> bool {
-    let (Some(granted), Some(current)) = (d.worktree_path.as_deref(), d.last_agent_cwd.as_deref())
-    else {
-        return false;
-    };
-    // #6556: granted a tree of its own, and standing in it right now.
-    granted != cwd && current == granted
-}
-
 /// What a shared-tree caller is going to DO with the answer (#6556 critic
 /// round 2).
 ///
@@ -460,9 +421,13 @@ impl DaemonState {
     ///   [`SessionStatus::Stopped`] in place (kept so the operator can see it).
     ///
     /// Returns the [`ReapResult`] with both counts. Native sessions are left
-    /// untouched.
+    /// untouched, and so is any session whose id a `SessionStart` settled in
+    /// the session-claude registry, or every session while it is sealed
+    /// (#8980).
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
-    /// `reap_marks_stopped_when_pid_dead`.
+    /// `reap_marks_stopped_when_pid_dead`,
+    /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`,
+    /// `a_sealed_registry_reaps_nothing_8980`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 
@@ -470,7 +435,12 @@ impl DaemonState {
         let mut stopped_ids: Vec<SessionId> = Vec::new();
         for entry in self.sessions.iter() {
             let session = entry.value();
-            if session.origin != SessionHost::Tmux {
+            // #8980: a `SessionStart`-announced id is a harness session, whose
+            // uuid-derived tmux name is never live; reaping it would stale its
+            // live agents on any forged or `compact`/`resume` SessionStart. A
+            // sealed registry settles every id, so it skips every session.
+            if session.origin != SessionHost::Tmux || self.session_claudes.is_settled(*entry.key())
+            {
                 continue;
             }
             if !live.contains(&session.tmux_name) {
@@ -517,14 +487,20 @@ impl DaemonState {
     /// still resolve the record to the truth for the rest of its
     /// [`STALE_RETENTION_SECS`] window.
     ///
-    /// It is driven only by the reaper, which acts on POSITIVE evidence — the
+    /// It is driven by the reaper, which acts on POSITIVE evidence — the
     /// tmux session is gone from `list-sessions`, or the tracked `claude`
-    /// process has exited. Absence from the registry is deliberately NOT a
-    /// trigger: a session the daemon never registered is undeterminable rather
-    /// than dead (ADR-0045), and treating it as dead would quietly disarm the
-    /// ADR-0048 shared-checkout guard for every unregistered session.
+    /// process has exited — and by a `SessionEnd` proven to come from the
+    /// session's own `claude` (#6797, #8980:
+    /// `delegation_repair_caller::stale_on_owner_session_end`). The reaper's
+    /// pid is not caller-writable on a session that owns delegations (#8980:
+    /// `sessions_legacy_ops::set_session_pid`). Absence from the registry is
+    /// deliberately NOT a trigger: a session the daemon never registered is
+    /// undeterminable rather than dead (ADR-0045), and treating it as dead
+    /// would quietly disarm the ADR-0048 shared-checkout guard for every
+    /// unregistered session.
     /// Test: `reap_stales_a_dead_sessions_delegations`,
-    /// `reap_leaves_a_live_sessions_delegations_alone`.
+    /// `reap_leaves_a_live_sessions_delegations_alone`,
+    /// `the_owners_session_end_stales_its_records_8980`.
     pub(crate) fn stale_delegations_of_dead_session(&self, session: SessionId) -> usize {
         let mut staled = 0;
         for mut entry in self.delegations.iter_mut() {
@@ -543,34 +519,6 @@ impl DaemonState {
             );
         }
         staled
-    }
-
-    /// Terminalize every non-terminal delegation naming `agent_id` (#7602).
-    ///
-    /// Why: the operator repair verb's only write. It is separate from
-    /// [`Self::stale_delegations_of_dead_session`] because the two record
-    /// DIFFERENT facts: that sweep says "the owner is gone, tracking gave up"
-    /// and writes the non-terminal [`DelegationStatus::Stale`], which the
-    /// reclaim gate still reads as live; this says "an operator ended a record
-    /// nothing else could end" and writes a terminal status, which is what
-    /// actually releases the agent's worktree.
-    ///
-    /// What: [`DelegationStatus::Cancelled`] — never `Completed`, which would
-    /// claim the agent finished. The gate deciding whether this may run at all
-    /// is [`crate::daemon::services::delegation_repair::decide`]; this function
-    /// performs the write and nothing else.
-    /// Test: `repair_ends_a_stuck_record_of_a_dead_owner_7602`.
-    pub(crate) fn cancel_stuck_delegations_of_agent(&self, agent_id: &str) -> usize {
-        let mut ended = 0;
-        for mut entry in self.delegations.iter_mut() {
-            let d = entry.value_mut();
-            if d.agent_id.as_deref() != Some(agent_id) || d.status.is_terminal() {
-                continue;
-            }
-            d.status = DelegationStatus::Cancelled;
-            ended += 1;
-        }
-        ended
     }
 
     /// Gather the tmux names tracked by BOTH session registries.
@@ -705,18 +653,6 @@ impl DaemonState {
         self.dispatch_record.lock()
     }
 
-    /// Hold the machine-wide builder-slot lock for one scan-and-claim (#6892).
-    ///
-    /// Why: see the `builder_claim` field's own doc. Exposed as a guard rather
-    /// than inlined so [`super::builder_slots`] — a sibling module of this one —
-    /// can take it without the field being `pub`.
-    /// What: blocks until the lock is free. `pub(crate)`: an internal invariant
-    /// between two modules of this crate, never a consumer API.
-    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
-    pub(crate) fn builder_claim_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
-        self.builder_claim.lock()
-    }
-
     /// Stops still waiting for the `agent_id` that names them (#4142).
     ///
     /// Why: `crate::daemon::services::delegation_tracker` is the ledger's only
@@ -770,11 +706,14 @@ impl DaemonState {
     /// closely related their sessions are. The session was never the right
     /// key; the daemon holds every session's delegations and this is the one
     /// place that fact is usable.
-    /// What: every delegation that is [`DelegationStatus::is_live`], whose
-    /// `cwd` equals `cwd`, whose agent
+    /// What: every delegation that is [`DelegationStatus::is_live`], that
+    /// `tree_membership::writes_in` places in `cwd`, and whose `tool_use_id` is
+    /// not `exclude_tool_use_id`; returned as agent names for the deny message.
+    /// That module decides WHERE an agent writes (#8535, #8161): a record
+    /// stamped at `cwd` whose agent
     /// [`shares_the_callers_tree`](crate::core::dispatch_isolation::shares_the_callers_tree),
-    /// and whose `tool_use_id` is not `exclude_tool_use_id`; returned as agent
-    /// names for the deny message.
+    /// unless it stands in another harness tree, plus any live writer standing
+    /// in `cwd` when `cwd` is a linked worktree.
     ///
     /// `exclude_tool_use_id` is load-bearing, not a convenience. The daemon's
     /// `matcher: "*"` `PreToolUse` hook and `tm hook --pm-guard` fire on the
@@ -783,8 +722,9 @@ impl DaemonState {
     /// session. Excluding the caller's own `tool_use_id` makes the answer
     /// independent of that ordering.
     ///
-    /// A delegation with no recorded `cwd` is skipped rather than assumed to
-    /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
+    /// A delegation with no recorded `cwd` is not assumed to share one: it
+    /// counts only where its own latest hook places it (#8161), and is
+    /// otherwise skipped, because this whole guard fails toward ALLOW.
     /// `Stale` is deliberately not live — a record tracking has given up on
     /// must not block a dispatch for the remaining hours of its retention.
     ///
@@ -801,6 +741,8 @@ impl DaemonState {
     /// (ADR-0045). On 2026-09-01 a `rust-engineer` dispatched with
     /// `isolation: "worktree"` and running in `.claude/worktrees/agent-…` was
     /// named here anyway, and blocked four ADR-0049 documents-only commits.
+    /// #8535 widened the evidence to the agent's latest hook cwd, so the answer
+    /// no longer waits for that claim to land.
     ///
     /// **This is the ADMISSION answer; occupancy is
     /// [`Self::shared_tree_occupants`] (#6556 critic round).** A record staled by
@@ -898,6 +840,29 @@ impl DaemonState {
         include_reconciled: bool,
         exclude_session: Option<SessionId>,
     ) -> Vec<String> {
+        self.shared_tree_records(
+            cwd,
+            exclude_tool_use_id,
+            include_reconciled,
+            exclude_session,
+        )
+        .into_iter()
+        .map(|d| d.agent)
+        .collect()
+    }
+
+    /// [`Self::shared_tree_agents`]' one filter, returning the records (#8257),
+    /// so the dispatch deny and `tm repair delegation --list` can name each
+    /// blocking record's id, owner and age. `(cwd, exclude, true, None)` is
+    /// exactly [`Self::shared_tree_occupants`].
+    /// Test: `shared_tree_dispatch_route_names_each_blocking_record_8257`.
+    pub(crate) fn shared_tree_records(
+        &self,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+        include_reconciled: bool,
+        exclude_session: Option<SessionId>,
+    ) -> Vec<Delegation> {
         let now = chrono::Utc::now();
         self.delegations
             .iter()
@@ -906,22 +871,16 @@ impl DaemonState {
                 let counts =
                     d.status.is_live() || (include_reconciled && type_reconciled_occupant(d, now));
                 counts
-                    && d.cwd.as_deref() == Some(cwd)
                     // #6797: the asking session's own agents are its own
                     // workstream, not a foreign writer a HEAD move would surprise.
                     && exclude_session != Some(d.session)
                     && !(exclude_tool_use_id.is_some()
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
-                    // #6556: the agent reported a tree of its own AND is still
-                    // standing in it, so it is not writing here whatever the
-                    // dispatch declared.
-                    && !holds_its_own_tree(d, cwd)
-                    && crate::core::dispatch_isolation::shares_the_callers_tree(
-                        &d.agent,
-                        d.isolation.as_deref(),
-                    )
+                    // #8535, #8161: where the agent stands now outranks where
+                    // its dispatcher stood; #6556's granted-tree test is folded in.
+                    && super::tree_membership::writes_in(d, cwd)
             })
-            .map(|e| e.value().agent.clone())
+            .map(|e| e.value().clone())
             .collect()
     }
 
@@ -1260,7 +1219,11 @@ impl DaemonState {
     /// guard's own comment in the body for why a missing `tmux_name` proves
     /// nothing while a resume is recreating that very session.
     ///
-    /// Test: `reap_dead_managed_sessions_marks_stopped`,
+    /// #8942 — a protected-kind record goes `Stopped` record-only
+    /// ([`crate::session_manager::SessionManager::mark_stopped_record_only`]).
+    ///
+    /// Test: `the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown`,
+    /// `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,
     /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
@@ -1294,7 +1257,14 @@ impl DaemonState {
                     );
                     continue;
                 }
-                match mgr.stop_with_cause(&r.id, cause).await {
+                // #8942: the Architect's pane is gone, so its record says so,
+                // but no teardown runs for it.
+                let stopped = if r.kind.is_protected() {
+                    mgr.mark_stopped_record_only(&r.id, cause).await
+                } else {
+                    mgr.stop_with_cause(&r.id, cause).await
+                };
+                match stopped {
                     Ok(_) => tracing::info!(
                         id = %r.id,
                         name = %r.tmux_name,

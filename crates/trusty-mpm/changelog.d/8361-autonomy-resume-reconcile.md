@@ -1,3 +1,0 @@
-Changed
-
-- The PM's `## Autonomous Execution` rule is its own tier-`project` instruction section with its own `AUTONOMOUS-EXECUTION` marker token, carved out of the tier-`fixed` `core` section. The rule now reads "run without stopping while the direction is clear" and names the ambiguity that stops it; `tm-session-resume` and `tm-session-management` no longer instruct a confirmation on resume, so the two can no longer contradict each other. A project sets its own comfort level with an `AUTONOMOUS-EXECUTION` block in its root `CLAUDE.md` (refs [#8361](https://github.com/bobmatnyc/trusty-tools/issues/8361))

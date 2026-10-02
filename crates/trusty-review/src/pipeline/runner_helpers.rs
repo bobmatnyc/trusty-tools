@@ -27,7 +27,7 @@ use crate::{
         post::{PostContext, finalize_review},
         prompt::ReviewPrMeta,
     },
-    store::DedupStore,
+    store::{ClaimOutcome, DedupError, DedupStore},
 };
 
 use super::runner::{ReviewDeps, ReviewInput};
@@ -293,7 +293,8 @@ pub(super) async fn abort_dry(
     result.findings_count = result.findings.len();
     // #4459: the same sync for the unverified count, so an aborted run reports
     // it too rather than leaving a stale zero.
-    result.unverified_count = crate::pipeline::post::count_unverified(&result.findings);
+    result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
+        + result.withheld_unverified_count; // #8904
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
     if claim == DedupClaim::Held
@@ -410,18 +411,31 @@ pub(super) async fn finalize_run(
 ///      every finding, the model's own verdict rested on the same evidence and
 ///      is relaxed with it (#4042, #4044).
 ///
+/// Returns every finding passes 1–3 dropped, each with its reason, for the
+/// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
+/// on #8905, 2026-09-30).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
-/// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`.
+/// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
+/// `run_review_records_self_negated_findings_as_withheld`.
 pub(super) fn ground_parsed_findings(
     parsed: &mut crate::pipeline::parser::ParsedReview,
     filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
-) {
+) -> Vec<crate::models::WithheldFinding> {
     let findings_before = parsed.findings.len();
-    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings);
+    let mut withheld = Vec::new();
+    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings, &mut withheld);
 
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
-    crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
-    crate::pipeline::absence_claim::drop_refuted_absence_claims(&mut parsed.findings, &cite_index);
+    crate::pipeline::citation_check::enforce_citation_integrity(
+        &mut parsed.findings,
+        &cite_index,
+        &mut withheld,
+    );
+    crate::pipeline::absence_claim::drop_refuted_absence_claims(
+        &mut parsed.findings,
+        &cite_index,
+        &mut withheld,
+    );
 
     crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
         &mut parsed.verdict,
@@ -429,10 +443,59 @@ pub(super) fn ground_parsed_findings(
         findings_before,
         &parsed.findings,
     );
+    withheld
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 // Split into a sibling file to keep this file under the 500-line cap.
+
+/// What the runner does with a `claim()` outcome.
+///
+/// Why: naming the outcomes makes the fail-closed rule reviewable in one place.
+/// It used to be an inline `match` whose error arm proceeded with the review,
+/// so a store failure produced an ungated live comment — and on the next
+/// redelivery, another one.
+/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a review that
+/// already ran to completion; `InProgressElsewhere` blocks a review that has
+/// NOT run because another holder owns the slot (#5126); `Abort` carries the
+/// reason a claim could not be established.
+/// Test: `classify_claim_*` in `runner_tests.rs`.
+pub(super) enum ClaimGate {
+    /// This caller owns the review slot.
+    Proceed,
+    /// A completed review already exists for this head SHA.
+    DuplicateSkip,
+    /// Another holder owns a fresh in-progress claim; nothing was reviewed.
+    InProgressElsewhere,
+    /// The claim gate did not engage; abort without posting.
+    Abort(String),
+}
+
+/// Decide what a `claim()` result means for the review about to run.
+///
+/// Why: #5064 — every `DedupError` means the same thing operationally. The
+/// caller does not know whether this head SHA was already reviewed, and could
+/// not record that it is reviewing it now. Proceeding posts an unguarded
+/// comment; aborting drops the review. The webhook handler has already returned
+/// 202 by this point (`service::webhook`), so GitHub will NOT redeliver — the
+/// review is lost until a human re-requests it. That is still the better half
+/// of the trade: a dropped review is visible and re-requestable, a duplicate
+/// comment cannot be retracted. Every error aborts, `Contended` included, which
+/// is the variant a stuck sibling process produces during a rolling upgrade.
+/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`,
+/// `Ok(InProgressElsewhere)` → `InProgressElsewhere` (#5126), and every `Err` →
+/// `Abort` carrying the error's `Display`.
+/// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
+/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`,
+/// `stranded_in_progress_claim_is_not_a_duplicate_skip`.
+pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
+    match outcome {
+        Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
+        Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
+        Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
+        Err(e) => ClaimGate::Abort(e.to_string()),
+    }
+}
 
 #[cfg(test)]
 #[path = "runner_helpers_tests.rs"]

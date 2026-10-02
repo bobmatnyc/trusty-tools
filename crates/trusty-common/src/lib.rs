@@ -225,10 +225,51 @@ pub mod bin_resolve;
 /// gui_mcp_client`.
 pub mod gui_mcp_client;
 
+/// The unconditional `provider ↔ canonical env var` credential table (#4564).
+///
+/// Why: hoisted out of the `credentials`-gated module tree by #8236 so
+/// [`launchd_secrets`] can name a credential by REGISTRY membership on every
+/// feature set. `credentials::registry` re-exports every item, so the
+/// documented import path is unchanged.
+/// What: [`credential_registry::REGISTRY`],
+/// [`credential_registry::env_var_for`],
+/// [`credential_registry::provider_for_env_var`] and
+/// [`credential_registry::is_registered_credential_env_var`].
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// credential_registry`.
+pub mod credential_registry;
+
+/// Crash-safe file replacement: write a sibling temp file, then rename (#8236).
+///
+/// Why: `tm doctor --fix` rewrites a LIVE LaunchAgent plist. A direct
+/// `std::fs::write` interrupted partway leaves a truncated plist and the daemon
+/// cannot start.
+/// What: [`atomic_file::write_atomic`], which preserves the target's existing
+/// permission bits and leaves the original byte-identical on any failure.
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// atomic_file`.
+pub mod atomic_file;
+
 /// macOS LaunchAgent generation and lifecycle management. macOS-only —
 /// the module compiles to nothing on every other platform.
 #[cfg(target_os = "macos")]
 pub mod launchd;
+
+/// Keep credential VALUES out of every generated launchd plist (#8236).
+///
+/// Why: `~/Library/LaunchAgents/*.plist` is user-readable, so a credential in
+/// its `EnvironmentVariables` dict is readable by every process running as the
+/// user and by every backup of the disk.
+/// What: [`launchd_secrets::is_credential_env_key`] and
+/// [`launchd_secrets::looks_like_credential_value`] detect;
+/// [`launchd_secrets::strip_credential_env`] guards the renderer and
+/// [`launchd_secrets::scrub_plist_credential_env`] remediates an already-
+/// installed plist.
+/// Deliberately NOT macOS-gated, unlike `launchd`, so `tm doctor`'s scan and
+/// the detection tests build on Linux CI too.
+/// Test: `credential_keys_are_detected`,
+/// `scrub_removes_the_credential_entry_and_keeps_the_rest`.
+pub mod launchd_secrets;
 
 /// Label-correct LaunchAgent activation with legacy eviction and rollback
 /// (#4919). macOS-only, like [`launchd`] itself.
@@ -528,7 +569,6 @@ pub mod migrations;
 /// surface (`EntityType`, `RawEntity`, `EdgeKind`, `fact_hash_str`, tables)
 /// — no tree-sitter, no `links` conflict. `symgraph-parser` additionally
 /// pulls in tree-sitter and the full parse → registry → emit stack.
-/// `symgraph-server` enables the HTTP server frontend.
 /// Test: `cargo test -p trusty-common --features symgraph` exercises the
 /// contracts surface; `cargo test -p trusty-symgraph` covers the parser
 /// path through the thin re-export shim.
@@ -678,6 +718,17 @@ pub mod host_metrics;
 #[cfg(feature = "load-average")]
 pub mod load_average;
 
+/// The host's memory pressure as the kernel reports it (#8261).
+///
+/// Why: builder admission read a free-megabytes floor over `sysinfo`'s
+/// estimate; both kernels publish the pressure verdict they act on, and that
+/// is the signal an admission decision should follow.
+/// What: [`memory_pressure::read_memory_pressure`] returns a level
+/// (normal/warn/critical), the available percentage and every raw signal read.
+/// Test: `cargo test -p trusty-common --features memory-pressure -- memory_pressure`.
+#[cfg(feature = "memory-pressure")]
+pub mod memory_pressure;
+
 /// Machine-tier detection + the proportional memory budget (#6820).
 ///
 /// Why: the suite's supported-hardware bar — 24 GB supported, 16 GB minimum,
@@ -696,6 +747,26 @@ pub mod load_average;
 /// Test: `cargo test -p trusty-common --features machine-tier --no-fail-fast`.
 #[cfg(feature = "machine-tier")]
 pub mod machine_tier;
+
+/// SHA-256 parse, hash and verify — the one integrity check (#8378).
+///
+/// Why: ADR-0064 decision 5 (i) rules that pinned-artifact verification has
+/// one implementation; trusty-installer's pinned downloads and the content
+/// resolver both call this module.
+/// What: [`integrity::Sha256Digest`] and [`integrity::IntegrityError`].
+/// Test: `cargo test -p trusty-common --features integrity -- integrity`.
+#[cfg(feature = "integrity")]
+pub mod integrity;
+
+/// Runtime resolver for instructional content (ADR-0064, #8378).
+///
+/// Why: agents, skills and instructions become runtime-only content, so every
+/// harness needs one place that picks the source and verifies the pin.
+/// What: [`content::resolve`] — a trusty-tools checkout override first, then
+/// the installed bundle pinned by `content-lock.toml` (tag + sha256).
+/// Test: `cargo test -p trusty-common --features content-resolver -- content`.
+#[cfg(feature = "content-resolver")]
+pub mod content;
 
 /// Upload trusty-* log files to object storage (#6533).
 ///

@@ -280,7 +280,8 @@ impl SessionManager {
         // nested-session guard can trust to confirm pane-level identity; a
         // session-scoped env var is inherited by sibling panes/windows and
         // therefore insufficient (see `SessionRecord::pane_id`'s doc).
-        let pane_id = self.tmux.get_pane_id(&tmux_name);
+        // #9004: with the server it was read on, or the record never owns it.
+        let (pane_id, tmux_server) = super::pane_identity::capture(self.tmux.as_ref(), &tmux_name);
 
         // OWN the freshly-created tmux session immediately (#1453). From here
         // until the record is durably persisted, this guard is the session's
@@ -332,6 +333,7 @@ impl SessionManager {
             last_cwd: None,
             deliverable_id: None,
             pane_id,
+            tmux_server,
             injection_status: Default::default(),
             // #3649: owner-unknown by default. The two real provisioning call
             // sites (`spawn_managed_inproject`, `spawn_managed_on_main` in
@@ -344,6 +346,7 @@ impl SessionManager {
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: super::SessionKind::Ordinary,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

@@ -72,16 +72,6 @@
 //! The grant is keyed by name and reaches exactly one agent; engineer
 //! source-write confinement is untouched.
 //!
-//! **A third question shares this module and answers none of the above
-//! (#6892).** [`agent_is_builder`] asks whether a dispatch claims one of the
-//! machine's builder slots — whether it runs a compiler or a test suite — which
-//! is neither "does it write files" nor "does it need its own tree". It is here
-//! because it reads the same bundled frontmatter through the same scan
-//! (`bundled_agent_metadata`), and it must NOT be folded into
-//! [`agent_mutates_files`]: `documentation` and `version-control` both write and
-//! neither builds, so counting them against a RAM cap would deny builds to buy
-//! nothing.
-//!
 //! Test: the `#[cfg(test)]` suite below.
 //!
 //! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
@@ -91,7 +81,6 @@
 //! [`requires_own_worktree_in_main_checkout`]: crate::core::dispatch_isolation::requires_own_worktree_in_main_checkout
 //! [`permitted_in_shared_checkout`]: crate::core::dispatch_isolation::permitted_in_shared_checkout
 //! [`blocked_by_shared_tree`]: crate::core::dispatch_isolation::blocked_by_shared_tree
-//! [`agent_is_builder`]: crate::core::dispatch_isolation::agent_is_builder
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;
@@ -163,15 +152,40 @@ const FILE_MUTATING_NAMES: &[&str] = &["qa", "web-qa", "api-qa"];
 /// (ADR-0048 decision 3) must not reach them.
 ///
 /// The list is exactly the built-ins whose published tool set excludes every
-/// write tool (`Edit`, `Write`, `NotebookEdit`). `general-purpose` is
-/// deliberately NOT here: it carries the full tool set, and in this project it
-/// is also the identity a failed named-agent dispatch degrades into (#4451), so
-/// a `general-purpose` delegation is routinely an engineer's work under another
-/// name. It stays `Unknown`, and stays isolated.
+/// write tool (`Edit`, `Write`, `NotebookEdit`). `claude-code-guide` qualifies
+/// on the same test as `Explore` and `Plan`: Claude Code 2.1.281 gives it
+/// `Read`/`Glob`/`Grep`/`WebFetch`/`WebSearch`, or `Bash` in place of
+/// `Glob`/`Grep`, and `Explore` and `Plan` carry `Bash` too. `general-purpose`
+/// and `claude` are deliberately NOT here: both carry the full tool set, and
+/// `general-purpose` is also the identity a failed named-agent dispatch
+/// degrades into (#4451), so a `general-purpose` delegation is routinely an
+/// engineer's work under another name. `statusline-setup` carries `Edit`. All
+/// three stay `Unknown`, and stay isolated.
 /// What: matched case-sensitively, ahead of the bundle scan, so a bundled agent
 /// could never be shadowed by one of these names without also colliding on it.
+/// Every entry is also in [`HARNESS_BUILTIN_AGENTS`].
 /// Test: `read_only_harness_builtins_are_not_isolated`.
-const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
+const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan", "claude-code-guide"];
+
+/// Every agent type the Claude Code harness itself provides, readers and
+/// writers alike (#8547).
+///
+/// Why: a dispatch in a main checkout is refused when its `subagent_type` is a
+/// name nothing defines. These six ship in no trusty-mpm bundle and in no
+/// deployed agent directory, yet Claude Code resolves them, so they are known
+/// names and must never be refused as unknown. Knowing a name is a separate
+/// question from whether it writes: [`READ_ONLY_HARNESS_AGENTS`] is the subset
+/// that reads only, and the rest still get a worktree.
+/// What: matched case-sensitively by [`agent_known_without_roster`].
+/// Test: `harness_builtins_are_known_names`.
+pub const HARNESS_BUILTIN_AGENTS: &[&str] = &[
+    "general-purpose",
+    "Explore",
+    "Plan",
+    "claude",
+    "claude-code-guide",
+    "statusline-setup",
+];
 
 /// Bundled agent `name:`s that write, and are still permitted to do so in a
 /// checkout they do not own (ADR-0056).
@@ -205,39 +219,6 @@ const READ_ONLY_HARNESS_AGENTS: &[&str] = &["Explore", "Plan"];
 // The two guard layers fire at different points (dispatch time and Bash time)
 // and must never disagree about the name, so neither keeps its own copy.
 const SHARED_CHECKOUT_PERMITTED_NAMES: &[&str] = &["version-control"];
-
-/// Frontmatter `role:` values whose agents run a compiler or a test suite.
-///
-/// Why: a builder-slot is a claim on the MACHINE's RAM and CPU, so this asks a
-/// narrower question than [`FILE_MUTATING_ROLES`] — "does this agent build?",
-/// not "does this agent write files?". The two must not be folded together:
-/// `documentation` and `version-control` both write and neither compiles
-/// anything, so counting them against the cap would deny builds to buy nothing.
-/// What: matched case-sensitively against
-/// [`AgentMetadata::role`](trusty_agents_common::agents::metadata::AgentMetadata::role)
-/// by [`agent_is_builder`]. `data-engineer` is deliberately absent — it declares
-/// its own role and #6892's design scopes v1 to plain `engineer` plus the one
-/// name below; widening it is a separate decision with its own evidence.
-/// Test: `engineer_role_agents_are_builders`, `non_builder_agents_are_not`.
-// #6892: the machine-wide builder-slot cap counts these.
-const BUILDER_ROLES: &[&str] = &["engineer"];
-
-/// Bundled agent `name:`s that build despite declaring a non-engineer role.
-///
-/// Why: `local-ops` declares `role: ops` and its whole job is running the
-/// quality gates — `cargo build`, `cargo test`, docker, database lifecycle — so
-/// a role-only classifier would leave the single most build-heavy agent
-/// uncounted. Keyed by NAME rather than by role because the other two `ops`
-/// agents (`gcp-ops`, `vercel-ops`) drive remote platforms and compile nothing:
-/// promoting `ops` to [`BUILDER_ROLES`] would charge them for RAM they never
-/// take.
-/// What: matched case-sensitively against the dispatch's `subagent_type`, ahead
-/// of the bundle scan, so a rename of the bundled file cannot silently drop the
-/// name from the cap.
-/// Test: `local_ops_is_a_builder_despite_its_ops_role`,
-/// `other_ops_agents_are_not_builders`.
-// #6892: role: ops is not homogeneous — see BUILDER_ROLES.
-const BUILDER_NAMES: &[&str] = &["local-ops"];
 
 /// The `extends:` base whose descendants are engineer-tier regardless of role.
 ///
@@ -356,11 +337,10 @@ pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
 /// The declared frontmatter of the bundled agent named `agent`, if this binary
 /// ships one.
 ///
-/// Why: [`agent_write_risk`] and [`agent_is_builder`] ask different questions of
-/// the SAME table, and a second scan is a second place the two could disagree
-/// about which artifact is which agent — see CLAUDE.md, "Common entry point,
-/// clean domain demarcation". Extracted rather than duplicated for that reason
-/// and no other; the policy each caller applies to the answer stays its own.
+/// Why: [`agent_write_risk`] and [`agent_known_without_roster`] ask different
+/// questions of the SAME table, and a second scan is a second place the two
+/// could disagree about which artifact is which agent. The builder classifier
+/// that also read it retired with the dispatch-time cap (#8261 round 3).
 /// What: scans `crate::core::bundle::ALL` for the `agents/*.md` artifact whose
 /// declared `name:` equals `agent`, and parses it. `None` for a name this binary
 /// does not ship — a custom project agent, a renamed agent, or an unparseable
@@ -371,8 +351,7 @@ pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
 /// ordinary tool calls. A process-lifetime cache would be global state for no
 /// measurable win.
 /// Test: `write_risk_separates_unknown_from_read_only`,
-/// `engineer_role_agents_are_builders`, `unknown_agent_is_not_a_builder`.
-// #6892: one scan serving both the write-risk and the builder classifiers.
+/// `harness_builtins_are_known_names`.
 fn bundled_agent_metadata(
     agent: &str,
 ) -> Option<trusty_agents_common::agents::metadata::AgentMetadata> {
@@ -388,43 +367,19 @@ fn bundled_agent_metadata(
         .find(|meta| meta.name.as_deref() == Some(agent))
 }
 
-/// Does dispatching `agent` claim one of the machine's builder slots (#6892)?
+/// Is `agent` a name this binary knows without reading any agent directory
+/// (#8547)?
 ///
-/// Why: "at most N concurrent builders" was a per-session rule held in PM
-/// memory, and the hazard it guards is a property of the MACHINE — on
-/// 2026-08-08 several sessions each honouring their own "2" produced six
-/// concurrent `cargo` builds and crashed the host. Enforcing it once, machine
-/// wide, needs a classifier that answers "does this agent build?" — which is a
-/// different question from [`agent_mutates_files`]'s "does this agent write
-/// files?". Reusing that one would charge `documentation` and `version-control`
-/// for RAM they never take, and it is the reason this predicate exists rather
-/// than a call to that one.
-/// What: `true` when `agent` is in [`BUILDER_NAMES`], or when this binary ships
-/// a bundled agent of that name whose `role:` is in [`BUILDER_ROLES`]. A name
-/// this binary does not ship answers `false`.
-///
-/// **`false` here is not the fail-open this module's header describes.** An
-/// unknown agent is not counted against the cap AND is never denied by it, so
-/// the answer is consistent in both directions — unlike the shared-tree
-/// classifiers, where `false` admits a dispatch that may still collide. The
-/// fail-CLOSED half of the builder cap is elsewhere: an unreachable or silent
-/// daemon denies a dispatch this predicate has classified as a builder.
-/// Test: `engineer_role_agents_are_builders`,
-/// `local_ops_is_a_builder_despite_its_ops_role`,
-/// `other_ops_agents_are_not_builders`, `non_builder_agents_are_not`,
-/// `unknown_agent_is_not_a_builder`.
-pub fn agent_is_builder(agent: &str) -> bool {
-    if agent.is_empty() {
-        return false;
-    }
-    // Checked before the bundle so a renamed artifact cannot silently drop the
-    // name from the cap. See the constant.
-    if BUILDER_NAMES.contains(&agent) {
-        return true;
-    }
-    bundled_agent_metadata(agent)
-        .and_then(|meta| meta.role)
-        .is_some_and(|role| BUILDER_ROLES.contains(&role.as_str()))
+/// Why: the #8547 refusal must not reach a name that something defines. Two of
+/// the three sources that define names need no I/O — the compiled-in bundle and
+/// the harness built-ins — so they are checked here, and the caller reads the
+/// deployed roster only when both answer no.
+/// What: `true` when `agent` is in [`HARNESS_BUILTIN_AGENTS`] or names a bundled
+/// agent. Exact, case-sensitive match; an empty name is `false`.
+/// Test: `harness_builtins_are_known_names`.
+pub fn agent_known_without_roster(agent: &str) -> bool {
+    !agent.is_empty()
+        && (HARNESS_BUILTIN_AGENTS.contains(&agent) || bundled_agent_metadata(agent).is_some())
 }
 
 /// Must this dispatch get a working tree of its own before it may run in a
@@ -489,8 +444,9 @@ pub fn blocked_by_shared_tree(agent: &str, isolation: Option<&str>) -> bool {
 /// can never read different fields and disagree about which agent was
 /// dispatched.
 /// What: `tool_input.subagent_type` as a non-empty `&str`. An untyped
-/// dispatch — no `subagent_type` at all — yields `None` and therefore fails
-/// open; it is a separate defect, not this guard's to block.
+/// dispatch — no `subagent_type` at all — yields `None`. The shared-tree race
+/// lets it through; a main checkout refuses it (#8547, see
+/// `pm_guard_worktree_grant`).
 /// Test: `reads_subagent_type_and_isolation`.
 pub fn dispatch_agent(tool_input: Option<&Value>) -> Option<&str> {
     dispatch_field(tool_input, "subagent_type")
@@ -687,7 +643,8 @@ mod tests {
         // targets and ship in no bundle, so they classified `Unknown` and were
         // granted a worktree — which is cut from a COMMIT and therefore hides
         // the session's uncommitted work from the very agent asked to read it.
-        for agent in READ_ONLY_HARNESS_AGENTS {
+        // #8547 review: `claude-code-guide` has no Edit/Write/NotebookEdit either.
+        for agent in ["Explore", "Plan", "claude-code-guide"] {
             assert_eq!(
                 agent_write_risk(agent),
                 AgentWriteRisk::ReadsOnly,
@@ -698,16 +655,36 @@ mod tests {
                 "{agent} only reads and must read the session's own tree"
             );
         }
-        // `general-purpose` carries the full tool set and is also the identity a
-        // failed named-agent dispatch degrades into, so it stays a writer.
-        assert_eq!(agent_write_risk("general-purpose"), AgentWriteRisk::Unknown);
-        assert!(requires_own_worktree_in_main_checkout(
-            "general-purpose",
-            None
-        ));
+        // `general-purpose` and `claude` carry the full tool set, and
+        // `statusline-setup` carries `Edit`, so all three stay writers.
+        for agent in ["general-purpose", "claude", "statusline-setup"] {
+            assert_eq!(agent_write_risk(agent), AgentWriteRisk::Unknown, "{agent}");
+            assert!(
+                requires_own_worktree_in_main_checkout(agent, None),
+                "{agent}"
+            );
+        }
         // The read-only classification must not leak into #4480's question:
         // these were already allowed to share a tree, and still are.
         assert!(!shares_the_callers_tree("Explore", None));
+    }
+
+    #[test]
+    fn harness_builtins_are_known_names() {
+        // #8547 review: every harness built-in and every bundled agent is a
+        // known name; a name nothing defines, or a mis-cased one, is not.
+        for agent in HARNESS_BUILTIN_AGENTS
+            .iter()
+            .chain(&["rust-engineer", "research"])
+        {
+            assert!(agent_known_without_roster(agent), "{agent}");
+        }
+        for agent in ["", "some-project-custom-agent", "explore", "Rust-Engineer"] {
+            assert!(!agent_known_without_roster(agent), "{agent:?}");
+        }
+        for agent in READ_ONLY_HARNESS_AGENTS {
+            assert!(HARNESS_BUILTIN_AGENTS.contains(agent), "{agent}");
+        }
     }
 
     #[test]
@@ -785,79 +762,5 @@ mod tests {
         assert!(!shares_the_callers_tree("rust-engineer", Some("remote")));
         assert!(!shares_the_callers_tree("research", None));
         assert!(!shares_the_callers_tree("unknown-agent", None));
-    }
-
-    // ---- #6892: the builder-slot classifier -----------------------------
-
-    /// Criterion 7's positive half: every `role: engineer` agent claims a slot.
-    #[test]
-    fn engineer_role_agents_are_builders() {
-        for agent in [
-            "rust-engineer",
-            "engineer",
-            "python-engineer",
-            "react-engineer",
-        ] {
-            assert!(
-                agent_is_builder(agent),
-                "{agent} declares role: engineer and must count against the cap"
-            );
-        }
-    }
-
-    /// Criterion 8. `local-ops` declares `role: ops`, so the role half of the
-    /// classifier cannot see it — only the name half can, and this is what
-    /// proves that half is wired rather than dead.
-    #[test]
-    fn local_ops_is_a_builder_despite_its_ops_role() {
-        let meta = bundled_agent_metadata("local-ops").expect("local-ops is bundled");
-        assert_eq!(
-            meta.role.as_deref(),
-            Some("ops"),
-            "the premise: if local-ops ever declares role: engineer this test proves nothing"
-        );
-        assert!(agent_is_builder("local-ops"));
-    }
-
-    /// The name half must reach exactly one name. `gcp-ops` and `vercel-ops`
-    /// share `role: ops` and drive remote platforms — promoting the role would
-    /// charge them for RAM they never take.
-    #[test]
-    fn other_ops_agents_are_not_builders() {
-        for agent in ["gcp-ops", "vercel-ops"] {
-            assert!(!agent_is_builder(agent), "{agent} compiles nothing");
-        }
-    }
-
-    /// Criterion 7. A research/ticketing/qa/documentation/version-control
-    /// dispatch must be invisible to the gate — including the two that DO write
-    /// files, which is why this cannot reuse `agent_mutates_files`.
-    #[test]
-    fn non_builder_agents_are_not() {
-        for agent in [
-            "research",
-            "ticketing",
-            "qa",
-            "web-qa",
-            "api-qa",
-            "code-critic",
-            "documentation",
-            "version-control",
-            "security",
-            "memory-manager",
-        ] {
-            assert!(!agent_is_builder(agent), "{agent} must not claim a slot");
-        }
-        // The distinction this predicate exists for, stated as an assertion.
-        assert!(agent_mutates_files("documentation"));
-        assert!(agent_mutates_files("version-control"));
-    }
-
-    /// An unknown or untyped dispatch is neither counted nor denied.
-    #[test]
-    fn unknown_agent_is_not_a_builder() {
-        for agent in ["", "general-purpose", "some-project-local-agent", "Explore"] {
-            assert!(!agent_is_builder(agent));
-        }
     }
 }

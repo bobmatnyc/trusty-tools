@@ -206,6 +206,7 @@ pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyh
     let _guard = crate::core::claude_json_guard::lock();
 
     let claude_json = claude_config_dir.join(".claude.json");
+    crate::core::home_write_fence::check(&claude_json); // #8545
 
     // Read existing config. If the file exists but contains malformed JSON,
     // quarantine it by renaming to `.claude.json.corrupt` (the file holds no

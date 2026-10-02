@@ -50,7 +50,14 @@ tracing = { workspace = true }
 # now 0.30/0.29 and every TUI crate names them, so the local pins are gone and
 # the vulnerable `lru 0.12` ratatui 0.29 carried is out of the graph. The
 # 0.29→0.30 API-breakage spike Slices 4/10 were told to expect has been paid.
-ratatui = { workspace = true }
+# #8205: `unstable-rendered-line-info` exposes `Paragraph::line_count`, which
+# measures a paragraph through the SAME `WordWrapper` the renderer uses. The
+# chat pane sizes itself from that number, so measuring with anything else
+# re-opens the clipping this issue is about. The feature is additive — every
+# other ratatui consumer in the workspace sees one extra method and nothing
+# removed — and it is named here rather than on the workspace pin because this
+# is the only crate that measures wrapped text.
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 
 [dev-dependencies]

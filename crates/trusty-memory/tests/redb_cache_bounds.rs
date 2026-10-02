@@ -32,12 +32,10 @@ use std::path::{Path, PathBuf};
 
 /// Source files allowed to call redb directly.
 ///
-/// `commands/kuzu_migrate.rs` opens a FOREIGN `store.redb` written by
-/// kuzu-memory, not a palace file: it is a one-shot CLI import, not the
-/// long-lived daemon, and the palace cache ceiling has no meaning for it.
-/// Nothing else in this tree may open redb outside
+/// Empty since #277 removed `commands/kuzu_migrate.rs`'s foreign `store.redb`
+/// reader: nothing in this tree may open redb outside
 /// `trusty_common::redb_cache`.
-const ALLOWED: &[&str] = &["src/commands/kuzu_migrate.rs"];
+const ALLOWED: &[&str] = &[];
 
 /// Trees scanned, relative to the crate root.
 const SCANNED: &[&str] = &["src"];

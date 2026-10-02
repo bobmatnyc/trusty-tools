@@ -344,14 +344,12 @@ pub(crate) fn default_marker_path() -> PathBuf {
 /// `session_ls_json_passthrough_prunes_dead_records`; the decision logic
 /// itself via [`auto_prune_dead_records_at`] directly.
 pub(crate) async fn prune_and_report(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     hides_dead_rows: bool,
 ) -> PrunedListing {
     prune_and_report_at(
-        client,
-        url,
+        daemon,
         sessions,
         &PruneContext::production(),
         hides_dead_rows,
@@ -371,8 +369,7 @@ pub(crate) async fn prune_and_report(
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
 /// `session_ls_no_prune_makes_the_read_non_mutating`.
 pub(crate) async fn prune_and_report_at(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     ctx: &PruneContext,
     hides_dead_rows: bool,
@@ -388,8 +385,7 @@ pub(crate) async fn prune_and_report_at(
         };
     }
     let outcome = auto_prune_dead_records_at(
-        client,
-        url,
+        daemon,
         sessions,
         &ctx.marker_path,
         ctx.live_tmux_names.clone(),
@@ -764,11 +760,15 @@ fn live_tmux_session_names() -> Option<HashSet<String>> {
 /// [`workspace_verified_gone`]'s parent check exists to prevent straight past
 /// the check. Requiring the CLI's own confirmation for EVERY record closes that.
 ///
-/// Dropping the short-circuit costs nothing in coverage: `is_unresumable`
-/// requires all three of `last_cwd`/`workspace_path`/`cwd` absent, so any record
-/// it flags is one this predicate also finds gone — provided the record carries
-/// a path on the wire. A legacy record with neither `workspace_path` nor `cwd`
-/// serialized is now kept rather than cleared; unverifiable is not dead.
+/// Since #8551 the daemon's flag covers MORE records than this predicate: a
+/// recorded `workspace_path` that is gone flags the record even when `cwd`
+/// still exists, while [`workspace_verified_gone`] requires every candidate
+/// gone. That gap is intended. The flag stays a picker label; it never deletes.
+/// 🔴 `is_dead_record` must NEVER short-circuit on `s.unresumable` — adding
+/// `s.unresumable ||` here would widen a record-deleting prune to every record
+/// the daemon's bare `try_exists` calls gone, unmounted volumes included (see
+/// #8551, PR #4725). A legacy record with neither `workspace_path` nor `cwd`
+/// serialized is kept rather than cleared; unverifiable is not dead.
 ///
 /// What: `is_clearable_state(s, live) && workspace_verified_gone(s)`.
 /// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`, in particular
@@ -817,8 +817,7 @@ async fn is_dead_record(s: &ManagedSessionSummary, live_tmux_names: &HashSet<Str
 /// `auto_prune_dead_records_honors_the_cap`,
 /// `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`.
 pub(crate) async fn auto_prune_dead_records_at(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     sessions: Vec<ManagedSessionSummary>,
     marker_path: &Path,
     live_tmux_names: Option<HashSet<String>>,
@@ -936,7 +935,7 @@ pub(crate) async fn auto_prune_dead_records_at(
     } else {
         let mut iter = to_prune.into_iter();
         for s in iter.by_ref() {
-            match decommission_dead_record(client, url, &s.id).await {
+            match decommission_dead_record(daemon, &s.id).await {
                 DecommissionOutcome::Pruned => {
                     pruned += 1;
                     seen.remove(&s.id);
@@ -1133,13 +1132,13 @@ enum DecommissionOutcome {
 /// drives the stale-daemon path through a stub server that ignores
 /// `record_only` and always reports `workspace_removed: true`.
 async fn decommission_dead_record(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
 ) -> DecommissionOutcome {
-    let resp = match client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
-        .query(&[("record_only", "true")])
+    let resp = match daemon
+        .post(format!("/api/v1/sessions/managed/{id}/decommission"))
+        // #6288: typed, so the socket's params struct decodes it.
+        .query(&[("record_only", true)])
         .send()
         .await
     {

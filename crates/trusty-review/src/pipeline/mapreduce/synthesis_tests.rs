@@ -133,6 +133,7 @@ fn reduced_with_findings(verdict: Verdict, findings: Vec<Finding>) -> ReducedRev
         grade_pre_floor: None,
         summary: String::new(),
         tokens: BASE_MAP_TOKENS,
+        withheld_findings: Vec::new(),
     }
 }
 
@@ -457,6 +458,30 @@ fn high_severity_floor_only_skips_refuted_high_finding() {
         Verdict::Approve,
         "a refuted High-effort finding must NOT trigger the safety floor"
     );
+}
+
+/// #4044: a code-provable High finding floors synthesis to BLOCK only in a
+/// category the grader lets block. Test-coverage and style are informational
+/// (#7036/#3474) and conformance caps at REQUEST_CHANGES (#1359); correctness
+/// is the control that still blocks.
+#[test]
+fn synthesis_floor_blocks_only_on_categories_the_grader_blocks_on() {
+    use crate::models::FindingCategory;
+    let cases = [
+        (FindingCategory::TestCoverage, Verdict::Approve),
+        (FindingCategory::Style, Verdict::Approve),
+        (FindingCategory::MethodConformance, Verdict::Approve),
+        (FindingCategory::Correctness, Verdict::Block),
+    ];
+    for (category, want) in cases {
+        let f =
+            finding("gap", "the new branch has no test", Effort::High, 0.9).with_category(category);
+        let got = apply_high_severity_floor_only(Verdict::Approve, &[f]);
+        assert_eq!(
+            got, want,
+            "{category:?}: synthesis floor must match the grader"
+        );
+    }
 }
 
 /// Synthesis falls back gracefully when the LLM returns unparseable JSON.

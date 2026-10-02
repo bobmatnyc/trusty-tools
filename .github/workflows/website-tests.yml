@@ -11,7 +11,7 @@
 # that classifier's rule, so the leg would skip on exactly the PRs it exists
 # to check.
 #
-# NO `paths:` FILTERS, AND WHY THEY WENT AWAY. The three jobs below run on
+# NO `paths:` FILTERS, AND WHY THEY WENT AWAY. The two jobs below run on
 # every push to main and every pull request, and each classifies relevance
 # ITSELF in its own first step (`scripts/ci-website-relevance.sh`). Two
 # reasons, both already established in this repo:
@@ -37,7 +37,8 @@
 #                           values out of (UNIT_RUST_INPUTS in the classifier),
 #                           plus root Cargo.toml when and only when the diff
 #                           touches its `rust-version` line
-#   Website content corpus  docs/**, website/src/content/**,
+#   Website content corpus  (ci.yml `website-corpus` since #8378, so `CI gate`
+#                           can wait on it) docs/**, website/src/content/**,
 #                           crates/*/changelog.d/**, crates/*/CHANGELOG.md,
 #                           crates/*/Cargo.toml, website/src/lib/**,
 #                           website/vite.config.ts, website/package.json,
@@ -176,94 +177,12 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       # `pnpm run test` is the `unit` and `smoke` projects. The `corpus`
-      # project is deliberately NOT in it — see the job below.
+      # project is deliberately NOT in it — it runs as ci.yml's
+      # `website-corpus` job (#8378).
       - name: Run the website test suite
         if: steps.relevance.outputs.relevant != 'false'
         working-directory: website
         run: pnpm run test
-
-  # The CONTENT gate, split out of the unit suite (owner ruling, 2026-09-18):
-  # every website suite that reads real repository content runs here and
-  # NOWHERE else — the six-crate changelog corpus, the 27-page docs corpus, the
-  # flagship pages, and the landing-page claims grounded in crates/**. As blocks
-  # inside `Vitest (unit + smoke)` they made every release PR pay for the whole
-  # website suite and blew vitest's default 10 s `hookTimeout` in `beforeAll`
-  # (PR #8272). Its own check name means a red corpus is legible as a content
-  # problem, not a website-code problem — and it is the ONLY suite a docs,
-  # content or changelog change can turn red.
-  website-corpus:
-    name: Website content corpus
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags --quiet origin \
-            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-
-      - name: Classify website content corpus relevance
-        id: relevance
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: bash scripts/ci-website-relevance.sh corpus
-
-      - name: Read the pinned pnpm version from website/package.json
-        id: pin
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
-          if [ -z "$version" ]; then
-            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install pnpm
-        if: steps.relevance.outputs.relevant != 'false'
-        uses: pnpm/action-setup@v4
-        with:
-          version: ${{ steps.pin.outputs.version }}
-
-      - name: Install Node.js
-        if: steps.relevance.outputs.relevant != 'false'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: pnpm
-          cache-dependency-path: website/pnpm-lock.yaml
-
-      - name: Verify the resolved pnpm is the pinned one
-        if: steps.relevance.outputs.relevant != 'false'
-        run: |
-          set -euo pipefail
-          resolved="$(pnpm --version)"
-          expected="${{ steps.pin.outputs.version }}"
-          if [ "$resolved" != "$expected" ]; then
-            echo "::error::pnpm $resolved resolved, but website/package.json pins $expected" >&2
-            exit 1
-          fi
-          echo "pnpm $resolved matches the pin"
-
-      - name: Install dependencies
-        if: steps.relevance.outputs.relevant != 'false'
-        working-directory: website
-        run: pnpm install --frozen-lockfile
-
-      # No Chromium and no `vite build`: the `corpus` project is plain Node.
-      - name: Run the website content corpus gate
-        if: steps.relevance.outputs.relevant != 'false'
-        working-directory: website
-        run: pnpm run test:corpus
 
   # #5918: nothing in CI ran `pnpm lint` over `website/`, and `main` carried a
   # Prettier violation because of it.

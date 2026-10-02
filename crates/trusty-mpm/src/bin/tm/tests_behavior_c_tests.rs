@@ -25,19 +25,21 @@ use crate::commands::first_run::needs_first_run_clone;
 /// Test: prevents `needs_first_run_clone_returns_none_when_clone_exists` from
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
+// #6542: the fallback runs only through the private-tmux wrapper.
 use crate::commands::guided::{
     CwdProject, NestedFallbackAction, NonGitFallbackPlan, classify_cwd_project, cwd_owns_git_entry,
-    derive_project, fallback_protected, format_project_context_row, github_host,
-    guard_managed_sessions, inplace_self_relaunch_hint, is_github_remote,
-    ls_tree_reports_tracked_dir, managed_pane_settle_pending_message, nested_fallback_action,
-    nested_guard_notice, non_github_refusal_message, plan_non_git_fallback, print_non_tty_hint,
-    print_project_context, tty_gate, untracked_ancestor_message,
+    derive_project, format_project_context_row, github_host, guard_managed_sessions,
+    inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
+    managed_pane_settle_pending_message, nested_fallback_action, nested_guard_notice,
+    non_github_refusal_message, plan_non_git_fallback, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
     ResumeAction, is_zombie, needs_restart, panes_prove_session_dead, parse_pane_probes,
     plan_resume, resume_classification_state, session_runtime_live,
 };
+use crate::tests_behavior_b::run_fallback_default;
 // #3873: the CLI's dead-runtime verdict composes the daemon's OWN liveness
 // primitives rather than reimplementing them, so the tests exercise that
 // composition directly.
@@ -1194,7 +1196,7 @@ async fn guided_fallback_non_git_dir_calls_launch_path() {
     // "live git checkout protected" error.
     let tmp = tempdir_with_name("trusty_test_fallback_nongit_1705");
     let client = reqwest::Client::new();
-    let result = fallback_protected(&client, "http://127.0.0.1:19999", &tmp).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:19999", &tmp).await;
     // The function should NOT return the live-checkout protection error.
     if let Err(e) = result {
         let msg = e.to_string();
@@ -1310,6 +1312,7 @@ fn make_session(
         slot: 0,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 
@@ -2126,7 +2129,7 @@ async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
     unsafe { std::env::set_var(repos_root_key, repos_root.path()) };
 
     let client = reqwest::Client::new();
-    let result = fallback_protected(&client, "http://127.0.0.1:1", &dir).await;
+    let result = run_fallback_default(&client, "http://127.0.0.1:1", &dir).await;
 
     unsafe {
         match prev {

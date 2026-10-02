@@ -116,8 +116,7 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 
     let client = reqwest::Client::new();
     let result = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(repo.to_string_lossy().to_string()),
     )
     .await;
@@ -172,8 +171,7 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     // passes the same tempdir `fw` is rooted at, which is what lets the test
     // stop repointing the process's `$HOME`.
     let result = start_session_in_place(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         target.path(),
         &fw,
         Some(tmp_home.path()),
@@ -196,6 +194,70 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
             .join("last-instructions.md")
             .exists(),
         "in-place start must still run prepare_session and stash instructions locally"
+    );
+}
+
+/// #8405: an unreadable `config.yaml` never blocks `tm session start`. The
+/// launch proceeds — `prepare_session` runs and the only error is the
+/// unreachable daemon — and the in-place seam turns the same malformed file into
+/// the tmux option's fallback renderer plus a warning naming the file. (The seam
+/// reads the config only when the daemon answered, so the warning is asserted
+/// on the seam itself.)
+#[tokio::test]
+async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let target = tempfile::TempDir::new().expect("tmp target dir");
+    let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
+    let state = fw.crate_config_root();
+    std::fs::create_dir_all(&state).expect("mkdir state root");
+    std::fs::write(
+        state.join("config.yaml"),
+        "tmux:\n  alternate_screen: [broken\n",
+    )
+    .expect("write config");
+
+    let result = start_session_in_place(
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+    )
+    .await;
+    let err = result.expect_err("the unreachable daemon, not the config, ends this launch");
+    assert!(!err.to_string().contains("alternate_screen"), "{err}");
+    assert!(
+        target
+            .path()
+            .join(".trusty-mpm")
+            .join("last-instructions.md")
+            .exists(),
+        "the launch must proceed past the config into prepare_session"
+    );
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let spec = tracing::subscriber::with_default(subscriber, || {
+        super::inplace_session_spec(target.path(), &state, std::path::Path::new("/probe/p.txt"))
+    });
+    let line = crate::test_support::spec_text(&spec);
+    let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
+        &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::default(),
+    )
+    .alternate_screen;
+    let want = crate::test_support::renderer_operand(tmux_option);
+    assert!(
+        line.contains(want),
+        "want the tmux option's fallback {want:?} in: {line}"
+    );
+    let logged = buffer.tail(64).join("\n");
+    let config = state.join("config.yaml");
+    assert!(
+        logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
+        "the warning must name the file: {logged}"
     );
 }
 
@@ -244,7 +306,7 @@ async fn spawn_capturing_managed_spawn_server_answering(
                     "name": "tmpm-test-session",
                     "state": "Active",
                     "runtime": "claude-code",
-                    "attach_cmd": "tmux attach -t tmpm-test-session",
+                    "attach_cmd": "tmux attach -t '=tmpm-test-session'",
                 })),
             )
         }
@@ -313,7 +375,11 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
     let (captured, url) = spawn_capturing_managed_spawn_server().await;
 
     let client = reqwest::Client::new();
-    let result = start_session(&client, &url, Some(repo.to_string_lossy().to_string())).await;
+    let result = start_session(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        Some(repo.to_string_lossy().to_string()),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "expected Ok from a successful spawn, got {result:?}"
@@ -374,8 +440,7 @@ async fn session_start_refuses_a_non_git_directory() {
 
     let client = reqwest::Client::new();
     let err = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(plain.to_string_lossy().to_string()),
     )
     .await
@@ -452,8 +517,7 @@ async fn capture_guided_launch_body(
     .await;
     let client = reqwest::Client::new();
     let result = crate::commands::guided_launch::launch_new_session_and_attach(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         "https://example.invalid/owner/repo.git",
         name_hint,
         isolation,
@@ -553,33 +617,72 @@ async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
     );
 }
 
-// ── #8286: the in-place launch line carries the PM prompt file ─────────────
-
-/// The in-place pane line names the file the composed PM prompt was written to.
-///
-/// Why: before #8286 this launch mode's line carried no prompt flag, so the
-/// session ran on the project `CLAUDE.md` alone.
-/// What: drives [`super::inplace_launch_line`] with a writer that records the
-/// prompt and returns a fixed path, then asserts the prompt was composed and
-/// the line hands that exact path to `--append-system-prompt-file`.
+/// #8405: the in-place start seam reads the renderer from its config root,
+/// both directions. Fails if the seam ignores the config.
 #[test]
-fn inplace_launch_line_carries_the_written_prompt_file() {
+fn inplace_session_spec_follows_the_configured_renderer() {
+    for alternate_screen in [true, false] {
+        let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
+        let spec = super::inplace_session_spec(
+            std::path::Path::new("/w"),
+            root.path(),
+            std::path::Path::new("/probe/p.txt"),
+        );
+        let line = crate::test_support::spec_text(&spec);
+        let want = crate::test_support::renderer_operand(alternate_screen);
+        assert!(line.contains(want), "want {want:?} in: {line}");
+    }
+}
+
+// ── #8286: the in-place launch carries the PM prompt file ──────────────────
+
+/// The in-place spec hands `claude` the PM prompt file it was given.
+///
+/// Why: before #8286 this launch mode carried no prompt flag, so the session
+/// ran on the project `CLAUDE.md` alone. FAILS BEFORE THIS CHANGE: the spec's
+/// argv was `--dangerously-skip-permissions` alone.
+/// What: builds [`super::inplace_session_spec`] with a probe path and asserts
+/// the flag is followed by exactly that path, ahead of the permission flag.
+#[test]
+fn inplace_session_spec_carries_the_prompt_file() {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let spec = super::inplace_session_spec(
+        std::path::Path::new("/w"),
+        root.path(),
+        std::path::Path::new("/probe/pm-prompt.txt"),
+    );
+    assert_eq!(
+        spec.args,
+        [
+            "--append-system-prompt-file",
+            "/probe/pm-prompt.txt",
+            "--dangerously-skip-permissions"
+        ],
+        "the in-place launch must carry the PM prompt file"
+    );
+}
+
+/// The composed PM prompt reaches the writer and its path comes back.
+///
+/// Why: the spec can only carry a prompt that was composed and written.
+/// What: drives [`super::inplace_prompt_file`] with a writer that records the
+/// prompt and returns a fixed path, then asserts the prompt was composed and
+/// that path is returned.
+#[test]
+fn inplace_prompt_file_returns_the_written_prompt_file() {
     let project = tempfile::TempDir::new().expect("tmp project");
     let mut written = String::new();
-    let line = super::inplace_launch_line(project.path(), false, |prompt| {
+    let file = super::inplace_prompt_file(project.path(), false, |prompt| {
         written = prompt.to_owned();
         Some(std::path::PathBuf::from("/probe/pm-prompt.txt"))
     })
-    .expect("a written prompt file yields a launch line");
+    .expect("a written prompt file is returned");
 
     assert!(
         !written.trim().is_empty(),
         "the composed PM prompt must reach the writer"
     );
-    assert!(
-        line.contains("--append-system-prompt-file '/probe/pm-prompt.txt'"),
-        "the in-place line must carry the written prompt file: {line}"
-    );
+    assert_eq!(file, std::path::PathBuf::from("/probe/pm-prompt.txt"));
 }
 
 /// A prompt file that cannot be written refuses the launch.
@@ -587,12 +690,12 @@ fn inplace_launch_line_carries_the_written_prompt_file() {
 /// Why: the fail-open alternative — launching without the flag — is the #8286
 /// defect itself, and #4752 already refuses a launch whose compiled
 /// instructions could not be written.
-/// What: a writer returning `None` must make [`super::inplace_launch_line`]
+/// What: a writer returning `None` must make [`super::inplace_prompt_file`]
 /// return an error that names the refusal.
 #[test]
-fn inplace_launch_line_refuses_when_the_prompt_file_cannot_be_written() {
+fn inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written() {
     let project = tempfile::TempDir::new().expect("tmp project");
-    let err = super::inplace_launch_line(project.path(), false, |_| None)
+    let err = super::inplace_prompt_file(project.path(), false, |_| None)
         .expect_err("a failed prompt write must refuse the launch");
     assert!(
         err.to_string()

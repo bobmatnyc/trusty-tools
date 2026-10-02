@@ -96,6 +96,23 @@ static REDACT_RE: OnceLock<regex::Regex> = OnceLock::new();
 /// `capture_into_missing_workspace_root_refuses_to_recreate`,
 /// `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
 pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDriver) {
+    capture_into_pane(record, driver, None).await;
+}
+
+/// [`capture_into`], reading the scrollback from pane `pane_id` when given
+/// instead of the session's active pane (#8935).
+///
+/// Why: a stop proves the live session holds the record's own `%N` pane;
+/// the scrollback must come from that pane, not whichever pane is active.
+/// What: identical to [`capture_into`] except that step (1) calls
+/// `driver.capture_pane(name, pane_id, …)` when `pane_id` is `Some`.
+/// Test: `a_foreign_stop_writes_no_scrollback_and_keeps_last_cwd`,
+/// `stopping_a_record_whose_pane_is_live_still_kills_it`.
+pub async fn capture_into_pane(
+    record: &mut SessionRecord,
+    driver: &dyn ManagedTmuxDriver,
+    pane_id: Option<&str>,
+) {
     let name = &record.tmux_name;
 
     // Step 1: scrollback snapshot (only if we have a workspace dir to write into).
@@ -108,7 +125,11 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
                  skipping scrollback write (#3715)"
             );
         } else {
-            match driver.capture(name, SCROLLBACK_LINES) {
+            let captured = match pane_id {
+                Some(pane) => driver.capture_pane(name, pane, SCROLLBACK_LINES),
+                None => driver.capture(name, SCROLLBACK_LINES),
+            };
+            match captured {
                 Ok(text) => {
                     let dest = ws.join(SCROLLBACK_SUBPATH);
                     match write_scrollback(ws, &dest, &text).await {
@@ -377,10 +398,12 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 

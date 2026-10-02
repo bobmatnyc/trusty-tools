@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::ManagedSessionId;
+use crate::session_manager::decommission_force::ProvisioningDirt;
 
 pub mod activity;
 pub(crate) mod auto_relaunch;
@@ -46,6 +47,8 @@ mod launch_on_main;
 /// Post-send "did the relaunch actually take?" status check (#6766).
 mod launch_verify;
 mod lifecycle;
+// #8934: spawn in a repository with no `origin` remote (local-only worktrees).
+mod local_only_spawn;
 pub mod managed_checkout;
 mod mcp_spawn_gate;
 // #6288: `pub` so `rpc::registry::projects` can call the shared `*_op` bodies.
@@ -62,7 +65,9 @@ pub(crate) mod residency;
 // #6497: the explicit ownership transfer for a dead owner's worktree.
 pub mod adopt_worktree;
 pub mod rename;
+// #8942: `tm fleet init` registers the Architect's sessions.
 mod resume_error;
+pub mod supervisor;
 // #8233 item 1: the resume claim's span across `resume_managed`.
 #[cfg(test)]
 mod resume_claim_tests;
@@ -340,6 +345,8 @@ pub struct StoreHealthPayload {
 /// session had an owned workspace.
 /// Test: `decommission_workspace_removed_reflects_ownership` in managed_routes tests.
 #[derive(Debug, Serialize)]
+// #7660 owner ruling 2026-09-24: a later field is not a semver break.
+#[non_exhaustive]
 pub struct DecommissionResponse {
     /// Flat session summary (post-tombstone: state=decommissioned, workspace_path=None).
     #[serde(flatten)]
@@ -354,6 +361,18 @@ pub struct DecommissionResponse {
     /// Used by the CLI to locate the base git repo and run `git worktree prune`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path_was: Option<String>,
+    /// #7660: why decommission kept a workspace — the dirty-tree guard, a
+    /// refused `--force`, the containment guard, or a failed removal. Under
+    /// `--force` it also carries the keep of a workspace tm never removes (a
+    /// main checkout, a local-path or adopted directory). Absent when the
+    /// workspace was removed or already gone, and for a plain decommission's
+    /// by-design keep. The CLI exits non-zero when this is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_reason: Option<String>,
+    /// #7660: why a plain decommission kept a workspace tm never removes.
+    /// Informational — the CLI prints it and exits 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_kept_by_design: Option<String>,
 }
 
 /// Query parameters for POST /api/v1/sessions/managed/{id}/delete (#2012).
@@ -390,6 +409,29 @@ pub struct DeleteResponse {
     pub summary: SessionSummary,
     /// Always `true` on success — the record was marked `--deleted--`.
     pub deleted: bool,
+    /// #8935: set when a live tmux session still carries the record's name.
+    /// Delete never touches tmux; this says the session was left running and
+    /// whether it is this record's or one that took the name since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
+}
+
+/// Response body for POST /api/v1/sessions/managed/{id}/runtime-stop.
+///
+/// Why (#8935): a stop whose record's tmux name now belongs to another
+/// session moves the record only. The caller must be told the live session
+/// was left running, not that the runtime stopped.
+/// What: the post-stop [`SessionSummary`], flattened so the body keeps its
+/// pre-#8935 shape, plus `runtime_left_running` when nothing was signalled.
+/// Test: `the_stop_report_says_the_runtime_was_left_running` (the report it carries).
+#[derive(Debug, Serialize)]
+pub struct StopResponse {
+    /// The record after the stop.
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    /// Why the live tmux session carrying the name was left running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/send.
@@ -659,6 +701,10 @@ pub async fn resume_managed_session(
 pub struct DecommissionQuery {
     #[serde(default)]
     pub record_only: bool,
+    /// #7660: `--force` — excuse tm's own provisioning files in the dirty-tree
+    /// guard. Never excuses other changes or unpushed commits.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
@@ -680,7 +726,16 @@ pub async fn decommission_managed_session(
     AxumPath(id_str): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<DecommissionQuery>,
 ) -> impl IntoResponse {
-    cores::decommission_core(&state, &id_str, q.record_only).await // #6288
+    cores::decommission_core(&state, &id_str, q.record_only, dirt_policy(q.force)).await // #6288
+}
+
+/// Map the wire's `force` flag onto the decommission dirt policy (#7660).
+pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
+    if force {
+        ProvisioningDirt::Discard
+    } else {
+        ProvisioningDirt::Refuse
+    }
 }
 
 #[cfg(test)]

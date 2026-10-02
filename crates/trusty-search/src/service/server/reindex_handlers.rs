@@ -21,9 +21,10 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{
-    root_gate, spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus,
+    root_gate, spawn_claimed_reindex, ReindexClaimError, ReindexProgress, ReindexStatus,
 };
 
+use super::degraded::write_quarantine_refusal;
 use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
 
@@ -63,12 +64,15 @@ pub(super) async fn reindex_handler(
 /// get wrong: the #120 cooldown that stops an infinite memory-abort loop, and
 /// the three guards on a `root_path` override (#3993 collision, #5357 root-move
 /// gate, #767 allowlist) that each stop this index being re-pointed at a tree it
-/// must not claim. The SSE progress stream stays on HTTP until slice 5.
+/// must not claim. #8105 adds the write-quarantine refusal, which runs first.
+/// #8889 adds the one-reindex-per-index claim, taken before the root override.
+/// The SSE progress stream stays on HTTP until slice 5.
 /// What: [`reindex_handler`]'s whole former body, taking the already-decoded
 /// request. `None` is the empty-body form axum's `Option<Json<_>>` produces.
 /// Test: `reindex_over_the_socket_matches_the_http_body`,
-/// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport` in
-/// `crate::service::rpc::writes`.
+/// `a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport`,
+/// `a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport`
+/// in `crate::service::rpc::writes`; `reindex_of_a_write_quarantined_index_is_refused_with_409`.
 pub(crate) async fn reindex_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -81,6 +85,16 @@ pub(crate) async fn reindex_report(
             "error": format!("unknown index: {}", index_id.0),
         }),
     ))?;
+
+    // #8105: a write-quarantined index can persist nothing, so refuse before
+    // anything is queued. Ahead of the #120 cooldown: the quarantine outlasts it.
+    if let Some(refusal) = write_quarantine_refusal(&index_id.0, &handle).await {
+        tracing::warn!(
+            index_id = %index_id.0,
+            "reindex_handler: refusing reindex of a write-quarantined index (issue #8105)"
+        );
+        return Err(refusal);
+    }
 
     // Issue #120: cooldown guard. If the most recent reindex for this index
     // aborted at the memory limit, refuse to queue another one for
@@ -124,16 +138,22 @@ pub(crate) async fn reindex_report(
         state.last_reindex_aborted_at.remove(&index_id);
     }
 
+    // #8889: claim the index before anything below changes it — the root
+    // override re-registers the handle and the progress entry is replaced — so
+    // a refused second request leaves the running job and its stream intact.
+    // #9059: a held index is refused at the claim, naming the invalid glob.
+    let force = body.as_ref().and_then(|req| req.force).unwrap_or(false);
+    let claim = crate::service::exclude_hold::claim_reindex(&handle, "http", force)
+        .map_err(|refused| claim_refusal(&index_id, refused))?;
+
     // If caller supplied a root_path and the stored handle doesn't have one
     // (or differs), re-register with the new path. We can't mutate the
     // existing Arc in place, but registering replaces the entry.
-    let mut force = false;
     // Issue #458: `background=true` routes to the low-priority semaphore so
     // startup auto-discover reindexes never starve interactive requests.
     // Default false (interactive/priority path) when the field is absent.
     let mut is_interactive = true;
     if let Some(req) = body {
-        force = req.force.unwrap_or(false);
         is_interactive = !req.background.unwrap_or(false);
         if let Some(new_root) = req.root_path {
             // Issue #63: a caller-supplied override must pass the same
@@ -366,7 +386,8 @@ pub(crate) async fn reindex_report(
         .reindex_progress
         .insert(index_id.clone(), Arc::clone(&progress));
 
-    spawn_reindex_with_cleanup(
+    spawn_claimed_reindex(
+        claim,
         handle,
         progress,
         force,
@@ -389,6 +410,120 @@ pub(crate) async fn reindex_report(
         "queued": true,
         "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
     }))
+}
+
+/// Start the catch-up reindex for an index a config PATCH just released (#9059).
+///
+/// Why: while an index is held, watcher saves, rescans, the boot delta and
+/// reindexes all refuse, so its corpus misses every change made in that
+/// window. Releasing the hold without a catch-up left the index stale until
+/// some unrelated reindex ran.
+/// What: refuses a write-quarantined index (#8105) like [`reindex_report`];
+/// otherwise claims the index (origin `config-release`), registers a fresh
+/// progress entry so the reindex stream follows it, and spawns a non-forced
+/// interactive reindex. Returns the PATCH response's `catch_up_reindex`
+/// object: `started`, plus `stream_url` or the refusal `reason`.
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`.
+pub(super) async fn start_release_catch_up(
+    state: &Arc<SearchAppState>,
+    handle: Arc<IndexHandle>,
+) -> serde_json::Value {
+    let index_id = handle.id.clone();
+    let refused = |reason: String| {
+        tracing::warn!(
+            index_id = %index_id.0,
+            "hold released, but the catch-up reindex did not start (#9059): {reason}"
+        );
+        serde_json::json!({ "started": false, "reason": reason })
+    };
+    if let Some((_, body)) = write_quarantine_refusal(&index_id.0, &handle).await {
+        return refused(body.to_string());
+    }
+    let claim = match crate::service::exclude_hold::claim_reindex(&handle, "config-release", false)
+    {
+        Ok(claim) => claim,
+        Err(err) => return refused(err.to_string()),
+    };
+    let progress = Arc::new(ReindexProgress::new());
+    state
+        .reindex_progress
+        .insert(index_id.clone(), Arc::clone(&progress));
+    spawn_claimed_reindex(
+        claim,
+        handle,
+        progress,
+        false,
+        Some(Arc::clone(&state.reindex_progress)),
+        Some(Arc::clone(&state.last_reindex_aborted_at)),
+        Some(Arc::clone(&state.embedderd_pid_slot)),
+        true,
+        None,
+    );
+    tracing::info!(
+        index_id = %index_id.0,
+        "hold released: catch-up reindex started (#9059)"
+    );
+    serde_json::json!({
+        "started": true,
+        "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
+    })
+}
+
+/// The HTTP answer to a refused reindex claim (#8889).
+///
+/// Why: a second request must learn which job holds the index and where to
+/// follow it, and a broken guard must read as the daemon's fault, not the
+/// caller's.
+/// What: `AlreadyRunning` → `409` naming the running job and its stream URL;
+/// `GuardUnavailable` → `503`; `Held` (#9059) → `409 index_held` naming the
+/// invalid globs. All carry `queued: false`.
+/// Test: `a_second_reindex_request_is_refused_while_the_first_runs`,
+/// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`,
+/// `every_ingest_path_refuses_a_held_index`.
+fn claim_refusal(
+    index_id: &IndexId,
+    refused: ReindexClaimError,
+) -> (StatusCode, serde_json::Value) {
+    let message = refused.to_string();
+    tracing::warn!("reindex_handler: {message} (#8889)");
+    match refused {
+        ReindexClaimError::AlreadyRunning { running, .. } => (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "reindex_already_running",
+                "index_id": index_id.0,
+                "message": message,
+                "running": running,
+                "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
+                "queued": false,
+                "retryable": true,
+            }),
+        ),
+        ReindexClaimError::GuardUnavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "error": "reindex_guard_unavailable",
+                "index_id": index_id.0,
+                "message": message,
+                "queued": false,
+                "retryable": false,
+            }),
+        ),
+        // #9059: the same 409 body a held index answers a pushed write with.
+        ReindexClaimError::Held {
+            index_id,
+            invalid_exclude_globs,
+            ..
+        } => {
+            let hold = crate::service::exclude_hold::ExcludeHold {
+                index_id,
+                patterns: invalid_exclude_globs,
+            };
+            let (status, mut body) = hold.refusal();
+            body["queued"] = false.into();
+            (status, body)
+        }
+    }
 }
 
 /// Heartbeat interval for the reindex SSE stream.

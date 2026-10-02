@@ -69,10 +69,12 @@ fn record_round_trips_injection_status() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: InjectionStatus::Pending,
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     record.injection_status = InjectionStatus::Success;
     let json = serde_json::to_string(&record).expect("serialize");

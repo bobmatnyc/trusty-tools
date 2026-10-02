@@ -139,60 +139,38 @@ pub fn run(print: bool, json: bool) -> i32 {
 ///
 /// Why: `tctl ui` must launch the console and return immediately, leaving a
 /// long-lived daemon behind that *survives `tctl` exiting*. A naive
-/// `Command::spawn()` whose child handle is dropped is wrong on two counts: the
-/// child stays in the parent's process group/session, so it receives `SIGHUP`
-/// when the controlling terminal (or `tctl`) goes away; and on Unix dropping the
-/// handle without reaping leaves a zombie if the child exits. We fully detach.
+/// `Command::spawn()` leaves the child in `tctl`'s process group and session,
+/// so a terminal hangup or a group kill aimed at `tctl` reaches it too.
 ///
-/// What: Redirects the child's stdin/stdout/stderr to `/dev/null` (so it is not
-/// tied to `tctl`'s terminal and cannot block on a pipe), and on Unix calls
-/// `setsid(2)` in the child via `pre_exec` to start a new session — detaching it
-/// from `tctl`'s process group so a terminal `SIGHUP` never reaches it. The
-/// returned [`Child`] handle is intentionally leaked with [`std::mem::forget`]:
-/// the console is a daemon `tctl` does not own, so we must NOT drop the handle
-/// (dropping does not wait, but forgetting documents that we will never reap it —
-/// `setsid` + closed std streams make it a clean orphan adopted by `init`/PID 1).
+/// What: spawns [`detached_console_command`]. The returned `Child` is
+/// intentionally leaked with [`std::mem::forget`]: the console is a daemon
+/// `tctl` does not own and never reaps. `Child::drop` neither kills nor reaps
+/// either, so `forget` only documents the intent.
 ///
-/// Test: Side-effecting (spawns a real process); the detach mechanism is
-/// documented here and validated manually (`tctl ui` returns immediately and the
-/// console keeps serving after `tctl` exits).
+/// Test: `the_console_leads_its_own_session` covers the command it spawns.
 fn spawn_detached_console() -> std::io::Result<()> {
-    let mut cmd = Command::new("trusty-console");
-    cmd.arg("serve")
+    let child = detached_console_command("trusty-console", &["serve"]).spawn()?;
+    std::mem::forget(child);
+    Ok(())
+}
+
+/// The command [`spawn_detached_console`] runs: `program args`, null stdio, and
+/// a session of its own.
+///
+/// Why (#8783): the console outlives `tctl`, so it must lead its own session.
+/// The previous private `setsid` hook discarded its result, so a failed
+/// `setsid` silently left the console in `tctl`'s group.
+/// What: `daemon_guard::start_in_new_session`, which fails the spawn when
+/// `setsid` fails (Unix; a no-op elsewhere).
+/// Test: `the_console_leads_its_own_session`.
+fn detached_console_command(program: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
-    // On Unix, start a new session so a terminal SIGHUP cannot reach the console
-    // when `tctl` (and its controlling terminal) goes away.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Safety: `setsid` is async-signal-safe and is the canonical way to
-        // detach a child into its own session. It takes no arguments and only
-        // affects the calling (child) process between fork and exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                // Detach from the parent's process group/session. The return
-                // value is deliberately discarded: the only documented failure
-                // is `EPERM` when the caller is already a session/process-group
-                // leader, which is benign here — the redirected std streams alone
-                // still prevent terminal coupling, so there is nothing to recover.
-                let _ = libc::setsid();
-                Ok(())
-            });
-        }
-    }
-
-    let child = cmd.spawn()?;
-    // Intentional detach: the console outlives `tctl`. We never wait on it, so we
-    // forget the handle rather than let `Drop` (which does not reap) run.
-    // Trade-off vs `drop(child)`: `Child::drop` does NOT kill or reap the child
-    // either, so behaviourally the two are equivalent here — but `forget` signals
-    // the intent ("we are deliberately abandoning a daemon we do not own") so a
-    // future reader does not mistake a dropped handle for an oversight.
-    std::mem::forget(child);
-    Ok(())
+    trusty_common::daemon_guard::start_in_new_session(&mut cmd);
+    cmd
 }
 
 /// Report a console launch (or already-running) result; return the exit code.
@@ -255,5 +233,24 @@ mod tests {
     #[test]
     fn default_url_is_localhost_7788() {
         assert_eq!(DEFAULT_CONSOLE_URL, "http://127.0.0.1:7788");
+    }
+
+    /// Why (#8783): the console `tctl ui` starts must outlive a hangup or a
+    /// group kill aimed at `tctl`.
+    /// What: spawns [`detached_console_command`] around `/bin/sleep` and
+    /// compares `getsid(child)` with the child's pid while it is alive.
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[test]
+    fn the_console_leads_its_own_session() {
+        let mut child = detached_console_command("/bin/sleep", &["60"])
+            .spawn()
+            .expect("spawn the stand-in console");
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: `getsid` only reads the session of our own unreaped child.
+        let sid = unsafe { libc::getsid(pid) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(sid, pid, "the console must lead its own session (#8783)");
     }
 }

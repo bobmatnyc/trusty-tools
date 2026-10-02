@@ -158,7 +158,11 @@ impl TrustyAgentsRepl {
             Ok((cfg, session)) => {
                 let _ = writeln!(out, "Connected: {}", session.name);
                 let _ = writeln!(out, "Project:   {} ({})", cfg.project.name, path.display());
-                let _ = writeln!(out, "To attach: tmux attach-session -t {}", session.name);
+                let _ = writeln!(
+                    out,
+                    "To attach: {}",
+                    trusty_common::tmux::shell_attach_command(&session.name)
+                );
             }
             Err(e) => {
                 let _ = writeln!(out, "error: {e}");

@@ -192,12 +192,18 @@ fn manifest_prose_lives_in_markdown_not_in_the_json() {
     // files `scripts/check_instruction_floor.sh` pins, so the manifest must stay
     // small and must reference its bulk prose by path. The inline `text` blocks it
     // DOES carry are short authored rules, not lifted section bodies.
+    // #8533 split `core.md` into ten small files, so the yardstick is the
+    // whole body of section prose the manifest references by path.
+    let prose: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+        .iter()
+        .map(|(_, body)| body.len())
+        .sum();
     assert!(
-        PM_PACKAGE_JSON.len() < SECTION_CORE.len(),
-        "the manifest ({} bytes) must be smaller than core.md ({} bytes) — prose \
-         belongs in markdown",
+        PM_PACKAGE_JSON.len() < prose,
+        "the manifest ({} bytes) must be smaller than the section prose ({} bytes) — \
+         prose belongs in markdown",
         PM_PACKAGE_JSON.len(),
-        SECTION_CORE.len()
+        prose
     );
     for (path, _) in SECTION_SOURCES {
         assert!(
@@ -312,10 +318,10 @@ fn the_former_floor_sections_are_still_the_block_tail() {
     // is no longer a validated invariant — block order is whatever the manifest
     // declares. It is kept as a SHAPE assertion because the delivered prompt
     // still ends with these four sections, and a reordering that moved them
-    // would be a large, silent change to every prompt.
+    // would be a large, silent change to every prompt. #8533 moved Identity to
+    // the top of the prompt, leaving three.
     let package = package_ref();
     let tail = [
-        SectionId::Identity,
         SectionId::Enforcement,
         SectionId::NonOverridableRules,
         SectionId::FrameworkGuaranteedConventions,
@@ -324,12 +330,12 @@ fn the_former_floor_sections_are_still_the_block_tail() {
         .blocks
         .len()
         .checked_sub(tail.len())
-        .expect("the package has at least four blocks");
+        .expect("the package has at least three blocks");
     assert!(
         package.blocks[first..]
             .iter()
             .all(|b| tail.contains(&b.section)),
-        "the four former-floor sections are still the block tail"
+        "the three former-floor sections are still the block tail"
     );
 }
 
@@ -655,9 +661,11 @@ fn composed_prompt_carries_the_live_roster_and_the_precedence_note() {
     let doctrine = composed
         .find("# Agent Delegation Routing")
         .expect("doctrine");
-    let note = composed.find("trust the harness listing").expect("note");
+    let note = composed
+        .find("authoritative for WHICH agents exist")
+        .expect("note");
     let roster = composed.find("### ticketing").expect("roster");
-    let floor = composed.find("# Framework Instructions").expect("floor");
+    let floor = composed.find("## Prohibitions (CANONICAL").expect("floor");
     assert!(doctrine < note && note < roster && roster < floor);
 }
 

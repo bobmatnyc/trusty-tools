@@ -24,10 +24,11 @@
 //! launch resolves the prompt twice), and the `legacy_overrides` `tm doctor`
 //! check fails on them.
 //!
-//! Naming note: `base_pm()` and the `# Framework Instructions` heading are
-//! historical labels. `BASE_PM.md` the FILE was deleted by #4183 and
-//! `scripts/check_instruction_floor.sh` fails the build if it returns; the floor
-//! is authored as four `fixed`-tier sections and reconstituted by that function.
+//! Naming note: `base_pm()` is a historical label. `BASE_PM.md` the FILE was
+//! deleted by #4183 and `scripts/check_instruction_floor.sh` fails the build if
+//! it returns; its content is the enforcement, non-overridable-rules and
+//! framework-guaranteed-conventions sections, which that function reconstitutes
+//! as the prompt tail. The `# Framework Instructions` heading is gone (#8533).
 //!
 //! Test: the `tests` module inverts one gate per retired file (a retired file
 //! must change nothing), pins the survival set across every reachable
@@ -286,7 +287,23 @@ const MEMORY_OVERRIDE_HEADING: &str = "## Memory Behavior (project override)";
 /// the robustness tests, and (in `claude_md_sections_tests.rs`)
 /// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
-    let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    resolve_pm_prompt_for(project_dir, profile)
+}
+
+/// [`resolve_pm_prompt`] for a profile the caller already resolved (#8453).
+///
+/// Why: a launch resolves the profile once and hands the same value to the
+/// composer, the style, the model and the settings, so they cannot disagree.
+/// What: [`resolve_pm_prompt_with_roster_for`] with the live roster scan.
+/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+pub fn resolve_pm_prompt_for(
+    project_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+) -> String {
+    let (prompt, source) = resolve_pm_prompt_with_roster_for(project_dir, profile, || {
+        crate::core::delegation_authority::deployed_roster_section(project_dir)
+    });
     // `info!`, deliberately: this is the operator-visible record of WHICH
     // composer produced the session's prompt, and the two are byte-identical by
     // contract so nothing else can reveal it. `debug!` sits below the default
@@ -307,7 +324,8 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 /// operator a log line saying which model produced their prompt.
 /// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
 /// [`PromptSource::Legacy`] for the two override configurations and for the
-/// compose-error degradation.
+/// compose-error degradation, [`PromptSource::Supervisor`] for a supervisor
+/// project (#8453).
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +334,8 @@ pub(crate) enum PromptSource {
     Package,
     /// Assembled by the legacy string concatenation.
     Legacy,
+    /// The supervisor profile's instructions, in place of the PM prompt (#8453).
+    Supervisor,
 }
 
 /// [`resolve_pm_prompt`], additionally reporting which composer ran.
@@ -327,6 +347,7 @@ pub(crate) enum PromptSource {
 /// scanned from the real tiers.
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
+#[cfg(test)] // #8453: production composes through `resolve_pm_prompt_for`.
 pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
     resolve_pm_prompt_with_roster(project_dir, || {
         crate::core::delegation_authority::deployed_roster_section(project_dir)
@@ -361,6 +382,39 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     project_dir: &Path,
     roster_source: impl FnOnce() -> Option<String>,
 ) -> (String, PromptSource) {
+    let profile = crate::core::session_profile::resolve_ambient(project_dir);
+    resolve_pm_prompt_with_roster_for(project_dir, profile, roster_source)
+}
+
+/// [`resolve_pm_prompt_with_roster`] for an already-resolved profile (#8453).
+///
+/// Why: see [`resolve_pm_prompt_for`].
+/// What: the supervisor prompt for a supervisor profile; otherwise the PM
+/// composition, unchanged.
+/// Test: `a_supervisor_project_needs_no_claude_md_override_blocks`.
+pub(crate) fn resolve_pm_prompt_with_roster_for(
+    project_dir: &Path,
+    profile: crate::core::session_profile::SessionProfile,
+    roster_source: impl FnOnce() -> Option<String>,
+) -> (String, PromptSource) {
+    // #8453: a supervisor session receives the supervisor profile INSTEAD of
+    // the PM prompt. CLAUDE.md named sections are PM-section overrides, so none
+    // applies; an undecidable profile is already the PM path below.
+    if profile.is_supervisor() {
+        let named = crate::core::claude_md_sections::scan_project(project_dir);
+        if !named.overrides.is_empty() {
+            tracing::warn!(
+                count = named.overrides.len(),
+                "CLAUDE.md named-section overrides are PM sections; the supervisor \
+                 profile ignores them"
+            );
+        }
+        return (
+            crate::core::session_profile::supervisor_prompt(),
+            PromptSource::Supervisor,
+        );
+    }
+
     // #4286: named sections in `CLAUDE.md` are now the ONLY project override
     // surface. Scanned first because every branch below consumes the result.
     let named = crate::core::claude_md_sections::scan_project(project_dir);
@@ -463,9 +517,12 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// one implementation with the byte-equality oracle the package path is tested
 /// against — an oracle that is dead test code proves nothing.
 /// What: `PM_INSTRUCTIONS` → stack profile → optional memory block → workflow →
-/// delegation → optional addendum → the non-overridable floor, joined with
-/// [`SECTION_SEPARATOR`] and with empty sections dropped.
+/// delegation → optional addendum → the non-overridable floor, each folded on
+/// its own, joined with [`SECTION_SEPARATOR`] and with empty sections dropped.
+/// `delegation` arrives as parts (doctrine, agent-selection note, roster) so a
+/// project body among them is folded apart from the base text after it.
 /// Test: `no_overrides_uses_bundled`,
+/// `an_override_ending_in_an_unclosed_comment_hides_nothing_on_the_roster_absent_path`,
 /// `a_named_memory_override_is_slotted_on_the_roster_absent_path`, and
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` in
 /// `bundled_pm_package_tests.rs`.
@@ -473,32 +530,34 @@ pub(crate) fn assemble_sections(
     stack: String,
     memory_override: Option<String>,
     workflow: String,
-    delegation: String,
+    delegation: Vec<String>,
     addendum: Option<String>,
 ) -> String {
-    let mut sections: Vec<String> = vec![pm_instructions().trim().to_string(), stack];
+    // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
+    // the same pass the packaged composer uses. #8533: each section, and each
+    // part of the delegation section, is folded ON ITS OWN, so an override body
+    // ending in an unclosed `<!--` or fence cannot hide the text after it.
+    use crate::core::instruction_fold::{fold_block, fold_parts};
+    let fold = |s: &str| fold_block(s.trim());
+    let mut sections: Vec<String> = vec![fold(pm_instructions()), fold(&stack)];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
     if let Some(memory) = memory_override {
-        sections.push(format!("{MEMORY_OVERRIDE_HEADING}\n\n{memory}"));
+        sections.push(fold(&format!("{MEMORY_OVERRIDE_HEADING}\n\n{memory}")));
     }
 
-    sections.push(workflow);
-    sections.push(delegation);
+    sections.push(fold(&workflow));
+    sections.push(fold_parts(&delegation, "\n\n"));
 
     // Additive project rules.
     if let Some(extra) = addendum {
-        sections.push(extra);
+        sections.push(fold(&extra));
     }
 
     // Non-overridable floor, always last.
-    sections.push(base_pm().trim().to_string());
+    sections.push(fold(base_pm()));
 
-    // #7616: the legacy assembly is a DELIVERED prompt too, so it folds through
-    // the same pass the packaged composer uses. Folding in one place only would
-    // break `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`
-    // and would hand a roster-absent project an unfolded prompt.
-    crate::core::instruction_fold::fold_delivered_prompt(&join_sections(sections))
+    join_sections(sections)
 }
 
 /// The DEFAULT delegation section: bundled routing doctrine + the live roster.
@@ -555,23 +614,43 @@ pub(crate) fn assemble_sections(
 /// What: returns the manifest's delegation doctrine (asset plus the precedence
 /// note) with the rendered `## Delegation Authority` block from
 /// [`crate::core::delegation_authority::deployed_roster_section`] appended when
-/// any agent is deployed. With no deployed agents the asset is returned alone,
-/// without the note — the note only makes sense above a roster (pre-#4069
-/// behaviour). Takes the already-rendered roster rather than scanning itself
-/// (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once whichever
-/// composition path it takes.
+/// any agent is deployed. With no deployed agents the asset is followed by
+/// [`AGENT_SELECTION_WITHOUT_ROSTER`] instead: the pinned note points at "the
+/// roster below", which is absent, yet agent selection is safety core and must
+/// be in force on every path (#8533). Returned as parts so
+/// [`assemble_sections`] folds each on its own. Takes the already-rendered
+/// roster rather than scanning itself (#4183) so `resolve_pm_prompt` scans the
+/// agent tiers exactly once whichever composition path it takes.
 /// Test: `bundled_delegation_appends_deployed_roster`, `no_overrides_uses_bundled`,
-/// `a_retired_delegation_file_no_longer_suppresses_the_live_roster`.
-pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
+/// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) fn delegation_with_roster(roster: Option<&str>) -> Vec<String> {
     match roster {
-        Some(roster) => format!(
-            "{}\n\n{}",
-            crate::core::instruction_pipeline::delegation_doctrine(),
-            roster.trim()
-        ),
-        None => AGENT_DELEGATION.trim().to_string(),
+        Some(roster) => vec![
+            crate::core::instruction_pipeline::delegation_doctrine().to_string(),
+            roster.trim().to_string(),
+        ],
+        None => vec![
+            AGENT_DELEGATION.trim().to_string(),
+            AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
+        ],
     }
 }
+
+/// The agent-selection rule for a prompt that carries no roster (#8533).
+///
+/// Why: the pinned note in the manifest refers to "the roster below", so it is
+/// emitted only above a roster; without this sentence the roster-absent prompt
+/// stated no agent-selection rule at all, with or without an override.
+/// What: the pinned note minus its roster references. It carries the same
+/// presence sentence ([`crate::core::instruction_safety_core::SAFETY_CORE`]'s
+/// agent-selection marker) as the pinned note.
+/// Test: `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) const AGENT_SELECTION_WITHOUT_ROSTER: &str = "> **Agent selection.** Dispatch a \
+     subagent only with the native Agent tool — `Agent(subagent_type=\"<name>\", ...)` — \
+     passing a name exactly as the harness's own `Available agent types for the Agent tool` \
+     listing spells it. A prose title like \"Documentation Agent\" is not an agent and \
+     fails to dispatch (#4594). That listing is authoritative for WHICH agents exist; \
+     routing tables are doctrine only (#4513).";
 
 /// The AGENT-DELEGATION section body when no legacy `AGENT_DELEGATION.md` file
 /// forced full replacement, honoring a CLAUDE.md named-section override if the
@@ -589,15 +668,31 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
 /// while the live roster — host-computed, never authored by a project — still
 /// follows when any agent is deployed.
 ///
-/// What: `Some(body)` returns `body` (trimmed), followed by the roster when
-/// `roster` is `Some`; `None` defers to [`delegation_with_roster`] unchanged.
+/// What: `Some(body)` returns `body` (trimmed), then the agent-selection rule —
+/// the pinned note above the roster when `roster` is `Some`,
+/// [`AGENT_SELECTION_WITHOUT_ROSTER`] when it is `None`; `None` defers to
+/// [`delegation_with_roster`] unchanged. Parts, not one string: the project
+/// body is folded apart from the base text after it.
 /// Test: `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`
-/// (`claude_md_sections_tests.rs`).
-fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
+/// (`claude_md_sections_tests.rs`),
+/// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
+pub(crate) fn delegation_with_named_override(
+    named_override: Option<&str>,
+    roster: Option<&str>,
+) -> Vec<String> {
     match named_override {
+        // #8533: agent selection is safety core — it survives the override on
+        // this path as it does on the package path, with or without a roster.
         Some(body) => match roster {
-            Some(roster) => format!("{}\n\n{}", body.trim(), roster.trim()),
-            None => body.trim().to_string(),
+            Some(roster) => vec![
+                body.trim().to_string(),
+                crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation),
+                roster.trim().to_string(),
+            ],
+            None => vec![
+                body.trim().to_string(),
+                AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
+            ],
         },
         None => delegation_with_roster(roster),
     }
@@ -619,6 +714,13 @@ fn join_sections(sections: Vec<String>) -> String {
         .collect::<Vec<_>>()
         .join(SECTION_SEPARATOR)
 }
+
+// #8533: the per-section status report lives in a child module (SLOC cap).
+#[path = "instruction_section_report.rs"]
+mod section_report;
+pub use section_report::{
+    SectionState, SectionStatus, render_section_report, section_report_for, section_statuses,
+};
 
 #[cfg(test)]
 #[path = "instruction_overrides_tests.rs"]

@@ -180,7 +180,7 @@ fn percentile(sorted: &[u128], p: usize) -> u128 {
 /// What: `GET /health` → 200, body contains `"status":"ok"`.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_daemon_health() {
     let base = daemon_url();
     println!("daemon url: {base}");
@@ -213,7 +213,7 @@ async fn test_daemon_health() {
 ///       `GET /indexes/trusty-tools/graph/stats` → `node_count >= MIN_NODE_COUNT`.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_index_exists_and_has_content() {
     let base = daemon_url();
     let client = make_client();
@@ -272,7 +272,7 @@ async fn test_index_exists_and_has_content() {
 /// prints a table, and asserts p50 < threshold.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_query_latency_p50_under_threshold() {
     let base = daemon_url();
     let client = make_client();
@@ -317,7 +317,7 @@ async fn test_query_latency_p50_under_threshold() {
 /// query × 3 repetitions), collects latencies, and asserts p99 < threshold.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_query_latency_p99_under_threshold() {
     let base = daemon_url();
     let client = make_client();
@@ -361,7 +361,7 @@ async fn test_query_latency_p99_under_threshold() {
 /// `expected_file_fragment`. Prints a pass/fail table for diagnostics.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_result_relevance() {
     let base = daemon_url();
     let client = make_client();
@@ -430,7 +430,7 @@ async fn test_result_relevance() {
 /// all succeed (HTTP 200) and the wall-clock total stays under 5 seconds.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_concurrent_queries_no_errors() {
     use tokio::task::JoinSet;
 
@@ -586,7 +586,7 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
 /// Test: this IS the test. Marked `#[ignore]` so the default `cargo test`
 /// run stays fast.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a live trusty-search fixture daemon (support/isolated_benchmark.rs)"]
 async fn test_grep_endpoint_latency_vs_ripgrep() {
     let base = daemon_url();
     let client = make_client();

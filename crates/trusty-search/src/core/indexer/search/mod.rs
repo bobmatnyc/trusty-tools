@@ -12,6 +12,7 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod drops;
+pub(crate) mod embed_degrade;
 pub(crate) mod exact;
 pub(crate) mod kg;
 pub(crate) mod lanes;
@@ -38,6 +39,7 @@ use super::{
     STRUCT_DEFINITION_BOOST,
 };
 use drops::SearchDrops;
+use embed_degrade::PrecomputedQueryVector;
 use exact::ExactMatchReport;
 
 /// Everything one search produced: the page, the drop tally, and the
@@ -59,6 +61,9 @@ pub struct SearchOutcome {
     pub dropped: SearchDrops,
     /// Whether an exact-match floor applied, and to which literal (#7675).
     pub exact_match: ExactMatchReport,
+    /// #8348: the query embed failed and the vector lane was skipped; the
+    /// embedder's error text. `None` when the lane ran or was never asked for.
+    pub vector_lane_error: Option<String>,
 }
 
 /// Score assigned to grep-fallback hits (issue #75). Intentionally tiny so
@@ -205,7 +210,36 @@ impl CodeIndexer {
     /// discarding wrappers.
     /// Test: `search_meta_reports_the_exact_match_floor`.
     pub async fn search_with_outcome(&self, query: &SearchQuery) -> Result<SearchOutcome> {
+        self.search_with_outcome_vec(query, None).await
+    }
+
+    /// [`Self::search`], with the query vector computed by the caller (#9027).
+    ///
+    /// Why: the all-index fan-out embedded the same text once per index; one
+    /// embedder call per request is enough when every index shares it.
+    /// What: `query_vector` replaces this index's own query embed, a failed one
+    /// included. `None`, or an index with no embedder wired (BM25-only), embeds
+    /// as `search` does.
+    /// Test: `global_search_embeds_the_query_once_for_every_index`.
+    pub async fn search_with_query_vector(
+        &self,
+        query: &SearchQuery,
+        query_vector: Option<PrecomputedQueryVector<'_>>,
+    ) -> Result<Vec<CodeChunk>> {
+        Ok(self
+            .search_with_outcome_vec(query, query_vector)
+            .await?
+            .results)
+    }
+
+    async fn search_with_outcome_vec(
+        &self,
+        query: &SearchQuery,
+        query_vector: Option<PrecomputedQueryVector<'_>>,
+    ) -> Result<SearchOutcome> {
         self.touch_activity();
+        // #8232: a handle that outlived DELETE must not answer from closed files.
+        self.refuse_if_deleted()?;
         // #6581: M005 clears the corpus and re-chunks it in batches, so a query
         // landing in that window would read a cleanly-readable but empty corpus
         // and answer `results: []` — the same "outage rendered as nothing
@@ -259,10 +293,15 @@ impl CodeIndexer {
         let skip_kg = lexical_only || semantic_lane;
 
         // 1) Embed (cache-first).
-        let embedding = if lexical_only {
-            None
+        // #8348: an embed failure degrades an unpinned query to lexical.
+        let (embedding, mut vector_lane_error) = if lexical_only {
+            (None, None)
+        } else if let (Some(pre), Some(_)) = (query_vector, self.embedder.as_ref()) {
+            // #9027: the fan-out already embedded this text once.
+            self.precomputed_or_degrade(pre, semantic_lane)?
         } else {
-            self.embed_query(&query.text).await?
+            self.embed_query_or_degrade(&query.text, semantic_lane)
+                .await?
         };
 
         // 2) Run lanes (HNSW + BM25), then inject entity-exact-match.
@@ -350,7 +389,12 @@ impl CodeIndexer {
             None
         } else {
             match &query.refine_query {
-                Some(rq) if !rq.is_empty() => self.embed_query(rq).await?,
+                // #8348: a refine embed failure drops the rerank, not the query.
+                Some(rq) if !rq.is_empty() => {
+                    let (v, err) = self.embed_query_or_degrade(rq, false).await?;
+                    vector_lane_error = vector_lane_error.or(err);
+                    v
+                }
                 _ => None,
             }
         };
@@ -459,6 +503,7 @@ impl CodeIndexer {
             results: result,
             dropped,
             exact_match,
+            vector_lane_error,
         })
     }
 

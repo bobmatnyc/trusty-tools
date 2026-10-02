@@ -81,6 +81,8 @@ pub(crate) fn adopt_pre_existing_worktrees(
     if !checkout.is_dir() {
         return BackfillReport::default();
     }
+    // #8511: exclude the harness files and move legacy markers out of the trees.
+    crate::session_manager::worktree_marker_migration::prepare_checkout(checkout);
     let store_dir = crate::project::registry_data_dir_under(state.framework_root());
     let report =
         crate::project::backfill_checkout(&store_dir, &project.name, checkout, chrono::Utc::now());
@@ -96,6 +98,40 @@ pub(crate) fn adopt_pre_existing_worktrees(
         );
     }
     report
+}
+
+/// The daemon's one-shot startup marker migration (#8511).
+///
+/// Why: registration covers a project registered from now on; this pass covers
+/// every project registered before the marker moved, once per daemon start.
+/// What: refuses on a scratch framework root (a test process, #6348), then runs
+/// [`crate::session_manager::worktree_marker_migration::migrate_registered_projects`]
+/// over the orphan-GC's repos root and the adopted anchors on a blocking thread,
+/// awaited by a small task that logs the tally or a panic (`JoinError`).
+/// Test: the pass itself is `the_fleet_pass_migrates_every_tree_and_excludes_once`.
+pub(crate) fn spawn_startup_marker_migration(state: &Arc<DaemonState>) {
+    if let Some(reason) = crate::daemon::host_state_refusal(state) {
+        tracing::info!("startup marker migration: skipped — {reason}");
+        return;
+    }
+    let repos_root = crate::daemon::managed_routes::inproject::repos_root();
+    let adopted = crate::project::adopted_anchors_under(state.framework_root());
+    let pass = tokio::task::spawn_blocking(move || {
+        crate::session_manager::worktree_marker_migration::migrate_registered_projects(
+            &repos_root,
+            &adopted,
+        )
+    });
+    tokio::spawn(async move {
+        match pass.await {
+            Ok(tally) => tracing::info!(
+                migrated = tally.migrated,
+                kept = tally.kept,
+                "startup marker migration finished (#8511)"
+            ),
+            Err(e) => tracing::warn!("startup marker migration did not finish: {e} (#8511)"),
+        }
+    });
 }
 
 #[cfg(test)]

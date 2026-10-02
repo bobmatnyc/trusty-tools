@@ -35,7 +35,7 @@ use tower::ServiceExt;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INTERNAL_ERROR};
 
 use crate::allowlist::{AllowlistConfig, AllowlistEntry, AllowlistPaths};
-use crate::core::corpus::CorpusStore;
+use crate::core::corpus::{CorpusOpenFailure, CorpusStore};
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -753,6 +753,111 @@ async fn index_file_over_the_socket_matches_the_http_body() {
     assert_eq!(over_socket, over_http);
 }
 
+/// Why (#8976): a pretty-printed JSON file of 500+ lines produced zero chunks
+/// and `index-file` still answered `indexed: true`, so the file stayed out of
+/// search with no signal. Pre-fix the large file has no `chunks` field and
+/// nothing lands, so this fails against 889f555fc3.
+/// What: a 600-line JSON file lands with its chunk count reported; a blank
+/// file answers `indexed: false` with a reason instead of a silent success.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let entries: Vec<String> = (0..600).map(|i| format!("  \"key_{i}\": {i},")).collect();
+    let big = format!("{{\n{}\n  \"last\": 0\n}}\n", entries.join("\n"));
+    let body = serde_json::json!({ "path": "config/big.json", "content": big });
+
+    let landed = http_ok(&http, "POST", "/indexes/wf/index-file", body).await;
+    assert_eq!(landed["indexed"], serde_json::json!(true), "{landed}");
+    let chunks = landed["chunks"].as_u64().unwrap_or(0);
+    assert!(
+        chunks > 0,
+        "a 600-line JSON file must land chunks: {landed}"
+    );
+    let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+    let ids = handle
+        .indexer
+        .read()
+        .await
+        .chunk_ids_for_file("config/big.json")
+        .await;
+    assert_eq!(
+        ids.len() as u64,
+        chunks,
+        "the reported count is the landed count"
+    );
+
+    let blank = serde_json::json!({ "path": "config/empty.json", "content": "  \n" });
+    let refused = http_ok(&http, "POST", "/indexes/wf/index-file", blank).await;
+    assert_eq!(refused["indexed"], serde_json::json!(false), "{refused}");
+    assert_eq!(
+        refused["reason"],
+        serde_json::json!("empty_file"),
+        "{refused}"
+    );
+    assert_eq!(refused["chunks"], serde_json::json!(0), "{refused}");
+}
+
+/// Why (#8976 fail-open check): a write whose chunks did not land is an error,
+/// and the error body must not read as indexed. The chunk cap is the error
+/// source here: the chunker succeeds, the commit refuses.
+/// What: an index at a one-chunk cap takes `FILE`, then refuses a second file;
+/// that refusal is a 500 whose body says `indexed: false`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_error_arm_never_reports_indexed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let indexer = CodeIndexer::new("cap", tmp.path().to_str().expect("utf8")).with_chunk_cap(1);
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("cap"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    ));
+    let (_state, http, _rpc) = routers(SearchAppState::new(registry)).await;
+    let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/cap/index-file", fits).await;
+
+    let over = serde_json::json!({ "path": "src/b.rs", "content": "fn b() -> u8 { 2 }\n" });
+    let (status, body) =
+        http_raw(&http, json_request("POST", "/indexes/cap/index-file", over)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["error"],
+        serde_json::json!("index_file_failed"),
+        "{body}"
+    );
+    assert_eq!(body["indexed"], serde_json::json!(false), "{body}");
+}
+
+/// Why (owner ruling item 232, Q2): a tombstone write removes the file's
+/// chunks, and its reply is the one `indexed: true` with zero chunks, marked
+/// `removed: true`. Fails against 889f555fc3, whose reply had no `chunks` and
+/// no `removed`.
+/// What: index `FILE`, tombstone it, read the reply and the corpus.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("ts", tmp.path()))).await;
+    let fits = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/ts/index-file", fits).await;
+
+    let tombstone = "---\nsource_status: deleted\nsource_id: auth-8976\n---\n";
+    let body = serde_json::json!({ "path": FILE, "content": tombstone });
+    let reply = http_ok(&http, "POST", "/indexes/ts/index-file", body).await;
+    assert_eq!(reply["indexed"], serde_json::json!(true), "{reply}");
+    assert_eq!(reply["chunks"], serde_json::json!(0), "{reply}");
+    assert_eq!(reply["removed"], serde_json::json!(true), "{reply}");
+    assert!(reply.get("reason").is_none(), "{reply}");
+    let handle = state.registry.get(&IndexId::new("ts")).expect("resident");
+    let left = handle.indexer.read().await.chunk_ids_for_file(FILE).await;
+    assert!(left.is_empty(), "the tombstone removed {FILE}: {left:?}");
+}
+
 /// Why: the delete half of the same contract. `removed_chunks` is the count a
 /// caller reconciles against, so a socket that reported a different one — or
 /// reported one for a removal that did not happen — would silently desynchronise
@@ -823,12 +928,93 @@ async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
     );
 }
 
+/// Why (#8922): `index-file` indexed any path and any content, so a caller
+/// could put a file the walker excludes, or a sops-encrypted secrets file, into
+/// the index and be told `indexed: true`.
+/// What: a path under the default-skipped `data/` dir and sops content on an
+/// admitted path each answer 403 `index_file_excluded` with `indexed: false`
+/// on both transports, and neither leaves a chunk. Fails with the #8922 fixes disabled:
+/// the route then answers 200 `indexed: true` for both.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let sops = crate::core::sops::sample_sops_yaml();
+    for (path, content, reason) in [
+        ("data/export.json", "{\"a\": 1}\n", "excluded_path"),
+        ("config/secrets.yaml", sops.as_str(), "sops_encrypted"),
+    ] {
+        let body = serde_json::json!({ "path": path, "content": content });
+        let over_http = http_err(&http, "POST", "/indexes/wf/index-file", body.clone()).await;
+        assert_eq!(
+            over_http.0,
+            StatusCode::FORBIDDEN,
+            "{path}: {}",
+            over_http.1
+        );
+        assert_eq!(over_http.1["error"], "index_file_excluded", "{path}");
+        assert_eq!(over_http.1["reason"], reason, "{path}");
+        assert_eq!(over_http.1["indexed"], false, "{path}");
+        let over_socket = rpc_err(
+            &rpc,
+            writes::METHOD_INDEX_FILE_PUT,
+            serde_json::json!({ "index_id": "wf", "body": body }),
+        )
+        .await;
+        assert_same_refusal(&over_http, &over_socket, CODE_FORBIDDEN, path);
+        let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+        assert!(
+            handle
+                .indexer
+                .read()
+                .await
+                .chunk_ids_for_file(path)
+                .await
+                .is_empty(),
+            "{path}: a refused write must leave no chunk"
+        );
+    }
+}
+
+/// Why (#8922): an exclude glob that does not parse is skipped at runtime, so
+/// accepting one at the API would index what it was written to exclude.
+/// What: `POST /indexes` and `PATCH /indexes/{id}/config` each answer
+/// `400 invalid_exclude_glob`, and neither registers nor changes anything.
+/// Fails with `reject_invalid_globs` removed from either handler.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_and_patch_reject_an_invalid_exclude_glob() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let bad = serde_json::json!(["secrets/[unclosed"]);
+
+    let mut create = create_body("bad-glob-8922", tmp.path());
+    create["exclude_globs"] = bad.clone();
+    let (status, body) = http_err(&http, "POST", "/indexes", create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
+    assert!(state.registry.get(&IndexId::new("bad-glob-8922")).is_none());
+
+    let patch = serde_json::json!({ "exclude_globs": bad });
+    let (status, body) = http_err(&http, "PATCH", "/indexes/wf/config", patch).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_exclude_glob", "{body}");
+    let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+    assert!(
+        handle.exclude_globs.is_empty(),
+        "a refused PATCH changes nothing"
+    );
+}
+
 // ----------------------------------------------------------------- reindex ---
 
 /// Why: the reindex TRIGGER is this slice's; the SSE progress stream is slice
 /// 5's. What the trigger owes a caller is the `stream_url` it will subscribe to,
 /// and a socket that built a different one would hand back a URL that answers
-/// nothing.
+/// nothing. #8889: the HTTP run holds the index until it ends, so the socket
+/// request retries (bounded) while it is refused as `reindex_already_running`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn reindex_over_the_socket_matches_the_http_body() {
@@ -837,12 +1023,21 @@ async fn reindex_over_the_socket_matches_the_http_body() {
         routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
 
     let over_http = http_ok(&http, "POST", "/indexes/wf/reindex", serde_json::json!({})).await;
-    let over_socket = rpc_ok(
-        &rpc,
-        writes::METHOD_INDEX_REINDEX,
-        serde_json::json!({ "index_id": "wf" }),
-    )
-    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let over_socket = loop {
+        let params = serde_json::json!({ "index_id": "wf" });
+        let response = dispatch(&rpc, writes::METHOD_INDEX_REINDEX, params).await;
+        match response.error {
+            Some(e)
+                if e.message.starts_with("reindex_already_running")
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Some(e) => panic!("search.index.reindex must answer a result: {e:?}"),
+            None => break response.result.expect("a non-error frame carries a result"),
+        }
+    };
 
     assert_eq!(over_socket["queued"], serde_json::json!(true));
     assert_eq!(
@@ -891,6 +1086,45 @@ async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport
         state.reindex_progress.get(&IndexId::new("wf")).is_none(),
         "a refused trigger must not publish a progress entry an SSE subscriber \
          would then wait on forever"
+    );
+}
+
+/// Why (#8105): the socket serves the same `reindex_report` body as HTTP, so a
+/// write-quarantined index must be refused on both, or the socket would queue
+/// the run whose completion never arrives.
+/// What: sets the quarantine exactly as `build_indexer_from_entry` does on a
+/// failed open (flag, kind, no corpus), then compares the two refusals.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wq", tmp.path()))).await;
+    {
+        let handle = state.registry.get(&IndexId::new("wq")).expect("planted");
+        let mut indexer = handle.indexer.write().await;
+        indexer.corpus_open_failed = true;
+        indexer.corpus_open_failure = Some(CorpusOpenFailure::Contention);
+    }
+
+    let over_http = http_err(&http, "POST", "/indexes/wq/reindex", serde_json::json!({})).await;
+    assert_eq!(over_http.0, StatusCode::CONFLICT, "body: {}", over_http.1);
+    assert_eq!(over_http.1["error"], "index_write_quarantined");
+    let over_socket = rpc_err(
+        &rpc,
+        writes::METHOD_INDEX_REINDEX,
+        serde_json::json!({ "index_id": "wq" }),
+    )
+    .await;
+
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        CODE_CONFLICT,
+        "reindex of a write-quarantined index",
+    );
+    assert!(
+        state.reindex_progress.get(&IndexId::new("wq")).is_none(),
+        "#8105: a refused trigger must queue nothing"
     );
 }
 

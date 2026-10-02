@@ -18,9 +18,16 @@ a section of the framework prompt, put the replacement between a marker pair —
 mechanism, so a worked example here would take effect as a real override — see
 `seeded_claude_md_declares_no_overrides`.)
 
-Tokens: `IDENTITY`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
-`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`.
-`CORE` is the one token that is always declined. Prose outside the markers is
+Tokens: `IDENTITY`, `PM-ALLOWLIST`, `DELEGATION-MECHANICS`, `AGENT-ROUTING`,
+`SUBAGENT-RE-ENGAGEMENT`, `PHASES`, `QA-GATE`, `GIT-FILE-TRACKING`,
+`TICKETS-PRS-RELEASES`, `MESSAGES-REPORTS-SESSIONS`, `AUTONOMOUS-EXECUTION`,
+`MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, `ENFORCEMENT`,
+`NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. `CORE` is the one
+token that is always declined. An override of `MEMORY`, `SEARCH` or
+`AGENT-DELEGATION` replaces that section but keeps its safety-core block: the
+memory protocol, the code search protocol, agent selection and the agent roster.
+`AUTONOMOUS-EXECUTION` is where a project sets how freely the PM runs — e.g.
+"ask before dispatching after a resume" (#8361). Prose outside the markers is
 project context — Claude Code loads it natively, so it is never copied into the
 composed prompt.
 

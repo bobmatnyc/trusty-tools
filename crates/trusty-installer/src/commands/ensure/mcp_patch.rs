@@ -72,7 +72,9 @@ fn mcp_members() -> Vec<McpMember> {
         },
         McpMember {
             key: "trusty-mpm",
-            command: "trusty-mpm",
+            // One full binary (owner ruling 2026-09-27): `trusty-mpm` is only
+            // a compatibility alias that execs `tm`.
+            command: "tm",
             args: &["serve", "--stdio"],
         },
     ]
@@ -150,5 +152,8 @@ mod tests {
         assert_eq!(search.args, &["serve"]);
         let memory = &members[1];
         assert_eq!(memory.args, &["serve", "--stdio"]);
+        let mpm = &members[3];
+        assert_eq!(mpm.command, "tm");
+        assert_eq!(mpm.args, &["serve", "--stdio"]);
     }
 }

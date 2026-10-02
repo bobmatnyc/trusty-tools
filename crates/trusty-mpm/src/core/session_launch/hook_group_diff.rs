@@ -12,7 +12,8 @@
 //! every group the file does not carry, plus every tm-owned group it carries
 //! that the config no longer asks for.
 //!
-//! What: [`project_hook_additions_for`] resolves the three toggles and builds
+//! What: [`project_hook_additions_for`] resolves every toggle (#9018 adds
+//! `[pm_guard] enabled`) and builds
 //! the additions block (the ONE builder the launch path and the resume merge
 //! also use, so the comparison can never expect a shape no writer produces);
 //! [`project_hook_group_gaps`] diffs that block against a settings value, and
@@ -43,14 +44,20 @@ use crate::core::standalone::hooks::cleanup::event_names_matching;
 /// let the diff expect a group no writer writes (or miss one every writer
 /// does). One function resolves all three, and both callers go through it.
 /// What: `[hooks] prompt_context` from [`crate::core::config::MpmConfig`] at
-/// `fw.root`, `[divert] enabled` from the re-resolved plan, and the #7688 flag
-/// from [`crate::core::prompt_self_improvement::enabled_for`], fed to
-/// [`super::project_hooks::project_managed_hook_additions_with_prompt_feedback`].
+/// `fw.root`, `[divert] enabled` from the re-resolved plan, the #7688 flag
+/// from [`crate::core::prompt_self_improvement::enabled_for_with_host`] with
+/// the host layer taken from that same `fw.root` config, and (#9018)
+/// `[pm_guard] enabled` from that config too, fed to
+/// [`super::project_hooks::project_managed_hook_additions_with_pm_guard`].
+/// Nothing here reads `$HOME`; `fw` is the only host input.
 /// `exe_override` pins the hook binary; production passes `None` and lets
 /// [`crate::core::standalone::hooks::resolve_stable_hook_exe`] (#7670) find the
 /// installed one, which refuses a build-tree artifact (#7244).
 /// Test: `expected_additions_carry_the_capture_when_the_flag_is_on`,
-/// `expected_additions_omit_the_capture_when_the_flag_is_off`.
+/// `expected_additions_omit_the_capture_when_the_flag_is_off`,
+/// `expected_additions_read_the_host_flag_from_the_framework_root`,
+/// `a_disabled_guard_is_left_out_of_the_additions`,
+/// `resume_with_the_guard_disabled_removes_an_existing_entry`.
 pub(crate) fn project_hook_additions_for(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -58,13 +65,20 @@ pub(crate) fn project_hook_additions_for(
 ) -> Result<Value, StableHookExeError> {
     let config = crate::core::config::MpmConfig::load(&fw.root);
     let plan = crate::core::mcp_session_env::resolve_plan(fw, project_dir);
-    super::project_hooks::project_managed_hook_additions_with_prompt_feedback(
+    super::project_hooks::project_managed_hook_additions_with_pm_guard(
         exe_override,
         config.hooks.prompt_context,
         plan.divert_enabled,
         // #7849: the toggle the resume merge used to hard-code `false`, which
         // stripped on every resume the capture the launch had just written.
-        crate::core::prompt_self_improvement::enabled_for(project_dir),
+        // #5040: the host layer comes from the SAME `fw.root` config as the
+        // other two toggles, not a second `$HOME` read `fw` cannot redirect.
+        crate::core::prompt_self_improvement::enabled_for_with_host(
+            project_dir,
+            config.pm.prompt_self_improvement,
+        ),
+        // #9018: `[pm_guard] enabled`, from the same `fw.root` config.
+        config.pm_guard.enabled,
     )
 }
 

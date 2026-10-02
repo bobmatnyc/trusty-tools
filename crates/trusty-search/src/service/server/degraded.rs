@@ -19,6 +19,7 @@
 //! | vector lane not built yet (#5068) | `503 vector_unavailable` | yes |
 //! | contribution stored, not merged (#5505) | `503 contrib_not_merged` | yes |
 //! | corpus mid-rebuild by a migration (#6581) | `503 index_migration_in_progress` | yes |
+//! | reindex against a write-quarantined index (#8105) | `409 index_write_quarantined` | no — restart |
 //!
 //! Centralising them means `search`, `index_status`, `chunks`, and `grep` can
 //! never drift into reporting the same daemon state three different ways —
@@ -32,7 +33,8 @@
 //! not-resident / restore-failed / unknown triple; [`vector_lane_unavailable`]
 //! renders the #5068 semantic-against-a-vector-less-index verdict;
 //! [`contrib_not_merged_response`] renders the #5505 stored-but-not-queryable
-//! contributed-graph verdict.
+//! contributed-graph verdict; [`write_quarantine_refusal`] renders the #8105
+//! reindex refusal.
 //!
 //! Test: `service::server::tests_4087` covers [`corpus_failure_response`];
 //! `residency_miss_is_404_only_when_absent_everywhere`,
@@ -119,6 +121,60 @@ pub(super) async fn corpus_failure_response(
                  'no matches' (issue #4087). {reason}"
             ),
         })),
+    ))
+}
+
+/// Build the 409 for a reindex requested against a write-quarantined index
+/// (#8105).
+///
+/// Why: such a reindex used to answer `queued: true`, walk and embed the whole
+/// tree, and then have every durable write refused by the #4226 guard. The
+/// index kept `chunk_count: null` and a caller polling for completion waited
+/// forever. Only a successful `CorpusStore::open` lifts the quarantine, and
+/// nothing in a running daemon re-attempts that open, so the run could never
+/// persist anything.
+/// What: `None` when [`crate::core::indexer::CodeIndexer::is_write_quarantined`]
+/// is false, and the caller queues the reindex. Otherwise `409
+/// index_write_quarantined` with `queued: false`, `retryable: false`, the #4333
+/// `failure_kind`, and a `message` naming the quarantine, its classified
+/// reason, and the daemon restart that clears it.
+/// Test: `reindex_of_a_write_quarantined_index_is_refused_with_409`,
+/// `reindex_of_a_healthy_index_is_still_queued`.
+pub(super) async fn write_quarantine_refusal(
+    index_id: &str,
+    handle: &IndexHandle,
+) -> Option<(StatusCode, serde_json::Value)> {
+    let indexer = handle.indexer.read().await;
+    if !indexer.is_write_quarantined() {
+        return None;
+    }
+    let kind = indexer.corpus_open_failure;
+    drop(indexer);
+
+    // The kind is written with the flag, so `None` is unreachable; report the
+    // flag rather than invent a cause, as `corpus_failure_response` does.
+    let (failure_kind, reason) = match kind {
+        Some(k) => (k.label(), k.stage_reason()),
+        None => (
+            "unclassified",
+            "durable corpus is unavailable and the cause was not classified",
+        ),
+    };
+    Some((
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": "index_write_quarantined",
+            "index_id": index_id,
+            "failure_kind": failure_kind,
+            "retryable": false,
+            "queued": false,
+            "message": format!(
+                "index '{index_id}' is write-quarantined: its durable corpus failed to open, \
+                 so a reindex could persist nothing and was not queued (issue #8105). \
+                 Retrying the request does not clear the quarantine; restart the daemon, \
+                 which re-opens the corpus and lifts it on success. {reason}"
+            ),
+        }),
     ))
 }
 
@@ -384,6 +440,30 @@ pub(super) fn vector_lane_unavailable(
                  unavailable ({reason}). Returning lexical results here would answer a \
                  different question than the one asked (issue #5068). {remedy}"
             ),
+        })),
+    ))
+}
+
+/// `503 vector_unavailable` for a pinned semantic query whose embed failed (#8348).
+///
+/// Why: the embed failure used to reach the caller as `500 internal search
+/// error`. The index is intact and the condition clears once the embedder
+/// recovers, so it is the retryable member of the #5068 `vector_unavailable`
+/// family, not an internal error.
+/// What: downcasts to `EmbedderUnavailable`; `None` for any other error.
+/// Test: `a_pinned_semantic_query_with_a_failed_embed_is_503_not_500`.
+pub(super) fn embedder_unavailable_from(
+    e: &anyhow::Error,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let fault = e.downcast_ref::<crate::core::indexer::EmbedderUnavailable>()?;
+    Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "vector_unavailable",
+            "reason": "embedder_unavailable",
+            "index_id": fault.index_id,
+            "retryable": true,
+            "message": fault.to_string(),
         })),
     ))
 }

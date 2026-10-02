@@ -250,8 +250,14 @@ impl<S: tracing::Subscriber> Layer<S> for LogBufferLayer {
 /// never dropped is always in that recomputation, so the cached answer can no
 /// longer go stale. This is the tracing-subscriber exception to the crate's
 /// no-global-state rule, and it is compiled only into the test build.
+///
+/// The second, no-op `Dispatch` is what makes that hold. With only one
+/// dispatcher registered, tracing-core computes a new callsite's interest from
+/// the default of whichever thread reaches it first, so a test with no subscriber
+/// could cache "never" for a line the capturing test is about to assert on
+/// (#8284).
 #[cfg(test)]
-static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>)> =
+static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>, tracing::Dispatch)> =
     std::sync::LazyLock::new(|| {
         use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -259,7 +265,10 @@ static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>)> =
         let dispatch = tracing::Dispatch::new(
             tracing_subscriber::registry().with(LogBufferLayer::new(buffer.clone())),
         );
-        (dispatch, buffer, Mutex::new(()))
+        // #8284: a second live dispatcher moves tracing-core off its
+        // one-dispatcher path, where interest follows the registering thread.
+        let companion = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        (dispatch, buffer, Mutex::new(()), companion)
     });
 
 /// Run `body` under a subscriber that captures every event, and return the
@@ -285,8 +294,11 @@ static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>)> =
 /// `search_index_confirm.rs::an_exhausted_confirm_deadline_is_still_a_warning`.
 #[cfg(test)]
 pub(crate) fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
-    let (dispatch, buffer, lock) = &*CAPTURE;
+    let (dispatch, buffer, lock, _companion) = &*CAPTURE;
     let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // #8284: re-derive any interest another thread cached while `CAPTURE` was
+    // still being built, before the second dispatcher existed.
+    tracing::callsite::rebuild_interest_cache();
     let _ = buffer.take();
     let value = tracing::dispatcher::with_default(dispatch, body);
     (value, buffer.take())

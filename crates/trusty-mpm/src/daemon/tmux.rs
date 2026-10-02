@@ -25,6 +25,7 @@ use crate::core::external_session::ExternalSession;
 use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
 use crate::core::{Error, Result};
+use crate::session_manager::SupervisorFloor;
 
 /// Find the end (one PAST the true closing `'`, byte offset into `s`) of a
 /// POSIX shell single-quoted value, given `s` is the text immediately AFTER
@@ -238,6 +239,8 @@ pub enum ExclusiveCreate {
 pub struct TmuxDriver {
     /// Absolute path to the `tmux` binary.
     tmux_path: String,
+    /// #8942: the protected-name check [`Self::kill_session`] asks first.
+    floor: SupervisorFloor,
 }
 
 impl TmuxDriver {
@@ -250,10 +253,12 @@ impl TmuxDriver {
     /// returns nothing and every managed-session spawn 500s after a restart
     /// (#1298). Resolving via the well-known dirs makes discovery survive the
     /// minimal inherited `PATH`.
-    /// What: delegates to [`trusty_common::bin_resolve::resolve_binary`], which
-    /// consults the live `PATH` first and then falls back to the well-known
-    /// daemon dirs (Homebrew + user bins). Errors with a clear message if no
-    /// `tmux` is found anywhere.
+    /// What: delegates to [`crate::core::tmux::resolve_tmux_binary`] — the
+    /// `with_tmux_binary` test override when one is in scope, else
+    /// [`trusty_common::bin_resolve::resolve_binary`], which consults the live
+    /// `PATH` first and then falls back to the well-known daemon dirs
+    /// (Homebrew + user bins). Errors with a clear message if no `tmux` is
+    /// found anywhere.
     ///
     /// Scratch-environment gate (#5784): before resolving anything, this asks
     /// [`crate::core::host_state_gate::host_state_access`] whether the process
@@ -279,14 +284,18 @@ impl TmuxDriver {
     /// `TRUSTY_MPM_ALLOW_HOST_STATE=1` is the explicit way back in.
     /// Test: `driver_reports_availability` (skips assertion when tmux
     /// missing); `scratch_home_daemon_does_not_spawn_tmux`
-    /// proves no tmux process is spawned once this refuses.
+    /// proves no tmux process is spawned once this refuses;
+    /// `tmux_backend_constructs_without_spawning` resolves through a
+    /// `with_tmux_binary` scope.
     pub fn discover() -> Result<Self> {
         let access = crate::core::host_state_gate::host_state_access();
         if let Some(reason) = access.skip_reason() {
             tracing::warn!("#5784: tmux access refused — {reason}");
             return Err(Error::Protocol(format!("tmux access refused: {reason}")));
         }
-        let path = trusty_common::bin_resolve::resolve_binary("tmux").ok_or_else(|| {
+        // #6542: `resolve_tmux_binary`, not `bin_resolve` directly, so a test
+        // inside a `with_tmux_binary` scope reaches its private server here too.
+        let path = crate::core::tmux::resolve_tmux_binary().ok_or_else(|| {
             Error::Protocol(
                 "tmux not found on PATH or in well-known dirs (e.g. /opt/homebrew/bin); \
                  use the PTY or SDK control model"
@@ -297,7 +306,32 @@ impl TmuxDriver {
             .to_str()
             .ok_or_else(|| Error::Protocol("resolved tmux path is not valid UTF-8".into()))?
             .to_string();
-        Ok(Self { tmux_path: path })
+        let floor = SupervisorFloor::host();
+        Ok(Self {
+            tmux_path: path,
+            floor,
+        })
+    }
+
+    /// A driver bound to `tmux_path` with no discovery — tests only, so a test
+    /// can point it at a private `-L` server shim (#8443).
+    #[cfg(test)]
+    pub(crate) fn with_tmux_path_for_test(tmux_path: impl Into<String>) -> Self {
+        Self {
+            tmux_path: tmux_path.into(),
+            floor: SupervisorFloor::host(),
+        }
+    }
+
+    /// This driver with its kill floor replaced — tests only (#8942).
+    #[cfg(test)]
+    pub(crate) fn with_floor(self, floor: SupervisorFloor) -> Self {
+        Self { floor, ..self }
+    }
+
+    /// The protected-name check this driver's kills ask (#8942).
+    pub fn supervisor_floor(&self) -> &SupervisorFloor {
+        &self.floor
     }
 
     /// True if a `tmux` binary is available on this host.
@@ -483,8 +517,23 @@ impl TmuxDriver {
         }
     }
 
-    /// Kill the tmux session named `name`.
+    /// Kill the tmux session named `name`, unless the #8942 floor refuses it.
+    ///
+    /// Why: every daemon kill-by-name funnels through here; a stale record
+    /// carrying the Architect's name must not reach its pane (#8935).
+    /// What: [`SupervisorFloor::refuse`] first — a protected or undeterminable
+    /// name is `Err` and no tmux process runs; otherwise `kill-session -t =name`.
+    /// Test: `kill_by_name_fails_closed_when_architect_sidecars_cannot_be_read`,
+    /// `a_record_with_an_unknown_kind_is_never_torn_down`.
+    #[track_caller]
     pub fn kill_session(&self, name: &str) -> Result<()> {
+        let caller = format!(
+            "TmuxDriver::kill_session from {}",
+            std::panic::Location::caller()
+        );
+        if let Some(why) = self.floor.refuse(name, &caller) {
+            return Err(Error::Protocol(why));
+        }
         self.run(&TmuxCommand::KillSession {
             name: name.to_string(),
         })?;
@@ -834,17 +883,20 @@ impl TmuxDriver {
     /// restore it on resume; `tmux display-message -p '#{pane_current_path}'`
     /// is the standard mechanism. The call is best-effort — callers must handle
     /// `None` gracefully (resume falls back to workspace_path/cwd).
-    /// What: runs `tmux display-message -t <name> -p '#{pane_current_path}'`,
+    /// What: runs `tmux display-message -t =<name>: -p '#{pane_current_path}'`,
     /// trims the output, and returns `Some(path)` on success or `None` if the
     /// session does not exist, tmux is unavailable, or the path is empty.
     /// Test: exercised indirectly via `snapshot::capture_into` with a live tmux;
     /// `RealTmuxDriver::get_pane_cwd` wraps this method.
     pub fn pane_current_path(&self, session_name: &str) -> Option<std::path::PathBuf> {
+        // #8443: an empty name would render a target matching no pane; say so.
+        crate::core::tmux::check_session_name(session_name).ok()?;
         let output = Command::new(&self.tmux_path)
             .args([
                 "display-message",
                 "-t",
-                session_name,
+                // #8443: pane-typed target — `=name:`, never a bare name.
+                &crate::core::tmux::exact_window_target(session_name),
                 "-p",
                 "#{pane_current_path}",
             ])
@@ -873,7 +925,7 @@ impl TmuxDriver {
     /// the full empirical proof). tmux's own `pane_id` (distinct from
     /// `pane_pid`, which the OS can reuse across a pane's lifetime) is that
     /// signal.
-    /// What: runs `tmux display-message -t <name> -p '#{pane_id}'`, trims the
+    /// What: runs `tmux display-message -t =<name>: -p '#{pane_id}'`, trims the
     /// output, and returns `Some(id)` on success or `None` if the session does
     /// not exist, tmux is unavailable, or the id is empty. Mirrors
     /// [`Self::pane_current_path`]'s exact shape.
@@ -881,8 +933,15 @@ impl TmuxDriver {
     /// `mark_runtime_exited_stopped` with a live tmux;
     /// `RealTmuxDriver::get_pane_id` wraps this method.
     pub fn pane_id(&self, session_name: &str) -> Option<String> {
+        crate::core::tmux::check_session_name(session_name).ok()?; // #8443
         let output = Command::new(&self.tmux_path)
-            .args(["display-message", "-t", session_name, "-p", "#{pane_id}"])
+            .args([
+                "display-message",
+                "-t",
+                &crate::core::tmux::exact_window_target(session_name),
+                "-p",
+                "#{pane_id}",
+            ])
             .output()
             .ok()?;
         if !output.status.success() {
@@ -1066,6 +1125,14 @@ pub struct SessionSnapshot {
     pub captured_at: i64,
 }
 
+// #9004: pane identity and kill-by-id, split out for the SLOC cap.
+#[path = "tmux_pane_identity.rs"]
+mod pane_identity;
+
 #[cfg(test)]
 #[path = "tmux_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tmux_exact_target_tests.rs"]
+mod exact_target_tests;

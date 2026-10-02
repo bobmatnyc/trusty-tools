@@ -14,7 +14,7 @@ crate's `Cargo.toml`.
 
 | Abbreviation | Full crate name | Cargo package flag | Directory |
 |---|---|---|---|
-| `tga` | trusty-git-analytics | `-p tga` | `crates/trusty-git-analytics/` |
+| `tga` | trusty-git-analytics | — | moved to bobmatnyc/trusty-git-analytics |
 | `tm` | trusty-memory | `-p trusty-memory` | `crates/trusty-memory/` |
 | `ts` | trusty-search | `-p trusty-search` | `crates/trusty-search/` |
 | `tc` | trusty-common | `-p trusty-common` | `crates/trusty-common/` |
@@ -24,7 +24,7 @@ crate's `Cargo.toml`.
 | `t-agents-common` | trusty-agents-common | `-p trusty-agents-common` | `crates/trusty-agents-common/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 | `tctl` | trusty-installer | `-p trusty-installer` | `crates/trusty-installer/` |
-| `taudit` | trusty-audit | `-p trusty-audit` | `crates/trusty-audit/` (bins: `trusty-audit`, `taudit`) |
+| `taudit` | trusty-audit | — | moved to bobmatnyc/trusty-git-analytics |
 
 > **Auto-resolution:** When connected to trusty-memory MCP, call
 > `get_prompt_context()` at the start of each turn to load current aliases and

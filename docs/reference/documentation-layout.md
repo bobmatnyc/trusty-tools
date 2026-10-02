@@ -25,6 +25,8 @@ README must not present draft behavior as implemented.
 ## Current entry points
 
 - `README.md`: workspace orientation; links to the live package map.
+- `TICKETING.md`: root ticketing standard of record — taxonomy, lifecycle,
+  comment conventions, and the `ticketing` agent's behaviour settings.
 - `crates/<directory>/README.md`: required package entry point for top-level
   workspace members; installation/usage or library quick start belongs here.
 - Rustdoc in `crates/<directory>/src/`: public API contract.
@@ -94,12 +96,21 @@ published page's content against the retired-term ratchet in
 Most `docs/reference/*.md` pages are linked from the root `CLAUDE.md` rule
 they serve. These are not:
 
+- [tracker-phases-pattern.md](tracker-phases-pattern.md) — the tracker +
+  phase-issue pattern the `tm-ticketing` epic defaults follow, committed
+  verbatim as authored
 - [ci-scripts.md](ci-scripts.md) — the `scripts/` checks that run only in a
   workflow, which of them block a merge, and which have a self-test
 - [ci-gates.md](ci-gates.md) — required contexts, merge states, and the jobs
   that gate nothing
+- [install-checkpoint.md](install-checkpoint.md) — installing a trusty-mpm build on a
+  machine with live sessions: checkpoint, git-rev install, daemon restart,
+  session relaunch, rollback
 - [test-ladder-baseline.md](test-ladder-baseline.md) — the six rungs, their
   commands, and baseline-red triage
+- [content-release.md](content-release.md) — cutting a `content-vX.Y.Z`
+  release and what the content bundle holds
+  ([ADR-0064](../adr/0064-instructional-content-tracked-separately-from-code.md))
 - [DOC-38](../specs/spec-linked-documentation.md) — SLD policy, enforced by
   `scripts/check_sld.sh`
 - [threat-model.md](threat-model.md) — per-daemon bind/guard/proxy inventory

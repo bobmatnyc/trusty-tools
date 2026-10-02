@@ -107,6 +107,53 @@ pub const INHERITED_SESSION_MARKERS: &[&str] = &[
     "CLAUDE_CODE_EXECPATH",
 ];
 
+/// tm's own launch stamps, which a child spawn must never inherit (#8453).
+///
+/// Why: `tm hook --pm-guard` reads `TRUSTY_MPM_SESSION_PROFILE` as the
+/// session's LAUNCH-TIME profile decision. A supervisor session's value
+/// reaches everything it starts — `tm run`, a daemon, the tmux server — so a
+/// child that inherited it would carry a stamp no launch of its own produced.
+/// Kept apart from [`INHERITED_SESSION_MARKERS`] because these are not Claude
+/// Code's markers: `tm doctor` reports those as a live leak, and a supervisor
+/// session's own stamp is not one.
+/// What: the stamp names. [`env_unset_flags`] and [`scrub_command`] clear them
+/// with the markers; a launch that decides a profile assigns the stamp again
+/// AFTER the scrub (`session_profile::launch_env`).
+/// Test: `both_helpers_clear_the_profile_stamp`,
+/// `the_env_prefix_really_drops_an_inherited_profile_stamp`.
+pub const INHERITED_TM_STAMPS: &[&str] = &[crate::core::session_profile::SESSION_PROFILE_ENV];
+
+/// Toolchain overrides a child spawn must never inherit (#8583).
+///
+/// Why: a `tm` run through a mise shim carries the `RUSTUP_TOOLCHAIN` mise
+/// resolved for the directory `tm` started in, not for the session's project.
+/// rustup ranks that variable above a `rust-toolchain.toml` pin, so every agent
+/// shell built on the wrong toolchain. The daemon, started by launchd, never
+/// had the variable, so the scrub also makes every launch path agree.
+/// What: the variable names. The session's own project then decides: its pin
+/// file, a mise shim, or the rustup default.
+/// Test: `both_helpers_clear_the_toolchain_override`,
+/// `the_env_prefix_really_drops_an_inherited_toolchain_override`.
+pub const INHERITED_TOOLCHAIN_OVERRIDES: &[&str] = &["RUSTUP_TOOLCHAIN"];
+
+/// Every variable a child spawn removes from the environment it inherits.
+///
+/// Why (#8453): the one list [`env_unset_flags`], [`scrub_command`] and
+/// `runtime::managed_env_unset` all read, so every launch path that already
+/// scrubs Claude Code's markers clears tm's stamps too.
+/// What: [`INHERITED_SESSION_MARKERS`], then [`INHERITED_TM_STAMPS`], then
+/// [`INHERITED_TOOLCHAIN_OVERRIDES`].
+/// Test: `both_helpers_clear_the_profile_stamp`,
+/// `both_helpers_clear_the_toolchain_override`.
+pub fn scrubbed_on_spawn() -> impl Iterator<Item = &'static str> {
+    INHERITED_SESSION_MARKERS
+        .iter()
+        .chain(INHERITED_TM_STAMPS)
+        // #8583: an inherited RUSTUP_TOOLCHAIN outranks the project's pin file.
+        .chain(INHERITED_TOOLCHAIN_OVERRIDES)
+        .copied()
+}
+
 /// Environment variables a managed spawn sets DELIBERATELY — never scrub these.
 ///
 /// Why (issue #4451 / #4455): this list exists to make over-scrubbing a
@@ -155,8 +202,7 @@ pub const DELIBERATE_SPAWN_ENV: &[&str] = &[
     crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR,
 ];
 
-/// The POSIX `env` unset flags that scrub every [`INHERITED_SESSION_MARKERS`]
-/// entry.
+/// The POSIX `env` unset flags that scrub every [`scrubbed_on_spawn`] entry.
 ///
 /// Why: the tmux-pane spawn paths build a shell command STRING, so the scrub has
 /// to be expressed as `env` flags rather than a `Command` mutation. Generating
@@ -170,15 +216,15 @@ pub const DELIBERATE_SPAWN_ENV: &[&str] = &[
 /// grammar requires — an assignment before a `-u` makes `env` stop parsing
 /// options and try to exec `-u` as a command.
 /// Test: `env_unset_flags_covers_every_marker`,
-/// `env_unset_flags_are_space_prefixed`.
+/// `env_unset_flags_are_space_prefixed`, `both_helpers_clear_the_profile_stamp`.
 pub fn env_unset_flags() -> String {
-    INHERITED_SESSION_MARKERS
-        .iter()
+    // #8453: the tm stamps too — see `scrubbed_on_spawn`.
+    scrubbed_on_spawn()
         .map(|name| format!(" -u {name}"))
         .collect()
 }
 
-/// Remove every [`INHERITED_SESSION_MARKERS`] entry from a [`std::process::Command`].
+/// Remove every [`scrubbed_on_spawn`] entry from a [`std::process::Command`].
 ///
 /// Why: the in-place relaunch (`build_inplace_exec_command`) and the
 /// stream-json backend (`control::backend::stream_json`) exec `claude` through a
@@ -189,9 +235,10 @@ pub fn env_unset_flags() -> String {
 /// surfaces as `(key, None)`, which is what the tests assert on.
 /// What: calls [`std::process::Command::env_remove`] once per marker.
 /// Test: `scrub_command_removes_every_marker`,
-/// `scrub_command_leaves_deliberate_env_intact`.
+/// `scrub_command_leaves_deliberate_env_intact`, `both_helpers_clear_the_profile_stamp`.
 pub fn scrub_command(cmd: &mut std::process::Command) {
-    for name in INHERITED_SESSION_MARKERS {
+    // #8453: the tm stamps too — see `scrubbed_on_spawn`.
+    for name in scrubbed_on_spawn() {
         cmd.env_remove(name);
     }
 }
@@ -230,8 +277,8 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// [`crate::core::model_inject::build_inplace_session_command`] and
 /// `build_client_session_command`, which were assignment-free until then — the
 /// unconditional
-/// [`crate::core::alt_screen::managed_shell_assignments`] operand text (#7160
-/// added a second variable to it), so the assignment stop now fires on all of
+/// [`crate::core::alt_screen::configured_shell_assignments`] operand text
+/// (#7160 added a second variable to it, #8405 made the renderer config-decided), so the assignment stop now fires on all of
 /// them. `daemon::spawn_command`'s
 /// `relaunch_command` is the one that stays assignment-free, which is what keeps
 /// the COMMAND stop reachable.

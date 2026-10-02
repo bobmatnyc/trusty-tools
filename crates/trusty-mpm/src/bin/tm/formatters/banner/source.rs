@@ -54,10 +54,19 @@ pub(crate) struct BannerEnv {
 
 impl BannerEnv {
     /// Read `$TRUSTY_MPM_BANNER_FILE` and `$HOME` from the running process.
+    ///
+    /// #8545: the test binary resolves no home, so the ten banner-rendering
+    /// tests neither read the operator's `banner.txt` nor seed one; every
+    /// `banner_source_*` test builds its env with `BannerEnv::new` instead.
+    /// Test: `banner_rendering_never_resolves_the_process_home`.
     pub(crate) fn from_process() -> Self {
         Self {
             override_file: std::env::var_os("TRUSTY_MPM_BANNER_FILE"),
-            home: std::env::var_os("HOME"),
+            home: if cfg!(test) {
+                None
+            } else {
+                std::env::var_os("HOME")
+            },
         }
     }
 
@@ -122,6 +131,7 @@ pub(crate) fn write_default_if_absent_in(env: &BannerEnv) {
     let Some(path) = env.home_banner_path() else {
         return;
     };
+    trusty_mpm::core::home_write_fence::check(&path); // #8545
     if let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_err()
     {
@@ -174,6 +184,7 @@ fn refresh_if_legacy(path: &std::path::Path, trimmed_content: &str) -> bool {
     if !is_known_legacy {
         return false;
     }
+    trusty_mpm::core::home_write_fence::check(path); // #8545
     match std::fs::write(path, DEFAULT_BANNER_ART) {
         Ok(()) => true,
         Err(e) => {
@@ -257,6 +268,12 @@ pub(crate) fn load_banner_art_in(env: &BannerEnv) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8545: rendering a banner in a test never seeds the operator's home.
+    #[test]
+    fn banner_rendering_never_resolves_the_process_home() {
+        assert!(BannerEnv::from_process().home_banner_path().is_none());
+    }
 
     // #5544: these tests write NO process-global environment. Every value
     // `load_banner_art_in` / `write_default_if_absent_in` resolve from `$HOME` and

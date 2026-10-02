@@ -60,12 +60,11 @@
 //!
 //! - **Gitignored loose files outside `.trusty-mpm/` whose names are not on the
 //!   #4166 list** — a scratch note in an ignored directory, a `.mcp.json.local`.
-//!   Deliberately not counted: on this repo's own 31 session worktrees,
-//!   treating every non-disposable ignored entry as dirt would flag `.claude/`
-//!   in 30 of 31 and disable reclamation outright, which is the failure mode of
-//!   a guard nobody can run. The named list buys back the unrecoverable cases
-//!   without that flag rate; widening it is a measurement, not a judgement
-//!   call.
+//!   Not counted HERE: on this repo's own 31 session worktrees, treating every
+//!   non-disposable ignored entry as dirt would flag `.claude/` in 30 of 31. Since
+//!   #8534 a separate gate counts them before removal, excusing harness and build
+//!   output: `super::worktree_ignored_output`, run by the shared remover, the
+//!   agent reap and the `tm pr cleanup` probe.
 //! - **Anything under a disposable build directory** (`target/`,
 //!   `node_modules/`, …), including a nested repository inside one — see
 //!   `super::worktree_nested::DISPOSABLE_DIR_NAMES`.
@@ -100,9 +99,10 @@
 //! Test: `worktree_safety_tests`.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+use super::git_ceiling::{bounded_git_output, bounded_git_output_with_input, is_timed_out};
 
 use serde::Serialize;
 
@@ -194,10 +194,19 @@ pub(crate) const GIT_ENV_REDIRECTS: &[&str] = &[
 ];
 
 /// Working-tree status for the candidate itself.
-const STATUS_ARGS: &[&str] = &[
+// #8572: `pub(crate)` so the main-checkout HEAD-switch guard reads dirt the same way.
+pub(crate) const STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain",
     "--untracked-files=normal",
+    "--ignore-submodules=none",
+];
+
+/// [`STATUS_ARGS`] with every untracked file listed on its own line (#7660).
+const STATUS_ARGS_PER_FILE: &[&str] = &[
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
     "--ignore-submodules=none",
 ];
 
@@ -323,6 +332,27 @@ pub fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
     inspect_dirt_at(path, true)
 }
 
+/// A predicate over one `git status --porcelain` line (#7660).
+pub(crate) type ExcuseEntry<'a> = &'a dyn Fn(&str) -> bool;
+
+/// [`inspect_dirt`], with the working-tree entries `excuse` accepts left
+/// uncounted (#7660).
+///
+/// Why: `tm sessions decommission --force` removes a workspace that is dirty
+/// only from tm's own provisioning files. Every other question this guard asks
+/// — unpushed commits, nested repositories, `.trusty-mpm/` work, the root
+/// identity check, and every fail-safe error arm — must still be asked, so the
+/// excuse is threaded through this one function rather than re-implemented.
+/// What: identical to [`inspect_dirt`] except that pass one of
+/// [`count_dirty_files`] lists untracked files one by one and skips a line
+/// `excuse` returns `true` for.
+/// Test: `force_decommission_removes_a_provisioning_only_worktree`,
+/// `force_decommission_still_refuses_user_work`,
+/// `force_decommission_still_refuses_unpushed_commits`.
+pub(crate) fn inspect_dirt_excusing(path: &Path, excuse: ExcuseEntry) -> Option<DirtyWorktree> {
+    inspect_dirt_with(path, true, Some(excuse))
+}
+
 /// [`inspect_dirt`], with the nested-repository scan switchable off.
 ///
 /// Why: the nested scan inspects each nested root by calling back into this
@@ -332,14 +362,32 @@ pub fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// What: `scan_nested = false` answers only questions 1, 2 and 4 for `path`.
 /// Test: `inspect_dirt_reports_nested_gitignored_worktree`.
 pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
+    inspect_dirt_with(path, scan_nested, None)
+}
+
+/// The body of [`inspect_dirt_at`] and [`inspect_dirt_excusing`] (#7660).
+fn inspect_dirt_with(
+    path: &Path,
+    scan_nested: bool,
+    excuse: Option<ExcuseEntry>,
+) -> Option<DirtyWorktree> {
     match is_worktree_root(path) {
         Ok(true) => {}
+        // #8306: a timed-out git is unknown, never "not a worktree".
+        Err(e) if is_timed_out(&e) => {
+            return Some(DirtyWorktree::new(
+                path,
+                format!("dirty-check failed: {e}"),
+                0,
+                0,
+            ));
+        }
         // Not a git worktree root (or git cannot tell us) — fall back to the
         // "is it even empty" question, the only one answerable without git.
         Ok(false) | Err(_) => return non_git_dirt(path),
     }
 
-    let dirty_files = match count_dirty_files(path) {
+    let dirty_files = match count_dirty_files_with(path, excuse) {
         Ok(n) => n,
         Err(e) => {
             return Some(DirtyWorktree::new(
@@ -391,10 +439,22 @@ pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWor
 /// question instead of its own plain `git status --porcelain` count, which
 /// counted the harness's own ownership marker as the agent's unsaved work.
 pub(crate) fn count_dirty_files(path: &Path) -> Result<usize, String> {
-    let status = git_stdout(path, STATUS_ARGS)?;
+    count_dirty_files_with(path, None)
+}
+
+/// [`count_dirty_files`], skipping the pass-one lines `excuse` accepts (#7660).
+fn count_dirty_files_with(path: &Path, excuse: Option<ExcuseEntry>) -> Result<usize, String> {
+    // #7660: an excuse needs one line per file — `-unormal` would collapse an
+    // untracked `.claude/` into a single entry no excuse can vouch for.
+    let args = if excuse.is_some() {
+        STATUS_ARGS_PER_FILE
+    } else {
+        STATUS_ARGS
+    };
+    let status = git_stdout(path, args)?;
     let mut count = 0usize;
     for line in status.lines() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || excuse.is_some_and(|excused| excused(line)) {
             continue;
         }
         let entry = porcelain_path(line);
@@ -549,7 +609,8 @@ fn non_git_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// cannot answer (not a repository, git missing, spawn failure).
 /// Test: `inspect_dirt_treats_non_worktree_with_files_as_dirty` (the nested
 /// plain-directory case), `inspect_dirt_clean_pushed_worktree_is_none`.
-fn is_worktree_root(path: &Path) -> Result<bool, String> {
+// #8318: `pub(crate)` so adoption's branch release asks the same identity question.
+pub(crate) fn is_worktree_root(path: &Path) -> Result<bool, String> {
     let top = git_stdout(path, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.trim());
     if top.as_os_str().is_empty() {
@@ -843,18 +904,9 @@ fn patch_ids(path: &Path, args: &[&str]) -> Vec<(String, String)> {
     if patch.trim().is_empty() {
         return Vec::new();
     }
-    let Ok(mut child) = git_command(path, &["patch-id", "--stable"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return Vec::new();
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(patch.as_bytes());
-    }
-    let Ok(out) = child.wait_with_output() else {
+    // #8306: bounded, with the patch written on its own thread.
+    let patch_id = git_command(path, &["patch-id", "--stable"]);
+    let Ok(out) = bounded_git_output_with_input(patch_id, patch.into_bytes()) else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -943,7 +995,7 @@ fn landing_bases(path: &Path) -> Vec<String> {
 /// Test: `inspect_dirt_reports_unpushed_session_branch_when_head_moved`,
 /// `inspect_dirt_reports_unpushed_bare_leaf_branch_when_head_moved`,
 /// `inspect_dirt_does_not_double_count_the_checked_out_session_branch`.
-fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
+pub(crate) fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
     let Some(leaf) = path.file_name().and_then(|n| n.to_str()) else {
         return Ok(0);
     };
@@ -979,12 +1031,13 @@ fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
 /// Why: every check in this module needs the same "ran, exited zero, gave me
 /// stdout" contract, and every deviation from it must surface as an `Err` the
 /// caller turns into DIRTY rather than being swallowed.
-/// What: non-zero exit and spawn failure both become `Err` carrying the
-/// command and git's own stderr; stdout is lossily decoded.
-/// Test: `inspect_dirt_treats_missing_path_as_dirty`.
+/// What: non-zero exit, spawn failure and a timeout (#8306) all become `Err`
+/// carrying the command and git's own stderr; stdout is lossily decoded.
+/// Test: `inspect_dirt_treats_missing_path_as_dirty`,
+/// `a_wedged_git_is_killed_within_the_ceiling`.
 pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git_command(dir, args)
-        .output()
+    // #8306: bounded — a wedged git is killed and reported, never waited on.
+    let out = bounded_git_output(git_command(dir, args))
         .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;
     if !out.status.success() {
         return Err(format!(
@@ -1070,7 +1123,40 @@ pub(crate) fn dirt_blocks_removal(
     policy: DirtyWorktreePolicy,
     phase: &'static str,
 ) -> Option<DirtyWorktree> {
-    let dirt = inspect_dirt(candidate)?;
+    match dirt_verdict(candidate, policy, phase) {
+        DirtVerdict::Blocks(dirt) => Some(dirt),
+        DirtVerdict::Clean | DirtVerdict::Discards(_) => None,
+    }
+}
+
+/// What the #4091 dirty-tree gate decided for one candidate (#8782).
+///
+/// Why: [`dirt_blocks_removal`] answers `None` both for a clean tree and for a
+/// dirty one `--discard-dirty` is about to destroy, so the prune preview told
+/// the operator "no unsaved work" for exactly the trees that would lose it.
+/// What: `Clean`; `Blocks` — keep it and report it; `Discards` — remove it
+/// anyway under [`DirtyWorktreePolicy::ForceDiscard`], carrying what is lost.
+#[derive(Debug)]
+pub(crate) enum DirtVerdict {
+    /// No unsaved work.
+    Clean,
+    /// Unsaved work, and the policy keeps the tree.
+    Blocks(DirtyWorktree),
+    /// Unsaved work the explicit force-discard opt-in destroys.
+    Discards(DirtyWorktree),
+}
+
+/// [`dirt_blocks_removal`], keeping the dirt a force-discard destroys (#8782).
+///
+/// Test: `the_orphan_preview_names_unsaved_work_that_discard_dirty_destroys`.
+pub(crate) fn dirt_verdict(
+    candidate: &Path,
+    policy: DirtyWorktreePolicy,
+    phase: &'static str,
+) -> DirtVerdict {
+    let Some(dirt) = inspect_dirt(candidate) else {
+        return DirtVerdict::Clean;
+    };
     if policy == DirtyWorktreePolicy::Skip {
         tracing::warn!(
             path = %candidate.display(), reason = %dirt.reason, phase,
@@ -1078,14 +1164,14 @@ pub(crate) fn dirt_blocks_removal(
              re-run with an explicit discard opt-in only if the work is genuinely \
              disposable (#4091)"
         );
-        return Some(dirt);
+        return DirtVerdict::Blocks(dirt);
     }
     tracing::warn!(
         path = %candidate.display(), reason = %dirt.reason, phase,
         "prune-worktrees: DISCARDING unsaved work — explicit force-discard opt-in \
          was supplied (#4091)"
     );
-    None
+    DirtVerdict::Discards(dirt)
 }
 
 /// Best-effort cross-check: does `git worktree list` on the checkout owning
@@ -1119,13 +1205,21 @@ pub(crate) fn dirt_blocks_removal(
 /// NOT the fail-safe gate; that role belongs to [`inspect_dirt`], which fails
 /// toward DIRTY. Returns `true` only when `candidate`'s canonicalized path
 /// appears among the registered worktrees.
+///
+/// The exception is a TIMEOUT (#8306): git was running and did not answer, so
+/// something in this worktree is wedged. That answers `false` — disagree, keep
+/// the tree — never the "unanswerable" `true`.
 /// Test: `git_worktree_list_agrees_true_for_real_worktree`,
 ///       `git_worktree_list_agrees_false_for_untracked_dir`,
 ///       `git_worktree_list_agrees_true_for_worktree_registered_to_parent_repo`
-///       (#4207 — fails against the grandparent rule).
+///       (#4207 — fails against the grandparent rule),
+///       `a_timed_out_worktree_list_disagrees`.
 pub(crate) fn git_worktree_list_agrees(candidate: &Path) -> bool {
-    let Some(worktrees) = super::worktree_registry::list_registered_worktrees(candidate) else {
-        return true; // best-effort: an unanswerable probe must never block a delete
+    let worktrees = match super::worktree_registry::probe_registered_worktrees(candidate) {
+        Ok(worktrees) => worktrees,
+        // #8306: a timeout is unknown, never agreement.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return false,
+        Err(_) => return true, // best-effort: an unanswerable probe must never block a delete
     };
     let canonical_candidate =
         std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());

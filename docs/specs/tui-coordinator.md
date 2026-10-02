@@ -438,7 +438,7 @@ meaningful line from `recent_output`, else the status word.
 ## 10. Out of scope
 
 - Editing code or files inside a session (that is the session's own Claude Code).
-- A web/graphical UI — owned by `trusty-console` / `trusty-mpm-gui`.
+- A web/graphical UI — owned by `trusty-console`.
 - Replacing the `tm sessions …` / `tm` CLI (the TUI complements it).
 - Implementing the daemon-side `last_summary` enrichment (that is its own child
   ticket; this spec only specifies the contract the TUI needs).

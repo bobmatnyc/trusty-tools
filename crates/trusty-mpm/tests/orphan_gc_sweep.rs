@@ -8,7 +8,7 @@
 //! two-pass debounce, never on first sight.
 //! What: drives [`orphan_gc::run_sweep`] with a recording fake driver and asserts
 //! the killed-name list across passes.
-//! Test: this file IS the test; run with `cargo test -p trusty-mpm --test orphan_gc_sweep`.
+//! Test: this file IS the test; run with `cargo test -p trusty-mpm --test integration orphan_gc_sweep::`.
 
 use std::sync::Mutex;
 

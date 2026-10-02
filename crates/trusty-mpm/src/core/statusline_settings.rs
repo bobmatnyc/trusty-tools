@@ -153,6 +153,7 @@ fn ensure_statusline_entry_locked(settings_path: &Path) -> StatuslineWrite {
     // #7617: staged-then-renamed, with `<path>.bak` taken first. Creates the
     // parent directory itself, so no separate `create_dir_all` is needed — and
     // on failure it leaves `settings_path` byte-for-byte as it was.
+    crate::core::home_write_fence::check(settings_path); // #8545
     match write_json_atomic(settings_path, &settings) {
         Ok(()) => outcome,
         Err(err) => StatuslineWrite::Refused(err.to_string()),

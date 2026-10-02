@@ -9,6 +9,10 @@
 A Cargo workspace hands you four high-signal search keys a generic issue search
 misses.
 
+The repository's full ticketing standard — taxonomy, lifecycle, comment
+conventions and the `ticketing` agent's behaviour settings — is
+[`TICKETING.md`](../../TICKETING.md) at the repo root.
+
 | Search key | Example | Why it finds the canonical issue |
 |---|---|---|
 | **Test name** | `execute_doctor_against_test_daemon` | Rust test names are effectively unique and get quoted verbatim in every prior report and CI log |

@@ -22,6 +22,7 @@ use uuid::Uuid;
 use super::super::kg::Triple;
 use crate::memory_core::store::concurrent_open::{OpenMode, SnapshotGuard};
 use crate::memory_core::store::kg_store::TripleValue;
+use crate::memory_core::store::write_deadline::DeadlinedWrite;
 
 /// Sentinel returned by every write method when the store is in snapshot
 /// (read-only) mode.
@@ -297,6 +298,13 @@ pub(super) struct KgDbState {
     /// always `PalaceHandle::write_mutex` then this, never the reverse.
     /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
     pub swap_lock: RwLock<()>,
+    /// Set while an open-time maintenance write for this file is outstanding.
+    /// #8314: single-flight, so reopens behind a stuck write do not each park
+    /// another helper thread. See `KgStoreRedb::try_claim_open_write`.
+    pub open_write_in_flight: std::sync::atomic::AtomicBool,
+    /// #8749 test seams; see [`KgTestHooks`].
+    #[cfg(test)]
+    pub test_hooks: KgTestHooks,
     pub mode: OpenMode,
     pub _snapshot_guard: SnapshotGuard,
 }
@@ -400,20 +408,49 @@ pub(super) fn triple_from_parts(
 /// What: owns the read guard, an `Arc<Database>` clone (so the handle a
 /// blocked writer picks up after a swap stays alive for its whole
 /// transaction), and the transaction itself. [`Self::commit`] consumes all
-/// three in the right order.
-/// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
+/// three in the right order. #8749: the transaction carries a deadline, so a
+/// stalled one rolls back instead of holding redb's write lock indefinitely.
+/// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`,
+/// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.
 pub(super) struct GuardedWrite<'a> {
     pub(super) _swap: std::sync::RwLockReadGuard<'a, ()>,
     pub(super) _db: Arc<Database>,
-    pub(super) txn: redb::WriteTransaction,
+    pub(super) txn: DeadlinedWrite,
 }
 
 impl GuardedWrite<'_> {
     /// Commit the transaction, then release the swap exclusion.
     ///
-    /// Test: every write path in this module.
+    /// #8749: past its deadline the transaction is aborted instead, and the
+    /// caller gets a
+    /// [`WriteTxnError`](crate::memory_core::store::write_deadline::WriteTxnError)
+    /// (downcastable through `anyhow`).
+    /// Test: every write path in this module;
+    /// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.
     pub(super) fn commit(self) -> Result<()> {
-        self.txn.commit().context("commit kg.redb write txn")
+        let txn = self.txn.check_before_commit()?;
+        txn.commit().context("commit kg.redb write txn")
+    }
+}
+
+/// Test-only seams for the #8749 transaction deadline, one set per shared
+/// [`KgDbState`].
+///
+/// What: `txn_budget` overrides `timeouts::write_txn_deadline()` without the
+/// process-global env var; `after_batch_op` runs after each `apply_batch` op,
+/// so a test can make one writer's ops slow while another writer's are not.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct KgTestHooks {
+    pub txn_budget: Mutex<Option<std::time::Duration>>,
+    #[allow(clippy::type_complexity)]
+    pub after_batch_op: Mutex<Option<Arc<dyn Fn(&BatchWriteOp) + Send + Sync>>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for KgTestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KgTestHooks").finish_non_exhaustive()
     }
 }
 

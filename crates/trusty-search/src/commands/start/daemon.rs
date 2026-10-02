@@ -222,6 +222,9 @@ pub async fn handle_start(
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        // #8783: own session, so a group kill aimed at this CLI's caller spares
+        // the daemon. Not `spawn_current_exe`: `--data-dir` may be non-UTF-8.
+        trusty_common::daemon_guard::start_in_new_session(&mut cmd);
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("could not spawn detached daemon: {e}"))?;
@@ -232,6 +235,12 @@ pub async fn handle_start(
         );
         return Ok(());
     }
+
+    // #8900: opt-in parent-death linkage, armed before anything can block. A
+    // test stamps its spawn with `parent_death::exit_with_parent`; SIGKILL that
+    // test and no `Drop` runs, so without this watchdog the daemon outlives the
+    // run. Absent `TRUSTY_EXIT_WITH_PARENT` (launchd, a hand run) it arms nothing.
+    trusty_common::parent_death::arm_from_env("trusty-search");
 
     // Issue #35: the foreground daemon owns tracing init so it can wire the
     // in-memory `LogBuffer` that backs `GET /logs/tail`.
@@ -311,6 +320,15 @@ pub async fn handle_start(
     // say which number is in force and where it came from.
     crate::service::lazy_loader::log_resident_index_cap(policy.tier);
     let _ = foreground;
+
+    // #8270: under launchd fd 2 is `StandardErrorPath`, opened once; reopen it
+    // after newsyslog renames it. This spawns a task, so it sits below every
+    // `set_var` above. No-op for a tty, pipe or `/dev/null` stderr (the
+    // detached child above).
+    #[cfg(unix)]
+    if let Some(log) = crate::service::log_reopen::arm_for_current_stderr() {
+        tracing::debug!("stderr log {} is reopened after a rotation", log.display());
+    }
 
     // Fast-path: bail before loading the 86 MB embedding model when
     // another daemon is already running.

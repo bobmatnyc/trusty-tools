@@ -13,6 +13,7 @@
 //! round-trip is covered by `tests_index::relocate_index_updates_root_path`.
 
 use super::daemon_utils::daemon_base_url;
+use super::explicit_target::{flag_only_index, IndexIdSource};
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
@@ -22,8 +23,16 @@ use std::path::PathBuf;
 /// Why: see module docs.
 /// What: resolves the current index id, canonicalizes `new_path`, calls the
 /// `PATCH /indexes/:id` endpoint, and updates the allowlist for the old path.
-/// Test: unit tests below; integration coverage in `tests_index.rs`.
-pub async fn handle_index_relocate(cli_index: &Option<String>, new_path: PathBuf) -> Result<()> {
+/// `TRUSTY_INDEX` alone refuses before any network call (#8737): a relocate
+/// rewrites the index's root, so its target needs a real `-i` or CWD detection.
+/// Test: unit tests below; integration coverage in `tests_index.rs`; the
+/// #8737 refusal by `relocate_env_only_refuses_with_no_requests`.
+pub async fn handle_index_relocate(
+    cli_index: &Option<String>,
+    index_source: Option<IndexIdSource>,
+    new_path: PathBuf,
+) -> Result<()> {
+    let cli_index = &flag_only_index("relocate", cli_index, index_source)?;
     let base = daemon_base_url();
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
 

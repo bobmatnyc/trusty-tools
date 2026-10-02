@@ -66,6 +66,8 @@ pub(super) struct SplashFacts<'a> {
 /// `tests::splash_warns_when_the_daemon_is_a_different_build`,
 /// `tests::splash_is_silent_when_the_daemon_build_is_unknown`,
 /// `tests::splash_notes_a_daemon_that_predates_build_reporting`,
+/// `tests::splash_is_silent_when_health_did_not_answer`,
+/// `tests::splash_is_silent_when_a_build_arrives_without_a_version`,
 /// `tests::splash_omits_an_unbound_workstream`.
 pub(super) fn splash_lines(facts: &SplashFacts<'_>) -> Vec<String> {
     let mut lines = vec![
@@ -269,6 +271,24 @@ mod tests {
         f.daemon_version = None;
         let text = rendered(&splash_lines(&f));
         assert!(!text.contains("warning:"), "{text}");
+        assert!(!text.contains("note:"), "{text}");
+        assert!(text.contains("(unreachable)"), "{text}");
+    }
+
+    /// A `health` reply carrying a `build` but NO `version` reads as
+    /// unreachable on the daemon line, so warning about its build would
+    /// contradict the line above it. This is the arm the mismatch guard was
+    /// tightened for (#8205 review): with `(_, Some(build))` the differing
+    /// build below would warn.
+    #[test]
+    fn splash_is_silent_when_a_build_arrives_without_a_version() {
+        let mut f = facts(Some("/repo"), Some("deadbeef"));
+        f.daemon_version = None;
+        let text = rendered(&splash_lines(&f));
+        assert!(
+            !text.contains("warning:"),
+            "a versionless daemon must not warn about its build: {text}"
+        );
         assert!(!text.contains("note:"), "{text}");
         assert!(text.contains("(unreachable)"), "{text}");
     }

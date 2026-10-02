@@ -6,13 +6,21 @@
 //! cuts those false-positive blocking verdicts before they are posted.  This is
 //! the trusty-review port of the code-intelligence verifier protocol.
 //!
-//! What: `run_verification_round` selects candidate findings (per the primary
-//! verdict), verifies each concurrently against the verifier model with a strict
-//! CONFIRMED / REFUTED judgment, demotes REFUTED findings below the advisory
-//! tier (without dropping them — the outcome is recorded on the finding), and
-//! re-derives the final verdict so a BLOCK whose only blocking finding was
-//! refuted relaxes correctly.  `probe_verifier_liveness` is the startup gate that
-//! refuses live mode when the verifier model is unavailable.
+//! What: `run_verification_round` sends EVERY undecided finding to the verifier
+//! (#8904), batched and capped by `verify_batch`, with a strict CONFIRMED /
+//! REFUTED / UNVERIFIABLE judgment. `verify_posted::enforce_outcomes` then
+//! drops every refuted, unjudged, or over-cap finding and settles the verdict:
+//! nothing dropped → `rederive_verdict`; anything dropped → the #8905 withhold
+//! policy, which never turns a non-APPROVE verdict into APPROVE, floored at the
+//! pre-verification verdict when the verifier failed on a finding.
+//! `probe_verifier_liveness` is the startup
+//! gate that refuses live mode when the verifier model is unavailable.
+//!
+//! ## Every posted finding (#8904)
+//! Before #8904, `select_candidates` sent only the findings that could change
+//! the verdict: confidence ≥ 0.90 on an APPROVE / APPROVE* review, ≥ 0.50 on a
+//! blocking one. On trusty-review 0.36.1 that selected nothing in 9 of 10
+//! reviews, and 7 of 7 fabricated findings were posted unverified.
 //!
 //! ## Third judgment (#5309)
 //! The verifier may also answer `UNVERIFIABLE` — "the evidence needed to settle
@@ -51,14 +59,17 @@
 //! off. `VerifyPolicy` now carries the width and a per-finding attempt budget
 //! from `[verification] concurrency` / `max_attempts`, `verify_one` retries a
 //! transient failure with exponential backoff and jitter, and a finding still
-//! unreachable after the last attempt is recorded `Unverifiable` — counted by
-//! `ReviewResult::unverified_count` — rather than `ErrorRefuted`, which reads as
-//! a judgment nothing made.
+//! unreachable after the last attempt is recorded `Unverifiable` rather than
+//! `ErrorRefuted`, which reads as a judgment nothing made. #8904 withholds such
+//! a finding; `ReviewResult::withheld_unverified_count` counts it, and
+//! `ReviewResult::unverified_count` includes that count (Test:
+//! `run_review_partial_verifier_outage_reports_the_withheld_count`).
 //!
 //! Test: `verify_tests.rs` — candidate selection, CONFIRMED/REFUTED outcomes,
 //! verdict re-derivation, truncation regression (#726), transient-error
-//! fail-open regression (#1876), fan-out retry / UNVERIFIED accounting (#4459),
-//! and liveness-gate logic.
+//! fail-open regression (#1876), fan-out retry (#4459), liveness-gate logic;
+//! `verify_posted_tests.rs` — every-finding coverage, fail-closed drops, the
+//! call cap, and the withhold verdict (#8904).
 
 use std::sync::Arc;
 
@@ -68,14 +79,17 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::ReviewConfig,
-    config::constants::{
-        BLOCK_VERDICT_MIN_CONFIDENCE, VERIFY_CANDIDATE_MIN_CONFIDENCE, VERIFY_REFUTED_CONFIDENCE,
+    config::constants::VERIFY_REFUTED_CONFIDENCE,
+    config::verification::{
+        DEFAULT_VERIFY_BATCH_SIZE, DEFAULT_VERIFY_CONCURRENCY, DEFAULT_VERIFY_MAX_ATTEMPTS,
+        DEFAULT_VERIFY_MAX_CALLS,
     },
-    config::verification::{DEFAULT_VERIFY_CONCURRENCY, DEFAULT_VERIFY_MAX_ATTEMPTS},
     llm::{LlmError, LlmProvider},
     models::{Finding, Verdict, VerifyOutcome},
     pipeline::{
-        grade::{derive_verdict, drives_block_floor},
+        grade::derive_verdict,
+        verify_batch::{build_batch_request, file_diff_slice, parse_batch_judgments, plan_batches},
+        verify_posted::{VerifyReport, enforce_outcomes},
         verify_prompt::build_verify_request,
     },
 };
@@ -102,6 +116,9 @@ const VERIFY_BACKOFF_BASE_MS: u64 = 250;
 /// TOTAL attempts per finding, so `1` means no retry; `backoff_base_ms` is the
 /// first sleep in the exponential ladder. Both counts are clamped to ≥ 1 on
 /// construction — a `0` would silently verify nothing.
+/// #8904 adds `max_calls` (verifier requests per review), `batch_size`
+/// (findings per request) and `per_file` (send each batch only its file's
+/// diff sections — set by the map-reduce path, whose diff is over the cap).
 /// Test: `verify_transient_failure_is_retried_until_it_succeeds`,
 /// `verify_round_never_exceeds_the_configured_concurrency`,
 /// `policy_from_config_clamps_zero_counts`.
@@ -109,10 +126,16 @@ const VERIFY_BACKOFF_BASE_MS: u64 = 250;
 pub struct VerifyPolicy {
     /// Verifier calls in flight at once.
     pub concurrency: usize,
-    /// Total attempts per finding, first call included.
+    /// Total attempts per request, first call included.
     pub max_attempts: u32,
     /// Sleep before the second attempt; doubles each further attempt.
     pub backoff_base_ms: u64,
+    /// Verifier requests per review; findings past it are withheld (#8904).
+    pub max_calls: usize,
+    /// Findings per verifier request (#8904).
+    pub batch_size: usize,
+    /// Send each batch only its own file's diff sections (#8904).
+    pub per_file: bool,
 }
 
 impl Default for VerifyPolicy {
@@ -122,6 +145,9 @@ impl Default for VerifyPolicy {
             concurrency: DEFAULT_VERIFY_CONCURRENCY,
             max_attempts: DEFAULT_VERIFY_MAX_ATTEMPTS,
             backoff_base_ms: VERIFY_BACKOFF_BASE_MS,
+            max_calls: DEFAULT_VERIFY_MAX_CALLS,
+            batch_size: DEFAULT_VERIFY_BATCH_SIZE,
+            per_file: false,
         }
     }
 }
@@ -131,13 +157,17 @@ impl VerifyPolicy {
     ///
     /// Why: `VerificationConfig` owns the env/file precedence; this is the only
     /// place the pipeline turns it into a fan-out decision.
-    /// What: clamps both counts to ≥ 1 and keeps the default backoff base.
+    /// What: clamps every count to ≥ 1, keeps the default backoff base, and
+    /// leaves `per_file` off.
     /// Test: `policy_from_config_clamps_zero_counts`.
     pub fn from_config(config: &crate::config::VerificationConfig) -> Self {
         Self {
             concurrency: config.concurrency.max(1),
             max_attempts: config.max_attempts.max(1),
             backoff_base_ms: VERIFY_BACKOFF_BASE_MS,
+            max_calls: config.max_calls.max(1),
+            batch_size: config.batch_size.max(1),
+            per_file: false,
         }
     }
 
@@ -168,37 +198,42 @@ impl VerifyPolicy {
 
 // ─── Runner seam ──────────────────────────────────────────────────────────────
 
-/// Run the verification round if enabled and a verifier is wired, else return
-/// the verdict unchanged.
+/// Run the verification round if enabled and a verifier is wired.
 ///
 /// Why: this is the single gating seam the runner calls so the enabled /
-/// verifier-wired checks live with the rest of the verification logic instead of
-/// cluttering the orchestration loop.  Keeping it here also keeps `runner.rs`
-/// under the 500-line cap.
+/// verifier-wired checks live with the rest of the verification logic.
 /// What: when `config.verification.enabled` and a `verifier` provider is present,
-/// delegates to `run_verification_round` with the resolved verifier role config;
-/// otherwise logs why it was skipped and returns `verdict` unchanged (findings
-/// untouched).
-/// Test: runner-level `run_review_verification_*` tests; the disabled path is
-/// `run_review_verification_disabled_skips_round`.
+/// runs [`run_verification_round_with_policy`] with the resolved verifier role
+/// and `[verification]` policy (`per_file` from the caller) and returns its
+/// report; otherwise returns `None` (findings and verdict untouched), logging
+/// at debug when disabled and at warn when enabled with no verifier (#8904).
+/// Test: `run_review_verification_disabled_skips_round`,
+/// `run_review_enabled_without_a_verifier_withholds_every_finding`,
+/// `run_review_posts_no_refuted_advisory_finding`.
 pub async fn maybe_verify(
     config: &ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,
     diff: &str,
+    per_file: bool,
     verdict: Verdict,
-    findings: &mut [Finding],
+    findings: &mut Vec<Finding>,
     author_rationale: Option<&str>,
-) -> Verdict {
+) -> Option<VerifyReport> {
     if !config.verification.enabled {
         debug!("verification disabled by config — skipping round");
-        return verdict;
+        return None;
     }
     let Some(verifier) = verifier else {
-        debug!("verification enabled but no verifier provider wired — skipping");
-        return verdict;
+        // #4044: `gate_then_verify` withholds every finding.
+        warn!("verification enabled but no verifier provider wired — withholding every finding");
+        return None;
     };
     let role = &config.role_models.verifier;
-    run_verification_round_with_policy(
+    let policy = VerifyPolicy {
+        per_file,
+        ..VerifyPolicy::from_config(&config.verification)
+    };
+    let report = run_verification_round_with_policy(
         verifier,
         &role.model,
         diff,
@@ -207,38 +242,31 @@ pub async fn maybe_verify(
         Some(role.temperature),
         Some(role.max_tokens),
         author_rationale,
-        VerifyPolicy::from_config(&config.verification),
+        policy,
     )
-    .await
+    .await;
+    Some(report)
 }
 
 // ─── Public entry point ──────────────────────────────────────────────────────
 
-/// Run the per-finding verification round and return the re-derived verdict.
+/// Run the verification round and return the settled verdict.
 ///
-/// Why: this is the single seam the runner calls between verdict parse and
-/// finalisation.  It mutates `findings` in place (recording each outcome and
-/// demoting refuted findings) and returns the verdict re-derived from the
-/// post-verification confidence distribution, so a blocking verdict whose only
-/// blocking finding was refuted correctly relaxes.
-/// What: selects candidates via `select_candidates`, verifies each concurrently
-/// (bounded), applies the outcome (CONFIRMED keeps confidence, REFUTED demotes
-/// below the advisory tier), then returns `derive_verdict(primary, findings)`.
-/// When there are no candidates the findings are left untouched and the primary
-/// verdict is re-derived unchanged.
+/// Why: the stable seam for callers that want only the verdict.
+/// What: [`run_verification_round_with_policy`] under the default policy,
+/// returning `report.verdict`. `findings` loses every finding the round drops.
 /// Test: `verify_confirmed_keeps_and_block_holds`,
-/// `verify_refuted_demotes_and_block_relaxes`,
-/// `verify_no_candidates_is_noop`.
+/// `verify_refuted_drops_and_block_is_withheld`,
+/// `verify_no_findings_is_noop`.
 // 8 args: verifier + model + diff + verdict + findings + temp/tokens overrides +
-// author_rationale (#1618).  Each is an independent input to the round; bundling
-// them into a struct would add indirection without clarity for a single caller.
+// author_rationale (#1618).  Each is an independent input to the round.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_verification_round(
     verifier: &Arc<dyn LlmProvider>,
     verifier_model: &str,
     diff: &str,
     primary_verdict: Verdict,
-    findings: &mut [Finding],
+    findings: &mut Vec<Finding>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     author_rationale: Option<&str>,
@@ -255,265 +283,171 @@ pub async fn run_verification_round(
         VerifyPolicy::default(),
     )
     .await
+    .verdict
 }
 
-/// Run the verification round under an explicit fan-out policy (#4459).
+/// Verify every undecided finding under an explicit policy (#4459, #8904).
 ///
-/// Why: [`run_verification_round`] is the stable seam its existing callers use;
-/// this is the same round with the concurrency ceiling and retry budget passed
-/// in, so `maybe_verify` can honour operator config and a test can run the
-/// ladder with the sleep set to zero.
-/// What: identical to [`run_verification_round`] except that `policy` replaces
-/// the defaults.
+/// Why: #8904 — every finding about to be posted must pass the verifier, not
+/// only the ones that could change the verdict.
+/// What: [`select_candidates`] takes every finding with no recorded outcome;
+/// [`plan_batches`] chunks them, highest impact first, into at most `policy.max_calls`
+/// batches of `policy.batch_size`. Each batch is one verifier request (the
+/// whole `diff`, or with `policy.per_file` only its findings' files' sections) retried per
+/// `policy.max_attempts`. [`enforce_outcomes`] then records each outcome,
+/// drops every non-CONFIRMED finding (refuted, unjudged, over-cap,
+/// unverifiable, other), and settles the verdict. An UNKNOWN primary is still
+/// verified: only its CONFIRMED findings are posted, and the verdict stays
+/// UNKNOWN.
 /// Test: `verify_transient_failure_is_retried_until_it_succeeds`,
-/// `verify_permanent_transport_failure_lands_in_unverified`,
-/// `verify_round_never_exceeds_the_configured_concurrency`.
+/// `verify_permanent_transport_failure_is_withheld`,
+/// `verify_round_never_exceeds_the_configured_concurrency`,
+/// `verify_cap_withholds_findings_past_the_last_call`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_verification_round_with_policy(
     verifier: &Arc<dyn LlmProvider>,
     verifier_model: &str,
     diff: &str,
     primary_verdict: Verdict,
-    findings: &mut [Finding],
+    findings: &mut Vec<Finding>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     author_rationale: Option<&str>,
     policy: VerifyPolicy,
-) -> Verdict {
-    // UNKNOWN is terminal — the diff was unassessable, so there is nothing to
-    // verify and no verdict to re-derive.
-    if primary_verdict == Verdict::Unknown {
-        return Verdict::Unknown;
-    }
-
-    let candidate_idxs = select_candidates(primary_verdict.clone(), findings);
-    if candidate_idxs.is_empty() {
-        // Nothing was verified — leave findings and verdict exactly as graded.
-        debug!("verification: no candidate findings — verdict unchanged");
-        return primary_verdict;
-    }
-
+) -> VerifyReport {
+    let candidates = select_candidates(findings);
+    let plan = plan_batches(findings, &candidates, policy.batch_size, policy.max_calls);
     info!(
-        candidates = candidate_idxs.len(),
+        candidates = candidates.len(),
         total = findings.len(),
+        calls = plan.batches.len(),
+        over_cap = plan.over_cap.len(),
         primary = %primary_verdict,
         concurrency = policy.concurrency,
-        max_attempts = policy.max_attempts,
-        "verification round: verifying candidate findings"
+        "verification round: verifying every posted finding (#8904)"
     );
 
-    // Verify candidates concurrently (bounded).  Each task borrows the finding
-    // immutably to build its request; the outcome is applied afterwards so we
-    // never hold a mutable borrow across the await points.
-    let outcomes: Vec<(usize, VerifyOutcome)> = stream::iter(candidate_idxs)
-        .map(|idx| {
-            let req = build_verify_request(
-                verifier_model,
-                diff,
-                &findings[idx],
-                temperature,
-                max_tokens,
-                author_rationale,
-            );
+    // Each batch borrows its findings immutably to build its request; the
+    // outcomes are applied afterwards, so no mutable borrow crosses an await.
+    let calls = plan.batches.len();
+    let per_batch: Vec<Vec<(usize, VerifyOutcome, VerifierReach)>> = stream::iter(plan.batches)
+        .map(|batch| {
+            let evidence = policy
+                .per_file
+                .then(|| file_diff_slice(diff, batch.iter().map(|&i| findings[i].file.as_str())))
+                .flatten();
+            let evidence = evidence.as_deref().unwrap_or(diff);
+            let req = if let [only] = batch.as_slice() {
+                build_verify_request(
+                    verifier_model,
+                    evidence,
+                    &findings[*only],
+                    temperature,
+                    max_tokens,
+                    author_rationale,
+                )
+            } else {
+                let members: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
+                build_batch_request(
+                    verifier_model,
+                    evidence,
+                    &members,
+                    temperature,
+                    max_tokens,
+                    author_rationale,
+                )
+            };
             async move {
-                let outcome = verify_one(verifier, req, policy).await;
-                (idx, outcome)
+                let judged = verify_batch(verifier, req, batch.len(), policy).await;
+                batch
+                    .into_iter()
+                    .zip(judged)
+                    .map(|(idx, (outcome, reach))| (idx, outcome, reach))
+                    .collect()
             }
         })
         .buffer_unordered(policy.concurrency.max(1))
         .collect()
         .await;
+    let outcomes: Vec<_> = per_batch.into_iter().flatten().collect();
 
-    // Apply outcomes: record on the finding and demote refuted ones.
-    let mut any_confirmed = false;
-    let mut any_clean_refuted = false;
-    let mut unverified = 0usize;
-    for (idx, outcome) in outcomes {
-        match &outcome {
-            VerifyOutcome::Confirmed => any_confirmed = true,
-            VerifyOutcome::Refuted => any_clean_refuted = true,
-            _ => {}
-        }
-        if outcome.is_unverified() {
-            unverified += 1;
-        }
-        apply_outcome(&mut findings[idx], outcome);
-    }
-
-    // Re-derive the verdict from the SURVIVING findings (refuted ones excluded).
-    let final_verdict = rederive_verdict(
+    let report = enforce_outcomes(
         primary_verdict.clone(),
-        any_confirmed,
-        any_clean_refuted,
         findings,
+        outcomes,
+        &plan.over_cap,
+        calls,
     );
     info!(
         primary = %primary_verdict,
-        final = %final_verdict,
-        any_confirmed,
-        any_clean_refuted,
-        unverified,
-        "verification round complete — verdict re-derived"
+        final = %report.verdict,
+        calls = report.calls,
+        refuted = report.refuted,
+        unjudged = report.unjudged,
+        over_cap = report.over_cap,
+        "verification round complete (#8904)"
     );
-    final_verdict
+    report
 }
 
-/// Re-derive the final verdict from the surviving (non-refuted) findings.
+/// Re-derive the verdict when the round dropped nothing (#8904).
 ///
-/// Why: refuted findings can no longer justify a blocking verdict; `derive_verdict`
-/// treats its model_proposed as a lower bound, so always passing the original
-/// BLOCK would pin the result even when every blocking finding was refuted.
+/// Why: refuted, unjudged, over-cap and unverifiable findings are dropped and
+/// the #8905 withhold policy settles those rounds (#4044), so from the round
+/// this path sees only CONFIRMED findings, or none when an approving review
+/// lost only advisory unverifiable ones. `derive_verdict` treats its baseline as a
+/// lower bound, so passing the model's BLOCK unchanged would pin it even when
+/// the confirmed evidence does not support it.
 ///
-/// Four-way baseline selection:
-///   a)  confirmed + at least one confirmed High-effort finding
-///       → keep `primary_verdict` (grounded critical evidence, e.g. BLOCK stays BLOCK)
-///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015 + #1343)
-///       → CAP (ceiling) the baseline at APPROVE*: `min(primary_verdict, APPROVE*)`.
-///         BUT this is a ceiling on the *baseline input*, not on the final result:
-///         `derive_verdict(baseline, survivors)` below independently re-derives the
-///         severity floor from the surviving findings, and as of #1876 a single
-///         confirmed Medium finding with confidence > FLOOR_MIN_CONFIDENCE (0.80)
-///         floors to REQUEST_CHANGES on its own merits (see
-///         `grade::correctness_floor`) — so `stricter_of(baseline, floor)` still
-///         lands on REQUEST_CHANGES even though the *baseline* was capped at
-///         APPROVE*.  The cap's remaining purpose is narrower after #1876: it
-///         still stops a confirmed non-High finding from *raising* a clean model
-///         APPROVE baseline to APPROVE* on its own (#1343 runtime residual), and it
-///         still provides a floor of APPROVE* for a confirmed finding that does
-///         NOT individually clear the severity-floor confidence gate.
-///   b)  clean model REFUTED, nothing confirmed
-///       → drop to APPROVE baseline (escalation rested on refuted evidence)
-///   c)  nothing was confirmed and nothing was cleanly refuted — every outcome
-///       was an infra / unable-to-verify failure (TruncationRefuted,
-///       ErrorRefuted, or, since #4459, `Unverifiable` after an exhausted retry
-///       budget) → preserve `primary_verdict` (do not fail-open to APPROVE on
-///       verifier infra failure, #726 + #1876). Since #4459 that preservation is
-///       enforced on the RESULT (`verdict_max` against `primary_verdict`), not
-///       just handed to `derive_verdict` as a baseline: an `Unverifiable`
-///       finding SURVIVES into the survivor set, and an all-advisory survivor
-///       set trips `grade`'s low-confidence collapse, which dissolved the
-///       model's own BLOCK. Surviving findings may still escalate.
+/// Three-way baseline selection:
+///   a)  the confirmed findings alone floor to BLOCK under `derive_verdict`
+///       (#4044) → keep `primary_verdict`.
+///   a2) confirmed, but not BLOCK-grade (#1015 + #1343) → baseline is
+///       `min(primary_verdict, APPROVE*)`. It caps the BASELINE, not the result:
+///       `derive_verdict(baseline, findings)` still floors a confident Medium
+///       to REQUEST_CHANGES (#1876), and a confirmed `praise` finding cannot
+///       raise a clean APPROVE (#1343 runtime residual).
+///   c)  nothing confirmed → the result is at least `primary_verdict`: no
+///       judgment in the round supports relaxing it (#4459).
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
-/// What: filters survivors (non-refuted), selects baseline (path a2 takes the
-/// severity-min of `primary_verdict` and APPROVE*), calls
-/// `derive_verdict(baseline, survivors)`.
-/// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
-/// `rederive_confirmed_medium_still_escalates_to_request_changes` (a2 — #1876,
-/// supersedes the pre-#1876 `..._caps_at_approve_star` expectation),
-/// `rederive_confirmed_praise_keeps_clean_approve` (a2 — #1343 runtime residual),
-/// `rederive_refuted_finding_does_not_clear_standing_medium_finding` (a2 — #1876),
-/// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
-/// `rederive_truncation_refuted_preserves_primary_verdict` (c).
-fn rederive_verdict(
-    primary_verdict: Verdict,
-    any_confirmed: bool,
-    any_clean_refuted: bool,
-    findings: &[Finding],
-) -> Verdict {
-    let survivors: Vec<Finding> = findings
-        .iter()
-        .filter(|f| {
-            !matches!(
-                f.verified,
-                Some(VerifyOutcome::Refuted)
-                    | Some(VerifyOutcome::ErrorRefuted { .. })
-                    | Some(VerifyOutcome::TruncationRefuted)
-            )
-        })
-        .cloned()
-        .collect();
-
-    // Does any confirmed (surviving) finding drive the BLOCK floor — i.e. is it
-    // High-effort AND escalation-eligible (cited or diff-provable)?
-    //
-    // #PR84 adversarial-review follow-up: this previously used a bare
-    // `f.effort == Effort::High` check, so a CONFIRMED-but-disqualified (uncited,
-    // non-diff-provable) High finding — exactly PR #84's shape post-verification
-    // (`verified: Confirmed`, no citation) — routed to path (a) below and pinned
-    // `primary_verdict` (e.g. a self-reported BLOCK) as a HARD floor.
-    // `derive_verdict`'s own #PR84 gate (in `grade.rs`) already prevents that
-    // baseline from surviving as an outright ungated BLOCK, but path (a) vs (a2)
-    // selection should agree with the unified path's citability rule on its own
-    // merits — using `drives_block_floor` here keeps this call site consistent
-    // with `correctness_floor` / the map-reduce synthesis floor rather than
-    // relying solely on the downstream `derive_verdict` safety net.
-    let any_confirmed_high = survivors
+/// What: selects the baseline, calls `derive_verdict(baseline, findings)`, and
+/// on path (c) raises the result to `primary_verdict`.
+/// Test: `rederive_keeps_confirmed_block` (a),
+/// `rederive_confirmed_medium_still_escalates_to_request_changes` (a2),
+/// `rederive_confirmed_praise_keeps_clean_approve` (a2),
+/// `rederive_unverifiable_only_preserves_primary_verdict` (c).
+pub(crate) fn rederive_verdict(primary_verdict: Verdict, findings: &[Finding]) -> Verdict {
+    // #4044: ask the grader, not a per-finding predicate — category caps
+    // (#1359/#3474/#7036) must hold here too.
+    let confirmed: Vec<Finding> = findings
         .iter()
         .filter(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed)))
-        .any(drives_block_floor);
-
-    // Four-way baseline selection (see Why above):
-    //  a)  confirmed + at least one High-effort confirmed
-    //      → keep primary_verdict as lower bound (grounded critical evidence)
-    //  a2) confirmed, but only Medium/Low confirmed
-    //      → CAP the baseline at APPROVE* via severity-min(primary, APPROVE*); don't
-    //         let a floor-driven REQUEST_CHANGES pin the verdict when the confirmed
-    //         finding is merely Medium-effort (#1015), and don't let a confirmed
-    //         non-High finding *raise* a clean APPROVE to APPROVE* (#1343 residual).
-    //  b)  clean refuted, nothing confirmed
-    //      → drop to APPROVE; let survivors alone decide
-    //  c)  infra-only fail (TruncationRefuted / ErrorRefuted), nothing confirmed
-    //      → preserve primary_verdict (don't discard on infra failure #726)
-    // #4459: path (c) below says "preserve primary_verdict", and until now it
-    // said so by passing `primary_verdict` as the baseline and trusting
-    // `derive_verdict` to treat it as a lower bound. That holds only while the
-    // survivor set is empty. Once an unable-to-verify finding SURVIVES — which
-    // is what `Unverifiable` does, unlike the refutation variants — an
-    // all-advisory survivor set trips `grade`'s low-confidence collapse and
-    // dissolves the model's own BLOCK, which is the fail-open this issue is
-    // about, arriving by a new route. Remember whether this round rendered any
-    // judgment at all; nothing may relax the verdict when nothing did.
-    let no_judgment_rendered = !any_confirmed && !any_clean_refuted;
-
-    let baseline = if any_confirmed && any_confirmed_high {
-        // Path (a): confirmed High-effort evidence supports the escalation fully.
-        primary_verdict.clone()
-    } else if any_confirmed {
-        // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
-        // severity-MIN of the model's own verdict and APPROVE* (the advisory tier)
-        // as the BASELINE (not the final answer — see the Why above for #1876):
-        //   - primary=REQUEST_CHANGES/BLOCK → baseline capped down to APPROVE*
-        //     (#1015); `derive_verdict` below still re-escalates to REQUEST_CHANGES
-        //     when the surviving confirmed Medium clears FLOOR_MIN_CONFIDENCE (#1876).
-        //   - primary=APPROVE → stays APPROVE (#1343 runtime residual): confirming a
-        //     low-effort `praise` finding must NOT harden the verdict to APPROVE* nor
-        //     downgrade the grade.  This is the same source-of-truth reconciliation
-        //     grade.rs applies — the model's APPROVE review_body is authoritative.
-        // `derive_verdict(baseline, survivors)` will still escalate further if the
-        // surviving findings warrant it (e.g. a surviving High → BLOCK, or as of
-        // #1876 a surviving confident Medium → REQUEST_CHANGES).
-        verdict_min(primary_verdict.clone(), Verdict::ApproveWithReservations)
-    } else if any_clean_refuted {
-        // Path (b): at least one clean REFUTED from the model — escalation rested
-        // on refuted evidence; let survivors alone decide.
-        Verdict::Approve
-    } else {
-        // Path (c): all demotions were infrastructure failures (TruncationRefuted /
-        // ErrorRefuted) — preserve the model's escalation rather than silently
-        // collapsing to APPROVE due to verifier infra failure.
-        primary_verdict.clone()
-    };
-
-    let rederived = derive_verdict(baseline, &survivors);
-    if no_judgment_rendered {
-        // Path (c): the round reached no judgment on anything. Surviving
-        // findings may still ESCALATE the verdict, but none of them may lower
-        // what the model itself said.
+        .cloned()
+        .collect();
+    if confirmed.is_empty() {
+        // Path (c).
+        let rederived = derive_verdict(primary_verdict.clone(), findings);
         return verdict_max(rederived, primary_verdict);
     }
-    rederived
+    let baseline = if derive_verdict(Verdict::Approve, &confirmed) == Verdict::Block {
+        // Path (a): confirmed BLOCK-grade evidence supports the escalation.
+        primary_verdict
+    } else {
+        // Path (a2).
+        verdict_min(primary_verdict, Verdict::ApproveWithReservations)
+    };
+    derive_verdict(baseline, findings)
 }
 
 /// Return the *more severe* (severity-max) of two verdicts.
 ///
-/// Why (#4459): the mirror of [`verdict_min`], used by path (c) so an
-/// infra-only round can escalate on surviving evidence but can never relax the
-/// model's own verdict — nothing in that round examined anything.
+/// Why (#4459): the mirror of [`verdict_min`], used by path (c) so a round with
+/// no confirmation can escalate on surviving evidence but never relax the
+/// model's own verdict.
 /// What: compares via `Verdict::ordinal`, the single source of truth shared with
 /// `grade.rs`.
-/// Test: `verify_permanent_transport_failure_lands_in_unverified`,
-/// `rederive_error_refuted_preserves_primary_verdict`.
+/// Test: `rederive_unverifiable_only_preserves_primary_verdict`.
 fn verdict_max(a: Verdict, b: Verdict) -> Verdict {
     if a.ordinal() >= b.ordinal() { a } else { b }
 }
@@ -540,54 +474,39 @@ fn verdict_min(a: Verdict, b: Verdict) -> Verdict {
 
 // ─── Candidate selection ─────────────────────────────────────────────────────
 
-/// Select the indices of findings to send to the verifier for a given verdict.
+/// Select the indices of findings to send to the verifier.
 ///
-/// Why: verifying every finding is wasteful; the candidate set depends on the
-/// primary verdict (#583 work item (b)).  On a blocking verdict we cast a wide
-/// net — any finding ≥ `VERIFY_CANDIDATE_MIN_CONFIDENCE` could be the sole reason
-/// the verdict escalated, so each must be confirmed before it is allowed to
-/// drive a block.  On an approving verdict only the blocking-tier findings (the
-/// ones that could *escalate* if confirmed) are worth the verifier's time.
-/// What: returns indices into `findings`.  For REQUEST_CHANGES / BLOCK: every
-/// finding with `confidence >= VERIFY_CANDIDATE_MIN_CONFIDENCE` (0.50).  For
-/// APPROVE / APPROVE*: only findings with `confidence >= BLOCK_VERDICT_MIN_CONFIDENCE`
-/// (0.90).  UNKNOWN never reaches here (handled by the caller).
-///
-/// A finding that ALREADY carries a `verified` outcome is never a candidate
-/// (#4081).  Nothing set that field before the round until `claim_grounding`
-/// began pre-stamping `Unverifiable` on package-registry claims the pipeline
-/// cannot check; sending one to the verifier would let a second model with the
-/// same stale training knowledge launder the recollection into
-/// `verified: "confirmed"` — the exact trust-signal inversion #4081 reports.
-/// The rule is stated generally rather than as an `Unverifiable` special case:
-/// an outcome that is already decided is not a question worth re-asking.
-/// Test: `select_candidates_block_uses_wide_net`,
-/// `select_candidates_approve_uses_block_tier_only`,
+/// Why (#8904): every finding that is posted must pass the verifier. The
+/// earlier rule sent only findings that could change the verdict (≥ 0.90 on an
+/// APPROVE / APPROVE* review, ≥ 0.50 on a blocking one), which selected nothing
+/// in 9 of 10 reviews on 0.36.1 and posted 7 of 7 fabrications unchecked.
+/// What: returns the index of every finding with no recorded outcome, whatever
+/// the verdict or confidence. A finding that ALREADY carries a `verified`
+/// outcome is never a candidate (#4081): `claim_grounding` pre-stamps
+/// `Unverifiable` on package-registry claims, and asking a second model with
+/// the same stale training knowledge would launder the recollection into
+/// `verified: "confirmed"`. Such a finding is posted with its "never verified"
+/// caveat and cannot escalate.
+/// Test: `select_candidates_takes_every_undecided_finding`,
 /// `select_candidates_skips_findings_with_a_decided_outcome`.
-pub fn select_candidates(primary_verdict: Verdict, findings: &[Finding]) -> Vec<usize> {
-    let floor = match primary_verdict {
-        Verdict::RequestChanges | Verdict::Block => VERIFY_CANDIDATE_MIN_CONFIDENCE,
-        Verdict::Approve | Verdict::ApproveWithReservations => BLOCK_VERDICT_MIN_CONFIDENCE,
-        // UNKNOWN is filtered before this is called; treat defensively as "no
-        // candidates" so a stray UNKNOWN never triggers verifier calls.
-        Verdict::Unknown => return Vec::new(),
-    };
+pub fn select_candidates(findings: &[Finding]) -> Vec<usize> {
     findings
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.verified.is_none() && f.confidence >= floor)
+        .filter(|(_, f)| f.verified.is_none())
         .map(|(i, _)| i)
         .collect()
 }
 
-// ─── Single-finding verification ─────────────────────────────────────────────
+// ─── One verifier request ────────────────────────────────────────────────────
 
 /// Verifier JSON output (forced via `response_schema`).
 ///
 /// Why: the verifier is forced to emit `{judgment, reason}`; parsing it into a
 /// typed struct lets the outcome mapping be exhaustive instead of string-sniffing.
-/// What: `judgment` is `"CONFIRMED"` / `"REFUTED"`; `reason` is advisory.
-/// Test: covered by `verify_one` behaviour in `verify_tests.rs`.
+/// What: `judgment` is `"CONFIRMED"` / `"REFUTED"` / `"UNVERIFIABLE"`; `reason`
+/// is advisory.
+/// Test: `verify_judgment_full_shape_deserializes`.
 #[derive(Debug, Deserialize)]
 struct VerifyJudgment {
     judgment: String,
@@ -596,73 +515,49 @@ struct VerifyJudgment {
     reason: String,
 }
 
-/// Verify one finding and map the provider result to a `VerifyOutcome`.
+/// Send one verifier request for `size` findings and map the answer to one
+/// outcome per finding.
 ///
-/// Why: this is where the safety-critical error handling lives.  A config/
-/// lifecycle error (`is_alarm`) from the verifier model must NOT be silently
-/// swallowed as a plain refutation — that is exactly the incident this phase
-/// guards against.  Such errors map to `ErrorRefuted { error_class }` AND emit
-/// the `verification_model_error` signal.  An unparseable/truncated response maps
-/// to `TruncationRefuted` (distinct from a clean model `Refuted`) so
-/// `rederive_verdict` can tell apart "the model said REFUTED" from "the provider
-/// returned garbage", and preserve the model's escalation in the latter case.
-/// What: calls the verifier, parses the forced JSON judgment, and returns
-/// `Confirmed` / `Refuted` accordingly.  On an alarm-class `LlmError`, emits the
-/// signal and returns `ErrorRefuted`.  On a transient error ALSO returns
-/// `ErrorRefuted` (#1876 — see the Why below), never plain `Refuted`, because a
-/// transient fault is "unable to verify", not "the model refuted this".  On a
-/// successful call that returns unparseable output returns `TruncationRefuted`
-/// (structurally distinct from a clean REFUTED judgment).
-///
-/// #1876 fail-open fix: prior to this change, a transient error (rate limit,
-/// transport blip, upstream 5xx) mapped to plain `VerifyOutcome::Refuted` —
-/// structurally identical to a clean model REFUTED judgment. That made
-/// `rederive_verdict` treat "we could not reach the verifier" the same as "the
-/// verifier examined this and found it wrong": both set `any_clean_refuted =
-/// true`, which collapses the review's baseline to APPROVE (path b) when
-/// nothing else was confirmed. A shadow-eval showed this fail-open behavior
-/// contributing to REQUEST_CHANGES being silently downgraded to APPROVE. Mapping
-/// transient errors to `ErrorRefuted` instead routes them through
-/// `rederive_verdict` path (c) — "unable to verify" — which PRESERVES
-/// `primary_verdict` rather than discarding it, matching the existing #726
-/// treatment of config/lifecycle errors and truncated responses. The finding
-/// itself is still excluded from the severity floor either way (an unverified
-/// finding must not drive escalation on its own); only the *fail-open-to-APPROVE*
-/// side effect on the surrounding review is fixed.
-/// #4459 retry + honest UNVERIFIED: a transient error is now retried up to
-/// `policy.max_attempts` times with exponential backoff and jitter before any
-/// outcome is recorded, because the transport errors that disabled this pass in
-/// production came from the round's OWN fan-out — a single call to the same
-/// model in isolation succeeded in ~845 ms while 27 of 29 findings in a
-/// concurrent round came back `Transport`. When the budget is exhausted the
-/// finding is recorded as `Unverifiable`, NOT `ErrorRefuted`: nothing examined
-/// it, so calling the result a refutation (and clamping its confidence to 0.10
-/// as `apply_outcome` does for every refutation variant) states a judgment the
-/// pipeline never made. `Unverifiable` keeps the finding visible as an advisory
-/// that cannot escalate, and `ReviewResult::unverified_count` reports how many
-/// there were. Alarm-class errors keep the `ErrorRefuted` + alarm treatment from
-/// #726 — a broken deployment is a different fact from an unreachable call, and
-/// retrying a deterministic ModelNotFound only delays the alarm.
-/// Test: `verify_one_confirmed`, `verify_one_refuted`,
-/// `verify_one_model_unavailable_emits_signal`,
-/// `verify_truncated_response_is_truncation_refuted`,
+/// Why: the safety-critical error handling lives here. An alarm-class error
+/// (#726) means the verifier model is broken: every finding gets
+/// `ErrorRefuted` and the `verification_model_error` signal fires, never a
+/// plain refutation. A transient error (#1876) is retried with backoff and
+/// jitter up to `policy.max_attempts` (#4459), because the transport errors
+/// that disabled this pass came from the round's own fan-out; an exhausted
+/// budget records `Unverifiable` with the error class. An unparseable or
+/// truncated answer records `TruncationRefuted`, and a batch answer that does
+/// not judge a finding records it for that finding alone. Every one of these is
+/// [`VerifierReach::Failed`]: nothing judged the finding, and #8904 withholds it.
+/// What: a single-finding request is read by `parse_judgment`, a batch by
+/// `parse_batch_judgments`. Returns exactly `size` entries in batch order.
+/// Test: `verify_one_model_unavailable_emits_signal`,
+/// `verify_truncated_response_is_withheld`,
 /// `verify_transient_error_is_not_plain_refuted` (#1876),
 /// `verify_transient_failure_is_retried_until_it_succeeds` (#4459),
-/// `verify_permanent_transport_failure_lands_in_unverified` (#4459).
-async fn verify_one(
+/// `verify_permanent_transport_failure_is_withheld` (#4459, #8904),
+/// `verify_batch_answer_missing_a_finding_withholds_only_that_finding`.
+async fn verify_batch(
     verifier: &Arc<dyn LlmProvider>,
     req: crate::llm::LlmRequest,
+    size: usize,
     policy: VerifyPolicy,
-) -> VerifyOutcome {
+) -> Vec<(VerifyOutcome, VerifierReach)> {
     let model = req.model.clone();
     let attempts = policy.max_attempts.max(1);
     let mut last_class = String::new();
     for attempt in 1..=attempts {
-        match attempt_verify(verifier, req.clone(), &model).await {
-            Ok(outcome) => return outcome,
-            Err(AttemptError::Alarm(outcome)) => return outcome,
-            Err(AttemptError::Transient(class)) => {
-                last_class = class;
+        match verifier.complete(req.clone()).await {
+            Ok(resp) => return judgments_for(&resp.text, size),
+            Err(e) if e.is_alarm() => {
+                // Config/lifecycle failure: loud, and deterministic, so never retried.
+                let error_class = error_class(&e);
+                emit_verification_model_error(&model, &error_class, &e);
+                let outcome = VerifyOutcome::ErrorRefuted { error_class };
+                return vec![(outcome, VerifierReach::Failed); size];
+            }
+            Err(e) => {
+                last_class = error_class(&e);
+                debug!(error_class = %last_class, "verifier call failed (retryable): {e}");
                 if attempt < attempts {
                     let backoff = policy.backoff(attempt + 1);
                     warn!(
@@ -682,93 +577,77 @@ async fn verify_one(
     warn!(
         attempts,
         error_class = %last_class,
-        "verifier unreachable after every attempt — recording the finding as UNVERIFIED (#4459)"
+        "verifier unreachable after every attempt — withholding the batch (#4459, #8904)"
     );
-    VerifyOutcome::Unverifiable {
+    let outcome = VerifyOutcome::Unverifiable {
         reason: format!(
             "the verifier could not be reached after {attempts} attempt(s) ({last_class}); \
              the finding was neither confirmed nor refuted"
         ),
-    }
+    };
+    vec![(outcome, VerifierReach::Failed); size]
 }
 
-/// Why one attempt failed, when it did (#4459).
+/// Map a verifier answer to one outcome per finding.
 ///
-/// Why: the retry loop must tell "retry this" from "stop now, the deployment is
-/// broken" without re-deriving the classification the alarm branch already made.
-/// What: `Alarm` carries the terminal outcome to return as-is; `Transient`
-/// carries the error class for the log line and the eventual reason string.
-enum AttemptError {
-    Alarm(VerifyOutcome),
-    Transient(String),
-}
-
-/// One verifier call, classified.
-///
-/// Why: keeps `verify_one`'s loop readable — the response-parsing arms are the
-/// same on every attempt and only the error arms decide whether to loop.
-/// What: `Ok` on any response the pipeline can act on (including a truncated
-/// one, which is a provider fault the same request will reproduce); `Err` on a
-/// call that failed.
-/// Test: covered through `verify_one` by the tests it lists.
-async fn attempt_verify(
-    verifier: &Arc<dyn LlmProvider>,
-    req: crate::llm::LlmRequest,
-    model: &str,
-) -> Result<VerifyOutcome, AttemptError> {
-    match verifier.complete(req).await {
-        Ok(resp) => Ok(match parse_judgment(&resp.text) {
-            Some(Judgment::Confirmed) => VerifyOutcome::Confirmed,
-            Some(Judgment::Refuted) => VerifyOutcome::Refuted,
-            // #5309: the verifier declined to confirm a claim the diff cannot
-            // settle.  Not a refutation — the finding may well be real — so it
-            // survives as an advisory note rather than being disproved.
-            Some(Judgment::Unverifiable) => VerifyOutcome::Unverifiable {
-                reason: VERIFIER_UNVERIFIABLE_REASON.to_string(),
-            },
+/// What: CONFIRMED / REFUTED / UNVERIFIABLE (#5309) are `Judged`; an entry
+/// the answer does not settle is `TruncationRefuted` and `Failed`.
+fn judgments_for(text: &str, size: usize) -> Vec<(VerifyOutcome, VerifierReach)> {
+    let parsed: Vec<Option<Judgment>> = if size == 1 {
+        vec![parse_judgment(text)]
+    } else {
+        parse_batch_judgments(text, size)
+            .into_iter()
+            .map(|j| j.as_deref().and_then(judgment_from))
+            .collect()
+    };
+    parsed
+        .into_iter()
+        .map(|judgment| match judgment {
+            Some(Judgment::Confirmed) => (VerifyOutcome::Confirmed, VerifierReach::Judged),
+            Some(Judgment::Refuted) => (VerifyOutcome::Refuted, VerifierReach::Judged),
+            // #5309: the evidence is outside the diff — a judgment, not a failure.
+            Some(Judgment::Unverifiable) => (
+                VerifyOutcome::Unverifiable {
+                    reason: VERIFIER_UNVERIFIABLE_REASON.to_string(),
+                },
+                VerifierReach::Judged,
+            ),
             None => {
                 warn!(
-                    text = %truncate(&resp.text, 120),
-                    "verifier returned unparseable/truncated judgment — recording TruncationRefuted"
+                    text = %truncate(text, 120),
+                    "verifier answer did not judge a finding — withholding it (#8904)"
                 );
-                // Use a structurally distinct variant so rederive_verdict can
-                // distinguish "model said REFUTED" from "provider returned garbage".
-                VerifyOutcome::TruncationRefuted
+                (VerifyOutcome::TruncationRefuted, VerifierReach::Failed)
             }
-        }),
-        Err(e) if e.is_alarm() => {
-            // Config/lifecycle failure: the verifier model is broken.  This is
-            // the incident path — make it loud, do not pretend the finding was
-            // refuted on its merits.  Deterministic, so it is never retried.
-            let error_class = error_class(&e);
-            emit_verification_model_error(model, &error_class, &e);
-            Err(AttemptError::Alarm(VerifyOutcome::ErrorRefuted {
-                error_class,
-            }))
-        }
-        Err(e) => {
-            // Transient failure (#1876, #4459): we could not verify this
-            // finding, but the deployment is not broken and the model never
-            // rendered a judgment.  Hand it back to the retry ladder; only an
-            // exhausted budget decides an outcome.  This is not an alarm-worthy
-            // incident (no emit_verification_model_error call): rate limits and
-            // transport blips are expected operational noise.
-            let error_class = error_class(&e);
-            debug!(
-                error_class = %error_class,
-                "verifier call failed (retryable): {e}"
-            );
-            Err(AttemptError::Transient(error_class))
-        }
-    }
+        })
+        .collect()
+}
+
+/// Whether the verifier rendered a judgment on a finding (#8653).
+///
+/// Why: a retry-exhausted failure and a verifier-judged UNVERIFIABLE (#5309)
+/// share one public `VerifyOutcome` variant; only the failure is withheld
+/// (#8904). A typed flag tells them apart without widening the serialized enum
+/// or reading the reason string.
+/// What: `Judged` for any parseable answer; `Failed` for an alarm error, an
+/// unparseable or truncated answer, or an exhausted retry budget.
+/// Test: `verify_permanent_transport_failure_is_withheld`,
+/// `verify_unverifiable_finding_is_withheld_not_posted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifierReach {
+    /// The verifier answered with a parseable judgment.
+    Judged,
+    /// The verifier call failed or its answer was cut off.
+    Failed,
 }
 
 /// Apply a verification outcome to a finding: record it and demote if refuted.
 ///
-/// Why: the spec (REV-606) forbids silently dropping a refuted finding — its
-/// outcome must stay on the result for transparency.  Demoting the confidence
-/// (rather than deleting the finding) makes `derive_verdict` treat it as noise
-/// while the `verified` field records *why*.
+/// Why: the `verified` field records *why* a finding carries the weight it
+/// does. #8904: the round drops every refuted or unjudged finding after this
+/// runs (`verify_posted::enforce_outcomes`), counting and logging each drop;
+/// the demotion still guards any other caller.
 /// What: sets `finding.verified`; for any refutation variant
 /// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) also clamps the confidence
 /// down to `VERIFY_REFUTED_CONFIDENCE` (0.10), below every advisory / block gate.
@@ -780,7 +659,7 @@ async fn attempt_verify(
 /// `Unverifiable`, so a claim carries the same weight whichever route classified
 /// it. `Confirmed` and `Skipped` leave the finding untouched.
 /// Test: `verify_confirmed_keeps_and_block_holds`,
-/// `verify_refuted_demotes_and_block_relaxes`,
+/// `verify_refuted_drops_and_block_is_withheld`,
 /// `apply_outcome_unverifiable_strips_block_floor_signals`.
 pub fn apply_outcome(finding: &mut Finding, outcome: VerifyOutcome) {
     let is_refutation = matches!(
@@ -818,8 +697,8 @@ const VERIFIER_UNVERIFIABLE_REASON: &str = "the verifier could not settle this f
 /// no room for "the verifier examined it and could not tell", which is the whole
 /// point of the third judgment.
 /// What: mirrors the `judgment` enum in `verify_prompt::verify_response_schema`.
-/// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
-/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+/// Test: `parse_judgment_unverifiable`,
+/// `parse_judgment_truncated_refuted_json_is_refuted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Judgment {
     /// The finding is real and grounded in the diff.
@@ -830,42 +709,85 @@ enum Judgment {
     Unverifiable,
 }
 
-/// Parse the verifier's forced JSON judgment, or `None` if unparseable.
+/// Parse a single-finding verifier answer, or `None` when it judges nothing.
 ///
-/// Why: the verifier output is forced JSON `{judgment, reason}`; a robust parse
-/// (with a keyword fallback for non-structured providers) keeps the outcome
-/// deterministic.
-/// What: tries direct JSON deserialisation first; falls back to a case-insensitive
-/// keyword scan so a provider that ignored the schema still produces a decision.
-/// UNVERIFIABLE is scanned FIRST in the fallback because it is the only token
-/// that could be swallowed by a substring match on another — a prose answer
-/// reading "not confirmed, unverifiable from this diff" contains both tokens, and
-/// the safe reading of an ambiguous answer is the one that does not confirm.
-/// Returns `None` only when no token appears.
-/// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
-/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+/// Why: the verifier output is forced JSON `{judgment, reason}`, but a
+/// truncated answer or a provider that ignored the schema must fail closed
+/// like the batched path (#8904): `{"judgment":"REFUTED","reason":"not
+/// confirmed by` once parsed as CONFIRMED and was posted.
+/// What: whole JSON first; then a structured `"judgment": "<X>"` token, which
+/// outranks every keyword in the text around it; then [`keyword_judgment`].
+/// Test: `parse_judgment_truncated_refuted_json_is_refuted`,
+/// `parse_judgment_ambiguous_prose_never_confirms`,
+/// `parse_judgment_unverifiable`.
 fn parse_judgment(text: &str) -> Option<Judgment> {
     let trimmed = text.trim();
     if let Ok(j) = serde_json::from_str::<VerifyJudgment>(trimmed) {
-        return match j.judgment.trim().to_uppercase().as_str() {
-            "CONFIRMED" => Some(Judgment::Confirmed),
-            "REFUTED" => Some(Judgment::Refuted),
-            "UNVERIFIABLE" => Some(Judgment::Unverifiable),
-            _ => None,
+        return judgment_from(&j.judgment);
+    }
+    if let Some(structured) = structured_judgment(trimmed) {
+        return structured;
+    }
+    keyword_judgment(&trimmed.to_uppercase())
+}
+
+/// The `"judgment": "<X>"` value of an answer that is not whole JSON (#8904).
+///
+/// What: `None` when no `"judgment"` key appears. `Some(None)` when a key's
+/// value is cut off or is not a judgment token, or when two keys disagree.
+/// `Some(Some(j))` otherwise.
+fn structured_judgment(text: &str) -> Option<Option<Judgment>> {
+    const KEY: &str = "\"judgment\"";
+    let mut found: Option<Option<Judgment>> = None;
+    for (at, _) in text.match_indices(KEY) {
+        let value = text[at + KEY.len()..]
+            .trim_start()
+            .strip_prefix(':')
+            .and_then(|v| v.trim_start().strip_prefix('"'))
+            .and_then(|v| v.split_once('"'))
+            .and_then(|(token, _)| judgment_from(token));
+        found = match found {
+            None => Some(value),
+            Some(prev) if prev == value => Some(prev),
+            Some(_) => Some(None),
         };
     }
-    // Fallback keyword scan for providers that ignored the forced schema.
-    let upper = trimmed.to_uppercase();
+    found
+}
+
+/// Words that make a CONFIRMED keyword ambiguous (#8904).
+const NEGATIONS: &[&str] = &["NOT", "NO", "NOR", "NEVER", "CANNOT", "UNCONFIRMED"];
+
+/// Keyword fallback for a provider that ignored the forced schema (#8904).
+///
+/// What: UNVERIFIABLE wins, then REFUTED — the readings that do not confirm.
+/// CONFIRMED is returned only when neither appears and the text carries no
+/// negation ("not confirmed", "unconfirmed", "can't"); an ambiguous answer is
+/// `None`, which the round withholds. `None` when no token appears.
+fn keyword_judgment(upper: &str) -> Option<Judgment> {
     if upper.contains("UNVERIFIABLE") {
         return Some(Judgment::Unverifiable);
-    }
-    if upper.contains("CONFIRMED") {
-        return Some(Judgment::Confirmed);
     }
     if upper.contains("REFUTED") {
         return Some(Judgment::Refuted);
     }
-    None
+    if !upper.contains("CONFIRMED") {
+        return None;
+    }
+    let negated = upper
+        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        .any(|w| NEGATIONS.contains(&w) || w.ends_with("N'T") || w.ends_with("N\u{2019}T"));
+    (!negated).then_some(Judgment::Confirmed)
+}
+
+/// Map an exact judgment token (any case, trimmed) to a [`Judgment`].
+fn judgment_from(token: &str) -> Option<Judgment> {
+    match token.trim().to_uppercase().as_str() {
+        "CONFIRMED" => Some(Judgment::Confirmed),
+        "REFUTED" => Some(Judgment::Refuted),
+        "UNVERIFIABLE" => Some(Judgment::Unverifiable),
+        _ => None,
+    }
 }
 
 // The startup liveness gate (`LivenessDecision`, `probe_verifier_liveness`)

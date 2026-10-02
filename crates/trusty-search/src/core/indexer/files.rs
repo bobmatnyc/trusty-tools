@@ -18,6 +18,13 @@ use crate::core::entity::EntityType;
 
 use super::{build_compact_snippet, raw_to_code_chunk, CodeChunk, CodeIndexer};
 
+/// #8976: test-only fault seam. `remove_file_no_kg_rebuild` fails, before it
+/// removes anything, for each `(index_id, file)` pair listed here. Keyed by
+/// index id so concurrent tests never see each other's faults.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_REMOVE: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// A resolved `path_prefix` filter for corpus enumeration (#7677).
 ///
 /// Why: both `list_chunks` pagination modes need the identical "is this chunk
@@ -117,7 +124,7 @@ impl CodeIndexer {
     /// Test: `enumerate_chunks_errors_when_rehydrate_did_not_commit`,
     /// `enumerate_chunks_waits_out_a_rehydrate_that_outlasts_one_budget`,
     /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index`.
-    async fn ensure_corpus_view_is_current(&self) -> Result<()> {
+    pub(super) async fn ensure_corpus_view_is_current(&self) -> Result<()> {
         let mut corpus_view_is_current = false;
         for _ in 0..crate::core::indexer::search::lanes::REHYDRATE_RACE_RETRIES {
             self.ensure_chunks_loaded().await;
@@ -155,9 +162,10 @@ impl CodeIndexer {
     /// What: clones every `RawChunk` while briefly holding the read lock.
     ///
     /// Errors when the in-memory map is not a view of the corpus — #5917 made
-    /// this fallible because `grep` and `call_chain` are its only production
+    /// this fallible because `grep` and `call_chain` were its only production
     /// callers, and both reported an unreadable corpus as an answer: an empty
-    /// match set, and a real symbol declared nonexistent.
+    /// match set, and a real symbol declared nonexistent. grep now lists files
+    /// through `indexed_file_set` instead (#8266).
     /// Test: covered by `service::call_chain::tests`;
     /// `grep_over_an_unreadable_corpus_returns_503_naming_the_index` and
     /// `call_chain_over_an_unreadable_corpus_is_503_not_404` cover the refusal.
@@ -580,6 +588,13 @@ impl CodeIndexer {
     /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
     /// `service::reindex::tests`.
     pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
+        #[cfg(test)]
+        if TEST_FAIL_REMOVE
+            .lock()
+            .is_ok_and(|f| f.contains(&(self.index_id.clone(), file_path.to_string())))
+        {
+            anyhow::bail!("injected remove failure for {file_path} (#8976 test seam)");
+        }
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids).await;
@@ -686,19 +701,24 @@ impl CodeIndexer {
     /// there is a write transaction that changes nothing.
     /// [`Self::remove_chunks_from_stores`] keeps the redb delete for the
     /// deletion paths, which need it.
-    /// What: best-effort `store.remove` per id (HNSW deletion is non-fatal
-    /// here), then one write lock per in-memory structure for the whole batch.
-    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`.
+    /// What: drops the ids from the chunk map, then best-effort `store.remove`
+    /// per id (HNSW deletion is non-fatal here), then one write lock per
+    /// remaining in-memory structure for the whole batch.
+    /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`,
+    /// `a_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
     async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
-        if let Some(store) = &self.store {
-            for id in ids {
-                store.remove(id).await.ok();
-            }
-        }
+        // #8761: map before vector. A deferred-embed commit that upserts one of
+        // these ids either finds it gone on its post-upsert check or upserted
+        // before the `store.remove` below.
         {
             let mut chunks = self.chunks.write().await;
             for id in ids {
                 chunks.remove(id);
+            }
+        }
+        if let Some(store) = &self.store {
+            for id in ids {
+                store.remove(id).await.ok();
             }
         }
         {
@@ -854,11 +874,13 @@ impl CodeIndexer {
     }
 
     /// Remove a chunk from the corpus and its vector from the HNSW store.
+    /// Test: `a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
     pub async fn remove_chunk(&self, chunk_id: &str) -> Result<()> {
+        // #8761: map before vector, as in `drop_chunk_ids_from_memory`.
+        self.chunks.write().await.remove(chunk_id);
         if let Some(store) = &self.store {
             store.remove(chunk_id).await.ok();
         }
-        self.chunks.write().await.remove(chunk_id);
         self.chunk_embeddings.write().await.pop(chunk_id);
         self.bm25.write().await.remove_document(chunk_id);
         // Issue #28: mirror the deletion into the durable redb corpus.

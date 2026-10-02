@@ -6,7 +6,7 @@
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
 #   fmt      – cargo fmt --all --check (stable)
-#   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
+#   clippy   – cargo clippy --workspace --all-targets -D warnings (1.98.1, SKIP_UI_BUILD=1)
 #   test-shard – cargo nextest run --workspace, split 8 ways (stable,
 #              SKIP_UI_BUILD=1, full clone for git tests, .NET SDK installed
 #              for trusty-analyze's C# Roslyn adapter tests, #1008). PUSH TO
@@ -18,33 +18,49 @@
 #              test-shard.
 #   test     – roll-up over the shards AND test-doc; inherits the same trigger
 #              scope
+#   affected-plan / affected-test / affected – "Rust tests (affected
+#              crates)": PULL REQUESTS. cargo test --no-fail-fast for the
+#              crates the PR touches plus their dependents
+#              (scripts/select-test-crates.sh), in up to 8 legs; the
+#              `affected` roll-up is the one context
 #   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
-#   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
-#   audit-ui – cargo clippy + test -p trusty-audit-ui (same runner shape, #5477)
-#   mpm-gui  – cargo clippy + test -p trusty-mpm-gui (same runner shape, #5934)
+#   agents-ui – cargo clippy -p trusty-agents-ui (1.98.1, WebKit2GTK-enabled runner)
 #   code-gui – cargo clippy + test -p trusty-code-gui (same runner shape, #5934)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
 #                         invariant test that is otherwise never compiled)
-#   ui-checks – matrix job running each of the 7 UI crates' OWN existing
+#   ui-checks – matrix job running each of the 6 UI crates' OWN existing
 #               test/build scripts (issue: SKIP_UI_BUILD=1 means pnpm is never
 #               invoked anywhere else in CI)
+#   teardown-guard / tmux-exact-targets – pure-shell text gates, skipped at the
+#               job level when `changes` says the diff reaches none of their
+#               inputs (#8378)
+#   parity-selftest / check5-decision / check8-decision – release-decision
+#               fixtures, unconditional
+#   website-corpus – the website content gate, step-gated on its own relevance
+#   ci-gate  – "CI gate": one context that fails when any context it stands in
+#              for fails, or a job skipped without the classifier's say-so
+#              (#8378; scripts/ci-gate-verdict.sh holds the covered list)
 #   notify-main-failure – file/refresh a tracking issue when `push: main` CI
 #                         goes red (post-merge breakage was detected but never
 #                         alerted)
 #
-# trusty-mpm-gui, trusty-code-gui, trusty-agents-ui and trusty-audit-ui are
-# excluded from the headless workspace jobs (clippy/test/msrv): all four are Tauri desktop apps
+# trusty-code-gui and trusty-agents-ui are
+# excluded from the headless workspace jobs (clippy/test/msrv): both are Tauri desktop apps
 # (publish = false) that require WebKit2GTK on Linux (~100 MB apt chain) which
 # the headless runners do not install. Exclude them via
-# --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
+# --exclude trusty-code-gui --exclude trusty-agents-ui
 # on every workspace-wide cargo invocation.
 #
-# Each of the four gets a DEDICATED job that installs the WebKit2GTK toolchain
+# `tga`, `trusty-audit` and its Tauri shell `trusty-audit-ui` left this
+# workspace (owner ruling 2026-09-28); bobmatnyc/trusty-git-analytics builds,
+# tests and publishes them.
+#
+# Each of the two gets a DEDICATED job that installs the WebKit2GTK toolchain
 # and runs `cargo clippy -p <crate> --all-targets -- -D warnings`, so exclusion
 # from the headless jobs never means the crate goes uncompiled: `agents-ui`
-# (#3053), `audit-ui` (#5477), and `mpm-gui` / `code-gui` (#5934). The last two
-# closed a real hole — until #5934 the only CI touching trusty-mpm-gui and
+# (#3053), and `code-gui` (#5934). The latter
+# closed a real hole — until #5934 the only CI touching
 # trusty-code-gui was the frontend-only `UI checks` matrix, so a Rust signature
 # change reached main uncompiled (#5935).
 #
@@ -189,7 +205,7 @@ jobs:
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
-  # .github/workflows/changelog-fragment.yml already documents. So every job
+  # ci.yml's `changelog-fragment` job already documents. So every job
   # still RUNS and still REPORTS; the exemption lives inside the jobs, on the
   # steps that cost money. A docs-only PR therefore gets a green required check
   # in ~30 s of runner startup instead of 45 minutes of cargo.
@@ -197,7 +213,9 @@ jobs:
   # The same reasoning rules out a job-level `if:`. GitHub documents a
   # conditionally-skipped job as reporting success to branch protection, but
   # the failure mode if that is wrong is every docs PR blocked forever, so the
-  # jobs are kept unconditional and only their steps are gated.
+  # jobs are kept unconditional and only their steps are gated. #8378 makes
+  # two exceptions, `teardown-guard` and `tmux-exact-targets`, and backs them
+  # with `ci-gate`, which fails on any skip this job did not order.
   #
   # PUSH TO MAIN compares the pushed range too. Re-running the complete Rust
   # suite after a Cargo-inert PR has already passed adds cost but no signal.
@@ -210,17 +228,17 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
       embedder_cuda_relevant: ${{ steps.detect-cuda.outputs.embedder_cuda_relevant }}
-      # #7063: one pair per Tauri UI crate — the verdict the four clippy jobs
+      # #7063: one pair per Tauri UI crate — the verdict the clippy jobs
       # gate their expensive steps on, and the one-line reason each job echoes
       # so a skipped run says why in its own log instead of only in this one.
       trusty_agents_ui_relevant: ${{ steps.detect-ui.outputs.trusty_agents_ui_relevant }}
       trusty_agents_ui_reason: ${{ steps.detect-ui.outputs.trusty_agents_ui_reason }}
-      trusty_audit_ui_relevant: ${{ steps.detect-ui.outputs.trusty_audit_ui_relevant }}
-      trusty_audit_ui_reason: ${{ steps.detect-ui.outputs.trusty_audit_ui_reason }}
-      trusty_mpm_gui_relevant: ${{ steps.detect-ui.outputs.trusty_mpm_gui_relevant }}
-      trusty_mpm_gui_reason: ${{ steps.detect-ui.outputs.trusty_mpm_gui_reason }}
       trusty_code_gui_relevant: ${{ steps.detect-ui.outputs.trusty_code_gui_relevant }}
       trusty_code_gui_reason: ${{ steps.detect-ui.outputs.trusty_code_gui_reason }}
+      # #8378: the two pure-shell gates path-filtered at the JOB level. `CI
+      # gate` accepts their skip only when the matching value here is 'false'.
+      teardown_guard_relevant: ${{ steps.detect-shell-gates.outputs.teardown_guard_relevant }}
+      tmux_targets_relevant: ${{ steps.detect-shell-gates.outputs.tmux_targets_relevant }}
     steps:
       # fetch-depth: 0 — the detector needs `git merge-base` against the base
       # branch, which a shallow checkout cannot resolve.
@@ -247,6 +265,14 @@ jobs:
       - name: Crate-relevance selftest (#7063)
         run: bash scripts/ci-crate-relevance-selftest.sh
 
+      # #8716: the rustdoc-links job's scope decision and the gate's own
+      # fail-closed arms. Neither needs a doc build; the gate's selftest scores
+      # captured cargo streams. It ran in no workflow before this step.
+      - name: Rustdoc scope + link-gate selftests (#8716)
+        run: |
+          bash scripts/rustdoc-links-scope-selftest.sh
+          bash scripts/check_rustdoc_links_selftest.sh
+
       # #7424: the startup-context size gate. It is a STEP of this existing job
       # rather than a job of its own — promoting a new required context wedges
       # every open PR that predates it (#5962), and this job already runs on
@@ -258,6 +284,17 @@ jobs:
 
       - name: Startup-context budget gate (#7424)
         run: bash scripts/check_context_budget.sh
+
+      # #8389: content-release.yml runs only on dispatch, so a packager change
+      # would otherwise meet its selftest for the first time at release time.
+      - name: Content-bundle packager selftest (#8389)
+        run: bash scripts/package_content_selftest.sh
+
+      # #8378: the relevance detector and the `CI gate` verdict decide which
+      # required contexts do work and which skips are legitimate, so their
+      # fixtures — and the table-equals-needs wiring check — run first.
+      - name: CI gate selftest (#8378)
+        run: bash scripts/ci-gate-selftest.sh
 
       # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
       # pr-version-bump job). `github.event.pull_request.base.sha` is a
@@ -338,24 +375,25 @@ jobs:
           fi
           CUDA_SCOPE_BASE="$before" bash scripts/detect-embedder-cuda-relevant.sh > /dev/null
 
-      # #7063: the four Tauri UI clippy jobs are REQUIRED contexts, so they run
+      # #7063: the Tauri UI clippy jobs are REQUIRED contexts, so they run
       # and report on every PR no matter what this step decides — only their
       # expensive steps consult the booleans written here. Before this, their
       # sole gate was `docs_only`, so a PR touching one unrelated crate still
-      # paid for a WebKit2GTK apt chain plus a cargo clippy in all four:
-      # trusty-mpm-gui has no workspace dependencies at all and still spent
-      # 1m20s on PR #7062, and trusty-code-gui spent 7m there and has timed out
+      # paid for a WebKit2GTK apt chain plus a cargo clippy in every one:
+      # the since-retired trusty-mpm-gui (#7964) had no workspace dependencies
+      # at all and still spent 1m20s on PR #7062, and trusty-code-gui spent 7m
+      # there and has timed out
       # at 30m before (PR #5992).
       #
       # The change set is resolved ONCE here and piped to each crate, so all
-      # four answers and `docs_only` above are decisions about the same diff.
-      # Every failure arm writes `true` for all four: a detector that cannot
+      # answers and `docs_only` above are decisions about the same diff.
+      # Every failure arm writes `true` for all of them: a detector that cannot
       # answer must cost a full build, never a silent skip — the same rule the
       # `!cancelled()` job conditions below encode.
       - name: Classify Tauri UI crate relevance (#7063)
         id: detect-ui
         env:
-          UI_CRATES: "trusty-agents-ui trusty-audit-ui trusty-mpm-gui trusty-code-gui"
+          UI_CRATES: "trusty-agents-ui trusty-code-gui"
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           PUSH_BEFORE: ${{ github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
@@ -401,6 +439,20 @@ jobs:
             bash scripts/ci-crate-relevance.sh "$crate" < "$changed" > /dev/null
           done
 
+      # #8378: `teardown-guard` and `tmux-exact-targets` skip at the JOB level
+      # on a diff that reaches none of their inputs. The script resolves the
+      # diff itself and answers `true` on every error arm, so a classifier
+      # that cannot answer costs a run, never a skip.
+      - name: Classify pure-shell gate relevance (#8378)
+        id: detect-shell-gates
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          bash scripts/ci-gate-relevance.sh teardown-guard > /dev/null
+          bash scripts/ci-gate-relevance.sh tmux-targets > /dev/null
+
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
   #
@@ -437,8 +489,8 @@ jobs:
         run: cargo fmt --all --check
 
   # --------------------------------------------------------------------------
-  # clippy: deny warnings across the whole workspace (stable, all targets)
-  # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: Tauri desktop apps, need WebKit2GTK on Linux.
+  # clippy: deny warnings across the whole workspace (pinned 1.98.1, all targets)
+  # trusty-code-gui, trusty-agents-ui excluded: Tauri desktop apps, need WebKit2GTK on Linux.
   # --------------------------------------------------------------------------
   clippy:
     name: Clippy
@@ -463,9 +515,10 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/ci-free-disk-space.sh
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 
@@ -491,7 +544,7 @@ jobs:
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 
       # `codex-config` is enabled by no crate in the workspace, so the
       # `--workspace` run above never pulls `codex_config` in via feature
@@ -519,10 +572,14 @@ jobs:
   # once and never rebuilds it, so a link that ships broken stays broken for
   # that version.
   #
-  # NOT a required context. Adding one wedges every open PR that predates it
-  # (they cannot produce a check run that did not exist when they were cut —
-  # see CLAUDE.md, "What CI actually gates"), so promoting this row is the
-  # repo owner's call, made once the open-PR backlog is drained.
+  # Covered by `CI gate` (#7288): `rustdoc-links` is now in `ci-gate`'s
+  # `needs:` and the CONTEXTS table in scripts/ci-gate-verdict.sh, so a red,
+  # cancelled or skipped-without-cause result fails the gate like any other
+  # covered context. #8835 merged with this check red because nothing gated
+  # on it. This job already ran unconditionally on every PR (#5973); this
+  # change only wires its existing result into the gate. An open PR keeps
+  # its current gate result until it gets a new commit, which then picks up
+  # this row.
   #
   # docs_only short-circuit and `!cancelled()` for the same reasons the fmt and
   # clippy jobs carry them: a Cargo-inert PR pays runner startup and nothing
@@ -530,6 +587,13 @@ jobs:
   # skip. A `.rs` doc-comment edit is NOT docs-only — detect-docs-only.sh
   # classifies any `.rs` path as Cargo-relevant — so the change class this gate
   # exists for always runs it.
+  #
+  # #8716: except on a release candidate. A changelog-only release PR is
+  # Cargo-inert, so it skipped this job, and the trusty-mpm 1.7.8 cut met three
+  # broken links at the publish boundary. scripts/rustdoc-links-scope.sh picks
+  # the scope: `release` always runs and adds `--require-published` (every
+  # publishable crate in `cargo metadata` must be documented), `ordinary` runs
+  # as before, `skip` is the old docs_only short-circuit.
   # --------------------------------------------------------------------------
   rustdoc-links:
     name: Rustdoc intra-doc links
@@ -540,12 +604,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Title, branch and commit message are untrusted text: env only, never
+      # interpolated into the script body.
+      - name: Decide the rustdoc scope (#8716)
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: bash scripts/rustdoc-links-scope.sh
+
       - name: Free disk space
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         uses: dtolnay/rust-toolchain@stable
 
       # `libdbus-1-dev` is this job's alone (#7466). The `features` lane enables
@@ -558,7 +634,7 @@ jobs:
       # nine LANE-NOT-EXAMINED rows. No other job enables `keyring-store` — no
       # crate depends on it — so no other apt list needs this.
       - name: Install system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
@@ -569,7 +645,7 @@ jobs:
       # Its own cache key, for the same reason every other job has one: a doc
       # build's target dir is not interchangeable with clippy's or test's.
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
+        if: steps.scope.outputs.scope != 'skip'
         uses: Swatinem/rust-cache@v2
         with:
           key: rustdoc-links
@@ -590,8 +666,15 @@ jobs:
       # (#7633). Read that line, not the SUMMARY above it, when triaging a run
       # from the log.
       - name: cargo doc + broken-link ratchet
-        if: needs.changes.outputs.docs_only != 'true'
-        run: bash scripts/check_rustdoc_links.sh
+        if: steps.scope.outputs.scope != 'skip'
+        env:
+          SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$SCOPE" = "release" ]; then
+            bash scripts/check_rustdoc_links.sh --require-published
+          else
+            bash scripts/check_rustdoc_links.sh
+          fi
 
   # --------------------------------------------------------------------------
   # test-shard: run all unit + integration tests (stable, no --include-ignored),
@@ -624,7 +707,7 @@ jobs:
   #
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
-  # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
+  # trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
   # fetch-depth: 0 (full clone) required for trusty-agents git tests that inspect
   # local branch refs and search commit history.
   #
@@ -1167,7 +1250,7 @@ jobs:
       # fingerprint and forced a ~91s recompile — measured in #4402.)
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-run
+        run: cargo test --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
 
       # The `.rcgu.o` sweep that used to sit here (#3668) was deleted as dead
       # code. It found nothing left to delete: `CARGO_PROFILE_TEST_DEBUG=
@@ -1223,7 +1306,7 @@ jobs:
       - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --no-fail-fast \
+          cargo nextest run --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
             --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
             -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
 
@@ -1234,34 +1317,10 @@ jobs:
       # parallel. `test` still gates on it, so nothing is verified less.
 
       # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
-      # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
-      # returns None whenever CI is non-empty, and this test expects the
-      # live cache-freshness path instead). It is filtered out of the nextest
-      # run above and re-run here with the override. Previously CI="" was
-      # applied to the WHOLE `cargo test --workspace` invocation, which flipped
-      # cargo's fingerprint for every crate in the workspace and forced an
-      # unrelated recompile of trusty-agents + trusty-agents-local (#4402).
-      # Scoping the override to a single `-p trusty-common` invocation
-      # contains that recompile to trusty-common alone (measured locally:
-      # ~3s) instead of cascading workspace-wide. `--features update-check`
-      # is required: that module is `#[cfg(feature = "update-check")]`-gated
-      # and only gets pulled in under `--workspace` via other crates'
-      # feature unification, not under a bare `-p trusty-common` build.
-      - name: cargo test -p trusty-common (cache-freshness, CI unset)
-        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
-        env:
-          CI: ""
-        run: |
-          cargo test -p trusty-common --lib --features update-check \
-            update::tests::cache_fresh_returns_some_when_newer -- --exact
-
-      # `codex-config` is enabled by no crate in the workspace, so neither
-      # `cargo test --workspace` nor `cargo clippy --workspace` ever compiles
-      # `codex_config` or runs its tests — the module could rot undetected
-      # (#5264). This is the only step that exercises it.
-      - name: cargo test -p trusty-common --features codex-config
-        if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test -p trusty-common --lib --features codex-config codex_config
+      # (check_throttled in crates/trusty-common/src/update/mod.rs returns None
+      # whenever CI is non-empty), so the filter above keeps it out of this
+      # run. The `trusty-common-lanes` job runs it with CI unset, together with
+      # the `codex-config` tests no workspace crate enables (#5264).
 
   # --------------------------------------------------------------------------
   # test-doc: the workspace doctests, on their own runner.
@@ -1333,7 +1392,7 @@ jobs:
 
       - name: cargo test --doc
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui --doc
+        run: cargo test --workspace --exclude trusty-code-gui --exclude trusty-agents-ui --doc
 
   # --------------------------------------------------------------------------
   # test: the aggregate gate over the sharded suite above.
@@ -1395,10 +1454,342 @@ jobs:
           echo "every test shard and the doctest job succeeded"
 
   # --------------------------------------------------------------------------
+  # Rust tests (affected crates): the PR-time test run (owner ruling
+  # 2026-09-23). The shards above stay post-merge; this runs `cargo test
+  # --no-fail-fast` for the crates a PR touches plus their dependents.
+  #
+  # Three jobs, one context. `affected-plan` computes the crate set with
+  # scripts/ci-affected-test-plan.sh (a thin wrapper over
+  # scripts/select-test-crates.sh from the PR's merge-base); `affected-test`
+  # runs it as a dynamic matrix of up to 8 legs; `affected` rolls both up under
+  # the single name `Rust tests (affected crates)`, the context meant to become
+  # required. That name must always REPORT: the roll-up is `!cancelled()`, and
+  # a docs-only PR, a push to main or a dispatch plans zero crates and reports
+  # success in seconds. Only the legs are skipped, and only when the plan
+  # itself says there is nothing to run; the roll-up then checks the plan,
+  # never the skipped matrix.
+  #
+  # A workspace-wide input (root Cargo.toml / Cargo.lock, deny.toml,
+  # rust-toolchain, .cargo/**) selects every crate — that is the selector's own
+  # rule. The 8-leg split keeps that run inside one leg's timeout; trusty-mpm,
+  # the largest suite, lands in a leg of its own. scripts/** and .github/**
+  # select narrowly (#7777): this file and the selector select trusty-common +
+  # trusty-mpm; any other such path selects only the crates whose Rust source
+  # names it, often none, and a zero-crate plan reports success.
+  #
+  # Toolchain, env, cache and fastembed handling copy `test-shard`, so the
+  # restored `test` cache matches. Not copied: nextest (`cargo test` runs the
+  # doctests of the selected crates too), and the fastembed pre-seed/save —
+  # the legs only restore the model cache `test-shard` saves on main.
+  # --------------------------------------------------------------------------
+  affected-plan:
+    name: Rust tests (affected crates) — plan
+    needs: [changes]
+    # `!cancelled()`: a failed `changes` job leaves `docs_only` empty, which
+    # the plan reads as "not Cargo-inert" and plans in full.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      reason: ${{ steps.plan.outputs.reason }}
+      # Read by `trusty-common-lanes`; the legs never carry trusty-common.
+      trusty_common: ${{ steps.plan.outputs.trusty_common }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # Same stale-merge-base fix as the `changes` job (#4688).
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Install stable toolchain
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      # Both selectors' fixtures run before the step that consults them.
+      - name: Crate-selection selftests
+        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        run: |
+          bash scripts/select-test-crates_selftest.sh
+          bash scripts/ci-affected-test-plan-selftest.sh
+
+      - name: Select affected crates
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            # scripts/ci-affected-test-plan.sh's own --event-name arm decides
+            # trusty_common: false on a docs-only push (#8236), true
+            # otherwise, including a missing/failed docs-only signal (fail
+            # closed — run the lanes).
+            bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" --event-name "${EVENT_NAME}" --
+            exit 0
+          fi
+          # An unresolvable merge-base passes an empty range, which the
+          # selector answers with EVERY crate (its FAIL OPEN rule).
+          range=""
+          if merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"; then
+            range="${merge_base}..HEAD"
+          else
+            echo "::warning::cannot resolve a merge-base against origin/${BASE_REF} — testing every crate"
+          fi
+          bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" -- --range "$range"
+
+  affected-test:
+    name: Rust tests (affected crates) — leg ${{ matrix.leg }} of ${{ matrix.total }}
+    needs: [affected-plan]
+    # Skipped only when the plan succeeded and selected nothing; the `affected`
+    # roll-up below reads the plan, so a skip here can never report green on
+    # its own.
+    if: ${{ !cancelled() && needs.affected-plan.result == 'success' && needs.affected-plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    # `test-shard` legs run 13-27 min (build ~9-12 min from the shared cache).
+    timeout-minutes: 45
+    strategy:
+      # Every leg runs to completion, as in `test-shard`.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.affected-plan.outputs.matrix) }}
+    env:
+      # Both copied from `test-shard`; CARGO_PROFILE_TEST_DEBUG must match for
+      # the restored `test` cache to hit (rust-cache hashes CARGO* env vars).
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Create local main branch for git tests
+        run: bash scripts/ci-create-local-main.sh
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/ci-apt-install.sh \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      - name: Install .NET SDK (for trusty-analyze's C# Roslyn adapter tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # Restore only: `test-shard` on main is the sole writer of this key.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: Resolve fastembed model cache key
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      - name: Restore fastembed model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      # trusty-common never appears here: the plan hands it to the
+      # `trusty-common-lanes` job. Were it ever to, its empty default feature
+      # set makes `-p trusty-common` a compile_error (#4901), so the leg fails
+      # rather than passing over the gated modules.
+      - name: cargo test (this leg's crates)
+        env:
+          LEG_CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          args=()
+          for c in $LEG_CRATES; do
+            args+=(-p "$c")
+          done
+          echo "cargo test ${args[*]} --no-fail-fast"
+          cargo test "${args[@]}" --no-fail-fast
+
+      # Owner ruling 2026-09-27: a default `cargo test -p trusty-mpm` compiles
+      # neither memory-core nor ONNX, so the memory-palace tests gated behind
+      # `sm-memory` / `manager-memory` run in this step, one build for both.
+      - name: cargo test -p trusty-mpm --features sm-memory,manager-memory
+        if: contains(format(' {0} ', matrix.crates), ' trusty-mpm ')
+        run: cargo test -p trusty-mpm --features sm-memory,manager-memory --no-fail-fast
+
+  # The single context for this suite. "Must equal success" polarity, as in
+  # `test` above, so a failed or skipped plan fails closed.
+  affected:
+    name: Rust tests (affected crates)
+    needs: [affected-plan, affected-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the plan and every leg to have succeeded
+        env:
+          PLAN_RESULT: ${{ needs.affected-plan.result }}
+          PLAN_COUNT: ${{ needs.affected-plan.outputs.count }}
+          PLAN_REASON: ${{ needs.affected-plan.outputs.reason }}
+          LEGS_RESULT: ${{ needs.affected-test.result }}
+        run: |
+          set -euo pipefail
+          if [ "${PLAN_RESULT}" != "success" ]; then
+            echo "::error::Rust tests (affected crates) is red: the plan job reported '${PLAN_RESULT}'."
+            exit 1
+          fi
+          if [ "${PLAN_COUNT}" = "0" ]; then
+            echo "${PLAN_REASON}"
+            exit 0
+          fi
+          echo "${PLAN_REASON}"
+          if [ "${LEGS_RESULT}" != "success" ]; then
+            echo "::error::Rust tests (affected crates) is red: the leg matrix reported '${LEGS_RESULT}'. Open the 'Rust tests (affected crates) — leg N of M' jobs for the failing crate."
+            exit 1
+          fi
+          echo "every affected-crate leg succeeded"
+
+  # --------------------------------------------------------------------------
+  # trusty-common coverage lanes (owner ruling 2026-09-27). trusty-common has
+  # `default = []` and gates most of its modules behind features, so no single
+  # `cargo test -p trusty-common` covers it: the bare form is a compile_error
+  # (#4901), and any one `--features` set compiles only what it names. The
+  # lanes in `[package.metadata.trusty-test-coverage]` of its Cargo.toml are a
+  # set whose union compiles and runs every test in the crate;
+  # `tests/feature_coverage.rs` proves they cover every declared feature.
+  # scripts/test_trusty_common_lanes.sh runs them one after another and keeps
+  # going past a failing lane. It is the same command a local run uses.
+  #
+  # One job, sequential lanes: the lanes share every dependency their feature
+  # sets agree on, and a matrix would rebuild that shared graph per leg.
+  #
+  # It always runs and always reports, like the required jobs above; only
+  # its steps consult the plan. The plan is `affected-plan`, i.e. the same
+  # selector the legs use, which already knows the out-of-crate inputs
+  # trusty-common's tests read. The legs never carry trusty-common. A push or
+  # dispatch run answers `trusty_common=true`, and a failed plan answers
+  # nothing, which runs the lanes too (fail closed).
+  #
+  # `CI: ""` on the lane step: update::tests::cache_fresh_returns_some_when_newer
+  # needs CI unset (see `test-shard`), and nothing else in trusty-common
+  # reads CI, so the whole run matches a local one. `libdbus-1-dev`: the
+  # `inference` lane enables `keyring-store` (see `rustdoc-links`).
+  # --------------------------------------------------------------------------
+  trusty-common-lanes:
+    name: trusty-common coverage lanes
+    needs: [affected-plan]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - name: Decide whether trusty-common is affected
+        id: decide
+        env:
+          PLAN_RESULT: ${{ needs.affected-plan.result }}
+          SELECTED: ${{ needs.affected-plan.outputs.trusty_common }}
+        run: |
+          if [ "${SELECTED}" = "false" ]; then
+            echo "the affected-crate plan did not select trusty-common — nothing to run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "running the lanes (plan=${PLAN_RESULT}, trusty_common='${SELECTED}')"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.decide.outputs.run == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Free disk space
+        if: steps.decide.outputs.run == 'true'
+        run: bash scripts/ci-free-disk-space.sh
+
+      - name: Create local main branch for git tests
+        if: steps.decide.outputs.run == 'true'
+        run: bash scripts/ci-create-local-main.sh
+
+      - name: Install stable toolchain
+        if: steps.decide.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        if: steps.decide.outputs.run == 'true'
+        run: |
+          bash scripts/ci-apt-install.sh \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libdbus-1-dev
+
+      # Its own key: four trusty-common feature sets, none of them the
+      # workspace union the `test` cache holds.
+      - name: Cache cargo artifacts
+        if: steps.decide.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: trusty-common-lanes
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Resolve fastembed model cache key
+        if: steps.decide.outputs.run == 'true'
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      # Restore only: `test-shard` on main is the sole writer of this key.
+      - name: Restore fastembed model cache
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
+
+      - name: Run every trusty-common coverage lane
+        if: steps.decide.outputs.run == 'true'
+        env:
+          CI: ""
+        run: ./scripts/test_trusty_common_lanes.sh
+
+  # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee
   # is that the code *compiles* on the minimum toolchain, not that tests pass.
-  # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
+  # trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
   #
   # Toolchain is 1.94, matching [workspace.package].rust-version = "1.94" in the
   # root Cargo.toml. The AWS SDK entries (aws-config, aws-sdk-bedrockruntime)
@@ -1453,7 +1844,7 @@ jobs:
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui
+        run: cargo check --workspace --exclude trusty-code-gui --exclude trusty-agents-ui
 
   # --------------------------------------------------------------------------
   # agents-ui: build- and lint-verify the trusty-agents Tauri desktop app
@@ -1463,7 +1854,7 @@ jobs:
   # jobs above (clippy/test/msrv) because Tauri links WebKit2GTK on Linux,
   # which those runners do not install. This dedicated job installs the
   # WebKit2GTK toolchain so the crate is genuinely compiled and clippy-linted
-  # in CI (unlike trusty-mpm-gui / trusty-code-gui, which are only excluded).
+  # in CI (unlike trusty-code-gui, which is only excluded).
   #
   # `tauri::generate_context!()` embeds the config's `frontendDist` ("../dist",
   # i.e. crates/trusty-agents/ui/dist) at compile time and hard-errors if that
@@ -1506,9 +1897,10 @@ jobs:
 
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_agents_ui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 
@@ -1552,211 +1944,10 @@ jobs:
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
 
   # --------------------------------------------------------------------------
-  # audit-ui: build- and lint-verify the auditor client's Tauri desktop shell
-  # (crates/trusty-audit/ui/src-tauri, package `trusty-audit-ui`). Issue #5477.
-  #
-  # Same shape and same reasons as `agents-ui` directly above: the crate is
-  # excluded from the headless workspace jobs because Tauri links WebKit2GTK on
-  # Linux, so this job installs that toolchain and genuinely compiles and lints
-  # it. `tauri::generate_context!()` embeds `frontendDist` ("../dist") at
-  # compile time and hard-errors when it is absent; `dist/` is a gitignored
-  # build artefact, so a placeholder index.html is stubbed before clippy. That
-  # compile- and lint-verifies the Rust side without pulling node/pnpm into CI.
-  #
-  # Unlike agents-ui this job also RUNS the crate's tests: they are pure
-  # mapping tests over `Session::execute`'s output with no window involved, so
-  # they cost seconds and are what keeps the Rust↔TypeScript wire shape from
-  # drifting.
-  # --------------------------------------------------------------------------
-  audit-ui:
-    name: trusty-audit-ui clippy
-    needs: [changes]
-    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
-    # GitHub reports a skipped required check as PASSING. `!cancelled()`
-    # overrides the implicit success() so a broken classifier costs a FULL
-    # build, never a silent skip.
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      # #7063: one line saying whether this job does real work and why.
-      # Unconditional, so the reason is present on a skipped run too. The
-      # `changes` job's `Classify Tauri UI crate relevance` step logs the
-      # full changed-file list and the derived closure this reason cites.
-      - name: Relevance decision (#7063)
-        env:
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          RELEVANT: ${{ needs.changes.outputs.trusty_audit_ui_relevant }}
-          REASON: ${{ needs.changes.outputs.trusty_audit_ui_reason }}
-        run: |
-          if [ "$DOCS_ONLY" = "true" ]; then
-            echo "trusty-audit-ui: skipped — the change set is Cargo-inert (docs_only=true)"
-          elif [ "$RELEVANT" = "false" ]; then
-            echo "trusty-audit-ui: skipped — ${REASON:-outside the dependency closure}"
-          else
-            echo "trusty-audit-ui: running — ${REASON:-relevance undetermined, failing closed}"
-          fi
-
-      - uses: actions/checkout@v5
-
-      - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        run: |
-          bash scripts/ci-apt-install.sh \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
-
-      - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: audit-ui
-          # Save only from main: a cache saved on a PR ref is readable by that
-          # PR alone but still counts against the repo-wide 10 GB quota.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # Stub the frontendDist so tauri::generate_context!() can embed it.
-      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
-      - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        run: |
-          mkdir -p crates/trusty-audit/ui/dist
-          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-audit</title></head><body></body></html>\n' \
-            > crates/trusty-audit/ui/dist/index.html
-
-      - name: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        env:
-          SKIP_UI_BUILD: "1"
-        run: cargo clippy -p trusty-audit-ui --all-targets -- -D warnings
-
-      - name: cargo test -p trusty-audit-ui
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_audit_ui_relevant != 'false'
-        env:
-          SKIP_UI_BUILD: "1"
-        run: cargo test -p trusty-audit-ui
-
-  # --------------------------------------------------------------------------
-  # mpm-gui: build- and lint-verify the fleet dashboard's Tauri desktop shell
-  # (crates/trusty-mpm-gui, package `trusty-mpm-gui`). Issue #5934.
-  #
-  # Same shape and same reasons as `agents-ui` and `audit-ui` above. Before
-  # this job, trusty-mpm-gui was excluded from every headless workspace job and
-  # had no dedicated job either, so its only CI coverage was the frontend-only
-  # `UI checks (trusty-mpm-gui)` leg — which never invokes cargo. A Rust
-  # signature change therefore reached main uncompiled: PR #5929 added a
-  # parameter to `WorkDir::resolve`, and main failed `cargo check --workspace`
-  # for hours (#5935, fixed by 15dca258).
-  #
-  # `tauri::generate_context!()` embeds `frontendDist` ("ui/dist") at compile
-  # time and hard-errors when it is absent; `ui/dist` is a gitignored build
-  # artefact, so a placeholder index.html is stubbed before clippy. The crate's
-  # build.rs writes an equivalent placeholder under SKIP_UI_BUILD=1, so the stub
-  # step is redundant today. It stays because it keeps all four Tauri jobs the
-  # same shape, and because this job then survives a change to that build.rs.
-  # --------------------------------------------------------------------------
-  mpm-gui:
-    name: trusty-mpm-gui clippy
-    needs: [changes]
-    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
-    # GitHub reports a skipped required check as PASSING. `!cancelled()`
-    # overrides the implicit success() so a broken classifier costs a FULL
-    # build, never a silent skip.
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      # #7063: one line saying whether this job does real work and why.
-      # Unconditional, so the reason is present on a skipped run too. The
-      # `changes` job's `Classify Tauri UI crate relevance` step logs the
-      # full changed-file list and the derived closure this reason cites.
-      - name: Relevance decision (#7063)
-        env:
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          RELEVANT: ${{ needs.changes.outputs.trusty_mpm_gui_relevant }}
-          REASON: ${{ needs.changes.outputs.trusty_mpm_gui_reason }}
-        run: |
-          if [ "$DOCS_ONLY" = "true" ]; then
-            echo "trusty-mpm-gui: skipped — the change set is Cargo-inert (docs_only=true)"
-          elif [ "$RELEVANT" = "false" ]; then
-            echo "trusty-mpm-gui: skipped — ${REASON:-outside the dependency closure}"
-          else
-            echo "trusty-mpm-gui: running — ${REASON:-relevance undetermined, failing closed}"
-          fi
-
-      - uses: actions/checkout@v5
-
-      - name: Install stable toolchain with clippy
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install Tauri system dependencies
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        run: |
-          bash scripts/ci-apt-install.sh \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
-
-      - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: mpm-gui
-          # Save only from main: a cache saved on a PR ref is readable by that
-          # PR alone but still counts against the repo-wide 10 GB quota.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # Stub the frontendDist so tauri::generate_context!() can embed it.
-      # SKIP_UI_BUILD=1 below stops build.rs looking for pnpm.
-      - name: Stub frontend dist for generate_context!
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        run: |
-          mkdir -p crates/trusty-mpm-gui/ui/dist
-          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-mpm-gui</title></head><body></body></html>\n' \
-            > crates/trusty-mpm-gui/ui/dist/index.html
-
-      - name: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        env:
-          SKIP_UI_BUILD: "1"
-        run: cargo clippy -p trusty-mpm-gui --all-targets -- -D warnings
-
-      # The crate has no tests today, so this asserts nothing yet. It is here so
-      # that tests added later actually run — clippy --all-targets only compiles
-      # the test target, it never executes it.
-      - name: cargo test -p trusty-mpm-gui
-        if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_mpm_gui_relevant != 'false'
-        env:
-          SKIP_UI_BUILD: "1"
-        run: cargo test -p trusty-mpm-gui
-
-  # --------------------------------------------------------------------------
   # code-gui: build- and lint-verify the tcode client's Tauri desktop shell
   # (crates/trusty-code-gui, package `trusty-code-gui`). Issue #5934.
   #
-  # Same shape and same gap as `mpm-gui` directly above. This crate does have
+  # Same shape and same reasons as `agents-ui` above. This crate does have
   # tests — `default_daemon_url_matches_tcode_default_http_port` pins its
   # compiled-in DEFAULT_DAEMON_URL against trusty-code's own DEFAULT_HTTP_PORT,
   # the drift that caused #3364 — so running them is what keeps that guard live.
@@ -1764,7 +1955,7 @@ jobs:
   code-gui:
     name: trusty-code-gui clippy
     needs: [changes]
-    # #4179: see the identical note on `mpm-gui` above.
+    # #4179: see the identical note on `agents-ui` above.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1789,9 +1980,10 @@ jobs:
 
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with clippy
+      - name: Install pinned 1.98.1 toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.trusty_code_gui_relevant != 'false'
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned per owner ruling 306 (2026-10-01); bump deliberately in its own PR together with the async-trait 0.1.92 / syn 3 upgrade.
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
 
@@ -1942,18 +2134,13 @@ jobs:
   # already committed under `ui-dist/` / `ui/dist/` via
   # include_dir!/include_str! with ZERO automated verification.
   #
-  # There are SEVEN `ui/` directories in this workspace, not six — verified
-  # by direct inspection of each package.json (the originating audit
-  # undercounted; token-drift.yml's own header independently confirms "all 7
-  # UI crates"). This job does NOT invent new test suites; it wires up
+  # There are SIX `ui/` directories in this workspace — verified by direct
+  # inspection of each package.json (token-drift.yml's own header
+  # independently confirms "all 6 UI crates"). This job does NOT invent new test suites; it wires up
   # exactly what each crate's package.json already declares:
   #   trusty-search    -> vitest run                          (real tests)
   #   trusty-agents    -> vitest run (test:unit) + svelte-check (check)
   #   trusty-code-gui  -> vitest run                          (real tests)
-  #   trusty-mpm-gui   -> vite build (build:web)   — NO test/lint/typecheck
-  #                        scripts exist in package.json at all; build:web is
-  #                        the cheapest meaningful floor (catches compile-time
-  #                        Svelte/TS errors) without inventing a test suite
   #   trusty-memory    -> vite build (build)       — same: no test scripts
   #   trusty-console   -> vite build (build) + node --test (test)  — #6360 added
   #                        src/*.test.js; `build` alone never ran them
@@ -2016,9 +2203,6 @@ jobs:
           - name: trusty-code-gui
             dir: crates/trusty-code-gui/ui
             command: pnpm run test
-          - name: trusty-mpm-gui
-            dir: crates/trusty-mpm-gui/ui
-            command: pnpm run build:web
           # #6155: the memory dashboard's source moved into trusty-console as
           # its third UI project, alongside ui-search. The matrix name follows
           # the directory so a failure names the tree to open. Not a required
@@ -2045,14 +2229,6 @@ jobs:
             # five list envelopes the daemon answers with. Not a required
             # context, so no open PR is wedged by the addition.
             command: pnpm run build && pnpm run test
-          # #5477 phase 1. No test suite yet — the shell has one view and its
-          # only logic (the Rust↔TypeScript wire shape) is asserted on the Rust
-          # side by `guided_serialises_to_the_shape_the_window_reads`. `build`
-          # proves the bundle Tauri embeds still compiles; `check` is
-          # svelte-check over the same sources.
-          - name: trusty-audit
-            dir: crates/trusty-audit/ui
-            command: pnpm run build && pnpm run check
     steps:
       - uses: actions/checkout@v5
 
@@ -2253,6 +2429,381 @@ jobs:
           fi
 
   # --------------------------------------------------------------------------
+  # Pure-shell required gates, moved here from their own workflow files by
+  # #8378 (teardown-guard.yml, tmux-exact-targets.yml, tag-publish-parity.yml,
+  # and the corpus job of website-tests.yml). They moved so `CI gate` below can
+  # name them in `needs:` — a job cannot wait on a job in another workflow
+  # file, and `CI gate` has to fail whenever any context it stands in for
+  # fails. Check names are unchanged, so the live required contexts still
+  # match.
+  #
+  # teardown-guard and tmux-exact-targets are PATH-FILTERED AT THE JOB: they
+  # skip when `changes` says the diff reaches none of their inputs
+  # (scripts/ci-gate-relevance.sh). A job skipped by `if:` still produces a
+  # check run, which branch protection counts as passing; a `paths:` trigger
+  # filter produces none and leaves a required context pending forever
+  # (#4468). `!cancelled()` plus `!= 'false'` keeps the fail-closed rule: a
+  # failed `changes` job leaves the output empty and the gate runs.
+  # --------------------------------------------------------------------------
+  teardown-guard:
+    name: Durable writes hold the teardown guard
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Every durable-write call site in crates/trusty-search/src/ acquires the
+      # per-index teardown guard in its own scope or is declared in
+      # scripts/teardown-guard-manifest.tsv (#3049). Mutation selftest FIRST:
+      # a gate that cannot fail makes the real run's green meaningless.
+      - name: Selftest (the gate must reject each known-bad shape)
+        run: bash scripts/check_teardown_guard_selftest.sh
+
+      - name: Every durable write holds the teardown guard, or is declared
+        run: bash scripts/check_teardown_guard.sh
+
+  tmux-exact-targets:
+    name: Every tmux -t target is exact
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # #8443: a bare `-t <name>` resolves by prefix, so every tmux target is
+      # rendered exact. Selftest FIRST: the gate must still reject a bare
+      # target, a stale allowlist row and an empty scan.
+      - name: Selftest (the gate must reject each known-bad shape)
+        run: bash scripts/check_tmux_exact_targets_selftest.sh
+
+      - name: No bare tmux -t target
+        run: bash scripts/check_tmux_exact_targets.sh
+
+  # The three release-decision selftests (#5620, #5755). Each gate can only run
+  # where a publish runs, so CI runs its fixtures to keep it able to fail.
+  # Unconditional: ~10 s each, and a `paths:` filter is scoped to what changed,
+  # not to what could break the gate — #6115 merged red that way (#6120).
+  # Separate jobs, so a red one names which decision broke.
+  parity-selftest:
+    name: Parity gate self-test (must catch a drifted tag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 brings tags with it, which case 11 of the self-test uses
+      # to run the gate against the real trusty-review-v0.15.0 (cut at the
+      # same 246e4ca2 as tga-v2.17.0; tga has left this workspace). That case self-skips when
+      # the tag is absent, so a shallow clone degrades it to a skip rather than
+      # a false failure — the synthetic cases carry the coverage either way.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Tag/publish parity self-test
+        run: bash scripts/check-tag-publish-parity-selftest.sh
+
+  check5-decision:
+    name: CHECK 5 decision self-test (0 compared must never print PASS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 5 decision self-test
+        run: bash scripts/preflight-check5-selftest.sh
+
+  check8-decision:
+    name: CHECK 8 decision self-test (a run's head_sha is not what it gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight CHECK 8 decision self-test
+        run: bash scripts/preflight-check8-selftest.sh
+
+  # The website CONTENT gate (owner ruling 2026-09-18): every website suite
+  # that reads real repository content runs here and nowhere else, and it is
+  # the only suite a docs, content or changelog change can turn red. Moved
+  # from website-tests.yml unchanged; it gates its costly steps on
+  # scripts/ci-website-relevance.sh, which counts this file as an input.
+  website-corpus:
+    name: Website content corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Classify website content corpus relevance
+        id: relevance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-website-relevance.sh corpus
+
+      - name: Read the pinned pnpm version from website/package.json
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([0-9][0-9.]*\).*/\1/p' website/package.json)"
+          if [ -z "$version" ]; then
+            echo "::error::no pnpm@<version> found in website/package.json packageManager" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        if: steps.relevance.outputs.relevant != 'false'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.pin.outputs.version }}
+
+      - name: Install Node.js
+        if: steps.relevance.outputs.relevant != 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+
+      - name: Verify the resolved pnpm is the pinned one
+        if: steps.relevance.outputs.relevant != 'false'
+        run: |
+          set -euo pipefail
+          resolved="$(pnpm --version)"
+          expected="${{ steps.pin.outputs.version }}"
+          if [ "$resolved" != "$expected" ]; then
+            echo "::error::pnpm $resolved resolved, but website/package.json pins $expected" >&2
+            exit 1
+          fi
+          echo "pnpm $resolved matches the pin"
+
+      - name: Install dependencies
+        if: steps.relevance.outputs.relevant != 'false'
+        working-directory: website
+        run: pnpm install --frozen-lockfile
+
+      # No Chromium and no `vite build`: the `corpus` project is plain Node.
+      - name: Run the website content corpus gate
+        if: steps.relevance.outputs.relevant != 'false'
+        working-directory: website
+        run: pnpm run test:corpus
+
+  # --------------------------------------------------------------------------
+  # changelog-fragment: the per-PR changelog gates, folded in from the retired
+  # changelog-fragment.yml (owner ruling 407, Refs #8388): the fragment gate
+  # (#4476), the merge-time half of the assembler gate (#6406) and the content
+  # gates (ADR-0064, #8388). It sits under `CI gate`, so it is required through
+  # that one context rather than through its own.
+  #
+  # NO job-level `if:` and NO dependency on `changes`: a Cargo-inert (docs or
+  # content) PR is exactly the PR these gates exist for, and `CI gate` accepts
+  # no skip for this row (scripts/ci-gate-verdict.sh). The gate compares a
+  # branch with its base, so every step runs on a `pull_request` and on a
+  # `workflow_dispatch` from a ref other than main (diffing against main), and
+  # nothing else: a push to main, or a dispatch on main, reports success without
+  # work. A dispatch on a PR branch must not report a green row for no work.
+  #
+  # Every step after the checkout carries `!cancelled()`, so a failed step does
+  # not hide the steps behind it. The job still fails if any one step failed.
+  # --------------------------------------------------------------------------
+  changelog-fragment:
+    name: Per-PR changelog fragment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 — the gate needs `git merge-base` against the base
+      # branch, which a shallow checkout cannot resolve. It also brings the
+      # TAGS, which the #6695 release-window evidence path and the #8388 bump
+      # gate read; with no tags in the checkout both refuse (fail closed).
+      - uses: actions/checkout@v5
+        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main') }}
+        with:
+          fetch-depth: 0
+
+      # Scan-floor mutation self-test (#4618): re-proves in CI that this gate
+      # REFUSES a vacuous scan. Runs before the real gate — a gate that cannot
+      # fail makes the real run's green meaningless.
+      - name: Scan-floor selftest (must refuse an empty scan)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_scan_floor_selftest.sh changelog_fragment changelog_fragment_tool_error
+
+      # Fragment-validation selftest. The gate asks the release assembler
+      # (`assemble-changelog.sh <crate> --stdout`), so gate and assembler cannot
+      # disagree; this proves the assembler still REJECTS a malformed fragment,
+      # including the four-categories-in-one-file case from the 1.3.3 release.
+      - name: Fragment-validation selftest (must reject a malformed fragment)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/assemble_changelog_selftest.sh
+
+      # Stale-base selftest (#5018): a branch touching crate A only, with crate
+      # B released on main since the fork point. The gate must refuse the stale
+      # base, pass against the live branch, and still fail a missing fragment.
+      - name: Stale-base selftest (must refuse a pinned base.sha)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_base_selftest.sh
+
+      # Release-window selftest (#6695): the fragment gate and
+      # check-changelog-assembled.sh demanded opposite states of the same PR
+      # (branch fix/prepublish-doc-links-20260902, ffe03c23c). Both must now
+      # pass that shape, and the evidence path must still reject a bullet
+      # written into an already-tagged section, one outside the cut section,
+      # and a stranded fragment.
+      - name: Release-window selftest (both changelog gates must agree)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_release_window_selftest.sh
+
+      # Crate-attribution selftest (#4576): nested crate source was selected by
+      # a `case` glob and then silently DROPPED by a one-level sed (PR #5796).
+      # Nested source must be attributed, an unattributable path must fail, and
+      # build.rs / tests/ / benches/ / testdata/ / dist bundles / Cargo.toml
+      # still need no fragment.
+      - name: Crate-attribution selftest (must not drop nested crate source)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_attribution_selftest.sh
+
+      # Shared-classification selftest (#5765): this gate and
+      # `check-pr-version-bump.sh` both read scripts/lib/source_class.sh; the
+      # selftest re-proves the classification and that neither has grown a
+      # private copy.
+      - name: Source-classification selftest (both gates share one definition)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_source_class_selftest.sh
+
+      # Author-mode selftest (#6947): `--staged` and `--file` must not weaken
+      # the DEFAULT verdict this job runs below.
+      - name: Author-mode selftest (--staged and --file must not weaken the gate)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_staged_selftest.sh
+
+      # Bump-mode selftest (#5674): `bump-version.sh --no-changelog` leaves the
+      # fragments this gate demands in place, and a release cut still assembles
+      # them (PR #5673).
+      - name: Bump-mode selftest (a mid-PR bump must not eat fragments)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/bump_version_selftest.sh
+
+      # Assembler-gate selftest (#7439): the failing and passing branches of
+      # the assembled-sections gate below, including a PR that deletes a
+      # CHANGELOG.md (the #7359 pipefail bug).
+      - name: Assembler-gate selftest (deletion passes, hand-written section fails)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check-pr-changelog-assembled-selftest.sh
+
+      # #8388: the content/ gates (ADR-0064) — manifest, member versions, the
+      # bundle-version bump and the content changelog arm of the fragment gate
+      # — each refuse their failure cases before the real runs below.
+      - name: Content gates selftest (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_content_selftest.sh
+
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot, so the merge base cannot lag behind the merge
+      # ref's own first parent. See the ATTRIBUTION note in
+      # scripts/check_changelog_fragment.sh (PR #5018 / run 31431273762).
+      - name: Refresh the base branch ref
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+
+      - name: Enforce per-PR changelog fragment
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check_changelog_fragment.sh
+
+      # #8388: content/manifest.toml lists every versioned content member and
+      # its bundle version is never below one of them.
+      - name: Enforce content manifest and member versions (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: python3 scripts/check_content.py tree
+
+      # #8388: a content member change must land under a bundle version no
+      # content-v* tag has used, and the version never goes down.
+      - name: Enforce content bundle version bump (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          CONTENT_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: python3 scripts/check_content.py bump
+
+      # Merge-time half of the changelog-assembler gate (#6406); the
+      # publish-time half is preflight-publish.sh CHECK 9. It asks "did a new
+      # release section consume the fragments it claims to have folded in", and
+      # fires ONLY on a NEW version heading. Base is origin/<base ref>, never
+      # `github.event.pull_request.base.sha` (#5018).
+      - name: Enforce assembled CHANGELOG sections (no stranded fragments)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          PR_CHANGELOG_ASSEMBLED_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check-pr-changelog-assembled.sh
+
+  # --------------------------------------------------------------------------
+  # ci-gate: ONE context that fails whenever any context it stands in for
+  # fails (#8378). The owner-approved required list is CI gate, line-cap,
+  # generation-artifact-lint, test-pointers, PR version bump and
+  # capabilities-drift; this job is what lets the covered contexts leave it.
+  # CI gate is the required context (owner ruling 407).
+  #
+  # Invariant: a required context must always produce a check run, and a
+  # skip must be one the classifier asked for. `always()` makes this job run
+  # and report even when a need failed or was skipped;
+  # scripts/ci-gate-verdict.sh then fails on a failed or cancelled need, a
+  # failed `changes` job (fail closed), a skip `changes` did not order, or a
+  # context whose job is missing from `needs:`. Its table of covered contexts
+  # is the single list; ci-gate-selftest.sh holds it equal to `needs:` below.
+  # --------------------------------------------------------------------------
+  ci-gate:
+    name: CI gate
+    needs:
+      [
+        changes,
+        fmt,
+        clippy,
+        msrv,
+        affected,
+        trusty-common-lanes,
+        agents-ui,
+        code-gui,
+        search-daemon-smoke,
+        rustdoc-links,
+        teardown-guard,
+        tmux-exact-targets,
+        parity-selftest,
+        check5-decision,
+        check8-decision,
+        website-corpus,
+        changelog-fragment,
+      ]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Every covered context passed, or was skipped by the classifier
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: bash scripts/ci-gate-verdict.sh
+
+  # --------------------------------------------------------------------------
   # notify-main-failure: file/refresh a tracking GitHub issue when CI goes red
   # on a `push` to `main` (post-merge breakage). ci.yml already re-runs on
   # push: branches: [main], so breakage IS detected — but nothing alerted
@@ -2331,13 +2882,18 @@ jobs:
         test-doc,
         msrv,
         agents-ui,
-        audit-ui,
-        mpm-gui,
         code-gui,
         embedder-cuda-check,
         ui-checks,
         search-daemon-smoke,
         rustdoc-links,
+        teardown-guard,
+        tmux-exact-targets,
+        parity-selftest,
+        check5-decision,
+        check8-decision,
+        website-corpus,
+        ci-gate,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2357,13 +2913,18 @@ jobs:
             test-doc=${{ needs['test-doc'].result }}
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
-            audit-ui=${{ needs['audit-ui'].result }}
-            mpm-gui=${{ needs['mpm-gui'].result }}
             code-gui=${{ needs['code-gui'].result }}
             embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}
             rustdoc-links=${{ needs['rustdoc-links'].result }}
+            teardown-guard=${{ needs.changes.outputs.teardown_guard_relevant != 'false' && needs['teardown-guard'].result || 'success' }}
+            tmux-exact-targets=${{ needs.changes.outputs.tmux_targets_relevant != 'false' && needs['tmux-exact-targets'].result || 'success' }}
+            parity-selftest=${{ needs['parity-selftest'].result }}
+            check5-decision=${{ needs['check5-decision'].result }}
+            check8-decision=${{ needs['check8-decision'].result }}
+            website-corpus=${{ needs['website-corpus'].result }}
+            ci-gate=${{ needs['ci-gate'].result }}
         run: bash scripts/classify-ci-results.sh > /dev/null
 
       - name: File or update tracking issue

@@ -2,10 +2,10 @@
 //! under the operator's real `$HOME`, spawns no tmux process during startup
 //! auto-discovery.
 //!
-//! Why its own test binary, and why a second one: the proof narrows `$PATH` to a
-//! single directory holding a fake `tmux`, and `$PATH` is process-global — the
-//! same reason `scratch_home_tmux_gate.rs` is its own binary, and the reason it
-//! holds exactly one test. That file cannot host this case: it reassigns `$HOME`
+//! Why the `env_serial` target, and why a second file: the proof narrows `$PATH`
+//! to a single directory holding a fake `tmux`, and `$PATH` is process-global —
+//! the same reason `scratch_home_tmux_gate.rs` runs there, one test at a time
+//! (#8345). That file cannot host this case: it reassigns `$HOME`
 //! to a scratch directory, which is the OTHER quadrant. #6348 is the quadrant
 //! where `$HOME` is untouched and only the data root is scratch, so a test that
 //! reassigns `$HOME` would pass on the pre-existing `$HOME` arm whether or not
@@ -17,7 +17,7 @@
 //! `DaemonState` on a temp root, and runs `discover_all` twice — once gated,
 //! once with the opt-in.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test scratch_root_tmux_gate`.
+//! `cargo test -p trusty-mpm --test env_serial scratch_root_tmux_gate::`.
 
 #![cfg(all(unix, feature = "daemon"))]
 
@@ -39,8 +39,8 @@ struct EnvOverride {
 impl EnvOverride {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
-        // SAFETY: this binary holds exactly one test, so no other thread reads
-        // or writes the environment while this runs.
+        // SAFETY: `env_serial` runs one test at a time, so no other thread
+        // reads or writes the environment while this runs.
         unsafe { std::env::set_var(key, value) };
         Self { key, prev }
     }
@@ -48,7 +48,7 @@ impl EnvOverride {
 
 impl Drop for EnvOverride {
     fn drop(&mut self) {
-        // SAFETY: as in `set` — single-test binary.
+        // SAFETY: as in `set` — one test at a time.
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(self.key, v) },
             None => unsafe { std::env::remove_var(self.key) },

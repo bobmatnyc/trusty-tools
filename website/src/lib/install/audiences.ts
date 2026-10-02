@@ -1,5 +1,5 @@
 /**
- * Why: nine products install nine different ways, and the differences that
+ * Why: eight products install eight different ways, and the differences that
  * matter most are the ones a reader cannot guess — `tctl install trusty-code`
  * fails, `tctl install trusty-review` quietly installs three crates, and the
  * macOS permission a product needs is per-product and easy to publish
@@ -7,16 +7,18 @@
  * of those facts has one place to be checked, and the page cannot show a
  * command for one audience while claiming a different one for another.
  *
- * What: nine `Audience` rows, plus the `Prerequisite` rows they share. A
+ * What: eight `Audience` rows, plus the `Prerequisite` rows they share. A
  * prerequisite is written ONCE and referenced by id, so the page renders the
- * `tctl` bootstrap and the API-key setup a single time instead of nine.
+ * `tctl` bootstrap and the API-key setup a single time instead of eight.
  *
  * Sourcing rule, stricter than `$lib/tools`: every command, env-var name, TCC
  * category, API-key requirement and MCP registration below comes from
  * `docs/research/install-paths-by-audience.md` (#5109, its UNKNOWNs resolved
  * in #5116/#6725), which checked all nine paths against crate source,
- * crates.io and the release tooling. Nothing here was derived from a README or
- * from an adjacent product's shape. Two deliberate, marked exceptions:
+ * crates.io and the release tooling — tga's row was removed in #8507 when the
+ * tool moved to its own site, so eight of those nine paths remain here.
+ * Nothing here was derived from a README or from an adjacent product's shape.
+ * Two deliberate, marked exceptions:
  *
  *   - `export <NAME>=<value>` lines. The env-var NAMES are verbatim from that
  *     doc; `export` is the shell mechanism for setting them, which the doc
@@ -25,10 +27,10 @@
  *     the doc; the surrounding `mcpServers` key is the config file's own
  *     schema, not a claim about any crate.
  *
- * Anything the doc leaves as prose stays prose here — tga's `--config` flag
- * and trusty-agents' signing script are named, not turned into a command
- * block, because the doc gives no exact invocation for either and inventing
- * one is the failure mode this module exists to prevent.
+ * Anything the doc leaves as prose stays prose here — trusty-agents' signing
+ * script is named, not turned into a command block, because the doc gives no
+ * exact invocation for it and inventing one is the failure mode this module
+ * exists to prevent.
  *
  * Test: `src/lib/install/audiences.test.ts` re-derives crate directories and
  * `tctl` stable-set membership from the repository and pins the TCC
@@ -135,7 +137,7 @@ export const PREREQUISITES: Prerequisite[] = [
 	{
 		id: 'tctl',
 		title: 'The tctl control plane',
-		body: 'tctl installs seven of the nine products on this page. It prefers a prebuilt tarball on macOS arm64, Linux x86_64 and Linux arm64, verifies its published SHA-256, and falls back to cargo install --locked from crates.io on any other host. It is also the only path that resolves a product’s runtime dependencies for you and keeps macOS signing identities stable across upgrades, so a permission you grant once survives the next install.',
+		body: 'tctl installs six of the eight products on this page. It prefers a prebuilt tarball on macOS arm64, Linux x86_64 and Linux arm64, verifies its published SHA-256, and falls back to cargo install --locked from crates.io on any other host. It is also the only path that resolves a product’s runtime dependencies for you and keeps macOS signing identities stable across upgrades, so a permission you grant once survives the next install.',
 		commands: [{ command: TCTL_BOOTSTRAP, label: 'Copy the tctl bootstrap command' }]
 	},
 	{
@@ -153,7 +155,7 @@ export const PREREQUISITES: Prerequisite[] = [
 	{
 		id: 'git',
 		title: 'git',
-		body: 'trusty-agents is installed by cloning this repository. trusty-code reads git metadata for branch context and tga reads git history through git2, so both want a git repository to point at.',
+		body: 'trusty-agents is installed by cloning this repository, and trusty-code reads git metadata for branch context, so both want a git repository to point at.',
 		commands: []
 	},
 	{
@@ -647,48 +649,6 @@ export const AUDIENCES: Audience[] = [
 			category: 'app-data',
 			summary:
 				'tagent needs the App Data category, the same narrow one tm needs and nothing wider. It reads $HOME and project .trusty-agents/ state, and project-local .claude/ directories that live under another application’s data category. Because it is installed outside tctl, its signing identity is not maintained for you — run scripts/install-trusty-agents-signed.sh from the clone if you want the grant to survive a rebuild.'
-		}
-	},
-	{
-		id: 'tga',
-		label: 'tga',
-		binary: 'tga',
-		tagline: 'Git analytics',
-		lede: 'A pure CLI over git history, and the only product whose published version matches this repository exactly. It is an optional stable-set member and a leaf: tctl installs it alone.',
-		prerequisites: [
-			{ id: 'tctl', requirement: 'recommended', note: 'The install path this page recommends.' },
-			{
-				id: 'git',
-				requirement: 'required',
-				note: 'It reads repository history through git2. SQLite is bundled — nothing to install.'
-			}
-		],
-		steps: [
-			{
-				title: 'Install it',
-				body: 'The package is named tga even though its directory is crates/trusty-git-analytics.',
-				commands: [
-					{ command: 'tctl install tga', label: 'Copy the tga tctl install' },
-					{ command: 'cargo install tga --locked', label: 'Copy the tga cargo install' }
-				],
-				notes: [
-					'Do not copy a built binary onto your PATH by hand. tga’s own user guide still shows a cp and an mv into /usr/local/bin; on macOS that leaves a stale kernel signature cache and the next run is killed in a way that looks like an out-of-memory kill. cargo install renames atomically instead.'
-				]
-			},
-			{
-				title: 'Point it at a config file',
-				body: 'One global flag, -c or --config, on every subcommand. It defaults to config.yaml resolved against your current directory.',
-				commands: [],
-				notes: [
-					'There is no ~/.config/tga/ fallback and no environment-variable override, whatever INSTALL-CONVENTION.md says.',
-					'tga has no MCP transport at all — nothing to register, by design.'
-				]
-			}
-		],
-		tcc: {
-			category: 'none',
-			summary:
-				'Nothing to grant. tga reads local git history and nothing else, which has never raised a prompt.'
 		}
 	}
 ];

@@ -73,6 +73,8 @@ use serde_json::Value;
 /// `errors_when_the_parent_cannot_be_created`,
 /// `an_acquisition_failure_names_the_sidecar`.
 pub(crate) fn with_settings_lock<R>(settings_path: &Path, f: impl FnOnce() -> R) -> io::Result<R> {
+    // #8545: every locked settings write passes here; fenced in tests.
+    crate::core::home_write_fence::check(settings_path);
     let stable = stable_path(settings_path)?;
     trusty_common::file_lock::with_exclusive_lock(&stable, f).map_err(|source| {
         io::Error::new(

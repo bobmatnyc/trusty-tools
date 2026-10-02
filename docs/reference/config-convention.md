@@ -193,6 +193,89 @@ overrides, PM toggles) is **unchanged** and still read. The YAML convention
 above is **additive** — it carries its own settings without disturbing the
 existing TOML.
 
+### The `[pm_guard]` section (#9018)
+
+```toml
+# Register the `tm hook --pm-guard` PreToolUse entry at every launch?
+[pm_guard]
+enabled = false   # default: true
+```
+
+`enabled = false` turns the PM guard off (owner ruling 307). The launch, resume
+and `tm install` writers then leave the `<tm> hook --pm-guard` entry out of
+`.claude/settings.json` and remove one a prior launch wrote, matched by its
+` hook --pm-guard` suffix. Every other managed hook stays, including the
+observability `tm hook` entry. A missing key or section means `true`, and so
+does a `config.toml` that cannot be read or parsed: a broken file fails closed
+to guarded. The `tm doctor` `pm_guard` row reports the state, and warns
+"pm-guard disabled by [pm_guard] enabled = false" when the key is off.
+
+A running Claude Code session keeps the hooks it loaded at startup, so the
+change takes effect at the session's next launch.
+
+### The `[accounts]` section (#9091)
+
+```toml
+# Which gh account clones and spawns sessions for a GitHub org.
+[accounts]
+duettoresearch = "bob-duetto"
+```
+
+Each key is a GitHub org (or user) name, matched without case, and each value
+is a `gh` login already logged in on this host. Only github.com repositories
+are mapped. An SSH host alias is resolved through `~/.ssh/config` first, so
+`git@github-bob:duettoresearch/x` maps when `github-bob` names github.com.
+gitlab.com, Bitbucket and GitHub Enterprise Server remotes are never mapped.
+
+Precedence, highest first. For a github.com remote, clone, spawn and the
+launch preflight read the registry pin through one selection, so a session runs
+as the account its base clone was made with. For any other host (for example
+GitHub Enterprise Server), clone and preflight do not read the pin, and the
+spawn still applies and proves it.
+
+1. An explicit selection: `--account`, `--user` or `--u`, or a
+   `<login>@<owner>/<repo>` positional.
+2. The registry pin for the repository, written by an earlier flag or by
+   `tm projects register --gh-account`. The registry pin wins over this table.
+   A record pinned by any field — `gh_account`, `github.account`,
+   `github.config_dir` or `github.token_env` — counts, and the table is not
+   read. The login is `gh_account`, else `github.account`; a pin naming
+   neither runs with the identity it pinned before this table existed.
+3. This table, looked up by the repository owner.
+4. The ambient identity, exactly as before. An org with no entry stays here.
+
+The table applies at the managed base clone (`tm <owner>/<repo>`, `tm run`,
+`tm launch --worktree`, the daemon's in-project spawn) and at every session
+spawn whose project pins no account. It is never written to the project
+registry, so editing the table changes the next clone or spawn.
+
+This table is read strictly, unlike the rest of the file. A malformed table is
+an error that names the problem: a value that is not a string, a blank or
+invalid login, two orgs that differ only in case, or `accounts` that is not a
+table. A TOML syntax error (an unquoted login is the common case) is an error
+when any line of the file names `accounts`: a header `[accounts]`,
+`["accounts"]`, `['accounts']`, `[[accounts]]` or `[accounts.<x>]`, or a key
+line `accounts = …` or `accounts.<org> = …`. Whitespace, quotes and `#`
+comments are ignored in the match, and a matching key line under another table
+also counts. In a file where no line names `accounts`, a syntax error reads as
+an empty table and logs a warning, the way the rest of the file treats it.
+
+When the table cannot be read:
+
+- `tm run <owner>/<repo>` and `tm launch` refuse before anything is cloned or
+  spawned, and print the error, which names `~/.trusty-mpm/config.toml` and the
+  parse error.
+- A clone refuses with that error and leaves the disk unchanged.
+- A spawn gets a `gh` token that authenticates as nobody and logs the error.
+- The `tm doctor` row `org_accounts` reports `Fail` with the error. It reports
+  `Ok` with the number of mapped orgs, `Ok` "missing" when there is no table,
+  and `Warn` for a syntax error read past as an empty table.
+
+Nothing falls back to the machine's active account. A command that names its
+account explicitly, or a repository with a registry pin, never reads the table.
+When a mapped login has no proven token, the spawn warning names this table and
+suggests `gh auth login` for that account, or editing the table.
+
 ## Adding this convention to a crate
 
 Crate maintainers implementing this convention in a new trusty-* crate should

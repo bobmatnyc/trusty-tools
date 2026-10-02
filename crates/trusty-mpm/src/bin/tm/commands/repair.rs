@@ -44,9 +44,24 @@ pub(crate) async fn dispatch(
     match action {
         // #7602: the only arm that needs the daemon — the delegation map lives
         // there and nowhere else.
-        RepairAction::Delegation { agent_id, force } => {
-            repair_delegation(client, url, &agent_id, force).await
-        }
+        // #8257: a listing, or a repair by delegation id or by agent id.
+        RepairAction::Delegation {
+            agent_id,
+            delegation_id,
+            list,
+            force,
+        } => match (list, delegation_id, agent_id) {
+            (Some(dir), _, _) => super::repair_delegation_list::list(client, url, &dir).await,
+            (None, Some(id), _) => {
+                let path = format!("/api/v1/delegations/by-id/{id}/repair");
+                repair_delegation(&path, &format!("delegation {id}"), force).await
+            }
+            (None, None, Some(agent_id)) => {
+                let path = format!("/api/v1/delegations/{agent_id}/repair");
+                repair_delegation(&path, &format!("agent {agent_id}"), force).await
+            }
+            (None, None, None) => anyhow::bail!("name an agent id, --delegation-id, or --list"),
+        },
         RepairAction::Deploy { force } => repair_deploy(force),
         RepairAction::PushGuard { path, dry_run } => {
             super::push_guard::repair_push_guard(path, dry_run)
@@ -76,16 +91,20 @@ pub(crate) async fn dispatch(
 /// outcome. `no_record` and `refused` both exit nonzero — the first because the
 /// operator named an agent nothing knows, which is a fact they must see rather
 /// than a success; the second because the gate declined.
-/// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`;
-/// the outcomes themselves in `delegation_repair_tests.rs`.
-async fn repair_delegation(
-    client: &reqwest::Client,
-    url: &str,
-    agent_id: &str,
-    force: bool,
-) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/delegations/{agent_id}/repair"))
+/// #8531: always over the daemon socket, which proves this process's pid to
+/// the daemon; the owning session is established from it. No caller id is
+/// sent — the daemon would ignore one.
+/// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`,
+/// `cli_rejects_a_caller_session_argument_8257`; the outcomes themselves in
+/// `delegation_repair_tests.rs`.
+async fn repair_delegation(path: &str, target: &str, force: bool) -> anyhow::Result<()> {
+    // #8257: `path` is the agent-id or the delegation-id endpoint; `target`
+    // names which in every line printed below.
+    // #8531: socket only, never HTTP — HTTP cannot prove the caller, so an
+    // owning session's own clear would be refused there.
+    let daemon = trusty_mpm::client::DaemonClient::from_resolved_socket()?;
+    let resp = daemon
+        .post(path)
         .json(&serde_json::json!({ "force": force }))
         .send()
         .await?;
@@ -100,18 +119,18 @@ async fn repair_delegation(
     use trusty_mpm::daemon::services::delegation_repair::RepairOutcome;
     match outcome {
         RepairOutcome::Ended { records } => {
-            println!("ended {records} stuck delegation record(s) for agent {agent_id} (cancelled)");
+            println!("ended {records} stuck delegation record(s) for {target} (cancelled)");
             Ok(())
         }
         RepairOutcome::AlreadyEnded { records } => {
-            println!("nothing to repair: all {records} record(s) for agent {agent_id} have ended");
+            println!("nothing to repair: all {records} record(s) for {target} have ended");
             Ok(())
         }
         // The gate's own words — paraphrasing them would hide which arm fired,
         // which is the only thing that says what to do next.
         RepairOutcome::Refused { reason } => anyhow::bail!("repair refused: {reason}"),
         RepairOutcome::NoRecord => anyhow::bail!(
-            "no delegation names agent {agent_id}. The daemon's delegation map is rebuilt empty \
+            "no delegation names {target}. The daemon's delegation map is rebuilt empty \
              at every start, so this is undeterminable rather than proof the agent is gone \
              (ADR-0045)"
         ),

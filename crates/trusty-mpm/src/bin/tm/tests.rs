@@ -421,13 +421,26 @@ fn cli_parses_doctor() {
                 prune_stale_skills: false,
                 fix_skills: false,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));
+}
+
+#[test]
+fn cli_parses_doctor_dir_and_refuses_it_beside_a_write_flag() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor { flags: DoctorFlags { dir: Some(d), .. } } if d == std::path::Path::new("/tmp/x")
+    ));
+    // #7757: repairs act on the cwd, so a scoped report beside them is refused.
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x", "--fix"]).is_err());
 }
 
 #[test]
@@ -440,10 +453,12 @@ fn cli_parses_doctor_prune_stale_skills() {
                 prune_stale_skills: true,
                 fix_skills: false,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));
@@ -466,10 +481,12 @@ fn cli_parses_doctor_fix_skills() {
                 prune_stale_skills: false,
                 fix_skills: true,
                 fix_agents: false,
+                fix_launchd_secrets: false,
                 fix: false,
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
             }
         }
     ));
@@ -824,6 +841,7 @@ fn cli_parses_launch() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -841,6 +859,7 @@ fn cli_parses_launch_with_dir() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
@@ -860,6 +879,7 @@ fn cli_parses_launch_with_style() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
@@ -889,6 +909,7 @@ fn cli_parses_launch_with_worktree() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -898,6 +919,93 @@ fn cli_parses_launch_with_worktree() {
             );
         }
         other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --twin` reaches the launch as an explicit arming request, and a
+/// bare `tm launch` never does (#8878, ruling D1).
+#[test]
+fn cli_parses_launch_with_twin() {
+    for (argv, want) in [
+        (&["trusty-mpm", "launch", "--twin"][..], true),
+        (&["trusty-mpm", "launch"][..], false),
+    ] {
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Launch { twin, worktree, .. } => {
+                assert_eq!(twin, want, "{argv:?}");
+                assert!(!worktree, "{argv:?}");
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+}
+
+/// `--twin --worktree` is refused, and only that pair (#8878 review).
+#[test]
+fn twin_preflight_refuses_only_twin_with_worktree() {
+    use crate::commands::launch_twin::preflight;
+    for (twin, worktree, refused) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let got = preflight(twin, worktree);
+        assert_eq!(got.is_err(), refused, "twin={twin} worktree={worktree}");
+    }
+}
+
+/// `tm launch --twin --worktree` is refused before `launch` resolves, inits
+/// or provisions anything — the directory is not even read (#8878 review).
+#[tokio::test]
+async fn a_twin_worktree_launch_is_refused_before_anything_is_touched() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let absent = root.path().join("never-created");
+    let err = crate::commands::launch::launch(
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        Some(absent.to_string_lossy().into_owned()),
+        None,
+        true,
+        crate::commands::managed_workspace::LaunchDir::OperatorCwd,
+        None,
+        true,
+    )
+    .await
+    .expect_err("a twin worktree launch is refused");
+    assert!(err.to_string().contains("`--worktree`"), "{err}");
+    assert!(!absent.exists());
+}
+
+/// A twin session must run in the directory the grant was checked for.
+#[test]
+fn twin_placement_must_be_the_checked_directory() {
+    use crate::commands::launch_twin::confirm_placement;
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let (checked, other) = (root.path().join("checked"), root.path().join("other"));
+    std::fs::create_dir(&checked).expect("mkdir");
+    std::fs::create_dir(&other).expect("mkdir");
+    assert!(confirm_placement(&checked, &checked.join(".")).is_ok());
+    assert!(confirm_placement(&checked, &other).is_err());
+    assert!(confirm_placement(&checked, &root.path().join("absent")).is_err());
+}
+
+/// The no-origin and reattach refusals fire for `--twin` only; a plain launch
+/// passes both (#8878 review).
+#[test]
+fn twin_refusals_apply_only_to_twin_launches() {
+    use crate::commands::launch_twin::{refuse_live_checkout, refuse_reattach};
+    for twin in [false, true] {
+        assert_eq!(
+            refuse_live_checkout(twin).is_err(),
+            twin,
+            "live, twin={twin}"
+        );
+        assert_eq!(
+            refuse_reattach(twin, "tm-x").is_err(),
+            twin,
+            "reattach, twin={twin}"
+        );
     }
 }
 
@@ -1175,6 +1283,70 @@ fn cli_account_flag_after_subcommand() {
         "--account",
         "bob-duetto",
         "bobmatnyc/trusty-tools",
+    ])
+    .unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert!(matches!(cli.command, Some(Command::Run { .. })));
+}
+
+/// 🔴 #5850 REGRESSION: `--user <login>` must bind the same field as
+/// `--account <login>`.
+///
+/// Why this is the assertion: the owner's report was
+/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto`
+/// failing at clap parsing. `--user` is the spelling `gh` itself uses for the
+/// same concept (`gh auth token -u`), so it has to be accepted, and it has to
+/// land on `cli.account` — an alias that parsed into a SECOND field would give
+/// the two spellings different behaviour downstream.
+#[test]
+fn cli_parses_user_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #9090 REGRESSION: `--u <login>` binds the same field as `--account`.
+/// The form × position matrix is in `run_target_tests.rs`.
+#[test]
+fn cli_parses_u_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--u", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #5850 REGRESSION (fail-open): a blank `--user`/`--account` given BEFORE
+/// the repository is refused at parse time.
+///
+/// Why this is the assertion: `tm --user= <url>` parsed as `Some("")`, and
+/// `resolve_account` reads a blank flag as absent, so the clone ran as the
+/// machine's global `gh` account. Same refusal text as the trailing form
+/// (`bare_form_rejects_an_empty_account_value`).
+#[test]
+fn cli_rejects_a_blank_account_flag_before_the_repository() {
+    for argv in [
+        &["trusty-mpm", "--user=", "acme/widget"][..],
+        &["trusty-mpm", "--account=", "acme/widget"][..],
+        &["trusty-mpm", "--user", "", "acme/widget"][..],
+        &["trusty-mpm", "--account", "   ", "acme/widget"][..],
+        &["trusty-mpm", "--user=  ", "run", "acme/widget"][..],
+    ] {
+        let err = Cli::try_parse_from(argv)
+            .expect_err("a blank account flag must refuse, not fall back to the global account");
+        assert!(
+            err.to_string().contains("needs a gh login"),
+            "{argv:?}: {err}"
+        );
+    }
+}
+
+/// The alias inherits `global = true`, so it also parses AFTER the positional
+/// — the exact shape the owner typed (`tm <url> --user <login>`).
+#[test]
+fn cli_user_alias_after_subcommand() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "run",
+        "https://github.com/duettoresearch/jev-matching",
+        "--user",
+        "bob-duetto",
     ])
     .unwrap();
     assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
@@ -1801,6 +1973,61 @@ fn resolve_managed_target_empty_list_is_none() {
     );
 }
 
+/// #8378 PR-C: the three `tm content` verbs and their flags.
+#[test]
+fn cli_parses_content_install_update_and_status() {
+    use crate::cli::ContentAction;
+    let parse = |args: &[&str]| {
+        let mut argv = vec!["trusty-mpm", "content"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Content { action } => action,
+            other => panic!("expected content, got {other:?}"),
+        }
+    };
+    match parse(&["install", "--from", "/b/content-v0.1.0.tar.gz"]) {
+        ContentAction::Install { from } => {
+            assert_eq!(from, std::path::Path::new("/b/content-v0.1.0.tar.gz"));
+        }
+        other => panic!("expected install, got {other:?}"),
+    }
+    assert!(matches!(
+        parse(&["update"]),
+        ContentAction::Update { content_ref: None }
+    ));
+    match parse(&["update", "--content-ref", "content-v0.2.0"]) {
+        ContentAction::Update { content_ref } => {
+            assert_eq!(content_ref.as_deref(), Some("content-v0.2.0"));
+        }
+        other => panic!("expected update, got {other:?}"),
+    }
+    assert!(matches!(parse(&["status"]), ContentAction::Status));
+    assert!(Cli::try_parse_from(["trusty-mpm", "content", "install"]).is_err());
+}
+
+/// #8389 owner ruling: `install --help` and `update --help` state that the
+/// sidecar is required and checks the transfer only, with a first-use pin.
+#[test]
+fn cli_content_help_states_the_sidecar_limit() {
+    use clap::CommandFactory as _;
+    for verb in ["install", "update"] {
+        let mut root = Cli::command();
+        let help = root
+            .find_subcommand_mut("content")
+            .expect("content group")
+            .find_subcommand_mut(verb)
+            .expect("content verb")
+            .render_long_help()
+            .to_string();
+        for needle in ["is required", "proves the transfer only", "first use"] {
+            assert!(
+                help.contains(needle),
+                "`content {verb} --help` omits {needle}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
@@ -2046,41 +2273,6 @@ fn cli_parses_issue_current_and_states_and_repair() {
 }
 
 #[test]
-fn gui_not_found_error_has_install_hint() {
-    // Why: when `trusty-mpm-gui` is not installed, `tm gui` must fail with an
-    // actionable message telling the user how to install it (gui decoupling,
-    // publish-prep). A bare "No such file" from the OS is not acceptable.
-    // What: feeds a synthetic `NotFound` spawn error into the result mapper and
-    // asserts the error string carries the `cargo install trusty-mpm-gui` hint.
-    let not_found = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-    let err = crate::commands::gui::gui_status_to_result(Err(not_found))
-        .expect_err("NotFound spawn error must map to an Err");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("cargo install trusty-mpm-gui"),
-        "expected install hint, got: {msg}"
-    );
-    assert!(
-        msg.contains("not installed"),
-        "expected 'not installed' phrasing, got: {msg}"
-    );
-}
-
-#[test]
-fn gui_binary_resolution_falls_back_to_bare_name() {
-    // Why: when no `trusty-mpm-gui` sibling exists next to the running binary,
-    // the resolver must fall back to the bare name so the OS resolves it on PATH
-    // (Single-Install convention). The test binary's dir has no such sibling.
-    // What: asserts the resolved path's file name is exactly `trusty-mpm-gui`.
-    let resolved = crate::commands::gui::resolve_gui_binary();
-    assert_eq!(
-        resolved.file_name().and_then(|n| n.to_str()),
-        Some("trusty-mpm-gui"),
-        "resolver must yield a trusty-mpm-gui path, got: {resolved:?}"
-    );
-}
-
-#[test]
 fn cli_parses_issue_seed_config_force() {
     // Why: `tm issue seed-config --force` must parse the overwrite flag (#1246).
     use crate::cli::IssueCmd;
@@ -2155,6 +2347,220 @@ fn cli_parses_issue_audit_single_and_window() {
         .is_err(),
         "--recent and --since must conflict"
     );
+}
+
+/// #8447: `tm issue epic create --from <plan>` carries the filing inputs a plan
+/// document cannot supply — milestone, component, project, session.
+#[test]
+fn cli_parses_issue_epic_create() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "docs/research/tm-epic-cli/epic-plan.md",
+        "--milestone",
+        "Issue management",
+        "--component",
+        "trusty-mpm",
+        "--project",
+        "3",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    from,
+                    milestone,
+                    component,
+                    phase_type,
+                    project,
+                    session,
+                    tracker,
+                    dry_run,
+                }),
+            ..
+        } => {
+            assert_eq!(
+                from.to_string_lossy(),
+                "docs/research/tm-epic-cli/epic-plan.md"
+            );
+            assert_eq!(milestone.as_deref(), Some("Issue management"));
+            assert_eq!(component, vec!["trusty-mpm".to_string()]);
+            assert_eq!(phase_type, "enhancement", "the default type label");
+            assert_eq!(project, Some(3));
+            assert!(session.is_none());
+            assert!(tracker.is_none());
+            assert!(dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+}
+
+/// #8447: `--component` is repeatable, and `--tracker` resumes an interrupted
+/// run into an existing tracker.
+#[test]
+fn cli_parses_issue_epic_create_repeatable_components() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "create",
+        "--from",
+        "plan.md",
+        "--milestone",
+        "Backlog · mpm/core",
+        "--component",
+        "trusty-mpm",
+        "--component",
+        "trusty-common",
+        "--phase-type",
+        "refactor",
+        "--session",
+        "tm-trusty-tools-15",
+        "--tracker",
+        "8445",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Create {
+                    component,
+                    phase_type,
+                    session,
+                    tracker,
+                    dry_run,
+                    ..
+                }),
+            ..
+        } => {
+            assert_eq!(
+                component,
+                vec!["trusty-mpm".to_string(), "trusty-common".to_string()]
+            );
+            assert_eq!(phase_type, "refactor");
+            assert_eq!(session.as_deref(), Some("tm-trusty-tools-15"));
+            assert_eq!(tracker, Some(8445));
+            assert!(!dry_run);
+        }
+        other => panic!("expected issue epic create, got {other:?}"),
+    }
+    // `--from` names the schema the whole verb reads; it is not optional.
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "create"]).is_err(),
+        "--from must be required"
+    );
+}
+
+/// #8447: `tm issue epic sync <epic#>` takes the tracker positionally.
+#[test]
+fn cli_parses_issue_epic_sync() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Sync { epic: 8445 }),
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "issue", "epic", "sync"]).is_err(),
+        "the tracker number must be required"
+    );
+}
+
+#[test]
+fn cli_parses_issue_epic_defer() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "defer",
+        "8445",
+        "--item",
+        "the gap",
+        "--why",
+        "later",
+        "--where",
+        "unscheduled",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd:
+                IssueCmd::Epic(EpicCmd::Defer {
+                    epic,
+                    item,
+                    why,
+                    destination,
+                }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(item, "the gap");
+            assert_eq!(why, "later");
+            assert_eq!(destination, "unscheduled");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // All three cells are required flags.
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "issue",
+            "epic",
+            "defer",
+            "8445",
+            "--item",
+            "x"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn cli_parses_issue_epic_close() {
+    use crate::cli::{EpicCmd, IssueCmd};
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "epic",
+        "close",
+        "8445",
+        "--evidence",
+        "O1: PR #1",
+        "--evidence",
+        "O2: PR #2",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic, evidence }),
+            ..
+        } => {
+            assert_eq!(epic, 8445);
+            assert_eq!(evidence, vec!["O1: PR #1", "O2: PR #2"]);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // `--evidence` is repeatable and optional at parse time; the verb itself
+    // refuses when the declared outcomes are not all covered.
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "epic", "close", "8445"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Epic(EpicCmd::Close { epic: 8445, .. }),
+            ..
+        }
+    ));
 }
 
 #[test]

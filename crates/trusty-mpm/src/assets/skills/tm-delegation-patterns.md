@@ -162,7 +162,8 @@ back rather than absorbed into the batch (owner ruling 2026-09-16).
 
 1. **`SendMessage` the SAME agent** — never open a new delegation to fix a
    previous one. The agent fixes and re-verifies inside its own context, at zero
-   context-reload cost.
+   context-reload cost. A worktree agent's tree must still exist first — see
+   PM Re-Engagement (#8004).
 2. Only re-delegate once that agent has failed 3+ times on the same issue
    (CB#10).
 
@@ -206,6 +207,17 @@ to a busy agent queues until its next tool round and costs it a turn; the
 harness already notifies on completion. Past the box, send ONE corrective
 message with a specific instruction. A second overrun means stop and
 re-dispatch with a narrower brief, never another nudge.
+
+**Scratch directory, every brief (#7791).** Name the agent's own scratch
+directory: `<scratchpad>/<issue>-<round>/` or `<scratchpad>/<agent-id>/`. The
+agent writes scratch files only there (BASE-AGENT). Agents dispatched
+together get distinct directories; generic names at the scratchpad root
+collide.
+
+**A brief commissioning a prose document names no line or word cap (#8309).**
+The 500-SLOC cap is code only. A cap on a research report, spec or ADR forces
+rewrites and collides with mandatory citations. Ask for the Write Plainly style
+instead; it limits verbosity.
 
 A brief never asks for output that scales with build length ("raw output",
 "full log") — it asks for gate summary lines per the gate-output rule
@@ -329,6 +341,11 @@ Enum changes and spelling fixes are rung 1–3. No critic.
 gate a session; it touches a trust boundary or an injection defense; it rewrites
 history or force-pushes; or the PR is already at review round 3+ — evidence
 something is being missed.
+
+**A code-critic brief states the PR and the gates (#8584).** It carries
+`PR: <n>|none`; with `none` the critic posts nothing and looks up no PR. It also
+says the gates are read-only for the critic: it cites the engineer's reported
+gate output and does not re-run one.
 
 **Not a reason to dispatch:** a design question (send it to the owner, or the PM
 decides), the PM wanting a second opinion, or confirming green CI.
@@ -507,13 +524,16 @@ fresh delegation for work an existing agent already owns: the fresh one reloads
 ~95K tokens of context and knows none of the history. Never nudge an agent back
 into a blocking wait.
 
-**Check the worktree still exists first (#8004).** A subagent dispatched with
-`isolation: "worktree"` that stops to report with a clean tree can have that
-tree reclaimed between turns; `SendMessage` then resumes the agent in the main
-checkout, where it cannot commit (ADR-0061, #5649). Run `git worktree list` and
-look for that agent's tree before re-engaging. Tree present — `SendMessage` it
-as above. Tree gone — re-dispatch fresh with `isolation: "worktree"` and
-restate the context; never `SendMessage` into the main checkout.
+**Check the worktree still exists first (#8004).** This applies to EVERY
+resume of an agent that held an isolated worktree — CI outcome, retry, a
+released HOLD, an owner ruling. Claude Code removes an unchanged worktree the
+moment its agent stops, and a clean tree can be reclaimed between turns;
+`SendMessage` then resumes the agent in the main checkout, where it cannot
+commit (ADR-0061, #5649). Run `git worktree list` and look for that agent's
+tree before re-engaging. Tree present — `SendMessage` it as above. Tree gone —
+do not resume: re-dispatch fresh with `isolation: "worktree"` and restate the
+base commit and branch in the brief; never `SendMessage` into the main checkout.
+`tm hook --pm-guard` refuses that `SendMessage` and names the missing tree.
 
 **Cross-check `state` before calling anything green.** Treat `bucket` as
 advisory: under GitHub API eventual-consistency lag it can report a false DONE

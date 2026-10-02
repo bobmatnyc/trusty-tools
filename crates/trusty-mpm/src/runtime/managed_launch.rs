@@ -60,11 +60,8 @@ const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// `env_unset_clears_nothing_without_a_gh_identity_binding`.
 pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
     let mut unset = vec![API_KEY_ENV.to_owned()];
-    unset.extend(
-        crate::core::claude_env_scrub::INHERITED_SESSION_MARKERS
-            .iter()
-            .map(|name| (*name).to_string()),
-    );
+    // #8453: the markers AND tm's profile stamp; `base` re-stamps after this.
+    unset.extend(crate::core::claude_env_scrub::scrubbed_on_spawn().map(str::to_owned));
     unset.extend(crate::core::gh_identity::inherited_identity_to_clear(
         gh_env,
     ));
@@ -101,7 +98,8 @@ pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
 /// here: they must yield per-variable to a value the pane already exports, which
 /// [`LaunchSpec::to_command`] expresses with
 /// [`crate::core::alt_screen::apply_default_to_command`] — the exec-path twin of
-/// the `${NAME-1}` shell operand.
+/// the `${NAME-1}` shell operand. The config-decided renderer (#8405) is not a
+/// default and is added by [`ManagedLaunch::base`].
 /// What: `(name, value)` pairs, in the order above.
 /// Test: `env_set_enables_todo_tools_unconditionally`,
 /// `env_set_disables_auto_memory_when_trusty_memory_answers`,
@@ -160,6 +158,10 @@ pub(super) struct ManagedLaunch<'a> {
     pub mcp_config: Option<&'a Path>,
     /// #7685: whether trusty-memory answered at launch.
     pub memory_reachable: bool,
+    /// #8405: config `tmux.alternate_screen`, read by the caller at launch.
+    pub alternate_screen: bool,
+    /// #8453: the profile this launch's prompt was composed for — the stamp.
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 impl ManagedLaunch<'_> {
@@ -168,9 +170,28 @@ impl ManagedLaunch<'_> {
     /// Why: cwd, program and environment are identical for spawn, resume and
     /// attach — only the flags differ — so composing them once is what stops the
     /// three paths drifting the way the four shell builders did.
-    /// What: [`managed_env_unset`] + [`managed_env_set`] with an empty argv.
-    /// Test: `attach_and_resume_share_an_identical_environment`.
+    /// What: [`managed_env_unset`] + [`managed_env_set`] with an empty argv,
+    /// then [`crate::core::alt_screen::configured_env`] for
+    /// `alternate_screen` (#8405).
+    /// Test: `attach_and_resume_share_an_identical_environment`,
+    /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
+    /// `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`.
     fn base(&self) -> LaunchSpec {
+        let mut env_set = managed_env_set(
+            self.config_dir,
+            self.oauth_token,
+            self.mcp_env,
+            self.memory_reachable,
+            self.gh_env,
+        );
+        // #8405: an explicit assignment, so the tmux server's inherited value
+        // cannot decide the renderer the config asked for.
+        env_set.extend(crate::core::alt_screen::configured_env(
+            self.alternate_screen,
+        ));
+        // #8453: the launch stamp `tm hook --pm-guard` reads; written for a PM
+        // too, so an inherited supervisor stamp never survives.
+        env_set.push(crate::core::session_profile::launch_env(self.profile));
         LaunchSpec {
             session_id: self.session_id.to_owned(),
             // #8233 review round 2 (finding 3): one id per LAUNCH, minted here
@@ -181,13 +202,7 @@ impl ManagedLaunch<'_> {
             program: self.claude_bin.to_owned(),
             args: Vec::new(),
             env_unset: managed_env_unset(self.gh_env),
-            env_set: managed_env_set(
-                self.config_dir,
-                self.oauth_token,
-                self.mcp_env,
-                self.memory_reachable,
-                self.gh_env,
-            ),
+            env_set,
         }
     }
 

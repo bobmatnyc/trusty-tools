@@ -43,7 +43,9 @@ mod claude_code_agents;
 // #8233: the daemon launch takes the named-root seam; the bare-`tm` in-place
 // relaunch below is a real run in the operator's own home and keeps the ambient
 // form.
-use super::prompt_file::{build_prompt_file, build_prompt_file_in};
+#[cfg(test)]
+use super::prompt_file::build_prompt_file;
+use super::prompt_file::build_prompt_file_in;
 
 /// #8233: every home-derived launch path reads this layout instead of
 /// `dirs::home_dir()`.
@@ -407,6 +409,9 @@ pub struct InPlaceResumeCommand {
     /// could be derived — the servers then fall back to their own cwd
     /// derivation, which is what the unpinned stub used to do.
     pub mcp_env: Vec<(String, String)>,
+    /// #8453: the profile the relaunched prompt was composed for; the exec
+    /// stamps it as `TRUSTY_MPM_SESSION_PROFILE`.
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
@@ -491,7 +496,7 @@ fn compose_inplace_args(
 /// missing), provisions/trust-seeds the managed `CLAUDE_CONFIG_DIR` via
 /// [`prepare_managed_config`] (logged under the synthetic session name
 /// `"in-place-relaunch"` — there is no tmux session name in this context),
-/// builds the PM system-prompt file via [`build_prompt_file`] (#4336 — the
+/// builds the PM system-prompt file via `build_prompt_file` (#4336 — the
 /// SAME carrier `spawn`/`spawn_resume` use, previously missing from this path
 /// alone; non-fatal, a write failure omits the flag), then delegates argv
 /// composition to [`compose_inplace_args`].
@@ -504,14 +509,32 @@ pub fn build_inplace_resume_command(
     // #8233: this path IS the `tm` process running inside the managed pane, so
     // the ambient home is its own correct layout — unlike the daemon adapter,
     // which holds the root it was built with.
-    let fw = FrameworkPaths::default();
-    let config_dir = prepare_managed_config(&fw, "in-place-relaunch", cwd);
+    build_inplace_resume_command_under(&FrameworkPaths::default(), cwd, claude_session_id)
+}
+
+/// [`build_inplace_resume_command`] against a caller-named framework layout.
+///
+/// Why (#8545): the ambient-home form provisioned the operator's own
+/// `~/.trusty-tools/trusty-mpm/claude-config` from every test that drove it.
+/// What: the same steps, with the managed config dir and the session-mcp root
+/// both derived from `fw`.
+/// Test: `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
+pub fn build_inplace_resume_command_under(
+    fw: &FrameworkPaths,
+    cwd: &Path,
+    claude_session_id: Option<&str>,
+) -> Result<InPlaceResumeCommand, RuntimeError> {
+    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd);
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
     // failure here abandons the relaunch rather than dropping the flag, which
     // would hand the pane the unscoped shared server map.
-    crate::core::session_mcp_scope::provision_for_spawn(cwd, Some(&config_dir))
-        .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
+    crate::core::session_mcp_scope::provision_for_spawn_at(
+        &fw.crate_config_root(),
+        cwd,
+        Some(&config_dir),
+    )
+    .map_err(|err| RuntimeError::Spawn(err.to_string()))?;
     let claude_bin = ClaudeCodeAdapter::resolve_claude().ok_or_else(|| {
         RuntimeError::BinaryNotFound(
             "claude binary not found on PATH or in well-known dirs \
@@ -521,7 +544,8 @@ pub fn build_inplace_resume_command(
     })?;
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
-    let prompt_file = build_prompt_file(cwd, None);
+    // #8545: the savings row lands under `fw`, not the process home.
+    let (prompt_file, profile) = build_prompt_file_in(&fw.root, cwd, None);
     let args = compose_inplace_args(
         cwd,
         Some(&config_dir),
@@ -537,6 +561,7 @@ pub fn build_inplace_resume_command(
         config_dir: Some(config_dir),
         oauth_token,
         mcp_env,
+        profile,
     })
 }
 
@@ -623,6 +648,19 @@ impl ClaudeCodeAdapter {
         super::launch_spec::LaunchSpec::root_at(&self.fw.crate_config_root())
     }
 
+    /// Config `tmux.alternate_screen` for this launch (#8405).
+    ///
+    /// Why: the launch spec carries the configured renderer explicitly, so the
+    /// tmux server's inherited env cannot decide it. An unreadable config never
+    /// blocks a spawn or restart: it warns and falls back with the tmux option.
+    /// What: [`crate::core::alt_screen::configured_alternate_screen_at`] under
+    /// [`FrameworkPaths::crate_config_root`].
+    /// Test: `spawn_carries_the_configured_fullscreen_renderer`,
+    /// `spawn_falls_back_with_the_tmux_option_on_an_unreadable_config`.
+    fn configured_alternate_screen(&self) -> bool {
+        crate::core::alt_screen::configured_alternate_screen_at(&self.fw.crate_config_root())
+    }
+
     /// Durably publish `TM_MANAGED_SESSION_ID` (and `CLAUDE_CONFIG_DIR` when
     /// resolved) into the tmux SESSION environment (#2157 item 1).
     ///
@@ -673,7 +711,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// if it cannot be found on `PATH` or in the well-known daemon dirs),
     /// provisions + trust-seeds the tm-owned `CLAUDE_CONFIG_DIR` via
     /// [`prepare_managed_config`], builds the PM system-prompt file via
-    /// [`build_prompt_file`] (issue #2125 item 3), resolves an optional
+    /// `build_prompt_file` (issue #2125 item 3), resolves an optional
     /// `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (issue #2246), then
     /// sends a FIXED-SHAPE launch line naming a [`super::launch_spec::LaunchSpec`] the shim reads
@@ -696,6 +734,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        // #8405: the config-decided renderer; never blocks the spawn.
+        let alternate_screen = self.configured_alternate_screen();
         // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
         // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
         // #4873: the framework roster and skills load FROM this config dir —
@@ -735,7 +775,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
         // out a CLAUDE.md-carrier fallback, so there is no other carrier).
         // #8233: the compiled-prompt ledger under the NAMED framework root.
-        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -775,6 +815,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
             memory_reachable,
+            alternate_screen,
+            profile,
         };
         // #8233 review round 2 (finding 6): a fresh spawn used to pass `None`
         // here, which makes every pane-directed step — the interrupt that
@@ -819,7 +861,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
     /// `claude_session_id` against the resolved config dir, falls back to a
     /// fresh launch when it is missing,
-    /// builds the PM system-prompt file via [`build_prompt_file`] (#2230 —
+    /// builds the PM system-prompt file via `build_prompt_file` (#2230 —
     /// same carrier `spawn` uses, previously missing from every resume path),
     /// resolves an optional `CLAUDE_CODE_OAUTH_TOKEN` via
     /// [`crate::core::oauth_token::resolve_oauth_token`] (#2246 — same carrier
@@ -849,6 +891,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         session_id: &str,
         gh_env: &[(String, String)],
     ) -> Result<(), RuntimeError> {
+        // #8405: same config read as `spawn` — a restart is where #8405 was seen.
+        let alternate_screen = self.configured_alternate_screen();
         let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
         // #7422: same fail-closed MCP composition as `spawn`, in the same
         // position — a resumed pane must not be the one path that still loads
@@ -871,7 +915,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // resumed/guided-resume/crash-recovery session silently ran vanilla
         // Claude Code. Non-fatal: a write failure omits the flag.
         // #8233: named framework root, exactly as `spawn` uses.
-        let prompt_file = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to
@@ -942,6 +986,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
             memory_reachable: resolve_memory_reachable(self.memory_reachable),
+            alternate_screen,
+            profile,
         };
         // #6863: a session Claude Code is still running in the background
         // refuses `--resume` and exits 0, leaving the pane a bare shell; ask its

@@ -23,8 +23,9 @@ mod entry;
 // `isolated_framework_paths` has no caller outside `entry` itself; the tests
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
-    prepare_isolated_session, prepare_session, prepare_session_for_managed,
-    prepare_session_for_repair, prepare_session_with_home, prepare_session_with_memory_reachable,
+    prepare_isolated_session, prepare_isolated_session_under, prepare_session,
+    prepare_session_for_managed, prepare_session_for_repair, prepare_session_for_repair_under,
+    prepare_session_with_home, prepare_session_with_memory_reachable,
     prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
     prepare_session_with_style, prepare_session_with_style_and_native,
 };
@@ -76,9 +77,12 @@ mod sync_assets;
 // unchanged.
 mod system_prompt;
 pub use system_prompt::{
-    build_system_prompt_for, build_system_prompt_for_with_roster,
-    build_system_prompt_for_with_style, build_system_prompt_for_with_style_and_native,
+    CliLaunch, build_system_prompt_for, build_system_prompt_for_profile,
+    build_system_prompt_for_with_roster, build_system_prompt_for_with_style,
+    build_system_prompt_for_with_style_and_native, cli_launch,
 };
+// #8453: the supervisor model key, written and removed by ownership.
+mod supervisor_model;
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -136,6 +140,24 @@ mod tests_malformed_settings_7780;
 #[path = "tests_settings_lock_7762.rs"]
 mod tests_settings_lock_7762;
 
+// #8533: the launch and `tm sessions instructions` name one style.
+#[cfg(test)]
+#[path = "tests_style_selection_8533.rs"]
+mod tests_style_selection_8533;
+// #8453: a supervisor launch writes the supervisor prompt, style and model.
+#[cfg(test)]
+#[path = "tests_supervisor_profile_8453.rs"]
+mod tests_supervisor_profile_8453;
+// #9018: `[pm_guard] enabled` wired into the launch and resume writers.
+#[cfg(test)]
+#[path = "tests_pm_guard_9018.rs"]
+mod tests_pm_guard_9018;
+
+// #8311: the catch-up watermark lands under `fw.root`, never the home.
+#[cfg(test)]
+#[path = "tests_catchup_root_8311.rs"]
+mod tests_catchup_root_8311;
+
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
@@ -148,11 +170,12 @@ use settings::{
     remove_global_trusty_memory_hooks,
     write_auto_memory_enabled,
     write_output_style,
-    // #7688: the launch path is the only caller that turns the capture on, so
-    // the plain `write_project_hooks` is not reached from this module.
+    // #9018: the launch builds its additions with every toggle resolved — the
+    // #7688 capture and `[pm_guard] enabled` included — and hands them to the
+    // shared writer.
     // write_enabled_plugins is not imported here: it is already brought into
     // scope by the pub(crate) re-export below (#7678).
-    write_project_hooks_with_prompt_feedback,
+    write_project_hooks_with,
 };
 
 /// Re-export of the project-tier `enabledPlugins` writer (#7678).
@@ -366,6 +389,8 @@ pub struct PrepReport {
     /// `true` means auto memory was turned off, `false` means it was restored.
     /// Test: `prepare_session_reports_the_resolved_reachability`.
     pub memory_reachable: bool,
+    /// The session profile this preparation resolved and wrote for (#8453).
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -578,6 +603,8 @@ pub(super) fn prepare_session_inner(
     host: HostInputs<'_>,
 ) -> Result<PrepReport, PrepError> {
     let home = host.home;
+    // #8663: before any provisioning write, so `record` below sees tm's edits.
+    let ledger_before = crate::session_manager::provisioning_ledger::snapshot(project_dir);
     // #7806: opens this launch's stack-detection scope. Every manifest
     // resolution below — and the five-plus in the call sites it reaches — then
     // shares ONE nested walk, while a daemon-hosted launch still re-detects a
@@ -593,6 +620,9 @@ pub(super) fn prepare_session_inner(
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
     // before style resolution) was a redundant filesystem read for the same data.
     let config = crate::core::config::MpmConfig::load(&fw.root);
+    // #8453: resolved ONCE per launch; the composer, the style, the model and
+    // the settings below all take this value, and it is returned for the stamp.
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
@@ -806,10 +836,58 @@ pub(super) fn prepare_session_inner(
     // a style, the manifest's value applies; otherwise the higher source wins
     // exactly as before (zero regression for the flag/config paths). `config` was
     // loaded ONCE at the top of this function.
-    let effective_style: Option<String> = explicit_style
-        .map(str::to_owned)
-        .or_else(|| config.style.active.clone())
-        .or_else(|| plan.style.clone());
+    // #8533: the committed `.trusty-mpm.toml` `[style] active` sits between the
+    // flag and the host config, and a project style file resolves like a
+    // bundled one.
+    // The report (`describe_effective_style`) calls this same selector.
+    let selected_style = crate::core::output_style::select_style(
+        project_dir,
+        explicit_style,
+        &config,
+        || plan.style.clone(),
+        profile,
+    );
+    let effective_style: Option<String> = selected_style.id.clone();
+
+    // Resolve the active output style for settings.json using the same
+    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
+    // An unknown id is logged and falls back to the professional default rather
+    // than failing the launch (DOC-17). The resolved id is written into
+    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
+    // it directly; older builds pick it up via prompt injection at the
+    // `build_system_prompt_for` seam.
+    // #8533: an unknown id is never a silent fallback — the warning joins the
+    // launch's asset notices, which every launch path prints. A project style
+    // is named through its composite (prose + floor), written before the prompt
+    // is built so the prompt seam sees it in place; a composite that cannot be
+    // written names the default style, which carries its own floor.
+    let mut style_notice = selected_style.warning;
+    let active_style_id =
+        match crate::core::output_style::native_style_id(project_dir, &selected_style.style) {
+            Ok(id) => id,
+            Err(err) => {
+                let warning = format!(
+                    "output style '{}': cannot write its composite with the trusty-mpm floor \
+                     ({err}); using `{OUTPUT_STYLE}` for native launches",
+                    selected_style.style.id()
+                );
+                tracing::warn!("{warning}");
+                style_notice.get_or_insert(warning);
+                OUTPUT_STYLE.to_string()
+            }
+        };
+
+    // Set the Claude Code output style so the launched session's status bar
+    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
+    // still launches, it just shows the operator's default style.
+    if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
+        tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+    // #8453: every launch path reads the project settings' `model`, including
+    // those that pass no `--model`; a supervisor runs on the Opus tier alias.
+    if let Err(err) = supervisor_model::write_supervisor_model(project_dir, profile) {
+        tracing::warn!("failed to update the supervisor model: {err}");
+    }
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -825,10 +903,11 @@ pub(super) fn prepare_session_inner(
     // breaking the stash/launch invariant in a host-dependent way. Routing both
     // through the single seam keeps them identical regardless of Claude version
     // (issue #381 / the #382 concern).
-    let resolved_prompt = build_system_prompt_for_with_style_and_native(
+    let resolved_prompt = build_system_prompt_for_profile(
         project_dir,
         effective_style.as_deref(),
         native_supported,
+        profile,
     );
     // #4752: these two writes DEGRADE TO A WARNING; they must never short-circuit
     // this function. An unwritable `.trusty-mpm/` (disk full, bad perms) used to
@@ -854,34 +933,6 @@ pub(super) fn prepare_session_inner(
             "could not refresh the instruction stash at {} (non-fatal): {e}",
             stash.display()
         ),
-    }
-
-    // Resolve the active output style for settings.json using the same
-    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
-    // An unknown id is logged and falls back to the professional default rather
-    // than failing the launch (DOC-17). The resolved id is written into
-    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
-    // it directly; older builds pick it up via prompt injection at the
-    // `build_system_prompt_for` seam.
-    let active_style_id = match crate::core::output_style::resolve_active_style(
-        &config,
-        effective_style.as_deref(),
-    ) {
-        Ok(style) => style.id,
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                "falling back to the default output style for settings.json"
-            );
-            crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID
-        }
-    };
-
-    // Set the Claude Code output style so the launched session's status bar
-    // reads `style:<active_style_id>`. A failure here is non-fatal: the session
-    // still launches, it just shows the operator's default style.
-    if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
-        tracing::warn!("failed to set trusty-mpm output style: {err}");
     }
 
     // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
@@ -933,7 +984,9 @@ pub(super) fn prepare_session_inner(
     // absent (never clobbers the user's existing statusLine). Non-fatal.
     // #7617: and into the user tier on the same call — provisioning owns both,
     // so the `💸` segment is core setup rather than a project's to arrange.
-    if let Err(err) = ensure_status_line(project_dir) {
+    // #8545: the injected home, not the ambient `$HOME` `ensure_status_line` reads.
+    let user_settings = home.map(|h| h.join(".claude").join("settings.json"));
+    if let Err(err) = ensure_status_line_in(project_dir, user_settings.as_deref()) {
         tracing::warn!("failed to write statusLine config: {err}");
     }
 
@@ -947,8 +1000,10 @@ pub(super) fn prepare_session_inner(
     // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
     // `trusty-memory prompt-context` injection (and strips one a prior launch
     // wrote). Default `true` — every other hook is written either way.
-    let hooks_written = match write_project_hooks_with_prompt_feedback(
-        project_dir,
+    //
+    // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
+    // out and strips one a prior launch wrote; every other hook is unchanged.
+    let additions = project_hooks::project_managed_hook_additions_with_pm_guard(
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
         // than wiring every hook to a build artifact. A test pins a stable path
@@ -959,7 +1014,9 @@ pub(super) fn prepare_session_inner(
         // #7688: register the `Stop`/`SubagentStop` capture only where the flag
         // is on, so a project with the feature off spawns no process per turn.
         crate::core::prompt_self_improvement::enabled_for(project_dir),
-    ) {
+        config.pm_guard.enabled,
+    );
+    let hooks_written = match write_project_hooks_with(project_dir, additions) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
@@ -1075,6 +1132,13 @@ pub(super) fn prepare_session_inner(
     if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
         tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
     }
+    // #8663: after the last write to a ledgered path. A failure only means a
+    // later decommission keeps this workspace.
+    if let Err(err) =
+        crate::session_manager::provisioning_ledger::record(project_dir, &ledger_before)
+    {
+        tracing::warn!("failed to record the provisioning ledger (#8663): {err}");
+    }
 
     // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).
     // Fail-open: if catch-up fails for any reason (daemon not running, no git
@@ -1096,7 +1160,10 @@ pub(super) fn prepare_session_inner(
             full: false,
         };
         // Auto-inject advances the watermark so subsequent sessions are incremental.
-        let ctx = crate::core::catchup::run_catchup_blocking(opts, true);
+        // #8311: the watermark is framework state, so it lives under `fw.root`
+        // — always named, never the process home a `None` home fell back to.
+        let state_root = Some(fw.root.clone());
+        let ctx = crate::core::catchup::run_catchup_blocking_in(opts, true, state_root);
         if ctx.is_empty() { None } else { Some(ctx) }
     } else {
         None
@@ -1151,8 +1218,9 @@ pub(super) fn prepare_session_inner(
 
     // #6649: computed LAST so the skill tier it reads is the one this launch
     // leaves behind, not the one it inherited.
-    let asset_notices =
+    let mut asset_notices =
         asset_notices::launch_asset_notices(fw, project_dir, quarantine_report.as_ref());
+    asset_notices.extend(style_notice);
 
     Ok(PrepReport {
         deploy,
@@ -1166,6 +1234,7 @@ pub(super) fn prepare_session_inner(
         roster_errors,
         asset_notices,
         memory_reachable,
+        profile,
     })
 }
 

@@ -14,7 +14,12 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod commit;
+pub(crate) mod deferred;
 pub(crate) mod embed;
+// #8976: what one `index_file` write did, so zero chunks never read as success.
+pub(crate) mod outcome;
+// #8884: refused embeddings survive a restart so restore does not re-demote.
+pub(crate) mod refusals;
 
 use anyhow::{Context, Result};
 
@@ -23,6 +28,7 @@ use crate::core::entity::RawEntity;
 use crate::core::symbol_graph::{ChunkTuple, ContribMergeOutcome, SymbolGraph};
 
 use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
+use outcome::IndexFileOutcome;
 
 /// What one deferred-embed catch-up pass achieved (#6524).
 ///
@@ -34,7 +40,7 @@ use super::{populate_virtual_terms, CodeIndexer, ParsedBatch};
 /// What: `embedded` is what THIS pass computed, `total` the corpus size, and
 /// `paused` whether an operator pause stopped it before the remainder was done.
 /// Test: `service::reindex::embed_pause_tests::a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedCatchUp {
     /// Chunks this pass embedded and committed.
     pub embedded: usize,
@@ -42,6 +48,8 @@ pub struct EmbedCatchUp {
     pub total: usize,
     /// The pass stopped on an operator pause and still owes work.
     pub paused: bool,
+    /// #8884: ids whose embedding the store refused — NaN or all-zero (#764).
+    pub rejected: Vec<String>,
 }
 
 impl EmbedCatchUp {
@@ -51,6 +59,7 @@ impl EmbedCatchUp {
             embedded,
             total,
             paused: false,
+            rejected: Vec::new(),
         }
     }
 }
@@ -321,6 +330,33 @@ impl CodeIndexer {
     /// `skip_vector_false_index_file_still_embeds`, and
     /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
+        self.index_file_outcome(file_path, content)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::index_file`], reporting what the write did to the corpus.
+    ///
+    /// Why: `Ok(())` could not tell a file that landed as chunks from one that
+    /// produced none, so `POST /index-file` answered `"indexed": true` for a
+    /// file that stayed unsearchable (#8976).
+    /// What: the same write; zero chunks for non-blank content logs at WARN
+    /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
+    /// `Empty`, JSON above the window ceiling `TooLarge`, a tombstone
+    /// `Removed`, sops-encrypted content `SopsEncrypted` after its old chunks
+    /// are removed (#8922). Every `Err` arm is unchanged.
+    /// Test: `index_file_on_large_json_lands_chunks`,
+    /// `index_file_refuses_sops_content_and_drops_its_old_chunks`,
+    /// `index_file_on_blank_content_reports_empty`, and
+    /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
+    /// `indexer::tests::zero_chunk_8976`.
+    pub async fn index_file_outcome(
+        &self,
+        file_path: &str,
+        content: &str,
+    ) -> Result<IndexFileOutcome> {
+        // #8167: a handle that outlived DELETE must not write into it.
+        self.refuse_if_deleted()?;
         if self.refuse_incremental_write("index_file", file_path) {
             anyhow::bail!(
                 "index '{}' is write-quarantined: its durable corpus failed to open, so \
@@ -331,9 +367,38 @@ impl CodeIndexer {
         }
         if trusty_common::knowledge_document::is_tombstone(content) {
             self.remove_file(file_path).await?;
-            return Ok(());
+            return Ok(IndexFileOutcome::Removed);
+        }
+        // #8922: a sops-encrypted file is never indexed, and a file that became
+        // one loses the chunks its plaintext left behind.
+        if crate::core::sops::is_sops_encrypted(content) {
+            // The hash goes too, or the plaintext's hash would skip the file
+            // when it is decrypted again; the graph is rebuilt only when chunks
+            // actually left.
+            let id = crate::core::registry::IndexId::new(self.index_id.as_str());
+            let removed = self.purge_file(&id, file_path).await?;
+            if removed > 0 && !self.skip_kg {
+                self.rebuild_symbol_graph().await;
+            }
+            tracing::warn!(
+                index_id = %self.index_id,
+                file = %file_path,
+                removed,
+                "index_file: refused a sops-encrypted file (#8922)"
+            );
+            return Ok(IndexFileOutcome::SopsEncrypted);
         }
         let (mut chunks, entities) = chunk_ast(file_path, content);
+        // #8976: classify before `chunks` moves into the commit below.
+        let outcome = IndexFileOutcome::classify(file_path, content, chunks.len());
+        if outcome == IndexFileOutcome::NoChunks {
+            tracing::warn!(
+                index_id = %self.index_id,
+                file = %file_path,
+                bytes = content.len(),
+                "index_file: non-empty file produced zero chunks; it is NOT indexed (#8976)"
+            );
+        }
 
         populate_virtual_terms(&mut chunks, &entities);
 
@@ -412,7 +477,7 @@ impl CodeIndexer {
                 dropped_by_cap
             );
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Run NER + ConceptCluster passes and merge their entities with the
@@ -616,8 +681,11 @@ impl CodeIndexer {
             files
                 .par_iter()
                 .map(|(path, content)| {
+                    // #8922: sops content parses to nothing, like a tombstone.
                     let (mut chunks, entities) =
-                        if trusty_common::knowledge_document::is_tombstone(content) {
+                        if trusty_common::knowledge_document::is_tombstone(content)
+                            || crate::core::sops::is_sops_encrypted(content)
+                        {
                             (vec![], vec![])
                         } else {
                             chunk_ast(path, content)
@@ -709,51 +777,11 @@ impl CodeIndexer {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> anyhow::Result<EmbedCatchUp> {
-        let chunks: Vec<RawChunk> = {
-            self.ensure_chunks_loaded().await;
-            let map = self.chunks.read().await;
-            map.values().cloned().collect()
-        };
-        let total = chunks.len();
-        if total == 0 || self.embedder.is_none() || self.store.is_none() {
-            return Ok(EmbedCatchUp::finished(0, total));
-        }
-        // Issue #2984 Phase 1 HIGH finding 3: incremental catch-up — skip
-        // chunks that already have a stored vector rather than blindly
-        // re-embedding the whole corpus.
-        let store = self.store.as_ref().expect("store presence checked above");
-        let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
-        let already_embedded = store.contains_many(&ids).await;
-        let to_embed: Vec<RawChunk> = chunks
-            .into_iter()
-            .zip(already_embedded)
-            .filter_map(|(chunk, embedded)| (!embedded).then_some(chunk))
-            .collect();
-        if to_embed.is_empty() {
-            return Ok(EmbedCatchUp::finished(0, total));
-        }
-        let mut embeddings = self
-            .embed_chunks_in_batches(&to_embed, progress_tx, pause)
-            .await?;
-        // #6524: a pause stops the wave loop early, leaving the tail `None`.
-        // Commit only the embedded prefix — a `None` slot means "no vector was
-        // computed for this chunk in this pass", which `commit_vectors_batch`
-        // reads as a stale-embedding eviction, and evicting the un-embedded
-        // remainder would be work undone rather than work deferred. Without a
-        // pause the loop fills every slot, so `done == to_embed.len()` and both
-        // commits see exactly the slices they always did.
-        let done = embeddings.iter().take_while(|e| e.is_some()).count();
-        let paused = done < to_embed.len();
-        embeddings.truncate(done);
-        self.commit_vectors_batch(&to_embed[..done], &embeddings)
-            .await?;
-        self.commit_embeddings_cache(&to_embed[..done], embeddings)
-            .await;
-        Ok(EmbedCatchUp {
-            embedded: done,
-            total,
-            paused,
-        })
+        // #8600: the three phases `run_embed_catch_up` runs with the indexer
+        // guard dropped between them, here under one borrow.
+        let plan = self.plan_deferred_embed().await;
+        let run = plan.embed(progress_tx, pause).await?;
+        self.commit_deferred_embed(plan, run).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

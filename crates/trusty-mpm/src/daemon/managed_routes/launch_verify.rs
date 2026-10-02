@@ -479,9 +479,11 @@ mod tests {
             claude_session_id: None, scrollback_path: None,
             last_cwd: None, deliverable_id: None,
             pane_id: None, injection_status: Default::default(),
+            tmux_server: None,
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 

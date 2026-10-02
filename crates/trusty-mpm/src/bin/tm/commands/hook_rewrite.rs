@@ -44,6 +44,9 @@
 use trusty_agents_common::compress::has_filter_for;
 // #7120: the #6986 source-read predicate, asked of the whole command.
 use trusty_agents_common::compress::tool_output::is_source_file_read;
+// #7477: the worktree resolver the `EnterWorktree` guard already uses.
+use std::path::{Path, PathBuf};
+use trusty_mpm::core::project_aliases::worktree_root;
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -160,6 +163,64 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
         "{} | tm compress --tool \"{tool}\"",
         crate::commands::compress::wrap_command_reporting_exit(trimmed)
     ))
+}
+
+/// [`rewrite_bash_command_for_compression`], unless the call runs in an
+/// isolation worktree.
+///
+/// Why (#7477): Claude Code's worktree-isolation classifier refuses the
+/// rewritten `{ …; printf …; } | tm compress --tool "…"` shape, so a wrapped
+/// `git diff`, `ls -la` or `cargo test` never runs in an agent's isolation
+/// worktree. The `SUB_AGENT_ENV` gate in `misc::hook` does not cover those
+/// agents: only trusty-agents' own spawns set that variable.
+/// What: `None` when `hook_cwd` sits in an isolation worktree
+/// ([`is_isolation_worktree`]), and also when `hook_cwd` is absent or empty —
+/// a cwd the hook cannot read cannot be shown to be outside one, and an
+/// unwrapped command never trips the classifier. Otherwise exactly
+/// [`rewrite_bash_command_for_compression`].
+/// Test: `no_rewrite_inside_an_isolation_worktree`,
+/// `rewrite_outside_an_isolation_worktree_is_unchanged`,
+/// `no_rewrite_when_the_cwd_is_undecidable`.
+pub(crate) fn rewrite_bash_command_unless_isolated(
+    command: &str,
+    hook_cwd: Option<&Path>,
+) -> Option<String> {
+    let cwd = hook_cwd.filter(|c| !c.as_os_str().is_empty())?;
+    if is_isolation_worktree(cwd) {
+        return None;
+    }
+    rewrite_bash_command_for_compression(command)
+}
+
+/// Whether `cwd` sits in a Claude Code isolation worktree (#7477).
+///
+/// Why: `isolation: "worktree"` provisions trees under `<repo>/.claude/worktrees/`
+/// (ADR-0020's harness store). A tm session worktree under `.worktrees/` hosts
+/// the PM itself, meets no isolation classifier, and keeps its compression.
+/// What: [`worktree_root`] — the resolver the `EnterWorktree` guard reads a
+/// caller's pinned tree from — names a tree whose container is
+/// `.claude/worktrees`. Purely lexical, like that guard.
+/// Test: `no_rewrite_inside_an_isolation_worktree`,
+/// `rewrite_outside_an_isolation_worktree_is_unchanged`.
+fn is_isolation_worktree(cwd: &Path) -> bool {
+    worktree_root(cwd)
+        .and_then(|root| root.parent().map(|p| p.ends_with(".claude/worktrees")))
+        .unwrap_or(false)
+}
+
+/// The directory a hook call runs in: the payload's `cwd`, else the hook's own.
+///
+/// Why (#7477): the same resolution `pm_guard` applies to its `hook_cwd`, so
+/// both hooks agree on which tree a call stands in.
+/// What: the payload's string `cwd`, else [`std::env::current_dir`], else
+/// `None` — which [`rewrite_bash_command_unless_isolated`] treats as isolated.
+/// Test: `hook_stays_silent_for_a_bash_call_in_an_isolation_worktree`.
+pub(crate) fn hook_cwd(payload: Option<&serde_json::Value>) -> Option<PathBuf> {
+    payload
+        .and_then(|v| v.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
 }
 
 /// Derive the `compress_tool_output` dispatch key from a Bash command.
@@ -287,83 +348,30 @@ fn is_orchestrator_command(command: &str) -> bool {
     }
 }
 
-/// Wrapper words that precede a real command without changing which program
-/// ultimately runs — privilege/environment wrappers (`sudo`, `env`,
-/// `command`, `builtin`, `doas`) and process/resource wrappers (`nice`,
-/// `time`, `nohup`, `exec`, `ionice`, `timeout`, `stdbuf`, `caffeinate`)
-/// alike. Issue #4031 review (pass 2): enumerating only `sudo`/`env` (then
-/// `command`/`builtin`) left `nice rm -rf /`, `nohup rm -rf /`, `exec rm -rf
-/// /`, and `env -i rm -rf /root` unresolved — each is a DIFFERENT wrapper
-/// bypassing the SAME enumeration weakness, so the fix is one list shared by
-/// every caller rather than another single word added to it.
-/// What: matched exactly (no prefix/substring matching) by [`strip_wrapper_prefix`].
-pub(crate) const COMMAND_WRAPPERS: &[&str] = &[
-    "sudo",
-    "env",
-    "command",
-    "builtin",
-    "doas",
-    "nice",
-    "time",
-    "nohup",
-    "exec",
-    "ionice",
-    "timeout",
-    "stdbuf",
-    "caffeinate",
-];
+// #8735: the wrapper list moved beside its option grammars, in `program_word`.
+pub(crate) use super::program_word::COMMAND_WRAPPERS;
 
 /// Skip a leading run of `KEY=value` env-assignments and [`COMMAND_WRAPPERS`]
 /// tokens in `tokens` (a leading `\` on any token stripped before comparison,
 /// per the same alias-bypass idiom [`first_command_token`] documents),
 /// returning the index of the first token that is neither — the real command
-/// — or `None` when a wrapper is immediately followed by a flag-shaped token
-/// (`sudo -u root make`, `env -i cmd`): resolving the real program name past
-/// that needs argument-aware parsing this function doesn't do.
+/// — or `None` when a wrapper takes an option (`sudo -u root make`, `env -i
+/// cmd`), carries an option or operand the resolver cannot measure, or has
+/// nothing after it.
 ///
 /// Why: [`first_command_token`] and `pm_guard_bash::shell_lex::git_subcommand`
 /// both need this exact skip — a wrapper reaching either unresolved is a
 /// classifier silently seeing a different (wrapped) command than the one
-/// that will actually run (issue #4031 review). One generic helper, indexing
-/// into whatever token slice the caller already has (`&[&str]` here,
-/// `&[String]` from `shlex::split` there), is what keeps the two from
-/// re-diverging the way `sudo`/`env`-only enumeration already had once.
-/// What: generic over any `T: AsRef<str>` token slice; loops advancing past
-/// each env-assignment or wrapper ONE TOKEN AT A TIME — a wrapper only
-/// consumes itself, then re-examines the following token (which may be
-/// another wrapper, an env-assignment, or the real command) — and returns
-/// the index it stops at. A wrapper followed by nothing, or by a
-/// flag-shaped token (ambiguous: might be the wrapper's own flag, e.g.
-/// `sudo -u root`), yields `None` rather than guessing.
+/// that will actually run (issue #4031 review). #8735: the skip is now the
+/// shared `program_word` resolver, so `timeout 5 make` resolves to `make`
+/// rather than to its duration `5`; the `None` answers are unchanged.
+/// What: delegates to `program_word::precommand_index`.
 /// Test: `strip_wrapper_prefix_skips_env_assignment`,
 /// `strip_wrapper_prefix_skips_every_known_wrapper`,
 /// `strip_wrapper_prefix_none_for_wrapper_followed_by_flag`,
 /// `strip_wrapper_prefix_skips_backslash_before_a_wrapper`.
 pub(crate) fn strip_wrapper_prefix<T: AsRef<str>>(tokens: &[T]) -> Option<usize> {
-    let mut i = 0;
-    while i < tokens.len() {
-        let raw = tokens[i].as_ref();
-        let tok = raw.strip_prefix('\\').unwrap_or(raw);
-        if is_env_assignment(tok) {
-            i += 1;
-            continue;
-        }
-        if COMMAND_WRAPPERS.contains(&tok) {
-            match tokens.get(i + 1) {
-                // The wrapper itself is the only token consumed here — the
-                // NEXT token becomes the new candidate to re-examine (it may
-                // itself be another wrapper, an env-assignment, or the real
-                // command), which is why this advances by ONE, not two.
-                Some(next) if !next.as_ref().starts_with('-') => {
-                    i += 1;
-                    continue;
-                }
-                _ => return None,
-            }
-        }
-        break;
-    }
-    Some(i)
+    super::program_word::precommand_index(tokens)
 }
 
 /// Extract the effective first command token, stripping noise prefixes.
@@ -606,6 +614,66 @@ mod tests {
             out.as_deref(),
             Some(expected_rewrite("git diff HEAD~1", "git diff").as_str())
         );
+    }
+
+    /// The three commands #7477 saw refused, each a covered tool.
+    const ISOLATION_REFUSED: [&str; 3] = ["git diff", "ls -la", "cargo test"];
+
+    #[test]
+    fn no_rewrite_inside_an_isolation_worktree() {
+        // #7477: the harness classifier refuses the wrapped shape here, so the
+        // command must reach Claude Code exactly as written.
+        for cwd in [
+            "/repo/.claude/worktrees/agent-a",
+            "/repo/.claude/worktrees/agent-a/crates/trusty-mpm",
+            "/repo/.base/.worktrees/session-x/.claude/worktrees/agent-b",
+        ] {
+            for cmd in ISOLATION_REFUSED {
+                assert!(
+                    rewrite_bash_command_for_compression(cmd).is_some(),
+                    "{cmd} must be a covered tool, or this test proves nothing"
+                );
+                assert_eq!(
+                    rewrite_bash_command_unless_isolated(cmd, Some(Path::new(cwd))),
+                    None,
+                    "{cmd} in {cwd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rewrite_outside_an_isolation_worktree_is_unchanged() {
+        // A main checkout, a tm session worktree, and the `.claude/worktrees`
+        // container itself (which names no single tree) all keep the wrap.
+        for cwd in [
+            "/repo",
+            "/repo/crates/trusty-mpm",
+            "/repo/.base/.worktrees/session-x",
+            "/repo/.claude/worktrees",
+            "/repo/worktrees/agent-a",
+        ] {
+            for cmd in ISOLATION_REFUSED {
+                assert_eq!(
+                    rewrite_bash_command_unless_isolated(cmd, Some(Path::new(cwd))),
+                    rewrite_bash_command_for_compression(cmd),
+                    "{cmd} in {cwd}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_rewrite_when_the_cwd_is_undecidable() {
+        // #7477 fail-open arm: no readable cwd means isolation cannot be ruled
+        // out, and the unwrapped command is the one the classifier accepts.
+        for cmd in ISOLATION_REFUSED {
+            assert_eq!(rewrite_bash_command_unless_isolated(cmd, None), None);
+            assert_eq!(
+                rewrite_bash_command_unless_isolated(cmd, Some(Path::new(""))),
+                None
+            );
+        }
     }
 
     #[test]
@@ -1201,10 +1269,16 @@ mod tests {
     #[test]
     fn strip_wrapper_prefix_skips_every_known_wrapper() {
         for wrapper in COMMAND_WRAPPERS {
-            let tokens = [*wrapper, "rm", "-rf", "/root"];
+            // #8735: `timeout`, `chrt`, `taskset`, `flock` take an operand.
+            let operand = crate::commands::program_word::sample_operand(wrapper);
+            let (tokens, program) = if operand.is_empty() {
+                (vec![*wrapper, "rm", "-rf", "/root"], 1)
+            } else {
+                (vec![*wrapper, operand, "rm", "-rf", "/root"], 2)
+            };
             assert_eq!(
                 strip_wrapper_prefix(&tokens),
-                Some(1),
+                Some(program),
                 "expected wrapper {wrapper} to be skipped"
             );
         }

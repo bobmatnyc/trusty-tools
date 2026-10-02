@@ -46,7 +46,7 @@ fn eight_crate_topology() -> CrateTopology {
             node("trusty-mcp", 2),
             node("trusty-progress", 1),
             node("trusty-mpm", 0),
-            node("trusty-mpm-gui", 0),
+            node("trusty-mpm-ext", 0),
             node("trusty-search", 0),
             node("trusty-review", 0),
             node("trusty-audit", 0),
@@ -378,12 +378,12 @@ fn naming_a_leaf_crate_outside_a_load_bearing_claim_passes() {
 fn a_crate_name_is_matched_on_its_own_boundaries() {
     let model = model_with(vec![repo("estate", vec![], Some(eight_crate_topology()))]);
     let GroundingOutcome::Rejected { reason, .. } = Grounding::from_model(&model).check(
-        "trusty-mpm-gui is the load-bearing crate the estate depends on.",
+        "trusty-mpm-ext is the load-bearing crate the estate depends on.",
         None,
     ) else {
         panic!("expected a rejection");
     };
-    assert!(reason.contains("trusty-mpm-gui"), "reason was: {reason}");
+    assert!(reason.contains("trusty-mpm-ext"), "reason was: {reason}");
 }
 
 // ─── Loopback scope stated without the word localhost (#6082 lap 6) ──────────

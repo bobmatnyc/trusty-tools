@@ -395,17 +395,10 @@ pub(super) async fn dispatch_cli_mode(
                     .await
                     .map(|_| ());
             }
-            // #5089 review: this process is a CLIENT — it forwards argv and
-            // binds nothing, so it may only unlink a socket the kernel has
-            // confirmed dead. `is_stale_socket_for_owner` also fires when the
-            // containing directory is not 0700, which says nothing about the
-            // socket, and would orphan a live controller onto an unlinked
-            // inode. `bind_singleton` re-probes from the owner side moments
-            // later and cleans up anything this arm leaves behind.
-            Err(e) if ctrl::is_connection_refused(&e) => {
-                tracing::debug!(path = %sock_path.display(), "stale ctrl socket — cleaning up");
-                ctrl::CtrlSocket::cleanup(&sock_path);
-            }
+            // #8870: no unlink here. This client holds no bind lock, and a
+            // refused connect is also what a starter's socket answers between
+            // its `bind` and `listen`. `bind_singleton` takes over a dead
+            // socket under the lock moments later.
             Err(e) => {
                 tracing::debug!(error = %e, "no controller found — starting one");
             }

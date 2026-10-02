@@ -92,6 +92,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn start_lock_lives_beside_the_socket() {
+        // #5937: resolves the data dir twice; a sibling override between them splits the two.
+        let _env = crate::commands::env_test_lock().blocking_lock();
         let (Some(lock), Ok(socket)) = (start_lock_path(), crate::transport::uds::socket_path())
         else {
             return; // No resolvable data dir in this environment.

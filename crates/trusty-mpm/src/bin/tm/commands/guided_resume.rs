@@ -354,7 +354,9 @@ pub(crate) fn parse_pane_probes(
 ///
 /// What: FAILS OPEN — returns `true` (assume live, preserving the pre-#3873
 /// `Attach` behavior) for a blank session name, a `tmux` spawn failure, a
-/// non-zero exit, a listing that cannot be fully parsed
+/// non-zero exit OTHER than `can't find session` / `no server running`
+/// (those PROVE the session absent under an exact target and return `false`,
+/// #8443), a listing that cannot be fully parsed
 /// ([`parse_pane_probes`]), or a listing [`panes_prove_session_dead`] declines
 /// to convict (no pane attributable to this session, or any pane still live).
 /// Only a fully-parsed listing in which EVERY pane of this session is a
@@ -376,19 +378,34 @@ pub(crate) fn parse_pane_probes(
 /// shell-out itself is I/O (a live tmux server), matching the existing
 /// `session_for_pane` / `pane_tty_for` precedent in `tmux_attach.rs`.
 pub(crate) fn session_runtime_live(session_name: &str) -> bool {
+    session_runtime_live_with_bin(
+        &trusty_mpm::core::tmux::resolve_tmux_binary_or_bare(),
+        session_name,
+    )
+}
+
+/// [`session_runtime_live`] against an explicit tmux binary (#8443).
+///
+/// Why: the seam a test points at a private `-L` tmux server.
+/// What: `list-panes -s -t =<name>:` — exact, so a missing `X` can never list
+/// `X-suffix`'s panes. A reply of `can't find session` or `no server running`
+/// PROVES the session absent and returns `false`: with an exact target that
+/// answer is certain, and the kill that `false` can lead to is exact too.
+/// Every other failure still fails open (`true`).
+/// Test: `session_runtime_live_never_reports_a_prefix_sibling`.
+pub(crate) fn session_runtime_live_with_bin(tmux_bin: &str, session_name: &str) -> bool {
     let name = session_name.trim();
     if name.is_empty() {
         return true;
     }
-    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    let mut cmd = std::process::Command::new(&tmux_bin);
+    let mut cmd = std::process::Command::new(tmux_bin);
     cmd.args([
-        "list-panes",
-        "-s",
-        "-t",
-        name,
-        "-F",
-        "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
+        "list-panes".to_string(),
+        "-s".to_string(),
+        "-t".to_string(),
+        trusty_mpm::core::tmux::exact_window_target(name),
+        "-F".to_string(),
+        "#{session_name}\t#{pane_current_command}\t#{pane_pid}".to_string(),
     ]);
     // #6529: a tmux client with no UTF-8 locale rewrites these tabs to `_`,
     // which `parse_pane_probes` then refuses — reporting every session live.
@@ -397,7 +414,8 @@ pub(crate) fn session_runtime_live(session_name: &str) -> bool {
         return true;
     };
     if !output.status.success() {
-        return true;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return !(stderr.contains("can't find session") || stderr.contains("no server running"));
     }
     let Some(panes) = parse_pane_probes(&String::from_utf8_lossy(&output.stdout)) else {
         return true;
@@ -476,8 +494,7 @@ pub(crate) fn panes_prove_session_dead(
 /// Returns the [`AttachOutcome`] from the terminal hand-off (#2678) so
 /// `run_tty_picker` knows whether it must stop reading stdin.
 pub(crate) async fn resume_guided_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<AttachOutcome> {
     // The picker is only ever reached after its own upstream TTY gate
@@ -485,7 +502,7 @@ pub(crate) async fn resume_guided_session(
     // attach here. `no_attach` gating lives in `resume_session`, used by the
     // explicit `tm session(s) resume <id>` verb, which has no such upstream
     // gate (#2649 review).
-    resume_session(client, url, session, false).await
+    resume_session(daemon, session, false).await
 }
 
 /// Same state machine as [`resume_guided_session`], but TTY-gated: skips the
@@ -529,8 +546,7 @@ pub(crate) async fn resume_guided_session(
 /// process and asserts no daemon-side mutation occurred; the restart I/O
 /// path is exercised by the e2e suite and manual smoke tests.
 pub(crate) async fn resume_session(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
     no_attach: bool,
 ) -> anyhow::Result<AttachOutcome> {
@@ -612,7 +628,7 @@ pub(crate) async fn resume_session(
                 session.name, persisted_state
             );
         }
-        reconcile_zombie_stop(client, url, session).await?;
+        reconcile_zombie_stop(daemon, session).await?;
     }
 
     // `resumed` reflects the daemon's authoritative post-restart record when a
@@ -644,7 +660,7 @@ pub(crate) async fn resume_session(
                 );
             }
         }
-        resumed = restart_via_daemon(client, url, session).await?;
+        resumed = restart_via_daemon(daemon, session).await?;
     }
 
     if no_attach {
@@ -682,13 +698,12 @@ pub(crate) async fn resume_session(
 /// Test: I/O path exercised by the e2e suite; the branch selection is the pure
 /// [`plan_resume`] seam.
 async fn reconcile_zombie_stop(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<()> {
-    let resp = match client
+    let resp = match daemon
         .post(format!(
-            "{url}/api/v1/sessions/managed/{}/runtime-stop",
+            "/api/v1/sessions/managed/{}/runtime-stop",
             session.id
         ))
         .timeout(std::time::Duration::from_secs(30))
@@ -750,16 +765,12 @@ async fn reconcile_zombie_stop(
 /// interactive caller uses it to attach.
 /// Test: I/O path exercised by the e2e suite; branch selection is [`plan_resume`].
 async fn restart_via_daemon(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<trusty_mpm::client::ManagedSessionSummary> {
     // POST with a 30-second timeout — a hung daemon must not freeze the CLI.
-    let resp = match client
-        .post(format!(
-            "{url}/api/v1/sessions/managed/{}/resume",
-            session.id
-        ))
+    let resp = match daemon
+        .post(format!("/api/v1/sessions/managed/{}/resume", session.id))
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -809,11 +820,7 @@ async fn restart_via_daemon(
         // fragile substring matching — the exact anti-pattern the daemon-side
         // typed `ResumeManagedError` was introduced to eliminate for 404/409.
         reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
-            let reason = resp
-                .headers()
-                .get("x-trusty-resume-reason")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
+            let reason = resp.resume_reason().map(str::to_owned);
             let msg = resp.text().await.unwrap_or_default();
             let detail = truncate_for_display(msg.trim());
             eprintln!("tm: cannot restart session '{}': {}", session.name, detail);
@@ -973,3 +980,7 @@ pub(crate) fn unresumable_remedy_line(id: &str, reason: Option<&str>) -> String 
 fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     crate::commands::tmux_attach::tmux_attach(name)
 }
+
+#[cfg(test)]
+#[path = "guided_resume_exact_target_tests.rs"]
+mod exact_target_tests;

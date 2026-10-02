@@ -33,7 +33,11 @@
 //!    writer actor. The caller still gets the over-budget error, but the write
 //!    lands: in redb and in the in-memory drawer table together, with the
 //!    Tier C retirement invariant intact, because the guard is held across
-//!    both and released only after the mirror.
+//!    both and released only after the mirror. #8749: unless its redb
+//!    transaction outruns `timeouts::write_txn_deadline`, in which case it
+//!    rolls back, lands nowhere, and releases the guard and redb's lock — so a
+//!    stalled commit cannot hold off every later writer. Residual: a stall
+//!    inside one redb call (an op, or `commit()`'s fsync) is not interruptible.
 //!
 //! What (3) costs: the caller is told the write failed while it in fact landed,
 //! and the legs after the commit — the deferred-embed spawn, the L1 snapshot,
@@ -151,7 +155,21 @@ pub(super) async fn remember_within(
             }
             result
         }
-        Err(_) => Err(over_budget_error(handle, budget, elapsed)),
+        Err(_) => {
+            // #8314: the abort is logged server-side, naming palace and
+            // operation — a client that gave up first never sees the error,
+            // and a silent daemon is what made #8314 undiagnosable.
+            tracing::error!(
+                palace = %handle.id,
+                operation = "remember",
+                elapsed_ms = elapsed.as_millis(),
+                budget_ms = budget.as_millis(),
+                "#8314: write aborted after exceeding its budget; nothing was \
+                 acknowledged, and a commit already dispatched lands whole or \
+                 not at all"
+            );
+            Err(over_budget_error(handle, budget, elapsed))
+        }
     }
 }
 
@@ -162,20 +180,16 @@ pub(super) async fn remember_within(
 /// server-side evidence at all (#6366). It also reports the `kg.redb` size, the
 /// factor the issue traced commit duration to.
 /// What: an `anyhow::Error` carrying palace, elapsed, budget, size, and the
-/// override env var.
-/// Test: `an_over_budget_write_fails_with_a_named_reason`.
+/// override env var. #8749: typed as [`timeouts::WriteTimeout::PipelineBudget`].
+/// Test: `an_over_budget_write_fails_with_a_named_reason`,
+/// `a_writer_behind_a_stalled_commit_times_out_with_a_typed_error`.
 fn over_budget_error(handle: &PalaceHandle, budget: Duration, elapsed: Duration) -> anyhow::Error {
-    anyhow::anyhow!(
-        "palace '{}' write pipeline exceeded its {:?} budget after {:?} \
-         (issue #6366); the palace write mutex has been released so other \
-         writers proceed. kg.redb is {} bytes — a large store makes commits \
-         slower; raise TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS if writes on this \
-         palace are legitimately this slow",
-        handle.id,
+    anyhow::Error::new(timeouts::WriteTimeout::PipelineBudget {
+        palace: handle.id.to_string(),
         budget,
         elapsed,
-        kg_store_bytes(handle).map_or_else(|| "unknown".to_string(), |bytes| bytes.to_string()),
-    )
+        kg_redb_bytes: kg_store_bytes(handle),
+    })
 }
 
 /// Best-effort size of the palace's KG store on disk.

@@ -27,8 +27,8 @@ use crate::session_manager::ManagedSessionId;
 /// directly. Extracted to a named, `fw`-parameterised function (rather than
 /// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
 /// tempdir without touching the operator's real `~/.trusty-mpm`/`~/.claude`.
-/// What: calls `prepare_session_for_managed(fw, worktree, Some(repo_url),
-/// session_id)` — #4832 threads the id so the compiled prompt lands in this
+/// What: calls `prepare_session_for_managed(fw, worktree, repo_url,
+/// session_id)` — `repo_url` is `None` for a local-only repository (#8934) — #4832 threads the id so the compiled prompt lands in this
 /// session's own directory rather than the unmanaged `local` bucket.
 /// On success, logs the deployed-agent count AND the deployed-skill count
 /// (`report.skill_deploy.deployed.len()` — #1917; previously only the agent
@@ -47,13 +47,13 @@ pub(super) fn prepare_inproject_session(
     fw: &crate::core::paths::FrameworkPaths,
     session_id: &ManagedSessionId,
     worktree: &std::path::Path,
-    repo_url: &str,
+    repo_url: Option<&str>,
 ) -> Result<Option<bool>, String> {
     let mut memory_reachable = None;
     match crate::core::session_launch::prepare_session_for_managed(
         fw,
         worktree,
-        Some(repo_url),
+        repo_url,
         &session_id.to_string(),
     ) {
         Ok(report) => {

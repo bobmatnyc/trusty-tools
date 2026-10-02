@@ -12,6 +12,8 @@
 pub mod api;
 pub mod audit;
 pub mod bug_report;
+/// The build-lease admission decision log (#8261).
+pub mod build_lease_routes;
 /// The machine-wide builder-slot claim route and its read-only census (#6892).
 pub mod builder_slot_routes;
 /// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
@@ -30,13 +32,37 @@ pub mod doctor;
 // sits AT the 500-SLOC production cap. `pub` because `tm doctor --fix` calls
 // `repair_auto_memory` from the `tm` binary.
 pub mod doctor_auto_memory;
+// #8236: declared here for the same reason — a credential in a user-readable
+// LaunchAgent plist. `pub` because `tm doctor --fix` calls
+// `repair_launchd_plist_secrets` from the `tm` binary.
+pub mod doctor_launchd_secrets;
+// #8236: the repair half, split from the row so neither file approaches the
+// 500-SLOC cap. `pub` for the same reason.
+pub mod doctor_launchd_secrets_repair;
+// #8236: `tm doctor --fix-launchd-secrets` — that repair alone, plus the chmod.
+pub mod doctor_launchd_secrets_scoped;
+// #8236 item 8: can the DAEMON's own resolver reach each credential it needs?
+// Read-only, key-only, and bounded so it can never hang on a Keychain dialog.
+pub mod doctor_credential_reach;
 // #7424: declared here rather than inside `doctor.rs` — that file sits AT the
 // 500-SLOC production cap, so its `mod` + `use` pair would not fit. The check
 // is reached as `super::doctor_startup_context::…` from `doctor::run_doctor`.
 mod doctor_startup_context;
+// #8415: the launchd `ProcessType` of the tm jobs that start tmux servers.
+// Declared here for the same cap reason as the rows above.
+pub mod doctor_launchd_process_type;
+// #8415: the observed priority of the RUNNING tmux server, which a plist fix
+// does not lift until the server restarts.
+mod doctor_tmux_priority;
+// #8926: trusty-* processes listening on TCP, against the ADR-0032 allowlist.
+mod doctor_tcp_listeners;
+// #8378 PR-C: the instructional-content source and the installed pin (ADR-0064).
+mod doctor_content;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
+// #8942: the shutdown legacy-registry reap's kill loop.
+mod legacy_reap;
 pub mod llm_overseer;
 pub mod lock;
 /// The cloud log-drain scheduler (#6535, Phase 3 of #6533).
@@ -262,6 +288,7 @@ pub async fn serve_with_shutdown(
     // cadence and the spawn all live in the service module, which keeps this file
     // under its SLOC cap and keeps the policy next to the loop it governs.
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    project_adoption::spawn_startup_marker_migration(&state); // #8511
 
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the
     // default host spawns nothing. A malformed section is reported here and
@@ -411,7 +438,8 @@ pub async fn serve_with_shutdown(
 /// `kill_session` for every name in its own registry. It asks
 /// [`host_state_refusal`] first, and a refusal returns before a driver exists.
 /// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op);
-/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`.
+/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`;
+/// `reap_all_live_sessions_never_kills_a_sidecar_named_session` (#8942).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
     if let Some(reason) = host_state_refusal(&state) {
         tracing::warn!("graceful shutdown: legacy session reap skipped — {reason}");
@@ -429,19 +457,8 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
         .map(|s| s.tmux_name)
         .collect();
 
-    let mut reaped = 0usize;
-    for name in names {
-        match driver.kill_session(&name) {
-            Ok(()) => reaped += 1,
-            Err(e) => {
-                // Fail-open: a kill failing (already gone, or never had a host)
-                // must not stop us reaping the rest. stderr only via tracing.
-                tracing::warn!(
-                    "graceful shutdown: kill_session({name}) failed (may already be gone): {e}"
-                );
-            }
-        }
-    }
+    // #8942: the kill floor inside `kill_session` spares the Architect's names.
+    let reaped = legacy_reap::reap_legacy_names(&driver, names);
     info!("graceful shutdown: reaped {reaped} legacy session(s)");
 }
 

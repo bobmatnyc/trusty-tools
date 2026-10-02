@@ -16,7 +16,7 @@
 //! answer: `merge`, `squash`, and `commit` with and without a session.
 //! Test: this file IS the test module.
 
-mod common;
+use crate::common;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

@@ -137,6 +137,7 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         // #6568: read straight off the record's `stop_cause`, so every listing
         // surface says the same thing about a parked session.
         auto_resume_parked: r.auto_resume_park_reason().map(str::to_string),
+        kind: r.kind, // #8942
     }
 }
 
@@ -305,6 +306,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         slot,
         deleted: true,
         auto_resume_parked: None,
+        kind: crate::session_manager::SessionKind::Ordinary,
     }
 }
 
@@ -795,10 +797,11 @@ pub(super) async fn numbered_summaries(
 /// Build the tmux attach command string for a session.
 ///
 /// Why: clients need the exact attach command without hardcoding the convention.
-/// What: returns `tmux attach-session -t <name>`.
+/// What: returns `tmux attach-session -t '=<name>'` — exact and quoted for
+/// zsh (#8443), via `trusty_common::tmux::shell_attach_command`.
 /// Test: attach-cmd handler test.
 pub(super) fn attach_cmd_for(tmux_name: &str) -> String {
-    format!("tmux attach-session -t {tmux_name}")
+    crate::core::tmux::shell_attach_command(tmux_name)
 }
 
 /// Parse a UUID path segment into a [`ManagedSessionId`].

@@ -132,6 +132,13 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
         "skills/tm-secrets.md",
+        "skills/tm-architect-setup.md",
+        // #8376: entry file plus its four reference files.
+        "skills/tm-epic.md",
+        "skills/tm-epic/references/tracker-template.md",
+        "skills/tm-epic/references/phase-template.md",
+        "skills/tm-epic/references/manual-procedure.md",
+        "skills/tm-epic/references/anti-patterns.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -294,6 +301,8 @@ fn tm_skills_have_frontmatter() {
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
         ("tm-secrets", TM_SECRETS),
+        ("tm-architect-setup", TM_ARCHITECT_SETUP),
+        ("tm-epic", TM_EPIC),
     ];
     for (name, content) in skills {
         assert!(
@@ -329,18 +338,33 @@ fn output_style_has_matching_frontmatter_name() {
 }
 
 #[test]
-fn output_style_registry_has_three_distinct_ids() {
-    // HR-4 bundles exactly three styles with distinct ids and file names.
-    assert_eq!(OUTPUT_STYLES.len(), 3);
+fn output_style_registry_has_four_distinct_ids() {
+    // HR-4 bundles three PM styles; #8453 adds the supervisor style. Ids and
+    // file names are distinct.
+    assert_eq!(OUTPUT_STYLES.len(), 4);
     let mut ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 3, "style ids must be distinct");
+    assert_eq!(ids.len(), 4, "style ids must be distinct");
 
     let mut files: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
     files.sort_unstable();
     files.dedup();
-    assert_eq!(files.len(), 3, "style file names must be distinct");
+    assert_eq!(files.len(), 4, "style file names must be distinct");
+}
+
+#[test]
+fn the_pm_styles_are_every_style_but_the_supervisor_style() {
+    // #8453: the PM-invariant tests iterate `pm_output_styles()`; it must drop
+    // exactly the supervisor style and nothing else.
+    let pm: Vec<&str> = pm_output_styles().map(|s| s.id).collect();
+    assert_eq!(
+        pm,
+        ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
+    );
+    assert!(OUTPUT_STYLES.iter().any(|s| s.id
+        == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
+        && s.content == OUTPUT_STYLE_SUPERVISOR));
 }
 
 #[test]
@@ -527,11 +551,16 @@ fn bundle_table_is_complete() {
     // Issue #8192 (+1): `skills/rust-delivery-workflow.md` is NEW — the Rust
     //   DELIVERY-PROCESS half split out from `rust-build-performance`'s
     //   build-speed scope, declared by `rust-engineer`. 184 + 1 = 185.
-    assert_eq!(ALL.len(), 185);
+    // Issue #8376 (+5): `skills/tm-epic.md` is NEW — tracker + phase-issue
+    //   authoring — plus four `references/*.md` files (tracker-template,
+    //   phase-template, manual-procedure, anti-patterns). 185 + 5 = 190.
+    // Issue #8436 (+1): `skills/tm-architect-setup.md` is NEW — the
+    //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
+    assert_eq!(ALL.len(), 191);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 185, "artifact paths must be unique");
+    assert_eq!(paths.len(), 191, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -1190,11 +1219,36 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
         "re-dispatch fresh with `isolation: \"worktree\"`",
         "never `SendMessage` into the main checkout",
         "ADR-0061, #5649",
+        // #8004 recurrence: Claude Code removes an unchanged tree on stop, so
+        // the check covers every resume, and the fresh brief names the base.
+        "applies to EVERY resume",
+        "Claude Code removes an unchanged worktree",
+        "restate the base commit and branch in the brief",
+        "A worktree agent's tree must still exist first",
     ] {
         assert!(
             contains_prose_anchor(TM_DELEGATION_PATTERNS, needle),
             "tm-delegation-patterns' PM Re-Engagement section is missing the \
              #8004 worktree-survival check: {needle:?}"
+        );
+    }
+}
+
+/// 🔴 #8004 recurrence: the resident PM section routed only CI-pending and
+/// goal-unmet hand-backs to PM Re-Engagement, so a resume after an owner
+/// ruling or a released HOLD skipped the worktree-survival check.
+#[test]
+fn resident_re_engagement_routes_every_resume_to_the_worktree_check_8004() {
+    let section = include_str!("../assets/instructions/sections/subagent-re-engagement.md");
+    for needle in [
+        "Before any `SendMessage` resume",
+        "\"PM Re-Engagement\"",
+        "#8004",
+    ] {
+        assert!(
+            contains_prose_anchor(section, needle),
+            "subagent-re-engagement.md must route every resume to the #8004 \
+             worktree check: {needle:?}"
         );
     }
 }
@@ -1571,21 +1625,31 @@ fn output_styles_keep_claude_code_coding_instructions() {
     // Claude Code strips its built-in software-engineering instructions (how to
     // scope changes, write comments, verify work) from any custom output style
     // unless `keep-coding-instructions` is true — the field defaults to FALSE.
-    // All three bundled styles are PM-orchestration styles layered ON TOP of
+    // All three PM styles are PM-orchestration styles layered ON TOP of
     // normal coding behaviour, so all three must opt back in.
-    for style in OUTPUT_STYLES {
-        let frontmatter = style
+    let frontmatter = |style: &BundledStyle| {
+        style
             .content
             .split("---")
             .nth(1)
-            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id));
+            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id))
+            .to_string()
+    };
+    for style in pm_output_styles() {
         assert!(
-            frontmatter.contains("keep-coding-instructions: true"),
+            frontmatter(style).contains("keep-coding-instructions: true"),
             "{} frontmatter must set `keep-coding-instructions: true`, or Claude \
              Code silently drops its built-in coding instructions",
             style.id
         );
     }
+    // #8453: the supervisor is not a coder — its style drops them on purpose,
+    // as the reference supervisor's style did.
+    let supervisor = OUTPUT_STYLES
+        .iter()
+        .find(|s| s.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .expect("the supervisor style is bundled");
+    assert!(frontmatter(supervisor).contains("keep-coding-instructions: false"));
 }
 
 /// Every prose RULE the output styles must state resident, as a short anchor.
@@ -1641,7 +1705,9 @@ fn output_styles_state_every_pm_prose_rule() {
     // is stated RESIDENT here rather than referenced. #7423 kept the rules and
     // moved their examples behind `Skill(skill="tm-prose-style")`, so the
     // contract is "the rule is still stated, and its evidence is one hop away".
-    for style in OUTPUT_STYLES {
+    // #8453: the PM styles; the supervisor style's prose section is pinned
+    // verbatim by `the_supervisor_style_carries_write_plainly_verbatim`.
+    for style in pm_output_styles() {
         for needle in PROSE_RULE_ANCHORS {
             // #7709: whitespace-insensitive, so a rewrap is not a regression.
             assert!(
@@ -1677,7 +1743,7 @@ fn prose_rule_anchors_survive_a_markdown_rewrap_7709() {
             .join("\n")
     }
 
-    for style in OUTPUT_STYLES {
+    for style in pm_output_styles() {
         let rewrapped = rewrap(style.content, 3);
         // A reflow-broken anchor must still match…
         for needle in PROSE_RULE_ANCHORS {
@@ -1891,7 +1957,8 @@ fn output_styles_name_the_todowrite_fallback() {
     // a PM on a harness that does not expose it announced the gap and improvised
     // its own tracking. The section must state the CONDITION and the fallback;
     // pinning both halves keeps a future trim from dropping one of them.
-    for style in OUTPUT_STYLES {
+    // #8453: a PM section; the supervisor style carries no TodoWrite mandate.
+    for style in pm_output_styles() {
         assert!(
             style.content.contains("where the harness exposes it"),
             "{}: the TodoWrite section must make the tool conditional (#2799)",
@@ -2250,6 +2317,40 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
              guidance: {needle:?}"
         );
     }
+}
+
+/// #8630: adaptive-crm spent its org's Actions cap and every job failed after.
+/// The deployed `git-workflow` entry must carry the four-check heading, each
+/// check, the run-spend rule and the billing-blocker phrase, and the composed
+/// `version-control` body must point at that section.
+#[test]
+fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
+    let deployed = ALL
+        .iter()
+        .find(|a| a.rel_path == "skills/git-workflow.md")
+        .expect("git-workflow must be in the ALL bundle table")
+        .contents;
+    for needle in [
+        "### Four Checks Before a Workflow Edit or a PR on a Billed Repo",
+        "branches: [main]",
+        "cancel-in-progress: ${{ github.ref != format(",
+        "timeout-minutes: 20",
+        "if: needs.changes.outputs.db == 'true'",
+        "Never re-run a green run.",
+        "recent account payments have failed or your spending limit",
+        "19,667 Linux minutes",
+    ] {
+        assert!(
+            deployed.contains(needle),
+            "deployed git-workflow skill is missing the #8630 Actions-spend text: {needle:?}"
+        );
+    }
+    let composed = crate::core::agent_builder::compose_agent("version-control", agent_assets_dir())
+        .expect("compose_agent(version-control) must succeed");
+    assert!(
+        composed.contains("git-workflow/SKILL.md`, \"GitHub Actions Spend\""),
+        "composed version-control must point at the #8630 section"
+    );
 }
 
 /// 🔴 #7558 REGRESSION, second home: `tm-workflow` owns the main-checkout

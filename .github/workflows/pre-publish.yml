@@ -33,11 +33,13 @@
 #   Plus the Code Contracts gates from #5729 (see the `contracts` job), which
 #   need a rustdoc JSON build too heavy for per-PR CI and belong here.
 #
-# TRIGGERS. `workflow_dispatch` plus tag push on `*-v*`, matching
-#   `semver-checks.yml`'s existing tag trigger so both release gates fire on the
-#   same event. It deliberately does NOT run on pull_request: it is 25-35
-#   minutes and gates the publish boundary, not the merge boundary — the same
-#   reasoning `ci.yml` applies to its shard matrix.
+# TRIGGERS. `workflow_dispatch` plus tag push on `*-v*` (excluding `content-v*`,
+#   Refs #8389 — that tag belongs to content-release.yml's independent bundle
+#   channel, not a crate publish), matching `semver-checks.yml`'s existing tag
+#   trigger so both release gates fire on the same event. It deliberately does
+#   NOT run on pull_request: it is 25-35 minutes and gates the publish
+#   boundary, not the merge boundary — the same reasoning `ci.yml` applies to
+#   its shard matrix.
 #
 # SHA TARGETING. `workflow_dispatch` only accepts a REF (branch/tag), so a
 #   caller normally cannot pin a manual run to a commit older than the ref's
@@ -78,6 +80,7 @@ on:
   push:
     tags:
       - "*-v*"
+      - "!content-v*"
   workflow_dispatch:
     inputs:
       crate:
@@ -330,8 +333,12 @@ jobs:
       # here — 1 (a link regressed), 3 (no verdict computable) and 4 (#7537: the
       # run examined fewer doc units than the workspace declares) all fail the
       # step. The last line of the output names which, as a `VERDICT` row.
+      # `--require-published` (#8716): every crate `cargo metadata` calls
+      # publishable must have a doc unit this run examined, so a published
+      # crate added to the gate's excluded set fails here instead of shipping
+      # undocumented.
       - name: cargo doc + broken-link ratchet
-        run: bash scripts/check_rustdoc_links.sh
+        run: bash scripts/check_rustdoc_links.sh --require-published
 
   # ==========================================================================
   # audit — GATE 2. Known-vulnerable dependencies.
@@ -446,7 +453,13 @@ jobs:
   # the next on `Lock acquisition failed: …/blobs/<sha>.lock`. That crate now
   # resolves the same shared cache dir, and hf-hub's `get()` reads the local
   # snapshot without touching the network when the file is present, so the
-  # pre-seed below now covers all eleven selected tests.
+  # pre-seed below now covers all eleven selected ONNX tests.
+  #
+  # #8643: two trusty-installer tests also run here. They read public GitHub
+  # releases (the API, and one tga asset download) rather than a model, so the
+  # run step passes the job's GITHUB_TOKEN, which trusty-installer sends as a
+  # Bearer header. Unauthenticated, the API allows 60 requests an hour per
+  # shared runner IP.
   # ==========================================================================
   ignored-tests:
     name: "Gate 4 — #[ignore]d ONNX/embedder tests"
@@ -597,6 +610,9 @@ jobs:
           key: ${{ steps.fastembed-key.outputs.key }}
 
       - name: Run the selected ignored tests + reconcile the rest
+        env:
+          # #8643: authenticates trusty-installer's live GitHub release reads.
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/check_ignored_tests.sh
 
   # ==========================================================================

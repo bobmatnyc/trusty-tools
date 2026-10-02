@@ -91,12 +91,14 @@ use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::decommission::WorktreeRemoval;
+use crate::session_manager::worktree_ignored_output::ignored_output_refusal;
 use crate::session_manager::worktree_liveness::process_holding;
 use crate::session_manager::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, find_agent_worktree,
     is_harness_agent_worktree, read_sentinel_owner,
 };
 use crate::session_manager::worktree_removal_audit::audited_removal;
+use crate::session_manager::worktree_removal_integrity::{content_count, partial_removal};
 use crate::session_manager::worktree_safety::{
     DirtyWorktreePolicy, dirt_blocks_removal, worktree_remove_command,
 };
@@ -115,6 +117,8 @@ pub enum ReapOutcome {
     AlreadyGone,
     /// Left in place, for the stated reason.
     Refused(String),
+    /// Git failed after deleting some or all of the tree (#8782); never kept.
+    PartiallyRemoved(String),
 }
 
 impl ReapOutcome {
@@ -144,6 +148,8 @@ pub struct SweepSummary {
     pub already_gone: usize,
     /// A gate refused, and the directory is still there.
     pub kept: usize,
+    /// Git failed after deleting some or all of the tree (#8782).
+    pub partially_removed: usize,
 }
 
 /// What the delegation registry can say about `agent_id` (#5661).
@@ -206,6 +212,9 @@ pub(crate) fn delegation_state_for_agent(
 ///    This is #4091's check, reused — uncommitted files, untracked files, a
 ///    nested dirty checkout and unpushed commits are all one implementation, and
 ///    a second copy here would drift from it.
+///    5a. [`ignored_output_refusal`] finds gitignored files that are not build
+///    output, or cannot tell → refuse (#8534). Gate 5 never counts gitignored
+///    files, and gate 7's `--force` deletes them.
 /// 6. [`process_holding`] finds a live process standing in the tree → refuse.
 ///    Gates 3 and 5 are both REGISTRY reads: gate 3 asks what trusty-mpm
 ///    recorded, gate 5 asks what git recorded. Neither can see a process
@@ -214,8 +223,8 @@ pub(crate) fn delegation_state_for_agent(
 ///    worktree ran for a day in exactly that blind spot. This gate asks the
 ///    OS instead, and fails toward IN USE when it cannot get an answer.
 /// 7. `git worktree remove --force` — force because a clean tree can still hold
-///    gitignored build output that plain `remove` refuses, and because gates 5
-///    and 6 have already established there is nothing to lose. A non-zero exit
+///    gitignored build output that plain `remove` refuses, and because gates 5,
+///    5a and 6 have already established there is nothing to lose. A non-zero exit
 ///    (a git-`locked` worktree exits 128) refuses, and so does a ZERO exit that
 ///    left the directory on disk ([`reap_outcome_of`], #7652 critic round 2).
 ///
@@ -228,7 +237,10 @@ pub(crate) fn delegation_state_for_agent(
 /// `reap_refuses_a_worktree_a_live_process_is_standing_in`,
 /// `reap_refuses_a_path_whose_sentinel_names_another_agent`,
 /// `reap_refuses_a_path_with_no_sentinel`,
-/// `reap_never_reports_removed_while_the_path_survives`.
+/// `reap_never_reports_removed_while_the_path_survives`,
+/// `reap_keeps_gitignored_run_output_in_a_zero_commit_tree`,
+/// `reap_keeps_untracked_run_output_in_a_zero_commit_tree`,
+/// `reap_removes_a_zero_commit_tree_holding_only_build_output`.
 pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> ReapOutcome {
     if !path.exists() {
         return ReapOutcome::AlreadyGone;
@@ -288,6 +300,11 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
             dirt.unpushed_commits
         ));
     }
+    // #8534: `--force` below also deletes gitignored files, which the dirt gate
+    // does not count — a zero-commit run's gitignored outputs were lost here.
+    if let Some(refusal) = ignored_output_refusal(path) {
+        return ReapOutcome::Refused(refusal);
+    }
     // #4311: the only gate that asks the OS rather than a record trusty-mpm or
     // git wrote. Last, because it is the most expensive.
     if let Some(holder) = process_holding(path) {
@@ -310,14 +327,24 @@ pub(crate) fn reap_worktree(path: &Path, agent_id: &str, in_use: &[PathBuf]) -> 
     let outcome = audited_removal(
         path,
         &format!("agent-worktree reap: agent {agent_id} has finished with this tree"),
-        || match worktree_remove_command(&registry_root, path).output() {
-            Ok(o) if o.status.success() => WorktreeRemoval::Removed,
-            Ok(o) => WorktreeRemoval::Kept(format!(
-                "`git worktree remove --force` exited {}: {}",
-                o.status,
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+        || {
+            // #8782: judged against this count if git fails.
+            let before = content_count(path);
+            match worktree_remove_command(&registry_root, path).output() {
+                Ok(o) if o.status.success() => WorktreeRemoval::Removed,
+                Ok(o) => {
+                    let failure = format!(
+                        "`git worktree remove --force` exited {}: {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                    match partial_removal(path, before, &failure) {
+                        Some(report) => WorktreeRemoval::PartiallyRemoved(report),
+                        None => WorktreeRemoval::Kept(failure),
+                    }
+                }
+                Err(e) => WorktreeRemoval::Kept(format!("could not run git: {e}")),
+            }
         },
     );
     reap_outcome_of(path, outcome)
@@ -352,6 +379,7 @@ fn reap_outcome_of(path: &Path, outcome: WorktreeRemoval) -> ReapOutcome {
             path.display()
         )),
         WorktreeRemoval::Kept(reason) => ReapOutcome::Refused(reason),
+        WorktreeRemoval::PartiallyRemoved(report) => ReapOutcome::PartiallyRemoved(report),
     }
 }
 
@@ -489,6 +517,9 @@ async fn reap_and_record(
                 path = %path.display(),
                 "agent-worktree reap: keeping this worktree — {reason} (#4311)"
             );
+        }
+        ReapOutcome::PartiallyRemoved(report) => {
+            tracing::warn!(agent_id, path = %path.display(), "agent-worktree reap: {report}");
         }
     }
     outcome
@@ -631,20 +662,24 @@ pub fn spawn_on_session_end(
                 ReapOutcome::Removed => summary.removed += 1,
                 ReapOutcome::AlreadyGone => summary.already_gone += 1,
                 ReapOutcome::Refused(_) => summary.kept += 1,
+                ReapOutcome::PartiallyRemoved(_) => summary.partially_removed += 1,
             }
         }
         let SweepSummary {
             removed,
             already_gone,
             kept,
+            partially_removed,
         } = summary;
         tracing::info!(
             session = %session.0,
             removed,
             already_gone,
             kept,
+            partially_removed,
             "agent-worktree reap: this session ended — removed {removed} of its agents' \
-             worktrees, found {already_gone} already gone and kept {kept} (#4311)"
+             worktrees, found {already_gone} already gone, kept {kept} and partially \
+             removed {partially_removed} (#4311, #8782)"
         );
         summary
     }))

@@ -8,7 +8,7 @@
 #   1. BEHAVIOR PRESERVATION. The generator was extracted from an inline Python
 #      heredoc in release.yml. The only acceptable evidence that the extraction
 #      changed nothing is that it reproduces, byte for byte, the formulae the
-#      retired code actually pushed. PASS A renders all nine live tap formulae
+#      retired code actually pushed. PASS A renders all eight live tap formulae
 #      from their own recorded inputs (scripts/test-data/homebrew/tap-inputs.tsv)
 #      and diffs against the real bytes (expected/<crate>.rb).
 #

@@ -362,3 +362,69 @@ fn the_bundled_corpus_actually_shrinks() {
         "the fold recovered nothing: authored {authored} B, folded {folded} B"
     );
 }
+
+#[test]
+fn an_unclosed_comment_in_one_part_hides_nothing_in_the_next() {
+    // #8533: a project body ending inside `<!--` beside base text. Folded as one
+    // string the base text vanished; folded per part it survives.
+    let parts = [
+        "Project body.\n<!-- TODO",
+        "> **Agent selection.** base",
+        "",
+    ];
+    assert_eq!(
+        fold_parts(&parts, "\n\n"),
+        "Project body.\n\n> **Agent selection.** base"
+    );
+    assert_eq!(
+        fold_delivered_prompt(&parts[..2].join("\n\n")),
+        "Project body."
+    );
+}
+
+#[test]
+fn tilde_and_long_backtick_fences_pair_by_character_and_length() {
+    // #8533: a fence closes only on its own character, at least as long, with
+    // nothing else on the line. Inside it, a comment is code and survives.
+    let text = "~~~\n<!-- kept -->\n```\n~~~\n\n````md\n```\n<!-- kept too -->\n```\n````\n\
+                <!-- dropped -->\nafter";
+    assert_eq!(
+        fold_delivered_prompt(text),
+        "~~~\n<!-- kept -->\n```\n~~~\n\n````md\n```\n<!-- kept too -->\n```\n````\nafter"
+    );
+    let mut open = None;
+    assert!(step_fence(&mut open, "```rust"));
+    assert!(
+        !step_fence(&mut open, "```rust"),
+        "an info string never closes"
+    );
+    assert!(
+        !step_fence(&mut open, "~~~"),
+        "the other character never closes"
+    );
+    assert!(step_fence(&mut open, "  ````  "));
+    assert_eq!(open, None);
+    assert_eq!(open_fence_at_end("``` a`b"), None, "a backtick info string");
+}
+
+#[test]
+fn a_block_closes_its_own_tilde_or_long_backtick_fence() {
+    // #8533: a block that leaves a fence open is closed with the same character
+    // and length, so the next block joined after it is prose again.
+    for (text, closed) in [
+        ("Body.\n```text\nopen", "Body.\n```text\nopen\n```"),
+        ("Body.\n~~~~\nopen", "Body.\n~~~~\nopen\n~~~~"),
+        (
+            "Body.\n````md\n```\ninner",
+            "Body.\n````md\n```\ninner\n````",
+        ),
+        ("Body.\n```\nclosed\n```", "Body.\n```\nclosed\n```"),
+    ] {
+        assert_eq!(fold_block(text), closed, "{text:?}");
+        assert_eq!(open_fence_at_end(&fold_block(text)), None, "{text:?}");
+    }
+    assert_eq!(
+        fold_parts(&["Body.\n~~~\nopen", "Base text."], "\n\n"),
+        "Body.\n~~~\nopen\n~~~\n\nBase text."
+    );
+}

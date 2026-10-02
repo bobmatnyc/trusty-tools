@@ -6,6 +6,81 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.5] — 2026-09-28
+
+### Changed
+
+- `BASE-AGENT.md` states the transcript cost model where the redirect rule already lives: a pasted log is re-sent every round and charged again on each, and a repeated check is cheap when it returns ONE line. The question is how many bytes a command puts in context, not whether it is a loop — so the `gh pr checks --watch` rule now names the STREAMING as the defect rather than implying repeated checking is one. "Show raw output" gains one clarifying line that it means the result lines, not the log that produced them; "Effort Matches Blast Radius" gains one line that a text-only change does not earn a compile-everything gate. Paid for within the 42,000-byte composed-agent resident budget (#7723, #7825) by deduplicating three restatements of the redirect recipe and two of the never-promise-to-report-back rule, leaving the file 77 bytes larger against 87 bytes of headroom. The worked detail stays in `verification-before-completion` rather than growing the resident chain (Refs #8251).
+
+## [0.8.4] — 2026-09-27
+
+### Documentation
+
+- `BASE-AGENT.md` now states that an agent's Improvement recommendations go to
+  the `bobmatnyc/trusty-tools` rollup issue #8021, or as a comment on the
+  parent issue, and never as a new issue (owner ruling 2026-09-27).
+- BASE-RESEARCH.md gains rules requiring a crash-diagnosis repro to go through the project's real connection/attach path and requiring each measured figure to name the exact rule it measured (Refs #8517, #8500).
+- BASE-ENGINEER.md's regression-test-first section now requires an error-path test to assert the code reached the point of failure, not just that it failed (Refs #8516).
+- BASE-AGENT.md gains a "Field Techniques" section covering launchd state-line polling, per-commit rebase-empty prediction, home-wide search timeouts, and drift-guard target-repo confirmation via `git remote -v` (Refs #8529).
+- BASE-AGENT.md's Handoff Protocol now states that edits on an already-checked-out branch land as commits on the branch actually checked out, and that untracked files missing from a branch diff are not deletions (Refs #8576).
+
+## [0.8.3] — 2026-09-26
+
+### Fixed
+
+- `BASE-AGENT.md`'s worktree-isolation bullet cuts the #8473 heredoc-commit-message clause to a short pointer at the `worktree-discipline.md` substitution table, and two other bullets drop redundant words, bringing composed `rust-engineer` and `ticketing` back under their resident-body budgets ([#8377](https://github.com/bobmatnyc/trusty-tools/issues/8377)).
+- `BASE-AGENT.md`'s worktree-isolation bullet names the substitute for a heredoc-embedded `git commit -m "$(cat <<'EOF' … EOF)"`, which a worktree agent's harness refuses: repeated `-m` flags, or `git commit -F <file>` with the file written by the Write tool ([#8473](https://github.com/bobmatnyc/trusty-tools/issues/8473)).
+- The `python-engineer` agent's Development Workflow section spells the test gate `.venv/bin/python -m pytest` instead of `source .venv/bin/activate`, which a worktree agent's harness refuses ([#8514](https://github.com/bobmatnyc/trusty-tools/issues/8514)).
+
+### Changed
+
+- The `version-control` agent points at the `git-workflow` skill's "GitHub Actions Spend" checks before a workflow edit or a PR on a billed repo ([#8630](https://github.com/bobmatnyc/trusty-tools/issues/8630)).
+
+### Security
+
+- The `local-ops` agent checks that a Keychain item exists by exit status alone, never adds `-w`/`-g` to a check, and consumes a needed value inside the command that uses it (a pipe to `--password-stdin`) rather than in a shell variable, matching the `tm-secrets` skill; the `gcp-ops` agent never runs `print-access-token` as its own command and consumes a token inside the command that needs it ([#8596](https://github.com/bobmatnyc/trusty-tools/issues/8596), [#8248](https://github.com/bobmatnyc/trusty-tools/issues/8248)).
+
+### Documentation
+
+- `version-control.md` no longer tells the agent to pass `--delete-branch` —
+  the flag fails post-merge whenever a worktree holds the base branch (#7104)
+  or the head branch (#8391), which every `isolation: "worktree"` delivery
+  does. Guidance now points to `tm pr merge <n>` + `tm pr cleanup <n>`, with a
+  fallback sequence and the correct merge-tree safety check for
+  `git branch -D` (closes [#8391](https://github.com/bobmatnyc/trusty-tools/issues/8391))
+
+## [0.8.2] — 2026-09-25
+
+### Added
+
+- the `ticketing` agent reads the project-root `TICKETING.md` before any create, label, comment, or transition in any tracker, generates it from the skill skeleton plus the observed repository state when absent, and never overwrites an existing one ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376))
+  - the file's behaviour settings are honoured, its contents are treated as data, and it outranks a conflicting brief unless the brief cites an owner ruling
+  - component labels are chosen from the project's own stack unit rather than an assumed Cargo crate, and the `no-component-label:` waiver reason names that unit
+  - epics follow the tracker + phase-issue pattern — `[EPIC <epic#>] <outcome>` (created `[EPIC]`, renamed once the number is known), `[EPIC_<epic#> PHASE_<n>]` sub-issues, a wholesale-regenerated phases block, four update triggers, phase numbers never reused — and a tracker links to its committed research doc instead of carrying findings
+  - follow-ups are budgeted per phase issue, and stale-issue recommendations are posted per epic as one digest
+
+### Fixed
+
+- The `version-control` agent's composed body is back under its 47,500-byte resident budget (#7727). Its CI-waits section, which #8601 pushed over the ceiling, now points at BASE-AGENT's "Finishing Work — Push, Report, Stop" instead of restating it; the agent-specific rules stay.
+- The `version-control` agent no longer falls back to a fleet-wide
+  `prune-worktrees` sweep when the guard refuses one worktree removal. It
+  reports the path and the refusal to the PM and stops. Refs #8577.
+
+### Changed
+
+- Align shared agent verification, authorization, issue references, and build waiting with scoped operational work.
+- The `version-control` agent names the command that moves an agent's commits
+  into a parked worktree (#8161).
+- The shared `ticketing` agent asset now carries the epic/phase mechanics — the `[EPIC N]` / `[EPIC_N PHASE_M]` title forms, the two-step tracker create, native sub-issue linking, the three tracker marker blocks, and the rule that the `phases` block is regenerated from live child state and never hand-patched — and its gh-version claim now matches the installed 2.96 ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
+- BASE-AGENT.md now forbids moving, renaming, or restructuring an existing top-level directory to satisfy a layout ADR, scaffold, or monorepo convention (Refs #8382).
+- The `version-control` agent never switches branches, stashes or runs
+  `reset --hard` in a main checkout; it publishes a branch with
+  `git push origin <branch>`, which needs no checkout. Refs #8572.
+
+### Documentation
+
+- The `AttachHandle::ShellCommand` example is now the exact, quoted form `tmux attach -t '=tmpm-a1b2c3'` that trusty-mpm returns (#8443).
+
 ## [0.8.1] — 2026-09-18
 
 ### Fixed

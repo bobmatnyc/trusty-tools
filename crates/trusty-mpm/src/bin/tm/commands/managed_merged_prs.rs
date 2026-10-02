@@ -176,6 +176,10 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
     for s in strings("removal_failed") {
         out.push(format!("  removal FAILED (still on disk): {s}"));
     }
+    // #8782: git failed after deleting content; what is left needs review.
+    for s in strings("partially_removed") {
+        out.push(format!("  PARTIALLY REMOVED: {s}"));
+    }
     // #6507: every candidate the survey refused, naming the gate. The three
     // families above disclose only what happened AFTER classification, so a
     // worktree refused during classification by any gate but 4 appeared
@@ -185,6 +189,102 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
         out.push(format!("  {s}"));
     }
     out
+}
+
+/// Is `url` the trusty-console gateway base (`http://<console>/api/mpm`)? (#8347)
+fn is_gateway_url(url: &str) -> bool {
+    url.trim_end_matches('/')
+        .ends_with(trusty_mpm::core::discovery::GATEWAY_PATH)
+}
+
+/// The prune-worktrees endpoint, addressed to the daemon itself (#8347).
+///
+/// Why: `tm` resolves its base URL gateway-first, so with the console running
+/// the request went to `http://<console>/api/mpm/api/v1/…`. The console proxy
+/// cuts every forwarded call at its 30 s client timeout, and a merged-PR survey
+/// runs for minutes, so the proxy answered 502 for a healthy daemon.
+/// What: joins `/api/v1/sessions/managed/prune-worktrees` onto `direct` when
+/// `url` is the gateway base, else onto `url`, with any trailing `/` removed.
+/// The result always carries exactly one `/api/` prefix.
+/// Test: `prune_worktrees_url_bypasses_the_gateway_prefix`.
+pub(crate) fn prune_worktrees_url(url: &str, direct: &str) -> String {
+    let base = if is_gateway_url(url) { direct } else { url };
+    format!("{}{PRUNE_WORKTREES_PATH}", base.trim_end_matches('/'))
+}
+
+/// Whether `url`'s host is this machine: `localhost` or a loopback IP (#8347).
+/// #6288: also `socket_dispatch`'s test for an explicit `--url`.
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The prune-worktrees endpoint this invocation may POST to (#8347).
+///
+/// Why: the console gateway cuts a long survey at its 30 s proxy timeout, so a
+/// gateway base must be bypassed. But the bypass resolves the LOCAL daemon, and
+/// a gateway on another host fronts a different daemon: redirecting there would
+/// run a destructive prune against the wrong fleet, which #1737 forbids.
+/// What: a non-gateway `url` is used as given. A gateway on a loopback host is
+/// replaced by `direct()` (lock file, then default), which must answer
+/// `GET /health` before anything is posted. A gateway on any other host is an
+/// error that names the daemon URL to pass instead.
+/// Test: `prune_endpoint_refuses_a_remote_gateway`,
+/// `prune_endpoint_resolves_a_loopback_gateway_to_the_daemon`,
+/// `prune_endpoint_errors_when_the_direct_daemon_does_not_answer`.
+pub(crate) async fn prune_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    direct: impl FnOnce() -> String,
+) -> anyhow::Result<String> {
+    if !is_gateway_url(url) {
+        return Ok(prune_worktrees_url(url, url));
+    }
+    anyhow::ensure!(
+        is_loopback_url(url),
+        "prune-worktrees will not run through the console gateway at {url}: it cannot \
+         address that host's daemon directly, and it will not retarget the local one \
+         (#8347, #1737). Pass the daemon's own URL with --url or TRUSTY_MPM_URL."
+    );
+    let direct = direct();
+    // #8347: probe the daemon before a destructive POST is addressed to it.
+    let direct = trusty_mpm::core::resolve_daemon_url_probing(client, Some(&direct))
+        .await
+        .map_err(|e| anyhow::anyhow!("prune-worktrees bypasses the console gateway: {e}"))?;
+    Ok(prune_worktrees_url(url, &direct))
+}
+
+/// Turn a prune-worktrees transport failure into the operator's error (#7884).
+///
+/// Why: a timed-out sweep printed reqwest's bare "error sending request for
+/// url", which does not say the daemon went silent, or that removals may have
+/// happened before the client gave up.
+/// What: a timeout becomes an error naming the timeout, stating that nothing
+/// is reported as removed, and naming the dry run that shows what remains.
+/// Every other error passes through unchanged.
+/// Test: `prune_worktrees_reports_a_timeout_as_an_error`.
+/// The route both transports address for a prune-worktrees pass.
+const PRUNE_WORKTREES_PATH: &str = "/api/v1/sessions/managed/prune-worktrees";
+
+fn prune_transport_error(e: trusty_mpm::client::DaemonCallError) -> anyhow::Error {
+    if !e.is_timeout() {
+        return e.into();
+    }
+    anyhow::anyhow!(
+        "prune-worktrees timed out waiting for the daemon (#7884): {e}. Nothing is reported \
+         as removed, but the daemon may still be sweeping — re-run without `--force` to see \
+         what remains."
+    )
 }
 
 /// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
@@ -206,22 +306,49 @@ fn diagnostic_lines(merged: &serde_json::Value) -> Vec<String> {
 /// own trees. It is a PARAMETER rather than an inline `$TM_MANAGED_SESSION_ID`
 /// read so this function performs no process-global env work — the call site in
 /// `commands::session` resolves the id.
+/// `project_root` (#8782) is the checkout this run is scoped to, or `None` for
+/// `--all-projects`. Every run POSTs a preview first and prints it; `--force`
+/// then POSTs once more carrying each pass's previewed paths as
+/// `only_orphan_paths` / `only_merged_paths`, so neither pass removes anything
+/// the preview did not list for it, and the rows the preview marked as
+/// discarding unsaved work as `only_discard_paths`. Each reply must echo the
+/// scope — a daemon that predates #8782 ignores it and runs daemon-global —
+/// and a `--force` run also needs every allowlist key echoed.
 /// Test: HTTP path covered by integration test; CLI parse by
 /// `cli_parses_session_prune_worktrees` and
 /// `cli_prune_worktrees_discard_dirty_is_opt_in`; the #5830 timeout override by
 /// `merged_pr_request_outlives_the_default_client_timeout`; the caller id by
-/// `prune_worktrees_sends_the_invoking_session`.
+/// `prune_worktrees_sends_the_invoking_session`; the #8782 two-step by
+/// `force_sends_only_the_previewed_paths`,
+/// `force_sends_nothing_after_a_reply_without_the_scope_echo`,
+/// `force_with_all_projects_sends_nothing_after_a_reply_without_the_scope_echo`,
+/// `force_sends_nothing_after_a_preview_without_the_allowlist_keys`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_prune_worktrees(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     dry_run: bool,
     discard_dirty: bool,
     merged_prs: bool,
     invoking_session: Option<String>,
+    project_root: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut request = client
-        .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
-        .json(&serde_json::json!({
+    // #8347: a loopback gateway is bypassed for the local daemon; a remote one
+    // is refused rather than silently retargeted (#1737).
+    // #6288: a socket client never goes through the gateway, so only an HTTP
+    // client's base is checked.
+    let daemon = match daemon.socket_path() {
+        Some(_) => daemon.clone(),
+        None => {
+            let endpoint = prune_endpoint(daemon.http(), daemon.base_url(), || {
+                trusty_mpm::core::resolve_daemon_url(None)
+            })
+            .await?;
+            let base = endpoint.trim_end_matches(PRUNE_WORKTREES_PATH);
+            trusty_mpm::client::DaemonClient::with_client(daemon.http().clone(), base)
+        }
+    };
+    let post = |dry_run: bool, planned: Option<&super::prune_preview::PlannedPaths>| {
+        let mut request = daemon.post(PRUNE_WORKTREES_PATH).json(&serde_json::json!({
             "dry_run": dry_run,
             "discard_dirty": discard_dirty,
             // #2919: the merged-PR reclaim pass, off unless explicitly asked for.
@@ -230,34 +357,127 @@ pub(crate) async fn session_prune_worktrees(
             // asking, so the caller names itself. Absent outside a managed
             // session, which leaves every claim foreign — the pre-#6806 gate.
             "invoking_session": invoking_session,
+            // #8782: the project this run is bounded to, and on `--force` the
+            // preview's own paths.
+            "project_root": project_root,
+            "only_orphan_paths": planned.map(|p| &p.orphan),
+            "only_merged_paths": planned.map(|p| &p.merged),
+            "only_discard_paths": planned.map(|p| &p.discard),
         }));
+        if merged_prs {
+            // #5830: the merged-PR survey runs synchronously in the handler and
+            // takes minutes, so the client's 10s default aborted every invocation.
+            request =
+                request.timeout(trusty_mpm::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT);
+        }
+        async move {
+            // #7884: a timeout is a named error, never a generic transport line.
+            let resp = request.send().await.map_err(prune_transport_error)?;
+            let body: serde_json::Value = resp.error_for_status()?.json().await?;
+            anyhow::Ok(body)
+        }
+    };
     if merged_prs {
-        // #5830: the merged-PR survey runs synchronously in the handler and
-        // takes minutes, so the client's 10s default aborted every invocation.
-        request = request.timeout(trusty_mpm::client::http_client::RECLAIM_SURVEY_REQUEST_TIMEOUT);
         // The wait is long and the daemon streams nothing, so say what is
         // happening — an operator with no output cannot tell a running survey
         // from a wedged one.
         eprintln!(
-            "merged-PR pass: surveying every registered worktree (classify, then byte-walk) \
-             — this takes minutes on a large workspace and prints nothing until it \
+            "merged-PR pass: surveying the registered worktrees in scope (classify, then \
+             byte-walk) — this takes minutes on a large workspace and prints nothing until it \
              finishes (#5830)"
         );
     }
-    let resp = request.send().await?;
-    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    // #8782: every run previews first. A `--force` run needs the echo too: a
+    // daemon without it would ignore the allowlists as well as the scope.
+    let preview = post(true, None).await?;
+    let project = project_root.as_deref();
+    super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
+    if !dry_run {
+        // #8782: a daemon that drops an allowlist key would run that bound
+        // unrestricted, so it gets no removal request.
+        super::prune_preview::check_allowlist_echo(&preview, None)?;
+    }
+    for line in super::prune_preview::preview_lines(&preview) {
+        println!("{line}");
+    }
+    if dry_run {
+        print_prune_reply(&preview, true, merged_prs);
+        return Ok(());
+    }
+    let planned = super::prune_preview::planned_paths(&preview);
+    if planned.is_empty() {
+        println!("--force: the preview listed nothing to remove, so nothing was removed (#8782)");
+        print_prune_reply(&preview, true, merged_prs);
+        return Ok(());
+    }
+    let body = post(false, Some(&planned)).await?;
+    super::prune_preview::check_scope_echo(&body, project, true)?;
+    super::prune_preview::check_allowlist_echo(&body, Some(&planned))?;
+    print_prune_reply(&body, false, merged_prs);
+    Ok(())
+}
+
+/// `tm session prune-worktrees`, scoped from the directory it runs in (#8782).
+///
+/// Why: outside a repository there is no project to scope to, and falling back
+/// to every project would turn a mistyped directory into a daemon-global sweep.
+/// What: `--all-projects` sends no project root; otherwise the checkout owning
+/// `cwd`, and outside a repository an error before any request is sent. Then
+/// [`session_prune_worktrees`], with `--force` as "not a dry run".
+/// Test: `prune_worktrees_outside_a_repository_posts_nothing`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prune_worktrees_from(
+    daemon: &trusty_mpm::client::DaemonClient,
+    cwd: &std::path::Path,
+    force: bool,
+    discard_dirty: bool,
+    merged_prs: bool,
+    all_projects: bool,
+    invoking_session: Option<String>,
+) -> anyhow::Result<()> {
+    let project_root = if all_projects {
+        None
+    } else {
+        Some(super::prune_preview::project_root_from(cwd)?)
+    };
+    session_prune_worktrees(
+        daemon,
+        !force,
+        discard_dirty,
+        merged_prs,
+        invoking_session,
+        project_root,
+    )
+    .await
+}
+
+/// Print one prune-worktrees reply: removed paths, dirty skips, merged-PR pass.
+///
+/// Why: split from [`session_prune_worktrees`] by #8782, which prints a preview
+/// reply and a removal reply through the same renderer.
+/// What: under `dry_run` the orphan paths are not repeated — the preview has
+/// listed them — and only the count is printed. A removal reply prints each
+/// orphan row with its reason, so every discard of unsaved work is named.
+/// Test: exercised by `prune_worktrees_sends_the_invoking_session`;
+/// the removal lines by `removed_lines_name_every_discard`.
+fn print_prune_reply(body: &serde_json::Value, dry_run: bool, merged_prs: bool) {
     let paths = body
         .get("paths")
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if !dry_run {
+        // #8782: the reason names any unsaved work the removal discarded.
+        for line in super::prune_preview::removed_lines(body) {
+            println!("{line}");
+        }
+    }
     let mut printed = 0usize;
     // Item 6 (#1845): non-string entries in the `paths` array are unexpected
     // (the server controls the format) but must not crash the CLI. Warn to
     // stderr so the operator is aware, rather than silently dropping the entry.
     for p in &paths {
-        if let Some(s) = p.as_str() {
-            println!("{s}");
+        if p.is_string() {
             printed += 1;
         } else {
             eprintln!("warning: prune-worktrees: unexpected non-string path entry: {p}");
@@ -293,13 +513,23 @@ pub(crate) async fn session_prune_worktrees(
         }
     }
 
+    // #8782: git failed after deleting content — neither removed nor kept.
+    for entry in body
+        .get("partially_removed")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        eprintln!("PARTIALLY REMOVED: {entry}");
+    }
+
     // #2919: the merged-PR pass reports separately, because its refusals have a
     // different shape — a worktree can be spared here for being on an OPEN PR,
     // which is not a dirty-tree skip and must not be filed as one.
     if merged_prs {
         print_merged_pr_pass(body.get("merged_prs"), dry_run);
     }
-    Ok(())
 }
 
 #[cfg(test)]

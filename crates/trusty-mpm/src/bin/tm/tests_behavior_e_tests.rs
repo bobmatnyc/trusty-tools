@@ -31,6 +31,19 @@ use crate::cli::{Cli, Command, SessionAction};
 use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 
 #[test]
+fn cli_parses_session_decommission_force() {
+    // #7660: `--force` excuses tm's own provisioning files.
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "session", "decommission", "abc", "--force"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Decommission { id, force },
+        } => assert!(id == "abc" && force),
+        other => panic!("expected session decommission --force, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_sessions_plural_canonical() {
     // #2116: `sessions` (plural) is now the canonical top-level spelling —
     // the mirror image of `cli_parses_session_singular` in `tests.rs`, parsing

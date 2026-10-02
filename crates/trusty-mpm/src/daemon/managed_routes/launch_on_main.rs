@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use super::deployment_check::ensure_deployment_complete;
+use super::deployment_check::{RepairHost, ensure_deployment_complete};
 use super::lifecycle::{
     SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env,
 };
@@ -97,7 +97,9 @@ pub(super) fn has_concurrent_main_checkout_session<'a>(
 /// auto-deleted by decommission (verified safe: `decommission_with_root`
 /// only ever removes a `workspace_owned = false` path when
 /// `is_session_worktree` recognises it as living under `.worktrees/`, which
-/// `local_path` never does); (6) sets `source_id`; (7) front gates; (8)
+/// `local_path` never does); (6) sets `source_id` when `source` has one — a
+/// local-only repository (#8934) has none, and its record carries no
+/// `repo_url` either; (7) front gates; (8)
 /// marks `Active`; (9) spawns the runtime.
 /// Test: `spawn_managed_on_main_creates_record_without_worktree`,
 /// `spawn_managed_on_main_warns_on_concurrent_main_checkout_session`,
@@ -110,8 +112,7 @@ pub(super) async fn spawn_managed_on_main(
     params: &SpawnParams,
     runtime: RuntimeKind,
     local_path: &std::path::Path,
-    owner: &str,
-    repo: &str,
+    source: &super::local_only_spawn::SessionSource,
 ) -> Result<SessionRecord, String> {
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
 
@@ -149,9 +150,12 @@ pub(super) async fn spawn_managed_on_main(
     }
 
     let reserved_name = mgr
-        .resolve_session_name(params.name_hint.as_deref(), Some(repo), local_path, |_| {
-            false
-        })
+        .resolve_session_name(
+            params.name_hint.as_deref(),
+            Some(&source.name),
+            local_path,
+            |_| false,
+        )
         .await
         .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
 
@@ -163,11 +167,11 @@ pub(super) async fn spawn_managed_on_main(
     // the #3764 guard). Nothing is lost: `params.task` is persisted on the
     // record below and handed to `adapter.spawn` as the runtime's opening
     // brief, which is how this path has always delivered it.
-    let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
+    // #8934: a local-only repository has no GitHub URL to synthesise.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
     // #7685: keep the reachability preparation resolved; the adapter reuses it.
     let memory_reachable =
-        prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url)?;
+        prepare_inproject_session(&fw, session_id, local_path, source.repo_url.as_deref())?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr
@@ -177,7 +181,7 @@ pub(super) async fn spawn_managed_on_main(
             params.task.clone(),
             Some(local_path.to_path_buf()),
             Some(local_path.to_path_buf()),
-            Some(synthetic_repo_url),
+            source.repo_url.clone(),
             None,
             runtime,
             params.ephemeral.unwrap_or(false),
@@ -189,8 +193,10 @@ pub(super) async fn spawn_managed_on_main(
             e.to_string()
         })?;
 
-    let source_id = format!("{owner}/{repo}");
-    if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
+    // #8934: a local-only record has no `owner/repo` to reconnect by.
+    if let Some(source_id) = &source.source_id
+        && let Err(e) = mgr.set_source_id(session_id, source_id).await
+    {
         warn!(id = %session_id, "spawn_managed (launch-on-main): set_source_id failed: {e}");
     }
 
@@ -218,7 +224,7 @@ pub(super) async fn spawn_managed_on_main(
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        memory_reachable,
+        RepairHost::new(memory_reachable, state.user_home()),
     ) {
         warn!(
             id = %session_id,

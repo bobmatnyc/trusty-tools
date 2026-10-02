@@ -12,6 +12,7 @@
 //! and the `FakeTmuxDriver` test double in `tests.rs`.
 
 use super::manager::ManagedError;
+use super::supervisor_floor::SupervisorFloor;
 
 /// Trait seam over tmux operations used by the session manager.
 ///
@@ -439,6 +440,38 @@ pub trait ManagedTmuxDriver: Send + Sync {
         None
     }
 
+    /// The identity of pane `pane_id` on the live tmux server (#9004).
+    ///
+    /// Why: a `%N` id is unique within one server only, so ownership also
+    /// needs the server instance and the session's `$N` id to kill by.
+    /// What: the default is `Err` — a driver that cannot read the identity
+    /// never proves ownership. [`super::real_tmux::RealTmuxDriver`] reads it
+    /// with one `display-message -t %N`.
+    /// Test: `an_unreadable_pane_identity_leaves_the_runtime_running`.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot read the identity of pane {pane_id}"
+        )))
+    }
+
+    /// Kill the session whose `$N` id is `session_id`, which carries `name`,
+    /// unless the [`Self::supervisor_floor`] refuses `name` (#9004).
+    ///
+    /// Why: a kill by name reaches whichever session holds the name at that
+    /// instant; a session id is never reused within one server instance.
+    /// What: the default is `Err`, so a driver that cannot kill by id kills
+    /// nothing. [`super::real_tmux::RealTmuxDriver`] runs
+    /// `kill-session -t $N`.
+    /// Test: `stopping_a_record_whose_pane_is_live_still_kills_it`.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot kill session {session_id} ('{name}') by id"
+        )))
+    }
+
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 
@@ -504,6 +537,16 @@ pub trait ManagedTmuxDriver: Send + Sync {
         self.session_exists(name)
     }
 
+    /// Whether a `claude` runs in session `name`'s pane (#8942).
+    ///
+    /// What: the default is `Unknown`, so a driver that cannot inspect the
+    /// pane never passes for a claude-free one. The real driver asks
+    /// [`crate::core::process::pane_claude`].
+    /// Test: `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        crate::core::process::PaneClaude::Unknown
+    }
+
     /// Durably publish `key=value` into the named session's tmux environment
     /// (#2157 item 1) — belt-and-suspenders alongside the pane-shell `export …;`
     /// prefix `runtime::claude_code`/`runtime::tcode` already send.
@@ -528,6 +571,16 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// FakeTmuxDriver`.
     fn set_environment(&self, _name: &str, _key: &str, _value: &str) -> Result<(), ManagedError> {
         Ok(())
+    }
+
+    /// The protected-name floor [`Self::signal_terminate`] asks (#8942).
+    ///
+    /// Why: the signal half of a teardown reaches the pane by name too.
+    /// What: the host floor; [`super::real_tmux::RealTmuxDriver`] returns
+    /// the one its `TmuxDriver` kills under.
+    /// Test: `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
+    fn supervisor_floor(&self) -> SupervisorFloor {
+        SupervisorFloor::host()
     }
 
     /// Signal a session's process to stop, then kill the tmux session.
@@ -567,10 +620,20 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// when the pid is unknown, falls back to a single `send_interrupt` (Ctrl-C).
     /// Signal errors are logged and swallowed — the process may already be gone —
     /// so this method is infallible (the fallible reclaim lives in `kill_session`).
+    /// #8942: a name the [`Self::supervisor_floor`] refuses gets no signal
+    /// at all — neither the SIGTERM nor the Ctrl-C.
     /// Test: `fake_driver_graceful_stop_with_pid` / `_without_pid` cover the
     /// composed `graceful_stop`; the CLI drain is covered by
-    /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`.
+    /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`; the
+    /// floor by `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
     fn signal_terminate(&self, name: &str, claude_pid: Option<u32>) {
+        let floor = self.supervisor_floor();
+        if floor
+            .refuse(name, "ManagedTmuxDriver::signal_terminate")
+            .is_some()
+        {
+            return;
+        }
         if let Some(pid) = claude_pid {
             #[cfg(unix)]
             {
@@ -588,6 +651,29 @@ pub trait ManagedTmuxDriver: Send + Sync {
             // No pid — best effort interrupt via tmux send-keys.
             let _ = self.send_interrupt(name);
         }
+    }
+
+    /// [`Self::signal_terminate`] for one known pane of `name` (#8935).
+    ///
+    /// Why: with no `claude` pid, `signal_terminate`'s Ctrl-C goes to the
+    /// session's ACTIVE pane, which need not be the pane the record owns.
+    /// What: a known pid gets `signal_terminate`'s SIGTERM; otherwise, unless
+    /// the [`Self::supervisor_floor`] refuses `name`, one
+    /// [`Self::send_interrupt_to_pane`] to `pane_id`. Errors are swallowed,
+    /// as in `signal_terminate`.
+    /// Test: `stopping_a_record_whose_pane_is_live_still_kills_it`.
+    fn signal_terminate_pane(&self, name: &str, pane_id: &str, claude_pid: Option<u32>) {
+        if claude_pid.is_some() {
+            return self.signal_terminate(name, claude_pid);
+        }
+        let floor = self.supervisor_floor();
+        if floor
+            .refuse(name, "ManagedTmuxDriver::signal_terminate_pane")
+            .is_some()
+        {
+            return;
+        }
+        let _ = self.send_interrupt_to_pane(name, pane_id);
     }
 }
 

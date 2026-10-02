@@ -51,6 +51,7 @@
 pub(crate) mod layout;
 pub(crate) mod new_session;
 pub(crate) mod new_session_entry;
+pub(crate) mod new_session_name;
 pub(crate) mod new_session_order;
 pub(crate) mod render;
 pub(crate) mod state;
@@ -75,9 +76,10 @@ use state::{Action, Input, Severity, TuiState};
 /// while browsing and a literal `d` while typing a name, and only
 /// [`TuiState::apply`] knows which mode is open.
 /// What: `None` for a key with no meaning here (a release event, a function
-/// key, a Ctrl chord other than C/D), so the caller can skip the redraw.
-/// Test: `input_maps_ctrl_c_to_cancel`, `input_ignores_key_release`,
-/// `input_passes_characters_through_unresolved`.
+/// key, a Ctrl chord other than C/D/N), so the caller can skip the redraw.
+/// #8587: Ctrl-N (either case, so Ctrl-Shift-N too) is [`Input::NameNew`].
+/// Test: `input_maps_ctrl_c_to_cancel`, `input_maps_ctrl_n_to_name_new`,
+/// `input_ignores_key_release`, `input_passes_characters_through_unresolved`.
 pub(crate) fn map_key(key: KeyEvent) -> Option<Input> {
     // Windows reports both press and release; act on press only.
     if key.kind == KeyEventKind::Release {
@@ -86,6 +88,7 @@ pub(crate) fn map_key(key: KeyEvent) -> Option<Input> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('c' | 'd') if ctrl => Some(Input::Cancel),
+        KeyCode::Char('n' | 'N') if ctrl => Some(Input::NameNew),
         KeyCode::Char(_) if ctrl => None,
         KeyCode::Char(c) => Some(Input::Char(c)),
         KeyCode::Enter => Some(Input::Enter),
@@ -132,7 +135,11 @@ pub(crate) async fn run_session_tui(
     self_tmux_name: Option<String>,
 ) -> anyhow::Result<()> {
     let mut sessions = sessions;
-    let mut state = TuiState::new(self_session_id, self_tmux_name);
+    // #8506: the same stdout TTY + `NO_COLOR` gate the static table uses.
+    let use_color = super::session_picker_render::table_use_color(
+        std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    );
+    let mut state = TuiState::new(self_session_id, self_tmux_name).with_color(use_color);
     let mut terminal = terminal::enter()?;
     // The guard restores cooked mode and the main screen on every exit path —
     // normal return AND panic unwind — so it is the SOLE teardown.
@@ -187,14 +194,15 @@ pub(crate) async fn run_session_tui(
             // first, exactly as it does for `Open` — both end in a tmux
             // hand-off that needs the real terminal in cooked mode.
             Action::Create(request) => {
-                let label = request.label.clone();
+                // #8587: names the session when Ctrl-N named it.
+                let created = new_session_name::created_message(&request);
                 terminal::suspend(&mut terminal)?;
                 match new_session::perform(client, url, request).await {
                     // #2678: the hand-off moved the operator's client away.
                     Ok(outcome) if outcome.ends_interactive_loop() => return Ok(()),
                     Ok(_) => {
                         terminal::resume(&mut terminal)?;
-                        state.set_message(format!("new session in {label}"), Severity::Info);
+                        state.set_message(created, Severity::Info);
                     }
                     Err(e) => {
                         terminal::resume(&mut terminal)?;
@@ -207,9 +215,11 @@ pub(crate) async fn run_session_tui(
                 // the tmux hand-off, so `attach-session` gets the real terminal
                 // in cooked mode.
                 terminal::suspend(&mut terminal)?;
-                let outcome =
-                    super::guided_resume::resume_guided_session(client, url, &sessions[index])
-                        .await;
+                let outcome = super::guided_resume::resume_guided_session(
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                    &sessions[index],
+                )
+                .await;
                 match outcome {
                     // #2678: a `switch-client` hand-off (or a fail-closed skip)
                     // means this pane is no longer visible — stop rather than
@@ -232,15 +242,20 @@ pub(crate) async fn run_session_tui(
                 // is the CLI step the daemon's refusal used to send the operator
                 // out of this surface to run by hand. The numbered fallback
                 // picker shares this routing rather than re-deciding it.
-                let report = route_delete(client, url, &session.id, force, stop_first).await;
+                let report = route_delete(
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+                    &session.id,
+                    force,
+                    stop_first,
+                )
+                .await;
                 let (text, severity) = delete_outcome(&session.name, report);
                 state.set_message(text, severity);
             }
             Action::Rename { index, name } => {
                 let session = &sessions[index];
                 match super::rename::do_rename_request(
-                    client,
-                    url,
+                    &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                     &session.name,
                     &session.id,
                     name,
@@ -257,7 +272,13 @@ pub(crate) async fn run_session_tui(
         // next frame is the daemon's answer, not this process's guess. A fetch
         // failure keeps the list already in hand and says so, rather than
         // dropping the operator back to a shell.
-        match fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await {
+        match fetch_live_sessions(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+            scope.source_id.as_deref(),
+            false,
+        )
+        .await
+        {
             Ok(fetched) => sessions = fetched,
             Err(e) => state.set_message(format!("refresh failed: {e}"), Severity::Error),
         }
@@ -276,8 +297,10 @@ pub(crate) async fn run_session_tui(
 /// 409 text; `StopFailed` (#7224) says the stop leg failed and NOTHING was
 /// deleted, carrying the daemon's full status and body; `NotFound` says the
 /// record was already gone. A transport error becomes an error line rather than
-/// ending the TUI.
+/// ending the TUI. #8935: a daemon note that a live tmux session with the
+/// name was left running is appended.
 /// Test: `delete_outcome_names_the_soft_delete`,
+/// `delete_outcome_says_a_live_session_was_left_running`,
 /// `delete_outcome_surfaces_a_refusal`,
 /// `delete_outcome_reports_a_failed_stop_as_not_deleted`,
 /// `delete_outcome_reports_not_found`,
@@ -291,16 +314,23 @@ pub(crate) fn delete_outcome(
             name,
             prior_state,
             local: true,
+            ..
         }) => (
             format!("deleted '{name}' [was {prior_state}] from the project store"),
             Severity::Info,
         ),
         Ok(DeleteReport::Deleted {
-            name, prior_state, ..
+            name,
+            prior_state,
+            note,
+            ..
         }) => (
             format!(
                 "'{name}' [was {prior_state}] marked --deleted-- \
-                 (still listed; `tm sessions prune --state deleted` removes it)"
+                 (still listed; `tm sessions prune --state deleted` removes it){}",
+                // #8935: delete is record-only; say a live session was kept.
+                note.map(|n| format!(" — record only: {n}"))
+                    .unwrap_or_default()
             ),
             Severity::Info,
         ),

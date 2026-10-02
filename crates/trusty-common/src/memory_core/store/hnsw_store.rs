@@ -26,9 +26,9 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
-use crate::memory_core::store::kg_store::{
-    DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
-};
+use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
+use crate::memory_core::store::write_deadline::{DeadlinedWrite, WriteTxnError};
+use crate::memory_core::timeouts;
 
 mod exhaustive;
 use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
@@ -109,6 +109,9 @@ pub enum HnswStoreError {
          refusing to overwrite a live vector — the palace index needs a rebuild"
     )]
     IdAllocationFailed { probes: u8, last_candidate: u64 },
+    /// A maintenance write outran its deadline and was rolled back (#8749).
+    #[error(transparent)]
+    WriteDeadline(#[from] WriteTxnError),
     /// Returned by every write method when the store is in snapshot
     /// (read-only) mode. Callers should surface this verbatim — the
     /// message is the canonical guidance for issue #59.
@@ -152,6 +155,7 @@ impl From<redb::CommitError> for HnswStoreError {
 }
 
 mod alloc;
+mod open_init;
 use alloc::allocate_vector_id;
 
 /// Public result alias to keep call-site signatures concise.
@@ -244,6 +248,8 @@ pub struct HnswStore {
     /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
     /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`.
     shadowed: RwLock<std::collections::HashSet<u64>>,
+    /// #8749: the palace a deadline abort names; see [`Self::with_palace`].
+    palace: Arc<str>,
     /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
     ///
     /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
@@ -257,6 +263,9 @@ pub struct HnswStore {
     /// Test: `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
     #[cfg(test)]
     compact_race_barrier: RwLock<Option<Arc<std::sync::Barrier>>>,
+    /// #8749 test seam: overrides `timeouts::write_txn_deadline()`.
+    #[cfg(test)]
+    txn_budget: RwLock<Option<std::time::Duration>>,
 }
 
 impl HnswStore {
@@ -294,15 +303,10 @@ impl HnswStore {
         // least once. In read-only mode we skip this — the snapshot copy
         // we hold was made from a fully-initialised live file, so the
         // tables already exist.
+        // #8314: write-free once initialised, so a reopen never waits on a
+        // live (possibly stuck) vector write. See `open_init`.
         if !read_only {
-            let wtx = db.begin_write()?;
-            {
-                let _ = wtx.open_table(VECTORS)?;
-                let _ = wtx.open_table(VECTOR_KEYS)?;
-                let _ = wtx.open_table(DELETED_VECTORS)?;
-                let _ = wtx.open_table(VECTOR_ID_SEQ)?;
-            }
-            wtx.commit()?;
+            open_init::ensure_schema(&db)?;
         }
 
         let index = Hnsw::<f32, DistCosine>::new(
@@ -377,17 +381,9 @@ impl HnswStore {
         // and the next open of a fixed binary pulls it back up before any id is
         // issued. Skipped in read-only/snapshot mode, where every write path
         // returns `ReadOnly` before it could allocate anything.
+        // #8314: reads first; writes only when the counter is below the floor.
         if !read_only {
-            let wtx = db.begin_write()?;
-            {
-                let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
-                let current = seq.get(NEXT_VECTOR_ID)?.map(|g| g.value()).unwrap_or(0);
-                let floor = max_seen.saturating_add(1);
-                if current < floor {
-                    seq.insert(NEXT_VECTOR_ID, floor)?;
-                }
-            }
-            wtx.commit()?;
+            open_init::raise_id_floor(&db, max_seen.saturating_add(1))?;
         }
 
         Ok(Self {
@@ -396,9 +392,37 @@ impl HnswStore {
             dim,
             read_only,
             shadowed: RwLock::new(std::collections::HashSet::new()),
+            palace: Arc::from("unnamed palace"),
             #[cfg(test)]
             compact_race_barrier: RwLock::new(None),
+            #[cfg(test)]
+            txn_budget: RwLock::new(None),
         })
+    }
+
+    /// Name the palace this store belongs to, for #8749 deadline diagnostics.
+    ///
+    /// Why: the store opens on a shared `Database` and never sees its path.
+    /// Test: `compact_orphans_past_its_deadline_removes_nothing`.
+    pub fn with_palace(mut self, palace: Arc<str>) -> Self {
+        self.palace = palace;
+        self
+    }
+
+    /// Begin a multi-row maintenance write under the #8749 deadline, so a
+    /// stalled sweep rolls back instead of holding off every `upsert`.
+    fn begin_deadlined_write(&self) -> Result<DeadlinedWrite> {
+        #[cfg(test)]
+        let budget = (*self.txn_budget.read()).unwrap_or_else(timeouts::write_txn_deadline);
+        #[cfg(not(test))]
+        let budget = timeouts::write_txn_deadline();
+        let palace = Arc::clone(&self.palace);
+        Ok(DeadlinedWrite::begin(
+            &self.db,
+            palace,
+            "vector redb",
+            budget,
+        )?)
     }
 
     /// Install the test-only `compact_orphans` rendezvous. See
@@ -758,7 +782,8 @@ impl HnswStore {
     /// tombstones the shared id, in one write transaction. Returns the freed
     /// uuids, which then read as ordinary "missing" drawers to
     /// `PalaceHandle::embed_health` and are repaired by the normal backfill.
-    /// Idempotent: a second run finds no groups and frees nothing.
+    /// Idempotent: a second run finds no groups and frees nothing. #8749: runs
+    /// under the write-transaction deadline, like `compact_orphans`.
     /// Test: `unalias_frees_every_uuid_in_a_collision_group`.
     pub fn unalias(&self) -> Result<Vec<String>> {
         if self.read_only {
@@ -769,11 +794,12 @@ impl HnswStore {
             return Ok(Vec::new());
         }
         let mut freed: Vec<String> = Vec::new();
-        let wtx = self.db.begin_write()?;
+        let wtx = self.begin_deadlined_write()?;
         {
             let mut keys = wtx.open_table(VECTOR_KEYS)?;
             let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
             for (id, uuids) in &audit.aliased {
+                wtx.check("between unalias groups")?; // #8749
                 for uuid in uuids {
                     let _ = keys.remove(uuid.as_str())?;
                     freed.push(uuid.clone());
@@ -781,7 +807,7 @@ impl HnswStore {
                 tombstones.insert(*id, [].as_slice())?;
             }
         }
-        wtx.commit()?;
+        wtx.check_before_commit()?.commit()?;
         tracing::warn!(
             groups = audit.aliased.len(),
             freed = freed.len(),
@@ -816,9 +842,12 @@ impl HnswStore {
     /// transaction, which redb serialises against every writer, closes that
     /// window: a row live at the moment of deletion is never deleted. The
     /// re-check is a per-candidate point lookup, so the write-lock hold stays
-    /// O(candidates), never the O(live-count) full-table scan.
+    /// O(candidates), never the O(live-count) full-table scan. #8749: that
+    /// hold is also bounded in time — past the deadline the sweep rolls back
+    /// and returns `WriteDeadline`, and the next cycle retries it.
     /// Test: `compact_orphans_removes_dangling`,
-    /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
+    /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`,
+    /// `compact_orphans_past_its_deadline_removes_nothing`.
     pub fn compact_orphans(&self) -> Result<usize> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
@@ -905,7 +934,7 @@ impl HnswStore {
             map
         };
 
-        let wtx = self.db.begin_write()?;
+        let wtx = self.begin_deadlined_write()?;
         let mut removed = 0usize;
         {
             let keys = wtx.open_table(VECTOR_KEYS)?;
@@ -929,6 +958,7 @@ impl HnswStore {
             };
 
             for id in &orphan_ids {
+                wtx.check("between orphan removals")?; // #8749
                 if is_live(*id)? {
                     continue;
                 }
@@ -938,6 +968,7 @@ impl HnswStore {
                 removed += 1;
             }
             for id in &tombstoned_ids {
+                wtx.check("between tombstone removals")?; // #8749
                 if is_live(*id)? {
                     // Tombstoned but still mapped — leave the vector row intact
                     // (re-upsert flow); only clear the tombstone when it has no
@@ -948,7 +979,7 @@ impl HnswStore {
                 let _ = dead.remove(id)?;
             }
         }
-        wtx.commit()?;
+        wtx.check_before_commit()?.commit()?;
         Ok(removed)
     }
 }

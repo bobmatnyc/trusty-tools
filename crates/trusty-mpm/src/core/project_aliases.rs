@@ -263,6 +263,31 @@ pub fn is_worktree_path(path: &Path) -> bool {
     s.contains("/.claude/worktrees/") || s.contains("/.worktrees/")
 }
 
+/// Is `path` a tree under a `<repo>-worktrees/` SIBLING directory (#8413)?
+///
+/// Why: the harness also places agent worktrees beside the checkout, in
+/// `<repo>-worktrees/<agent-dir>`, which [`is_worktree_path`] never matched —
+/// so the ADR-0057 removal scope refused every such tree whatever its state.
+/// Kept separate from [`is_worktree_path`] on purpose: that predicate also
+/// decides [`is_main_checkout`], and a directory merely NAMED `*-worktrees`
+/// must not strip a real checkout of the ADR-0037 guard.
+/// What: `true` when a component other than the last is `<prefix>-worktrees`
+/// with a non-empty prefix, its parent is not the filesystem root, and at least
+/// one component follows it. Purely lexical; callers that grant on it must add
+/// their own filesystem proof.
+/// Test: `is_sibling_worktree_path_matches_the_repo_worktrees_layout`.
+pub fn is_sibling_worktree_path(path: &Path) -> bool {
+    let components: Vec<_> = path.components().collect();
+    components.iter().enumerate().any(|(i, c)| {
+        let name = c.as_os_str().to_string_lossy();
+        i > 1
+            && i + 1 < components.len()
+            && name
+                .strip_suffix("-worktrees")
+                .is_some_and(|prefix| !prefix.is_empty())
+    })
+}
+
 /// The worktree ROOT `path` sits in — the tree itself, not a directory inside it.
 ///
 /// Why (#7172): [`is_worktree_path`] answers "is this a worktree?", and the
@@ -545,6 +570,26 @@ mod tests {
             is_worktree_path(p),
             "expected is_worktree_path=true for .worktrees path, got false"
         );
+    }
+
+    #[test]
+    fn is_sibling_worktree_path_matches_the_repo_worktrees_layout() {
+        // #8413: the harness's sibling layout, from the issue's own evidence.
+        assert!(is_sibling_worktree_path(Path::new(
+            "/Users/mac/trusty-mpm-projects/bobmatnyc/trusty-tools-worktrees/agent-a5d25ac7779a8ddaa"
+        )));
+        // The container itself, a bare `-worktrees`, a top-level one, and an
+        // ordinary checkout name no tree.
+        assert!(!is_sibling_worktree_path(Path::new(
+            "/Users/mac/p/trusty-tools-worktrees"
+        )));
+        assert!(!is_sibling_worktree_path(Path::new(
+            "/Users/mac/-worktrees/x"
+        )));
+        assert!(!is_sibling_worktree_path(Path::new("/x-worktrees/y")));
+        assert!(!is_sibling_worktree_path(Path::new(
+            "/Users/mac/p/trusty-tools"
+        )));
     }
 
     #[test]

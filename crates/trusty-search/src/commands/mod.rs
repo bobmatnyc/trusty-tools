@@ -39,6 +39,8 @@ pub mod daemon_guard;
 pub mod dashboard;
 pub mod discover;
 pub mod doctor;
+// #8175/#8737: target resolution shared by the destructive index verbs.
+pub(crate) mod explicit_target;
 pub mod hook;
 pub mod index;
 pub(crate) mod index_action;
@@ -47,6 +49,8 @@ pub mod index_cwd_resolve;
 pub(crate) mod index_persist;
 pub mod index_relocate;
 pub mod index_remove;
+// #8687: residency-independent target lookup for `index remove`.
+mod index_remove_stale;
 pub mod index_status;
 pub mod init;
 pub mod integrate;
@@ -54,6 +58,9 @@ pub mod list;
 pub mod migrate;
 pub mod migrate_redb;
 pub mod migrate_storage;
+/// Scratch-socket daemon double for CLI tests (#6285).
+#[cfg(test)]
+pub(crate) mod mock_socket;
 pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;

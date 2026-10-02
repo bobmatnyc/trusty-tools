@@ -17,6 +17,16 @@
 
 use super::*;
 
+/// The orphan candidates under `repos_root`, unscoped: the `_in` form under
+/// `WorktreeScope::all()` (#8782), reduced to its paths.
+fn orphans_all(
+    repos_root: &std::path::Path,
+    active: &std::collections::HashSet<std::path::PathBuf>,
+    adopted: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    find_orphaned_worktrees_in(repos_root, active, adopted, &WorktreeScope::all()).paths
+}
+
 /// A live session's worktree must never be returned as an orphan (#1840).
 ///
 /// #4207: the worktree is now a REAL `git worktree add`, not a `mkdir`. Under
@@ -28,7 +38,7 @@ fn prune_orphaned_worktrees_spares_active() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("live-session");
     let active: std::collections::HashSet<_> = [wt.clone()].into_iter().collect();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &active, &[]);
+    let orphans = orphans_all(&fx.repos_root, &active, &[]);
     assert!(
         orphans.is_empty(),
         "live session must not be listed as orphan; got {orphans:?}"
@@ -45,7 +55,7 @@ fn prune_orphaned_worktrees_fresh_active_set_blocks_deletion() {
     // Empty initial snapshot → the worktree looks like an orphan candidate.
     let empty_initial: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    let candidates = find_orphaned_worktrees(&fx.repos_root, &empty_initial, &[]);
+    let candidates = orphans_all(&fx.repos_root, &empty_initial, &[]);
     assert!(
         candidates.contains(&wt),
         "empty initial set must find the worktree as a candidate; got {candidates:?}"
@@ -54,7 +64,7 @@ fn prune_orphaned_worktrees_fresh_active_set_blocks_deletion() {
     // A fresh active set containing it blocks the deletion (Phase 2, #1840).
     let fresh: std::collections::HashSet<std::path::PathBuf> = [wt.clone()].into_iter().collect();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &fresh, &[]).is_empty(),
+        orphans_all(&fx.repos_root, &fresh, &[]).is_empty(),
         "a candidate in the fresh active set must not be proposed for deletion"
     );
     assert!(wt.exists(), "worktree must survive the TOCTOU check");
@@ -67,7 +77,7 @@ fn prune_orphaned_worktrees_collects_orphan() {
     let live = fx.add_worktree("live");
     let dead = fx.add_worktree("dead");
     let active: std::collections::HashSet<_> = [live.clone()].into_iter().collect();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &active, &[]);
+    let orphans = orphans_all(&fx.repos_root, &active, &[]);
     assert_eq!(
         orphans,
         vec![dead],
@@ -154,10 +164,12 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store
         .write()
@@ -205,7 +217,7 @@ fn find_orphaned_worktrees_discovers_worktree_at_unwalked_location() {
     let fx = GitWorktreeFixture::new();
     let parked = fx.add_worktree_at(&fx.repo.join("agents").join("scratch"), "wt-1");
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty, &[]);
+    let orphans = orphans_all(&fx.repos_root, &empty, &[]);
     assert!(
         orphans.contains(&parked),
         "a registered worktree must be found wherever it lives; got {orphans:?}"
@@ -225,7 +237,7 @@ fn find_orphaned_worktrees_ignores_plain_directory() {
     let fake = fx.repo.join(".worktrees").join("just-a-mkdir");
     std::fs::create_dir_all(&fake).expect("mkdir");
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty, &[]);
+    let orphans = orphans_all(&fx.repos_root, &empty, &[]);
     assert!(
         !orphans.contains(&fake),
         "a plain directory is not a registered worktree; got {orphans:?}"
@@ -522,7 +534,7 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     // The candidate IS discovered — otherwise this test would pass vacuously.
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &empty, &[]).contains(&wt),
+        orphans_all(&fx.repos_root, &empty, &[]).contains(&wt),
         "test invariant: the worktree must reach the ownership gate"
     );
 
@@ -591,7 +603,7 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     // The candidate IS discovered — otherwise this test would pass vacuously.
     let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     assert!(
-        find_orphaned_worktrees(&fx.repos_root, &empty, &[]).contains(&wt),
+        orphans_all(&fx.repos_root, &empty, &[]).contains(&wt),
         "test invariant: the worktree must reach the ownership gate"
     );
 
@@ -1049,10 +1061,12 @@ async fn reap_aged_ephemeral_spares_a_worktree_holding_unsaved_work() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
@@ -1393,5 +1407,56 @@ async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
         wt.exists(),
         "{} must still exist on disk after the real sweep",
         wt.display()
+    );
+}
+
+/// 🔴 #8782: identity at action time. A scanned path replaced by a symlink
+/// before its removal is skipped, and the tree the symlink names is untouched.
+///
+/// Why: a path is not an identity. Every orphan-removing entry point — the
+/// PM-pause prune, the orphan-GC loop, `prune-worktrees --force` — reaches
+/// `remove_candidate`, so this pins all three.
+/// What: scans a reclaimable orphan, then moves its directory outside the
+/// project and leaves a symlink at the scanned path, and runs the action-time
+/// step on that path. Git's own worktree validation passes through the
+/// symlink, so this fails when `remove_candidate` accepts any path that
+/// canonicalizes: `git worktree remove` then empties the relocated tree.
+#[tokio::test]
+async fn a_scanned_path_replaced_by_a_symlink_is_not_removed() {
+    let fx = GitWorktreeFixture::new();
+    let scanned = fx.add_worktree("replaced-8782");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&scanned);
+    let found = orphans_all(&fx.repos_root, &std::collections::HashSet::new(), &[]);
+    assert!(found.contains(&scanned), "{found:?}");
+
+    let target = fx.repos_root.join("relocated-8782");
+    std::fs::rename(&scanned, &target).expect("move the scanned tree away");
+    std::os::unix::fs::symlink(&target, &scanned).expect("symlink the scanned path");
+    let entries = |dir: &std::path::Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let before = entries(&target);
+    assert!(!before.is_empty(), "the target starts populated");
+
+    let outcome = remove_candidate(
+        &scanned,
+        &std::collections::HashSet::new(),
+        DirtyWorktreePolicy::Skip,
+        &WorktreeScope::all(),
+        crate::session_manager::git_ceiling::GIT_CALL_TIMEOUT,
+    )
+    .await;
+    assert!(
+        matches!(outcome, CandidateRemoval::Kept(None)),
+        "{outcome:?}"
+    );
+    assert_eq!(entries(&target), before, "the symlink's target was touched");
+    assert!(
+        std::fs::symlink_metadata(&scanned).is_ok_and(|m| m.file_type().is_symlink()),
+        "the scanned path itself is left as found"
     );
 }

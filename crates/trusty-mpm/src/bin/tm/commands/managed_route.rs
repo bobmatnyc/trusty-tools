@@ -12,7 +12,7 @@
 //! What: [`to_command`] maps a managed [`SessionAction`] to a [`TrustyCommand`];
 //! [`render_cli`] renders a [`CommandResult`] as plain, scriptable terminal text
 //! (NOT the Telegram HTML formatter); [`run`] glues them — build the executor
-//! from the CLI's `(client, url)` pair, execute, print. The managed-aware
+//! from the CLI's `(daemon)` pair, execute, print. The managed-aware
 //! `stop`/`resume` decision (managed vs project session) is made by
 //! [`resolve_managed_match`] using the canonical resolver.
 //! Test: `to_command_maps_*` and `render_cli_*` in `tests.rs`; the HTTP round-trip
@@ -24,17 +24,17 @@ use trusty_mpm::client::{
 
 use crate::cli::SessionAction;
 
-/// Build a [`CommandExecutor`] from the CLI's `(client, url)` pair.
+/// Build a [`CommandExecutor`] from the CLI's `(daemon)` pair.
 ///
 /// Why: the CLI owns a configured `reqwest::Client`; routing through chat-core
 /// must reuse it (timeouts/pool) rather than minting a default one.
-/// What: returns `CommandExecutor::with_client(client.clone(), url)` — cloning a
-/// `reqwest::Client` is cheap (`Arc` internally), so the pool/settings persist.
+/// What: wraps a clone of `daemon` — cheap, and it keeps the caller's
+/// transport (#6288: a socket client stays on the socket).
 /// `pub(crate)` since #5913: `commands::managed`'s decommission handler builds
 /// its executor here rather than minting a second one.
 /// Test: exercised transitively by every routed managed handler's coverage.
-pub(crate) fn executor(client: &reqwest::Client, url: &str) -> CommandExecutor {
-    CommandExecutor::with_client(client.clone(), url.to_string())
+pub(crate) fn executor(daemon: &trusty_mpm::client::DaemonClient) -> CommandExecutor {
+    CommandExecutor::from_daemon_client(daemon.clone())
 }
 
 /// Map a MANAGED [`SessionAction`] variant to its [`TrustyCommand`] intent.
@@ -103,7 +103,7 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             TrustyCommand::ManagedRuntimeStop { target: id.clone() }
         }
         SessionAction::ManagedResume { id } => TrustyCommand::ManagedResume { target: id.clone() },
-        SessionAction::Decommission { id } => {
+        SessionAction::Decommission { id, .. } => {
             TrustyCommand::ManagedDecommission { target: id.clone() }
         }
         // Every other variant is project-session / TUI / prune; not routed here.
@@ -219,11 +219,10 @@ pub(crate) fn render_cli(result: &CommandResult) -> String {
 /// `resolve_managed_match` (below) is a thin projection of this and shares
 /// its coverage.
 pub(crate) async fn resolve_managed_summary(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id_or_name: &str,
 ) -> Option<ManagedSessionSummary> {
-    let sessions = executor(client, url)
+    let sessions = executor(daemon)
         .client()
         .list_managed_sessions()
         .await
@@ -247,11 +246,10 @@ pub(crate) async fn resolve_managed_summary(
 /// Test: the resolver precedence is covered by `client::resolver` tests; the
 /// managed-vs-project fallback by the integration suite.
 pub(crate) async fn resolve_managed_match(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id_or_name: &str,
 ) -> Option<String> {
-    resolve_managed_summary(client, url, id_or_name)
+    resolve_managed_summary(daemon, id_or_name)
         .await
         .map(|s| s.id)
 }
@@ -269,11 +267,10 @@ pub(crate) async fn resolve_managed_match(
 /// nothing matches.
 /// Test: precedence by `client::resolver` tests; wiring by `cli_parses_session_events`.
 pub(crate) async fn resolve_project_session_id(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id_or_name: &str,
 ) -> anyhow::Result<Option<String>> {
-    let rows = executor(client, url).client().sessions().await?;
+    let rows = executor(daemon).client().sessions().await?;
     Ok(resolve_target(&rows, id_or_name).map(|r| r.id.0.to_string()))
 }
 
@@ -301,14 +298,13 @@ pub(crate) async fn resolve_project_session_id(
 /// `run_propagates_error_result_as_err` covers the exit-code fix; the HTTP
 /// path by the executor tests and `tests/session_manager_mvp.rs`.
 pub(crate) async fn run(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     action: &SessionAction,
 ) -> anyhow::Result<bool> {
     let Some(cmd) = to_command(action) else {
         return Ok(false);
     };
-    let result = executor(client, url).execute(cmd).await;
+    let result = executor(daemon).execute(cmd).await;
     if let CommandResult::Error(msg) = &result {
         anyhow::bail!("{msg}");
     }
@@ -442,7 +438,10 @@ mod tests {
             Some(TrustyCommand::ManagedResume { .. })
         ));
         assert!(matches!(
-            to_command(&SessionAction::Decommission { id: "x".into() }),
+            to_command(&SessionAction::Decommission {
+                id: "x".into(),
+                force: false,
+            }),
             Some(TrustyCommand::ManagedDecommission { .. })
         ));
         assert!(matches!(
@@ -505,12 +504,12 @@ mod tests {
             name: "tmpm-red-owl".into(),
             state: "Provisioning".into(),
             runtime: "claude-code".into(),
-            attach_cmd: "tmux attach -t tmpm-red-owl".into(),
+            attach_cmd: "tmux attach -t '=tmpm-red-owl'".into(),
         };
         let out = render_cli(&r);
         assert_eq!(
             out,
-            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t tmpm-red-owl"
+            "spawned tmpm-red-owl (uuid-1) [Provisioning] runtime=claude-code\n  attach: tmux attach -t '=tmpm-red-owl'"
         );
     }
 
@@ -551,9 +550,9 @@ mod tests {
         assert_eq!(
             render_cli(&CommandResult::ManagedAttachCmd {
                 id: "m-1".into(),
-                attach_cmd: "tmux attach -t tmpm-red-owl".into()
+                attach_cmd: "tmux attach -t '=tmpm-red-owl'".into()
             }),
-            "tmux attach -t tmpm-red-owl"
+            "tmux attach -t '=tmpm-red-owl'"
         );
     }
 
@@ -725,9 +724,12 @@ mod tests {
             id: "nonexistent".into(),
             text: "hi".into(),
         };
-        let err = run(&client, "http://127.0.0.1:1", &action)
-            .await
-            .expect_err("a CommandResult::Error must propagate as Err, not be swallowed");
+        let err = run(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), "http://127.0.0.1:1"),
+            &action,
+        )
+        .await
+        .expect_err("a CommandResult::Error must propagate as Err, not be swallowed");
         assert!(
             err.to_string().contains("daemon unreachable"),
             "unexpected error: {err}"

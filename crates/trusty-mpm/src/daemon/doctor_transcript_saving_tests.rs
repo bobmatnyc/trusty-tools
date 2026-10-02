@@ -39,9 +39,14 @@ fn launch_lines_covers_every_builder() {
         "core::model_inject::build_claude_command",
         "core::model_inject::build_inplace_session_command",
         "core::model_inject::build_client_session_command",
+        // #8308: the specs the CLI and fleet paths launch from.
+        "runtime::cli_launch::isolated_spec",
+        "runtime::cli_launch::inplace_spec",
+        "runtime::cli_launch::client_spec",
         "daemon::spawn_command::relaunch_command",
         "core::standalone::run::build_launch_command",
         "control::backend::stream_json::build_claude_command",
+        "control::backend::tmux::pane_claude_line",
     ] {
         assert!(
             labels.iter().any(|l| l.contains(expected)),
@@ -55,6 +60,12 @@ fn launch_lines_covers_every_builder() {
         assert!(
             unset.iter().any(|n| n == "CLAUDE_CODE_CHILD_SESSION"),
             "{label} must unset CLAUDE_CODE_CHILD_SESSION; unsets: {unset:?}"
+        );
+        // #8453: no child inherits a supervisor's launch stamp; a path that
+        // decides a profile assigns it again after this unset.
+        assert!(
+            unset.iter().any(|n| n == "TRUSTY_MPM_SESSION_PROFILE"),
+            "{label} must unset TRUSTY_MPM_SESSION_PROFILE; unsets: {unset:?}"
         );
         assert!(
             !unset.iter().any(|n| n == "CLAUDE_CONFIG_DIR"),
@@ -71,25 +82,39 @@ fn launch_lines_covers_every_builder() {
 ///
 /// Why (#8286): `launch_lines()` proves every builder scrubs the session
 /// markers, but a builder could scrub correctly and still launch with no PM
-/// instructions — `build_inplace_session_command` did exactly that. The owner
-/// rule is that every PM launch mode delivers its prompt through
-/// `--append-system-prompt-file`, so the two shell-string PM builders listed in
-/// `launch_lines()` are pinned to that flag here, next to the scrub coverage.
+/// instructions — the in-place `tm session start` launch did exactly that. The
+/// owner rule is that every PM launch mode delivers its prompt through
+/// `--append-system-prompt-file`, so the in-place and client PM builders listed
+/// in `launch_lines()`, string and spec form, are pinned to that flag here, next
+/// to the scrub coverage.
 /// What: builds each with a probe path and asserts the flag and the path are on
-/// the line. The daemon spawn/resume spec is pinned by
-/// `spawn_argv_matches_the_shell_line_it_replaces`; `build_claude_command` by
-/// `claude_command_with_prompt`.
+/// the line (a spec's argv joined with spaces). The daemon spawn/resume spec is
+/// pinned by `spawn_argv_matches_the_shell_line_it_replaces`;
+/// `build_claude_command` by `claude_command_with_prompt`.
 #[test]
 fn pm_launch_builders_carry_the_prompt_file() {
     let probe = std::path::Path::new("/probe/prompt.txt");
+    let cwd = std::path::Path::new("/probe");
     for (label, line) in [
         (
-            "core::model_inject::build_inplace_session_command",
-            crate::core::model_inject::build_inplace_session_command(probe),
+            "core::model_inject::build_inplace_session_command_with_prompt",
+            crate::core::model_inject::build_inplace_session_command_with_prompt(probe, false),
         ),
         (
-            "core::model_inject::build_client_session_command",
-            crate::core::model_inject::build_client_session_command(Some(probe)),
+            "core::model_inject::build_client_session_command_configured",
+            crate::core::model_inject::build_client_session_command_configured(Some(probe), false),
+        ),
+        (
+            "runtime::cli_launch::inplace_spec",
+            crate::runtime::cli_launch::inplace_spec(cwd, probe, false)
+                .args
+                .join(" "),
+        ),
+        (
+            "runtime::cli_launch::client_spec",
+            crate::runtime::cli_launch::client_spec(cwd, Some(probe), false)
+                .args
+                .join(" "),
         ),
     ] {
         assert!(
@@ -153,8 +178,8 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "core/alt_screen.rs",
-        3,
-        "test fixtures for apply_default_when_unset (#6495, #7160) — not launch lines. \
+        5,
+        "test fixtures for apply_default_when_unset and apply_configured_to_command (#6495, #7160, #8405) — not launch lines. \
          The module emits no command of its own: it supplies the alt-screen and \
          mouse-capture defaults the real builders carry, as a shell operand or a \
          Command mutation",
@@ -284,13 +309,14 @@ fn ok_message_names_every_binary_crate_gap() {
 #[test]
 fn probe_supplies_an_oauth_token_so_over_scrub_is_visible() {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
-    let prefix = crate::core::model_inject::build_claude_command_with(
+    let prefix = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),
         Some(PROBE_TOKEN),
         &[],
         None,
+        false,
     );
     assert!(
         prefix.contains("CLAUDE_CODE_OAUTH_TOKEN="),

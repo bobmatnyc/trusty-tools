@@ -134,6 +134,10 @@ pub(crate) async fn delete_index_report(
     if let Some(refusal) = outcome.refusal {
         return Err(refusal);
     }
+    // #9027: a warm-all pin never outlives its index.
+    if outcome.removed {
+        state.warm.unpin(id);
+    }
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
     // distinguishes a typo from a delete that failed.
@@ -334,7 +338,16 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// refusal behaviour by `service::server::tests_3049`; the registry-only,
 /// unknown-id and failed-cleanup arms by `service::server::tests_6363`; the
 /// under-lock expectation re-check by
-/// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`.
+/// `tests_6380::a_relocate_landing_mid_quiesce_refuses_the_delete`; the
+/// file close by `delete_releases_the_corpus_and_vector_files_while_a_clone_survives`
+/// and `a_corpus_still_referenced_elsewhere_abandons_the_delete`; the
+/// deferred close by
+/// `a_writer_outliving_the_quiesce_wait_closes_the_files_when_it_finishes`.
+///
+/// #8167/#8232: a quiesced delete closes the index's redb corpus and HNSW
+/// mapping before deregistering — see [`super::delete_close::close_index_files`].
+/// An unquiesced one closes them in the background once the writer finishes —
+/// see [`super::delete_close::close_after_writer_drains`].
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -441,18 +454,54 @@ pub(super) async fn unregister_index(
             };
         }
     }
+    // #8167/#8232: close the index's files BEFORE deregistering, so a close
+    // that cannot finish abandons a delete that changed nothing. When not
+    // quiesced a live writer still holds them; the close runs once it
+    // finishes, after the deregistration below.
+    let mut errors: Vec<String> = Vec::new();
+    if quiesced {
+        let hot = state.registry.get(&index_id);
+        // #8664: also the handles queued deferred-embed jobs hold.
+        match super::delete_close::close_all_index_files(
+            &index_id,
+            hot.as_ref(),
+            super::delete_close::REHYDRATE_WAIT_BUDGET,
+            super::delete_close::CLOSE_BUDGET,
+        )
+        .await
+        {
+            Ok(vector_close_error) => errors.extend(vector_close_error),
+            Err(reason) => {
+                tracing::error!(
+                    "delete[{id}]: ABANDONED — {reason}; nothing was changed, re-issue the \
+                     delete (issue #8167)"
+                );
+                crate::service::reindex::clear_index_cancel(&index_id);
+                return UnregisterOutcome {
+                    removed: false,
+                    data_deleted: false,
+                    quiesced,
+                    registered: true,
+                    error: Some(format!("index files not closed: {reason}")),
+                    refusal: None,
+                };
+            }
+        }
+    }
     let (removed_hot, removed_handle) = state.registry.remove_and_get(&index_id);
-    let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
+    if !quiesced {
+        // #8167: the id is gone, so no later delete can close these files.
+        super::delete_close::close_after_writer_drains(index_id.clone(), removed_handle.clone());
+    }
+    let root_path_for_cleanup = removed_handle.as_ref().map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
     // forever for an id that is now absent from every store. Sampled BEFORE the
     // purge because a cold-parked or restore-failed index is not in the hot
     // registry — `removed` is false for exactly the ids this is meant to reap,
     // and the durable cleanup below must still run for them.
     let was_cold = state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id);
-    let cold_root = state
-        .cold_store
-        .get_persisted(&index_id)
-        .map(|e| e.root_path);
+    let cold_entry = state.cold_store.get_persisted(&index_id);
+    let cold_root = cold_entry.as_ref().map(|e| e.root_path.clone());
     state.cold_store.purge(&index_id);
     let root_path_for_cleanup = root_path_for_cleanup.or(cold_root);
     let in_memory_removed = removed_hot || was_cold;
@@ -462,7 +511,6 @@ pub(super) async fn unregister_index(
     // produces exactly this shape. Consulting it here is what turns those rows
     // from undeletable (200 `removed:false`, row and data dir intact) into an
     // ordinary delete, and what lets a genuinely unknown id 404 instead.
-    let mut errors: Vec<String> = Vec::new();
     let registry_entry = if in_memory_removed {
         // Already proven to exist; skip the file read on the hot path.
         None
@@ -484,6 +532,12 @@ pub(super) async fn unregister_index(
         }
     };
     let registry_only = registry_entry.is_some();
+    // #8438: the layout a cold-store entry or registry row names; a hot
+    // handle's indexer is consulted below, only once the delete has quiesced.
+    let entry_layout = cold_entry
+        .as_ref()
+        .or(registry_entry.as_ref())
+        .map(crate::service::storage_layout::StorageLayout::for_entry);
     let root_path_for_cleanup = root_path_for_cleanup.or(registry_entry.map(|e| e.root_path));
     // A registry read that failed leaves existence UNKNOWN; treating it as
     // "registered" keeps the answer a reportable failure rather than a 404.
@@ -517,7 +571,14 @@ pub(super) async fn unregister_index(
             // delete that timed out returned above without touching anything, so
             // no `remove_dir_all` can run under an active writer.
             debug_assert!(quiesced, "delete_data teardown runs only when quiesced");
-            match crate::service::persistence::remove_index_data_dir(id) {
+            // #8438: remove the directory the registry names — the colocated
+            // `<root>/.trusty-search/` included — and never the in-repo
+            // directory of a non-colocated index.
+            let layout = match removed_handle.as_ref() {
+                Some(h) => crate::service::storage_layout::layout_of(h).await,
+                None => entry_layout.unwrap_or_default(),
+            };
+            match layout.remove_storage(id, root_path_for_cleanup.as_deref()) {
                 // #3049: this is the only assignment of `data_deleted` —
                 // the response field can no longer disagree with the disk.
                 Ok(()) => data_deleted = true,
@@ -804,6 +865,10 @@ pub(crate) async fn search_report(
             );
             return (status, body.0);
         }
+        // #8348: a pinned semantic query whose embed failed is 503, not 500.
+        if let Some((status, body)) = super::degraded::embedder_unavailable_from(&e) {
+            return (status, body.0);
+        }
         if let Some((status, body)) = super::degraded::corpus_read_failure_from(&e) {
             tracing::warn!(
                 index_id = %index_id,
@@ -826,8 +891,16 @@ pub(crate) async fn search_report(
         mut results,
         mut dropped,
         exact_match,
+        vector_lane_error,
         ..
     } = outcome;
+    // #8348: a failed query embed counts against the embedder on `/health`, so
+    // `search_health` reports it unhealthy instead of `ok`. #8600: a pooled
+    // embed already recorded it in `EmbedPool::embed`; count only the no-pool
+    // fallback (the boot window before the pool installs), never twice.
+    if vector_lane_error.is_some() && !indexer.has_embed_pool() {
+        state.embedder_stall_tracker.record_timeout();
+    }
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
     // paths relative to the index root, so anything that escapes the root
     // (absolute path pointing elsewhere, `..` traversal, or simply a path
@@ -952,7 +1025,9 @@ pub(crate) async fn search_report(
             // for the unpinned caller, who legitimately gets whatever lanes are
             // ready but must be able to tell which ones those were without
             // diffing `search_capabilities` against a schema it does not have.
-            "vector_unavailable": !semantic_ready,
+            // #8348: also `true` when the query embed failed and the lane was skipped.
+            "vector_unavailable": !semantic_ready || vector_lane_error.is_some(),
+            "embedder_error": vector_lane_error,
             // #5068: separates "off for this index" from "not built yet" — the
             // same split `vector_unavailable`'s 503 body carries, so a caller
             // handles one contract, not two.

@@ -21,7 +21,7 @@ const REPO_ROOT = path.resolve(HERE, '../../..');
 
 describe('flagship tool records are grounded in the repository', () => {
 	it('names a crate directory that exists', () => {
-		expect(TOOLS.length).toBe(7);
+		expect(TOOLS.length).toBe(5);
 		for (const tool of TOOLS) {
 			expect(existsSync(path.join(REPO_ROOT, 'crates', tool.name, 'Cargo.toml')), tool.name).toBe(
 				true
@@ -73,7 +73,9 @@ describe('flagship tool records are grounded in the repository', () => {
 	 * Since #6960 a flagship page is served one of two ways, and a record that
 	 * matches NEITHER is a `/tools/<slug>` link on the landing page that leads
 	 * to a 404: markdown under `src/content/tools/`, served by the `[slug]`
-	 * route, or a hand-authored `+page.svelte` of its own (trusty-audit).
+	 * route, or a hand-authored `+page.svelte` of its own. No current TOOLS
+	 * entry takes the second path — trusty-audit, the one that did, moved to
+	 * its own site in #8507 — but the check stays generic for one that will.
 	 */
 	it('has a page source for every slug, and no duplicate slugs', () => {
 		expect(new Set(TOOLS.map((t) => t.slug)).size).toBe(TOOLS.length);

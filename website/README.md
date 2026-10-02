@@ -30,11 +30,11 @@ pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 `crates/*/ui/`.
 
 🟡 Run `pnpm test` by hand from INSIDE `website/` before pushing, where pnpm is
-pinned. The workflow runs Node 20 — a newer local Node reports spurious
+pinned. The workflow runs Node 22 — a newer local Node reports spurious
 `localStorage` failures in `theme.test.ts`. (Moved from `CLAUDE.md` by #7423.)
 
 `pnpm test` runs in CI as `.github/workflows/website-tests.yml` (#5200), on
-Node 20 with Chromium installed for the mobile-overflow smoke test. It is a
+Node 22 with Chromium installed for the mobile-overflow smoke test. It is a
 separate workflow rather than a leg on `ci.yml`'s `ui-checks` matrix because
 `scripts/detect-docs-only.sh` buckets `website/**` as docs-only, and every
 `ui-checks` step is gated on `docs_only != 'true'` — a leg there would skip on
@@ -202,24 +202,25 @@ tracks replacing copy-paste distribution of Foundry assets with a real package.
 
 ## The flagship tool pages
 
-`/tools/<slug>` serves seven pages. Six render their prose from markdown; one
-is still Svelte.
+`/tools/<slug>` serves five pages, all rendering their prose from markdown.
+`tga` and `trusty-audit` had the sixth and seventh — `trusty-audit`'s was the
+one still Svelte, its copy embedding live `CopyButton` components next to the
+commands an operator has to run — until both moved to their own site in
+#8507.
 
-| To change                          | Edit                                         |
-| ---------------------------------- | -------------------------------------------- |
-| What a flagship page SAYS          | `src/content/tools/<slug>.md`                |
-| Its tagline, lede, or fact cards   | `src/lib/tools.ts`                           |
-| The hero, install block, or footer | `src/lib/components/ToolPage.svelte`         |
-| The `/tools/trusty-audit` page     | `src/routes/tools/trusty-audit/+page.svelte` |
+| To change                          | Edit                                 |
+| ---------------------------------- | ------------------------------------ |
+| What a flagship page SAYS          | `src/content/tools/<slug>.md`        |
+| Its tagline, lede, or fact cards   | `src/lib/tools.ts`                   |
+| The hero, install block, or footer | `src/lib/components/ToolPage.svelte` |
 
 A crate README is not a source for any of them — nothing in the build reads one.
 
-One route serves all six: `src/routes/tools/[slug]/`, whose `entries` are the
+One route serves all five: `src/routes/tools/[slug]/`, whose `entries` are the
 markdown files themselves, so adding `src/content/tools/<slug>.md` for a slug
-already in `TOOLS` is the whole of adding a page. `trusty-audit` keeps its own
-static route, which takes precedence over `[slug]`; its copy embeds live
-`CopyButton` components next to the commands an operator has to run, and
-markdown cannot express those.
+already in `TOOLS` is the whole of adding a page. A page whose copy needs live
+Svelte can still take its own static route instead, which takes precedence
+over `[slug]` — markdown cannot express an embedded component.
 
 `src/lib/flagship/content.ts` does the rendering, through the **same**
 remark/rehype pipeline as the documentation reader below — so a table, a fenced

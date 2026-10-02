@@ -614,9 +614,12 @@ pub(super) fn write_project_hooks(
 /// `build_system_prompt_for_with_style`.
 /// What: identical to [`write_project_hooks`], except
 /// `prompt_feedback_enabled = true` registers the `Stop` / `SubagentStop`
-/// capture groups. The launch path is the only caller that passes `true`.
+/// capture groups. #9018: the launch now builds its additions with
+/// `[pm_guard] enabled` resolved too and calls [`write_project_hooks_with`]; this
+/// form survives as the guard-on reference its tests assert against.
 /// Test: `project_hooks_tests::write_project_hooks_writes_prompt_feedback_when_enabled`,
 /// `project_hooks_tests::write_project_hooks_strips_stale_prompt_feedback_when_disabled`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn write_project_hooks_with_prompt_feedback(
     project_dir: &Path,
     exe_override: Option<&Path>,
@@ -989,6 +992,7 @@ pub(super) fn preseed_workspace_trust(
     // Claude Code itself — could read the file while it was half-written and
     // see malformed JSON, which every reader in this crate treats as "skip,
     // leave it alone" (silently losing the seed) rather than as an error.
+    crate::core::home_write_fence::check(claude_json); // #8545
     trusty_common::claude_config::write_json_atomic(claude_json, &config)
         .map_err(|err| PrepError::Deploy(format!("write {}: {err}", claude_json.display())))?;
     Ok(())
@@ -1020,6 +1024,8 @@ pub(super) fn preseed_workspace_trust_home(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude.json"));
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
@@ -1074,6 +1080,8 @@ pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(
     let Some(home) = usable_home(home) else {
         return Ok(());
     };
+    // #8545: the operator's `~/.claude/settings.json`; fenced in tests.
+    crate::core::home_write_fence::check(&home.join(".claude"));
     clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
 }
 

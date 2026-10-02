@@ -212,10 +212,12 @@ async fn seed_sessions(
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -254,6 +256,15 @@ fn config_defaults() {
         c.pr_cleanup_interval, None,
         "#7275: the post-merge cleanup sweep spawns `gh` and deletes branches, so it \
          follows auto_resume's precedent and is OFF in a hand-constructed config"
+    );
+    // #8335: every sweep step is bounded.
+    assert_eq!(
+        c.tick_timeout.as_secs(),
+        super::config::DEFAULT_TICK_TIMEOUT_SECS
+    );
+    assert_eq!(
+        c.step_timeout.as_secs(),
+        super::config::DEFAULT_STEP_TIMEOUT_SECS
     );
     // An empty injected env yields the same cadence and policy (no process env
     // touched). The cleanup sweep is the one field that deliberately differs —
@@ -429,10 +440,12 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -557,6 +570,37 @@ async fn tick_never_resumes_a_deliberately_stopped_session() {
         "no tmux session may be created for a deliberately stopped record"
     );
     assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
+}
+
+/// #8942: the sweep never relaunches the Architect or its helpers, whatever
+/// the stop cause — only `tm fleet init` launches them.
+#[tokio::test]
+async fn tick_never_resumes_a_supervisor_record() {
+    use crate::session_manager::SessionKind;
+    for kind in [
+        SessionKind::Supervisor,
+        SessionKind::SupervisorAux,
+        SessionKind::Unknown,
+    ] {
+        let dir = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let tmux = FakeTmux::new();
+        let mgr = make_manager(&dir, tmux.clone()).await;
+        let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+        set_stop_cause(&mgr, &ids[0], Some(StopCause::Unexpected)).await;
+        {
+            let mut store = mgr.store.write().await;
+            let mut record = store.cached_get(&ids[0]).expect("seeded record");
+            record.kind = kind;
+            store.upsert(record).await.expect("stamp kind");
+        }
+
+        let report = run_tick::<StubClassifier>(&mgr, &resume_cfg(), None).await;
+
+        assert!(report.resumed.is_empty(), "{kind:?}: {:?}", report.resumed);
+        assert_eq!(*tmux.create_calls.lock().unwrap(), 0, "{kind:?}");
+        assert_eq!(mgr.list().await[0].state, ManagedSessionState::Stopped);
+    }
 }
 
 /// A sweep still relaunches a session whose runtime exited on its own (#6194).
@@ -1269,10 +1313,14 @@ async fn supervisor_publishes_run_stats_after_sweeps() {
 /// Why: the loop must publish an initial snapshot BEFORE parking on the timer,
 /// so the console sees the supervisor immediately on start rather than after one
 /// full interval, and must return cleanly on shutdown — never killed mid-sweep
-/// (CLAUDE.md #534).
+/// (CLAUDE.md #534). #8335: a clean shutdown logs no ERROR — the loop-exit
+/// guard is disarmed.
 /// Test: this is the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn supervisor_run_until_stops_cleanly() {
+    use tracing::instrument::WithSubscriber;
+    let (buffer, subscriber) = capture_logs();
     let dir = TempDir::new().unwrap();
     let ws = TempDir::new().unwrap();
     let tmux = FakeTmux::new();
@@ -1287,6 +1335,7 @@ async fn supervisor_run_until_stops_cleanly() {
         classify_idle: false,
         // #7275: off, so this shutdown test never reaches a `gh` spawn.
         pr_cleanup_interval: None,
+        ..SupervisorConfig::default()
     };
     let metrics_file = dir.path().join("supervisor-metrics.json");
     let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
@@ -1304,16 +1353,449 @@ async fn supervisor_run_until_stops_cleanly() {
 
     // Bound the test so a regression (loop ignoring shutdown) fails fast
     // instead of hanging the suite.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), sup.run_until(shutdown))
-        .await
-        .expect("run_until must return promptly after shutdown");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sup.run_until(shutdown).with_subscriber(subscriber),
+    )
+    .await
+    .expect("run_until must return promptly after shutdown");
     result.expect("clean shutdown returns Ok");
+    let errors = error_lines(&buffer);
+    assert!(
+        errors.is_empty(),
+        "a clean shutdown logs no ERROR: {errors:#?}"
+    );
 
     // The initial snapshot was published before the loop parked on the timer.
     let published = publish::read_at(&metrics_file)
         .expect("read")
         .expect("the loop published before parking on the timer");
     assert_eq!(published.fleet.stopped, 2);
+}
+
+// ── #8335: a wedged sweep cannot stop the loop ───────────────────────────────
+
+/// A classifier whose FIRST call never completes; later calls answer at once.
+///
+/// Why: #8335's wedge was a sweep future that stopped being woken. A classify
+/// call that never returns reproduces that inside a real `run_tick`.
+/// Test: `a_wedged_sweep_times_out_and_the_loop_continues`.
+struct HangsOnceClassifier {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LlmClassifier for HangsOnceClassifier {
+    async fn classify(
+        &self,
+        pane_text: &str,
+    ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            std::future::pending::<()>().await;
+        }
+        StubClassifier::new().classify(pane_text).await
+    }
+}
+
+/// Why (#8335): a sweep that never finishes stopped the supervisor loop for
+/// hours. The loop must abandon it, keep ticking, and complete a later sweep.
+/// What: one active session, classification on, and a classifier that hangs
+/// on its first call. The run stops once the published snapshot shows a
+/// completed classification — which only a sweep AFTER the wedged one can
+/// produce. Without the step bound the first sweep never returns and the
+/// outer 10 s bound fails the test.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_wedged_sweep_times_out_and_the_loop_continues() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+
+    let cfg = SupervisorConfig {
+        interval: std::time::Duration::from_millis(20),
+        classify_idle: true,
+        tick_timeout: std::time::Duration::from_millis(200),
+        ..SupervisorConfig::default()
+    };
+    let classifier = HangsOnceClassifier {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let monitor = ActivityMonitor::new(classifier, "test-model");
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let sup = Supervisor::new(mgr, cfg, Some(monitor))
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+
+    let watched = metrics_file.clone();
+    let later_sweep_completed = async move {
+        loop {
+            let classified = publish::read_at(&watched)
+                .ok()
+                .flatten()
+                .map_or(0, |m| m.fleet.run_stats.classified);
+            if classified >= 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sup.run_until(later_sweep_completed),
+    )
+    .await
+    .expect("the loop must abandon the wedged sweep and complete a later one");
+    result.expect("clean shutdown returns Ok");
+}
+
+/// Why (#8335): the supervisor's log said nothing while its heartbeat froze.
+/// What: an old snapshot is judged stale (and logged once); a fresh one clears
+/// the verdict; an unreadable file keeps the previous verdict.
+/// Test: this is the test.
+#[test]
+fn heartbeat_watchdog_flags_a_stale_snapshot_once() {
+    use super::watchdog::check_heartbeat;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("supervisor-metrics.json");
+    let interval = std::time::Duration::from_secs(30);
+    let now = Utc::now();
+
+    assert!(
+        !check_heartbeat(&path, now, false),
+        "an absent file is not stale"
+    );
+    let old = now - chrono::Duration::seconds(3600);
+    publish::write_at(&path, &FleetMetrics::default(), interval, old).expect("write");
+    assert!(
+        check_heartbeat(&path, now, false),
+        "a frozen heartbeat is stale"
+    );
+    assert!(check_heartbeat(&path, now, true), "it stays stale");
+
+    publish::write_at(&path, &FleetMetrics::default(), interval, now).expect("write");
+    assert!(!check_heartbeat(&path, now, true), "a fresh write recovers");
+
+    std::fs::write(&path, "not json").expect("corrupt");
+    assert!(
+        check_heartbeat(&path, now, true),
+        "unreadable keeps the verdict"
+    );
+}
+
+/// A capture subscriber and the buffer it writes to (#4931 pattern).
+fn capture_logs() -> (
+    trusty_common::log_buffer::LogBuffer,
+    impl tracing::Subscriber + Send + Sync + 'static,
+) {
+    use tracing_subscriber::layer::SubscriberExt;
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    (buffer, subscriber)
+}
+
+/// The captured lines logged at ERROR.
+fn error_lines(buffer: &trusty_common::log_buffer::LogBuffer) -> Vec<String> {
+    buffer
+        .tail(256)
+        .into_iter()
+        .filter(|l| l.contains("[ERROR"))
+        .collect()
+}
+
+/// Why (#8335): a dropped or panicked loop left no log line. Dropping an armed
+/// guard must log at ERROR and stop the watchdog; a disarmed one logs nothing.
+/// Test: this is the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_armed_loop_exit_guard_logs_an_error_when_dropped() {
+    use super::watchdog::LoopExitGuard;
+    let (buffer, subscriber) = capture_logs();
+    let task = tokio::spawn(std::future::pending::<()>());
+    let abort = task.abort_handle();
+    tracing::subscriber::with_default(subscriber, || {
+        drop(LoopExitGuard::new(Some(task)));
+        let mut clean = LoopExitGuard::new(None);
+        clean.disarm();
+        drop(clean);
+    });
+    let errors = error_lines(&buffer);
+    assert_eq!(errors.len(), 1, "exactly the armed drop logs: {errors:#?}");
+    assert!(
+        errors[0].contains("exited without a shutdown signal"),
+        "{errors:#?}"
+    );
+    for _ in 0..100 {
+        if abort.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(abort.is_finished(), "dropping the guard stops the watchdog");
+}
+
+/// A `gh` whose every call blocks its thread until the test releases it.
+///
+/// Why (#8335): `RealGh::run` blocks in `Command::output()`; this reproduces a
+/// hung `gh` without spawning one.
+/// Test: `a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues`.
+struct HungGh {
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::core::pr_cleanup::Gh for HungGh {
+    fn run(&self, _args: &[String]) -> anyhow::Result<crate::core::pr_cleanup::CmdOut> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self
+            .gate
+            .lock()
+            .expect("lock")
+            .recv_timeout(std::time::Duration::from_secs(20));
+        Ok(crate::core::pr_cleanup::CmdOut {
+            success: false,
+            stdout: String::new(),
+            stderr: "fake gh released".into(),
+        })
+    }
+}
+
+/// REGRESSION (#8335 HIGH): a hung `gh` in the post-merge cleanup sweep held
+/// the loop task, so the tick's timeout never fired. Each tick must return
+/// within its bound, the next tick must run, and it must not start a second
+/// `gh` while the first is still blocked.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_hung_gh_in_the_cleanup_sweep_is_abandoned_and_the_loop_continues() {
+    use crate::core::pr_cleanup::auth_backoff::AuthBackoff;
+    use crate::core::pr_cleanup::{CleanupRegistry, CleanupScope, OpenedPr};
+    let dir = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let registry_path = dir.path().join("pr-cleanup.json");
+    CleanupRegistry::at(&registry_path)
+        .record_open(OpenedPr {
+            pr: 1,
+            repo: "owner/repo".into(),
+            repo_root: dir.path().to_path_buf(),
+            opened_at: Utc::now(),
+            cleaned_at: None,
+            scope: CleanupScope::Wide,
+        })
+        .expect("record the pending PR");
+    let (release, gate) = std::sync::mpsc::channel();
+    let gh = Arc::new(HungGh {
+        gate: Mutex::new(gate),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let seam_gh = Arc::clone(&gh);
+    let cleanup: super::CleanupFn = Arc::new(move |mgr| {
+        let (gh, path) = (Arc::clone(&seam_gh), registry_path.clone());
+        Box::pin(async move {
+            let registry = CleanupRegistry::at(path);
+            super::pr_cleanup_tick::run_sweep_with_gh(&mgr, &*gh, &registry, &AuthBackoff::new())
+                .await
+        })
+    });
+    let cfg = SupervisorConfig {
+        classify_idle: false,
+        pr_cleanup_interval: Some(std::time::Duration::ZERO),
+        tick_timeout: std::time::Duration::from_millis(200),
+        ..SupervisorConfig::default()
+    };
+    let mut sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None)
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(dir.path().join("supervisor-metrics.json"))
+        .with_cleanup(cleanup);
+
+    for tick in 1..=2 {
+        let started = std::time::Instant::now();
+        sup.tick().await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "tick {tick} waited {:?} on a hung `gh`",
+            started.elapsed()
+        );
+    }
+    assert_eq!(sup.stats().sweeps, 2, "both fleet sweeps completed");
+    assert_eq!(sup.stats().cleanup_sweeps_abandoned, 2);
+    assert_eq!(
+        gh.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the second tick skips the cleanup sweep while the first one is blocked"
+    );
+    drop(release);
+}
+
+/// A tmux driver whose `capture` blocks its thread until the gate closes.
+///
+/// Test: `abandoned_fleet_sweeps_are_counted_and_read_as_stale`.
+struct BlockingCaptureTmux {
+    inner: Arc<FakeTmux>,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl ManagedTmuxDriver for BlockingCaptureTmux {
+    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        self.inner.create_session(name, workdir)
+    }
+
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        self.inner.kill_session(name)
+    }
+
+    fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        self.inner.send_line(name, text)
+    }
+
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        let _ = self
+            .gate
+            .lock()
+            .expect("lock")
+            .recv_timeout(std::time::Duration::from_secs(20));
+        self.inner.capture(name, lines)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        self.inner.list_sessions()
+    }
+}
+
+/// REGRESSION (#8335): a fleet sweep blocked in a tmux call is abandoned, the
+/// next tick is skipped rather than stacked, both are counted, and a fresh
+/// snapshot reads `stale` until a sweep completes again.
+/// Test: this is the test.
+#[tokio::test]
+async fn abandoned_fleet_sweeps_are_counted_and_read_as_stale() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let tmux = Arc::new(BlockingCaptureTmux {
+        inner: FakeTmux::new(),
+        gate: Mutex::new(gate),
+    });
+    let mgr = Arc::new(SessionManager::new(dir.path(), tmux).await.expect("mgr"));
+    seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let cfg = SupervisorConfig {
+        classify_idle: true,
+        tick_timeout: std::time::Duration::from_millis(200),
+        ..SupervisorConfig::default()
+    };
+    let monitor = ActivityMonitor::new(StubClassifier::new(), "test-model");
+    let metrics_file = dir.path().join("supervisor-metrics.json");
+    let mut sup = Supervisor::new(mgr, cfg, Some(monitor))
+        .with_auto_resume_path(no_override(&dir))
+        .with_metrics_path(&metrics_file);
+
+    for _ in 0..2 {
+        let started = std::time::Instant::now();
+        sup.tick().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+    let stats = sup.stats().clone();
+    assert_eq!(
+        (
+            stats.sweeps,
+            stats.sweeps_abandoned,
+            stats.consecutive_sweeps_abandoned
+        ),
+        (0, 2, 2)
+    );
+    sup.publish_snapshot().await;
+    match publish::read_status_at(&metrics_file, Utc::now()) {
+        SupervisorMetricsStatus::Stale { snapshot, .. } => {
+            assert_eq!(snapshot.fleet.run_stats.sweeps_abandoned, 2);
+        }
+        other => panic!("a fresh snapshot of abandoned sweeps must be stale: {other:?}"),
+    }
+
+    drop(release);
+    for _ in 0..100 {
+        sup.tick().await;
+        if sup.stats().sweeps > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(sup.stats().consecutive_sweeps_abandoned, 0);
+    sup.publish_snapshot().await;
+    assert!(matches!(
+        publish::read_status_at(&metrics_file, Utc::now()),
+        SupervisorMetricsStatus::Current { .. }
+    ));
+}
+
+/// REGRESSION (#8335): a hung per-session step used up the whole sweep. It is
+/// abandoned at `step_timeout`, logged with the session and step, and the
+/// sweep classifies the next session.
+/// Test: this is the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_hung_classify_step_is_abandoned_and_the_sweep_moves_on() {
+    use tracing::instrument::WithSubscriber;
+    let (buffer, subscriber) = capture_logs();
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 2, ManagedSessionState::Active, &ws).await;
+    let cfg = SupervisorConfig {
+        classify_idle: true,
+        step_timeout: std::time::Duration::from_millis(100),
+        ..SupervisorConfig::default()
+    };
+    let classifier = HangsOnceClassifier {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let monitor = ActivityMonitor::new(classifier, "test-model");
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_tick(&mgr, &cfg, Some(&monitor)).with_subscriber(subscriber),
+    )
+    .await
+    .expect("the sweep must not wait on the hung step");
+    assert_eq!(
+        report.classified, 1,
+        "the other session is still classified"
+    );
+    let errors = error_lines(&buffer);
+    let line = errors
+        .iter()
+        .find(|l| l.contains("sweep step did not finish"))
+        .unwrap_or_else(|| panic!("no step-expiry line: {errors:#?}"));
+    assert!(line.contains("classify"), "{line}");
+    assert!(line.contains("tmpm-fleet-"), "{line}");
+    assert!(
+        ids.iter().any(|id| line.contains(&id.to_string())),
+        "{line}"
+    );
+}
+
+/// Why (#8335 review): after a system sleep the heartbeat is hours old until
+/// the next tick publishes. The watch skips the verdict across a wall-clock gap
+/// larger than twice its period, then judges normally.
+/// Test: this is the test.
+#[test]
+fn heartbeat_watch_skips_its_verdict_across_a_wall_clock_jump() {
+    use super::watchdog::HeartbeatWatch;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("supervisor-metrics.json");
+    let period = std::time::Duration::from_secs(30);
+    let t0 = Utc::now();
+    publish::write_at(&path, &FleetMetrics::default(), period, t0).expect("write");
+    let mut watch = HeartbeatWatch::new(period);
+    assert!(!watch.observe(&path, t0), "a fresh heartbeat is current");
+    let woke = t0 + chrono::Duration::hours(1);
+    assert!(
+        !watch.observe(&path, woke),
+        "the first check after a wall-clock jump gives no verdict"
+    );
+    assert!(
+        watch.observe(&path, woke + chrono::Duration::seconds(30)),
+        "a normal gap judges again, and the old heartbeat is stale"
+    );
 }
 
 /// BEHAVIORAL BAR (#6288), the daemon half: after real sweeps, the exact
@@ -1476,5 +1958,148 @@ async fn a_supervisor_tick_does_nothing_to_a_session_being_resumed() {
         after.resumed.len(),
         1,
         "once the claim is gone the sweep resumes it as usual: {after:?}"
+    );
+}
+
+// ── #8396: a resume refused because the session is already active ────────────
+
+/// REGRESSION (#8396): a stale `Stopped` read of a session another path has
+/// already made `Active` is resume's goal reached, not a failure.
+///
+/// Why: the sweep's generic arm marked the refusal errored, which demoted a
+/// running session and appended "cannot resume a session in state 'active'" to
+/// its task on every sweep — two to eight copies were observed live.
+/// What: seeds an `Active` record, takes the real refusal `resume_auto`
+/// returns for it, and settles it twice through the sweep's failure handler
+/// with a stale `Stopped` snapshot. The record must stay `Active` with an
+/// unchanged task, and no failure may be counted.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn an_already_active_session_is_not_marked_errored_by_a_stale_resume() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let fresh = mgr.get(&ids[0]).await.expect("record");
+    let mut stale = fresh.clone();
+    stale.state = ManagedSessionState::Stopped;
+
+    let mut report = super::poller::TickReport::default();
+    for _ in 0..2 {
+        let refusal = mgr
+            .resume_auto(&ids[0])
+            .await
+            .expect_err("an active session cannot be resumed");
+        assert!(
+            matches!(refusal, ManagedError::InvalidState(..)),
+            "{refusal:?}"
+        );
+        super::poller::settle_failed_resume(&mgr, &stale, refusal, &mut report).await;
+    }
+
+    assert_eq!(report.resume_failures, 0, "nothing failed: {report:?}");
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Active);
+    assert_eq!(after.task, fresh.task, "no note accumulates on the task");
+}
+
+/// #8396 error arm: an `InvalidState` refusal for a state that is NOT active
+/// is still a real failure — marked errored and counted.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_resume_refusal_for_a_non_active_state_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Provisioning, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+    let refusal = mgr
+        .resume_auto(&ids[0])
+        .await
+        .expect_err("a provisioning session cannot be resumed");
+    assert!(
+        matches!(refusal, ManagedError::InvalidState(..)),
+        "{refusal:?}"
+    );
+
+    let mut report = super::poller::TickReport::default();
+    super::poller::settle_failed_resume(&mgr, &record, refusal, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert_eq!(after.task.matches("[error: auto-resume failed").count(), 1);
+}
+
+/// #8396 error arm: any other resume error keeps the #5208 handling.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_non_state_resume_error_is_still_recorded() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Stopped, &ws).await;
+    let record = mgr.get(&ids[0]).await.expect("record");
+
+    let mut report = super::poller::TickReport::default();
+    let err = ManagedError::TmuxUnavailable("tmux server went away".to_owned());
+    super::poller::settle_failed_resume(&mgr, &record, err, &mut report).await;
+
+    assert_eq!(report.resume_failures, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.state, ManagedSessionState::Errored);
+    assert!(
+        after.task.contains("tmux server went away"),
+        "{}",
+        after.task
+    );
+}
+
+/// #8301 critic: a claim recorded under another spelling of the tree — a
+/// symlink, or macOS's `/private` prefix — is still that tree's claim. A path
+/// that cannot be resolved falls back to the raw comparison and keeps its
+/// holder too.
+///
+/// Fails at 4b1f480af: the byte comparison missed the symlinked holder, so the
+/// sweep never saw the claim it had to judge.
+#[tokio::test]
+async fn session_claims_match_a_workspace_spelled_through_a_symlink() {
+    use crate::core::pr_cleanup::ClaimEnder;
+    use crate::supervisor::pr_cleanup_tick::SessionClaims;
+    let dir = TempDir::new().expect("store dir");
+    let ws = TempDir::new().expect("workspace dir");
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let tree = ws.path().join("tree");
+    std::fs::create_dir(&tree).expect("create the tree");
+    let alias = ws.path().join("alias");
+    std::os::unix::fs::symlink(&tree, &alias).expect("symlink the tree");
+    let gone = ws.path().join("gone");
+    let mut via_alias = rec(ManagedSessionState::Active, None);
+    via_alias.workspace_path = Some(alias);
+    let mut on_gone = rec(ManagedSessionState::Active, None);
+    on_gone.workspace_path = Some(gone.clone());
+    let (alias_id, gone_id) = (via_alias.id.to_string(), on_gone.id.to_string());
+    {
+        let mut store = mgr.store.write().await;
+        store
+            .upsert(via_alias)
+            .await
+            .expect("upsert the alias record");
+        store.upsert(on_gone).await.expect("upsert the gone record");
+    }
+    let claims = SessionClaims::new(&mgr);
+
+    let on_tree = claims.claims_on(&tree).await.expect("claims on the tree");
+    assert_eq!(on_tree, [alias_id], "the symlinked spelling holds the tree");
+    let on_missing = claims
+        .claims_on(&gone)
+        .await
+        .expect("claims on a gone path");
+    assert_eq!(
+        on_missing,
+        [gone_id],
+        "an unresolvable path keeps its holder"
     );
 }

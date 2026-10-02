@@ -23,6 +23,8 @@
 //! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
 mod claude_code;
+// #8308: the CLI and fleet launches ride the same spec carrier.
+pub mod cli_launch;
 // #8233: the managed launch is carried to the pane as PARAMETERS, not as a
 // typed shell script. `launch_spec` is the carrier, `managed_launch` composes
 // it, `launch_report` is the on-exit hint the shim now prints.
@@ -48,7 +50,10 @@ pub(crate) use claude_code::encode_project_dir;
 // constant — a check that compared the constant against itself could not fail.
 // #8233: the daemon's launch is no longer a shell string, so the check reads the
 // STRUCTURED unset list the spec carries instead of parsing `-u` operands.
-pub use claude_code::{ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command};
+pub use claude_code::{
+    ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command,
+    build_inplace_resume_command_under,
+};
 pub(crate) use managed_launch::managed_env_unset;
 pub use tcode::TcodeAdapter;
 

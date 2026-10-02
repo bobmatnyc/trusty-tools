@@ -43,8 +43,9 @@
 //! boot re-enters the same arm and re-walks the tree, forever. Those indexes are
 //! therefore left untouched and counted as `skipped_unresolvable_git`.
 //!
-//! Both paths reuse the walker's `path_in_skipped_dir` / `should_skip_path`
-//! predicates so exclusion rules are applied consistently.
+//! Both paths prune their walk with the walker's `path_in_skipped_dir` /
+//! `should_skip_path` predicates, then judge every delta file with
+//! `index_admission::admits`, the walker's own admission decision (#8922).
 //!
 //! Boot-reconcile progress is surfaced on `GET /health` via `ReconcileSummary`
 //! on `SearchAppState` (issue #1672).
@@ -54,11 +55,12 @@
 //!
 //! Test: unit + integration tests in `commands/start/reconcile_tests.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::core::git::WorkTree;
 use crate::core::registry::IndexHandle;
+use crate::service::index_admission::{admits, Admission};
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
 use crate::service::server::ReconcileSummary;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
@@ -655,7 +657,9 @@ fn read_last_indexed_unix_for_index(index_id: &str) -> Option<u64> {
 /// `reconcile_one_index`.
 fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex_with_cleanup(
+    // #8889: a reindex already running covers what this one would do, so a
+    // refusal is logged and dropped rather than queued behind it.
+    if let Err(refused) = spawn_reindex_with_cleanup(
         Arc::clone(handle),
         progress,
         false, // not force — incremental skip-hash still applies
@@ -664,7 +668,12 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
         None,
         false, // background priority
         None,
-    );
+    ) {
+        tracing::warn!(
+            "reconcile[{}]: full reindex not started — {refused}",
+            handle.id.0
+        );
+    }
 }
 
 /// Apply per-file reconciliation for a small delta.
@@ -673,9 +682,11 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// a full reindex — it reuses the same `index_file` / `remove_file` API the
 /// HTTP handler and filesystem watcher use.
 ///
-/// What: for each repo-relative path in `files`:
-/// if the file exists on disk and passes skip rules → `indexer.index_file`;
-/// if the file is gone → `indexer.remove_file` (removes all its chunks).
+/// What: for each repo-relative path in `files`, asks
+/// `index_admission::admits` (#8922): an admitted file → `indexer.index_file`
+/// (which refuses sops content); an excluded or deleted file →
+/// `purge_file` (its chunks and content hash); an undetermined answer
+/// touches nothing and counts as failed.
 /// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
 /// reindex requests (which need a write lock) are not blocked for the entire
 /// batch duration. This mirrors the locking discipline in
@@ -688,13 +699,22 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// on total failure.
 ///
 /// Test: `reconcile_stale_index_stamps_new_sha`,
-///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs.
-async fn apply_delta(
+///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs,
+///       `boot_reconcile_delta_honours_the_walker_policy`,
+///       `boot_reconcile_delta_leaves_an_undetermined_file_alone` and
+///       `every_ingest_path_refuses_a_held_index`.
+pub(super) async fn apply_delta(
     handle: &Arc<IndexHandle>,
     index_id: &str,
     files: &[String],
     new_sha: &str,
 ) -> bool {
+    // #9059: a held index takes no delta. The SHA stays unstamped, so the
+    // next boot retries once a PATCH fixes the globs.
+    if let Some(hold) = crate::service::exclude_hold::hold(handle) {
+        tracing::error!("reconcile[{index_id}]: {}", hold.reason());
+        return false;
+    }
     let root = &handle.root_path;
     let mut indexed = 0usize;
     let mut removed = 0usize;
@@ -703,16 +723,20 @@ async fn apply_delta(
 
     for rel_path_str in files {
         let abs_path = root.join(rel_path_str);
-        let rel_as_path = PathBuf::from(rel_path_str);
 
-        // Apply the same exclusion rules as the live watcher.
-        if should_skip_for_reconcile(&rel_as_path) {
-            tracing::debug!("reconcile[{index_id}]: skip excluded path {rel_path_str}");
-            skipped += 1;
+        // #8922: the walker's own admission decision, not a subset of it — the
+        // old skip-dir check let `exclude_globs`, `extensions`, include paths
+        // and ignore files through. An excluded or deleted file takes the
+        // removal arm; an undetermined one is left alone (#7396) and counted
+        // as failed so a delta of only those does not stamp the SHA.
+        let admission = admits(handle, &abs_path);
+        if admission == Admission::Undetermined {
+            tracing::warn!("reconcile[{index_id}]: admission undetermined for {rel_path_str}");
+            failed += 1;
             continue;
         }
 
-        if abs_path.exists() && abs_path.is_file() {
+        if admission == Admission::Included && abs_path.is_file() {
             // Modified or added: reindex the file.
             let content = match tokio::fs::read_to_string(&abs_path).await {
                 Ok(s) => s,
@@ -751,7 +775,9 @@ async fn apply_delta(
                 let _teardown_guard =
                     crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
                 let idx = handle.indexer.read().await;
-                idx.remove_file(rel_path_str).await
+                // #8922: the content hash goes with the chunks, and the graph
+                // is rebuilt once after the loop rather than per file.
+                idx.purge_file(&handle.id, rel_path_str).await
             };
             match result {
                 Ok(n) if n > 0 => removed += n,
@@ -765,6 +791,12 @@ async fn apply_delta(
                 }
             }
         }
+    }
+
+    if removed > 0 {
+        let _teardown_guard =
+            crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
+        handle.indexer.read().await.rebuild_symbol_graph_now().await;
     }
 
     // Only stamp the new HEAD SHA when at least one operation succeeded.

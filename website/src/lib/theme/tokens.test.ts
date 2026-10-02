@@ -197,7 +197,7 @@ describe('contrast facts the layout depends on', () => {
 	 * (code-critic on #5415). These derive the ratios from the tokens and
 	 * assert the threshold each rule actually depends on.
 	 */
-	describe('the tga audit severity badges', () => {
+	describe('the severity badges', () => {
 		// The stamps sit in a table on the page ground and, for the plain
 		// `.badge`, on a card — so both grounds are asserted.
 		const grounds = ['content-bg', 'card-bg'];

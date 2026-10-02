@@ -46,6 +46,8 @@ mod batch;
 // Issue #3979: resume-from-checkpoint — durable "which run is building this
 // staging corpus" record plus the pure adopt/discard decision.
 mod checkpoint;
+// #8889: one reindex per index; per-run staging names.
+mod claim;
 mod completion;
 mod corpus_swap;
 mod finish;
@@ -53,6 +55,8 @@ mod finish_teardown;
 mod guard;
 // #6570: `watch_rescan` reuses the content-hash cache to skip unchanged files.
 pub(crate) mod hash;
+// #8976: a withheld hash overwrites the old one, so a revert reindexes.
+mod hash_withhold;
 mod hnsw_swap;
 // #7991: the promotion never renames over a live corpus another opener holds.
 mod live_corpus_lock;
@@ -80,6 +84,7 @@ mod hash_cache;
 mod prune;
 pub mod quarantine;
 mod staging;
+mod staging_leftovers;
 // #4951: `reindex_handlers` mirrors this module's #2178 trust gate at the HTTP
 // boundary so an accepted root override always gets the walk it depends on.
 pub(crate) mod validate;
@@ -120,6 +125,10 @@ pub use semaphore::background_reindex_queue_depth;
 /// Test: `defer_embed_queue`'s own tests cover the counters directly;
 /// `server::tests_health_degraded` covers the recompute consumer.
 pub use defer_embed_queue::{deferred_embed_completion_epoch, deferred_embed_queue_depth};
+// #8664: the delete path closes the handles queued embed jobs hold.
+pub(crate) use defer_embed_queue::job_handles_for;
+#[cfg(test)]
+pub(crate) use defer_embed_queue::{push_job, wait_for_turn, LiveJob};
 
 /// Re-export `background_reindex_semaphore` (test-only — see the
 /// `#[cfg(test)]` internal re-exports below) so
@@ -243,6 +252,15 @@ pub(crate) use defer_embed::spawn_deferred_embed_pass;
 /// Test: `reindex_walks_directory_and_emits_events` (primary integration test).
 pub use orchestrator::{spawn_reindex, spawn_reindex_with_cleanup};
 
+/// The one-reindex-per-index guard (#8889).
+///
+/// Why: `reindex_report` claims before it touches anything, then spawns under
+/// that claim; library callers read the refusal type.
+/// Test: `a_second_claim_is_refused_and_names_the_running_job`,
+/// `a_second_reindex_request_is_refused_while_the_first_runs`.
+pub use claim::{try_claim_reindex, ReindexClaim, ReindexClaimError, RunningReindex};
+pub(crate) use orchestrator::spawn_claimed_reindex;
+
 // ── internal re-exports used by tests (via `use super::*` in tests.rs) ───────
 // Gated under #[cfg(test)] so clippy does not flag them as unused in release
 // builds. The test glob `use super::*` picks them up when running `cargo test`.
@@ -273,6 +291,10 @@ pub(crate) use tokio::sync::Semaphore;
 #[cfg(test)]
 mod tests;
 
+// #8976: which content hashes a batch commit records.
+#[cfg(test)]
+mod hash_withhold_tests;
+
 // #6524: the embedding pause, end to end.
 #[cfg(test)]
 mod embed_pause_tests;
@@ -280,6 +302,9 @@ mod embed_pause_tests;
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]
 mod root_hijack_tests;
+// #8438: the swap and staging paths honour the registry's layout.
+#[cfg(test)]
+mod registry_layout_8438_tests;
 // Issue #3979: end-to-end interrupt/resume equivalence plus the corrupt- and
 // stale-checkpoint fallbacks. Isolated from `tests.rs` for the same reason
 // `root_hijack_tests` is — the 1500-SLOC test-file cap.

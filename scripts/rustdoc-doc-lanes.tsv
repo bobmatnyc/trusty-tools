@@ -40,11 +40,10 @@
 #       Same bar as scripts/semver-checks-feature-exclusions.tsv, which carries
 #       the matching rows for the same features.
 #
-# The four Tauri GUI crates the gate excludes outright (trusty-mpm-gui,
-# trusty-code-gui, trusty-agents-ui, trusty-audit-ui) need no rows: they are
-# never documented. trusty-audit-ui joined that list in #7466 — it needs
-# WebKit2GTK exactly as its three siblings do, and carrying a row for a crate
-# the run excludes is a claim about documentation that never happens.
+# The two Tauri GUI crates the gate excludes outright (trusty-code-gui,
+# trusty-agents-ui) need no rows: they are never documented,
+# and carrying a row for a crate the run excludes is a claim about
+# documentation that never happens.
 #
 # Regenerate the inventory this file must cover:
 #   cargo metadata --no-deps --format-version 1
@@ -58,16 +57,25 @@
 # bundled-ort coexist (only load-dynamic and cuda conflict with bundled-ort at
 # the ort-sys level), so the single lane carries both backends.
 # ---------------------------------------------------------------------------
-LANE	features	tga/bedrock
 LANE	features	trusty-analyze/http-server,trusty-analyze/ner,trusty-analyze/review
 LANE	features	trusty-common/axum-server,trusty-common/bedrock,trusty-common/bedrock-client,trusty-common/blocking-http,trusty-common/bm25,trusty-common/bug-capture,trusty-common/catchup,trusty-common/chat-attachments
 LANE	features	trusty-common/cli-help,trusty-common/codex-config,trusty-common/config-cli,trusty-common/console-metrics,trusty-common/crate-config,trusty-common/credentials,trusty-common/daemon-token
 LANE	features	trusty-common/docgen,trusty-common/embedder,trusty-common/embedder-candle,trusty-common/embedder-client,trusty-common/embedder-test-support,trusty-common/gh-cli,trusty-common/host-metrics
-LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-common/keyring-store,trusty-common/knowledge-document,trusty-common/load-average,trusty-common/log-drain,trusty-common/machine-tier,trusty-common/memory-core,trusty-common/memory-rpc
+LANE	features	trusty-common/inference-client,trusty-common/intent-source,trusty-common/keyring-store,trusty-common/knowledge-document,trusty-common/load-average,trusty-common/log-drain,trusty-common/machine-tier,trusty-common/memory-core,trusty-common/memory-pressure,trusty-common/memory-rpc
 LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/palace-resolve,trusty-common/redb-open,trusty-common/rpc,trusty-common/search-index,trusty-common/session-naming
-LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/symgraph-server,trusty-common/tickets,trusty-common/uds
+LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
-LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon
+LANE	features	trusty-common/content-resolver,trusty-common/integrity
+# #8616: `load-dynamic` joined this row once `ort_probe.rs` (mod-private,
+# `cfg(any(feature = "load-dynamic", feature = "cuda", test))`) gated a cfg
+# site on it, which rotted the prior NO-CFG row. `cargo doc` never runs the
+# final link step the crate's own Cargo.toml warns conflicts with the
+# default `bundled-ort` feature at the `ort-sys` level (that conflict is a
+# `cargo build`-time linker fact, per .github/workflows/al2023-build.yml) —
+# verified locally: `cargo doc -p trusty-embedderd --features load-dynamic`
+# exits 0 with defaults still on, so this LANE's additive-only `--features`
+# reaches the module cleanly.
+LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon
 LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
@@ -86,11 +94,8 @@ NO-CFG	trusty-common	embedder-coreml
 NO-CFG	trusty-common	embedder-load-dynamic
 NO-CFG	trusty-common	unconditional-only
 NO-CFG	trusty-embedderd	coreml
-NO-CFG	trusty-embedderd	cuda
 NO-CFG	trusty-embedderd	http-server
-NO-CFG	trusty-embedderd	load-dynamic
 NO-CFG	trusty-mpm	cli
-NO-CFG	trusty-mpm	gui
 NO-CFG	trusty-search	bundled-ort
 NO-CFG	trusty-search	coreml
 NO-CFG	trusty-search	cuda
@@ -100,3 +105,9 @@ NO-CFG	trusty-search	load-dynamic
 # SKIP — cannot be built on a stock runner. Reason mandatory.
 # ---------------------------------------------------------------------------
 SKIP	trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has; also mutually exclusive with embedder-bundled-ort, which the `features` lane carries. Matching row in scripts/semver-checks-feature-exclusions.tsv.
+# #8616: pass-through to trusty-common/embedder-cuda (dep:libloading is the
+# only other thing this feature adds). Verified locally: `cargo doc -p
+# trusty-embedderd --features cuda` fails the same way — cudarc's build.rs
+# panics on `nvcc --version` — which no CI runner here has. Matching row in
+# scripts/semver-checks-feature-exclusions.tsv.
+SKIP	trusty-embedderd	cuda	pass-through to trusty-common/embedder-cuda; cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has. Matching row in scripts/semver-checks-feature-exclusions.tsv.

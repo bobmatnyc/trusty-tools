@@ -34,6 +34,7 @@ fn install_claude_hooks_at_writes_only_the_managed_config_dir() {
         Some(std::path::PathBuf::from(
             crate::test_support::STABLE_HOOK_EXE,
         )),
+        false,
     )
     .unwrap();
     assert_eq!(changed, 1, "first install must report one file changed");
@@ -67,6 +68,7 @@ fn install_claude_hooks_at_is_idempotent() {
         Some(std::path::PathBuf::from(
             crate::test_support::STABLE_HOOK_EXE,
         )),
+        false,
     )
     .unwrap();
     assert_eq!(first, 1);
@@ -78,6 +80,7 @@ fn install_claude_hooks_at_is_idempotent() {
         Some(std::path::PathBuf::from(
             crate::test_support::STABLE_HOOK_EXE,
         )),
+        false,
     )
     .unwrap();
     assert_eq!(second, 0, "second install must report no changes");
@@ -117,6 +120,7 @@ fn install_claude_hooks_at_never_touches_a_sibling_project_dir() {
         Some(std::path::PathBuf::from(
             crate::test_support::STABLE_HOOK_EXE,
         )),
+        false,
     )
     .unwrap();
 
@@ -130,5 +134,104 @@ fn install_claude_hooks_at_never_touches_a_sibling_project_dir() {
     assert!(
         sibling_val.get("hooks").is_none(),
         "the sibling project must never gain a `hooks` key from `tm install`"
+    );
+}
+
+/// The event keys `tm install` left in `<config_dir>/settings.json`, sorted.
+fn installed_events(config_dir: &std::path::Path) -> Vec<String> {
+    let text = std::fs::read_to_string(config_dir.join("settings.json")).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let mut events: Vec<String> = val["hooks"].as_object().unwrap().keys().cloned().collect();
+    events.sort();
+    events
+}
+
+/// #8392: with the opt-in off (the default) `tm install` writes exactly the six
+/// lifecycle events — no `Notification` key at all.
+#[test]
+fn opt_in_off_installs_exactly_the_six_lifecycle_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = Some(std::path::PathBuf::from(
+        crate::test_support::STABLE_HOOK_EXE,
+    ));
+    install_claude_hooks_at(tmp.path(), exe, false).unwrap();
+    let mut expected = vec![
+        "PostToolUse",
+        "PreToolUse",
+        "SessionEnd",
+        "SessionStart",
+        "Stop",
+        "SubagentStop",
+    ];
+    expected.sort_unstable();
+    assert_eq!(installed_events(tmp.path()), expected);
+}
+
+/// #8392: with the opt-in on, `tm install` adds one `Notification` entry that
+/// runs `tm hook`; a second run changes nothing and leaves one entry.
+#[test]
+fn opt_in_on_installs_one_notification_entry_idempotently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = || {
+        Some(std::path::PathBuf::from(
+            crate::test_support::STABLE_HOOK_EXE,
+        ))
+    };
+    assert_eq!(install_claude_hooks_at(tmp.path(), exe(), true).unwrap(), 1);
+    let first = std::fs::read(tmp.path().join("settings.json")).unwrap();
+    assert_eq!(install_claude_hooks_at(tmp.path(), exe(), true).unwrap(), 0);
+    assert_eq!(
+        std::fs::read(tmp.path().join("settings.json")).unwrap(),
+        first
+    );
+
+    assert!(installed_events(tmp.path()).contains(&"Notification".to_string()));
+    let val: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let groups = val["hooks"]["Notification"].as_array().unwrap();
+    assert_eq!(groups.len(), 1, "exactly one Notification group");
+    assert_eq!(
+        groups[0]["hooks"][0]["command"],
+        format!("{} hook", crate::test_support::STABLE_HOOK_EXE)
+    );
+}
+
+/// Why (#9018): with `[pm_guard] enabled = false`, `tm install` must take a
+/// guard entry out of the settings file it writes, not leave it to fire.
+/// What: seeds a guard entry and a foreign entry, installs with the guard off,
+/// and asserts the guard is gone while the lifecycle `tm hook` group and the
+/// foreign entry remain.
+#[test]
+fn install_with_the_guard_off_strips_an_existing_guard_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = format!("{} hook --pm-guard", crate::test_support::STABLE_HOOK_EXE);
+    let seeded = serde_json::json!({
+        "hooks": { "PreToolUse": [
+            { "matcher": "", "hooks": [{ "type": "command", "command": guard }] },
+            { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/opt/foreign/x" }] }
+        ] }
+    });
+    std::fs::write(tmp.path().join("settings.json"), seeded.to_string()).unwrap();
+
+    let exe = Some(std::path::PathBuf::from(
+        crate::test_support::STABLE_HOOK_EXE,
+    ));
+    assert_eq!(
+        install_claude_hooks_at_with_pm_guard(tmp.path(), exe, false, false).unwrap(),
+        1
+    );
+
+    let val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tmp.path().join("settings.json")).unwrap()).unwrap();
+    let commands: Vec<&str> = val["hooks"]["PreToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|g| g["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(!commands.contains(&guard.as_str()), "{commands:?}");
+    assert!(commands.contains(&"/opt/foreign/x"), "{commands:?}");
+    assert!(
+        commands.iter().any(|c| c.ends_with(" hook")),
+        "{commands:?}"
     );
 }

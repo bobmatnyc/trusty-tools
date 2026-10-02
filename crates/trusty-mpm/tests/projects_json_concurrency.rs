@@ -66,9 +66,16 @@ fn child_env() -> Option<(PathBuf, String)> {
 }
 
 /// Spawn one child process running the named `#[ignore]`d helper test.
+///
+/// #8345: this file is a module of the shared `integration` target, so libtest
+/// names the helper `<module path>::<helper>`; `--exact` needs that full name.
 fn spawn_child(helper: &str, dir: &Path, tag: &str) -> Child {
+    let exact = match module_path!().split_once("::") {
+        Some((_crate, module)) => format!("{module}::{helper}"),
+        None => helper.to_string(),
+    };
     Command::new(std::env::current_exe().expect("current_exe"))
-        .args(["--ignored", "--exact", "--nocapture", helper])
+        .args(["--ignored", "--exact", "--nocapture", &exact])
         .env(DIR_ENV, dir)
         .env(TAG_ENV, tag)
         .spawn()

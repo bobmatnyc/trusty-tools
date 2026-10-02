@@ -17,6 +17,8 @@
 //! Test: this file IS the test module.
 
 use super::*;
+// #8545: moved here from `lifecycle.rs`, which imported them only for these tests.
+use super::super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
 
 /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
 /// identical pattern in `core::session_launch::tests::EnvVarGuard`,
@@ -50,6 +52,23 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     // SAFETY: serialized via `#[serial_test::serial]`.
     unsafe { std::env::set_var("HOME", home) };
     HomeGuard(prior)
+}
+
+/// A scratch `$HOME` whose trusty-mpm config sets `disk.max_usage_pct: <pct>`.
+///
+/// Why (#7497): `create_session_worktree` gates on the REAL volume against the
+/// threshold read from `$HOME`, so an unpinned test's verdict tracks how full
+/// the host disk is and whichever `$HOME` a neighbour test left behind.
+fn disk_threshold_home(pct: u8) -> tempfile::TempDir {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let dir = home.path().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {pct}\n"),
+    )
+    .expect("write config");
+    home
 }
 
 /// Minimal `ManagedTmuxDriver` test double scoped to this module.
@@ -117,9 +136,11 @@ fn stub_record(
         claude_session_id: None, scrollback_path: None,
         last_cwd: None, deliverable_id: None,
         pane_id: None, injection_status: Default::default(),
+        tmux_server: None,
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
     }
 }
 
@@ -271,7 +292,7 @@ fn prepare_inproject_session_writes_statusline() {
         &fw,
         &session_id,
         worktree.path(),
-        "https://github.com/owner/repo",
+        Some("https://github.com/owner/repo"),
     )
     .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
 
@@ -336,7 +357,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
             &fw,
             &session_id,
             worktree.path(),
-            "https://github.com/owner/repo",
+            Some("https://github.com/owner/repo"),
         )
         .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
     })
@@ -380,7 +401,12 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
 /// worktree directory actually exists on disk.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
+    // #7497: pin the disk threshold so the host volume cannot refuse the
+    // worktree this test exists to name.
+    let home = disk_threshold_home(100);
+    let _home = set_home(home.path());
     let data_root = tempfile::TempDir::new().expect("tmp data root");
     let state = std::sync::Arc::new(
         crate::daemon::state::DaemonState::with_root_isolated_managed(
@@ -484,11 +510,17 @@ fn ensure_deployment_complete_noops_for_unknown_workspace() {
     // a fixed placeholder base (no I/O, no tempdir) is sufficient.
     let id = ManagedSessionId::new();
     let fw = crate::core::paths::FrameworkPaths::under("/nonexistent-fw-base-for-test");
-    let result = ensure_deployment_complete(&fw, std::path::Path::new("/unknown"), None, &id, None);
+    let result = ensure_deployment_complete(
+        &fw,
+        std::path::Path::new("/unknown"),
+        None,
+        &id,
+        RepairHost::default(),
+    );
     assert!(result.is_ok());
 
     let missing = std::path::Path::new("/this/path/does/not/exist/anywhere");
-    let result = ensure_deployment_complete(&fw, missing, None, &id, None);
+    let result = ensure_deployment_complete(&fw, missing, None, &id, RepairHost::default());
     assert!(result.is_ok());
 }
 
@@ -544,7 +576,7 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     .unwrap();
 
     let id = ManagedSessionId::new();
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, RepairHost::default());
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
@@ -678,7 +710,7 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
     fw.trusty_mpm_root = None;
     let id = ManagedSessionId::new();
 
-    let result = ensure_deployment_complete(&fw, &workspace, None, &id, None);
+    let result = ensure_deployment_complete(&fw, &workspace, None, &id, RepairHost::default());
 
     // Restore write permission so the TempDir can clean itself up.
     let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755));
@@ -761,8 +793,7 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
@@ -851,8 +882,7 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
@@ -939,8 +969,7 @@ async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
         local_path,
-        "acme",
-        "writing",
+        &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
@@ -975,7 +1004,7 @@ fn both_launch_gates_reuse_the_resolved_reachability() {
     assert!(
         on_main.contains(
             "ensure_deployment_complete( &fw, local_path, record.repo_url.as_deref(), \
-             session_id, memory_reachable, )"
+             session_id, RepairHost::new(memory_reachable, state.user_home()), )"
         ),
         "launch-on-main must hand the gate the reachability preparation resolved"
     );
@@ -983,8 +1012,9 @@ fn both_launch_gates_reuse_the_resolved_reachability() {
     let inproject = flat(include_str!("lifecycle.rs"));
     assert!(
         inproject.contains(
-            "let url = record.repo_url.as_deref(); if let Err(reason) = \
-             ensure_deployment_complete(&fw, &worktree, url, session_id, reachable)"
+            "let host = RepairHost::new(reachable, state.user_home()); \
+             let url = record.repo_url.as_deref(); if let Err(reason) = \
+             ensure_deployment_complete(&fw, &worktree, url, session_id, host)"
         ),
         "the in-project spawn must hand the gate the reachability preparation resolved"
     );

@@ -84,6 +84,37 @@ pub(crate) use crate::core::spawn_disclaim::disclaimed_output as tmux_spawn;
 /// Test: `tmux_session::tests::the_spawn_seam_takes_the_path_lock`.
 pub(crate) use crate::core::trusty_tools_config::env_test_lock as lock_path_env;
 
+/// Arm `core::home_write_fence` for the lib test binary, before `main` (#8545).
+///
+/// Why: the lib target wrote `~/.claude/settings.json`, `~/.claude.json` and
+/// `~/.trusty-mpm/{sessions,usage,projects}` during `cargo test -p trusty-mpm`.
+/// The `tm` bin target arms the same fence from its own `test_support`.
+/// What: a pre-`main` constructor, so the roots are recorded before libtest
+/// starts a test thread. A test that later repoints `$HOME` to a temp dir
+/// writes there freely; only the homes seen at startup are fenced.
+/// Test: `tests::the_home_write_fence_is_armed_for_the_lib_binary`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    crate::core::home_write_fence::arm_for_this_process();
+}
+
+/// Give the lib test binary its own default tmux server, before `main` (#6542).
+///
+/// Aborts the binary when the private directory cannot be created, rather than
+/// let a test reach the operator's server. See `core::tmux_test_isolation`.
+/// Test: `core::tmux_test_isolation::tests::this_test_binary_runs_on_a_relocated_tmux_server`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    crate::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    crate::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// The loopback port every dead-daemon test points at (#4306, #4415).
 ///
 /// Why this specific port, rather than one the fixture binds for itself: the
@@ -513,6 +544,26 @@ pub(crate) fn enable_event_capture() {
 mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    /// #8545: the constructor ran and fences the operator's real home. Reads
+    /// the password-database home, which no sibling test repoints.
+    #[test]
+    fn the_home_write_fence_is_armed_for_the_lib_binary() {
+        use crate::core::home_write_fence::{armed_roots, fenced_root};
+        let home = crate::core::host_state_gate::passwd_home_dir().expect("a passwd home");
+        for dest in [
+            home.join(".trusty-mpm").join("usage"),
+            home.join(".claude").join("settings.json"),
+            home.join(".claude.json"),
+        ] {
+            assert!(
+                fenced_root(&dest, armed_roots()).is_some(),
+                "{} is not fenced; armed roots: {:?}",
+                dest.display(),
+                armed_roots()
+            );
+        }
+    }
 
     /// `real_system_tmp` must ignore `$TMPDIR` even when it points somewhere
     /// that would otherwise cause litter (e.g. a project tree).

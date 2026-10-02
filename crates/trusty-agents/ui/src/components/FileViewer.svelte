@@ -4,6 +4,9 @@
   import { openedFile } from '../stores/workspace';
   import { readWorkspaceFile, diffWorkspaceFile, type WorkspaceFile, type WorkspaceDiff } from '../lib/workspaceFiles';
   import { renderMarkdown, renderCode, relativeDocumentPath } from '../lib/fileRendering';
+  // Shared with the search dashboard's hit viewer (docs/design/UI/design-system/components/).
+  import CodeView from '../lib/foundry/CodeView.svelte';
+  import DiffView from '../lib/foundry/DiffView.svelte';
 
   let document: WorkspaceFile | null = null;
   let diff: WorkspaceDiff | null = null;
@@ -61,7 +64,7 @@
 </script>
 
 <svelte:window on:keydown={handleKey} />
-<div class="flex h-full min-h-0 min-w-0 flex-col bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text" aria-label="File viewer">
+<div class="file-viewer flex h-full min-h-0 min-w-0 flex-col bg-foundry-light-bg dark:bg-foundry-bg text-foundry-light-text dark:text-foundry-text" aria-label="File viewer">
   <header class="flex shrink-0 flex-wrap items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4 py-2">
     <div class="min-w-0 flex-1">
       <h1 class="truncate text-sm font-semibold" title={$openedFile?.path}>{$openedFile?.path}</h1>
@@ -81,7 +84,7 @@
     {:else if mode === 'diff'}
       <p class="mb-4 text-xs text-foundry-light-muted dark:text-foundry-text/60">Working file compared with Git HEAD · includes staged and unstaged changes</p>
       {#if diff?.available}
-        {#if diff.diff}<pre class="text-xs leading-6 font-mono" aria-label="File diff">{#each diff.diff.split('\n') as line}<div class:diff-added={line.startsWith('+') && !line.startsWith('+++')} class:diff-removed={line.startsWith('-') && !line.startsWith('---')} class:diff-hunk={line.startsWith('@@')}>{line || ' '}</div>{/each}</pre>
+        {#if diff.diff}<DiffView diff={diff.diff} class="text-xs leading-6 font-mono" />
         {:else}<p class="text-sm">No changes from HEAD.</p>{/if}
       {:else}<p class="text-sm">{diff?.reason ?? 'Diff is unavailable for this file.'}</p>{/if}
     {:else if document?.kind === 'image'}
@@ -90,7 +93,7 @@
       <!-- Sanitized HTML; local links are opened through the scoped native reader. -->
       <article class="document-prose" on:click={followLink} on:keydown={followLink} role="document">{@html markdownHtml}</article>
     {:else if document?.kind === 'code' || document?.kind === 'markdown'}
-      <pre class="file-code text-sm leading-6" aria-label="File source"><code>{@html codeHtml}</code></pre>
+      <CodeView html={codeHtml} class="text-sm leading-6" />
     {:else if document}<p class="text-sm">This file type is not supported yet. Open Markdown, an image, or a text/code file.</p>{/if}
     {#if notice}<p role="status" class="mt-3 text-xs text-foundry-light-muted dark:text-foundry-text/60">{notice}</p>{/if}
   </div>
@@ -100,9 +103,13 @@
   .viewer-toggle { padding: .35rem .65rem; border-radius: .3rem; font-size: .75rem; }
   .viewer-toggle[aria-pressed='true'] { background: rgb(var(--color-primary) / .12); }
   .viewer-toggle:disabled { opacity: .4; }
-  .diff-added { background: rgb(60 160 80 / .12); }
-  .diff-removed { background: rgb(200 70 70 / .12); }
-  .diff-hunk { color: rgb(var(--color-primary)); }
+  /* Colours for the shared CodeView / DiffView, in this app's --color-* tokens. */
+  .file-viewer {
+    --code-accent: rgb(var(--color-primary));
+    --code-string: rgb(var(--color-success));
+    --code-added-bg: rgb(60 160 80 / .12);
+    --code-removed-bg: rgb(200 70 70 / .12);
+  }
   .document-prose { overflow-wrap: anywhere; line-height: 1.75; font-size: .95rem; }
   .document-prose :global(h1) { font-size: 2rem; font-weight: 650; margin: .6em 0; }
   .document-prose :global(h2) { font-size: 1.5rem; font-weight: 600; margin: 1.2em 0 .5em; }
@@ -116,8 +123,4 @@
   .document-prose :global(blockquote) { border-left: 2px solid rgb(var(--color-border)); padding-left: 1em; }
   .document-prose :global(table) { border-collapse: collapse; margin: 1em 0; }
   .document-prose :global(th), .document-prose :global(td) { border: 1px solid rgb(var(--color-border)); padding: .4em .7em; }
-  .file-code :global(.hljs-keyword), .file-code :global(.hljs-built_in) { color: rgb(var(--color-primary)); font-weight: 600; }
-  .file-code :global(.hljs-string), .file-code :global(.hljs-title) { color: rgb(var(--color-success)); }
-  .file-code :global(.hljs-comment) { opacity: .55; }
-  .file-code :global(.hljs-number), .file-code :global(.hljs-literal) { color: rgb(var(--color-primary)); }
 </style>

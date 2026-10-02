@@ -22,15 +22,9 @@ pub(super) use super::session_prep::prepare_inproject_session;
 
 use tracing::{info, warn};
 
-use super::deployment_check::ensure_deployment_complete;
-// `carrier_reachable`/`warn_if_no_persona_carrier` are only called from
-// within `deployment_check` itself in non-test code; `lifecycle_tests.rs`
-// (a child module, `use super::*`) still exercises them directly, so they
-// are imported here ONLY under `#[cfg(test)]` to avoid an unused-import
-// warning on the production build.
-#[cfg(test)]
-use super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
+use super::deployment_check::{RepairHost, ensure_deployment_complete};
 use super::inproject::try_inproject_spawn;
+use super::local_only_spawn::SessionSource;
 use super::managed_checkout::deny_worktree_fallback;
 use super::resume_error::ResumeManagedError;
 use crate::daemon::state::DaemonState;
@@ -467,13 +461,24 @@ async fn spawn_managed_routed(
                     &params,
                     runtime,
                     &placement,
-                    &gh.owner,
-                    &gh.repo,
+                    &SessionSource::github(&gh.owner, &gh.repo),
                 )
                 .await;
             }
         }
 
+        // #8934: a repository root with no `origin` runs local-only.
+        if crate::core::remote_mode::is_local_only_root(local_path)? {
+            return super::local_only_spawn::spawn_managed_local_only(
+                state,
+                &session_id,
+                &params,
+                runtime,
+                local_path,
+                &config,
+            )
+            .await;
+        }
         match try_inproject_spawn(local_path) {
             Ok(Some((base, owner, repo))) => {
                 // Reconnect pre-flight (#1707), HOISTED AHEAD of worktree
@@ -522,8 +527,7 @@ async fn spawn_managed_routed(
                             &params,
                             runtime,
                             worktree,
-                            owner,
-                            repo,
+                            SessionSource::github(&owner, &repo),
                             reserved_name,
                         )
                         .await;
@@ -539,7 +543,10 @@ async fn spawn_managed_routed(
             // Same rule as the reservation arm above: see `deny_worktree_fallback`.
             Err(e) => deny_worktree_fallback(&session_id, params.worktree, &e)?,
         }
-        return Err(spawn_managed_local(&session_id, &params));
+        return Err(super::local_only_spawn::spawn_managed_local(
+            &session_id,
+            &params,
+        ));
     }
 
     // #6000 / ADR-0055: `spawn_managed` refuses a non-local `repo_url` before
@@ -584,7 +591,7 @@ async fn spawn_managed_routed(
 /// the sync step's own behaviour (matching, size cap, path-escape guard,
 /// `.git/info/exclude` append) is unit-tested directly in
 /// `inproject::untracked_sync::tests`.
-async fn reserve_inproject_worktree(
+pub(super) async fn reserve_inproject_worktree(
     state: &Arc<DaemonState>,
     session_id: &ManagedSessionId,
     params: &SpawnParams,
@@ -740,22 +747,21 @@ fn reconnect_candidate(
 /// worktree via `create_with_reserved_name` (issue #2032 — `reserved_name` was
 /// already resolved by `reserve_inproject_worktree` and used to name the
 /// worktree/branch, so this step reuses it verbatim instead of re-deriving);
-/// (4) sets `source_id` via `set_source_id`; (5) runs the FRONT gate
+/// (4) sets `source_id` via `set_source_id` when `source` has one (#8934: a
+/// local-only repository has none); (5) runs the FRONT gate
 /// (fail-open); (6) marks `Active`; (7) spawns the runtime. A spawn failure
 /// marks the record errored (non-fatal).
 /// Test: covered transitively by the in-project spawn integration tests;
 /// `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule exercises the new prep-call in isolation (hermetic — no daemon,
 /// tmux, or git required).
-#[allow(clippy::too_many_arguments)]
-async fn spawn_managed_inproject(
+pub(super) async fn spawn_managed_inproject(
     state: &std::sync::Arc<crate::daemon::state::DaemonState>,
     session_id: &crate::session_manager::ManagedSessionId,
     params: &SpawnParams,
     runtime: crate::runtime::RuntimeKind,
     worktree: std::path::PathBuf,
-    owner: String,
-    repo: String,
+    source: SessionSource,
     reserved_name: String,
 ) -> Result<crate::session_manager::SessionRecord, String> {
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
@@ -771,14 +777,13 @@ async fn spawn_managed_inproject(
     info!(
         id = %session_id,
         worktree = %worktree.display(),
-        owner = %owner,
-        repo = %repo,
+        source = ?source.source_id,
         "spawn_managed: in-project worktree spawn"
     );
 
     write_task_md(&worktree, &params.task, session_id);
 
-    // Pass a canonical GitHub HTTPS URL as repo_url so the session-manager can
+    // `source.repo_url` is a canonical GitHub HTTPS URL, so the session-manager can
     // derive the project name (`tm-<repo>-NN`, issue #1955, formerly
     // `tmpm-<repo>-<8hex>` per #1789) for the tmux session name. Using a
     // synthetic HTTPS URL is safe: `parse_github_path`
@@ -789,7 +794,7 @@ async fn spawn_managed_inproject(
     // sessions that did not clone a fresh workspace. It also doubles as the
     // `repo_url` threaded into `prepare_inproject_session` below, for the same
     // trusty-memory palace-pinning reason the session's `repo_url` is threaded.
-    let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
+    // #8934: `None` for a local-only repository, which has no GitHub URL.
 
     // Prepare the session BEFORE spawning the runtime (#1913). See the
     // function-level doc for why this call is required here specifically (no
@@ -801,7 +806,8 @@ async fn spawn_managed_inproject(
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
     // #7685: reuse prep's reachability answer rather than probing again.
-    let reachable = prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url)?;
+    let reachable =
+        prepare_inproject_session(&fw, session_id, &worktree, source.repo_url.as_deref())?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -814,7 +820,7 @@ async fn spawn_managed_inproject(
             params.task.clone(),
             Some(worktree.clone()),
             Some(worktree.clone()),
-            Some(synthetic_repo_url),
+            source.repo_url.clone(),
             None,
             runtime,
             params.ephemeral.unwrap_or(false),
@@ -827,8 +833,9 @@ async fn spawn_managed_inproject(
         })?;
 
     // Record the source project identity so callers can reconnect later.
-    let source_id = format!("{owner}/{repo}");
-    if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
+    if let Some(source_id) = &source.source_id
+        && let Err(e) = mgr.set_source_id(session_id, source_id).await
+    {
         warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
     }
 
@@ -863,8 +870,9 @@ async fn spawn_managed_inproject(
     // already resolved above for `prepare_inproject_session`.
     // #7763: `reachable` is what `prepare_inproject_session` already resolved —
     // the gate's repair reuses it instead of re-probing trusty-memory.
+    let host = RepairHost::new(reachable, state.user_home());
     let url = record.repo_url.as_deref();
-    if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, reachable) {
+    if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, host) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
@@ -906,61 +914,6 @@ async fn spawn_managed_inproject(
 
     emit(ProvisioningStage::Complete);
     Ok(mgr.get(&record.id).await.unwrap_or(record))
-}
-
-/// Refuse a local directory the surviving in-project path could not serve.
-///
-/// Why: ADR-0055 (#6000) removed trusty-mpm's own workspace provisioner, and
-/// this function was its second call site — it cloned the directory's origin
-/// into `<workspace-root>/<owner>/<repo>` and added a worktree there. With that
-/// gone there is no second route to try: a local checkout with a GitHub origin
-/// is served by `spawn_managed_routed`'s in-project branch, and everything
-/// reaching here has already failed that branch's own preconditions.
-/// What: reports which precondition failed — no `origin` remote, an origin no
-/// GitHub `owner/repo` parses out of, or (the ADR-0055 case) a directory that
-/// is inside a repository but is not its root, so it has no `.git` of its own
-/// for the in-project path to open.
-/// Test: `spawn_managed_local_errors_on_no_remote` in tests/local_spawn.rs;
-/// the ADR-0055 arm by `a_subdirectory_of_a_repo_is_refused_not_provisioned`
-/// in tests/session_new_requires_a_local_path.rs.
-fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnParams) -> String {
-    let local_dir = std::path::PathBuf::from(&params.repo_url);
-
-    // #4734: `?` first — a git failure is its own error, not "no remote".
-    let origin_url = match super::inproject::get_origin_url(&local_dir) {
-        Err(e) => return e,
-        Ok(None) => {
-            return format!(
-                "spawn failed: '{}' has no git origin remote; \
-                 managed sessions require a GitHub remote. \
-                 Use `tm connect` / `tm launch --live` to run in the live checkout.",
-                local_dir.display()
-            );
-        }
-        Ok(Some(url)) => url,
-    };
-
-    if trusty_common::github_path::parse_github_path(&origin_url).is_none() {
-        return format!(
-            "spawn failed: could not parse a GitHub owner/repo from origin remote \
-             '{origin_url}' for '{}'. \
-             Use `tm connect` to run in the live checkout instead.",
-            local_dir.display()
-        );
-    }
-
-    // #6000 / ADR-0055: git answered with a remote, so this directory sits
-    // INSIDE a repository — but the in-project branch already declined it,
-    // which for a directory with a remote means it is not the repository root
-    // (no `.git` of its own). trusty-mpm no longer clones a workspace to stand
-    // in for one.
-    format!(
-        "spawn failed for session {session_id}: '{}' resolves to the repository at \
-         '{origin_url}' but is not that repository's root, so there is no checkout to run \
-         the session in. trusty-mpm no longer provisions one for you (ADR-0055): pass the \
-         repository ROOT — the directory holding `.git` — instead.",
-        local_dir.display()
-    )
 }
 
 /// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
@@ -1210,7 +1163,8 @@ pub async fn resume_managed(
     crate::core::session_launch::resume_self_heal(&workspace, &record.id.to_string()).await;
 
     // Defensive self-heal (#1913): best-effort, never blocks the resume.
-    if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {
+    // #8545: the user tier under the daemon's home, which an isolated test pins.
+    if let Err(e) = state.ensure_status_line(&workspace) {
         warn!(
             id = %record.id,
             "resume_managed: statusline self-heal failed (non-fatal): {e}"
@@ -1230,8 +1184,9 @@ pub async fn resume_managed(
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
     // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
     // `None` keeps the single probe the repair pipeline makes for itself.
+    let host = RepairHost::new(None, state.user_home());
     let url = record.repo_url.as_deref();
-    if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, None) {
+    if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, host) {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 

@@ -143,8 +143,30 @@ impl<'a> StateMachine<'a> {
         issue_labels: &[String],
         gh_open: bool,
     ) -> CurrentState<'a> {
-        let matches: Vec<&'a str> = self
-            .model
+        let matches = self.labelled_states(issue_labels);
+        match matches.len() {
+            0 => self
+                .labelless_state(gh_open)
+                .map_or(CurrentState::None, CurrentState::One),
+            1 => CurrentState::One(matches[0]),
+            _ => CurrentState::Many(matches),
+        }
+    }
+
+    /// The names of every labelled state one of `issue_labels` represents.
+    ///
+    /// Why: a label is a lifecycle label because the model says so — its
+    /// `StateDef.label.name` — not because it starts with `status_prefix`;
+    /// the two need not be related (#8696). This is the one place that
+    /// matching lives, shared by [`Self::resolve_current_state`] and the epic
+    /// tracker's State cell, so the two cannot disagree.
+    /// What: the states, in declared order, whose `label.name` is exactly one
+    /// of `issue_labels`; a label-less state never matches. No fallback — the
+    /// caller decides what an empty result means.
+    /// Test: `sm_resolve_one`, `sm_resolve_many`, `sm_resolve_none`,
+    /// `state_cell_resolves_a_label_whose_name_lacks_the_prefix`.
+    pub(crate) fn labelled_states(&self, issue_labels: &[String]) -> Vec<&'a str> {
+        self.model
             .states
             .iter()
             .filter(|s| {
@@ -153,14 +175,7 @@ impl<'a> StateMachine<'a> {
                     .is_some_and(|lbl| issue_labels.iter().any(|l| l == &lbl.name))
             })
             .map(|s| s.name.as_str())
-            .collect();
-        match matches.len() {
-            0 => self
-                .labelless_state(gh_open)
-                .map_or(CurrentState::None, CurrentState::One),
-            1 => CurrentState::One(matches[0]),
-            _ => CurrentState::Many(matches),
-        }
+            .collect()
     }
 
     /// The label-less state for an open (or closed) issue, if the model has one.

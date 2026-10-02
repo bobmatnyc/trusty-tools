@@ -177,6 +177,15 @@ fn deps(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
     }
 }
 
+/// [`deps`] with a verifier that confirms every finding: since #4044 only a
+/// verifier-confirmed finding is posted.
+fn confirmed_deps(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
+    ReviewDeps {
+        verifier: Some(Arc::new(DiffRecordingVerifier::default())),
+        ..deps(llm)
+    }
+}
+
 /// A search client that is always down — used with `require_search = Some(false)`
 /// (#590 opt-out) to drive `preflight_context` into `GateOutcome::Degraded`
 /// alongside a separately-triggered partial-coverage map-reduce run (#1661).
@@ -575,7 +584,7 @@ async fn run_review_mapreduce_chunk_request_changes_propagates() {
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);
 
-    let result = run_review(&config, input(source), deps(llm)).await;
+    let result = run_review(&config, input(source), confirmed_deps(llm)).await;
 
     assert_ne!(
         result.verdict,
@@ -775,7 +784,7 @@ impl LlmProvider for MediumRcReviewer {
         let text = if is_synthesis {
             r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"medium nit remains."}"#
         } else if body.contains(self.rc_marker.as_str()) {
-            r#"{"verdict":"REQUEST_CHANGES","summary":"medium nit found","findings":[{"title":"style-nit","body":"missing doc comment","severity":"medium","confidence":0.85,"file":"src/big.rs","line":1}]}"#
+            r#"{"verdict":"REQUEST_CHANGES","summary":"medium nit found","findings":[{"title":"style-nit","body":"missing doc comment on `pub fn build`","severity":"medium","confidence":0.85,"file":"src/big.rs","line":1}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
@@ -812,7 +821,7 @@ async fn run_review_mapreduce_medium_rc_propagates_through_synthesis() {
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);
 
-    let result = run_review(&config, input(source), deps(llm)).await;
+    let result = run_review(&config, input(source), confirmed_deps(llm)).await;
 
     assert_ne!(
         result.verdict,
@@ -1134,5 +1143,230 @@ async fn run_review_mapreduce_both_degraded_triggers_partial_coverage_reason_win
         "context-opt-out banner must also still be present (both banners prepend \
          independently of the consolidated status write): {:?}",
         result.review_body
+    );
+}
+
+// ── #8904: every chunk's findings are verified ─────────────────────────────
+
+/// Files in [`chunked_diff`]; together they exceed the unified-path cap.
+const CHUNK_FILES: usize = 4;
+
+/// `CHUNK_FILES` files of distinct lines whose combined size is over
+/// `MAX_DIFF_CHARS`, so the review routes to map-reduce.
+fn chunked_diff() -> String {
+    use crate::config::constants::MAX_DIFF_CHARS;
+    let per_file = MAX_DIFF_CHARS / CHUNK_FILES + 1_000;
+    let mut diff = String::new();
+    for n in 0..CHUNK_FILES {
+        let mut body = String::new();
+        let mut line = 0;
+        while body.len() < per_file {
+            line += 1;
+            body.push_str(&format!("+    let v_{n}_{line} = compute_{n}({line});\n"));
+        }
+        diff.push_str(&format!(
+            "diff --git a/src/mr{n}.rs b/src/mr{n}.rs\n--- a/src/mr{n}.rs\n+++ b/src/mr{n}.rs\n@@ -0,0 +1,{line} @@\n{body}"
+        ));
+    }
+    diff
+}
+
+/// Each map call emits one Medium finding per file in its prompt, quoting that
+/// file's line 5; the synthesis call requests changes.
+struct PerFileFindingReviewer;
+
+#[async_trait]
+impl LlmProvider for PerFileFindingReviewer {
+    fn name(&self) -> &str {
+        "per-file-finding-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body: String = req.messages.iter().map(|m| m.content.as_str()).collect();
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"per-file issues."}"#.to_string()
+        } else {
+            let findings: Vec<serde_json::Value> = (0..CHUNK_FILES)
+                .filter(|n| body.contains(&format!("b/src/mr{n}.rs")))
+                .map(|n| {
+                    serde_json::json!({
+                        "title": format!("issue in mr{n}"),
+                        "body": format!("`let v_{n}_5 = compute_{n}(5)` discards an error."),
+                        "severity": "medium",
+                        "confidence": 0.85,
+                        "file": format!("src/mr{n}.rs"),
+                        "line": 5,
+                    })
+                })
+                .collect();
+            serde_json::json!({"verdict": "REQUEST_CHANGES", "summary": "issue", "findings": findings})
+                .to_string()
+        };
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 400,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// Confirms every finding and records, per request, which chunk files the
+/// request's diff carried.
+#[derive(Default)]
+struct DiffRecordingVerifier {
+    diffs: Mutex<Vec<Vec<usize>>>,
+}
+
+#[async_trait]
+impl LlmProvider for DiffRecordingVerifier {
+    fn name(&self) -> &str {
+        "diff-recording-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let user = req.messages.first().map_or("", |m| m.content.as_str());
+        let carried = (0..CHUNK_FILES)
+            .filter(|n| user.contains(&format!("diff --git a/src/mr{n}.rs")))
+            .collect();
+        self.diffs.lock().expect("lock").push(carried);
+        let text =
+            crate::pipeline::verify_batch::test_support::answer(&req, |_| "CONFIRMED".to_string());
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// (d) #8904: on the map-reduce path the findings from EVERY chunk reach the
+/// verifier and are posted as confirmed, and each request carries only the
+/// diff sections of its own findings' files, not the whole over-cap diff.
+#[tokio::test]
+async fn run_review_mapreduce_verifies_findings_from_every_chunk() {
+    let (source, _tmp) = local_source(&chunked_diff());
+    let verifier = Arc::new(DiffRecordingVerifier::default());
+    let mut review_deps = deps(Arc::new(PerFileFindingReviewer));
+    review_deps.verifier = Some(verifier.clone());
+    let mut config = ReviewConfig::load(None);
+    config.verification.batch_size = 1;
+
+    let result = run_review(&config, input(source), review_deps).await;
+
+    let mut posted: Vec<String> = result.findings.iter().map(|f| f.file.clone()).collect();
+    posted.sort();
+    let expected: Vec<String> = (0..CHUNK_FILES).map(|n| format!("src/mr{n}.rs")).collect();
+    assert_eq!(posted, expected, "one posted finding per chunk");
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| matches!(f.verified, Some(crate::models::VerifyOutcome::Confirmed))),
+        "every chunk's finding passed the verifier: {:?}",
+        result.findings
+    );
+    let diffs = verifier.diffs.lock().expect("lock").clone();
+    assert_eq!(diffs.len(), CHUNK_FILES, "one request per finding");
+    assert!(
+        diffs.iter().all(|carried| carried.len() == 1),
+        "each request carries only its own file's diff: {diffs:?}"
+    );
+}
+
+// ── #4044: per-chunk hygiene withholds reach the final result ───────────────
+
+/// Body of the finding [`SelfNegatingChunkReviewer`] emits for chunk `n`:
+/// chunk 0 withdraws itself, chunk 1 says "this is fine", the rest are real.
+fn chunk_finding_body(n: usize) -> String {
+    let quote = format!("`let v_{n}_5 = compute_{n}(5)`");
+    match n {
+        0 => format!("{quote} discards an error. Withdrawing this finding."),
+        1 => format!("{quote} discards an error, but this is fine."),
+        _ => format!("{quote} discards an error."),
+    }
+}
+
+/// Like [`PerFileFindingReviewer`], but the findings for chunks 0 and 1
+/// negate themselves in their own text.
+struct SelfNegatingChunkReviewer;
+
+#[async_trait]
+impl LlmProvider for SelfNegatingChunkReviewer {
+    fn name(&self) -> &str {
+        "self-negating-chunk-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body: String = req.messages.iter().map(|m| m.content.as_str()).collect();
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"per-file issues."}"#.to_string()
+        } else {
+            let findings: Vec<serde_json::Value> = (0..CHUNK_FILES)
+                .filter(|n| body.contains(&format!("b/src/mr{n}.rs")))
+                .map(|n| {
+                    serde_json::json!({
+                        "title": format!("issue in mr{n}"),
+                        "body": chunk_finding_body(n),
+                        "severity": "medium",
+                        "confidence": 0.85,
+                        "file": format!("src/mr{n}.rs"),
+                        "line": 5,
+                    })
+                })
+                .collect();
+            serde_json::json!({"verdict": "REQUEST_CHANGES", "summary": "issue", "findings": findings})
+                .to_string()
+        };
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 400,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// #4044 (owner ruling on #8905, 2026-09-30): on the map-reduce aggregate
+/// path, a finding a per-chunk hygiene pass drops reaches the final
+/// `ReviewResult::withheld_findings` with a `#4044 self-negated` reason, and is
+/// not posted. Red on `origin/main`: the per-chunk drop was only logged, so
+/// `withheld_findings` held no hygiene entry.
+#[tokio::test]
+async fn run_review_mapreduce_records_hygiene_withholds() {
+    let (source, _tmp) = local_source(&chunked_diff());
+    let mut review_deps = deps(Arc::new(SelfNegatingChunkReviewer));
+    review_deps.verifier = Some(Arc::new(DiffRecordingVerifier::default()));
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), review_deps).await;
+
+    let mut withheld: Vec<(String, String)> = result
+        .withheld_findings
+        .iter()
+        .filter(|w| w.reason.starts_with("#4044 self-negated"))
+        .map(|w| (w.finding.file.clone(), w.reason.clone()))
+        .collect();
+    withheld.sort();
+    assert_eq!(
+        withheld.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(),
+        vec!["src/mr0.rs", "src/mr1.rs"],
+        "both self-negated chunk findings are recorded: {:?}",
+        result.withheld_findings
+    );
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| f.file != "src/mr0.rs" && f.file != "src/mr1.rs"),
+        "a self-negated finding is never posted: {:?}",
+        result.findings
     );
 }

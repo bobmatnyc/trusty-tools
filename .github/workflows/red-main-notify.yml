@@ -53,7 +53,7 @@
 #     completion recurses (GitHub caps the chain at three levels).
 #   - Every watched completion creates a run of this workflow, green or not. The
 #     job is skipped on a green one and consumes no runner, but the Actions list
-#     shows the entry. That noise buys a signal for all 19 siblings at once.
+#     shows the entry. That noise buys a signal for all 21 siblings at once.
 name: Red main notifier
 
 on:
@@ -63,6 +63,7 @@ on:
     workflows:
       - "Agent assets" # agent-assets.yml
       - "AL2023 load-dynamic build gate" # al2023-build.yml
+      - "Architect sub-project" # architect-subproject.yml
       - "build.rs sync" # buildrs-sync.yml
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml
@@ -72,12 +73,9 @@ on:
       - "Line cap" # line-cap.yml
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
-      - "Tag/publish parity" # tag-publish-parity.yml
-      - "Teardown guard" # teardown-guard.yml
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
       - "Token drift" # token-drift.yml
-      - "trusty-audit installer" # trusty-audit-install.yml
       - "UI bundle freshness" # ui-bundle-freshness.yml
       - "vmtest harness" # vmtest-harness.yml
       - "Website tests" # website-tests.yml

@@ -18,10 +18,16 @@
 mod agent;
 mod auth;
 mod catalog;
+// #8378 PR-C: `tm content install|update|status` (ADR-0064).
+mod content;
 mod coordinator;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
+// #8939: `tm env set|keys` — dotenv edits that print no value.
+mod env;
+// #8436: `tm fleet` — the Architect's setup and status.
+mod fleet;
 mod generate;
 mod hooks;
 mod issue;
@@ -48,15 +54,18 @@ mod watch;
 pub(crate) use agent::AgentAction;
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
+pub(crate) use content::ContentAction;
 pub(crate) use coordinator::CoordinatorAction;
 pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
     MilestonesAction,
 };
 pub(crate) use divert::DivertAction;
+pub(crate) use env::EnvAction;
+pub(crate) use fleet::FleetAction;
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
-pub(crate) use issue::IssueCmd;
+pub(crate) use issue::{EpicCmd, IssueCmd};
 pub(crate) use mcp::{McpCmd, McpTransportArg};
 pub(crate) use memory::MemoryAction;
 pub(crate) use meta::MetaAction;

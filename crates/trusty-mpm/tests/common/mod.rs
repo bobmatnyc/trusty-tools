@@ -34,6 +34,58 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// Arm `core::home_write_fence` for this integration target, before `main`
+/// (#8545).
+///
+/// Why: every integration target declares `mod common;` (ratcheted by
+/// `every_integration_target_arms_the_home_write_fence`), so this one
+/// constructor fences them all. It runs before [`scratch_home`] can repoint
+/// `$HOME`, so the fenced roots are the harness's home and the password-database
+/// home, never the scratch dir.
+/// What: records the fenced roots; an in-process writer that reaches one panics.
+/// Also records [`operator_home`] while `$HOME` is still the harness's own.
+/// A spawned `tm` child is not fenced — [`isolate_spawned_tm`] confines it.
+/// Test: `the_home_write_fence_is_armed_for_integration_targets`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    OPERATOR_HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from));
+    trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
+/// `$HOME` as the harness started this process, before any test repointed it.
+static OPERATOR_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The operator's own `$HOME`, as it was before `main` (#8345).
+///
+/// Why: a guard that asserts the operator's files stay untouched must name the
+/// real ones. Since #8345 a module shares its process with [`scratch_home`]'s
+/// callers, so reading `$HOME` mid-run can return the scratch dir and turn that
+/// guard vacuous.
+/// What: the value [`arm_home_write_fence`] captured; `None` when the harness
+/// ran with no `$HOME`, which is the stripped-CI case.
+/// Test: `a_spawned_tm_resolves_the_helper_home_and_leaves_the_operators_alone`.
+pub fn operator_home() -> Option<&'static Path> {
+    OPERATOR_HOME
+        .get_or_init(|| std::env::var_os("HOME").map(PathBuf::from))
+        .as_deref()
+}
+
+/// Give this integration target its own default tmux server, before `main`
+/// (#6542). Its spawned children inherit it: [`CHILD_STATE_ENV`] clears `TMUX`
+/// but keeps `TMUX_TMPDIR`. Aborts rather than let a test reach the operator's
+/// server. See `trusty_mpm::core::tmux_test_isolation`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// Redirect this test process's `$HOME` to a scratch directory, once (#6671).
 ///
 /// Returns the scratch home, so a caller may plant fixtures under it.
@@ -53,8 +105,11 @@ pub fn scratch_home() -> &'static Path {
             .keep();
         // SAFETY: this runs inside `OnceLock::get_or_init`, so exactly one
         // thread ever writes `HOME` in this process and every other thread is
-        // blocked until that write is visible. Nothing else in these targets
-        // mutates `HOME`.
+        // blocked until that write is visible. In the parallel `integration`
+        // target nothing else mutates `HOME` (ratcheted by
+        // `every_integration_target_arms_the_home_write_fence`). `env_serial`
+        // modules do rewrite it, which is safe only because that target runs
+        // one test at a time (#8345).
         unsafe { std::env::set_var("HOME", &dir) };
         dir
     })
@@ -82,16 +137,21 @@ pub fn tm_bin() -> &'static str {
 /// `CLAUDE_CODE_SESSION_ID` is what made a spawned child append a real row to
 /// the operator's savings ledger (#7514). `TRUSTY_MPM_URL`, `TMUX` and the
 /// managed-session ids make a child adopt the developer's live daemon, tmux
-/// server and session rather than the fixture's.
+/// server and session rather than the fixture's. #6288: `TRUSTY_MPM_SOCKET`,
+/// `TRUSTY_DATA_DIR_OVERRIDE` and `XDG_DATA_HOME` pick the daemon socket the
+/// socket-only commands dial, so each points a child at the developer's daemon.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
-/// environment, so the `#5544` hazard — a `set_var` visible to every parallel
-/// sibling in the same test binary — does not arise.
+/// environment, so the `#5544` hazard — a `set_var` visible to every test
+/// running in parallel in the `integration` target — does not arise.
 /// Test: `the_helper_clears_every_state_pointing_var`.
 const CHILD_STATE_ENV: &[&str] = &[
     "TRUSTY_MPM_ROOT",
     "TRUSTY_MPM_URL",
+    "TRUSTY_MPM_SOCKET",
+    "TRUSTY_DATA_DIR_OVERRIDE",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     "CLAUDE_CONFIG_DIR",
     trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
     "CLAUDE_SESSION_ID",
@@ -158,4 +218,67 @@ pub fn tm_spawn_home() -> &'static Path {
 /// A `tm` command confined to [`tm_spawn_home`].
 pub fn tm_command() -> Command {
     tm_command_in(tm_spawn_home())
+}
+
+/// A `trusty-mpm` alias command confined to [`tm_spawn_home`].
+///
+/// The alias execs the `tm` beside it, so the child needs the same isolation.
+pub fn alias_command() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-mpm"));
+    isolate_spawned_tm(&mut cmd, tm_spawn_home());
+    cmd
+}
+
+/// Write `disk.max_usage_pct: <pct>` into `home`'s trusty-mpm config (#7497).
+///
+/// Why: a spawned `tm hook --pm-guard` gates every `git worktree add` on the
+/// REAL volume's usage, and with no configured value the shipped 90% default
+/// decides the verdict — so a test's outcome would track how full the host
+/// disk is. An explicit threshold is the only seam; the gate has no env-var off
+/// switch by design (`core::disk_usage_guard` module doc).
+/// What: creates `<home>/.trusty-tools/trusty-mpm/config.yaml` holding only the
+/// `disk:` section.
+pub fn write_disk_threshold(home: &Path, pct: u8) {
+    let dir = home.join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("disk:\n  max_usage_pct: {pct}\n"),
+    )
+    .expect("write config");
+}
+
+/// The prefix every `tm hook --pm-guard` refusal starts with (#8546).
+///
+/// Mirrors `PM_GUARD_REFUSAL_PREFIX` in the `tm` binary, which an integration
+/// target cannot import.
+pub const PM_GUARD_REFUSAL_PREFIX: &str = "tm pm-guard: ";
+
+/// Assert that every deny object in a `tm hook --pm-guard` stdout names its
+/// layer: the reason starts with [`PM_GUARD_REFUSAL_PREFIX`] and carries it
+/// exactly once (#8546).
+///
+/// Why: every pm-guard integration collector calls this, so a refusal path
+/// added later without the prefix fails the first test that exercises it —
+/// the test author does not have to remember to assert it.
+/// What: parses each stdout line; a line that is not a JSON deny is ignored,
+/// because an ALLOW prints nothing and a grant prints `updatedInput`.
+pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
+    for line in stdout.lines() {
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let output = &parsed["hookSpecificOutput"];
+        if output["permissionDecision"] != "deny" {
+            continue;
+        }
+        let reason = output["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.starts_with(PM_GUARD_REFUSAL_PREFIX)
+                && reason.matches(PM_GUARD_REFUSAL_PREFIX.trim_end()).count() == 1,
+            "a tm pm-guard refusal must start with {PM_GUARD_REFUSAL_PREFIX:?} exactly once: {reason:?}"
+        );
+    }
 }

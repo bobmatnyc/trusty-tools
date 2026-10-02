@@ -1,0 +1,480 @@
+//! Registry-resolved on-disk storage layout for one index (#8438).
+//!
+//! Why: every write path used to choose its target by probing whether
+//! `<root>/.trusty-search/` existed on disk, while every read path followed the
+//! registry's `PersistedIndex::colocated` flag. An index registered
+//! `colocated=false` whose root already held an in-repo `.trusty-search/` (for
+//! example another host's live copy) therefore read from the data dir and wrote
+//! into the repository — a split brain, and a write into a directory another
+//! instance may be serving.
+//! What: [`StorageLayout`] is decided once from the registry entry
+//! ([`StorageLayout::for_entry`]) and carried on `CodeIndexer`.
+//! [`StorageLayout::storage_dir`] is the single resolver every read and write
+//! path goes through; the write guard ([`WriteUnderRootRefused`]) lives inside
+//! it, so no path can reach the repository without the registry naming it.
+//! Test: `service::storage_layout_8438_tests`.
+
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+use crate::core::registry::IndexHandle;
+use crate::service::colocated_storage::{self, COLOCATED_DIR_NAME};
+use crate::service::persistence::{self, PersistedIndex};
+
+/// Live HNSW snapshot file name.
+pub(crate) const HNSW_FILE: &str = "hnsw.usearch";
+/// Staging HNSW snapshot written while a reindex runs (#3970).
+pub(crate) const HNSW_STAGING_FILE: &str = "hnsw.reindex-staging.usearch";
+/// Live redb corpus file name.
+pub(crate) const REDB_FILE: &str = "index.redb";
+/// Staging redb corpus written by a reindex (#28 Phase 4).
+pub(crate) const REDB_TMP_FILE: &str = "index.redb.tmp";
+/// Schema-version stamp file name.
+pub(crate) const SCHEMA_VERSION_FILE: &str = "schema_version.json";
+/// Legacy JSON chunk snapshot file name.
+pub(crate) const CHUNKS_JSON_FILE: &str = "chunks.json";
+
+/// Where one index keeps its on-disk state, as the registry records it.
+///
+/// Why: the registry is the only authority on where an index lives; the
+/// presence of a `.trusty-search/` directory under the root is not.
+/// What: `DataDir` → `<data_dir>/indexes/<id>/`; `Colocated` →
+/// `<root_path>/.trusty-search/`. The default is `DataDir`, matching
+/// `PersistedIndex::colocated`'s serde default.
+/// Test: `layout_follows_the_registry_flag_not_the_directory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StorageLayout {
+    #[default]
+    DataDir,
+    Colocated,
+}
+
+/// A resolution that would place a non-colocated index's storage under its
+/// root was refused (#8438).
+///
+/// Why: a redirect would hide the misconfiguration; the write must fail so the
+/// caller logs it and skips the write.
+/// What: carried inside the `anyhow::Error` the resolver returns; callers can
+/// recognise it with [`is_write_refusal`].
+/// Test: `guard_refuses_a_data_dir_that_resolves_into_the_repo`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to place storage for index '{index_id}' at {}: it lies under the index \
+     root {} but the registry entry is not colocated (#8438)",
+    target.display(),
+    root.display()
+)]
+pub(crate) struct WriteUnderRootRefused {
+    pub(crate) index_id: String,
+    pub(crate) target: PathBuf,
+    pub(crate) root: PathBuf,
+}
+
+/// A colocated resolution whose index root does not exist (#8438).
+///
+/// Why: creating `<root>/.trusty-search` with `create_dir_all` recreated a
+/// deleted root, so the #484 missing-root guard at warm boot passed and a
+/// later `git worktree add` at that path failed. A missing root is an error;
+/// the caller logs it and skips the write.
+/// What: carried inside the `anyhow::Error` the resolver returns; callers can
+/// recognise it with [`is_write_refusal`].
+/// Test: `colocated_persist_never_recreates_a_missing_root`,
+/// `shutdown_flush_never_recreates_a_missing_colocated_root`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to place storage for colocated index '{index_id}': its root {} does not \
+     exist, and a write must never recreate it (#8438)",
+    root.display()
+)]
+pub(crate) struct ColocatedRootMissing {
+    pub(crate) index_id: String,
+    pub(crate) root: PathBuf,
+}
+
+/// A new data-dir store would sit inside the index root's work tree (#8499).
+///
+/// Why: `git clean -fdx` deletes everything under the root, ignored or not, so
+/// a store there dies with the next clean — whatever the data dir is set to.
+/// What: carried inside the `anyhow::Error`; [`is_write_refusal`] matches it.
+/// Test: `create_refuses_a_data_dir_inside_the_work_tree`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to place a new store for index '{index_id}' at {}: the data dir {} lies \
+     inside {}, the work tree holding the index root {}, where git clean -fdx deletes it \
+     (#8499)",
+    target.display(),
+    data_base.display(),
+    work_tree.display(),
+    root.display()
+)]
+pub(crate) struct StoreInWorkTreeRefused {
+    pub(crate) index_id: String,
+    pub(crate) target: PathBuf,
+    pub(crate) data_base: PathBuf,
+    /// The root itself, or the top of the git work tree holding it (#8499).
+    pub(crate) work_tree: PathBuf,
+    pub(crate) root: PathBuf,
+}
+
+/// True when `e` is (or wraps) a resolver refusal — [`WriteUnderRootRefused`],
+/// [`ColocatedRootMissing`] or [`StoreInWorkTreeRefused`]. Callers log a
+/// refusal at error and skip.
+pub(crate) fn is_write_refusal(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<WriteUnderRootRefused>().is_some()
+        || e.downcast_ref::<ColocatedRootMissing>().is_some()
+        || e.downcast_ref::<StoreInWorkTreeRefused>().is_some()
+}
+
+impl StorageLayout {
+    /// The layout the registry entry names.
+    pub(crate) fn for_entry(entry: &PersistedIndex) -> Self {
+        if entry.colocated {
+            Self::Colocated
+        } else {
+            Self::DataDir
+        }
+    }
+
+    /// The layout a NEW registration of `index_id` at `root_path` gets.
+    ///
+    /// Why (#8499): an index inside the work tree does not survive
+    /// `git clean -fdx`, which removes ignored files too; on a shared mount
+    /// that deletion lands under a live mmap and SIGBUSes the daemon. No
+    /// ignore rule can prevent it, so a fresh index lives outside the work
+    /// tree. A repo that already holds a colocated artifact keeps it (#8135
+    /// off-box delivery); that directory hides itself from `git status` and
+    /// `git clean -fd` via its own `.gitignore`.
+    /// What: `Colocated` when `<root>/.trusty-search/` holds an own index file;
+    /// otherwise `DataDir`, after resolving (and creating) the data-dir store.
+    /// Fails closed: a store anywhere inside the root
+    /// ([`refuse_data_dir_store_in_work_tree`]) or one the #8438 guard refuses
+    /// is returned as the refusal, never redirected. A non-colocated
+    /// `indexes.toml` row at the same root skips the up-front check, but only
+    /// an existing store is then accepted — [`Self::storage_dir`] refuses to
+    /// create one in the work tree.
+    /// Test: `index_survives_git_reset_hard_and_clean_fdx`,
+    /// `create_refuses_when_the_store_would_land_in_the_work_tree`,
+    /// `create_refuses_a_data_dir_inside_the_work_tree`,
+    /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
+    /// `create_with_a_corrupt_registry_still_refuses_a_store_in_the_work_tree`,
+    /// `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
+    pub(crate) fn for_new_registration(index_id: &str, root_path: &Path) -> Result<Self> {
+        if holds_colocated_artifact(root_path) {
+            return Ok(Self::Colocated);
+        }
+        // #8499: an entry `indexes.toml` already holds at this root keeps the
+        // #8438 exemption for its EXISTING store; `storage_dir` refuses to
+        // create a missing one. An unreadable registry exempts nothing.
+        let existing = persistence::find_index_registry_entry(index_id)
+            .ok()
+            .flatten()
+            .is_some_and(|e| {
+                !e.colocated
+                    && trusty_common::index_id::identifies_same_path(&e.root_path, root_path)
+            });
+        if !existing {
+            refuse_data_dir_store_in_work_tree(index_id, root_path)?;
+        }
+        Self::DataDir.storage_dir(index_id, root_path)?;
+        Ok(Self::DataDir)
+    }
+
+    /// Resolve (and create) this index's storage directory — the one resolver.
+    ///
+    /// Why: see the module docs; every path helper below and every write site
+    /// in the crate funnels through here, so the layout decision and the guard
+    /// exist exactly once.
+    /// What: `Colocated` → `<root_path>/.trusty-search/`, created with a
+    /// non-recursive `create_dir`, so a missing root is a
+    /// [`ColocatedRootMissing`] error and is never recreated. `DataDir` →
+    /// `<data_dir>/indexes/<sanitized id>/`, checked by
+    /// [`refuse_write_under_root`], and — when `indexes/<id>/` does not exist
+    /// yet — by [`refuse_data_dir_store_in_work_tree`] before it is created
+    /// (#8499): an existing store keeps its writes, a new one never lands in
+    /// the work tree, whichever caller asks. A refused
+    /// `DataDir` resolution never creates `indexes/<id>/`, but
+    /// `persistence::data_dir()` runs first and creates the configured data
+    /// dir itself (`TRUSTY_DATA_DIR`, or the platform default) when missing —
+    /// so a `TRUSTY_DATA_DIR` naming a path inside the repo leaves that one
+    /// directory behind.
+    /// Test: `guard_refuses_a_data_dir_that_resolves_into_the_repo`,
+    /// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
+    /// `colocated_layout_creates_a_missing_directory`,
+    /// `colocated_persist_never_recreates_a_missing_root`.
+    pub(crate) fn storage_dir(self, index_id: &str, root_path: &Path) -> Result<PathBuf> {
+        match self {
+            // #8438: never `create_dir_all` — that recreated a deleted root.
+            Self::Colocated => colocated_dir_under_existing_root(index_id, root_path),
+            Self::DataDir => {
+                // #8438: creates the data dir itself before the guard runs;
+                // see the doc comment above.
+                let base = persistence::data_dir()?;
+                let dir = base
+                    .join("indexes")
+                    .join(persistence::sanitize_id_for_path(index_id));
+                refuse_write_under_root(index_id, root_path, &base, &dir)?;
+                // #8499: creating a store is a new placement, whether a
+                // registration, a warm boot or a lazy restore asks for it.
+                if !dir.is_dir() {
+                    refuse_data_dir_store_in_work_tree(index_id, root_path)?;
+                }
+                std::fs::create_dir_all(&dir).context("create per-index data dir")?;
+                Ok(dir)
+            }
+        }
+    }
+
+    /// `storage_dir(..)/<name>`.
+    pub(crate) fn file(self, index_id: &str, root_path: &Path, name: &str) -> Result<PathBuf> {
+        Ok(self.storage_dir(index_id, root_path)?.join(name))
+    }
+
+    /// Remove this index's storage without creating anything (#8438).
+    ///
+    /// Why: `delete_index?delete_data=true` removed only the data dir, so a
+    /// colocated index kept its `<root>/.trusty-search/` forever; and a
+    /// non-colocated index must never remove the in-repo directory, which may
+    /// be another instance's live data.
+    /// What: always removes `<data_dir>/indexes/<id>/` (legacy residue);
+    /// when colocated, also removes trusty-search's own index files from
+    /// `<root>/.trusty-search/` ([`remove_own_index_files`]), then the
+    /// directory itself only if that left it empty.
+    /// Test: `delete_data_removes_the_directory_the_registry_names`,
+    /// `delete_data_keeps_foreign_files_in_a_shared_trusty_search_dir`.
+    pub(crate) fn remove_storage(self, index_id: &str, root_path: Option<&Path>) -> Result<()> {
+        persistence::remove_index_data_dir(index_id)?;
+        if let (Self::Colocated, Some(root)) = (self, root_path) {
+            // #8438: never `remove_dir_all` — `$HOME/.trusty-search/` is also
+            // the daemon's runtime dir (config.toml, http_addr, mcp_http_addr).
+            remove_own_index_files(&root.join(COLOCATED_DIR_NAME))?;
+        }
+        Ok(())
+    }
+}
+
+/// File-name stems of every artifact trusty-search writes into an index's
+/// storage directory: the live files, their staging and `.tmp` siblings, the
+/// HNSW key sidecar, and the `.corrupt[.N]` / incompatible-format backups.
+const OWN_FILE_STEMS: [&str; 4] = ["hnsw.", REDB_FILE, SCHEMA_VERSION_FILE, CHUNKS_JSON_FILE];
+
+/// True when `name` is one of trusty-search's own index files.
+fn is_own_index_file(name: &str) -> bool {
+    OWN_FILE_STEMS.iter().any(|stem| name.starts_with(stem))
+}
+
+/// Remove trusty-search's index files from `dir`, then `dir` if it is empty.
+///
+/// Why (#8438): a colocated index rooted at `$HOME` shares
+/// `$HOME/.trusty-search/` with the daemon's own runtime files; deleting the
+/// index must not delete those.
+/// What: deletes every regular file in `dir` whose name starts with one of
+/// [`OWN_FILE_STEMS`] and the #8499 self-ignore file when it still holds
+/// exactly `*`, leaves every other entry, then removes `dir` only when
+/// nothing is left. A missing `dir` is a no-op.
+/// Test: `delete_data_keeps_foreign_files_in_a_shared_trusty_search_dir`,
+/// `delete_data_on_a_live_colocated_index_removes_its_in_repo_dir`.
+fn remove_own_index_files(dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read {}", dir.display()))?;
+        let own = entry.file_name().to_str().is_some_and(is_own_index_file);
+        if own && entry.file_type().is_ok_and(|t| t.is_file()) {
+            let path = entry.path();
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        }
+    }
+    // #8499: the self-ignore file is ours only while it holds exactly what
+    // `ensure_self_ignored` wrote; any other content is left alone.
+    let ignore = dir.join(colocated_storage::SELF_IGNORE_FILE);
+    if std::fs::read(&ignore).is_ok_and(|b| b == colocated_storage::SELF_IGNORE_CONTENT.as_bytes())
+    {
+        std::fs::remove_file(&ignore).with_context(|| format!("remove {}", ignore.display()))?;
+    }
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("remove {}", dir.display())),
+    }
+}
+
+/// Resolve `<root>/.trusty-search/`, creating only that last component.
+///
+/// Why (#8438): `create_dir_all` recreated a deleted root; see
+/// [`ColocatedRootMissing`].
+/// What: a non-recursive `create_dir`; an existing directory is accepted, a
+/// missing or empty root is [`ColocatedRootMissing`], and any other failure is
+/// returned with context. Nothing outside `<root>` is ever created.
+/// Test: `colocated_persist_never_recreates_a_missing_root`,
+/// `colocated_layout_creates_a_missing_directory`.
+fn colocated_dir_under_existing_root(index_id: &str, root: &Path) -> Result<PathBuf> {
+    let missing = || -> anyhow::Error {
+        ColocatedRootMissing {
+            index_id: index_id.to_string(),
+            root: root.to_path_buf(),
+        }
+        .into()
+    };
+    if root.as_os_str().is_empty() {
+        return Err(missing());
+    }
+    let dir = root.join(COLOCATED_DIR_NAME);
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("create colocated storage dir at {}", dir.display()));
+        }
+    }
+    // #8499: hide the directory with a `.gitignore` of its own — never the
+    // repository's. Best-effort: the index is untracked either way.
+    if let Err(e) = colocated_storage::ensure_self_ignored(&dir) {
+        tracing::warn!("could not hide {} from git: {e:#}", dir.display());
+    }
+    Ok(dir)
+}
+
+/// True when `<root>/.trusty-search/` already holds one of trusty-search's own
+/// index files — a colocated corpus a registration adopts rather than orphans.
+///
+/// Why (#8499, #8135): off-box delivery ships a colocated artifact that
+/// `POST /indexes` must serve without a re-walk; a bare directory or the
+/// daemon's `$HOME/.trusty-search/` runtime files are not a corpus.
+/// What: scans the directory's entries for an [`OWN_FILE_STEMS`] name. A
+/// missing or unreadable directory is `false`.
+/// Test: `adopted_colocated_corpus_is_invisible_to_git_status_and_clean_fd`.
+fn holds_colocated_artifact(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root.join(COLOCATED_DIR_NAME)) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_str().is_some_and(is_own_index_file)
+            && entry.file_type().is_ok_and(|t| t.is_file())
+    })
+}
+
+/// The top of the git work tree that holds `root`, or `None` outside any repo.
+///
+/// Why (#8499): `git clean -fdx` run at the top deletes every untracked file
+/// in the work tree, not only those under the index root.
+/// What: the nearest of `root` and its ancestors holding a `.git` entry, as
+/// `git rev-parse --show-toplevel` answers. A `.git` directory is a plain
+/// repository; a `.git` file is a linked worktree or a submodule, whose top is
+/// that directory — an outer repository's clean does not descend into it.
+/// Test: `a_git_file_marks_the_top_of_a_linked_worktree`.
+pub(crate) fn enclosing_work_tree(root: &Path) -> Option<PathBuf> {
+    root.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .map(Path::to_path_buf)
+}
+
+/// Refuse a `DataDir` store for `index_id` that would sit inside the work tree
+/// holding `root` (#8499).
+///
+/// Why: [`refuse_write_under_root`] exempts a data dir that itself sits under
+/// the root, so an existing `$HOME`-rooted index keeps its writes. A NEW
+/// placement gets no such exemption: `TRUSTY_DATA_DIR` inside the repo, or a
+/// dotfiles repo at `$HOME` over the default data dir, would put the whole
+/// store where `git clean -fdx` deletes it — and that clean runs from the
+/// repository top, so a root at `<repo>/sub` does not shield `<repo>/data`.
+/// What: resolves the configured data dir and refuses with
+/// [`StoreInWorkTreeRefused`] when it, or any ancestor of it, is the same
+/// directory as `root` or as [`enclosing_work_tree`]`(root)` — compared by
+/// `(dev, ino)` over both the configured and the canonical spelling, so a
+/// symlink or a case variant cannot slip past. A root in no repository is
+/// checked against itself only. Registration, relocate, and
+/// [`StorageLayout::storage_dir`] before it creates a store call it; a write
+/// into an existing store does not. Creates only the data dir itself,
+/// exactly as [`persistence::data_dir`] always does.
+/// Test: `create_refuses_a_data_dir_inside_the_work_tree`,
+/// `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
+/// `relocate_refuses_a_new_root_that_encloses_the_store`.
+pub(crate) fn refuse_data_dir_store_in_work_tree(index_id: &str, root: &Path) -> Result<()> {
+    if root.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let base = persistence::data_dir()?;
+    // #8499: the work tree top, not only the root, bounds what a clean deletes.
+    let guards: Vec<PathBuf> = std::iter::once(root.to_path_buf())
+        .chain(enclosing_work_tree(root))
+        .collect();
+    let spellings = [Some(base.clone()), std::fs::canonicalize(&base).ok()];
+    let Some(work_tree) = guards.into_iter().find(|guard| {
+        spellings.iter().flatten().any(|spelling| {
+            spelling
+                .ancestors()
+                .any(|a| trusty_common::index_id::identifies_same_path(a, guard))
+        })
+    }) else {
+        return Ok(());
+    };
+    Err(StoreInWorkTreeRefused {
+        index_id: index_id.to_string(),
+        target: base
+            .join("indexes")
+            .join(persistence::sanitize_id_for_path(index_id)),
+        data_base: base,
+        work_tree,
+        root: root.to_path_buf(),
+    }
+    .into())
+}
+
+/// The write guard: refuse a `DataDir` target that lands under the root.
+///
+/// Why (#8438): nothing may be written under `<root>/.trusty-search` unless the
+/// registry names that directory for the index.
+/// What: returns [`WriteUnderRootRefused`] when `target` lies under
+/// `<root>/.trusty-search`, or under `root` at all while the configured data
+/// dir `data_base` does not. The second clause exempts an operator whose data
+/// dir itself sits under the root (for example an index rooted at `$HOME`);
+/// the in-repo `.trusty-search` stays refused in every case.
+/// Test: `guard_refuses_a_data_dir_that_resolves_into_the_repo`.
+fn refuse_write_under_root(
+    index_id: &str,
+    root: &Path,
+    data_base: &Path,
+    target: &Path,
+) -> Result<()> {
+    if root.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let in_repo_dir = target.starts_with(root.join(COLOCATED_DIR_NAME));
+    let under_root = target.starts_with(root) && !data_base.starts_with(root);
+    if in_repo_dir || under_root {
+        return Err(WriteUnderRootRefused {
+            index_id: index_id.to_string(),
+            target: target.to_path_buf(),
+            root: root.to_path_buf(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Read the layout carried by `handle`'s indexer.
+///
+/// Why: write sites that hold only an `IndexHandle` (reindex swaps, shutdown,
+/// migrations, delete) need the layout without a field on the all-pub
+/// `IndexHandle`, which would force a semver-major release.
+/// What: a short read lock on the indexer. Callers must not already hold an
+/// indexer guard.
+pub(crate) async fn layout_of(handle: &IndexHandle) -> StorageLayout {
+    handle.indexer.read().await.storage_layout()
+}
+
+/// Resolve `name` inside `handle`'s registry-named storage directory.
+pub(crate) async fn handle_file(handle: &IndexHandle, name: &str) -> Result<PathBuf> {
+    layout_of(handle)
+        .await
+        .file(&handle.id.0, &handle.root_path, name)
+}
+
+#[cfg(test)]
+#[path = "storage_layout_8438_tests.rs"]
+pub(crate) mod storage_layout_8438_tests;

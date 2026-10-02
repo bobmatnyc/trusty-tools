@@ -21,9 +21,18 @@
 //! Test: `mcp/tools/tests_health.rs`, and end to end over a real stdio session
 //! in the crate's `mcp_stdio_e2e_5264` integration test.
 
+use std::path::Path;
+
 use serde_json::{Map, Value};
 
+use super::health_verdicts::{
+    embedder_unavailable, failed_migration_stages, held_reason, unknown_count_cause,
+};
 use super::McpServer;
+use crate::mcp::cwd_scope::{
+    confirm_candidate, derive_cwd_candidate, parse_index_entries, Confirmation, CwdCandidate,
+    DaemonIndex,
+};
 
 /// The daemon answered and the resolved project index holds chunks.
 pub const HEALTH_OK: &str = "ok";
@@ -59,6 +68,17 @@ pub const HEALTH_INDEX_UNKNOWN: &str = "index_unknown";
 /// the operator's chance to look at it. The empty-index verdict prescribes
 /// exactly that reindex, so the migration fault has to be checked first.
 pub const HEALTH_INDEX_MIGRATION_FAILED: &str = "index_migration_failed";
+
+/// The index is fine, but the daemon's embedder is not answering (#8348).
+///
+/// Why: searches still return lexical rows, flagged `meta.vector_unavailable`,
+/// so every other check passes — and `ok` hid a daemon serving no semantic
+/// results at all.
+pub const HEALTH_EMBEDDER_UNAVAILABLE: &str = "embedder_unavailable";
+
+/// The index serves reads but indexes nothing new: an exclude glob does not
+/// parse, so the daemon holds it until a PATCH fixes the glob (#9059).
+pub const HEALTH_INDEX_HELD: &str = "index_held";
 
 /// Longest response-body excerpt echoed back in a diagnostic.
 const BODY_EXCERPT_CHARS: usize = 400;
@@ -98,7 +118,8 @@ const DAEMON_IDENTITY_FIELDS: &[&str] = &[
 /// `search_health_does_not_report_ok_when_no_index_could_be_resolved`,
 /// `search_health_does_not_report_an_unreadable_chunk_count_as_empty`.
 pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Value {
-    report_health(server, resolve_scope(server, args)).await
+    let cwd = std::env::current_dir().ok();
+    report_health(server, resolve_scope(server, args, cwd.as_deref())).await
 }
 
 /// Pure-ish core of [`handle_search_health`], taking the resolved index scope
@@ -111,10 +132,7 @@ pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Va
 /// branch directly assertable.
 /// What: identical to the wrapper except that `scope` is supplied.
 /// Test: `search_health_does_not_report_ok_when_no_index_could_be_resolved`.
-pub(super) async fn report_health(
-    server: &McpServer,
-    scope: Option<(String, &'static str)>,
-) -> Value {
+pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> Value {
     let base = server.base_url.clone();
 
     let health = match probe_daemon(server).await {
@@ -164,7 +182,7 @@ pub(super) async fn report_health(
     // verified. Reporting `ok`/`healthy: true` here would be a green verdict on
     // a check that never ran — the same defect this tool fixes at the daemon
     // layer, one level down.
-    let Some((index_id, source)) = scope else {
+    let Some(scope) = scope else {
         return report(
             HEALTH_INDEX_UNKNOWN,
             daemon,
@@ -178,6 +196,15 @@ pub(super) async fn report_health(
             "Call `list_indexes` to see what this daemon serves, then re-run \
              `search_health` with an explicit `index_id`.",
         );
+    };
+    let (index_id, source) = match scope {
+        Scope::Named { index_id, source } => (index_id, source),
+        Scope::Cwd(candidate) => {
+            match confirm_cwd_scope(server, &candidate, &daemon, &answered).await {
+                Ok(named) => named,
+                Err(refusal) => return refusal,
+            }
+        }
     };
 
     match probe_index(server, &index_id).await {
@@ -255,6 +282,19 @@ pub(super) async fn report_health(
                      error names, then restart the daemon so the migration retries.",
                 );
             }
+            // #9059: a held index answers searches, so the count arms read it `ok`.
+            if let Some(why) = held_reason(&body) {
+                return report(
+                    HEALTH_INDEX_HELD,
+                    daemon,
+                    index,
+                    format!("{answered} Index '{index_id}' ({source}) is HELD: {why}"),
+                    "Fix `exclude_globs` with `PATCH /indexes/<id>/config`; the hold lifts \
+                     without a restart, and the PATCH starts a catch-up reindex for the \
+                     changes refused while held (`catch_up_reindex` in its response). \
+                     A reindex before the fix is refused.",
+                );
+            }
             // #5633: the daemon's `chunk_count` is `Option<usize>` and a null
             // one rides a 200, so `unwrap_or(0)` turned "I could not read this"
             // into "it holds nothing" — and prescribed the reindex that is
@@ -268,6 +308,15 @@ pub(super) async fn report_health(
                     "Populate it with `trusty-search index <path>`, or \
                      `trusty-search doctor --fix`, which reindexes every \
                      zero-chunk index.",
+                ),
+                // #8348: checked only once the index itself is healthy.
+                Some(chunks) if embedder_unavailable(&health) => report(
+                    HEALTH_EMBEDDER_UNAVAILABLE,
+                    daemon,
+                    index,
+                    format!("{answered} Index '{index_id}' ({source}) holds {chunks} chunks, but the embedder is not answering, so searches return lexical results only (`meta.vector_unavailable: true`)."),
+                    "Check that `trusty-embedderd` is installed and starts (`trusty-search doctor`), \
+                     then read `embedder_error` on `/health` and the daemon log.",
                 ),
                 Some(chunks) => report(
                     HEALTH_OK,
@@ -296,71 +345,6 @@ pub(super) async fn report_health(
             }
         }
     }
-}
-
-/// The failed migration stages the daemon reported, comma-joined (#7979).
-///
-/// Why: `search_health`'s verdict has to branch on whether a migration failed,
-/// and the branch must not depend on the field's exact shape drifting — an
-/// absent key, `null`, and an empty array all mean "no fault".
-/// What: reads `migration_error` from the status body and joins each entry's
-/// `stage`. Returns `None` when there is nothing outstanding.
-/// Test: `search_health_reports_a_failed_migration_instead_of_prescribing_a_reindex`.
-fn failed_migration_stages(body: &Value) -> Option<String> {
-    let entries = body.get("migration_error")?.as_array()?;
-    let stages: Vec<&str> = entries
-        .iter()
-        .filter_map(|e| e.get("stage").and_then(Value::as_str))
-        .collect();
-    (!stages.is_empty()).then(|| stages.join(", "))
-}
-
-/// Why the daemon could not state a chunk count, and what to do about it.
-///
-/// Why (#5633): "0 chunks because the index is empty" and "count unavailable
-/// because the corpus would not open" demand OPPOSITE actions — reindex, versus
-/// do not reindex because the index is write-quarantined and its chunks are
-/// intact on disk. Rendering both the same way is what sent a caller to
-/// `trusty-search index` against a quarantined corpus.
-/// What: reads the `corpus_open_failure` block the daemon already sends beside
-/// a null count (#4333) rather than inventing a cause, and lets its `transient`
-/// classifier pick between "retry" and "this needs operator action". Returns
-/// `(because, remediation)`; when no failure block is present the cause is
-/// genuinely unknown and the remediation says exactly that.
-/// Test: `search_health_does_not_report_an_unreadable_chunk_count_as_empty`,
-/// `search_health_does_not_report_a_missing_chunk_count_as_empty`.
-fn unknown_count_cause(body: &Value) -> (String, &'static str) {
-    let Some(failure) = body.get("corpus_open_failure").filter(|v| !v.is_null()) else {
-        return (
-            "its chunk count was absent from the daemon's status response".to_string(),
-            "Re-run `search_health`. If the count stays unreadable, check \
-             `trusty-search status` and the daemon log. Do NOT reindex on this \
-             verdict alone — nothing here says the index is empty.",
-        );
-    };
-    let field = |k: &str| failure.get(k).and_then(Value::as_str).unwrap_or("unknown");
-    let because = format!(
-        "its durable corpus failed to open ({}: {}), so the daemon reported the \
-         count as unknown rather than guessing at one",
-        field("kind"),
-        field("reason"),
-    );
-    let remediation = if failure
-        .get("transient")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        "Retry shortly — the daemon classified this corpus failure as transient \
-         (typically an open timeout under warm-boot contention). Do NOT reindex: \
-         the chunks are intact on disk and the index is write-quarantined until \
-         the corpus opens."
-    } else {
-        "The daemon classified this corpus failure as NOT transient, so retrying \
-         will not clear it. Restart the daemon (`trusty-search stop` then \
-         `trusty-search start`) and re-check. Do NOT reindex on this verdict — \
-         the count is unknown, not zero."
-    };
-    (because, remediation)
 }
 
 /// Assemble one report body. `status` decides `healthy`.
@@ -429,21 +413,151 @@ fn daemon_identity(base: &str, health: &Value) -> Value {
 /// closed. Reporting the SOURCE alongside the id is what lets a reader see that
 /// a `cwd`-derived answer says nothing about the index a pinned session uses.
 /// What: an explicit `index_id` argument wins, then the session pin (#1373),
-/// then the id the CLI would derive from the working directory.
-/// Test: `search_health_reports_which_source_named_the_index`.
-fn resolve_scope(server: &McpServer, args: &Value) -> Option<(String, &'static str)> {
+/// then a candidate derived from `cwd`. The cwd tier is returned UNCONFIRMED —
+/// see [`Scope::Cwd`]. `cwd` is a parameter so tests need not change the
+/// process-global working directory.
+/// Test: `search_health_reports_which_source_named_the_index`,
+/// `cwd_fallback_resolves_same_basename_checkouts_to_their_own_indexes`.
+pub(super) fn resolve_scope(server: &McpServer, args: &Value, cwd: Option<&Path>) -> Option<Scope> {
     if let Some(id) = args.get("index_id").and_then(Value::as_str) {
         if !id.trim().is_empty() {
-            return Some((id.to_string(), "argument"));
+            return Some(Scope::Named {
+                index_id: id.to_string(),
+                source: "argument",
+            });
         }
     }
     if let Some(id) = server.pinned_index.clone() {
-        return Some((id, "session_pin"));
+        return Some(Scope::Named {
+            index_id: id,
+            source: "session_pin",
+        });
     }
-    let cwd = std::env::current_dir().ok()?;
-    let root = trusty_common::resolve_project_root(&cwd);
-    let id = trusty_common::derive_index_id(&root);
-    (!id.trim().is_empty()).then_some((id, "cwd"))
+    derive_cwd_candidate(cwd?).map(Scope::Cwd)
+}
+
+/// Which index a `search_health` call is about, before the daemon is asked.
+pub(super) enum Scope {
+    /// Named outright — an explicit argument or the session pin.
+    Named {
+        index_id: String,
+        source: &'static str,
+    },
+    /// #8229: derived from the working directory. The id is a bare basename, so
+    /// two checkouts named alike share it; it is confirmed against the daemon's
+    /// `root_path` list by [`confirm_cwd_scope`] before anything is probed.
+    Cwd(CwdCandidate),
+}
+
+/// Confirm a working-directory candidate against the daemon's roots (#8229).
+///
+/// Why: probing the bare-basename id reported a different clone's index —
+/// 50,731 chunks, 0 vectors, rooted elsewhere — as this project's, with
+/// `healthy: true`, while the index actually rooted at the cwd sat unused on
+/// the same daemon. `serve`'s startup pin already refuses that collision
+/// (#5264, #6864); this applies the same verdict.
+/// What: reads `GET /indexes?details=true` and runs
+/// [`confirm_candidate`]. A matching root probes the derived id (`cwd`); an
+/// index registered under another id at this root probes that one
+/// (`cwd_root_match`); an unserved id probes the derived id so the usual
+/// `index_not_registered` verdict follows. A root mismatch is
+/// `index_not_registered` naming the other tree, an unconfirmable root is
+/// `index_unknown`, and an unreadable list is `daemon_error` — the `Err` arm
+/// carries the finished report. Never `ok` for a tree the index does not serve.
+/// Test: `cwd_fallback_resolves_same_basename_checkouts_to_their_own_indexes`,
+/// `cwd_fallback_refuses_an_id_served_from_another_tree`.
+async fn confirm_cwd_scope(
+    server: &McpServer,
+    candidate: &CwdCandidate,
+    daemon: &Value,
+    answered: &str,
+) -> Result<(String, &'static str), Value> {
+    let id = candidate.index_id.as_str();
+    let root = candidate.project_root.display().to_string();
+    let entries = match fetch_index_entries(server).await {
+        Ok(entries) => entries,
+        Err(detail) => {
+            let index = index_scope(
+                id,
+                "cwd",
+                serde_json::json!({ "registered": null, "project_root": root, "error": detail }),
+            );
+            return Err(report(
+                HEALTH_DAEMON_ERROR,
+                daemon.clone(),
+                index,
+                format!(
+                    "{answered} Its index list could not be read to confirm which index \
+                     serves {root}: {detail}."
+                ),
+                "Retry once. If it persists, check the daemon log, or re-run \
+                 `search_health` with an explicit `index_id`.",
+            ));
+        }
+    };
+    match confirm_candidate(candidate, &entries) {
+        Confirmation::Confirmed | Confirmation::NotServed => Ok((id.to_string(), "cwd")),
+        Confirmation::ServedByAnotherId { index_id } => Ok((index_id, "cwd_root_match")),
+        Confirmation::RootMismatch { serving_root } => {
+            let serving = serving_root.display().to_string();
+            let index = index_scope(
+                id,
+                "cwd",
+                serde_json::json!({
+                    "registered": false,
+                    "project_root": root,
+                    "serving_root": serving,
+                }),
+            );
+            Err(report(
+                HEALTH_INDEX_NOT_REGISTERED,
+                daemon.clone(),
+                index,
+                format!(
+                    "{answered} Its index '{id}' is rooted at {serving}, a DIFFERENT tree \
+                     that shares this project's directory name, and no index is rooted at \
+                     {root} — so searches for this project will not find its code."
+                ),
+                "Index this project with `trusty-search index <path>`, or re-run \
+                 `search_health` with the `index_id` `list_indexes` shows for this \
+                 root. Do not treat the same-named index as this project's.",
+            ))
+        }
+        Confirmation::RootUnknown => {
+            let index = index_scope(
+                id,
+                "cwd",
+                serde_json::json!({ "registered": true, "project_root": root, "root_path": null }),
+            );
+            Err(report(
+                HEALTH_INDEX_UNKNOWN,
+                daemon.clone(),
+                index,
+                format!(
+                    "{answered} It serves index '{id}' but reports no root for it, so \
+                     whether that index is this project ({root}) could not be confirmed."
+                ),
+                "Re-run `search_health` with an explicit `index_id`.",
+            ))
+        }
+    }
+}
+
+/// `GET /indexes?details=true`, parsed into id/root pairs (#8229).
+async fn fetch_index_entries(server: &McpServer) -> Result<Vec<DaemonIndex>, String> {
+    let url = format!("{}/indexes?details=true", server.base_url);
+    let resp = server
+        .http
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status} from {url}"));
+    }
+    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(parse_index_entries(&body))
 }
 
 /// What `GET /health` did.

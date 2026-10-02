@@ -194,6 +194,7 @@ fn add_exclude_locked(settings_path: &Path, absolute: &Path) -> ExcludeWrite {
     }
     list.push(serde_json::Value::String(wanted));
 
+    crate::core::home_write_fence::check(settings_path); // #8545
     match write_json_atomic(settings_path, &settings) {
         Ok(()) => ExcludeWrite::Added,
         Err(err) => ExcludeWrite::Refused(err.to_string()),

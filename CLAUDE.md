@@ -36,6 +36,10 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 - Anything else (release builds, feature-gated tests, `--include-ignored`, a
   single test by name) — `Skill(skill="cargo-commands")` rather than guessing.
+- 🔴 **`CARGO_TARGET_DIR` is exported by the repo-local `.envrc`.** Never
+  override it EXCEPT with the builder slot the hook grants, and never point a
+  gate at a worktree-local `target/` — that is a cold build of the whole
+  dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
@@ -58,6 +62,14 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
 `cargo test --workspace` is a publish gate, not inner-loop proof.
+
+🔴 **Markdown under `crates/*/src/assets/**` is rung 3, not rung 1.** It is
+`include_str!`-embedded into the binary and asserted on by bundle tests, so a
+text-only edit recompiles dependents and can go red. Run the named bundle test,
+not the crate suite — which test reads which asset:
+[agent-cost-controls.md](docs/reference/agent-cost-controls.md).
+
+🟡 Dev lane vs release lane: live-check the debug tm while building; releases use the SMALL/LARGE gate rule — [release-workflow.md](docs/reference/release-workflow.md#dev-lane-and-release-lane).
 
 Per-rung commands, CI gates, baseline-red triage:
 [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md),
@@ -93,6 +105,7 @@ stale. Advance with `tm issue transition N status:merged`. Fix PRs use
 `status:merged`/`status:tested`. Rung 4–6 (CLI/daemon/hook fixes needing
 live proof) close only from `status:tested`; a merged fix failing
 verification stays open, returning to `status:coded` only via a follow-up fix.
+Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
 
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,
@@ -137,7 +150,8 @@ category list: [changelog-fragments.md](docs/reference/changelog-fragments.md).
 🔴 **Version bumps, tags, and `cargo publish` are delegated to `local-ops`** —
 the PM never edits a version file, cuts a tag, or publishes directly. Call
 `Skill(skill="cargo-publish")` first: [release-workflow.md](docs/reference/release-workflow.md),
-semver gate (`preflight-publish.sh` CHECK 5, always the absolute stop):
+semver gate (`preflight-publish.sh` CHECK 5 never blocks on a computed break;
+an infrastructure fault still stops it — owner ruling 2026-09-26):
 [semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **CRITICAL macOS:** never `cp` a release binary — always `cargo install`,
@@ -151,8 +165,10 @@ checkout → remove worktree, then delete branch. Full eight-step rule:
 [worktree-discipline.md](docs/reference/worktree-discipline.md#the-delivery-sequence).
 Dispatch mechanics: `Skill(skill="tm-workflow")`.
 
-- `cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked`
-  — never `cp` — only from a checkout with empty `git status --porcelain`.
+- `cargo install <crate> --version <version> --locked` — never `cp`, and
+  never `--path` from a worktree, which loses provenance once that worktree
+  is reclaimed ([ADR-0043](docs/adr/0043-cargo-bin-policy.md)); run from
+  outside the workspace directory so no local `[patch]` resolution applies.
 - **Stage by name, never `-A`:** `git add <file>` or `git add -p` — `-A`
   stages untracked build directories like `target-worktree/`.
 - Docs/config stay writable in the main checkout; commits never land on
@@ -161,6 +177,11 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
   Exception (owner ruling 2026-09-19): the PM may commit a NEW documentation
   file straight to `main`; the pre-push credential scan still applies.
 - 🔴 **`.trusty-mpm/sessions/` is gitignored, local-only** (ruling 2026-09-13).
+- 🔴 **A pre-claim check reads LOCAL state too** — `git worktree list` and
+  `git log --oneline origin/main..<branch>`. `git ls-remote` and `gh pr list`
+  cannot see an unpushed branch, and that gap duplicated a whole
+  implementation (#8250):
+  [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 The harness (not `tm hook --pm-guard`) refuses some git/script shapes in
   a worktree — bare `git diff`, `bash scripts/…`, a heredoc. Substitute for
   every shape: [worktree-discipline.md](docs/reference/worktree-discipline.md).
@@ -172,7 +193,7 @@ commands, conversation. Directory is always `crates/<crate>/`.
 
 | Abbrev | Crate |
 |---|---|
-| `tga` | trusty-git-analytics (`-p tga`) |
+| `tga` | trusty-git-analytics — moved to bobmatnyc/trusty-git-analytics |
 | `tm` | trusty-memory |
 | `ts` | trusty-search |
 | `tc` | trusty-common |
@@ -182,7 +203,7 @@ commands, conversation. Directory is always `crates/<crate>/`.
 | `t-agents-common` | trusty-agents-common |
 | `tcode` | trusty-code |
 | `tctl` | trusty-installer |
-| `taudit` | trusty-audit (bins `trusty-audit`, `taudit`) |
+| `taudit` | trusty-audit — moved to bobmatnyc/trusty-git-analytics |
 
 What each crate is for: [crate-map.md](docs/reference/crate-map.md).
 

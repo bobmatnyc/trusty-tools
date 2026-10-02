@@ -61,11 +61,10 @@ export const FLAGSHIPS: Flagship[] = TOOLS;
  *
  * Why a subset rather than `FLAGSHIPS`: `$lib/changelog/site` fails the build
  * for a crate whose `CHANGELOG.md` parses to zero release sections, because an
- * empty section is indistinguishable from "nothing shipped". trusty-audit is
- * `publish = false` (it ships a signed binary via install script, not
- * crates.io) but does cut its own tagged releases, so once its CHANGELOG.md
- * carried a real `## [0.6.0]` heading it joined this set (`Tool.released`)
- * like the rest.
+ * empty section is indistinguishable from "nothing shipped" — a `publish =
+ * false` crate that ships a signed binary via install script rather than
+ * crates.io still joins this set (`Tool.released`) once its own CHANGELOG.md
+ * carries a real release heading.
  */
 export const RELEASED_FLAGSHIPS: Flagship[] = FLAGSHIPS.filter((f) => f.released);
 
@@ -113,7 +112,6 @@ export const CRATE_GROUPS: CrateGroup[] = [
 			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
 			{ name: 'trusty-kb', description: 'Personal knowledge base as an MCP server' },
 			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
-			{ name: 'trusty-mpm-gui', description: 'Desktop dashboard for trusty-mpm' },
 			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }
 		]
 	}

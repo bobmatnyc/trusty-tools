@@ -801,13 +801,34 @@ fn write_missing_group_settings(project: &Path) -> PathBuf {
     path
 }
 
+/// A framework layout under `base` whose `config.toml` states the hook toggles.
+///
+/// Why: `for_managed_workspace` reads the process-global `$HOME`, and the
+/// config under it decides whether the merge writes the `UserPromptSubmit`
+/// prompt-context group. A test deriving it read the operator's real config,
+/// and a concurrent `#[serial]` test redirecting `$HOME` flipped that answer
+/// between two merges — the parallel-run flake in
+/// `contamination_strip_then_missing_group_merge_restores_the_launch_state`.
+/// What: `for_managed_workspace_under(base, project)` with
+/// `[hooks] prompt_context = true` written to its root, so every merge in a
+/// test resolves the same toggles whatever `$HOME` holds.
+fn hermetic_fw(base: &Path, project: &Path) -> crate::core::paths::FrameworkPaths {
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(base, project);
+    fs::create_dir_all(&fw.root).unwrap();
+    fs::write(fw.config_toml(), "[hooks]\nprompt_context = true\n").unwrap();
+    fw
+}
+
 /// The `--fix --yes` arm merges the missing lifecycle group back in (#7490).
 #[test]
 fn missing_group_repair_merges_the_sessionstart_group_back() {
     let project = tempfile::tempdir().unwrap();
     let path = write_missing_group_settings(project.path());
+    let base = tempfile::tempdir().unwrap();
+    let fw = hermetic_fw(base.path(), project.path());
 
     let steps = repair_missing_hook_group_with(
+        &fw,
         project.path(),
         Some(Path::new("/usr/local/bin/tm")),
         RepairMode::Apply,
@@ -870,29 +891,41 @@ fn missing_group_repair_dry_run_changes_nothing() {
 /// What: seeds a settings file carrying the full triad (produced by the merge
 /// itself), then runs the two repairs in Apply mode in the SAME order
 /// `run_repairs` uses, and asserts the resulting bytes equal what
-/// `ensure_project_hooks` alone produces for the same input.
+/// `ensure_project_hooks` alone produces for the same input. Every merge runs
+/// under one [`hermetic_fw`] layout, so the toggles cannot change between the
+/// expected and the actual merge.
 /// Test: itself.
 #[test]
 fn contamination_strip_then_missing_group_merge_restores_the_launch_state() {
     let exe = Some(Path::new("/usr/local/bin/tm"));
+    let base = tempfile::tempdir().unwrap();
 
     // The expected state: one project taken straight to the merged form.
     let expected_project = tempfile::tempdir().unwrap();
+    let expected_fw = hermetic_fw(base.path(), expected_project.path());
     let expected_path = write_missing_group_settings(expected_project.path());
-    crate::core::session_launch::ensure_project_hooks(expected_project.path(), exe).unwrap();
+    crate::core::session_launch::ensure_project_hooks_with(
+        &expected_fw,
+        expected_project.path(),
+        exe,
+    )
+    .unwrap();
     let expected = fs::read(&expected_path).unwrap();
 
     // The driver's path: identical input, strip first, then re-merge.
     let actual_project = tempfile::tempdir().unwrap();
+    let actual_fw = hermetic_fw(base.path(), actual_project.path());
     let actual_path = write_missing_group_settings(actual_project.path());
-    crate::core::session_launch::ensure_project_hooks(actual_project.path(), exe).unwrap();
+    crate::core::session_launch::ensure_project_hooks_with(&actual_fw, actual_project.path(), exe)
+        .unwrap();
     let strip = repair_hooks_contamination(actual_project.path(), RepairMode::Apply);
     assert!(
         !strip.is_empty(),
         "the fixture must actually carry entries the strip removes, or this \
          test proves nothing about the ordering: {strip:?}"
     );
-    let merge = repair_missing_hook_group_with(actual_project.path(), exe, RepairMode::Apply);
+    let merge =
+        repair_missing_hook_group_with(&actual_fw, actual_project.path(), exe, RepairMode::Apply);
     assert!(
         matches!(
             merge.first().map(|s| &s.status),
@@ -946,14 +979,16 @@ fn missing_group_repair_closes_a_toggle_driven_gap() {
         .path()
         .join(crate::core::project_config::PROJECT_CONFIG_FILE);
     fs::write(&flag, "prompt_self_improvement = false\n").unwrap();
-    crate::core::session_launch::ensure_project_hooks(project.path(), exe).unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let fw = hermetic_fw(base.path(), project.path());
+    crate::core::session_launch::ensure_project_hooks_with(&fw, project.path(), exe).unwrap();
     assert!(
-        repair_missing_hook_group_with(project.path(), exe, RepairMode::DryRun).is_empty(),
+        repair_missing_hook_group_with(&fw, project.path(), exe, RepairMode::DryRun).is_empty(),
         "the fixture must start complete, or this test proves nothing"
     );
 
     fs::write(&flag, "prompt_self_improvement = true\n").unwrap();
-    let steps = repair_missing_hook_group_with(project.path(), exe, RepairMode::Apply);
+    let steps = repair_missing_hook_group_with(&fw, project.path(), exe, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert!(

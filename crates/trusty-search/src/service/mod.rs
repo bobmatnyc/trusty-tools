@@ -9,9 +9,12 @@ pub mod config;
 pub mod constants;
 pub mod context_inference;
 pub mod daemon;
+pub mod daemon_client;
 pub(crate) mod data_dir;
 pub mod embed_pool;
 pub mod embedder_supervisor;
+// #9059: hold an index whose exclude globs do not parse.
+pub(crate) mod exclude_hold;
 pub mod fs_discovery;
 pub mod grep;
 // #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.
@@ -21,6 +24,9 @@ pub mod index_budget;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;
+// #8270: the daemon reopens its stderr log after a newsyslog rotation.
+#[cfg(unix)]
+pub mod log_reopen;
 pub mod mcp_descriptor;
 pub mod metrics;
 pub mod network_fs;
@@ -45,8 +51,12 @@ pub mod shutdown_flush;
 pub mod rpc;
 pub mod socket;
 pub mod stall_tracker;
+// #8438: the registry-resolved storage layout every write path resolves through.
+pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
+// #8726: demote a `ready` semantic stage short of vectors and queue its backfill.
+pub mod vector_gap;
 pub mod walker;
 pub mod warm_boot;
 // #4213 / #4721: shared "run this one test alone in a child process with the
@@ -62,6 +72,15 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #8922: the walker's admission decision for a pushed `index_file` write.
+pub(crate) mod write_admission;
+
+// #8922: every ingest path against one fixture tree.
+#[cfg(test)]
+mod excludes_8922_tests;
+// #9059: every ingest path against an index held by an invalid exclude glob.
+#[cfg(test)]
+mod exclude_hold_9059_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 
@@ -70,8 +89,9 @@ pub use constants::DEFAULT_PORT;
 pub use daemon::{
     bootstrap_process_env, daemon_env_path, daemon_lock_path, daemon_port_path, http_addr_path,
     is_already_running, load_daemon_env, load_daemon_env_early, load_daemon_env_early_for,
-    parse_daemon_env, run_daemon, running_daemon_pid, save_daemon_env, write_http_addr_file,
-    DaemonEnvPair, DaemonEnvReject, DaemonError, DaemonHandle, PERSISTED_ENV_VARS,
+    parse_daemon_env, remove_daemon_files_if_unheld, run_daemon, running_daemon_pid,
+    save_daemon_env, write_http_addr_file, DaemonEnvPair, DaemonEnvReject, DaemonError,
+    DaemonHandle, StaleLockRemoval, PERSISTED_ENV_VARS,
 };
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;

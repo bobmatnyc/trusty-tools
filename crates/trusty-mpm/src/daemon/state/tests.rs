@@ -745,6 +745,37 @@ fn audit_logger_is_accessible() {
     );
 }
 
+/// #8545: a lib test's `DaemonState::new()` roots outside every fenced home,
+/// and its audit write lands there. The root is checked before the write, so a
+/// regression fails here without touching the operator's `~/.trusty-mpm`.
+#[test]
+fn new_never_writes_under_the_real_home() {
+    use crate::core::home_write_fence::{armed_roots, fenced_root};
+    use crate::daemon::audit::AuditEntry;
+    assert!(!armed_roots().is_empty(), "the lib binary arms the fence");
+    let state = DaemonState::new();
+    let audit = state.audit();
+    for path in [state.framework_root(), audit.path()] {
+        assert!(
+            fenced_root(path, armed_roots()).is_none(),
+            "{} sits under a fenced home root {:?}",
+            path.display(),
+            armed_roots()
+        );
+    }
+    audit.log(AuditEntry {
+        ts: "2026-09-26T00:00:00Z".into(),
+        session: "tmpm-8545".into(),
+        event: "PreToolUse".into(),
+        tool: None,
+        decision: "allow".into(),
+        reason: "#8545 regression".into(),
+        handler: "deterministic".into(),
+    });
+    let written = std::fs::read_to_string(audit.path()).expect("the audit line landed");
+    assert!(written.contains("#8545 regression"), "{written}");
+}
+
 #[test]
 fn hook_history_is_bounded() {
     let state = DaemonState::new();
@@ -1175,6 +1206,42 @@ async fn reap_leaves_a_whole_server_loss_auto_resumable() {
     }
 }
 
+/// #8942: when the Architect's name is missing from the live set, its record
+/// goes `Stopped`, and no teardown reaches a pane of that name.
+#[tokio::test]
+async fn the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let driver = MinFakeDriver::new();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), driver.clone())
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+    let id = active_session_in_state(&mgr, "architect", "/tmp/test-reap-architect").await;
+    let mut record = mgr.get(&id).await.expect("record");
+    record.kind = crate::session_manager::SessionKind::Supervisor;
+    let name = record.tmux_name.clone();
+    mgr.store.write().await.upsert(record).await.expect("seed");
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    let live: std::collections::HashSet<String> =
+        ["someone-elses-shell".to_string()].into_iter().collect();
+    state.reap_managed_against(&live).await;
+
+    let after = mgr.get(&id).await.expect("get after reap");
+    assert_eq!(
+        after.state,
+        crate::session_manager::ManagedSessionState::Stopped
+    );
+    assert_eq!(
+        after.stop_cause,
+        Some(crate::session_manager::StopCause::Deliberate)
+    );
+    assert!(
+        driver.sessions.lock().unwrap().contains(&name),
+        "the reaper killed a pane carrying the Architect's name"
+    );
+}
+
 /// #3822 hardening (code-critic review): `project_registry()`'s session-
 /// history seed must not depend on some OTHER call site having already
 /// warmed `managed_sessions` first — it must warm `session_manager()` itself.
@@ -1303,5 +1370,124 @@ fn head_write_without_a_caller_excludes_nothing() {
             .live_shared_tree_writers_excluding(&cwd, None, Some(session))
             .is_empty(),
         "and naming that session must exclude its own record"
+    );
+}
+
+/// The #8161 half of the tree-membership rule. A `reset --keep` into a parked
+/// worktree asks who holds it, and the answer used to omit the one agent that
+/// matters: an isolated agent standing in its own tree carries the checkout it
+/// was dispatched FROM, so no directory-keyed query on the tree matched it.
+///
+/// Fails before the fix: the filter keyed on `Delegation::cwd` alone.
+#[test]
+fn a_live_agent_is_counted_in_the_worktree_it_stands_in() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-parked");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.isolation = Some("worktree".to_string());
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.join("crates/foo"));
+    state.upsert_delegation(d);
+
+    assert_eq!(
+        state.live_shared_tree_writers_excluding(&tree, None, None),
+        vec!["rust-engineer".to_string()],
+        "a tree-holders query must name the agent standing in the tree"
+    );
+    assert!(
+        state
+            .live_shared_tree_writers_excluding(&tree, None, Some(id))
+            .is_empty(),
+        "a session-scoped HEAD write still excludes its own session (#6797)"
+    );
+    assert!(
+        state.live_shared_tree_writers(&checkout, None).is_empty(),
+        "and the agent is still not a writer in the checkout it left"
+    );
+}
+
+/// The #8535 regression. The harness moved the PM's cwd into an agent's
+/// worktree, so a qa dispatch made from there was stamped with that worktree,
+/// and when the harness then isolated the agent anyway the record still read
+/// as a second writer in the PM's directory until its ownership claim landed.
+/// Here the claim has not landed (`worktree_path` is `None`) but the agent's
+/// own hook already reports a different harness tree.
+///
+/// Fails before the fix: `holds_its_own_tree` needed `worktree_path`, so the
+/// record fell through to the isolation test and was reported.
+#[test]
+fn a_record_stamped_in_a_relocated_pm_cwd_is_not_a_writer_there() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let relocated = std::path::PathBuf::from("/repo/main/.claude/worktrees/agent-engineer");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &relocated);
+    d.agent = "qa".to_string();
+    d.last_agent_cwd = Some(std::path::PathBuf::from(
+        "/repo/main/.claude/worktrees/agent-qa/tests",
+    ));
+    state.upsert_delegation(d);
+
+    assert!(
+        state.shared_tree_occupants(&relocated, None).is_empty(),
+        "an agent standing in another harness tree is not a writer in the PM's cwd"
+    );
+}
+
+/// #8161 critic round: rule 1 on the DISPATCH question. When the PM's cwd sits
+/// inside a live agent's worktree (#8535), an unisolated dispatch from there
+/// would join that agent's tree, so the agent occupies it even though its
+/// record carries the checkout it was dispatched from.
+///
+/// Fails before the fix: the filter matched `Delegation::cwd` only.
+#[test]
+fn a_live_agent_occupies_its_worktree_for_a_dispatch_from_inside_it() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-live");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.isolation = Some("worktree".to_string());
+    d.worktree_path = Some(tree.clone());
+    d.last_agent_cwd = Some(tree.clone());
+    state.upsert_delegation(d);
+
+    assert_eq!(
+        state.shared_tree_occupants(&tree, None),
+        vec!["rust-engineer".to_string()]
+    );
+    assert!(state.shared_tree_occupants(&checkout, None).is_empty());
+}
+
+/// The control for the #8161 rule: a positively read-only agent standing in a
+/// parked worktree does not block consolidating into it.
+#[test]
+fn a_read_only_agent_in_a_linked_worktree_is_not_a_writer() {
+    let state = DaemonState::new();
+    let session = sample_session();
+    let id = session.id;
+    let checkout = std::path::PathBuf::from("/repo/main");
+    let tree = checkout.join(".claude/worktrees/agent-parked");
+    state.register_session(session);
+
+    let mut d = unisolated_running_delegation(id, &checkout);
+    d.agent = "research".to_string();
+    d.last_agent_cwd = Some(tree.clone());
+    state.upsert_delegation(d);
+
+    assert!(
+        state
+            .live_shared_tree_writers_excluding(&tree, None, None)
+            .is_empty()
     );
 }

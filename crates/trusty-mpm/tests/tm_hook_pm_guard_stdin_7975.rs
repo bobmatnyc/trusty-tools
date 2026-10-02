@@ -15,9 +15,9 @@
 //! deadline — its only denied target is its LAST argument, so only a read that
 //! consumed the whole payload reaches it — and a parsed payload naming no
 //! guarded operation still allows.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_stdin_7975`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_stdin_7975::`.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -63,7 +63,9 @@ fn run_with_stdin(stdin: Stdio) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// The audit POST body the guard sent, captured from a one-shot HTTP sink.
@@ -169,7 +171,9 @@ fn run_with_bytes(bytes: &[u8]) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("stdout is utf8")
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    common::assert_pm_guard_refusals_prefixed(&stdout);
+    stdout
 }
 
 /// The `permissionDecision` the guard printed, or `None` for an ALLOW.

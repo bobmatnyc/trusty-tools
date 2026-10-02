@@ -214,8 +214,17 @@ List every registered index.
 - **Request body**: none.
 - **Response 200**:
   ```json
-  { "indexes": ["my-project", "trusty-search", "trusty-agents"] }
+  { "indexes": ["my-project", "trusty-search", "trusty-agents"],
+    "parked": [{ "id": "old-wt", "root_path": "/repo/.claude/worktrees/old-wt",
+                 "root_state": "orphaned" }] }
   ```
+  - `indexes`: the resident ids.
+  - `parked` (#8727): every registered-but-not-resident id — the rest of the
+    set `POST /indexes`'s overlap check consults. `root_state` is the
+    `/registry/orphans` classification (`present` / `orphaned` /
+    `indeterminate`). Also on `?details=true`; a `?repo_identity=` filter
+    narrows it to that repo's rows. Omitted when nothing is
+    parked, so a consumer must treat it as optional.
 
 ##### `POST /indexes`
 
@@ -234,6 +243,36 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 400** `invalid_exclude_glob` (#8922): an `exclude_globs` entry
+  does not parse. Nothing is registered. `PATCH /indexes/:id/config` refuses
+  the same way.
+- **Response 409** (#8499): the index store would land inside the git work
+  tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
+  repository (not only under `<root_path>`), or the default data dir under a
+  root such as `$HOME`. Outside any repository the root itself is the bound.
+  A linked worktree or submodule is its own work tree. An id already in
+  `indexes.toml` at the same root is exempt only while its store already
+  exists there; a missing store is never created. Nothing is registered and no
+  store is written. `PATCH /indexes/:id` refuses a new root the same way, and
+  also answers `409` while a reindex holds that index.
+- **Response 503** `index_corpus_unavailable` (#8499): the store is still
+  open under an earlier registration of the same index (a deferred embed job
+  or an unfinished delete close). Carries `index_id`, `failure_kind`, and
+  `retryable: true`; nothing is registered. Retry.
+
+Concurrent registrations and relocates wait for each other only when they
+share an id or their roots are equal or nested; unrelated roots register in
+parallel.
+
+**Storage placement (#8499).** A new index keeps its store in the data dir
+(`<data_dir>/indexes/<id>/`), outside the work tree, so `git reset --hard` plus
+`git clean -fdx` cannot delete it. Registration never reads or writes the
+repository's `.gitignore`. A root whose `.trusty-search/` already holds an
+index file (a pre-#8499 index, or an off-box artifact below) is adopted in
+place; that directory then carries its own `.gitignore` (`*`), which hides it
+from `git status` and `git clean -fd` but not from `git clean -fdx`. To move
+such an index out of the work tree, `DELETE /indexes/:id?delete_data=true`
+and register it again.
 
 ###### Off-box per-index delivery (issue #8135)
 
@@ -266,9 +305,23 @@ version does not.
 `delete_data`) followed by `POST /indexes` with the same `id`/`root_path` is
 the supported way to swap a registration's data while the daemon keeps
 running. `DELETE` (via `unregister_index`) always stops that index's
-filesystem watcher and drops its in-memory handle — and with it the redb
-file lock — before returning, so the following `POST` reopens the corpus
-cleanly. Skipping the `DELETE` and dropping a handle out-of-process (or
+filesystem watcher and drops its in-memory handle before returning. A
+delete that answers `quiesced: true` also closes the redb corpus and unmaps
+`hnsw.usearch` first, even while another handle clone survives it (#8167,
+#8232), so the files can then be replaced and the root unmounted. A delete
+that lands during a detached corpus rehydrate (#3683) first waits up to 30 s
+for the scan, without blocking searches; a scan still running then answers
+`500` with a `rehydrate` reason and nothing changed — re-issue the delete. A
+delete that answers `quiesced: false` could not close the files, because a
+live writer still holds them. The id is already deregistered, so a second
+delete answers `404` and cannot help. Instead the daemon closes the files in
+the background once that writer finishes, and the response says nothing
+about it: do not replace the files or unmount until the daemon log shows
+`delete[<id>]: deferred close done`. An ERROR line starting
+`delete[<id>]: deferred close` means they stayed open. Re-registering or
+writing to the same index id waits until `delete[<id>]: deferred close done`
+is logged, because the queued deferred close holds the teardown lock queue.
+Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
@@ -374,6 +427,7 @@ Per-index stats.
   {
     "index_id": "my-project",
     "root_path": "/Users/me/code/my-project",
+    "status": "ready",
     "chunk_count": 14823,
     "watcher": {
       "active": true,
@@ -382,6 +436,21 @@ Per-index stats.
     }
   }
   ```
+  - `status`: one of four values, checked in this order.
+    - `"indexing"` — a reindex task is running for this index.
+    - `"held"` (#9059) — an `exclude_globs` entry does not parse (a glob
+      restored from `indexes.toml`; entry points reject one). The index
+      serves reads but indexes nothing: watcher saves, `index-file`, rescans,
+      boot reconcile and reindexes all refuse. `last_walk_error` names the
+      glob, and `GET /indexes/:id/config` lists it in `invalid_exclude_globs`.
+      A `PATCH /indexes/:id/config` with valid globs lifts it, no restart,
+      and starts a catch-up reindex for the changes refused while held. The
+      PATCH response reports it as `catch_up_reindex` (`started`, then
+      `stream_url` or the refusal `reason`).
+    - `"degraded"` (#8134) — a stage in `stages` has `failed`, or
+      `migration_error` is non-null. Both fields name the cause. An index
+      that restored vectors over an empty corpus reports this, not `ready`.
+    - `"ready"` — neither of the above.
   - `watcher` (issue #3408): `active` is whether a live OS-level watcher is
     currently running for this index. `network_mount_degraded` is `true` when
     the watcher was refused because `root_path` was detected as
@@ -547,6 +616,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
   returns `200` and degrades to whatever lanes are ready, reporting that via
   the `meta` flags above.
 
+  **Embed-only trigger (#8148).** `PATCH /indexes/{id}/config {"vector": true}`
+  is also how a corpus that was registered with unembedded chunks gets its
+  vectors, with no full reindex: when the lane is ALREADY enabled and the
+  semantic stage is `pending` or `failed`, the PATCH queues the same C2 embed
+  pass a reindex queues and answers `components.catch_up_started: true`. The
+  pass waits for the one background permit, so re-arming many indexes runs
+  their passes one at a time, and it sets the `deferred_embed_pending` marker,
+  so a restart re-arms an interrupted pass. It stays a no-op
+  (`catch_up_started: false`) once the stage is `ready` or a pass is already
+  `in_progress`. A `500` from a failed `indexes.toml` write still starts the
+  requested catch-up, because the in-memory config it serves is live.
+
   **Facet routing (#5069).** Before refusing, the daemon looks for a sibling
   index carrying the same `PersistedIndex::repo_identity` that was built with
   the vector component enabled, loads it, and runs the caller's own query there
@@ -587,8 +668,38 @@ Add or replace one file in the index.
   ```
 - **Response 200**:
   ```json
-  { "index_id": "my-project", "path": "src/auth.rs", "indexed": true }
+  { "index_id": "my-project", "path": "src/auth.rs", "indexed": true, "chunks": 3 }
   ```
+  - `indexed` (#8976): `true` only when the file's chunks landed. A write
+    that produced no chunks answers `200` with `indexed: false`, `chunks: 0`,
+    and `reason`: `empty_file` (blank content), `too_large` (a `.json` file
+    above the 50-window ceiling of 10,000 lines; owner ruling item 232, Q1(b)),
+    or `no_chunks` (non-blank content the chunker could not split; also logged
+    at WARN). A reindex keeps the content hash of an `empty_file` or
+    `too_large` file, so it is not re-read on every run.
+  - Tombstone exemption (owner ruling item 232, Q2): a tombstone write removes
+    the file's chunks and answers `indexed: true`, `chunks: 0`,
+    `removed: true`. It is the one reply where `indexed: true` comes with zero
+    chunks.
+  - `chunks` (#8976): chunks the write committed.
+- **Response 403** `index_file_excluded` (#8922): the write is refused and
+  nothing is indexed. `reason` is `excluded_path` — the reindex walker would
+  skip this path (`exclude_globs`, `extensions`, `include_paths`,
+  `path_filter`, ignore files when the file is on disk, skip dirs, source
+  extensions, size caps measured on `content`, or a `..` segment) — or
+  `sops_encrypted` — the content is a sops-encrypted file. Either way any
+  chunks an earlier write left for the path are removed (`removed_chunks`).
+  Carries `indexed: false` and `chunks: 0`. A tombstone write is never refused.
+- **Response 503** `index_file_admission_undetermined` (#8922): the
+  filesystem could not say whether the path is admitted (an unresolvable
+  symlink, a permission error). Nothing is indexed or removed;
+  `retryable: true`.
+- **Response 409** `index_held` (#9059): the index is held because an
+  `exclude_globs` entry does not parse. Nothing is indexed or removed.
+  `reason: "invalid_exclude_glob"`, the patterns in `invalid_exclude_globs`,
+  `retryable: false`; fix them with `PATCH /indexes/:id/config`.
+- **Response 500** `index_file_failed`: the write did not land (quarantine,
+  chunk cap, embed failure). Carries `indexed: false` and `message`.
 
 ##### `POST /indexes/:id/remove-file`
 
@@ -703,6 +814,22 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
     "stream_url": "/indexes/my-project/reindex/stream"
   }
   ```
+- **Response 409** `index_write_quarantined` (#8105): the index's durable
+  corpus failed to open, so a reindex could persist nothing. Nothing is
+  queued. The body carries `index_id`, `failure_kind`, `queued: false`,
+  `retryable: false`, and a `message` naming the quarantine. Restart the
+  daemon to clear it: a successful corpus open lifts the quarantine.
+- **Response 409** `reindex_already_running` (#8889): a reindex of this index
+  is already running. Nothing is queued and the running job's progress entry
+  is untouched. The body carries `index_id`, `running` (`run_id`, `origin`,
+  `started_unix_ms`, `force`), that job's `stream_url`, `queued: false`, and
+  `retryable: true`. Follow the stream, or retry after it ends.
+- **Response 503** `reindex_guard_unavailable` (#8889): the one-reindex guard
+  could not be checked, so the reindex is refused rather than started
+  unguarded. `retryable: false`; restart the daemon.
+- **Response 409** `index_held` (#9059): an `exclude_globs` entry does not
+  parse, so the index takes no reindex. Same body as `index-file`'s 409, plus
+  `queued: false`. Fix the globs with `PATCH /indexes/:id/config`.
 
 ##### `GET /indexes/:id/reindex/stream`
 
@@ -843,7 +970,7 @@ this table is generated from it, not maintained by hand.
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
-| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
+| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
 | `index_status` | `index_id?` | Get stats for an index (chunk count, root path). |
 | `list_chunks` | `index_id`, `after?`, `full?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?` | Paginated enumeration of every chunk in an index (issue #54). |
 | `list_indexes` | — | List all registered indexes on this daemon |
@@ -1375,10 +1502,11 @@ it with `ORT_DYLIB_PATH`. Always pair `--features cuda` with
 # Build trusty-search without bundled ORT (load-dynamic path)
 cargo install trusty-search --no-default-features --features cuda
 
-# Install ONNX Runtime GPU 1.20.x (built against glibc 2.31, runs on 2.34+)
-curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz \
+# Install ONNX Runtime GPU 1.24.x — ort 2.0.0-rc.12 (api-24) refuses any
+# older runtime (#8612)
+curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu-1.24.2.tgz \
   | sudo tar xz -C /opt
-sudo ln -s /opt/onnxruntime-linux-x64-gpu-1.20.1 /opt/onnxruntime
+sudo ln -s /opt/onnxruntime-linux-x64-gpu-1.24.2 /opt/onnxruntime
 
 # Point ort at the dynamic library and start the daemon
 export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so

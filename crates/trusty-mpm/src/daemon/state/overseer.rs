@@ -137,6 +137,26 @@ pub(super) fn logs_dir() -> PathBuf {
     FrameworkPaths::default().root.join("logs")
 }
 
+/// The framework root [`DaemonState::new`](super::DaemonState::new) builds under.
+///
+/// Why (#8545): ~150 lib tests build `DaemonState::new()`, so the real
+/// `~/.trusty-mpm` took their overseer audit writes and, under
+/// `manager-memory`, the portfolio palace.
+/// What: production resolves `FrameworkPaths::default().root`, as before; the
+/// lib test binary gets a fresh temp dir per call, leaked like
+/// `with_session_manager`'s and reaped by the `tm-test-*` sweep.
+/// Test: `new_never_writes_under_the_real_home`.
+#[cfg(not(test))]
+pub(super) fn default_framework_root() -> PathBuf {
+    FrameworkPaths::default().root
+}
+
+/// Test-binary arm of the production `default_framework_root` (#8545).
+#[cfg(test)]
+pub(super) fn default_framework_root() -> PathBuf {
+    crate::test_support::hermetic_temp_dir().keep()
+}
+
 /// Build an [`AuditLogger`] under `root/logs`.
 ///
 /// Why: both `DaemonState::new` and `DaemonState::with_paths` need an audit

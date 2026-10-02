@@ -116,3 +116,26 @@ fn non_mapping_yaml_yields_no_document() {
     assert!(yaml_document("").is_none());
     assert!(yaml_document("just-a-scalar\n").is_none());
 }
+
+/// #8261: the build-lease keys under `[builders]` are known, not typos.
+#[test]
+fn build_lease_keys_are_not_reported() {
+    let text = "[builders]\nmax_concurrent = 2\nmemory_pressure_max = \"warn\"\nlease_wait_secs = 30\n\
+                heavy_build_commands = [\"cargo test\"]\ncount_foreign_builds = false\n\
+                min_available_pct = 5\nmax_concurent = 3\n";
+    let raw = toml_document(text).expect("toml");
+    let parsed: MpmConfig = toml::from_str(text).expect("parse");
+    assert_eq!(
+        unknown_key_paths(&raw, &parsed),
+        vec!["builders.max_concurent".to_string()]
+    );
+}
+
+/// #9091: `[accounts]` is read by `core::gh_org_accounts`, so it is known.
+#[test]
+fn accounts_table_is_not_reported() {
+    assert_eq!(
+        mpm_unknown("[accounts]\nduettoresearch = \"bob-duetto\"\n\n[acounts]\nx = \"y\"\n"),
+        vec!["acounts".to_string()]
+    );
+}

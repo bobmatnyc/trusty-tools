@@ -19,7 +19,7 @@
 //! real `SessionRegistry` admission path with cap=3, zero stagger, and asserts
 //! it admits 3 and rejects the 4th.
 //! Test: this file IS the WI-5 gate. Run with
-//! `cargo test -p trusty-mpm --test auth_cost`.
+//! `cargo test -p trusty-mpm --test env_serial auth_cost::`.
 
 use std::path::Path;
 

@@ -66,6 +66,9 @@ pub(crate) enum DeleteReport {
         prior_state: String,
         /// True when removed via the project-session store fallback.
         local: bool,
+        /// #8935: the daemon's note that a live tmux session carrying the
+        /// record's name was left running; `None` when no such session exists.
+        note: Option<String>,
     },
     /// The id was in neither the managed store nor the project-session store.
     NotFound,
@@ -215,16 +218,15 @@ pub(crate) fn errored_confirm_ask(name: &str) -> String {
 /// Test: the `picker_delete_*` and `stop_then_delete_*` round trips in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn route_delete(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     force: bool,
     stop_first: bool,
 ) -> anyhow::Result<DeleteReport> {
     if stop_first {
-        stop_then_delete(client, url, id, force).await
+        stop_then_delete(daemon, id, force).await
     } else {
-        delete_managed_then_local(client, url, id, force).await
+        delete_managed_then_local(daemon, id, force).await
     }
 }
 
@@ -247,14 +249,13 @@ pub(crate) async fn route_delete(
 /// `picker_and_verb_route_each_state_identically` in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn route_delete_for_state(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     state: Option<&str>,
     force: bool,
 ) -> anyhow::Result<DeleteReport> {
     let stop_first = state.is_some_and(|s| delete_route_flags(s).1);
-    route_delete(client, url, id, force, stop_first).await
+    route_delete(daemon, id, force, stop_first).await
 }
 
 /// Read a managed record's persisted state, for routing its delete (#7388).
@@ -272,12 +273,11 @@ pub(crate) async fn route_delete_for_state(
 /// `verb_delete_issues_no_stop_when_the_id_is_not_a_managed_record` in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn managed_state_for_delete(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+    let resp = daemon
+        .get(format!("/api/v1/sessions/managed/{id}"))
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -384,14 +384,13 @@ pub(crate) fn local_session_needs_force(status: SessionStatus) -> bool {
 /// via [`classify_managed_delete`]; the local guard's real-HTTP round trip is
 /// covered by `local_delete_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn delete_managed_then_local(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     force: bool,
 ) -> anyhow::Result<DeleteReport> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/delete"))
-        .query(&[("force", force.to_string())])
+    let resp = daemon
+        .post(format!("/api/v1/sessions/managed/{id}/delete"))
+        .query(&[("force", force)])
         .send()
         .await?;
     match classify_managed_delete(resp.status()) {
@@ -407,16 +406,22 @@ pub(crate) async fn delete_managed_then_local(
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
                 .to_string();
+            // #8935: delete is record-only; carry the daemon's left-running note.
+            let note = body
+                .get("runtime_left_running")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             Ok(DeleteReport::Deleted {
                 name,
                 prior_state,
                 local: false,
+                note,
             })
         }
         ManagedDeleteNext::Refused => {
             Ok(DeleteReport::Refused(resp.text().await.unwrap_or_default()))
         }
-        ManagedDeleteNext::FallbackLocal => delete_local(client, url, id, force).await,
+        ManagedDeleteNext::FallbackLocal => delete_local(daemon, id, force).await,
         ManagedDeleteNext::Error => {
             // `resp` is guaranteed non-2xx here (every 2xx/404/409 status is
             // handled by the arms above), so build the error directly instead
@@ -448,13 +453,12 @@ pub(crate) async fn delete_managed_then_local(
 /// `stop_then_delete_never_deletes_after_a_failed_stop` in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn stop_then_delete(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     force: bool,
 ) -> anyhow::Result<DeleteReport> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/runtime-stop"))
+    let resp = daemon
+        .post(format!("/api/v1/sessions/managed/{id}/runtime-stop"))
         .send()
         .await?;
     let status = resp.status();
@@ -465,7 +469,7 @@ pub(crate) async fn stop_then_delete(
             body.trim()
         )));
     }
-    delete_managed_then_local(client, url, id, force).await
+    delete_managed_then_local(daemon, id, force).await
 }
 
 /// Delete a project-session record via `DELETE /sessions/{id}` (the local path),
@@ -491,12 +495,11 @@ pub(crate) async fn stop_then_delete(
 /// `local_delete_force_bypasses_guard_on_running_session` (real-HTTP round trip
 /// against a loopback daemon) in `tests_behavior_d_tests.rs`.
 async fn delete_local(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: &str,
     force: bool,
 ) -> anyhow::Result<DeleteReport> {
-    let get_resp = client.get(format!("{url}/sessions/{id}")).send().await?;
+    let get_resp = daemon.get(format!("/sessions/{id}")).send().await?;
     if get_resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(DeleteReport::NotFound);
     }
@@ -509,7 +512,7 @@ async fn delete_local(
         )));
     }
 
-    let resp = client.delete(format!("{url}/sessions/{id}")).send().await?;
+    let resp = daemon.delete(format!("/sessions/{id}")).send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(DeleteReport::NotFound);
     }
@@ -518,6 +521,7 @@ async fn delete_local(
         name: id.to_string(),
         prior_state,
         local: true,
+        note: None,
     })
 }
 
@@ -538,8 +542,7 @@ async fn delete_local(
 /// Test: stdin/HTTP path is side-effect-only (manual smoke + e2e); the pure
 /// confirm/route/guard seams it composes are unit-tested (see module doc).
 pub(crate) async fn confirm_and_delete(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &ManagedSessionSummary,
 ) -> anyhow::Result<bool> {
     let (force, stop_first) = delete_route_flags(&session.state);
@@ -582,7 +585,7 @@ pub(crate) async fn confirm_and_delete(
         return Ok(false);
     }
 
-    delete_confirmed(client, url, session).await
+    delete_confirmed(daemon, session).await
 }
 
 /// Route an already-confirmed delete and report what the daemon did (#7224).
@@ -601,18 +604,18 @@ pub(crate) async fn confirm_and_delete(
 /// `picker_delete_issues_no_stop_for_a_non_errored_row` in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn delete_confirmed(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     session: &ManagedSessionSummary,
 ) -> anyhow::Result<bool> {
     // #7388: routes through the same seam `tm session delete <id>` uses, so the
     // two surfaces cannot answer the same state differently.
     let (force, _) = delete_route_flags(&session.state);
-    match route_delete_for_state(client, url, &session.id, Some(&session.state), force).await? {
+    match route_delete_for_state(daemon, &session.id, Some(&session.state), force).await? {
         DeleteReport::Deleted {
             name,
             prior_state,
             local,
+            note,
         } => {
             if local {
                 eprintln!(
@@ -625,6 +628,10 @@ pub(crate) async fn delete_confirmed(
                     "tm: '{name}' [was {prior_state}] marked --deleted-- \
                      (still listed; `tm sessions prune --state deleted` to remove)."
                 );
+            }
+            // #8935: record-only — say a live session with the name was kept.
+            if let Some(note) = note {
+                eprintln!("tm: record only: {note}.");
             }
             Ok(true)
         }

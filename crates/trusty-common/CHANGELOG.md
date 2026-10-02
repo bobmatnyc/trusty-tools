@@ -6,6 +6,188 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.0] — 2026-10-02
+
+### Breaking
+
+- `uds::server::RpcError` and `search_rpc::SearchRpcError` each gain a public `data: Option<serde_json::Value>` field. Code that builds either with a struct literal, or destructures one without `..`, must add the field; `RpcError::new` and the other constructors are unchanged (#6285).
+- `memory_core::store::hnsw_store::HnswStoreError` gains the variant `WriteDeadline`, for a palace write transaction that stalls past its deadline. The enum is public and not `#[non_exhaustive]`, so an exhaustive `match` on it must add an arm (#8749).
+- The `embedder-test-support` feature no longer enables `embedder`. A crate that relied on it to get the embedder must enable `embedder` itself; see Changed (#8838).
+- The `symgraph::server` module and the `symgraph-server` cargo feature are removed; see Removed (#8926).
+
+### Added
+
+- `uds::server::RpcError` now carries JSON-RPC 2.0's optional `data` member, set with the new `RpcError::with_data` builder. It is omitted from the frame when unset, and a frame from an older peer with no `data` still parses (#6285).
+- `search_rpc::SearchRpcError` carries the daemon's `data` member, so `search_rpc::call_at` callers read a refusal's structured detail, not only its code and message (#6285).
+- `memory_pressure::read_memory_pressure` (feature `memory-pressure`) reads the kernel's own memory-pressure verdict — macOS `kern.memorystatus_vm_pressure_level` and `kern.memorystatus_level` via `sysctlbyname`, Linux cgroup v2 `memory.pressure` inside a container, host PSI `/proc/pressure/memory`, or `MemAvailable / MemTotal` without PSI — as a normal/warn/critical level with every raw signal attached (#8261). Nothing is guessed: an unreadable source is an error the caller decides on.
+- `content::resolve` (feature `content-resolver`) is the runtime resolver for instructional content (ADR-0064, #8378). A trusty-tools checkout wins when one is found from the start directory or named explicitly; otherwise `content-lock.toml` pins a `content-vX.Y.Z` tag and a sha256, and the cached `<tag>.tar.gz` is hashed, checked against the lock, checked against its own `bundle-manifest.toml` tag, and unpacked in memory. A missing or unreadable lock, a missing bundle, a sha256 mismatch, a tag mismatch, a malformed archive and an incomplete named checkout each return a typed `ContentError`; none falls back to another source. `ContentLock` loads and atomically stores the lock.
+- The content resolver's hardening (#8378 review): a checkout is detected only at the enclosing repository root (the walk stops at the first `.git`), and is trusted only with a `.git` marker, a `Cargo.toml` holding a `[workspace]` table and, on unix, a root, `.git` and `Cargo.toml` all owned by the current effective uid in a root that is not world-writable (group write is allowed), so a tree planted under a shared directory such as `/tmp` is never served, not even to root (`ContentError::UntrustedCheckout`). A bundle is refused as `BundleCorrupt` for a duplicate entry (`./a` and `a` included), and as `BundleTooLarge` over `MAX_BUNDLE_BYTES` (64 MiB), `MAX_UNPACKED_BYTES` (256 MiB) or `MAX_BUNDLE_ENTRIES` (20,000). `MAX_UNPACKED_BYTES` counts each entry's size as tar reads it, a pax `size=` override included, and the decompressed stream itself is capped at that plus 4 KiB per permitted entry, so oversized pax or GNU long-name records are refused too. Dev mode serves only regular files reached through real directories; a symlink, a directory or a dot-file is `NotFound`. `DevOverride`, `ResolveOptions` and `ContentSource` are `#[non_exhaustive]`; build options with `ResolveOptions::new`.
+- `integrity::Sha256Digest` (feature `integrity`) parses a digest or a `sha256sum` sidecar line, hashes bytes or a file, and verifies against a pinned digest. It is the one sha256 implementation; trusty-installer's pinned downloads now call it (#8378).
+- `content::resolve` refuses a bundle whose `bundle-manifest.toml` declares a
+  `schema_major` newer than `SUPPORTED_SCHEMA_MAJOR` (1) with the new
+  `ContentError::UnsupportedSchema`, and refuses a manifest with no
+  `schema_major` as `BundleCorrupt` (ADR-0064 PHASE_3 (iv)). The major is
+  read before the rest of the manifest, so a newer layout that renames a key
+  is refused as `UnsupportedSchema`, not as `BundleCorrupt`.
+- `content::validate_tag` is public, so a caller can refuse a malformed
+  `content-vX.Y.Z` tag before it builds a download URL from it.
+- `uds::server::request_peer_pid()` returns the kernel-reported pid of the
+  process whose request a socket handler is serving, or `None` outside a
+  socket dispatch. A handler can bind a privilege to the caller's process
+  instead of a caller-written parameter (#8531).
+- `uds::server::request_peer()` returns that pid with the instant the
+  connection was accepted, stamped before the request frame is read, so a
+  consumer can refuse a process that took the pid over later (#8531).
+
+### Fixed
+
+- The `bug-capture` error store (`errors.jsonl`) no longer grows without bound. The live file rotates to `errors.jsonl.1` at 4 MiB and at most two rotated files are kept; an oversized pre-fix file keeps only its newest 4 MiB when first rotated. When a rotation fails, the store stops writing to disk and counts the refusal (`ErrorStore::refused_disk_writes`) instead of growing the file; records stay in memory and the next append retries.
+- Concurrent writers no longer corrupt `errors.jsonl`. Each record is written as one full line in a single append, so records from separate processes cannot fuse into one line.
+- A malformed line in `errors.jsonl`, including invalid UTF-8, is skipped and counted (`ErrorStore::corrupt_lines_skipped`) and no longer empties the whole read. Readers also load records from the rotated files.
+- Compacting an oversized pre-fix `errors.jsonl` no longer loses records that other processes append while it runs. The live file is renamed aside first, so new appends start a fresh file, and bytes written through an already-open descriptor are copied into the compacted slot. When the compaction fails, the whole file moves into `errors.jsonl.1` instead; no failure path deletes a record.
+- `ErrorStore::append` no longer holds the store lock while it waits for the rotation lock or writes to disk, and that wait is capped at 50 ms instead of 2 s. A stuck rotation-lock holder no longer delays every other ERROR event and every reader of the store.
+- Reading a store while it rotates no longer returns the same records twice, so the multi-store bug-report view no longer double-counts them.
+- The search-index registry confirm poll (feature `search-index`) now reads its deadline from an injected clock, so its test drives the poll schedule on a stepped clock instead of the wall clock. The test no longer flakes when one slow registry read under CI load spends the whole deadline (#8284). Production behaviour is unchanged.
+- `uds::rpc` clients no longer fail an exchange with `half-close … Socket is not connected (os error 57)` on macOS when the daemon replies and closes before the client shuts down its write side. `ENOTCONN` from that shutdown now means the peer already closed, and the response read decides the outcome: the buffered reply, or `NoResponse` (#8464). This was the intermittent `memory_verbs_socket` failure in `tm memory recall|remember|note`.
+- `memory_core`: a palace redb write transaction that stalls past its deadline is rolled back instead of committed, so it releases redb's write lock and the palace commit-order guard and the next writer proceeds. The deadline lives in the new shared `store::write_deadline::DeadlinedWrite`, checked between ops and before commit on every kg.redb write and on the vector store's `compact_orphans` / `unalias` sweeps. The abort surfaces as the typed `WriteTxnError::DeadlineExceeded` (also `HnswStoreError::WriteDeadline`), including to every caller queued in the aborted `KgWriter` batch, and is logged at warn with the palace id and how long the lock was held. Default 30 s, overridable with `TRUSTY_WRITE_TXN_DEADLINE_SECS`; a value of zero or at/above the write-pipeline ceiling or the write-lock wait (`TRUSTY_WRITE_LOCK_TIMEOUT_SECS`) falls back to the default with a warning logged once per process. The write-pipeline ceiling's floor warning is also logged once per process now that it is read on every write transaction. A stall inside one redb call (one op, or `commit()`'s fsync) still cannot be interrupted (#8749).
+- `memory_core`: a writer that gives up waiting now fails with the typed `timeouts::WriteTimeout` — `LockWait` for the palace write mutex, `PipelineBudget` for the write-pipeline ceiling — with the same message text as before (#8749).
+
+### Changed
+
+- The `embedder-test-support` feature no longer implies `embedder`. On its own it compiles nothing and pulls no ONNX; it exposes `MockEmbedder` and `seed_shared_embedder_with_mock` only alongside `embedder` or `memory-core`. A crate that enabled `embedder-test-support` alone to get the embedder must now name `embedder` as well — every in-workspace consumer already does.
+- `content::DEV_CLASS_SOURCES` now lists bundle destinations under the three content classes, `agents`, `skills` and `instructions` (owner ruling 2026-10-01, #8378). The former classes `output-styles`, `sm_instructions` and `harness_understanding` are served as `instructions/output-styles/`, `instructions/sm_instructions/` and `instructions/harness_understanding/`, read from the same crate directories as before. In a checkout, `ResolvedContent::list("instructions")` includes those subfolders and `list("instructions/output-styles")` lists one of them; `read("output-styles/…")` now finds nothing in a checkout or in a bundle built after this change, and `list("output-styles")` returns the new `ContentError::UnknownClass` in both backings, as does any first path segment other than the three classes.
+
+### Removed
+
+- BREAKING (public API): deleted the `symgraph::server` module (`AppState`, `router`, `serve`, `DEFAULT_PORT`, `ApiError`) and the `symgraph-server` cargo feature. The module bound `0.0.0.0` and had no caller in the workspace; only the console may bind TCP (ADR-0032). Refs [#8926](https://github.com/bobmatnyc/trusty-tools/issues/8926)
+
+## [0.52.7] — 2026-09-28
+
+### Breaking
+
+- trusty-common 0.52.7 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-common-0.52.7.txt` (Refs #8699).
+
+### Added
+
+- `daemon_guard::start_in_new_session(&mut Command)` makes a spawned process lead a new session (`setsid` in a `pre_exec` hook, Unix; a no-op elsewhere), for a daemon start that needs its own stdio or cwd and so cannot use `spawn_detached`. Combined with `Command::process_group` the spawn fails with `EPERM`, because a group leader cannot call `setsid` (#8783).
+
+### Fixed
+
+- Tests that write `HOME`, `OLLAMA_HOST` or the memory-core timeout knobs now share one serialization domain with every other writer and reader of the same variable: every `HOME` reader and writer in the lib tests (`update`, `workspace_layout`, `bin_resolve`, `launchd`, `catchup`, `search_index`, `embedder`) holds `data_dir::ENV_LOCK`, `update/tests.rs`'s private lock is gone, `memory_core::timeouts` takes the same lock, and the `OLLAMA_HOST` writers share `dotenv_credential_env` (#5937). Test-only.
+- The env-lock ratchet now accepts only the exact path `crate::data_dir::ENV_LOCK` (or a `use` of it) and fails on any new private env mutex in the lib target (#5937). Test-only.
+- `FileKeyStore::try_get` now returns an `Io` or `Toml` error when the credential file exists but cannot be read or parsed, instead of reporting the credential as absent. A missing file still reads as an empty store, and `get` keeps its `None`-on-failure contract (#8569).
+- `FileKeyStore::set` and `unset` now hold an exclusive advisory lock on a `0600` `credentials.toml.lock` beside the store across the read, modify and atomic write, so concurrent writers in separate processes no longer lose each other's keys. A writer waits at most 10 seconds for a live holder, then fails with a `TimedOut` I/O error; the kernel releases the lock when a holder process dies (#8569).
+- The stdio embedder client now restarts a sidecar that answers only requests that have already timed out. Only a reply to a still-pending request resets the wedge counter or re-arms the call deadline; a late or orphan reply does neither. Before this, a sidecar working through abandoned requests at high CPU reset the counter on every late reply and never tripped the three-timeout wedge restart (#8600).
+- With several embed requests in flight, a sidecar that never answers the oldest one while it keeps answering newer ones now times the oldest out and trips the wedge restart. The call deadline belongs to the oldest pending request and re-arms only when that request resolves or times out, and only a reply that resolves the oldest pending request resets the wedge counter. Before, every reply to a newer request re-armed the shared deadline, so the stuck request never timed out (#8600).
+- `PersistedDreamStats::save` now publishes `dream_stats.json` through `atomic_file::write_atomic` (sibling temp file, `fsync`, rename) instead of a truncating `fs::write`. A concurrent `load` no longer reads an empty or partial file (`EOF while parsing a value`), and a failed save leaves the previous snapshot intact (#8733).
+- `atomic_file::write_atomic` now stages each call in its own `<name>.<pid>.<n>.tm-tmp` file, opened with `create_new`, instead of one shared `<path>.tm-tmp`. Two concurrent writers to one path each publish a complete file, and neither fails with `ENOENT`. Before, one writer could truncate the other's staging file, so a partial file was published. This covers every caller: the dream stats snapshot, `codex_config`, and the `tm doctor` LaunchAgent repair (#8733).
+- `atomic_file::write_atomic` creates its staging file with mode `0600` on Unix, so a copy stranded by a crash between the write and the rename is owner-only. The published file keeps the target's existing mode, and a new target still gets the plain-create default (`0666 & !umask`) (#8733).
+- Two daemons binding the same socket through `uds::bind_singleton_hardened` at the same time can no longer both succeed. The whole probe, takeover and bind now runs under an exclusive lock on `<socket>.lock`; a second binder that finds the lock held refuses with the new `UdsSecurityError::BindInProgress`, and one that cannot take the lock refuses with `UdsSecurityError::BindLock` instead of binding unlocked (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- The singleton bind lock at `<socket>.lock` is never followed through a symlink, and a lock path holding anything but a regular file (a symlink, directory or FIFO) refuses the bind with `UdsSecurityError::BindLock` naming that path, so a planted link can no longer make the bind create or lock a file elsewhere (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- A daemon started through `daemon_guard::spawn_detached` or `spawn_current_exe` (and their `_forwarding_parent_link` forms) now starts in its own session (`setsid`, Unix), so a SIGKILL or Ctrl-C aimed at the spawning CLI's process group no longer kills it (#8783).
+- A detached `uds::UdsServiceSupervisor` child (`SupervisorConfig::with_detached`, used for the on-demand trusty-analyze daemon) now starts in its own session too, so it outlives a group kill or Ctrl-C aimed at its caller. A supervised child stays in the caller's group (#8783).
+- The dream concurrency tests no longer read a peak of 3 against the cap of 2. `the_in_flight_gauge_counts_a_held_cycle` enters the process-wide in-flight gauge without a permit, so it now shares the `dream_permits` serial key with `ten_palaces_never_exceed_the_concurrency_cap` and `dream_permits_cap_concurrent_holders`. A test-only reset also rebases the peak mark before the cap test measures (#8835). Test-only.
+- `dream_cycles_peak_in_flight`'s doc comment linked `reset_dream_cycles_peak_in_flight_for_test` as an intra-doc link; that helper is `#[cfg(test)]`-only, so a non-test rustdoc build (the release pre-publish gate) never sees it and the link reported broken, failing both the rustdoc intra-doc-link gate and `check_contracts.sh` (Refs #8835). The reference is now plain backticks, no behaviour change.
+
+### Changed
+
+- Tests: nine previously `#[ignore]`d tests (filesystem, redb, fail-open, `cargo` probe) now run by default; the two recall-ranking tests use the real ONNX embedder in the pre-publish gate instead of silently seeding the mock; every remaining ignored test states its reason (refs #8787 audit).
+
+## [0.52.6] — 2026-09-27
+
+0.52.5 was tagged but never published.
+
+### Added
+
+- `memory_core::maintenance_log`: every drawer deleted by dream dedup, content prune, prune, room consolidation, `purge_expired` or the palace-open TTL sweep is appended to `<palace data_dir>/maintenance_deletions.jsonl` with the palace, drawer id, reason, pid and, for dedup, the surviving drawer id and cosine score. The journal rotates once at 4 MiB; the size check, rotation and append run under a cross-process lock, so concurrent writers never discard a generation. If the lock cannot be taken or the rotation fails, the record is appended without rotating. A failed append leaves the deletion in place and logs the full record at `error`. User deletions through `PalaceHandle::forget` are not recorded; maintenance paths call the new `PalaceHandle::forget_for_maintenance` (#8732).
+
+### Fixed
+
+- `memory_core`: a process that loses the maintenance lease now reports the holder's pid. Before, a loser that arrived between the winner's lock and its pid write reported no pid ("pid unknown") or the previous holder's stale pid. The lock attempt and the pid write or read now run under a sidecar `<data_root>/maintenance.lock.gate` lock, polled for at most 500 ms; past that bound the election proceeds ungated and only the reported pid can be missing (#8733).
+- `memory_core`: dream passes and the open-time TTL purge run in at most one process per data root. A new `MaintenanceLease` holds an exclusive `flock` on `<data_root>/maintenance.lock` for the holder's lifetime; `PalaceRegistry::with_maintenance_lease` gates the dream loop and every registry open on it. A non-holder retries each tick and takes over when the holder exits. A lock file that cannot be created fails closed with a warn. The holder logs its pid at warn and writes it into the lock file (#8733).
+
+## [0.52.4] — 2026-09-26
+
+### Fixed
+
+- A palace reopen no longer waits on a write transaction that never finishes (#8314). The vector store's open is write-free once the file is initialised, and the open-time expired-drawer sweep waits at most 2 s for its deletes before the open proceeds, logging an error that names the palace and the operation. A read that has to reopen an evicted palace now answers with the last committed data instead of hanging.
+- The registry's reopen path no longer waits on a stuck write either (#8314). Room backfill and default-wing seeding at open begin no write when every row already exists, and otherwise run under the same 2 s bound; a skipped row is written on a later open.
+- Repeated reopens behind a stuck write no longer park one more helper thread each (#8314). At most one open-time write per database is outstanding; later opens skip their maintenance writes and log a warning until it finishes.
+- A write that exceeds its pipeline budget now logs an ERROR naming the palace and the `remember` operation, not only an error returned to a client that may already have given up (#8314).
+
+## [0.52.3] — 2026-09-25
+
+### Fixed
+
+- The memory secret filter (`check_secret`) no longer refuses relative source paths whose file or directory names are long CamelCase identifiers made of letters only, such as `src/main/java/com/example/ReservationForecastAdjustmentServiceImpl.java`. These paths were most of the memories a kuzu-memory import refused ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277), [#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+- A file name such as `BituKura.java` or `Oauth2ClientRegistration.java` now stores when its extension is 1 to 5 lowercase letters or digits and every word of its name opens with a capital (an acronym of up to 5 capitals counts), averages at least 4 letters, and the letters are at least 27% vowels, with at most one digit group and one single letter per `-`/`_`/`.` piece. A lowercase first word (`getUserId.java`), an acronym plus a short word (`GTSBejm.java`), and a name with a vowel-free word (`Http2ClientPool.java`) are still refused, because random keys take those shapes ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- A long CamelCase name now needs 27% vowels instead of 30% ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- These shapes now store: a GitHub noreply email (`12345+login@users.noreply.github.com`); `KEY=<url>` where the URL passes the ordinary-URL test and has no `user@` or `user:pass@`; an npm `name@1.2.3` path segment with a lowercase name and a semver version; and a ticket key with a CamelCase title (`AB-1234-FixRateLoader`) ([#277](https://github.com/bobmatnyc/trusty-tools/issues/277))
+- Google Docs, Sheets, Slides and Drive URLs (`https://docs.google.com/spreadsheets/d/<id>`) now store. The document id is admitted only in its URL position on `docs.google.com` or `drive.google.com`, and only at a length Google issues (19, 28, 33 or 44 characters, or an 86-character `2PACX-` published id). A bare id is still refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+### Changed
+
+- The memory secret filter (`check_secret`) no longer refuses a path for the shape of a short file name. A `<stem>.<ext>` file name whose stem is 19 characters or fewer now stores whatever its word shape (`GTSBejm.java`, `getUserId.java`, `Http2ClientPool.java`), provided each `-`/`_`/`.` piece of the stem has at most one digit group and one single letter, and the stem plus every other path segment, before or after it, that is not plain lowercase adds up to at most 19 characters. A provider-prefixed or AWS-key-id stem, a stem of 20 or more characters, and a short stem beside mixed-case segments that reach credential length are still refused. In a kuzu-memory import dry run this admits 2,163 of the 3,057 memories the filter still refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+### Security
+
+- The memory secret filter (`check_secret`) now screens the key of a `KEY=value` token the way it screens a bare token. A random 40-character key in front of a path, such as `<key>=src/main.rs`, was admitted because only the key's characters were checked; it is now refused ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+- The value of a `KEY=value` token is now screened the same way. A credential-shaped value with no `/`, such as `TOKEN=<base62 key>` or `TOKEN=<base64>==`, and a token with an empty key were admitted, although the value alone is refused; they are now refused. Ordinary values such as `LOG_LEVEL=debug`, `PORT=8080` and `RATE_SRC=src/main.rs` still store ([#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+## [0.52.2] — 2026-09-25
+
+### Documentation
+
+- `KnowledgeGraph::assert_sync`, `upsert_drawer_sync` and `store` docs no longer cite the removed `kuzu_migrate` tests; their `Test:` pointers name the room-backfill and Tier C tests that call them.
+
+## [0.52.1] — 2026-09-23
+
+### Added
+
+- `tmux::exact_session_target`, `exact_window_target`, `exact_pane_target`, `shell_exact_session_target`, `shell_attach_command`, `is_immutable_id` and `check_session_name` are the one place a tmux target is spelled. They normalize `:` and `.` in a session name to `_`, matching the name tmux actually stores (#8443).
+- `TmuxTarget::try_session`, `TmuxTarget::validate`, `TmuxCommand::validate_targets` and `TmuxTargetError` let a caller refuse an empty session name before tmux runs (#8443).
+
+### Fixed
+
+- Every tmux `-t` target that `tmux::tmux_argv` and `TmuxTarget::as_target` render is now exact: `=<name>` for the session verbs (`has-session`, `kill-session`, `rename-session`, `list-windows`, `set-environment`) and `=<name>:` for the window and pane verbs (`list-panes -s`, `send-keys`, `capture-pane`). A bare name let tmux prefix-match `tm-cto` onto a live `tm-cto-reports` and kill it. `$N`, `@N` and `%N` ids pass through unchanged (#8443).
+- An empty session name (or `=` alone) no longer renders `=:`, which tmux resolves to the current session; it renders a target that matches nothing, and `TmuxCommand::validate_targets` rejects it (#8443).
+
+## [0.52.0] — 2026-09-23
+
+This release lowers the tmux scrollback limit from 100,000 lines to 10,000. The lower limit removes the keystroke lag in tm sessions ([#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
+
+### Added
+
+- `load_average` module (feature `load-average`): the kernel's 1/5/15-minute load average from `getloadavg(3)` on macOS/BSD and `/proc/loadavg` on Linux, as a `Result` that never substitutes a guessed value for a failed reading. Builder admission needs a sustained saturation measure, which `host_metrics`' instantaneous `CpuMetrics::usage_pct` is not. Adds no crate to the lockfile (#8261).
+
+### Fixed
+
+- `launchd_secrets`'s module doc no longer links to the private `plist` submodule, which rustdoc could never resolve (#8236).
+- The shared Unix-socket client retries a transient dial a bounded number of times instead of surfacing the first `ENOENT` / `ECONNREFUSED` / `ENOTCONN` as a hard failure. Three attempts with a 20 ms doubling backoff by default; `uds::ConnectRetry` and `uds::send_framed_request_retrying` let a caller state its own bound. Every attempt logs through `tracing`, and an exhausted retry returns `UdsRpcError::ConnectRetriesExhausted`, naming the socket, the attempt count and the last OS error. `UdsRpcError::is_dial_failure` is the predicate that spans that wrapper and the bare `Dial` variant (#8267).
+- Half-closing the write side is its own failure now, `UdsRpcError::HalfClose`, and is never retried. `UdsRpcError::Write` covers the `write_all` + `flush` phase only, where a failure provably leaves the peer without a newline-terminated frame. Folding the two together would have let a retry re-send a request the daemon had already dispatched (#8267).
+
+### Changed
+
+- `DEFAULT_TMUX_HISTORY_LIMIT` is now 10,000 lines, down from 100,000. The larger value, with a long pane history, gave every tmux pane on the host seconds of lag per keystroke. `tmux.history_limit` in `~/.trusty-tools/trusty-mpm/config.yaml` still overrides it, with the 1,000-line floor unchanged (Refs [#8404](https://github.com/bobmatnyc/trusty-tools/issues/8404)).
+
+### Security
+
+- `credentials::resolve_env_var_bounded` is the one credential read a daemon may make: process environment, then `.env.local`, then the credential store. `.env` is deliberately not a tier — it is a committed file, and a credential in one is the same defect as a credential in a LaunchAgent plist (#8236).
+- Every resolution failure is now a typed `SecretResolveError` naming the variable and a value-free error KIND — absent, unregistered, timeout, or the store's own failure class — so a caller can tell "nothing is configured" from "the keychain refused". No arm falls back to a default or a stale value.
+- Store reads are bounded at 3 seconds, single-flight per key, and negative-cached for 45 seconds, with the reading thread detached rather than cancelled. Under launchd a rebuilt binary's first Keychain read blocks on a SecurityAgent dialog; the caller now gives up while the read keeps waiting, so a late approval still counts (#8236).
+- `credential_registry` is ungated, so the LaunchAgent plist scanner names a credential by registry membership rather than by a suffix guess on every feature set. Plist rewrites go through a new `atomic_file::write_atomic`, which fsyncs the temp file before the rename and the directory after it, so an interrupted repair cannot leave a half-written plist and a power loss cannot lose the published one.
+- `atomic_file::write_atomic` refuses a symlinked target. `rename(2)` replaces the link itself, so writing through one would sever an operator's symlink and silently leave the real file stale.
+- A store read that succeeds now clears that key's negative-cache entry instead of waiting out the 45-second window. A Keychain approval that lands after the caller gave up is picked up by the next resolve, which is what detaching the reader was for; previously the cached timeout discarded it.
+- A resolution failure reports whether it came from the negative cache or from a fresh read, so "approve the dialog" and "the suppression window is still open" are distinguishable by the caller.
+- That retirement now holds under concurrency: the negative-cache write and the outcome publish share one critical section, so a caller whose bound elapsed can no longer record a `Timeout` after the reader cleared one and leave a stale entry suppressing reads for the full 45 seconds while the approved value was already in hand.
+- Generated launchd plists no longer carry credential values. `LaunchdConfig::render_plist` drops any `EnvironmentVariables` entry whose key names a credential (logging the key, never the value) and refuses a `ProgramArguments` entry carrying a credential-shaped value — a plist is user-readable, so anything written there is readable by every process running as the user and by every backup (#8236).
+- New `launchd_secrets` module: credential-key and credential-value detection, the renderer's strip, and `scrub_plist_credential_env` for rewriting an already-installed plist in place. A plist it cannot parse is an error, never a silent "clean".
+
+### Documentation
+
+- `write_atomic`'s `Test:` pointer now sits in the Why/What/Test section, not inside its `# Code Contract` block, so the contract check computes a verdict again. `contracts.json` now carries the `write_atomic`, `is_credential_env_key` and `strip_credential_env` contracts. (#8236)
+
 ## [0.51.1] — 2026-09-18
 
 ### Changed

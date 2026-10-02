@@ -14,14 +14,11 @@
 //! Test: `tests` cover SHA-256 verify (match + tampered → error) and extraction
 //! (multi-binary archive). Real network calls are `#[ignore]`-tagged.
 
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
-use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
 /// Why a prebuilt download did not yield a verified artifact.
 ///
@@ -140,20 +137,21 @@ pub async fn download_and_verify(
     // Read and parse the expected hex digest (strip the optional filename suffix).
     let sha_content = std::fs::read_to_string(&sha_path)
         .with_context(|| format!("reading checksum file {}", sha_path.display()))?;
-    let expected_hex = parse_sha256_line(&sha_content)?;
+    let expected = parse_sha256_line(&sha_content)?;
 
     // Compute the actual digest.
-    let actual_hex = sha256_file(&tar_path)?;
+    let actual = sha256_file(&tar_path)?;
 
     // #5518: a typed variant, not a string — the caller must be able to tell a
     // tamper signal from a routine "no asset for this platform".
-    if actual_hex != expected_hex {
-        return Err(DownloadError::ChecksumMismatch {
+    // #8378: compared as validated digests, never as raw strings.
+    actual
+        .verify(&expected)
+        .map_err(|_| DownloadError::ChecksumMismatch {
             archive: archive_name.to_owned(),
-            expected: expected_hex,
-            actual: actual_hex,
-        });
-    }
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        })?;
 
     Ok(tar_path)
 }
@@ -163,23 +161,30 @@ pub async fn download_and_verify(
 /// Why: The `.sha256` files published by the release workflow follow the
 /// `shasum -a 256` / `sha256sum` format (`hex  filename`); we need just the hex.
 ///
-/// What: Trims whitespace, takes the first whitespace-delimited token, and
-/// validates it is a 64-character hex string.
+/// What: Delegates to trusty-common's
+/// `integrity::Sha256Digest::from_sidecar`, the one parse ADR-0064 decision 5
+/// (i) allows (#8378).
 ///
 /// Test: `tests::parse_sha256_line_*`.
-pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
-    let hex = content
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty checksum file"))?
-        .to_lowercase();
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "invalid SHA-256 hex (expected 64 hex chars, got {:?})",
-            hex
-        ));
-    }
-    Ok(hex)
+pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<Sha256Digest> {
+    Ok(Sha256Digest::from_sidecar(content)?)
+}
+
+/// The prefix GitHub's release-asset `digest` field puts on a SHA-256.
+const GITHUB_DIGEST_PREFIX: &str = "sha256:";
+
+/// Parse a caller-pinned digest: 64 hex digits, optionally `sha256:`-prefixed.
+///
+/// Why: compared as a raw string, a pin copied from GitHub's asset `digest`
+/// field (`sha256:<hex>`) could never match and was reported as a checksum
+/// mismatch (#8378 review).
+///
+/// What: strips one optional `sha256:` prefix, then
+/// `integrity::Sha256Digest::parse_hex` (case-insensitive).
+///
+/// Test: `tests::parse_pin_accepts_a_github_prefix`.
+pub(crate) fn parse_pin(pin: &str) -> Result<Sha256Digest, IntegrityError> {
+    Sha256Digest::parse_hex(pin.strip_prefix(GITHUB_DIGEST_PREFIX).unwrap_or(pin))
 }
 
 /// Compute the SHA-256 hex digest of a file synchronously.
@@ -188,27 +193,14 @@ pub(crate) fn parse_sha256_line(content: &str) -> anyhow::Result<String> {
 /// enough for binaries < 100 MB) to do this synchronously rather than spawning
 /// an async reader.
 ///
-/// What: Opens the file, streams through a `sha2::Sha256` hasher, and returns
-/// the lowercase hex digest.
+/// What: Delegates to trusty-common's `integrity::Sha256Digest::of_file`
+/// (#8378).
 ///
 /// Test: `tests::sha256_file_correct` exercises it directly;
 /// `tests::verify_sha256_tampered_is_detectable` exercises it through the
 /// comparison [`download_and_verify`] makes.
-pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("opening {} for hashing", path.display()))?;
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| "reading file for hash")?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<Sha256Digest> {
+    Ok(Sha256Digest::of_file(path)?)
 }
 
 /// Extract all regular files from a `.tar.gz` archive into `dest_dir`.
@@ -355,8 +347,8 @@ mod tests {
         std::fs::write(&path, b"hello trusty").unwrap();
         // Computed independently: echo -n "hello trusty" | sha256sum
         let expected = sha256_file(&path).unwrap();
-        assert_eq!(expected.len(), 64);
-        assert!(expected.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(expected.as_hex().len(), 64);
+        assert!(expected.as_hex().chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     /// Why: The SHA-256 parse must accept both bare hex and `hex  filename` format.
@@ -366,7 +358,7 @@ mod tests {
     fn parse_sha256_line_bare_hex() {
         let hex = "a".repeat(64);
         let parsed = parse_sha256_line(&hex).unwrap();
-        assert_eq!(parsed, hex);
+        assert_eq!(parsed.as_hex(), hex);
     }
 
     /// Why: The `sha256sum` / `shasum` format embeds the filename after two spaces.
@@ -377,7 +369,7 @@ mod tests {
         let hex = "b".repeat(64);
         let content = format!("{hex}  some-archive.tar.gz");
         let parsed = parse_sha256_line(&content).unwrap();
-        assert_eq!(parsed, hex);
+        assert_eq!(parsed.as_hex(), hex);
     }
 
     /// Why: A 63-char hex string must be rejected (would silently accept a truncated
@@ -397,6 +389,21 @@ mod tests {
     fn parse_sha256_line_rejects_non_hex() {
         let hex = format!("{}z", "a".repeat(63));
         assert!(parse_sha256_line(&hex).is_err());
+    }
+
+    /// Why: GitHub publishes asset digests as `sha256:<hex>`; a pin copied from
+    /// there must parse to the same digest as the bare hex (#8378).
+    /// What: Parses the bare, prefixed and uppercase forms; asserts one digest,
+    /// and that a short or doubly-prefixed pin is rejected.
+    /// Test: This is the test.
+    #[test]
+    fn parse_pin_accepts_a_github_prefix() {
+        let hex = "c".repeat(64);
+        let bare = parse_pin(&hex).unwrap();
+        assert_eq!(parse_pin(&format!("sha256:{hex}")).unwrap(), bare);
+        assert_eq!(parse_pin(&hex.to_uppercase()).unwrap(), bare);
+        assert!(parse_pin("sha256:abc").is_err());
+        assert!(parse_pin(&format!("sha256:sha256:{hex}")).is_err());
     }
 
     /// Why: A tampered tarball (wrong SHA-256) must be rejected before extraction.

@@ -72,6 +72,41 @@ pub(crate) fn lock_path_env() -> std::sync::MutexGuard<'static, ()> {
     PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Arm `core::home_write_fence` for this whole test binary, before `main`.
+///
+/// Why (#8545): `cargo test -p trusty-mpm --bin tm` deployed the full skill and
+/// agent roster into the operator's `~/.trusty-tools/trusty-mpm/claude-config`
+/// and `~/.trusty-mpm/framework`. A process-wide `$HOME` redirect would stop
+/// it, but this target bans `HOME` writes (`env_isolation_tests`, #5544) and a
+/// redirected `$HOME` makes the #5784 host-state gate refuse tmux to every
+/// tmux fixture here. The fence writes no environment at all.
+/// What: a pre-`main` constructor, so the fence is armed before libtest starts
+/// any test thread and parallel tests only ever read it. It fences the `$HOME`
+/// and password-database home config paths; a test that reaches a home-config
+/// writer panics there, by name, before the write.
+/// Test: `tests::the_home_write_fence_is_armed_for_this_binary`.
+#[ctor::ctor]
+fn arm_home_write_fence() {
+    trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
+/// Give this test binary its own default tmux server, before `main` (#6542).
+///
+/// Aborts the binary when the private directory cannot be created, rather than
+/// let a test reach the operator's server. See `core::tmux_test_isolation`.
+/// Test: `tests::this_test_binary_runs_on_a_relocated_tmux_server`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
+}
+
 /// Same prefix the lib's fixture uses, so its sweep reaps these too.
 const TEST_DIR_PREFIX: &str = "tm-test-";
 
@@ -110,9 +145,112 @@ pub(crate) fn hermetic_temp_dir() -> TempDir {
         .expect("create hermetic test temp dir")
 }
 
+/// Raise the process-global tracing level so a thread-local capture can see
+/// `warn!` (#4931).
+///
+/// Why: `tracing`'s macros short-circuit on a process-global `MAX_LEVEL` that
+/// only a GLOBAL default subscriber raises, so a `with_default`/`set_default`
+/// capture records nothing unless something in the binary installed one first.
+/// `trusty_mpm::test_support::enable_event_capture` is the library's copy and is
+/// not reachable from this bin target; this is the bin's one copy (#8405 review).
+/// What: installs a bare registry once per process, then asserts the resulting
+/// level admits `WARN`, so a filtered global installed elsewhere fails here by
+/// name instead of as an empty capture.
+/// Test: `compress`'s warning-capture test and
+/// `session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config`
+/// are vacuous without it.
+pub(crate) fn enable_event_capture() {
+    static RAISE_MAX_LEVEL: std::sync::Once = std::sync::Once::new();
+    RAISE_MAX_LEVEL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+    assert!(
+        tracing::level_filters::LevelFilter::current() >= tracing::Level::WARN,
+        "the process-global tracing level is {:?}, which discards WARN before \
+         any subscriber sees it (#4931)",
+        tracing::level_filters::LevelFilter::current()
+    );
+}
+
+/// A launch spec's assignments and argv as one line of `K=V ` words then args
+/// (#8308), so a seam test can assert with substrings.
+pub(crate) fn spec_text(spec: &trusty_mpm::runtime::launch_spec::LaunchSpec) -> String {
+    let env: String = spec
+        .env_set
+        .iter()
+        .map(|(k, v)| format!("{k}={v} "))
+        .collect();
+    format!("{env}{} {}", spec.program, spec.args.join(" "))
+}
+
+/// A state root whose `config.yaml` sets `tmux.alternate_screen` (#8405).
+///
+/// Why: every CLI launch seam reads the renderer from a config root; its
+/// wiring test needs one holding a known value.
+/// What: a hermetic temp dir containing `config.yaml` with
+/// `tmux: { alternate_screen: <value> }`.
+/// Test: used by each `*_follows_the_configured_renderer` test.
+pub(crate) fn config_root_with_alternate_screen(alternate_screen: bool) -> TempDir {
+    let root = hermetic_temp_dir();
+    std::fs::write(
+        root.path().join("config.yaml"),
+        format!("tmux:\n  alternate_screen: {alternate_screen}\n"),
+    )
+    .expect("write config.yaml");
+    root
+}
+
+/// The renderer operand a launch line carries for `alternate_screen` (#8405).
+pub(crate) fn renderer_operand(alternate_screen: bool) -> &'static str {
+    if alternate_screen {
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=0 "
+    } else {
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8545: the constructor ran, and it fences this process's home config
+    /// paths. Fails if the constructor is removed or stripped by the linker.
+    #[test]
+    fn the_home_write_fence_is_armed_for_this_binary() {
+        use trusty_mpm::core::home_write_fence::{armed_roots, fenced_root};
+        let home = dirs::home_dir().expect("a test process has a home");
+        let managed = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir_at(&home);
+        let framework = trusty_mpm::core::paths::FrameworkPaths::under(&home).framework;
+        for dest in [managed.join("skills"), framework.join("agents")] {
+            assert!(
+                fenced_root(&dest, armed_roots()).is_some(),
+                "{} is not fenced; armed roots: {:?}",
+                dest.display(),
+                armed_roots()
+            );
+        }
+        let scratch = hermetic_temp_dir();
+        assert!(
+            fenced_root(&scratch.path().join(".trusty-mpm"), armed_roots()).is_none(),
+            "a test temp root must stay writable"
+        );
+    }
+
+    /// #6542: the constructor ran, so no tmux call in this binary can reach
+    /// the host's server through `$TMUX` or the default socket.
+    #[test]
+    fn this_test_binary_runs_on_a_relocated_tmux_server() {
+        let dir = trusty_mpm::core::tmux_test_isolation::relocated_dir()
+            .expect("this binary's test_support constructor relocates tmux");
+        assert_eq!(
+            std::env::var_os("TMUX_TMPDIR").as_deref(),
+            Some(dir.as_os_str())
+        );
+        assert!(
+            std::env::var_os("TMUX").is_none(),
+            "the host's $TMUX must not reach a test"
+        );
+    }
 
     /// The whole point, asserted rather than assumed: the directory lands under
     /// the hardcoded root, not wherever `$TMPDIR` currently points.

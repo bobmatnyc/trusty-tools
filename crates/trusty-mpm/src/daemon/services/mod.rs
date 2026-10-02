@@ -12,7 +12,13 @@
 //! `cargo test -p trusty-mpm-daemon services`.
 
 pub mod agent_worktree_reap;
+// #8257: the record view the dispatch deny and `--list` share, and the OS
+// probe the repair asks before it writes.
+pub mod delegation_records;
 pub mod delegation_repair;
+// #8531: the repair caller, established from the socket's kernel peer pid.
+pub mod delegation_repair_caller;
+pub(crate) mod delegation_repair_probe;
 pub mod delegation_tracker;
 pub mod hook_service;
 // #7504: the ONE place the merged-PR reclaim's production probes are assembled,

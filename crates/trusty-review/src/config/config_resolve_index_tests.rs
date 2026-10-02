@@ -176,14 +176,15 @@ async fn resolve_index_falls_back_on_daemon_error() {
     );
 }
 
-/// When no registered index root_path matches the repo root, keep the default.
+/// When no registered index root_path matches the repo root, the index is
+/// cleared to "no index" rather than left at the unregistered `"main"`.
 ///
-/// Why: a fresh machine with no indexed projects should not crash or produce an
-/// incorrect index name (issue #661).
-/// What: provides an index with an unrelated root_path, asserts `"main"` kept.
+/// Why: #8411 — the `"main"` default names no registered index, so the gate
+/// hard-skipped every review in an unindexed checkout.
+/// What: provides an index with an unrelated root_path, asserts `""`.
 /// Test: this test.
 #[tokio::test]
-async fn resolve_index_keeps_default_when_no_match() {
+async fn resolve_index_clears_unregistered_default_when_no_match() {
     let mut config = ReviewConfig::load(None);
     config.search_index = "main".to_string();
     config.search_index_explicit = false;
@@ -196,8 +197,8 @@ async fn resolve_index_keeps_default_when_no_match() {
     config.resolve_index(&client).await;
 
     assert_eq!(
-        config.search_index, "main",
-        "no-match must leave search_index at fallback 'main'"
+        config.search_index, "",
+        "no-match must clear the unregistered 'main' default (#8411)"
     );
 }
 

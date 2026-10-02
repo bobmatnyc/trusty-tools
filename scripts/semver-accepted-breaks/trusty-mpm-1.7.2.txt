@@ -1,0 +1,9 @@
+crate   trusty-mpm
+version 1.7.2
+reason  Owner ruling 2026-09-24 ("stick with 1.7.2"): ship 1.7.2 through this accepted-breaks declaration rather than a major bump, per the same rationale as the 1.7.0 declaration — the user base is small, and it does not dictate the release model.
+accept  constructible_struct_adds_field  DecommissionQuery.force
+accept  constructible_struct_adds_field  DecommissionResponse.workspace_kept_reason
+accept  constructible_struct_adds_field  ManagedDecommissionOutcome.workspace_kept_reason
+accept  constructible_struct_adds_field  DecommissionParams.force
+accept  constructible_struct_adds_field  OpenedPr.scope
+accept  constructible_struct_adds_field  CleanupRequest.head_only

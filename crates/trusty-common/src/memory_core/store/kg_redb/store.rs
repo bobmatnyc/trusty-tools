@@ -13,6 +13,8 @@ use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
+use crate::memory_core::store::write_deadline::{DeadlinedWrite, palace_label};
+use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use redb::Database;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,9 @@ use std::sync::Arc;
 
 use super::migrate::migrate_triple_keys_fail_open;
 use super::types::{GuardedWrite, KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
+
+/// Store name a #8749 deadline error reports for this file.
+const KG_STORE_NAME: &str = "kg.redb";
 
 /// Why: All KG callers go through a single `KnowledgeGraph` handle that is
 /// cheap to clone and Send + Sync. Holding `Arc<Database>` lets background
@@ -188,6 +193,9 @@ impl KgStoreRedb {
                     let state = Arc::new(KgDbState {
                         db: std::sync::RwLock::new(db),
                         swap_lock: std::sync::RwLock::new(()),
+                        open_write_in_flight: std::sync::atomic::AtomicBool::new(false),
+                        #[cfg(test)]
+                        test_hooks: Default::default(),
                         mode,
                         _snapshot_guard: snapshot_guard,
                     });
@@ -281,6 +289,27 @@ impl KgStoreRedb {
         self.db()
     }
 
+    /// Claim this file's single slot for open-time maintenance writes (#8314).
+    ///
+    /// Why: an open-time write that waits past its budget leaves a helper
+    /// thread parked in `begin_write` until the stuck write ends. The work it
+    /// was doing is still undone, so every reopen of the same palace would park
+    /// one more thread. One slot per shared [`KgDbState`](super::types) caps
+    /// that at one, however many handles or reopens share the file.
+    /// What: `None` while an earlier claim is alive; otherwise a claim that
+    /// frees the slot when dropped.
+    /// Test: `reopens_behind_a_stuck_kg_write_park_at_most_one_sweep_helper`.
+    pub(crate) fn try_claim_open_write(&self) -> Option<OpenWriteClaim> {
+        use std::sync::atomic::Ordering;
+        self.state
+            .open_write_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| OpenWriteClaim {
+                state: Arc::clone(&self.state),
+            })
+    }
+
     /// Begin a write transaction that the compaction swap cannot race.
     ///
     /// Why (#6652, code-critic BLOCK on effb8c343): every kg.redb write in this
@@ -293,16 +322,46 @@ impl KgStoreRedb {
     /// then reads the live handle, so a writer that blocked on an in-flight
     /// swap resumes against the NEW file rather than the unlinked one. The
     /// returned [`GuardedWrite`] holds both for the transaction's lifetime.
-    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`.
+    /// #8749: the transaction gets [`timeouts::write_txn_deadline`], so a
+    /// stalled one rolls back and releases redb's lock instead of committing.
+    /// Test: `a_kg_writer_commit_inside_the_swap_window_is_never_dropped`,
+    /// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.
     pub(super) fn begin_write_guarded(&self) -> Result<GuardedWrite<'_>> {
+        self.begin_write_guarded_within(self.write_txn_budget())
+    }
+
+    /// [`Self::begin_write_guarded`] with an explicit transaction budget;
+    /// `Duration::MAX` never expires (the one-shot `import_all` migration).
+    pub(super) fn begin_write_guarded_within(
+        &self,
+        budget: std::time::Duration,
+    ) -> Result<GuardedWrite<'_>> {
         let swap = self.state.swap_lock.read().expect("kg swap lock poisoned");
         let db = self.state.db();
-        let txn = db.begin_write().context("begin kg.redb write txn")?;
+        // #8749: the palace id rides along so a deadline abort's warn line and
+        // error name the palace whose writers it unblocked.
+        let txn = DeadlinedWrite::begin(&db, palace_label(&self.path), KG_STORE_NAME, budget)
+            .context("begin kg.redb write txn")?;
         Ok(GuardedWrite {
             _swap: swap,
             _db: db,
             txn,
         })
+    }
+
+    /// The deadline for one kg.redb write transaction (#8749).
+    fn write_txn_budget(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if let Some(budget) = *self.test_hooks().txn_budget.lock().expect("hook lock") {
+            return budget;
+        }
+        timeouts::write_txn_deadline()
+    }
+
+    /// The #8749 test seams shared by every handle on this file.
+    #[cfg(test)]
+    pub(crate) fn test_hooks(&self) -> &super::types::KgTestHooks {
+        &self.state.test_hooks
     }
 
     /// Wall-clock budget for taking the swap exclusion.
@@ -389,5 +448,19 @@ impl KgStoreRedb {
         } else {
             Ok(())
         }
+    }
+}
+
+/// The held slot from [`KgStoreRedb::try_claim_open_write`]; dropping it frees
+/// the slot. Holds the shared state alive, so the slot outlives every handle.
+pub(crate) struct OpenWriteClaim {
+    state: Arc<KgDbState>,
+}
+
+impl Drop for OpenWriteClaim {
+    fn drop(&mut self) {
+        self.state
+            .open_write_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }

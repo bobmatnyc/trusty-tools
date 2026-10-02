@@ -42,6 +42,7 @@ pub(crate) async fn launch_protected_workspace(
     git_root: &std::path::Path,
     origin_url: &str,
     gate: &trusty_mpm::core::disk_usage_guard::DiskGate,
+    home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
 ) -> anyhow::Result<()> {
     let session_id = trusty_mpm::session_manager::ManagedSessionId::new();
     // #7603: `gate` is `MeasureTarget` in production; a test pins it instead.
@@ -67,6 +68,8 @@ pub(crate) async fn launch_protected_workspace(
         None,
         false,
         super::managed_workspace::LaunchDir::CallerResolved,
+        home,
+        false, // #8878: twin mode is armed only by `tm launch --twin`.
     )
     .await
 }

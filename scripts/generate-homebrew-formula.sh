@@ -40,14 +40,14 @@
 #     [--assets-dir <dir>] [--formula-dir <dir>] [--repo-slug <owner/repo>] \
 #     [--macos-sha256 <hex>] [--linux-sha256 <hex>] [--expect-unchanged]
 #
-#     --crate      crate name as released, e.g. trusty-review. `tga-v*` tags are
-#                  already canonicalised to trusty-git-analytics upstream
-#                  (#1128), so this is always the canonical name.
+#     --crate      crate name as released, e.g. trusty-review. An aliased tag
+#                  is already canonicalised to the crate directory name
+#                  upstream (#1128), so this is always the canonical name.
 #     --version    the crate version, X.Y.Z. Appears in the formula and in every
 #                  asset filename.
-#     --tag        the release tag the assets hang off, e.g. tga-v2.19.0. NOT
-#                  derivable from crate+version — the tga alias series is why
-#                  (#5455).
+#     --tag        the release tag the assets hang off, e.g.
+#                  trusty-review-v0.36.0. NOT derivable from crate+version — an
+#                  alias tag series is why (#5455).
 #     --binaries   space-separated binaries to `bin.install`, in order. The first
 #                  is the `test do` smoke-test target. In CI this is
 #                  `needs.setup.outputs.binaries`, straight from CRATE_CONFIG.

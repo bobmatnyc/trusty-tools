@@ -193,7 +193,9 @@ fn build_prompt_file_writes_resolved_prompt_for_project() {
     // developer's real `~/.trusty-mpm` (the #2459/#2460/#2461 hazard class).
     let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
         content.contains("# PM Agent -- Trusty MPM"),
@@ -223,7 +225,9 @@ fn build_prompt_file_refreshes_the_compiled_prompt() {
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     std::fs::write(&compiled, STALE).expect("seed stale compiled prompt");
 
-    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
 
     let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt readable");
     assert_ne!(
@@ -258,6 +262,7 @@ fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
     std::fs::create_dir_all(&compiled).expect("plant a directory at the compiled path");
 
     let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .0
         .expect("spawn must still get its prompt file (non-fatal)");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
@@ -302,6 +307,7 @@ fn build_prompt_file_records_under_the_named_framework_root() {
     let project = tempfile::tempdir().expect("project");
 
     let path = build_prompt_file_in(root.path(), project.path(), Some("sess-1"))
+        .0
         .expect("prompt file written");
     std::fs::remove_file(&path).ok();
 
@@ -336,7 +342,9 @@ fn an_ambient_build_prompt_file_records_under_whatever_home_it_inherits() {
     let home = HomeGuard::set();
     let project = tempfile::tempdir().expect("project");
 
-    let path = build_prompt_file(project.path(), Some("sess-1")).expect("prompt file written");
+    let path = build_prompt_file(project.path(), Some("sess-1"))
+        .0
+        .expect("prompt file written");
     std::fs::remove_file(&path).ok();
 
     assert!(
@@ -1619,6 +1627,86 @@ fn spawn_uses_the_launch_resolved_reachability() {
             .any(|(k, _)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
         "an unreachable trusty-memory must leave auto memory on: {:?}",
         spec.env_set
+    );
+}
+
+/// Write `yaml` as the config under the redirected home's state root — the
+/// file the adapter's named framework root resolves to (#8405).
+fn write_state_config(home: &HomeGuard, yaml: &str) {
+    let root = home.home().join(".trusty-tools").join("trusty-mpm");
+    std::fs::create_dir_all(&root).expect("mkdir state root");
+    std::fs::write(root.join("config.yaml"), yaml).expect("write config");
+}
+
+/// #8405: config `alternate_screen: true` reaches the spec of a fresh spawn
+/// AND of a restart, as an explicit `=0` the pane environment cannot override.
+#[test]
+#[serial_test::serial]
+fn spawn_carries_the_configured_fullscreen_renderer() {
+    use crate::core::alt_screen::{ALT_SCREEN_ENABLED, ALT_SCREEN_ENV_VAR};
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: true\n");
+    let spawned = FakeTmux::new();
+    let spawn_spec = sent_spec(&drive_spawn(&spawned, &home));
+    let resumed = FakeTmux::new();
+    drive_resume(&resumed, &home, home.home(), None, None);
+    let resume_spec = sent_spec(&only_line(&resumed));
+    for spec in [spawn_spec, resume_spec] {
+        assert!(
+            spec.env_set
+                .iter()
+                .any(|(k, v)| k == ALT_SCREEN_ENV_VAR && v == ALT_SCREEN_ENABLED),
+            "the configured renderer must ride in the spec: {:?}",
+            spec.env_set
+        );
+    }
+}
+
+/// #8405: an unreadable config never blocks a spawn or a restart. Both proceed,
+/// a warning names the file, and the renderer falls back to exactly what the
+/// tmux `alternate-screen` option gets from the same file — read here through
+/// `TrustyToolsConfig::load()`, the call `apply_scrollback_options` makes — so
+/// the two steps of one launch cannot disagree.
+#[test]
+#[serial_test::serial]
+fn spawn_falls_back_with_the_tmux_option_on_an_unreadable_config() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let home = HomeGuard::set();
+    write_state_config(&home, "tmux:\n  alternate_screen: [broken\n");
+    let tmux_option = crate::core::trusty_tools_config::resolve_tmux_options(
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+    )
+    .alternate_screen;
+    let want = crate::core::alt_screen::configured_env(tmux_option);
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(256);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let (spawned, resumed) = (FakeTmux::new(), FakeTmux::new());
+    tracing::subscriber::with_default(subscriber, || {
+        drive_spawn(&spawned, &home);
+        drive_resume(&resumed, &home, home.home(), None, None);
+    });
+
+    for spec in [
+        sent_spec(&only_line(&spawned)),
+        sent_spec(&only_line(&resumed)),
+    ] {
+        for pair in &want {
+            assert!(
+                spec.env_set.contains(pair),
+                "the renderer must match the tmux option's fallback {pair:?}: {:?}",
+                spec.env_set
+            );
+        }
+    }
+    let logged = buffer.tail(256).join("\n");
+    let config = home.home().join(".trusty-tools/trusty-mpm/config.yaml");
+    assert!(
+        logged.contains("alternate_screen") && logged.contains(&config.display().to_string()),
+        "the warning must name the file: {logged}"
     );
 }
 

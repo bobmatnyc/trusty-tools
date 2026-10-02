@@ -78,9 +78,7 @@ const PRODUCT_LABEL: &str = "tcode";
 /// than handing the work to a sub-agent.
 pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve the current directory")?;
-    // Canonicalized so the `$HOME` guard in `resolve_project` compares like
-    // with like; an unresolvable home simply disables that one guard.
-    let home = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let home = home_for_guard(dirs::home_dir());
     let project = resolve_project(project, projectless, &cwd, home.as_deref())?;
     // #4512: attach to a running daemon serving this project, or start one —
     // replaces #4424's "exit and tell the user to start one". Nothing is
@@ -148,14 +146,21 @@ pub async fn run(project: Option<PathBuf>, projectless: bool, delegate: bool) ->
 ///    means no implicit bind: projectless.
 /// 4. A root that CONTAINS `home` — `home` itself, or any ancestor of it —
 ///    is refused and stays projectless: binding one would ask trusty-search
-///    to index an entire home directory or more. An explicit `--project ~`
-///    still works — rule 1 outranks this.
+///    to index an entire home directory or more. A root `home` contains — the
+///    everyday repository under `$HOME` — is NOT refused; the test is
+///    one-directional. An explicit `--project ~` still works, rule 1
+///    outranks this. `home = None` disables this rule and lets the bind
+///    proceed, there being nothing to compare a root against; that arm is
+///    reached only when the platform reports no home path at all, never
+///    when one merely fails to canonicalize ([`home_for_guard`]).
 ///
 /// Test: `tui_tests::resolve_project_defaults_to_the_enclosing_git_repo`,
 /// `tui_tests::resolve_project_without_a_repo_stays_projectless`,
 /// `tui_tests::resolve_project_projectless_opts_out_of_homing`,
 /// `tui_tests::resolve_project_refuses_to_home_on_the_home_directory`,
 /// `tui_tests::resolve_project_refuses_a_repo_above_the_home_directory`,
+/// `tui_tests::resolve_project_binds_a_repo_below_the_home_directory`,
+/// `tui_tests::resolve_project_binds_when_the_platform_reports_no_home`,
 /// `tui_tests::resolve_project_canonicalizes_a_real_directory`,
 /// `tui_tests::resolve_project_rejects_a_missing_path`.
 fn resolve_project(
@@ -187,6 +192,22 @@ fn resolve_project(
         return Ok(None);
     }
     Ok(Some(root))
+}
+
+/// The home path [`resolve_project`]'s rule-4 guard compares a git root to.
+///
+/// Why (#8205): rule 4 is the only alarm for "never index a home directory",
+/// and a `None` here skips it while the bind proceeds. Collapsing
+/// "canonicalize failed" into `None` therefore disarmed the guard on exactly
+/// the input it exists for, so a home that exists but does not resolve keeps
+/// its raw form instead — `Path::starts_with` is component-wise and still
+/// answers usefully on an uncanonicalized path.
+/// What: canonicalizes when it can, keeps the raw path when it cannot, and
+/// returns `None` only for a platform that reports no home path at all.
+/// Test: `tui_tests::home_for_guard_keeps_an_uncanonicalizable_path`,
+/// `tui_tests::resolve_project_binds_when_the_platform_reports_no_home`.
+fn home_for_guard(raw: Option<PathBuf>) -> Option<PathBuf> {
+    raw.map(|h| h.canonicalize().unwrap_or(h))
 }
 
 /// Name shown on the banner's `{user} · tcode` identity line — `$USER`, or a
@@ -307,6 +328,82 @@ mod tui_tests {
                 .expect("resolve")
                 .is_none(),
             "a repository enclosing $HOME must not become the default project"
+        );
+    }
+
+    /// The everyday launch (#8205): a repository UNDER `$HOME`, which is
+    /// where nearly every project lives. Rule 4's test is one-directional —
+    /// it refuses a root CONTAINING home, never a root home contains — so an
+    /// over-broad `|| root.starts_with(h)` would make this projectless and
+    /// reintroduce the very bug the homing exists to fix.
+    #[test]
+    fn resolve_project_binds_a_repo_below_the_home_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().canonicalize().expect("canonicalize");
+        let repo = home.join("projects").join("trusty-tools");
+        let nested = repo.join("crates").join("x");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        std::fs::create_dir(repo.join(".git")).expect("create .git");
+
+        assert_eq!(
+            resolve_project(None, false, &nested, Some(&home))
+                .expect("resolve")
+                .expect("a repo under $HOME must bind"),
+            repo,
+            "the guard refuses a root containing $HOME, never one $HOME contains"
+        );
+    }
+
+    /// #8205 fail-open regression: a home path that EXISTS but does not
+    /// canonicalize used to collapse to the same `None` as "no home at all",
+    /// which skips rule 4 — so a repository ENCLOSING `$HOME` bound anyway,
+    /// and the only alarm for "never index a home directory" read healthy
+    /// precisely when it could not resolve home. Keeping the raw path leaves
+    /// the guard armed.
+    #[test]
+    fn home_for_guard_keeps_an_uncanonicalizable_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let above = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(above.join(".git")).expect("create .git");
+        let cwd = above.join("masa").join("projects");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        // Never created on disk, so `canonicalize` fails on it while the
+        // path itself is still a perfectly usable `starts_with` operand.
+        let home = above.join("masa").join("vanished");
+        assert!(home.canonicalize().is_err(), "the fixture must not resolve");
+
+        let guarded = home_for_guard(Some(home.clone()));
+        assert!(
+            resolve_project(None, false, &cwd, guarded.as_deref())
+                .expect("resolve")
+                .is_none(),
+            "a repository enclosing an unresolvable $HOME must still be refused"
+        );
+        assert_eq!(
+            guarded.as_deref(),
+            Some(home.as_path()),
+            "an unresolvable home keeps its raw form rather than becoming None"
+        );
+    }
+
+    /// The one remaining fail-open arm, made deliberate (#8205): with NO home
+    /// path at all there is nothing to compare a root against, so rule 4 is
+    /// skipped and the bind proceeds. Pinned so changing that choice has to
+    /// change a test that states it.
+    #[test]
+    fn resolve_project_binds_when_the_platform_reports_no_home() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let above = dir.path().canonicalize().expect("canonicalize");
+        std::fs::create_dir(above.join(".git")).expect("create .git");
+        let cwd = above.join("masa").join("projects");
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+
+        assert_eq!(home_for_guard(None), None, "no home path stays None");
+        assert_eq!(
+            resolve_project(None, false, &cwd, None)
+                .expect("resolve")
+                .expect("with no home to compare against, the root binds"),
+            above
         );
     }
 

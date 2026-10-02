@@ -141,32 +141,7 @@ impl Preflight for RealPreflight {
     }
 
     fn changelog_gate(&self, base: &str, head: &str) -> anyhow::Result<ChangelogVerdict> {
-        let root = repo_root()?;
-        // #7747: the script takes `--base` and always diffs it against the
-        // checkout's HEAD — it has no `--head` of its own. A named head that
-        // resolves to a DIFFERENT commit therefore cannot be judged here, and
-        // saying `Pass` about the checkout instead would clear a source PR
-        // against a diff it does not contain (#7282 round 5).
-        if !head_is_checkout(&root, head) {
-            return Ok(ChangelogVerdict::HeadElsewhere);
-        }
-        let script = root.join("scripts/check_changelog_fragment.sh");
-        if !script.exists() {
-            return Ok(ChangelogVerdict::Skipped);
-        }
-        let out = std::process::Command::new("bash")
-            .arg(&script)
-            .arg("--base")
-            .arg(format!("origin/{base}"))
-            .current_dir(&root)
-            .output()
-            .with_context(|| format!("cannot run {}", script.display()))?;
-        if out.status.success() {
-            return Ok(ChangelogVerdict::Pass);
-        }
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        Ok(ChangelogVerdict::Fail(text.trim().to_string()))
+        changelog_gate_at(&repo_root()?, base, head)
     }
 
     fn base_freshness(
@@ -216,6 +191,52 @@ impl Preflight for RealPreflight {
     }
 }
 
+/// The changelog-fragment gate, run in the checkout at `root`.
+///
+/// Why: the verdict decides whether `tm pr open` may call `gh`, and a repo
+/// with no gate script has nothing to judge — neither the checkout's HEAD nor
+/// a `--head` standing elsewhere (#8145).
+/// What: [`ChangelogVerdict::Skipped`] when `root` has no
+/// `scripts/check_changelog_fragment.sh`; else `HeadElsewhere` when `head` is
+/// not the checkout's commit; else the script's own pass/fail over
+/// `origin/<base>`.
+/// Test: `pr_8145_a_repo_without_the_gate_script_skips_for_any_head`,
+/// `pr_8145_the_script_still_refuses_a_head_elsewhere`.
+pub(crate) fn changelog_gate_at(
+    root: &Path,
+    base: &str,
+    head: &str,
+) -> anyhow::Result<ChangelogVerdict> {
+    // #8145: the script's absence is asked FIRST. A repo without it skipped
+    // the gate only when `--head` was the checkout; any other head was refused
+    // with a message about a script the repo does not have.
+    let script = root.join("scripts/check_changelog_fragment.sh");
+    if !script.exists() {
+        return Ok(ChangelogVerdict::Skipped);
+    }
+    // #7747: the script takes `--base` and always diffs it against the
+    // checkout's HEAD — it has no `--head` of its own. A named head that
+    // resolves to a DIFFERENT commit therefore cannot be judged here, and
+    // saying `Pass` about the checkout instead would clear a source PR
+    // against a diff it does not contain (#7282 round 5).
+    if !head_is_checkout(root, head) {
+        return Ok(ChangelogVerdict::HeadElsewhere);
+    }
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--base")
+        .arg(format!("origin/{base}"))
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("cannot run {}", script.display()))?;
+    if out.status.success() {
+        return Ok(ChangelogVerdict::Pass);
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(ChangelogVerdict::Fail(text.trim().to_string()))
+}
+
 /// The `--head` branch, when the caller named a non-blank one.
 ///
 /// Why: a blank `--head ""` must read as "not supplied" rather than reaching
@@ -247,11 +268,13 @@ fn head_branch(args: &PrOpenArgs) -> Option<&str> {
 /// `pr_7747_a_head_that_is_the_checkout_opens_a_source_pr`.
 fn head_elsewhere_refusal(args: &PrOpenArgs) -> String {
     let head = head_branch(args).unwrap_or("HEAD");
+    // #8572: "Check `{head}` out" sent an agent to switch a dirty main checkout.
     format!(
         "--head `{head}` is not the commit this checkout stands on, and \
          scripts/check_changelog_fragment.sh takes only --base — it would judge \
-         origin/{}...HEAD, this checkout, rather than `{head}`. Check `{head}` out, \
-         or pass --docs-only if this PR changes no crate source.",
+         origin/{}...HEAD, this checkout, rather than `{head}`. Run `tm pr open` \
+         from the worktree that holds `{head}` (`git worktree list` names it); never \
+         switch a main checkout to it. Pass --docs-only if this PR changes no crate source.",
         args.base
     )
 }
@@ -591,6 +614,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
                 eprintln!("\nrequired body skeleton — paste this and fill each section:\n");
                 eprintln!("{skeleton}");
             }
+            // #8467: name the full opt-out wherever the contract is what failed.
+            if let Some(hint) = minimal_hint(&failures, args.minimal) {
+                eprintln!("\n{hint}");
+            }
             return Ok(EXIT_CHECK_FAILED);
         }
     };
@@ -620,7 +647,10 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         Ok(_) => {}
     }
 
-    let out = gh.run(&plan.argv)?;
+    // #8431: a repository with no `trusty-mpm` label gets it created, or the PR
+    // opens without it; every other create failure still fails below.
+    let repo = args.repo.as_deref().filter(|r| !r.trim().is_empty());
+    let (out, dropped) = super::missing_label::create(gh, &plan, repo)?;
     // #7869: `gh pr create` creates the PR and THEN applies the assignee and
     // labels over separate API calls. A 502 on one of those exits non-zero with
     // the PR already created, and bailing here printed no number at all — the
@@ -649,11 +679,12 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
         .trim();
     let number = url.rsplit('/').next().unwrap_or("?");
     println!("opened PR #{number} — {url}");
-    println!(
-        "  labels: {}, {}",
-        policy_labels::CONVENTION_LABEL,
-        plan.workstream_label
-    );
+    let applied: Vec<String> = plan
+        .create_labels()
+        .into_iter()
+        .filter(|l| !dropped.contains(l))
+        .collect();
+    println!("  labels: {}", applied.join(", "));
     if let Some(rung) = args.rung {
         println!("  test-ladder rung claimed: {rung}");
     }
@@ -701,6 +732,24 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
         .then(body::skeleton)
 }
 
+/// The `--minimal` opt-out, named when the nine-field contract failed (#8467).
+///
+/// Why: the agents in #8467's reports never passed `--minimal` — the refusal
+/// named each heading and printed the skeleton, but not the one flag that drops
+/// all nine. Each fell back to `gh pr create`, losing the footer, `Refs`/`Closes`
+/// and changelog checks this command exists to run.
+/// What: a hint when any failure line is a contract gap
+/// ([`body::is_contract_gap`]) and `--minimal` was not passed; else `None`.
+/// Test: `pr_8467_a_contract_gap_names_the_minimal_opt_out`.
+pub(crate) fn minimal_hint(failures: &[String], minimal: bool) -> Option<&'static str> {
+    (!minimal && failures.iter().any(|f| body::is_contract_gap(f))).then_some(
+        "a small docs PR, or a project whose CLAUDE.md names a different PR-body standard, \
+         may pass --minimal: it drops all nine headings, `## Gates not run` and \
+         `## Partial-red accounting` included. The attribution footer, the closing-keyword \
+         ban and the changelog gate still apply.",
+    )
+}
+
 /// The PR URL `gh pr create` printed, when its stdout carries a parsable one.
 ///
 /// Why (#7869): this is the only evidence that a non-zero `gh pr create` still
@@ -710,7 +759,7 @@ pub(crate) fn skeleton_hint(failures: &[String]) -> Option<String> {
 /// What: the last stdout line that starts with `http` and names a `/pull/` path.
 /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`,
 /// `pr_7869_a_create_that_fails_with_no_url_is_still_an_error`.
-fn created_pr_url(stdout: &str) -> Option<&str> {
+pub(crate) fn created_pr_url(stdout: &str) -> Option<&str> {
     stdout
         .lines()
         .map(str::trim)
@@ -748,6 +797,7 @@ fn record_for_cleanup<P: Preflight>(pre: &P, url: &str, number: &str) {
         repo_root: root,
         opened_at: chrono::Utc::now(),
         cleaned_at: None,
+        scope: Default::default(),
     };
     if let Err(e) = pre.cleanup_registry().record_open(entry) {
         eprintln!("tm pr open: could not record #{pr} for post-merge cleanup: {e:#}");

@@ -99,6 +99,8 @@ pub struct DaemonState {
     pub(super) sessions: DashMap<SessionId, Session>,
     /// Active delegations, keyed by delegation id.
     pub(super) delegations: DashMap<uuid::Uuid, Delegation>,
+    /// #8531: the first announcement of each session id, persisted under the root.
+    pub(super) session_claudes: super::session_claudes::SessionClaudes,
     /// Circuit breakers, keyed by agent name.
     pub(super) breakers: DashMap<String, CircuitBreaker>,
     /// Latest token-usage snapshot per session.
@@ -186,6 +188,9 @@ pub struct DaemonState {
     /// What: the framework root, the directory `pairing.json` lives in.
     /// Test: `pairing_persists_to_disk`.
     pub(super) framework_root: PathBuf,
+    /// The user home for user-global writes; `None` resolves the process home.
+    /// #8545: the isolated test constructors pin it under their temp root.
+    pub(super) user_home: Option<PathBuf>,
     /// The base the captured-error stores are read from, when this daemon must
     /// not resolve them from process-global state (#6505).
     ///
@@ -453,50 +458,6 @@ pub struct DaemonState {
     /// so the two can never deadlock. In-memory work only: no I/O, no await.
     /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
     pub(super) dispatch_record: parking_lot::Mutex<()>,
-    /// Serializes the machine-wide builder-slot claim (#6892).
-    ///
-    /// Why: the same reason [`Self::shared_tree_claim`] exists, one scope wider.
-    /// A guard that asked how many builders were running and acted on the answer
-    /// would leave the window two dispatches issued in one PM turn slip through
-    /// — both seeing a free slot, both taking it, which is the overcommit the
-    /// cap exists to prevent. `delegations` is a `DashMap`: it makes each entry
-    /// atomic, never a scan-then-insert pair.
-    /// What: guards nothing itself — it is held across the scan-and-record in
-    /// [`DaemonState::claim_builder_slot`], which is its only taker. Held for an
-    /// in-memory scan of the delegation map and at most one insert; no I/O and
-    /// no await.
-    ///
-    /// It is a SEPARATE lock from [`Self::shared_tree_claim`], never nested
-    /// inside it and never around it: the two claims answer different questions
-    /// on different routes and one call takes exactly one of them. Both may take
-    /// [`Self::dispatch_record`] inside, which is the documented inner lock.
-    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
-    pub(super) builder_claim: parking_lot::Mutex<()>,
-    /// The builder capacity formula's one piece of carried state (#8261).
-    ///
-    /// Why: N may drop at once but may rise only after a full quiet window, and
-    /// "was this machine overloaded a moment ago" cannot be derived from a
-    /// single reading. It lives on the daemon rather than in a `static` because
-    /// the daemon is already the one process that counts builders machine-wide,
-    /// and a global would make every test share one window.
-    /// Test: `n_rises_only_after_a_full_quiet_window`.
-    pub(super) builder_quiet_window: parking_lot::Mutex<crate::core::builder_capacity::QuietWindow>,
-    /// Slot indices whose one-time seed is running right now (#8261).
-    ///
-    /// Why: a `Seeding` admission holds its index while it builds, but the
-    /// admission can end inside the multi-minute clone — and the index is then
-    /// free for the next claim, which finds the slot still unmarked and would
-    /// spawn a SECOND seed of the same index. The two share one staging
-    /// directory name, so the later one deletes the earlier one's tree mid-copy
-    /// and the surviving marker is written over a directory assembled from two
-    /// interleaved runs. This set is what makes at most one seed per index be
-    /// in flight WITHIN one daemon. It cannot reach across a restart — a `cp`
-    /// child outlives the daemon that spawned it, since `std::process::Command`
-    /// sets no death signal and macOS has none — so the pool defends that case
-    /// separately, with a per-run staging name and a `create_new` marker write
-    /// (#8261 critic round 3).
-    /// Test: `a_second_reservation_does_not_spawn_a_second_seed`.
-    pub(super) builder_seeding: parking_lot::Mutex<std::collections::HashSet<u32>>,
     /// `SubagentStop`s that arrived before the `agent_id` naming them (#4142).
     ///
     /// Why: `PostToolUse` is async and `SubagentStop` synchronous, so the stop
@@ -527,11 +488,13 @@ impl DaemonState {
     /// What: delegates to [`Self::with_root`] using the default
     /// [`FrameworkPaths`] root (`~/.trusty-mpm`), so startup cleanup and
     /// pairing restore are handled exactly once in the shared inner constructor.
+    /// The lib test binary builds under a temp root instead (#8545).
     /// Test: `new_reads_default_when_optimizer_file_missing`,
-    /// `new_overseer_is_disabled_when_file_missing`.
+    /// `new_overseer_is_disabled_when_file_missing`,
+    /// `new_never_writes_under_the_real_home`.
     pub fn new() -> Self {
-        let framework_root = FrameworkPaths::default().root;
-        Self::with_root(framework_root)
+        // #8545: see `overseer::default_framework_root`.
+        Self::with_root(super::overseer::default_framework_root())
     }
 
     /// Wrap the state in an `Arc` for sharing across tasks.
@@ -576,6 +539,8 @@ impl DaemonState {
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
+            // #8531: the persisted first-announcement registry.
+            session_claudes: super::session_claudes::SessionClaudes::load(&root),
             breakers: DashMap::new(),
             memory: DashMap::new(),
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),
@@ -592,6 +557,7 @@ impl DaemonState {
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root: root,
+            user_home: None,
             // Production keeps the OS data-directory resolution; see the field doc.
             error_store_base: None,
             event_tx,
@@ -613,9 +579,6 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
-            builder_claim: parking_lot::Mutex::new(()),
-            builder_quiet_window: parking_lot::Mutex::default(),
-            builder_seeding: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
@@ -658,6 +621,7 @@ impl DaemonState {
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
+            session_claudes: super::session_claudes::SessionClaudes::load(&framework_root),
             breakers: DashMap::new(),
             memory: DashMap::new(),
             hook_history: Mutex::new(VecDeque::with_capacity(HOOK_HISTORY_LIMIT)),
@@ -679,6 +643,7 @@ impl DaemonState {
             // root, so neither transport re-resolves the process data directory.
             error_store_base: Some(framework_root.clone()),
             framework_root,
+            user_home: None,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
@@ -698,9 +663,6 @@ impl DaemonState {
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
-            builder_claim: parking_lot::Mutex::new(()),
-            builder_quiet_window: parking_lot::Mutex::default(),
-            builder_seeding: parking_lot::Mutex::default(),
             pending_stops: super::pending_stops::PendingStops::default(),
         }
     }
@@ -724,6 +686,30 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// The user home this daemon's user-global writes resolve under (#8545).
+    ///
+    /// What: the pinned home of an isolated test state, else `dirs::home_dir()`.
+    /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+    pub fn user_home(&self) -> Option<PathBuf> {
+        self.user_home.clone().or_else(dirs::home_dir)
+    }
+
+    /// Self-heal `workspace`'s statusLine, the user tier under [`Self::user_home`].
+    ///
+    /// Why (#8545): the resume route used the ambient `$HOME`, so an isolated
+    /// daemon test wrote the operator's `~/.claude/settings.json`.
+    /// What: `session_launch::ensure_status_line_in` with `<home>/.claude/settings.json`.
+    /// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+    pub fn ensure_status_line(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<(), crate::core::session_launch::PrepError> {
+        let user = self
+            .user_home()
+            .map(|h| h.join(".claude").join("settings.json"));
+        crate::core::session_launch::ensure_status_line_in(workspace, user.as_deref())
     }
 
     /// The base this daemon reads captured-error stores from, when one is
@@ -960,6 +946,7 @@ impl DaemonState {
                 let refusal =
                     crate::core::host_state_gate::host_state_access_for_root(&self.framework_root)
                         .skip_reason();
+                let host = refusal.is_none();
                 let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
                     match refusal {
                         Some(reason) => {
@@ -992,6 +979,12 @@ impl DaemonState {
                             .expect("temp-dir session store must load")
                     }
                 };
+                // #7771: only a host daemon reads the operator's Claude dirs.
+                if host {
+                    mgr.install_claude_registry_roots(
+                        crate::session_manager::host_claude_config_roots(),
+                    );
+                }
                 // Reconcile persisted session records against live tmux state:
                 // sessions whose tmux is gone are flipped to Stopped (resumable);
                 // live sessions are re-adopted as Active.
@@ -1059,7 +1052,8 @@ impl DaemonState {
     pub fn with_session_manager(
         mgr: std::sync::Arc<crate::session_manager::SessionManager>,
     ) -> Self {
-        let state = Self::new();
+        // #8545: a leaked temp root, never `~/.trusty-mpm` — handlers write under it.
+        let state = Self::with_root(crate::test_support::hermetic_temp_dir().keep());
         let _ = state.managed_sessions.set(mgr);
         state
     }
@@ -1152,7 +1146,8 @@ impl DaemonState {
         let mgr = SessionManager::new(&data_dir, driver)
             .await
             .expect("temp-dir fake session store must load");
-        let state = Self::with_root(root);
+        let mut state = Self::with_root(root.clone());
+        state.user_home = Some(root.join("home")); // #8545
         let _ = state.managed_sessions.set(std::sync::Arc::new(mgr));
         state
     }

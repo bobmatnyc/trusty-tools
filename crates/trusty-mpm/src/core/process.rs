@@ -5,8 +5,9 @@
 //! the daemon detect a stopped session and mark it as such rather than reporting
 //! a hollow tmux window as still active.
 //! What: [`find_claude_pid_in_tmux`] resolves the `claude` PID under a tmux
-//! pane's shell, and [`is_process_alive`] checks whether a recorded PID still
-//! refers to a live process.
+//! pane's shell, [`pane_claude`] answers whether a `claude` runs in a pane
+//! without reading "cannot tell" as "no", and [`is_process_alive`] checks
+//! whether a recorded PID still refers to a live process.
 //! Test: `cargo test -p trusty-mpm-core process` covers liveness for the
 //! current process, a guaranteed-dead PID, and a bogus tmux session name.
 
@@ -21,7 +22,7 @@ use std::time::Duration;
 /// process tree.
 /// What:
 /// 1. Get the pane's shell PID: `tmux display-message -t <session> -p '#{pane_pid}'`.
-/// 2. Find a child process named `claude`/`claude-code` via `pgrep -P <pane_pid>`.
+/// 2. Find a child process named `claude`/`claude-code` via [`child_pids`].
 /// 3. Retry up to `max_attempts` times with `delay` between attempts, since
 ///    `claude` takes 1-3 s to start after `send-keys`.
 ///
@@ -48,6 +49,19 @@ pub fn find_claude_pid_in_tmux(
     None
 }
 
+/// The `claude` PID under one pane, addressed by its `%N` pane id (#8935).
+///
+/// Why: [`find_claude_pid_in_tmux`] reads the session's ACTIVE pane, which may
+/// be a sibling window rather than the pane a record is bound to; a teardown
+/// that has proved the record's own pane must signal that pane's `claude`.
+/// What: one probe, no retry: the pane's shell PID, then [`claude_child_of`].
+/// `None` when tmux, the pane or a `claude` child is missing.
+/// Test: `find_claude_pid_in_pane_returns_none_for_an_unknown_pane`.
+pub fn find_claude_pid_in_pane(session_name: &str, pane_id: &str) -> Option<u32> {
+    let target = crate::core::tmux::TmuxTarget::pane(session_name, pane_id);
+    claude_child_of(tmux_target_pid(&target)?)
+}
+
 /// Read the shell PID of a tmux session's active pane.
 ///
 /// Why: the `claude` process is a child of this shell; it is the root we walk
@@ -58,15 +72,18 @@ pub fn find_claude_pid_in_tmux(
 /// the session does not exist.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn tmux_pane_pid(session_name: &str) -> Option<u32> {
-    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
-    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
     // `TmuxTarget::session` renders the BARE session name (never a
     // `"session:%pane"` compound, which tmux would parse as a window spec).
+    tmux_target_pid(&crate::core::tmux::TmuxTarget::session(session_name))
+}
+
+/// [`tmux_pane_pid`] for any target — a session's active pane or a `%N` pane
+/// id (#8935).
+fn tmux_target_pid(target: &crate::core::tmux::TmuxTarget) -> Option<u32> {
+    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
     let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
-    let argv = crate::core::tmux::display_message_argv(
-        Some(&crate::core::tmux::TmuxTarget::session(session_name)),
-        "#{pane_pid}",
-    );
+    let argv = crate::core::tmux::display_message_argv(Some(target), "#{pane_pid}");
     let output = crate::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
     if !output.status.success() {
         return None;
@@ -83,13 +100,13 @@ fn tmux_pane_pid(session_name: &str) -> Option<u32> {
 /// the `internal-spawn-disclaimed` shim so it can be `posix_spawn`ed with TCC
 /// responsibility disclaimed — which makes `claude` a GRANDCHILD (`shell →
 /// tm internal-spawn-disclaimed → claude`), not a direct child. A direct-child
-/// `pgrep -P` would then deterministically miss it, breaking every downstream
+/// scan would then deterministically miss it, breaking every downstream
 /// consumer of the resolved PID (runtime-ready gate, `--task` injection,
 /// graceful-stop SIGTERM, daemon PID capture). So after the direct-child scan
 /// fails, walk exactly one hop through any child that is our wrapper (matched
 /// by the unique [`crate::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`]
 /// token — deterministic, not a fragile name heuristic).
-/// What: `pgrep -P <shell_pid>`; return the first direct child whose process
+/// What: list `shell_pid`'s children ([`child_pids_of`]); return the first direct child whose process
 /// name contains `claude`; else, for each direct child that
 /// [`is_disclaim_wrapper`] identifies, scan ITS children for `claude` and
 /// return the first found. On non-macOS (and with the disclaim disabled) no
@@ -117,29 +134,102 @@ fn claude_child_of(shell_pid: u32) -> Option<u32> {
         })
 }
 
-/// Return the PIDs of the direct children of `pid` via `pgrep -P`.
+/// Whether a `claude` runs in a tmux pane, as far as can be proven (#8942).
 ///
-/// Why: both the direct-child `claude` scan and the one-hop-through-the-wrapper
-/// scan in [`claude_child_of`] need a process's child list; factoring it keeps
-/// the two-level walk readable.
-/// What: runs `pgrep -P <pid>` and parses one PID per line; an unavailable
-/// `pgrep`, a non-zero exit (no children), or unparsable output all yield an
-/// empty vector.
-/// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
-fn child_pids_of(pid: u32) -> Vec<u32> {
-    let Ok(output) = Command::new("pgrep")
-        .args(["-P", &pid.to_string()])
-        .output()
-    else {
-        return Vec::new();
+/// Why: a check that grants protection must fail closed, and a `bool` probe
+/// reads every "cannot tell" as "no claude".
+/// What: `Present`; `Absent` when every lookup answered and none names
+/// `claude`; `Unknown` when a lookup failed.
+/// Test: `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneClaude {
+    /// A process in the pane is named `claude`.
+    Present,
+    /// Proven: no process in the pane is named `claude`.
+    Absent,
+    /// The pane pid, a child list or a process name could not be read.
+    Unknown,
+}
+
+/// Whether a `claude` runs in tmux session `session_name`'s pane (#8942).
+///
+/// Why: [`find_claude_pid_in_tmux`] answers `None` for an unreadable pane, a
+/// process-table miss and a pane whose own process is `claude`, so it cannot
+/// prove that no `claude` runs there.
+/// What: one probe of the pane process itself, its children, and the
+/// children of a #2997 disclaim wrapper among them. `Present` on the first
+/// `claude` name; `Unknown` when the pane pid, a child list or a name cannot
+/// be read; else `Absent`.
+/// Test: `a_helper_whose_pane_process_is_claude_is_not_registered`,
+/// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`.
+pub fn pane_claude(session_name: &str) -> PaneClaude {
+    let Some(pane_pid) = tmux_pane_pid(session_name) else {
+        return PaneClaude::Unknown;
     };
-    if !output.status.success() {
-        return Vec::new();
+    let mut level = vec![pane_pid];
+    let mut unknown = false;
+    // Depth 0: the pane process; 1: its children; 2: a wrapper's children.
+    for depth in 0..3 {
+        let mut next = Vec::new();
+        for pid in level {
+            match process_name_checked(pid) {
+                Some(true) => return PaneClaude::Present,
+                Some(false) => {}
+                None => unknown = true,
+            }
+            if depth == 0 || (depth == 1 && is_disclaim_wrapper(pid)) {
+                match child_pids(pid) {
+                    Ok(children) => next.extend(children),
+                    Err(_) => unknown = true,
+                }
+            }
+        }
+        level = next;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect()
+    if unknown {
+        PaneClaude::Unknown
+    } else {
+        PaneClaude::Absent
+    }
+}
+
+/// The direct children of `pid`, read from the process table (#8938).
+///
+/// Why: every `claude` lookup resolves through [`find_claude_pid_in_tmux`] —
+/// the runtime-ready probe, both stop paths, the daemon PID capture and the
+/// `tm fleet` binding check — and this is its child listing. It replaced `pgrep -P`: macOS `pgrep` drops "the current pgrep
+/// process and all of its ancestors", so a lookup run from inside a pane
+/// never saw the `claude` above it. `pgrep -a` is no fix — on Linux procps it
+/// means `--list-full`.
+/// What: one `sysinfo` refresh of every process (parent links only), then the
+/// PIDs whose parent is `pid`, ascending. Threads are not children. `Err`
+/// when the table holds no entry for `pid`, so a caller can fail closed.
+/// Test: `child_pids_include_the_callers_ancestors`,
+/// `tree_helpers_see_a_real_child_and_reject_a_non_wrapper`,
+/// `child_pids_of_a_dead_pid_is_an_error`.
+fn child_pids(pid: u32) -> Result<Vec<u32>, String> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let parent = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    if sys.process(parent).is_none() {
+        return Err(format!("the process table holds no entry for pid {pid}"));
+    }
+    let mut children: Vec<u32> = sys
+        .processes()
+        .iter()
+        .filter(|(_, p)| p.parent() == Some(parent) && p.thread_kind().is_none())
+        .map(|(child, _)| child.as_u32())
+        .collect();
+    children.sort_unstable();
+    Ok(children)
+}
+
+/// [`child_pids`] for the `claude` scan, where a table miss means no children.
+///
+/// Test: `child_pids_include_the_callers_ancestors`.
+fn child_pids_of(pid: u32) -> Vec<u32> {
+    child_pids(pid).unwrap_or_default()
 }
 
 /// Whether `pid` is the #2997 disclaim-exec shim (`tm/trusty-mpm
@@ -190,20 +280,28 @@ fn process_args(pid: u32) -> Option<String> {
 /// substring match accepts both `claude` and `claude-code`.
 /// Test: exercised via `find_claude_pid_returns_none_for_nonexistent_session`.
 fn process_name_contains_claude(pid: u32) -> bool {
+    process_name_checked(pid).unwrap_or(false)
+}
+
+/// [`process_name_contains_claude`], with `None` when the name cannot be read
+/// (#8942: [`pane_claude`] must tell a failed lookup from "not claude").
+fn process_name_checked(pid: u32) -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            return comm.to_ascii_lowercase().contains("claude");
+            return Some(comm.to_ascii_lowercase().contains("claude"));
         }
     }
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output();
     match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .to_ascii_lowercase()
-            .contains("claude"),
-        _ => false,
+        Ok(out) if out.status.success() => Some(
+            String::from_utf8_lossy(&out.stdout)
+                .to_ascii_lowercase()
+                .contains("claude"),
+        ),
+        _ => None,
     }
 }
 
@@ -274,6 +372,13 @@ mod tests {
         assert_eq!(pid, None);
     }
 
+    /// #8935: a pane id no server has handed out yields `None`, read-only.
+    #[test]
+    fn find_claude_pid_in_pane_returns_none_for_an_unknown_pane() {
+        let pid = find_claude_pid_in_pane("tmpm-definitely-not-a-real-session-xyz", "%999999999");
+        assert_eq!(pid, None);
+    }
+
     #[test]
     fn is_process_alive_current_process() {
         // The test process itself is, by definition, alive.
@@ -331,6 +436,20 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// #8938: a child listing run by a descendant still sees that descendant's
+    /// own ancestors. macOS `pgrep -P` drops "all of its ancestors", so from
+    /// inside a pane the `claude` above the caller vanished from the list.
+    #[test]
+    fn child_pids_include_the_callers_ancestors() {
+        let me = std::process::id();
+        let parent = std::os::unix::process::parent_id();
+        let children = child_pids_of(parent);
+        assert!(
+            children.contains(&me),
+            "the children of pid {parent} must include this test process {me}; got {children:?}"
+        );
+    }
+
     /// Live end-to-end proof that PID discovery walks one hop through the
     /// #2997 disclaim wrapper (the class the pure string tests cannot catch).
     ///
@@ -343,9 +462,9 @@ mod tests {
     /// resolve that grandchild through the wrapper.
     ///
     /// The session is created with the command inline (not `send-keys`, which
-    /// races zsh's line-editor startup) on the DEFAULT tmux socket (so the
-    /// production `find_claude_pid_in_tmux`, which shells out to a bare `tmux`,
-    /// can see it); cleanup kills only this session, never the server. The fake
+    /// races zsh's line-editor startup) on a private `-L` server (#6542); the
+    /// production `find_claude_pid_in_tmux` reaches it through a
+    /// `with_tmux_binary` shim scope, and the server dies with its guard. The fake
     /// `claude` is a SYMLINK to `/bin/sleep` — a copy would be SIGKILLed by
     /// macOS AMFI as an unsigned clone of a SIP binary, whereas the symlink
     /// execs the real signed `sleep` while `ps -o comm=` still reports the
@@ -393,13 +512,23 @@ mod tests {
         // process-unique, and a genuine duplicate is better surfaced as a failed
         // `new-session` than silently killed — that kill used a bare `-t` target,
         // which prefix-matches and can destroy an unrelated session.
-        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+        // #6542: on a private server, reached by the production lookup through
+        // a `with_tmux_binary` shim scope, never the operator's default one.
+        let server = crate::test_support::tmux_session::PrivateTmuxServer::new("tmux", "disclaim");
+        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn_on_socket(
             "tmux",
+            Some(server.name()),
             &session,
             &format!("sh {}", drv.display()),
         );
 
-        let pid = find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let pid = rt.block_on(crate::core::tmux::with_tmux_binary(
+            server.shim_bin().into(),
+            async { find_claude_pid_in_tmux(&session, 25, Duration::from_millis(200)) },
+        ));
         // Verify the resolved pid IS the claude grandchild WHILE the session is
         // still alive — dropping the guard tears down the whole tree, so this
         // check must precede cleanup.
@@ -411,6 +540,144 @@ mod tests {
             named_claude,
             Some(true),
             "resolved pid {pid} must be the fake claude grandchild reached via the wrapper hop"
+        );
+    }
+
+    /// #8938: a PID the table does not hold is an error, so a caller can fail
+    /// closed; the `claude` scan's wrapper reads it as "no children".
+    #[test]
+    fn child_pids_of_a_dead_pid_is_an_error() {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        let got = child_pids(pid);
+        assert!(got.is_err(), "{got:?}");
+        assert!(child_pids_of(pid).is_empty());
+    }
+
+    /// Where the in-pane half of the #8938 test writes `<found> <its parent>`.
+    #[cfg(target_os = "macos")]
+    const PANE_PROBE_OUT: &str = "TM_8938_PANE_PROBE_OUT";
+    /// The tmux session the in-pane half looks up.
+    #[cfg(target_os = "macos")]
+    const PANE_PROBE_SESSION: &str = "TM_8938_PANE_PROBE_SESSION";
+    /// The private-server tmux shim the in-pane half runs tmux through.
+    #[cfg(target_os = "macos")]
+    const PANE_PROBE_SHIM: &str = "TM_8938_PANE_PROBE_SHIM";
+
+    /// #8938: `find_claude_pid_in_tmux`, run by a process INSIDE the pane,
+    /// finds the `claude` above it — the lookup `tm fleet status` makes from
+    /// the Architect's own Bash tool.
+    ///
+    /// The pane runs `sh drv.sh`, which spawns a fake `claude` (a symlink to
+    /// `/bin/bash`, so `ps -o comm=` names it `claude`), which runs this test
+    /// binary again with [`PANE_PROBE_OUT`] set. That inner run is the probe:
+    /// it looks the session up and writes what it found next to its own parent
+    /// PID, which is the fake `claude`. macOS-gated + `#[ignore]` like
+    /// `claude_pid_resolves_through_disclaim_wrapper`: it needs real tmux and
+    /// the macOS `comm` of a symlink.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn claude_pid_resolves_from_inside_its_own_pane() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime")
+        };
+        // The inner half, inside the pane.
+        if let Some(out) = std::env::var_os(PANE_PROBE_OUT) {
+            let session = std::env::var(PANE_PROBE_SESSION).expect("probe session");
+            let shim = std::env::var(PANE_PROBE_SHIM).expect("probe shim");
+            let found = runtime()
+                .block_on(crate::core::tmux::with_tmux_binary(shim.into(), async {
+                    find_claude_pid_in_tmux(&session, 1, Duration::ZERO)
+                }));
+            let found = found.map_or_else(|| "none".to_owned(), |pid| pid.to_string());
+            let line = format!("{found} {}", std::os::unix::process::parent_id());
+            std::fs::write(out, line).expect("write the probe result");
+            return;
+        }
+        if Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::os::unix::fs::symlink("/bin/bash", dir.join("claude")).unwrap();
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = dir.join("probe.out");
+        let server = crate::test_support::tmux_session::PrivateTmuxServer::new("tmux", "inpane");
+        let session = format!("tmpm-inpane-pid-{}", std::process::id());
+        // The inner run re-isolates its own `TMUX_TMPDIR` at startup, so the
+        // private server's socket dir is pinned into the shim it runs.
+        let tmpdir = std::env::var("TMUX_TMPDIR").unwrap_or_default();
+        let shim = dir.join("tmux-pinned");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nTMUX_TMPDIR='{tmpdir}' exec '{}' \"$@\"\n",
+                server.shim_bin()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        // inner.sh runs as the fake claude; the probe is its child. The
+        // trailing sleep keeps `claude` alive for the name check below.
+        let inner = dir.join("inner.sh");
+        std::fs::write(
+            &inner,
+            format!(
+                "{PANE_PROBE_OUT}='{}' {PANE_PROBE_SESSION}='{session}' \
+                 {PANE_PROBE_SHIM}='{}' '{}' --exact \
+                 core::process::tests::claude_pid_resolves_from_inside_its_own_pane \
+                 --include-ignored --test-threads=1 >/dev/null 2>&1\nsleep 60\n:\n",
+                out.display(),
+                shim.display(),
+                exe.display(),
+            ),
+        )
+        .unwrap();
+        let drv = dir.join("drv.sh");
+        std::fs::write(
+            &drv,
+            format!(
+                "#!/bin/sh\n\"{}/claude\" \"{}\" &\nwait\n",
+                dir.display(),
+                inner.display()
+            ),
+        )
+        .unwrap();
+        let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn_on_socket(
+            "tmux",
+            Some(server.name()),
+            &session,
+            &format!("sh {}", drv.display()),
+        );
+
+        let mut result = None;
+        for _ in 0..150 {
+            if let Ok(text) = std::fs::read_to_string(&out)
+                && !text.is_empty()
+            {
+                result = Some(text);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let result = result.expect("the in-pane probe must report within 30 s");
+        let (found, claude) = result.split_once(' ').expect("`<found> <parent>`");
+        let claude_is_named_claude = claude.parse().is_ok_and(process_name_is_claude);
+        drop(scratch);
+
+        assert!(
+            claude_is_named_claude,
+            "the probe's parent {claude} is the fake claude"
+        );
+        assert_eq!(
+            found, claude,
+            "from inside the pane the lookup must find the claude above the caller"
         );
     }
 }

@@ -465,6 +465,137 @@ async fn expired_tier_c_drawer_survives_the_open_time_sweep() {
     );
 }
 
+/// #8314: a reopen that shares a live handle's KG must not wait on its write.
+///
+/// Why: the daemon reopens a palace on a READ after an LRU or idle eviction,
+/// and that reopen shares the cached kg.redb `Database` with any handle still
+/// alive — including one whose write transaction never ends. The open-time
+/// sweep deleted each expired drawer with a synchronous write, which waited on
+/// that transaction forever, so the read behind the reopen never answered.
+/// What: seeds one live and one expired drawer through a live handle, holds a
+/// raw kg.redb write transaction on another thread, then opens the same palace
+/// again on a third thread. The reopen must finish inside a bound, show the
+/// live drawer, and keep the expired one out of the in-memory table.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reopen_behind_a_stuck_kg_write_still_reads() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("stuck-palace");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let palace = Palace {
+        id: PalaceId::new("stuck-palace"),
+        name: "Stuck".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir,
+    };
+    let live = PalaceHandle::open(&palace).expect("open live handle");
+    let room_id = Uuid::new_v4();
+    let kept = Drawer::new(room_id, "a drawer committed before the stall");
+    let mut expired = Drawer::new(room_id, "an expired ordinary drawer");
+    expired.expires_at = Some(Utc::now() - Duration::days(1));
+    let (kept_id, expired_id) = (kept.id, expired.id);
+    live.kg.upsert_drawer_sync(&kept).unwrap();
+    live.kg.upsert_drawer_sync(&expired).unwrap();
+
+    let db = live.kg.store().db_for_test();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = std::thread::spawn(move || {
+        let wtx = db.begin_write().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        drop(wtx); // abort: never committed
+    });
+    held_rx.recv().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let reopen_palace = palace.clone();
+    std::thread::spawn(move || {
+        let ids = PalaceHandle::open(&reopen_palace)
+            .map(|h| h.drawers.read().iter().map(|d| d.id).collect::<Vec<_>>());
+        let _ = done_tx.send(ids.map_err(|e| format!("{e:#}")));
+    });
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    release_tx.send(()).unwrap();
+    stuck.join().unwrap();
+
+    let ids = outcome
+        .expect("reopen blocked behind the stuck kg write (#8314)")
+        .expect("reopen succeeds");
+    assert!(ids.contains(&kept_id), "the committed drawer is readable");
+    assert!(
+        !ids.contains(&expired_id),
+        "the expired drawer is still hidden"
+    );
+}
+
+/// #8314 (critic round 2): reopens behind a stuck write park one sweep helper.
+///
+/// Why: a sweep that times out leaves its helper parked in `begin_write`, and
+/// the expired rows it was deleting stay on disk. Every later reopen of the
+/// same palace (the daemon's idle-evict cycle) found them again and spawned
+/// another helper, so threads grew without bound for as long as the write
+/// stayed stuck.
+/// What: holds a raw kg.redb write, reopens the palace three times, and counts
+/// the parked helpers by the `Arc<Database>` each one holds inside
+/// `begin_write_guarded`. At most one may be outstanding.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopens_behind_a_stuck_kg_write_park_at_most_one_sweep_helper() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("sweep-flight");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let palace = Palace {
+        id: PalaceId::new("sweep-flight"),
+        name: "Sweep flight".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir,
+    };
+    let live = PalaceHandle::open(&palace).expect("open live handle");
+    let mut expired = Drawer::new(Uuid::new_v4(), "an expired ordinary drawer");
+    expired.expires_at = Some(Utc::now() - Duration::days(1));
+    live.kg.upsert_drawer_sync(&expired).unwrap();
+
+    let db = live.kg.store().db_for_test();
+    let stuck_db = Arc::clone(&db);
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = std::thread::spawn(move || {
+        let wtx = stuck_db.begin_write().unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        drop(wtx);
+    });
+    held_rx.recv().unwrap();
+    let baseline = Arc::strong_count(&db);
+
+    let mut reopen_errors = Vec::new();
+    for _ in 0..3 {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reopen_palace = palace.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(PalaceHandle::open(&reopen_palace).map(drop).is_ok());
+        });
+        if !matches!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(true)
+        ) {
+            reopen_errors.push("reopen failed or blocked");
+        }
+    }
+    let parked = Arc::strong_count(&db).saturating_sub(baseline);
+    release_tx.send(()).unwrap();
+    stuck.join().unwrap();
+
+    assert!(reopen_errors.is_empty(), "{reopen_errors:?}");
+    assert!(
+        parked <= 1,
+        "{parked} sweep helpers parked behind one stuck write (#8314)"
+    );
+}
+
 // ── The incumbent-absent fallback (#6438) ───────────────────────────────────
 
 /// Every drawer row in `rows` whose own `fact_key` still claims [`SLOT`].

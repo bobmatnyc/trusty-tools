@@ -157,28 +157,28 @@ retrying `cargo test -p <crate>` specifically, add `-- --test-threads=4`.
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 
-🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, and `trusty-agents-common` use edition 2024;
+🟢 **Edition mismatch** — `trusty-mpm`, `trusty-agents`, and `trusty-agents-common` use edition 2024;
 all other crates use edition 2021. Let-chains (`if let … && let …`) only
 work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
-🟢 **`trusty-mpm-gui` is excluded from bare `cargo build`/`test`/`check`**
-(#2951) — the root `Cargo.toml`'s `default-members` list omits it, matching
-CI's existing `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui
---exclude trusty-agents-ui` for the same commands (the third exclusion guards
+🟢 **`trusty-code-gui` is excluded from bare `cargo build`/`test`/`check`**
+(#2951, #2983) — the root `Cargo.toml`'s `default-members` list omits it,
+matching CI's existing `--workspace --exclude trusty-code-gui
+--exclude trusty-agents-ui` for the same commands (the second exclusion guards
 against a build-order race: `trusty-agents-ui`'s `tauri::generate_context!()`
 reads the same `ui/dist/` that `trusty-agents`' own build.rs populates, and
 panics if it runs first).
-Use `cargo build -p trusty-mpm-gui` (or `--workspace`, which always builds
+Use `cargo build -p trusty-code-gui` (or `--workspace`, which always builds
 everything regardless of `default-members`) when you actually need it. This
 also stops every agent worktree from silently producing a fresh ad-hoc-signed
 GUI debug binary — and its own macOS "would like to access data from other
 apps" TCC prompt — on every bare `cargo build`.
 
-🟡 **`cargo tauri build` for `trusty-mpm-gui` needs Bob's Developer ID cert,
-or an env-var override** — `crates/trusty-mpm-gui/tauri.conf.json` pins
+🟡 **`cargo tauri build` for `trusty-code-gui` needs Bob's Developer ID cert,
+or an env-var override** — `crates/trusty-code-gui/tauri.conf.json` pins
 `bundle.macOS.signingIdentity` to `"Developer ID Application: Bob Matsuoka
-(4JH68XUHC5)"` (#2951, stable TCC identity instead of a fresh ad-hoc one per
-rebuild — see the entry above). On a machine without that exact certificate
+(4JH68XUHC5)"` (stable TCC identity instead of a fresh ad-hoc one per
+rebuild). On a machine without that exact certificate
 in the login keychain, Tauri's bundler hard-fails the signing step. Override
 it with the `APPLE_SIGNING_IDENTITY` environment variable — Tauri's bundler
 honors it in place of the config value (confirmed against the Tauri v2
@@ -187,23 +187,14 @@ honors it in place of the config value (confirmed against the Tauri v2
 `tauri.conf.json > bundle > macOS > signingIdentity`."):
 `APPLE_SIGNING_IDENTITY=- cargo tauri build` for a local ad-hoc build (the
 `-` pseudo-identity), or set it to a Developer ID string you do have. `cargo
-build -p trusty-mpm-gui` / `cargo check -p trusty-mpm-gui` (no bundling) are
+build -p trusty-code-gui` / `cargo check -p trusty-code-gui` (no bundling) are
 unaffected — this only matters for `cargo tauri build`/`tauri build`.
-
-🟡 **`trusty-code-gui` mirrors the `trusty-mpm-gui` signing pattern above** —
-same stable Developer ID identity (`Developer ID Application: Bob Matsuoka
-(4JH68XUHC5)`) pinned in `crates/trusty-code-gui/tauri.conf.json`'s
-`bundle.macOS.signingIdentity`, same `APPLE_SIGNING_IDENTITY` env-var
-override for machines without that cert, and it is likewise excluded from
-`default-members` (a bare `cargo build`/`test`/`check` skips it; use
-`cargo build -p trusty-code-gui` or `--workspace`). `trusty-code-gui` is a
-second, independent Tauri crate (`crates/trusty-code-gui`, for the
-`trusty-code`/tcode daemon) — it does not join `trusty-mpm-gui`'s
-`SIGNABLE_BINARIES` set, and as of this writing `trusty-code`/`tcode` has no
-`tctl sign`-style fallback install path of its own for either the CLI or the
-GUI binary (no `install-trusty-code-signed.sh` script or `CODE_SET` exists);
-the Tauri `bundle.macOS.signingIdentity` config is the only signing path for
-`trusty-code-gui` today.
+`trusty-code-gui` (`crates/trusty-code-gui`, for the `trusty-code`/tcode
+daemon) is not in `SIGNABLE_BINARIES`, and as of this writing
+`trusty-code`/`tcode` has no `tctl sign`-style fallback install path of its
+own for either the CLI or the GUI binary (no `install-trusty-code-signed.sh`
+script or `CODE_SET` exists); the Tauri `bundle.macOS.signingIdentity` config
+is the only signing path for `trusty-code-gui` today.
 
 🔴 **Naming an agent file `base…` without a hyphen** — `scan_agents`
 (`crates/trusty-mpm/src/core/delegation_authority.rs`) treats a case-insensitive
@@ -217,3 +208,13 @@ never appears in the PM's `## Delegation Authority` section, check the file name
 first, then run `tm doctor` — its `agents` check reports the deployed file count
 and the delegatable roster size side by side, and a gap between them is the
 symptom. `RUST_LOG=debug` logs every file this rule excludes, with its directory.
+
+🟡 **Seconds of lag per keystroke in every tmux pane** — a large tmux
+`history-limit` plus a pane holding tens of thousands of scrollback lines slows
+the whole tmux server, so every pane on the host lags, not only the full one
+(#8404). The code default (`DEFAULT_TMUX_HISTORY_LIMIT` in
+`crates/trusty-common/src/tmux.rs`) is 10,000 lines; it was 100,000 until
+#8404. Override it with `history_limit` under `tmux:` in
+`~/.trusty-tools/trusty-mpm/config.yaml`; a value below 1,000 is clamped up to
+1,000. The option applies to panes created after the change, so a pane already
+holding a large history needs `tmux clear-history -t <pane>` to recover.

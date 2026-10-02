@@ -36,9 +36,8 @@ impl DaemonClient {
     /// Test: `managed_list_response_deserializes` covers the wire shape; live
     /// HTTP via `tests/session_manager_mvp.rs`.
     pub async fn list_managed_sessions(&self) -> anyhow::Result<Vec<ManagedSessionSummary>> {
-        let url = format!("{}/api/v1/sessions/managed", self.base);
+        let url = "/api/v1/sessions/managed".to_string();
         let body: ManagedListResponse = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -59,9 +58,8 @@ impl DaemonClient {
     /// Test: `managed_fleet_response_deserializes` in `tests.rs`; live HTTP via
     /// `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`.
     pub async fn fleet_managed_sessions(&self) -> anyhow::Result<Vec<FleetProjectGroupWire>> {
-        let url = format!("{}/api/v1/sessions/managed/fleet", self.base);
+        let url = "/api/v1/sessions/managed/fleet".to_string();
         let body: FleetByProjectWireResponse = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -78,9 +76,8 @@ impl DaemonClient {
     /// a 404 (and any other non-success status) surfaces as an `Err`.
     /// Test: live HTTP via `tests/session_manager_mvp.rs`.
     pub async fn get_managed_session(&self, id: &str) -> anyhow::Result<ManagedSessionSummary> {
-        let url = format!("{}/api/v1/sessions/managed/{id}", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}");
         let summary = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -118,16 +115,14 @@ impl DaemonClient {
         &self,
         req: &ManagedSpawnRequest,
     ) -> anyhow::Result<ManagedSpawnResponse> {
-        let url = format!("{}/api/v1/sessions/managed", self.base);
+        let url = "/api/v1/sessions/managed".to_string();
         let resp = self
-            .http
             .post(&url)
             .json(req)
             .timeout(config::PROVISION_REQUEST_TIMEOUT)
             .send()
             .await?;
-        let resp = response_or_body_error(resp).await?;
-        Ok(resp.json().await?)
+        response_or_body_error(resp).await?.json().await
     }
 
     /// Adopt an EXISTING tmux session via `POST /api/v1/sessions/managed/adopt`
@@ -148,8 +143,8 @@ impl DaemonClient {
         &self,
         req: &ManagedAdoptRequest,
     ) -> anyhow::Result<ManagedAdoptResponse> {
-        let url = format!("{}/api/v1/sessions/managed/adopt", self.base);
-        let resp = self.http.post(&url).json(req).send().await?;
+        let url = "/api/v1/sessions/managed/adopt".to_string();
+        let resp = self.post(&url).json(req).send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -169,9 +164,8 @@ impl DaemonClient {
         id: &str,
         text: &str,
     ) -> anyhow::Result<ManagedSendInputResponse> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/send", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/send");
         let resp = self
-            .http
             .post(&url)
             .json(&ManagedSendInputRequest {
                 text: text.to_string(),
@@ -194,9 +188,8 @@ impl DaemonClient {
         id: &str,
         answer: &str,
     ) -> anyhow::Result<ManagedAnswerResponse> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/answer", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/answer");
         let resp = self
-            .http
             .post(&url)
             .json(&ManagedAnswerRequest {
                 answer: answer.to_string(),
@@ -219,9 +212,8 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedActivityResponse> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/activity", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/activity");
         let resp = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -240,9 +232,8 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedAttachCmdResponse> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/attach-cmd", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/attach-cmd");
         let resp = self
-            .http
             .get(&url)
             .send()
             .await?
@@ -262,9 +253,8 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedSessionSummary> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/runtime-stop", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/runtime-stop");
         let resp = self
-            .http
             .post(&url)
             .send()
             .await?
@@ -284,8 +274,8 @@ impl DaemonClient {
     /// HTTP status and the response body text so the caller can surface both.
     /// Test: live HTTP via `tests/session_manager_mvp.rs`.
     pub async fn resume_managed_session(&self, id: &str) -> anyhow::Result<ManagedSessionSummary> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/resume", self.base);
-        let resp = self.http.post(&url).send().await?;
+        let url = format!("/api/v1/sessions/managed/{id}/resume");
+        let resp = self.post(&url).send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -322,8 +312,26 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedDecommissionOutcome> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
-        let resp = self.http.post(&url).send().await?;
+        self.decommission_managed_session_with(id, false).await
+    }
+
+    /// [`decommission_managed_session`](Self::decommission_managed_session),
+    /// with `force` sent as `?force=true` (#7660).
+    ///
+    /// Test: `session_decommission_routed_force_removes_a_provisioning_only_worktree`
+    /// (sends `force=true`), `session_decommission_routed_fails_naming_why_the_workspace_was_kept`.
+    pub async fn decommission_managed_session_with(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> anyhow::Result<ManagedDecommissionOutcome> {
+        let url = format!("/api/v1/sessions/managed/{id}/decommission");
+        let mut req = self.post(&url);
+        if force {
+            // #6288: typed, so the socket's params struct decodes it.
+            req = req.query(&[("force", true)]);
+        }
+        let resp = req.send().await?;
         // #5913: name the 404 here, once. `prune.rs`'s sweep records the resulting
         // `Err` as a failed row (#2457), and that fail-closed behaviour must not
         // depend on which entry point issued the request.
@@ -374,11 +382,10 @@ impl DaemonClient {
         &self,
         id: &str,
     ) -> anyhow::Result<ManagedDecommissionOutcome> {
-        let url = format!("{}/api/v1/sessions/managed/{id}/decommission", self.base);
+        let url = format!("/api/v1/sessions/managed/{id}/decommission");
         let resp = self
-            .http
             .post(&url)
-            .query(&[("record_only", "true")])
+            .query(&[("record_only", true)])
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {

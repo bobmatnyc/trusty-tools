@@ -107,15 +107,28 @@ pub async fn session_new(
 /// Stop a session's runtime, keeping its workspace (`session_stop` tool).
 ///
 /// Why: thin wrapper over [`crate::session_manager::SessionManager::stop`].
-/// What: parses the id, calls `stop`, returns the updated record as JSON.
-/// Test: `session_stop_unknown_id_errors` in the `tests` module.
+/// What: parses the id, calls `stop_reporting`, returns the updated record as
+/// JSON plus `runtime_left_running` — the reason a live tmux session with the
+/// record's name was left running, or `null` (#8935; additive, as the HTTP
+/// route).
+/// Test: `unknown_id_errors_for_all_single_id_tools`,
+/// `session_stop_says_an_unproven_runtime_was_left_running`.
 pub async fn session_stop(state: &Arc<DaemonState>, session_id: &str) -> Result<Value, String> {
     let id = parse_managed_id(session_id)?;
     let mgr = state.session_manager().await;
-    mgr.stop(&id)
+    let report = mgr
+        .stop_reporting(&id, crate::session_manager::StopCause::Deliberate)
         .await
-        .map(|r| record_to_json(&r))
-        .map_err(managed_err)
+        .map_err(managed_err)?;
+    let mut json = record_to_json(&report.record);
+    // #8935: a record-only stop must not read as a stopped runtime.
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "runtime_left_running".into(),
+            report.runtime.left_running().into(),
+        );
+    }
+    Ok(json)
 }
 
 /// Resume a stopped session in its existing workspace (`session_resume` tool).
@@ -141,7 +154,11 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 ///
 /// Why: thin wrapper over
 /// [`crate::session_manager::SessionManager::decommission`].
-/// What: parses the id, calls `decommission`, returns the tombstone record.
+/// What: parses the id, calls `decommission_reporting` (the same teardown
+/// as `decommission`, without `--force`), returns the tombstone record plus
+/// `workspace_removed` (bool), `workspace_kept_reason` and
+/// `workspace_kept_by_design` (string or null each, as the HTTP route) — a
+/// workspace kept for the work it holds is reported, not hidden (#8663).
 ///
 /// `caller` (#3649, Option B): the trait-level MCP `Backend::session_decommission`
 /// method currently carries no per-connection caller identity — the wire
@@ -151,7 +168,10 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 /// session already carries), this always passes `None`, which preserves
 /// full pre-#3649 authority — i.e. an MCP-driven decommission behaves
 /// exactly as it did before this issue, never gated by the new owner check.
-/// Test: `session_decommission_unknown_id_errors` in the `tests` module.
+/// Test: `session_decommission_unknown_id_errors`,
+/// `session_decommission_prunes_stale_worktree_bookkeeping`,
+/// `session_decommission_reports_a_workspace_kept_by_design` in the `tests`
+/// module.
 pub async fn session_decommission(
     state: &Arc<DaemonState>,
     session_id: &str,
@@ -160,10 +180,35 @@ pub async fn session_decommission(
     let mgr = state.session_manager().await;
     // TODO(#3649): populate `caller` from the calling session's identity once
     // the MCP transport threads it through; `None` preserves current authority.
-    mgr.decommission(&id, None)
+    let report = mgr
+        .decommission_reporting(
+            &id,
+            None,
+            crate::session_manager::decommission_force::ProvisioningDirt::Refuse,
+        )
         .await
-        .map(|(r, _workspace_removed)| record_to_json(&r))
-        .map_err(managed_err)
+        .map_err(managed_err)?;
+    let mut value = record_to_json(&report.record);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "workspace_removed".to_string(),
+            Value::Bool(report.workspace_removed),
+        );
+        obj.insert(
+            "workspace_kept_reason".to_string(),
+            report
+                .workspace_kept_reason
+                .map_or(Value::Null, Value::String),
+        );
+        // #8663 critic round 2: the same verdict fields the HTTP route returns.
+        obj.insert(
+            "workspace_kept_by_design".to_string(),
+            report
+                .workspace_kept_by_design
+                .map_or(Value::Null, Value::String),
+        );
+    }
+    Ok(value)
 }
 
 /// Hard-delete a session's RECORD from the store (`session_delete` tool, #2012).
@@ -472,6 +517,53 @@ mod tests {
         }
     }
 
+    /// #8935 critic round: `session_stop` says when it moved the record only.
+    /// The live session carries the record's name and the record has no pane
+    /// id, so ownership is unproven and nothing is killed. Red on a73e5ac7f3,
+    /// whose response had no `runtime_left_running` key.
+    #[tokio::test]
+    async fn session_stop_says_an_unproven_runtime_was_left_running() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let tmux = LiveTrackingTmux::new();
+        let s = Arc::new(
+            DaemonState::with_root_isolated_managed_and_driver(
+                root.path().to_path_buf(),
+                tmux.clone(),
+            )
+            .await,
+        );
+        let id = ManagedSessionId::new();
+        let ws = root.path().join(format!("{id}-mcp-stop"));
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "mcp session_stop test".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_stop(&s, &id.to_string()).await.expect("stop");
+
+        let why = json["runtime_left_running"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the stop names the live session: {json}"));
+        assert!(why.contains("no pane id"), "{why}");
+        assert_eq!(json["state"], "stopped", "{json}");
+        assert!(
+            !tmux.live.lock().unwrap().is_empty(),
+            "the session was killed"
+        );
+    }
+
     /// `session_delete` fail-closed guard + `force` bypass, driven end-to-end
     /// against a real (isolated) [`SessionManager`] record (#2012).
     ///
@@ -742,6 +834,24 @@ mod tests {
                 .status
                 .success()
         );
+        // #8663: pushed, so the owned workspace holds no unpushed commit.
+        let remote = workspace_root.join("tm-5949-remote.git");
+        assert!(
+            git(
+                &workspace_root,
+                &["init", "--quiet", "--bare", "tm-5949-remote.git"]
+            )
+            .status
+            .success()
+        );
+        let remote = remote.to_string_lossy();
+        for args in [
+            &["remote", "add", "origin", &remote][..],
+            &["push", "--quiet", "origin", "HEAD"],
+            &["fetch", "--quiet", "origin"],
+        ] {
+            assert!(git(&base, args).status.success(), "git {args:?}");
+        }
 
         let id = crate::session_manager::ManagedSessionId::new();
         let leaf = format!("tm-5949-{id}");
@@ -794,6 +904,13 @@ mod tests {
             .await
             .expect("decommission");
         assert_eq!(json["state"], "decommissioned", "{json}");
+        // #8663 critic round 1: the verdict is reported, not discarded.
+        assert_eq!(json["workspace_removed"], Value::Bool(true), "{json}");
+        assert_eq!(
+            json.get("workspace_kept_reason"),
+            Some(&Value::Null),
+            "{json}"
+        );
         assert!(!ws.exists(), "the workspace must be gone: {}", ws.display());
         assert!(
             !listed(&base).contains(&leaf),
@@ -802,5 +919,93 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #8663 critic round 1: a kept owned workspace comes back from the MCP
+    /// tool as `workspace_removed: false` with the reason, not as a bare
+    /// tombstone.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn session_decommission_reports_a_kept_workspace() {
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home_guard = HomeGuard::redirect(home.path());
+        let workspace_root = trusty_common::workspace_layout::resolve_workspace_root(None);
+        let ws = workspace_root
+            .join("owner")
+            .join("repo")
+            .join("tm-8663-kept");
+        std::fs::create_dir_all(&ws).expect("create workspace");
+        std::fs::write(ws.join("notes.md"), "agent work\n").expect("write notes");
+
+        let (_root, s) = state().await;
+        let id = crate::session_manager::ManagedSessionId::new();
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8663 MCP kept workspace".to_string(),
+                Some(ws.clone()),
+                None,
+                Some(ws.clone()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                true,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_decommission(&s, &id.to_string())
+            .await
+            .expect("a refusal is not an error");
+        assert_eq!(json["state"], "decommissioned", "{json}");
+        assert_eq!(json["workspace_removed"], Value::Bool(false), "{json}");
+        let reason = json["workspace_kept_reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the kept reason is a string: {json}"));
+        assert!(reason.contains("notes.md"), "{reason}");
+        assert!(ws.join("notes.md").exists(), "the work must survive");
+        assert_eq!(
+            json.get("workspace_kept_by_design"),
+            Some(&Value::Null),
+            "{json}"
+        );
+    }
+
+    /// #8663 critic round 2: a workspace tm never removes comes back as
+    /// `workspace_kept_by_design`, as the HTTP route reports it.
+    #[tokio::test]
+    async fn session_decommission_reports_a_workspace_kept_by_design() {
+        let ws = tempfile::tempdir().expect("user directory");
+        let (_root, s) = state().await;
+        let id = crate::session_manager::ManagedSessionId::new();
+        s.session_manager()
+            .await
+            .create_with_id(
+                id,
+                "regression: #8663 MCP kept by design".to_string(),
+                Some(ws.path().to_path_buf()),
+                None,
+                Some(ws.path().to_path_buf()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                // Unowned: a local-path directory decommission never deletes.
+                false,
+            )
+            .await
+            .expect("seed session");
+
+        let json = session_decommission(&s, &id.to_string())
+            .await
+            .expect("decommission");
+        let by_design = json["workspace_kept_by_design"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the by-design reason is a string: {json}"));
+        assert!(by_design.contains("kept by design"), "{by_design}");
+        assert_eq!(json["workspace_removed"], Value::Bool(false), "{json}");
+        assert!(ws.path().exists(), "the user's directory must survive");
     }
 }

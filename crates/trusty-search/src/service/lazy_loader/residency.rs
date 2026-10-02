@@ -520,11 +520,21 @@ async fn persist_before_park(
         Err(e) => {
             // No resolvable snapshot path — there is nowhere to save to, and
             // that is not a reason to keep the index resident forever.
-            tracing::debug!(
-                "residency-park: '{}' has no resolvable HNSW snapshot path ({e}) \
-                 — parking (#6870)",
-                id.0
-            );
+            // #8438: a resolver refusal is a misconfiguration, logged at error;
+            // the park still proceeds.
+            if crate::service::storage_layout::is_write_refusal(&e) {
+                tracing::error!(
+                    "residency-park: '{}' HNSW snapshot write refused ({e:#}) — parking \
+                     without a save (#6870)",
+                    id.0
+                );
+            } else {
+                tracing::debug!(
+                    "residency-park: '{}' has no resolvable HNSW snapshot path ({e}) \
+                     — parking (#6870)",
+                    id.0
+                );
+            }
             return true;
         }
     };

@@ -6,33 +6,57 @@
 //! `start`-spawned daemon is just a detached child process whose only public
 //! handle is its name on the process table and its address file at
 //! `~/.trusty-memory/http_addr`.
-//! What: walks the process table via `sysinfo`, collects every `trusty-memory`
-//! process whose argv contains `serve` (filters out short-lived CLI calls and
-//! `cargo run -- migrate` invocations), sends SIGTERM, polls up to five
-//! seconds for them to exit, and SIGKILLs stragglers. Mirrors the
-//! `trusty-search stop` flow so the two daemons share a stop UX.
-//! Test: `cargo run -p trusty-memory -- start && cargo run -p trusty-memory --
-//! stop` should report at least one process killed and leave no live
-//! `trusty-memory` process behind.
+//! What: walks the process table via `sysinfo`, collects every daemon-mode
+//! `trusty-memory serve` process (not the per-session stdio bridges, not CLI
+//! calls, not `cargo run`), sends SIGTERM, polls up to five seconds for them
+//! to exit, and SIGKILLs stragglers. Mirrors the `trusty-search stop` flow so
+//! the two daemons share a stop UX.
+//! Test: `daemon_pids_in_returns_only_daemon_mode_serve_processes`,
+//! `find_daemon_pids_finds_a_live_serve_foreground_process`,
+//! `stop_terminates_the_daemon_and_spares_a_stdio_bridge`.
 
 use anyhow::{bail, Result};
 use colored::Colorize;
 use std::time::{Duration, Instant};
 
-/// Stop every live `trusty-memory serve` process owned by this user.
+/// How long `stop` waits after SIGTERM before sending SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(5);
+
+/// Stop every live `trusty-memory` daemon owned by this user.
 ///
-/// Why: the daemon writes no PID file (only an `http_addr` record), so the
-/// process table is the source of truth. Killing every matching process is
-/// the safe answer — `find_daemon_pids` filters out short-lived CLI calls by
-/// requiring `serve` in argv, so `trusty-memory status`, `migrate`, etc.
-/// cannot be hit. Exits non-zero ("No daemon running") when nothing matches
-/// so shell-scripted callers can distinguish "I stopped it" from "nothing to
-/// stop".
-/// What: SIGTERM phase → 5 s poll → SIGKILL phase; finally removes the stale
-/// address file when every targeted process has exited.
-/// Test: exercised via `start` followed by `stop` in the integration paths.
+/// Why: the process table is the source of truth for which daemon runs.
+/// Exits non-zero ("No daemon running") when nothing matches so
+/// shell-scripted callers can distinguish "I stopped it" from "nothing to
+/// stop", and non-zero when a daemon is still alive after SIGKILL.
+/// What: [`stop_daemons_in`] over [`list_processes`]; on a clean stop, removes
+/// the stale address file.
+/// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
+/// `stop_reports_no_daemon_when_only_bridges_run`,
+/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
 pub async fn handle_stop() -> Result<()> {
-    let targets = find_daemon_pids();
+    stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
+    cleanup_addr_file();
+    Ok(())
+}
+
+/// Signal the daemons in `procs` (excluding `me`) until they exit.
+///
+/// Why (#277): the targets are [`daemon_pids_in`]'s, so the stdio bridge each
+/// MCP client session runs is never signalled; killing one strands its
+/// session without memory tools. Split from [`handle_stop`] so a test can
+/// hand in a process table that holds only its own stand-ins.
+/// What: SIGTERM phase, poll up to `grace` for exit, SIGKILL phase.
+///
+/// # Errors
+///
+/// "No daemon running" when `procs` holds no daemon; "daemon still running"
+/// when a target is alive after SIGKILL.
+///
+/// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
+/// `stop_reports_no_daemon_when_only_bridges_run`,
+/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
+pub(crate) fn stop_daemons_in(procs: &[ProcInfo], me: u32, grace: Duration) -> Result<()> {
+    let targets = daemon_pids_in(procs, me);
     if targets.is_empty() {
         bail!("No daemon running");
     }
@@ -49,14 +73,12 @@ pub async fn handle_stop() -> Result<()> {
         let _ = send_signal(*pid, "TERM");
     }
 
-    // Phase 2: poll up to 5 s for every targeted PID to exit.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Phase 2: poll up to `grace` for every targeted PID to exit.
+    let deadline = Instant::now() + grace;
     loop {
         std::thread::sleep(Duration::from_millis(100));
-        let any_alive = targets.iter().any(|p| pid_alive(*p));
-        if !any_alive {
+        if !targets.iter().any(|p| pid_alive(*p)) {
             println!("{} Daemon stopped", "✓".green());
-            cleanup_addr_file();
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -79,12 +101,16 @@ pub async fn handle_stop() -> Result<()> {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    if targets.iter().any(|p| pid_alive(*p)) {
-        println!("{} Daemon may still be shutting down", "⚠".yellow());
-    } else {
-        println!("{} Daemon stopped", "✓".green());
-        cleanup_addr_file();
+    let alive: Vec<u32> = targets.iter().copied().filter(|p| pid_alive(*p)).collect();
+    if !alive.is_empty() {
+        // #277 MEDIUM-4: a caller that goes on after `stop` must not meet a
+        // live daemon, so a survivor is an error, not a warning.
+        bail!(
+            "daemon still running after SIGKILL ({} process(es): {alive:?})",
+            alive.len()
+        );
     }
+    println!("{} Daemon stopped", "✓".green());
     Ok(())
 }
 
@@ -104,41 +130,116 @@ fn cleanup_addr_file() {
     }
 }
 
-/// Walk the process table and return every `trusty-memory` daemon PID.
+/// One process-table row: pid, executable basename, argv.
+#[derive(Debug, Clone)]
+pub(crate) struct ProcInfo {
+    pub pid: u32,
+    pub name: String,
+    pub argv: Vec<String>,
+}
+
+/// What a `trusty-memory` process is, read from its argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessRole {
+    /// `serve --foreground` / `serve --http[=ADDR]`: the resident daemon, the
+    /// one long-lived process that opens palaces.
+    Daemon,
+    /// Bare `serve` / `serve --stdio`: a per-session MCP bridge that never
+    /// opens redb (#1078) and is never re-spawned by its client (#8351).
+    StdioBridge,
+    /// Any other subcommand.
+    Other,
+}
+
+/// Classify a `trusty-memory` argv the way `main::serve_mode` dispatches it.
 ///
-/// Why: we need a portable "find every live trusty-memory daemon" probe; the
-/// crate already depends on `sysinfo` indirectly via the workspace, and the
-/// same approach is used by `trusty-search stop`, so the two stop paths share
-/// a mental model. Filtering by argv keeps short-lived CLI invocations
-/// (`trusty-memory status`, `trusty-memory migrate`) from being killed.
-/// What: refreshes the process list once, matches `name() == "trusty-memory"`
-/// AND `cmd().contains("serve")`. Excludes the current process so a future
-/// caller running inside the same binary cannot suicide.
-/// Test: covered indirectly by the stop integration path.
-pub(crate) fn find_daemon_pids() -> Vec<u32> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let me = std::process::id();
-    let mut out = Vec::new();
-    for (pid, proc_) in sys.processes() {
-        let raw = pid.as_u32();
-        if raw == me {
-            continue;
-        }
-        // `name()` is the executable basename. Matching on basename avoids
-        // killing `cargo run -p trusty-memory ...` invocations whose argv
-        // contains the string but whose binary is `cargo`.
-        if proc_.name().to_string_lossy() == "trusty-memory" {
-            let is_daemon = proc_.cmd().iter().any(|a| a.to_string_lossy() == "serve");
-            if is_daemon {
-                out.push(raw);
-            }
-        }
+/// Why (#277): since #5267 bare `serve` is the stdio bridge, so "argv contains
+/// `serve`" no longer means "the daemon". Every Claude session runs a bridge.
+/// What: the subcommand is the first argument after argv\[0\] that is not a
+/// flag (the only global flag, `-v`, takes no value). Under `serve`,
+/// `--stdio` wins; otherwise `--foreground` or `--http[=ADDR]` selects the
+/// daemon and no transport flag selects the bridge.
+/// Test: `classify_argv_separates_the_daemon_from_stdio_bridges`.
+pub(crate) fn classify_argv(argv: &[String]) -> ProcessRole {
+    let args = argv.get(1..).unwrap_or_default();
+    let Some(sub) = args.iter().position(|a| !a.starts_with('-')) else {
+        return ProcessRole::Other;
+    };
+    if args[sub] != "serve" {
+        return ProcessRole::Other;
     }
+    let flags = &args[sub + 1..];
+    let has = |f: &str| flags.iter().any(|a| a == f);
+    if has("--stdio") {
+        ProcessRole::StdioBridge
+    } else if has("--foreground")
+        || flags
+            .iter()
+            .any(|a| a == "--http" || a.starts_with("--http="))
+    {
+        ProcessRole::Daemon
+    } else {
+        ProcessRole::StdioBridge
+    }
+}
+
+/// The daemon PIDs in `procs`, excluding `me`.
+///
+/// Why: the decision, separated from the process-table read so a test can
+/// inject the table.
+/// What: keeps rows whose executable basename is `trusty-memory` (so `cargo
+/// run -p trusty-memory -- serve` is never matched) and whose argv classifies
+/// as [`ProcessRole::Daemon`]. Stdio bridges are excluded: they hold no
+/// palace, and killing one strands its client session without memory tools.
+/// Test: `daemon_pids_in_returns_only_daemon_mode_serve_processes`,
+/// `daemon_pids_in_is_empty_when_only_bridges_run`.
+pub(crate) fn daemon_pids_in(procs: &[ProcInfo], me: u32) -> Vec<u32> {
+    let mut out: Vec<u32> = procs
+        .iter()
+        .filter(|p| p.pid != me && p.name == "trusty-memory")
+        .filter(|p| classify_argv(&p.argv) == ProcessRole::Daemon)
+        .map(|p| p.pid)
+        .collect();
+    out.sort_unstable();
     out
+}
+
+/// Read the process table with each process' argv loaded.
+///
+/// Why (#277): `ProcessRefreshKind::nothing()` and `refresh_processes` never
+/// load argv, so `cmd()` was always empty and the scan matched nothing.
+/// What: one refresh with `with_cmd(UpdateKind::Always)`.
+/// Test: `find_daemon_pids_finds_a_live_serve_foreground_process`.
+pub(crate) fn list_processes() -> Vec<ProcInfo> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    sys.processes()
+        .iter()
+        .map(|(pid, p)| ProcInfo {
+            pid: pid.as_u32(),
+            name: p.name().to_string_lossy().into_owned(),
+            argv: p
+                .cmd()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+        })
+        .collect()
+}
+
+/// Every live `trusty-memory` daemon PID, excluding this process.
+///
+/// Why: the daemon writes no PID file, so the process table is the source of
+/// truth for `stop` and for `import kuzu`'s live-daemon refusal.
+/// What: [`daemon_pids_in`] over [`list_processes`].
+/// Test: `find_daemon_pids_finds_a_live_serve_foreground_process`.
+pub(crate) fn find_daemon_pids() -> Vec<u32> {
+    daemon_pids_in(&list_processes(), std::process::id())
 }
 
 /// Send a POSIX signal to a PID by shelling out to `/bin/kill`.
@@ -192,3 +293,7 @@ fn pid_alive(pid: u32) -> bool {
 fn pid_alive(_pid: u32) -> bool {
     true
 }
+
+#[cfg(test)]
+#[path = "stop_tests.rs"]
+mod tests;

@@ -202,12 +202,12 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_delete",
-                "description": "Delete an entire memory palace, including its drawers, vectors, and knowledge graph. Refuses to delete a non-empty palace unless `force=true` is set.",
+                "description": "Delete an entire memory palace, including its drawers, vectors, and knowledge graph. Refuses to delete a non-empty palace unless `force=true` is set, and also refuses a palace it cannot open cleanly or whose legacy SQLite kg.db still holds data. `force=true` skips every check and also destroys legacy kg.db drawers and triples that were never imported; run `trusty-memory palace legacy-kg <palace>` first.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace_id": {"type": "string", "description": "Id of the palace to delete."},
-                        "force":     {"type": "boolean", "description": "Required when the palace still has drawers; defaults to false.", "default": false}
+                        "force":     {"type": "boolean", "description": "Required when the palace still has drawers; defaults to false. DESTRUCTIVE: also deletes unimported legacy kg.db data and skips the checks that protect it.", "default": false}
                     },
                     "required": ["palace_id"]
                 }

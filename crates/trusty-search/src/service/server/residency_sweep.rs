@@ -103,7 +103,10 @@ async fn run_residency_sweep_tick_inner(state: &Arc<SearchAppState>, hook: impl 
         .filter(|e| resident_ids.contains(&e.id))
         .collect();
 
-    let to_park = crate::service::lazy_loader::ids_to_park(resident_entries, cap);
+    let mut to_park = crate::service::lazy_loader::ids_to_park(resident_entries, cap);
+    // #9027: a warm-all pin keeps the index resident for its window, even past
+    // the cap; the warm's own RSS ceiling bounds what that can cost.
+    to_park.retain(|entry| !state.warm.is_pinned(&entry.id));
     if to_park.is_empty() {
         return;
     }

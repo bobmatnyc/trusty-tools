@@ -96,9 +96,11 @@ fn cli_parses_repair_delegation() {
         Cli::try_parse_from(["trusty-mpm", "repair", "delegation", "af20cc838b2b30a55"]).unwrap();
     match cli.command.unwrap() {
         Command::Repair {
-            action: RepairAction::Delegation { agent_id, force },
+            action: RepairAction::Delegation {
+                agent_id, force, ..
+            },
         } => {
-            assert_eq!(agent_id, "af20cc838b2b30a55");
+            assert_eq!(agent_id.as_deref(), Some("af20cc838b2b30a55"));
             assert!(
                 !force,
                 "a bare invocation must not assert the owner is gone"
@@ -112,6 +114,76 @@ fn cli_parses_repair_delegation() {
 /// hits after a daemon restart, so its escape has to be reachable.
 /// What: pins `--force`.
 /// Test: this test.
+#[test]
+fn cli_parses_repair_delegation_by_id_and_list_8257() {
+    let by_id = Cli::try_parse_from([
+        "trusty-mpm",
+        "repair",
+        "delegation",
+        "--delegation-id",
+        "64237d1c-0aa4-4090-bd14-d3c273da7e95",
+    ])
+    .unwrap();
+    match by_id.command.unwrap() {
+        Command::Repair {
+            action:
+                RepairAction::Delegation {
+                    agent_id,
+                    delegation_id,
+                    list,
+                    ..
+                },
+        } => {
+            assert_eq!(agent_id, None);
+            assert_eq!(
+                delegation_id.as_deref(),
+                Some("64237d1c-0aa4-4090-bd14-d3c273da7e95")
+            );
+            assert_eq!(list, None);
+        }
+        other => panic!("expected Command::Repair(Delegation), got {other:?}"),
+    }
+    let list = Cli::try_parse_from(["trusty-mpm", "repair", "delegation", "--list"]).unwrap();
+    match list.command.unwrap() {
+        Command::Repair {
+            action: RepairAction::Delegation { list, .. },
+        } => assert_eq!(list, Some(std::path::PathBuf::from("."))),
+        other => panic!("expected Command::Repair(Delegation), got {other:?}"),
+    }
+    // A bare invocation names nothing, and a listing never writes.
+    assert!(Cli::try_parse_from(["trusty-mpm", "repair", "delegation"]).is_err());
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "repair", "delegation", "--list", "--force"]).is_err()
+    );
+}
+
+/// Why (#8257 owner ruling): the owning session may clear its own record, and
+/// the daemon learns the caller only from the harness's
+/// `CLAUDE_CODE_SESSION_ID`. An argument naming a session would let any caller
+/// claim to be the owner.
+/// What: every spelling a caller might use to name a session is rejected.
+/// Test: this test; the daemon side is
+/// `repair_route_ignores_an_owner_id_the_caller_supplies_8257`.
+#[test]
+fn cli_rejects_a_caller_session_argument_8257() {
+    let owner = "64237d1c-0aa4-4090-bd14-d3c273da7e95";
+    for extra in [
+        vec!["--session", owner],
+        vec!["--session-id", owner],
+        vec!["--caller-session", owner],
+        vec!["--owner", owner],
+        vec![owner],
+    ] {
+        let mut argv = vec!["trusty-mpm", "repair", "delegation", "a0wner"];
+        argv.extend(extra.iter().copied());
+        assert!(
+            Cli::try_parse_from(&argv).is_err(),
+            "`{}` must not parse: no argument names the caller session",
+            argv.join(" ")
+        );
+    }
+}
+
 #[test]
 fn cli_parses_repair_delegation_force() {
     let cli = Cli::try_parse_from([

@@ -8,10 +8,10 @@
 	 * is choosing between two tools, not reading about one.
 	 *
 	 * What: the whole migration page. Not built on `ToolPage.svelte`, for the
-	 * same reason `/tools/trusty-git-analytics/audit` is not: that component
-	 * derives its `<h1>`, source link, and single install line from a `Tool`
-	 * record, and this page is about a move between two projects rather than
-	 * about a crate. The chrome below matches it by hand.
+	 * same reason `/install` is not: that component derives its `<h1>`, source
+	 * link, and single install line from a `Tool` record, and this page is
+	 * about a move between two projects rather than about a crate. The chrome
+	 * below matches it by hand.
 	 *
 	 * Sourcing rule, inherited from `$lib/tools`: every claim was checked
 	 * against repository source, never against a README sentence.
@@ -33,11 +33,11 @@
 	 *     and `docs/reference/threat-model.md`
 	 *   - the kuzu-memory targets, their required flags, and the idempotency
 	 *     claims — `crates/trusty-memory/src/commands/migrate.rs` and
-	 *     `src/main.rs`'s `Migrate` variant; the importer's behaviour and the
-	 *     four refused predicates —
-	 *     `crates/trusty-memory/src/commands/kuzu_migrate.rs` and
+	 *     `src/main.rs`'s `Migrate` variant; the importer's behaviour and why it
+	 *     never writes one of the four hot predicates —
+	 *     `crates/trusty-memory/src/commands/kuzu_import/` and
 	 *     `crates/trusty-memory/src/prompt_facts.rs::HOT_PREDICATES`, pinned by
-	 *     `kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones`. There is
+	 *     `kuzu_import_never_writes_a_hot_predicate`. There is
 	 *     no default `--from` path: the handler errors when it is absent, so
 	 *     the `~/.open-mpm/...` path in the example is kuzu-memory's own
 	 *     convention rather than a default this command applies.

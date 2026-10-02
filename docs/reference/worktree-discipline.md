@@ -131,63 +131,35 @@ section, cross-referenced from the "Worktree Discipline" section of the
 
 ## Installing a Freshly Built Binary
 
-Install from a checkout with an empty `git status --porcelain`, at a known
-commit — `cargo install --path` bakes in whatever is actually on disk, so a
-dirty or unverified checkout ships whatever it happens to be holding:
+🔴 **A release install always uses the registry, never `cargo install
+--path`.** Per [ADR-0043](../adr/0043-cargo-bin-policy.md), `~/.cargo/bin`
+holds only registry installs; a path install is a prohibited class even from
+a clean checkout — it just downgrades the violation from a hard failure to a
+tolerated `Warn` in `tm doctor binary_provenance`, right up until the source
+worktree is reclaimed, at which point the same install reports `Fail` because
+its recorded source directory no longer exists
+([#8561](https://github.com/bobmatnyc/trusty-tools/issues/8561)). Once
+`cargo publish` succeeds, install with:
 
 ```bash
-git -C <checkout> status --porcelain   # must print nothing
-git -C <checkout> log -1 --oneline     # is this the commit you meant to ship?
-cargo install --path <checkout>/crates/<name> --locked
+cargo install <crate> --version <version> --locked
 ```
 
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
-which keeps the macOS kernel's cdhash cache consistent — see
-[release-workflow.md](release-workflow.md) for the full cdhash hazard (why a
-bare `cp` over an on-PATH binary SIGKILLs the next exec, and the TCC-grant
-consequences). That property holds for `cargo install --path` from any clean
-checkout; it says nothing about which checkout to pick.
+Run this from OUTSIDE the workspace directory, so no local `[patch]` table or
+relative path can shadow the registry resolution. No checkout, clean or
+otherwise, is needed for this step — see
+[release-workflow.md](release-workflow.md#release-steps) for the full
+release-install step and the macOS cdhash hazard (why a bare `cp` over an
+on-PATH binary SIGKILLs the next exec, and the TCC-grant consequences); that
+hazard is unchanged by which source `cargo install` reads from.
 
-A freshly-provisioned worktree off `origin/main` satisfies the clean-tree
-requirement by construction, which is why it stays the default:
-
-```bash
-cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
-```
-
-The main checkout is not automatically disqualified, but it is not
-automatically clean either. The write boundary
-([ADR-0044](../adr/0044-main-checkout-write-boundary-and-agent-worktree-ownership.md),
-[ADR-0048](../adr/0048-dispatched-writers-get-a-worktree-and-the-write-boundary-is-enforced.md),
-[ADR-0061](../adr/0061-commits-never-land-on-local-main.md)) denies source
-edits and every commit aimed at local `main`, which rules out the worst
-case, but it classifies a write by file EXTENSION, not by directory:
-documents and configuration stay writable directly in the main checkout,
-and reach origin only through the fast-path branch — never a commit onto
-local `main` itself, per ADR-0061.
-`crates/trusty-mpm/src/assets/skills/*.md` falls on the
-writable side of that line even though it lives under `src/` and is compiled
-into the `trusty-mpm` binary at build time via `include_str!` — so a
-locally-edited, uncommitted skill file in the main checkout can still be
-baked into a binary installed from there. The `git status --porcelain` check
-above is what catches that; running it costs one command.
-
-If the checkout you need to install from is not clean and you cannot switch to
-one that is, provision a throwaway worktree off `origin/main` and install from
-there:
-
-```bash
-git worktree add .claude/worktrees/baseline-$$ origin/main
-cargo install --path .claude/worktrees/baseline-$$/crates/<name> --locked
-git worktree remove .claude/worktrees/baseline-$$
-```
-
-This reaches the clean tree the install needs without disturbing the dirty
-checkout at all: nothing another session can observe changes, and a failure
-partway through leaves that session's uncommitted work exactly where it was.
-The old form of this recipe stashed the dirty checkout instead, which meant an
-interrupted run left the work in a stash entry someone had to find and restore
-by hand (#4730).
+**A path install is never a substitute for the step above, not even for
+local, unreleased testing.** ADR-0043's own escape valve for trying an
+unreleased fix immediately is to skip installing it at all: build once
+(`cargo build --release -p <crate>`) and run the binary directly out of
+`target/{debug,release}/` for that session. That satisfies "run what I just
+built" without ever writing to `~/.cargo/bin` from a worktree or checkout that
+can later be reclaimed out from under the install.
 
 ## Git Staging in Worktrees
 
@@ -238,6 +210,44 @@ raced when two sessions paused at once (#7782), and left the fast-forward watch
 blocked on a dirty sessions log. `**/.trusty-mpm/*` in `.gitignore` covers the
 store; do not re-add a `!.trusty-mpm/sessions/` negation.
 
+## Resuming parked work
+
+Claude Code mints a fresh isolation worktree for every isolated dispatch. The
+`isolation` field says whether to isolate, never where, and the harness refuses
+an isolated agent's git commands aimed at any other tree. A dispatch therefore
+cannot resume a worktree that is already parked
+([#8161](https://github.com/bobmatnyc/trusty-tools/issues/8161)), and cannot
+check out a PR branch that a parked worktree holds
+([#8494](https://github.com/bobmatnyc/trusty-tools/issues/8494)). The agent
+works in its own tree, and a caller that is not pinned to a tree moves the
+result across.
+
+1. **Dispatch.** Brief the agent with the parked tree's tip SHA and branch
+   name, never with the parked path: "base on `<parked-tip>`, branch
+   `<pr-branch>`". Read the tip first with
+   `git -C <parked> rev-parse HEAD`.
+2. **Agent, in its own tree.** `git reset --keep <parked-tip>`, then commit
+   there. Worktrees share refs, so the tip SHA resolves. `reset --keep`
+   refuses to discard uncommitted work, and an agent moving its own tree's
+   HEAD is never gated.
+3. **Consolidate, as the PM or `version-control`:**
+
+   ```bash
+   git -C <parked> fetch <agent-worktree> <agent-branch> && git -C <parked> reset --keep FETCH_HEAD
+   ```
+
+   The parked worktree now holds the agent's commits on its own branch. To
+   amend an open PR, push from the parked tree (`git -C <parked> push`).
+
+`tm hook --pm-guard` governs step 3. A `reset --keep`/`--hard`/`--merge`,
+`merge` (including `--ff-only`) or `rebase` whose target is a linked worktree
+is denied while the daemon reports a live agent standing in that tree. The
+answer counts your own session's agents too. It is allowed when the tree is
+idle. If the daemon cannot answer, the command is denied, not allowed. A
+target the guard cannot resolve (`$WT`, `$(…)`) is also denied, so spell the
+path out. A stale record is listed by `tm repair delegation --list <parked>`
+and ended with `tm repair delegation <agent-id>`.
+
 ## Harness Refusals Inside an Isolation Worktree
 
 An agent pinned to a worktree meets a second command classifier that is not
@@ -250,6 +260,16 @@ This agent is isolated in the worktree …, refusing
   be shown not to be git
 … is too complex to verify that it stays inside the worktree
 ```
+
+`tm` used to produce some of these refusals itself. `tm hook` rewrote covered
+commands (`cargo test`, `git diff`, `grep`, `ls`, …) into
+`{ <cmd>; printf …; } | tm compress --tool "<name>"`, and the classifier
+refused that shape. Since
+[#7477](https://github.com/bobmatnyc/trusty-tools/issues/7477), `tm` no longer
+wraps a Bash command whose working directory is inside a `.claude/worktrees/`
+isolation worktree, or whose working directory the hook cannot read. The
+command reaches the harness as written. If a refusal quotes `tm compress`, the
+installed `tm` predates that fix.
 
 Those strings live only in the harness bundle. `tm hook --pm-guard` clears every
 shape reported on [#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982):
@@ -280,11 +300,12 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | `git diff --cached -- <path>`, `git diff <a>...<b>`, `git diff HEAD~2 HEAD -- <path>` | `git --no-pager diff …` |
 | a diff of one path at one commit | `git show <sha> -- <path>` |
 | `git log origin/main..<sha>` | `git --no-pager log …` |
+| a bare `git diff origin/main` or `git log --oneline` with no range, from the worktree's own cwd (#7477) | `git --no-pager diff origin/main -- <path>`, `git --no-pager log --oneline -<n>` |
 | `git -C .` — a relative `-C` reads as computed at runtime | `git -C <absolute worktree path>` |
 | `cd <worktree> && git diff …` | `git -C <absolute worktree path> diff …` |
 | a git command wrapped in the redirect-then-`echo` gate idiom | run the git command bare, one per Bash call |
 | a pathspec whose basename starts `tm-`, or a `$(git …)` substitution as a pathspec | quote a glob: `git --no-pager diff -- 'crates/*/src/assets/skills/tm-capa*'` |
-| `git checkout HEAD -- <paths>` | `git restore --source=HEAD --staged --worktree <paths>` |
+| `git checkout HEAD -- <paths>`, or `git checkout <sha> -- <paths>` from any other commit (#7477) | `git restore --source=<HEAD or sha> --staged --worktree <paths>` |
 | a `grep` pattern with no `git` in it at all — `grep -n caller_session <file>` refused, `grep -n 'caller' <same file>` allowed, same file both times | re-spell the pattern shorter, or read the file with the Read tool instead |
 | `gh pr create` / `tm pr open` refused because the PR body text carries an env-sample filename substring (a dotenv-style `.example` suffix) | reword the body text to avoid that literal substring, or pass the body via `--body-file <path>` |
 
@@ -300,6 +321,8 @@ substitutes as the reliable spelling rather than as a workaround for one shape.
 | an `awk` program over a log file | `grep` |
 | `grep -n <pattern> <file>` | multi-file/line-number `grep` results are unreliable here — read the file with the Read tool and search visually, or narrow to the one line with `sed -n '<N>p' <file>` on a literal address |
 | a helper script written with the Write tool to the scratchpad directory, then run from there (`python3 <scratchpad>/name.py`) — refused even quoted, because the scratchpad sits outside the worktree | write the script INSIDE the worktree with the Write tool and invoke it as `./name.py`, not from the scratchpad path |
+| `source .venv/bin/activate && pytest`, `. <venv>/bin/activate` — runs a string through `source`, which can't be verified to stay inside the worktree | `.venv/bin/python -m pytest …` (#8514) |
+| `git commit -m "$(cat <<'EOF' … EOF)"` — refused as "too complex to verify … cannot be shown not to run git" | repeated `-m` flags, `git commit -m "<subject>" -m "<body>"` — the default, since no file path is needed. Or `git commit -F <file>` with the file written by the Write tool inside the worktree (never staged, never the scratchpad path above) (#8473) |
 
 This repo's docs spell every gate `bash scripts/<name>.sh`, so the first row
 above applies to the whole test ladder, not only to the line-cap check.
@@ -316,6 +339,7 @@ re-execute themselves under bash, so `./scripts/<name>.sh` and
 | `xargs` piped into another program | one program per Bash call |
 | `sed -n` whose address is shell arithmetic, or whose path is a variable | a literal address and a literal path, or `grep` |
 | `export VAR=$PWD/… && cargo …`, `CARGO_TARGET_DIR=$PWD/… cargo …` | spell the absolute path literally in the assignment |
+| `HOME=<dir> cargo …` — an assignment that moves `HOME` in front of a command (#7477) | put the assignment and the command in a script written with the Write tool and run it as `./name.sh`; in a test, pass the path as a parameter instead (#5544) |
 | `$(pgrep …)` or any command substitution supplying an argument | a literal value, captured in a previous call |
 | an argument whose TEXT contains `git` — a grep pattern, a `perl -pi` regex, a filename | none; re-spell the pattern, or use the Write-a-script route |
 | a directory argument with a trailing `/` (`find crates/<crate>/ -name …`) | drop the trailing slash: `find crates/<crate> -name …` |
@@ -343,7 +367,7 @@ Every refusal costs the agent a full turn of its resident prompt, so reach for t
 | `cat >> <file> <<'EOF'` — heredoc append into a file | the Write tool or Edit tool |
 | `env HOME=<tmp> ./target/debug/deps/<bin>` — environment override in a test | inject the path as a parameter to the test (#5544), never set a global env var |
 | a filename containing the literal substring `diff` or `token` | rename the file to avoid that substring |
-| a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
+| a filename or script body containing ANY known command word as a substring — not only `diff`/`token`/`git` above (e.g. `fix_tac_tests.py`, matched on `tac`; `ls src/eval`, refused as running a string through `eval`, #7477) | rename the file to avoid the substring; the guard matches command words anywhere in the argument text, never only in command position |
 | `cat -n <abs>/.gitignore` | the Read tool — `.gitignore` is an ordinary file here |
 | `git push origin HEAD:<pr-branch>` after creating a local branch from that PR branch (cross-branch push) | until the fast-forward exemption lands, set `TM_ALLOW_CROSS_BRANCH_PUSH=1` in the environment, and use `--force-with-lease` only after a rebase (#2867) |
 

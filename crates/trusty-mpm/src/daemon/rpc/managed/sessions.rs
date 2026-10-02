@@ -18,6 +18,7 @@
 //! | `mpm.managed.prune_worktrees` | `POST /api/v1/sessions/managed/prune-worktrees` |
 //! | `mpm.managed.reconcile_worktrees` | `GET /api/v1/sessions/managed/reconcile-worktrees` |
 //! | `mpm.managed.fleet` | `GET /api/v1/sessions/managed/fleet` |
+//! | `mpm.managed.register_supervisor` | `POST /api/v1/sessions/managed/supervisor` |
 //! | `mpm.residency.active` | none — socket-only (#7087 slice 1b) |
 //! | `mpm.managed.get` | `GET /api/v1/sessions/managed/{id}` |
 //! | `mpm.managed.stop` | `DELETE /api/v1/sessions/managed/{id}` |
@@ -50,7 +51,7 @@ use crate::daemon::managed_routes::prune::{PruneRequest, PruneWorktreesRequest};
 use crate::daemon::managed_routes::{
     AdoptExistingRequest, AnswerRequest, ReactivateQuery, RenameRequest, SendInputRequest,
     SpawnRequest, activity, cores, delete, fleet, provision_status, prune, reactivate, reconcile,
-    rename, residency, sync_assets,
+    rename, residency, supervisor, sync_assets,
 };
 use crate::daemon::state::DaemonState;
 
@@ -109,6 +110,9 @@ pub struct DecommissionParams {
     /// an absent query parameter does.
     #[serde(default)]
     pub record_only: bool,
+    /// #7660: `--force`, as on the HTTP route.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// `mpm.managed.delete` parameters: the id plus `?force=`.
@@ -166,7 +170,7 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
     }
     let (spawn_s, list_s, adopt_s, prune_s, eph_s) = (st!(), st!(), st!(), st!(), st!());
     let (pw_s, rw_s, fleet_s, sa_s) = (st!(), st!(), st!(), st!());
-    let residency_s = st!();
+    let (residency_s, sup_s) = (st!(), st!());
 
     router
         .typed("mpm.managed.spawn", move |req: SpawnRequest| {
@@ -215,6 +219,21 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
             let state = Arc::clone(&fleet_s);
             async move { fleet::fleet_core(&state).await.into_rpc() }
         })
+        // #8942: the same body as `POST .../managed/supervisor`.
+        .typed(
+            "mpm.managed.register_supervisor",
+            move |req: crate::session_manager::SupervisorRegistration| {
+                let state = Arc::clone(&sup_s);
+                async move {
+                    let verifier = supervisor::LaunchRecordBinding {
+                        root: state.framework_root().to_path_buf(),
+                    };
+                    supervisor::register_supervisor_core(&state, &req, &verifier)
+                        .await
+                        .into_rpc()
+                }
+            },
+        )
         .typed(
             trusty_common::mpm_rpc::METHOD_RESIDENCY_ACTIVE,
             move |_: NoParams| {
@@ -326,9 +345,14 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
             move |req: DecommissionParams| {
                 let state = Arc::clone(&dec_s);
                 async move {
-                    cores::decommission_core(&state, &req.id, req.record_only)
-                        .await
-                        .into_rpc()
+                    cores::decommission_core(
+                        &state,
+                        &req.id,
+                        req.record_only,
+                        crate::daemon::managed_routes::dirt_policy(req.force),
+                    )
+                    .await
+                    .into_rpc()
                 }
             },
         )

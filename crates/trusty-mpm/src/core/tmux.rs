@@ -79,8 +79,10 @@ use tracing::warn;
 pub use trusty_common::tmux::{
     ALTERNATE_SCREEN_OPTION, DEFAULT_TMUX_ALTERNATE_SCREEN, DEFAULT_TMUX_HISTORY_LIMIT,
     DEFAULT_TMUX_MOUSE, HISTORY_LIMIT_OPTION, MOUSE_OPTION, PANE_LIST_FORMAT, SESSION_LIST_FORMAT,
-    TmuxCommand, TmuxTarget, WINDOW_LIST_FORMAT, managed_session_commands,
-    scrollback_option_commands, tmux_argv,
+    TmuxCommand, TmuxTarget, TmuxTargetError, WINDOW_LIST_FORMAT, check_session_name,
+    exact_pane_target, exact_session_target, exact_window_target, is_immutable_id,
+    managed_session_commands, scrollback_option_commands, shell_attach_command,
+    shell_exact_session_target, tmux_argv,
 };
 
 /// Resolve the `tmux` binary, preferring live `PATH` and falling back to
@@ -93,10 +95,44 @@ pub use trusty_common::tmux::{
 /// well-known-dirs-aware lookup for others — means resolution behavior is
 /// identical everywhere, and there is exactly one place to fix if it ever
 /// needs to change.
-/// What: delegates to `trusty_common::bin_resolve::resolve_binary("tmux")`.
-/// Test: `resolve_tmux_binary_does_not_panic`.
+/// What: returns the [`with_tmux_binary`] override when the current task has
+/// one, else delegates to `trusty_common::bin_resolve::resolve_binary("tmux")`.
+/// Test: `resolve_tmux_binary_does_not_panic`,
+/// `with_tmux_binary_scopes_the_override_to_its_future`.
 pub fn resolve_tmux_binary() -> Option<std::path::PathBuf> {
+    if let Ok(bin) = TMUX_BINARY_OVERRIDE.try_with(Clone::clone) {
+        return Some(bin);
+    }
+    // #6542: a no-op outside a test binary; in one, the first resolution
+    // starts that process's config-free private default server.
+    crate::core::tmux_test_isolation::ensure_default_server();
     trusty_common::bin_resolve::resolve_binary("tmux")
+}
+
+tokio::task_local! {
+    /// The tmux binary [`resolve_tmux_binary`] returns inside a
+    /// [`with_tmux_binary`] scope.
+    static TMUX_BINARY_OVERRIDE: std::path::PathBuf;
+}
+
+/// Run `fut` with every tmux resolution inside it returning `bin` (#6542).
+///
+/// Why: the guided-fallback tests drive a real `launch()`, which creates a
+/// tmux session through a dozen call sites that each resolve the binary
+/// themselves. A test that only reaps afterwards leaked sessions onto the
+/// operator's live server whenever the reap missed. Pointing `bin` at a
+/// `tmux -L <private>` shim sends every one of those calls to a server the
+/// test owns outright. The scope is task-local, not process-global, so tests
+/// running in parallel keep resolving the real binary.
+/// What: installs `bin` for [`resolve_tmux_binary`] and
+/// [`resolve_tmux_binary_or_bare`] while `fut` is polled. Work moved to
+/// another task or thread does not see it.
+/// Test: `with_tmux_binary_scopes_the_override_to_its_future`.
+pub async fn with_tmux_binary<F: std::future::Future>(
+    bin: std::path::PathBuf,
+    fut: F,
+) -> F::Output {
+    TMUX_BINARY_OVERRIDE.scope(bin, fut).await
 }
 
 /// [`resolve_tmux_binary`], falling back to the literal `"tmux"` (a plain
@@ -215,6 +251,9 @@ pub fn run_tmux_with_bin(
     cmd: &TmuxCommand,
 ) -> std::io::Result<std::process::Output> {
     host_state_guard()?;
+    // #8443: an empty session name addresses no session; never spawn for it.
+    cmd.validate_targets()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     crate::core::spawn_disclaim::disclaimed_output(tmux_bin, &tmux_argv(cmd))
 }
 
@@ -300,14 +339,14 @@ pub fn display_message_argv(target: Option<&TmuxTarget>, format: &str) -> Vec<St
 /// What: `name: None` renders untargeted (`show-environment <key>`, querying
 /// the CURRENT session — the only shape this issue's call site uses, since it
 /// only ever runs from inside the tmux client whose own session it wants);
-/// `Some(name)` renders `-t <name> <key>` for a caller that needs an
-/// explicit session.
+/// `Some(name)` renders `-t =<name> <key>` (exact match, #8443) for a caller
+/// that needs an explicit session.
 /// Test: `show_environment_argv_untargeted`, `show_environment_argv_session_targeted`.
 pub fn show_environment_argv(name: Option<&str>, key: &str) -> Vec<String> {
     let mut argv = vec!["show-environment".to_string()];
     if let Some(n) = name {
         argv.push("-t".to_string());
-        argv.push(n.to_string());
+        argv.push(exact_session_target(n));
     }
     argv.push(key.to_string());
     argv
@@ -346,6 +385,39 @@ pub fn run_tmux_argv_with_bin(
 /// Test: exercised transitively; see [`run_tmux_argv_with_bin`].
 pub fn run_tmux_argv(args: &[String]) -> std::io::Result<std::process::Output> {
     run_tmux_argv_with_bin(&resolve_tmux_binary_or_bare(), args)
+}
+
+/// [`run_tmux_argv`] under a deadline: a tmux that outlives `budget` is
+/// killed with its process group, and the call is `ErrorKind::TimedOut`.
+///
+/// Why: #9001 — pm-guard lists tmux panes inside a hook Claude Code kills at
+/// 5 s, and a stopped tmux server held the unbounded listing for minutes.
+/// What: the host-state guard, then [`crate::core::bounded_proc::run_bounded`]
+/// over the resolved binary, stdin from `/dev/null`. It is not TCC-disclaimed:
+/// the disclaimed spawns have no kill-on-timeout, and a tmux client that only
+/// reads its socket touches no TCC-protected resource.
+/// Test: `a_stopped_tmux_server_times_out_the_listing`.
+pub fn run_tmux_argv_bounded(
+    args: &[String],
+    budget: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use crate::core::bounded_proc::{BoundedError, run_bounded};
+    host_state_guard()?;
+    let mut cmd = std::process::Command::new(resolve_tmux_binary_or_bare());
+    cmd.args(args).stdin(std::process::Stdio::null());
+    match run_bounded(cmd, budget) {
+        Ok(out) => Ok(std::process::Output {
+            status: out.status,
+            stdout: out.stdout.into_bytes(),
+            stderr: out.stderr.into_bytes(),
+        }),
+        Err(BoundedError::Spawn(err)) => Err(err),
+        Err(BoundedError::TimedOut) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("tmux did not answer within {budget:?}"),
+        )),
+        Err(err) => Err(std::io::Error::other(format!("tmux {err}"))),
+    }
 }
 
 /// Build the exact ordered [`TmuxCommand`] sequence [`create_managed_session`]
@@ -908,6 +980,33 @@ pub fn send_command_line(
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
     }
     send_line(tmux_bin, target, text)
+}
+
+/// Type a composed `claude` launch line at a fresh session's shell (#8308).
+///
+/// Why: `tm launch`, `tm connect`, the in-place `tm session start`,
+/// `DaemonClient::launch_session`/`connect_session` and the Architect launch in
+/// `tm fleet` each typed their line through the unguarded [`send_line`], so a
+/// line past [`MAX_PANE_COMMAND_BYTES`] lost its tail in the tty with no error
+/// — the #8233 class, which that fix closed only for the managed path. The six
+/// now start `claude` through `runtime::cli_launch::send_spec_launch`, whose
+/// short line this types, so a line that grew is refused, never truncated.
+/// What: [`send_command_line`] against `TmuxTarget::session(session)`. `Err`
+/// carries the refusal (`InvalidInput`, nothing typed), a spawn failure, or a
+/// non-zero `send-keys` exit with tmux's stderr.
+/// Test: `launch_line_over_the_limit_is_refused_before_tmux_runs`,
+/// `launch_line_within_the_limit_reaches_tmux`,
+/// `cli_launch_paths_type_through_the_guard`.
+pub fn send_launch_line(tmux_bin: Option<&str>, session: &str, line: &str) -> std::io::Result<()> {
+    let output = send_command_line(tmux_bin, &TmuxTarget::session(session), line)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!(
+        "tmux send-keys exited {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 /// Type `text` into a tmux pane, then press Enter (#2398 consolidation).

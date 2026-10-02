@@ -140,7 +140,8 @@ existing drift — the 51 unsentineled directories and the one path/payload
 mismatch measured above — is reconciled. The rejected alternative was
 leaving the sentinel at its current coverage, which is correct only for
 worktrees trusty-mpm creates and, after decision A, describes a strictly
-smaller set of the worktrees that actually exist.
+smaller set of the worktrees that actually exist. (The sentinel's location
+is amended by #8511 — see "Amendment — 2026-09-24" below.)
 
 ## Consequences
 
@@ -245,3 +246,17 @@ No prior Accepted decision is superseded. ADR-0036's and ADR-0020's own
 follow-up sections are the ones this ADR answers, and both are recorded above
 as Extends rather than Supersedes: neither ADR's Decision or Consequences
 section is reversed, only its stated open question is resolved.
+
+## Amendment — 2026-09-24: the sentinel moves into the git admin dir (#8511)
+
+Decision C stands; only the sentinel's location changes. The authoritative
+marker is now the file `git rev-parse --git-path trusty-mpm-worktree` names
+for the tree — `<common-dir>/worktrees/<name>/trusty-mpm-worktree` for a
+linked worktree — not `<worktree>/.trusty-mpm-worktree`. An in-tree marker
+made git count the tree as dirty in any project that does not ignore it, so
+`git worktree remove` and Claude Code's cleanup refused, and `git add -A`
+could commit it (#8368). Readers still accept a legacy in-tree marker, and the
+admin-dir marker wins when both exist; readers never move one. The daemon's
+startup pass, project registration and `tm doctor --fix --yes` migrate legacy
+markers, and a marker git tracks is never removed. Design and concurrency
+rules: `crates/trusty-mpm/src/session_manager/worktree_ownership_location.rs`.

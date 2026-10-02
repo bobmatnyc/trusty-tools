@@ -57,9 +57,8 @@ describe('the real flagship-crate corpus', () => {
 		// A title where the date should be, and a heading with no separator.
 		expect(versions('trusty-search')).toContain('0.1.46');
 		expect(versions('trusty-mpm')).toContain('0.4.0');
-		// A non-semver label, and a date sitting in the version slot.
+		// A non-semver label.
 		expect(versions('trusty-mpm')).toContain('consolidation');
-		expect(versions('trusty-git-analytics')).toContain('2026-05-11');
 	});
 
 	it('links each crate at its LIVING changelog on main, not a pinned SHA', () => {
@@ -95,14 +94,12 @@ describe('the real flagship-crate corpus', () => {
 	});
 
 	/**
-	 * trusty-audit's CHANGELOG.md carries a real `## [0.6.0]` release, so it
-	 * joined RELEASED_FLAGSHIPS (`Tool.released`) alongside the others. Only
-	 * non-flagship crates such as `trusty-common` — never carded or paged —
-	 * stay out of this surface.
+	 * Only non-flagship crates such as `trusty-common` — never carded or
+	 * paged — stay out of this surface. `trusty-audit` and `tga` moved to
+	 * their own site in #8507 and, with them, out of `RELEASED_FLAGSHIPS`.
 	 */
 	it('includes every released flagship, and only non-flagship crates stay out', () => {
 		expect(site.crates.map((c) => c.name)).not.toContain('trusty-common');
-		expect(site.crates.map((c) => c.name)).toContain('trusty-audit');
 		expect(site.crates).toHaveLength(RELEASED_FLAGSHIPS.length);
 	});
 });

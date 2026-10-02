@@ -8,8 +8,11 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
  * What: SvelteKit config. `adapter-vercel` emits `.vercel/output/` in the
  * Build Output API v3 layout; every route here is prerendered
  * (`src/routes/+layout.ts`), so in practice the adapter writes static HTML
- * and provisions no serverless function. The Node runtime is pinned so a
- * Vercel default-runtime bump cannot silently change the build.
+ * and provisions no serverless function. No `runtime` is passed on purpose:
+ * adapter-vercel then derives `nodejs<major>.x` from the Node that runs the
+ * build, which is the Vercel project's "Node.js Version" setting. A pinned
+ * `nodejs20.x` (#5117) broke every deploy once Vercel discontinued it
+ * (2026-10-01); following the project setting survives the next retirement.
  * Test: `pnpm build` in `tests/build-smoke.test.ts` asserts the prerendered
  * `index.html` lands in `.vercel/output/static/`.
  *
@@ -19,7 +22,7 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 export default {
 	preprocess: vitePreprocess(),
 	kit: {
-		adapter: adapter({ runtime: 'nodejs20.x' }),
+		adapter: adapter(),
 		alias: {
 			// The doc reader (#5098) reads `docs/public-manifest.tsv` and the
 			// Markdown sources it points at, both of which live OUTSIDE

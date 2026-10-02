@@ -59,7 +59,9 @@ fn staged_index(
     staging
         .write_reindex_checkpoint_sync(br#"{"probe":"7991"}"#)
         .expect("stamp checkpoint");
-    let mut indexer = CodeIndexer::new(index_id, &root);
+    let mut indexer = CodeIndexer::new(index_id, &root)
+        // #8438: this fixture models a colocated index; the registry decides.
+        .with_storage_layout(crate::service::storage_layout::StorageLayout::Colocated);
     indexer.set_corpus_store(std::sync::Arc::new(staging));
 
     let registry = IndexRegistry::new();
@@ -441,7 +443,14 @@ async fn the_next_runs_probe_discards_a_deferred_runs_staging_corpus() {
         "test setup: the refusal keeps the staging file AND its open handle"
     );
 
-    let resumed = probe_resume(&handle, &handle.id, handle.root_path.as_path(), &current).await;
+    let resumed = probe_resume(
+        &handle,
+        &handle.id,
+        handle.root_path.as_path(),
+        &current,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await;
 
     assert!(
         resumed.is_none(),

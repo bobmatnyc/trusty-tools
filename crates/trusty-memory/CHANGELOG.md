@@ -6,6 +6,102 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.28.2] — 2026-09-28
+
+### Breaking
+
+- trusty-memory 0.28.2 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-memory-0.28.2.txt` (Refs #8699).
+
+### Fixed
+
+- Tests that write process env (bm25 knobs, `FASTEMBED_CACHE_*`, `TRUSTY_DATA_DIR_OVERRIDE`, `TRUSTY_MEMORY_PALACE`, `TRUSTY_DREAM_DISABLED`, the idle-evict and bm25-lane knobs) and the tests that read those paths now share one lock, so a parallel sibling can no longer point a test at the wrong data dir or palace (#5937). Test-only.
+- A source-scan ratchet fails the build when a lib test writes the environment without `commands::env_test_lock()`; known exceptions are listed with a reason (#5937). Test-only.
+- Two `trusty-memory serve --foreground` daemons started at the same moment on one data root no longer both serve. Previously both could prove the socket free, bind it and run, with one stranded on a socket nothing could reach; now exactly one binds and the other exits with an error naming the socket (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+- `discovers_trusty_git_analytics_alias` and `dispatch_discover_aliases_inserts_new_and_dedupes` build their `tga` → `trusty-git-analytics` workspace in a tempdir instead of reading `crates/trusty-git-analytics`, which left this workspace (#8824). Test-only.
+
+### Removed
+
+- The unused `commands::daemon_lock` module (`acquire_lock`, `DaemonLock`, `read_lock_pid`, `pid_alive`, `lock_file_path`). Nothing has called it since the daemon moved to a Unix socket (#6286), and its empty-file window let two callers both take the lock; the socket's bind lock is the daemon lock now (refs [#8759](https://github.com/bobmatnyc/trusty-tools/issues/8759))
+
+## [0.28.1] — 2026-09-27
+
+### Breaking
+
+- trusty-memory 0.28.1 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-memory-0.28.1.txt` (Refs #8699).
+
+### Added
+
+- `trusty-memory palace deletions <palace> [--drawer <uuid>] [--limit N] [--json]` lists the drawers the dream and purge passes deleted, with the reason, the pid of the deleting process and, for a dedup, the surviving drawer and its similarity score. It is read-only and safe with the daemon up. A pass that deletes drawers now also logs a one-line summary at `warn`, so it shows at the daemon's default log level (#8732).
+
+### Fixed
+
+- A writer (`serve --foreground`, `kg-rebuild`) runs dream and TTL-purge maintenance only while it holds its data root's maintenance lease; a second writer on the same root keeps serving reads and writes but deletes nothing, and a manual dream run there answers `Conflict`. The holder's pid is logged at warn on acquisition and kept in `maintenance.lock` (#8733).
+- The CLI one-shots respect the same lease. `palace legacy-kg --apply` and `rooms backfill --apply` still import or register while another process holds it, but their open deletes no expired row; `palace compact` refuses and names the holder's pid. A `--dry-run` open never purges (#8733).
+- The MCP tools `palace_dream`, `dream_consolidate_room` and `palace_compact` refuse, with the same message as a refused dream run, in a process that does not hold the maintenance lease, and change nothing (#8733).
+
+## [0.28.0] — 2026-09-26
+
+### Added
+
+- `trusty-memory palace legacy-kg <palace>` reports the drawers a pre-redb SQLite `kg.db` still holds that `kg.redb` lacks, plus unreadable rows, legacy triples, missing drawers whose content a live drawer already holds, and `.v2-incompatible` files. It reads a private copy of `kg.db` and its WAL, so rows only in `kg.db-wal` count; a copy taken while either file changed is retried once, then refused. It is a dry run by default; `--apply` imports the missing drawers with their original id, room and timestamps, then embeds them so recall finds them. A missing drawer whose content a live drawer already holds under another id is skipped and reported as `content_duplicates`; `--include-content-duplicates` imports it anyway. A drawer held only in the L1 snapshot counts as missing and is imported, and the imported copy replaces the L1 entry in memory. `--apply` refuses a `kg.redb` or vector index it cannot open read-only rather than let the write open recreate it, and prints its report before failing on an embed error. It never deletes or rewrites `kg.db`, and a re-run imports nothing ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+
+### Fixed
+
+- A write parked in redb no longer keeps `trusty-memory` alive after a graceful shutdown (#8314). The binary tears its runtime down within what the termination grace window (launchd's `ExitTimeOut`) has left since the shutdown signal, less 1 s, instead of waiting for every blocking task. A slow but finite KG commit that fits in that window finishes and closes the store cleanly; a stuck one is abandoned and logged, and the process exits so the palace's file locks are released. redb commits are atomic, so the next start opens the last committed state.
+- `palace_delete` without `force` now refuses a palace whose legacy `kg.db` holds drawers `kg.redb` lacks, holds legacy triples, or cannot be read, or which still has a `.v2-incompatible` file. This check runs before the has-drawers check, so a palace with live drawers and unimported legacy data gets the legacy-data refusal, which carries no hint to pass `force`. It also refuses a palace it cannot open or whose drawer table loaded degraded, instead of deleting it unchecked. Before, it deleted that data with no copy left. The `palace_delete` tool schema now states that `force` also destroys unimported `kg.db` data ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- `palace legacy-kg` now screens every drawer it would import with the same secret check and quality gates a live `memory_remember` write runs, including the 8-token minimum. A refused drawer is not imported; the report counts refusals as `rejected_secret` and `rejected_noise=N (too_short=M)` and lists each refused id with its reason, never its content. The dry run prints the same counts, so they are visible before `--apply` ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- New `palace legacy-kg --allow-short` flag skips the 8-token minimum alone, as `memory_note` does, so short drawers can be imported on purpose. The secret check, blocklist, word-count and noise-pattern gates still apply; no flag bypasses the secret check. The flag works on a dry run too, and a dry run without it says how many `too_short` drawers `--allow-short` would import ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+- `palace legacy-kg --apply` now copies `kg.redb`, `index.usearch.redb`, `kg.db` and its `-wal`/`-journal` sidecars into `<palace>/legacy-kg-backup-<timestamp>/` before it writes, and checks each copy's size and SHA-256 against the original. It writes a `MANIFEST.sha256` and prints the backup path and each verified file. If any copy fails or does not verify, `--apply` writes nothing and exits non-zero ([#8434](https://github.com/bobmatnyc/trusty-tools/issues/8434))
+
+## [0.27.2] — 2026-09-26
+
+### Added
+
+- `trusty-memory audit secrets --count-only [--palace <id>] [--json]` re-screens every stored drawer with the current `check_secret` filter and prints counts only: drawers scanned, drawers refused, a per-`FilterReject` breakdown, and two `KEY=value` counters (`key_value_first`, `key_value_only`) for the value half #8589 started screening. No drawer text, id or token preview is printed. Each palace store is read from a private temporary copy, so the scan writes nothing to any palace, takes no lock, and is safe while the daemon runs. A scan that could not see everything fails: each palace line carries `store=read|absent|error` and an `unreadable=` count of undecodable drawer rows, and the command exits non-zero when any palace could not be read — including a denied stat or a torn copy — or held unreadable rows. Store copies left by a killed run are swept after an hour, and Ctrl-C deletes the current run's copies (#8645).
+
+## [0.27.1] — 2026-09-25
+
+### Fixed
+
+- kuzu-import no longer refuses identifier paths, Google doc URLs and common
+  identifier shapes as secrets, picking up the trusty-common 0.52.3 filter fix
+  (Refs [#8589](https://github.com/bobmatnyc/trusty-tools/issues/8589))
+
+## [0.27.0] — 2026-09-25
+
+### Added
+
+- `trusty-memory import kuzu` runs the palace's secret check on every string a kuzu store supplies that would become a tag or a triple, not only on memory content: user, session and other column values, metadata keys and values, `content_hash`, entity ids, names and types, relationship types, and `Memory.id`. A refused value is dropped and counted; a refused `Memory.id` refuses the whole memory, and the memory is listed as `(secret-shaped id)`.
+- Each store line and the run totals tally the refusals by detector rule class (`provider_prefix`, `aws_key_id`, `base64_blob`, `mixed_case_alnum`, `other`) and never print the refused token.
+- `import kuzu --update` retracts a kuzu-imported MENTIONS or RELATES_TO triple that the store no longer carries, and prints one line per retraction with its memory id; `--update --dry-run` counts the retractions without making them. Triples from other writers are never retracted, and neither are the edges of a drawer whose recorded store is another store that still exists.
+- The store line and the totals count memories skipped for empty content, and count the edges in relationship tables the import does not map (`HAS_KEYWORD`, `CO_OCCURS_WITH`, `CONSOLIDATED_INTO`, `BELONGS_TO_SESSION`) by table.
+- A palace locked by another process is refused with a message that names both possible holders, a daemon or another trusty-memory command.
+- `trusty-memory import kuzu` discovers kuzu-memory stores (`<project>/.kuzu-memory/memories.db`, walking `$HOME` to depth 5 with `--discover`, plus any `--root`) or takes one with `--from`, and imports their memories and knowledge-graph edges (Entity nodes, MENTIONS, RELATES_TO) into the palace `resolve_palace` names for each project; every store line names the palace and the rule that chose it. A walk refuses to run while `TRUSTY_MEMORY_PALACE` is set, since that variable would send every store into one palace. The store is read read-only through kuzu-memory's own Python interpreter (`--python` overrides it; `--bridge-timeout-secs` bounds each export). Re-running is idempotent: each drawer carries the store's `Memory.id` as its identity plus its content hash, so a moved or re-cloned store imports nothing new; unchanged memories and already-active triples are skipped, a memory changed in kuzu since import is reported and rewritten in place only with `--update`, a secret-shaped memory is refused and its id reported, and an id another live store holds with other content is skipped and reported. A palace whose metadata or drawer table cannot be read is left untouched. `--dry-run` reads each palace from a temporary copy, so it writes nothing to the palace and leaves no export file behind. A real run refuses to start while the trusty-memory daemon is running: stop the daemon first.
+
+### Fixed
+
+- `trusty-memory stop` finds the running daemon again. The process scan never loaded each process's command line, so it matched no process at all and `stop` always reported "No daemon running". The scan now reads the command line and matches only daemon-mode processes (`serve --foreground`, `serve --http`); it no longer counts the `serve --stdio` bridge that each MCP client session runs, so `stop` does not cut a session off from its memory tools.
+- `trusty-memory import kuzu` now refuses to run while the daemon is running, as documented; the same broken scan let it start while the daemon was still loading palaces and not yet listening on its socket.
+- `trusty-memory stop` exits non-zero when a daemon is still alive after SIGKILL. It used to print a warning and exit 0, so a script that stopped the daemon before an import went on against a live daemon.
+
+### Changed
+
+- `trusty-memory migrate kuzu-data` is deprecated: it prints a warning and forwards to `import kuzu --from <path> --palace <name>`. `--limit` is refused, because `import kuzu` has no limit and ignoring the flag would turn a trial run into a full import; use `--dry-run` to preview.
+
+### Removed
+
+- The `commands::kuzu_migrate` redb reader (`KuzuEntity`, `KuzuRelation`, `entity_uuid`, `entity_to_drawer`, `relation_to_triple`, `discover_schema`, `read_entities`, `read_relations`, `ENTITIES_TABLE`, `RELATIONS_TABLE`). It read a `store.redb` layout real kuzu-memory stores never had; `commands::kuzu_import` replaces it.
+
+## [0.26.2] — 2026-09-23
+
+### Fixed
+
+- `serve --stdio` answers `initialize` and `tools/list` from its own process, so a daemon that is unreachable during the MCP handshake no longer costs a client session its memory tools. The client marks a server that fails its handshake dead and never re-spawns it, which is how ten seconds of daemon downtime ended memory for a whole session (#8351).
+- `serve --stdio` no longer exits when the daemon cannot be started. The failure is reported on stderr and the bridge keeps serving: tool calls answer with an error naming the socket while the daemon is down, and succeed on the next call once it returns, with no restart. This deliberately replaces the exit-on-unreachable-daemon behaviour of #1152, whose no-spawn half is unchanged — the bridge still never starts an unmanaged daemon (#8351).
+- `serve --stdio` re-resolves the daemon socket for every forwarded request instead of trusting the path resolved at startup, so a bridge that resolved a stale path heals on the next call (#8351).
+
 ## [0.26.1] — 2026-09-18
 
 ### Added

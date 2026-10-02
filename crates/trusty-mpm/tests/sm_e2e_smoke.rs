@@ -24,7 +24,7 @@
 //! mock control leaked no live sessions.
 //!
 //! Test: this file IS the test. Run with
-//! `cargo test -p trusty-mpm --test sm_e2e_smoke -- --nocapture`
+//! `cargo test -p trusty-mpm --test integration sm_e2e_smoke:: -- --nocapture`
 //! (add `--features sm-memory` to include the delegation chain).
 
 use std::sync::Arc;

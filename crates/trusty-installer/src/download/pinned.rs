@@ -40,7 +40,11 @@
 
 use std::path::{Path, PathBuf};
 
+use trusty_common::integrity::Sha256Digest;
+
 use crate::download::{fetch, glibc, release};
+// #8642: endpoints now live beside the per-crate release-repo table.
+pub(crate) use crate::download::release::{EndpointSource, Endpoints};
 
 // #5970: "can this be installed without installing it" — the question a consumer
 // had to either install or grow a second resolver to answer. Its `resolve_pin` is
@@ -69,7 +73,10 @@ pub struct PinnedTool {
     pub version: String,
     /// Executable that must report `version`. Defaults to `crate_name`.
     pub binary: String,
-    /// Optional caller-pinned SHA-256 of the release tarball, lowercase hex.
+    /// Optional caller-pinned SHA-256 of the release tarball: 64 hex digits,
+    /// optionally `sha256:`-prefixed as GitHub's asset `digest` field carries
+    /// it. Validated before any download; a malformed pin is
+    /// [`PinnedError::InvalidPin`].
     pub sha256: Option<String>,
 }
 
@@ -243,6 +250,23 @@ pub enum PinnedError {
         actual: String,
     },
 
+    /// The digest the CALLER pinned is not a SHA-256 digest, so it could never
+    /// match; reported before anything is downloaded.
+    #[error(
+        "the pinned checksum for {crate_name} {version} is not a SHA-256 digest \
+         ({pin:?}): {reason}; nothing was installed"
+    )]
+    InvalidPin {
+        /// The crate that was pinned.
+        crate_name: String,
+        /// The version that was pinned.
+        version: String,
+        /// The pin as the caller supplied it.
+        pin: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+
     /// The artifact does not match the digest the CALLER pinned.
     #[error(
         "the artifact for {crate_name} {version} does not match the pinned \
@@ -333,24 +357,6 @@ pub enum PinnedError {
     },
 }
 
-/// Where the pinned path fetches from. Crate-internal so tests can substitute a
-/// loopback fixture without a live network call.
-pub(crate) struct Endpoints<'a> {
-    /// GitHub Releases API URL.
-    pub releases_url: &'a str,
-    /// Base URL that release assets hang off.
-    pub download_base: &'a str,
-}
-
-impl Default for Endpoints<'_> {
-    fn default() -> Self {
-        Self {
-            releases_url: release::RELEASES_API,
-            download_base: release::RELEASE_DL_BASE,
-        }
-    }
-}
-
 /// Install ONE tool at its exact pinned version, or fail closed.
 ///
 /// Why: The single-tool shape of [`install_pinned_set`], for a caller fetching
@@ -431,7 +437,8 @@ pub async fn install_pinned_set(
     tools: &[PinnedTool],
     install_dir: &Path,
 ) -> Result<Vec<PinnedInstall>, PinnedError> {
-    install_pinned_set_at(client, &Endpoints::default(), tools, install_dir).await
+    // #8642: each tool resolves from its own release repo.
+    install_pinned_set_at(client, EndpointSource::PerCrate, tools, install_dir).await
 }
 
 /// [`install_pinned_set`], against caller-supplied endpoints.
@@ -446,7 +453,7 @@ pub async fn install_pinned_set(
 /// Test: All of `tests`.
 pub(crate) async fn install_pinned_set_at(
     client: &reqwest::Client,
-    endpoints: &Endpoints<'_>,
+    endpoints: EndpointSource<'_>,
     tools: &[PinnedTool],
     install_dir: &Path,
 ) -> Result<Vec<PinnedInstall>, PinnedError> {
@@ -460,12 +467,16 @@ pub(crate) async fn install_pinned_set_at(
         source: anyhow::Error::new(e).context("creating staging directory"),
     })?;
 
+    // #8378: every caller pin is parsed before the first download, so a
+    // malformed pin is `InvalidPin`, never a checksum mismatch.
+    let pins = tools.iter().map(parse_pin).collect::<Result<Vec<_>, _>>()?;
+
     // Phase 1 — stage and verify EVERY tool. `?` here is what makes the set
     // all-or-nothing: the first failure returns before phase 2 places anything.
     let mut staged = Vec::with_capacity(tools.len());
-    for (idx, tool) in tools.iter().enumerate() {
+    for (idx, (tool, pin)) in tools.iter().zip(&pins).enumerate() {
         let dir = staging.path().join(format!("{idx}-{}", tool.crate_name));
-        staged.push(stage_one(client, endpoints, tool, &dir).await?);
+        staged.push(stage_one(client, endpoints, tool, pin.as_ref(), &dir).await?);
     }
 
     // Phase 2 — every tool verified. Copy the whole set into place under
@@ -473,6 +484,25 @@ pub(crate) async fn install_pinned_set_at(
     // could leave tool 1 installed while the error said nothing was.
     let pending = copy_set_into_install_dir(&staged, install_dir)?;
     commit_set(pending)
+}
+
+/// Parses `tool.sha256` with [`fetch::parse_pin`]; `None` when nothing is
+/// pinned, [`PinnedError::InvalidPin`] when the pin is not a digest.
+///
+/// Test: `tests::a_github_prefixed_pin_installs`,
+/// `tests::a_malformed_pin_is_invalid_not_a_mismatch`.
+fn parse_pin(tool: &PinnedTool) -> Result<Option<Sha256Digest>, PinnedError> {
+    let Some(pin) = tool.sha256.as_deref() else {
+        return Ok(None);
+    };
+    fetch::parse_pin(pin)
+        .map(Some)
+        .map_err(|e| PinnedError::InvalidPin {
+            crate_name: tool.crate_name.clone(),
+            version: tool.version.clone(),
+            pin: pin.to_owned(),
+            reason: e.to_string(),
+        })
 }
 
 /// A tool downloaded, verified, and proved to report its pinned version, sitting
@@ -495,16 +525,19 @@ struct Staged {
 /// reporting `tool.version`. On `Err`, nothing outside `dir` was modified.
 ///
 /// What: Runs the five checks in order — Tier-1 target, exact tag, artifact
-/// download, checksum(s), binary-reported version.
+/// download, checksum(s), binary-reported version. `pin` is `tool.sha256`
+/// already parsed by [`parse_pin`].
 ///
 /// Test: Each failure arm has a test in `tests`.
 async fn stage_one(
     client: &reqwest::Client,
-    endpoints: &Endpoints<'_>,
+    endpoints: EndpointSource<'_>,
     tool: &PinnedTool,
+    pin: Option<&Sha256Digest>,
     dir: &Path,
 ) -> Result<Staged, PinnedError> {
     let (name, version) = (tool.crate_name.as_str(), tool.version.as_str());
+    let endpoints = &endpoints.for_crate(name);
 
     // Checks 1 and 2 — a prebuilt exists for this host, and the EXACT pinned
     // version is published. #5970 moved them into `preflight` so the dry-run
@@ -558,25 +591,25 @@ async fn stage_one(
         version: version.to_owned(),
         source: e.context("hashing the downloaded artifact"),
     })?;
-    if actual != expected {
-        return Err(PinnedError::ChecksumMismatch {
+    actual
+        .verify(&expected)
+        .map_err(|_| PinnedError::ChecksumMismatch {
             crate_name: name.to_owned(),
             version: version.to_owned(),
-            expected,
-            actual,
-        });
-    }
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        })?;
     // A caller-supplied digest pins the BYTES, so a re-uploaded asset at the
     // same tag (whose sidecar would agree with itself) still fails closed.
-    if let Some(pinned) = tool.sha256.as_deref() {
-        if actual != pinned {
-            return Err(PinnedError::PinnedChecksumMismatch {
+    if let Some(pinned) = pin {
+        actual
+            .verify(pinned)
+            .map_err(|_| PinnedError::PinnedChecksumMismatch {
                 crate_name: name.to_owned(),
                 version: version.to_owned(),
-                pinned: pinned.to_owned(),
-                actual,
-            });
-        }
+                pinned: pinned.to_string(),
+                actual: actual.to_string(),
+            })?;
     }
 
     let extract_dir = dir.join("extracted");
@@ -607,7 +640,9 @@ async fn stage_one(
             found: binary_names,
         });
     }
-    let reported_line = trusty_common::update::verify_installed_binary_at_path(&staged_binary)
+    // #6231: the binary was extracted by this process moments ago; ride out an
+    // ETXTBSY from a write fd a concurrent fork inherited.
+    let reported_line = super::fresh_exec::probe_fresh_binary(&staged_binary)
         .await
         .map_err(|e| PinnedError::VersionMismatch {
             crate_name: name.to_owned(),

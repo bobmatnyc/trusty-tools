@@ -13,47 +13,43 @@
 # headless CI jobs (WebKit2GTK-dependent); a dedicated `agents-ui` CI job
 # build- and lint-verifies it.
 #
-# `crates/trusty-audit/ui/src-tauri` (#5477 phase 1, package `trusty-audit-ui`)
-# is nested the same way and is here for the same reason — the `crates/*` glob
-# reaches one level, not three. It gets the same treatment throughout: absent
-# from `default-members`, `--exclude`d from the headless workspace jobs, and
-# build/lint-verified by a dedicated `audit-ui` CI job.
+# `tga`, `trusty-audit` and its Tauri shell `trusty-audit-ui` left this
+# workspace (owner ruling 2026-09-28); they live and publish in
+# bobmatnyc/trusty-git-analytics.
 members = [
     "crates/*",
     "crates/trusty-agents/ui/src-tauri",
-    "crates/trusty-audit/ui/src-tauri",
 ]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
 # want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
-# scratch dir; trusty-mpm-gui's `src-tauri` is included via its parent crate.
+# scratch dir.
 exclude = []
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
-# except `trusty-mpm-gui` (#2951) and `trusty-code-gui` (#2983, same rationale
-# — a second Tauri desktop GUI needing the pnpm/Svelte UI toolchain).
+# except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
+# UI toolchain).
 #
 # Why: CI already runs the workspace-wide gates with
-# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui`
+# `--workspace --exclude trusty-code-gui --exclude trusty-agents-ui`
 # (`.github/workflows/ci.yml`) because these GUIs need the pnpm/Svelte UI
 # toolchain — a bare `cargo build`/`test`/`check` had no equivalent exclusion,
 # so every agent worktree (which routinely runs the bare form per this
 # repo's own documented workflow) silently rebuilt the GUI too. Seven stray
-# ad-hoc-signed `trusty-mpm-gui` debug binaries were found across worktrees
+# ad-hoc-signed Tauri GUI debug binaries were found across worktrees
 # this way (forensics in #2951) — each a brand-new identity to macOS TCC, and
 # each a wasted UI-toolchain-dependent build for anyone not actually touching
 # the GUI. `--workspace` and `-p <crate>` are UNAFFECTED by `default-members`
 # and keep working exactly as before (`cargo build --workspace`,
-# `cargo test -p trusty-mpm-gui`, `cargo check -p trusty-code-gui`, etc.), so
+# `cargo check -p trusty-code-gui`, etc.), so
 # this only changes what the bare, no-flag form does — it does not remove
-# either GUI crate from the workspace. `trusty-agents-ui` needs the same
+# the GUI crate from the workspace. `trusty-agents-ui` needs the same
 # `--exclude` on `--workspace` invocations for a different reason: its
 # `tauri::generate_context!()` reads the same `crates/trusty-agents/ui/dist/`
 # that `trusty-agents`' own build.rs populates, so a `--workspace` run that
 # happens to check/build `trusty-agents-ui` before that build script has run
 # panics on the missing path — a real cargo build-order race, not merely a
-# missing-toolchain skip (#3053). `trusty-audit-ui` (#5477) is the fourth crate
-# in this category and carries the same `--exclude` for the same two reasons.
+# missing-toolchain skip (#3053).
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
@@ -65,7 +61,6 @@ default-members = [
     "crates/trusty-agents",
     "crates/trusty-agents-common",
     "crates/trusty-analyze",
-    "crates/trusty-audit",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-code-tui",
@@ -74,7 +69,6 @@ default-members = [
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
-    "crates/trusty-git-analytics",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
     "crates/trusty-kb",
@@ -121,10 +115,10 @@ trusty-code = { path = "crates/trusty-code", version = "0.7" }
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.8" }
-trusty-common = { path = "crates/trusty-common", version = "0.51" }
+trusty-common = { path = "crates/trusty-common", version = "0.53" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
-trusty-mcp = { path = "crates/trusty-mcp", version = "0.1.2" }
+trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -145,18 +139,8 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.4", default-
 # Why (#5329): the `trusty-bm25-daemon` member and dependency were REMOVED. Its
 # per-palace subprocess never ran in any shipped configuration, and its index is
 # now `trusty_memory::bm25_lane::Bm25Lane`, in-process.
-# tga: trusty-git-analytics — developer productivity analytics, and (since
-# #5468) the sole owner of contributor profiling. #5466 removed trusty-review's
-# Cargo edge, and the tga -> trusty-review direction is a PATH lookup, not a
-# manifest edge (#5236, DOC-67 §6). One in-tree Cargo edge exists again: #6294
-# made `tga` a dev-dependency of trusty-analyze, which is why tga no longer has
-# a row in scripts/semver-checks-crate-exclusions.tsv (#6300).
-# #6776: same drift as trusty-console, surfaced by the new gate — `^6.0.1`
-# cannot accept the crate's own 7.1.0.
-tga = { path = "crates/trusty-git-analytics", version = "8.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
-# daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
-# because it owns Tauri's build.rs and tauri.conf.json.
+# daemon,cli,tui,telegram} sub-crates).
 trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
@@ -168,7 +152,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.36", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.38", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -182,17 +166,10 @@ trusty-console = { path = "crates/trusty-console", version = "0.12" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
-# trusty-installer: consumed as a LIBRARY by trusty-audit for the pinned,
-# fail-closed prebuilt download entry point (#5491, #5495). trusty-audit is
-# `publish = false`, so this entry exists for in-tree resolution.
-trusty-installer = { path = "crates/trusty-installer", version = "0.13" }
-# trusty-audit: consumed as a LIBRARY by the auditor client's Tauri shell
-# (`trusty-audit-ui`, #5477 phase 1), which calls `Session::execute` in-process
-# rather than serving HTTP or shelling out to the `taudit` binary — DOC-68 §11
-# fixes the shell as a view over that one API. Both crates are
-# `publish = false`, so there is no `version` to keep in step; the path entry
-# exists purely for in-tree resolution.
-trusty-audit = { path = "crates/trusty-audit" }
+# trusty-installer: the pinned, fail-closed prebuilt download entry point
+# (#5491, #5495) is also consumed as a library by trusty-audit, which now
+# builds from bobmatnyc/trusty-git-analytics against the crates.io release.
+trusty-installer = { path = "crates/trusty-installer", version = "0.14" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
@@ -241,8 +218,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
-# IANA named-timezone support (e.g. "America/New_York") for chrono. Already
-# resolved in Cargo.lock transitively via `tera` (trusty-git-analytics); pinned
+# IANA named-timezone support (e.g. "America/New_York") for chrono. Pinned
 # here as a first-class workspace dep for trusty-agents' user-timezone-aware
 # date/time rendering (#3052 follow-up).
 chrono-tz = "0.9"
@@ -306,6 +282,9 @@ toml = "0.8"
 # not reflow the operator's comments and unrelated tables.
 toml_edit = "0.22"
 libc = "0.2"
+# `trusty-embedderd`'s pre-init ONNX Runtime probe (#8616). Same major as the
+# `libloading` that `ort`'s `load-dynamic` feature already pulls in.
+libloading = "0.9"
 unicode-width = "0.2"
 # `.env.local` loader for the trusty-common `credentials` resolver
 # (issue #2401). Already used ad hoc by trusty-agents and trusty-search; the
@@ -345,7 +324,7 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 # Progress bars / spinners. Shared rustup/cargo-style progress display lives in
 # the `trusty-progress` crate (#1315). Pinned to 0.17 to match the existing
-# local pins in trusty-search and tga; migrating those two crates to this
+# local pin in trusty-search; migrating that crate to this
 # workspace dep is a tracked follow-up (do NOT churn them here, see #1315).
 indicatif = "0.17"
 
@@ -404,6 +383,9 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Testing
 tempfile = "3"
+# #8545: a pre-`main` constructor, so a test binary arms a process-wide guard
+# before any test thread exists. Already in the lockfile via tauri-utils.
+ctor = "0.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads. Used by bug-report token tests.
@@ -414,11 +396,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # attribute does not resolve for any crate taking this row.
 serial_test = { version = "3", features = ["file_locks"] }
 # wiremock: async HTTP mock server for hermetic reqwest-based client tests
-# (e.g. trusty-channels' 200/401/429 Slack Web API paths). Also pinned locally by
-# trusty-git-analytics; this shared entry is the canonical version.
+# (e.g. trusty-channels' 200/401/429 Slack Web API paths).
 wiremock = "0.6"
 
-# ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + trusty-agents + tga) ──
+# ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + trusty-agents) ──
 # Versions pinned to what is already resolved in Cargo.lock (1.8.17 / 1.131.0).
 # `behavior-version-latest` silences the deprecation warning on aws_config::load_from_env().
 # `aws-sdk-bedrockruntime`'s default `rustls` feature drags in a legacy hyper 0.14 +
@@ -555,8 +536,15 @@ trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
 trusty-console = { path = "crates/trusty-console" }
 
+# Owner ruling 2026-09-27: workspace crates keep file:line tables so panic and
+# test-failure backtraces still resolve; dependencies carry no debuginfo. The
+# `test` profile inherits both settings, including the package override.
 [profile.dev]
 opt-level = 0
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 opt-level = 3

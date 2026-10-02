@@ -139,11 +139,25 @@ pub(crate) enum RepairAction {
     /// every daemon start and silence is undeterminable rather than absent —
     /// `--force` is the operator asserting the owner is gone. The status
     /// written is `cancelled`, never `completed`.
-    /// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`.
+    /// #8257: `--delegation-id` reaches a record with no agent id, and
+    /// `--list [DIR]` prints the live records for a directory without writing.
+    /// Test: `cli_parses_repair_delegation`, `cli_parses_repair_delegation_force`,
+    /// `cli_parses_repair_delegation_by_id_and_list_8257`.
     Delegation {
         /// The agent id from the worktree's ownership sentinel, e.g.
         /// `af20cc838b2b30a55`.
-        agent_id: String,
+        #[arg(required_unless_present_any = ["delegation_id", "list"],
+              conflicts_with_all = ["delegation_id", "list"])]
+        agent_id: Option<String>,
+        /// Address the record by its delegation id instead — the only address
+        /// a record whose stop was matched by agent type has (#8257).
+        #[arg(long, conflicts_with = "list")]
+        delegation_id: Option<String>,
+        /// List the live delegation records for DIR (default: the current
+        /// directory), read-only (#8257).
+        #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".",
+              conflicts_with = "force")]
+        list: Option<std::path::PathBuf>,
         /// End the record even though the daemon cannot confirm the dispatching
         /// session is gone.
         #[arg(long)]

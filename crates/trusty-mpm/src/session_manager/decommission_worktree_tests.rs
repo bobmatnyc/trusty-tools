@@ -40,7 +40,8 @@ use super::tests::FakeTmuxDriver;
 #[tokio::test]
 async fn manager_decommission_removes_real_git_worktree() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let fake = FakeTmuxDriver::new();
+    // #8935: the record's pane proves the live session is its own.
+    let fake = super::tests::fake_with_pane();
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
@@ -252,7 +253,8 @@ fn push_to_bare_remote(repo: &std::path::Path) {
 #[tokio::test]
 async fn manager_decommission_refuses_dirty_worktree() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let fake = FakeTmuxDriver::new();
+    // #8935: the record's pane proves the live session is its own.
+    let fake = super::tests::fake_with_pane();
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
@@ -337,6 +339,8 @@ async fn manager_decommission_refuses_dirty_worktree() {
 async fn prune_reports_dirty_worktree_retained() {
     let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
@@ -439,7 +443,11 @@ fn remove_refuses_a_stale_worktree_pointer() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     std::fs::remove_dir_all(fx.repo.join(".git").join("worktrees")).expect("drop admin dir");
 
-    let outcome = remove_session_worktree(&wt, "test");
+    let outcome = remove_session_worktree(
+        &wt,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         wt.join("precious.txt").exists(),
         "a stale pointer must not cost the working tree: {outcome:?}"
@@ -458,7 +466,11 @@ fn remove_refuses_an_unreadable_git_entry() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     let _restore = deny_all(&wt.join(".git"));
 
-    let outcome = remove_session_worktree(&wt, "test");
+    let outcome = remove_session_worktree(
+        &wt,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         wt.join("precious.txt").exists(),
         "an unreadable .git must not cost the working tree: {outcome:?}"
@@ -478,7 +490,11 @@ fn remove_refuses_a_worktree_with_a_broken_git_file() {
     std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
     std::fs::write(wt.join(".git"), "gitdir: /nonexistent/xyz\n").expect("corrupt .git");
 
-    let outcome = remove_session_worktree(&wt, "test");
+    let outcome = remove_session_worktree(
+        &wt,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(
         wt.join("precious.txt").exists(),
         "a broken .git must not cost the working tree: {outcome:?}"
@@ -503,7 +519,11 @@ fn remove_cleans_up_a_directory_no_repository_claims() {
     std::fs::create_dir_all(&leftover).expect("mkdir");
     std::fs::write(leftover.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
 
-    let outcome = remove_session_worktree(&leftover, "test");
+    let outcome = remove_session_worktree(
+        &leftover,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!leftover.exists(), "the leftover directory must be gone");
 }
@@ -520,7 +540,11 @@ fn remove_cleans_up_an_unregistered_leftover_inside_a_repo() {
     let leftover = fx.repo.join(".worktrees").join("unregistered-e2e-4732");
     std::fs::create_dir_all(&leftover).expect("mkdir");
 
-    let outcome = remove_session_worktree(&leftover, "test");
+    let outcome = remove_session_worktree(
+        &leftover,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!leftover.exists(), "the leftover directory must be gone");
 }
@@ -532,7 +556,11 @@ fn remove_still_removes_a_healthy_worktree() {
     let fx = GitWorktreeFixture::new();
     let wt = fx.add_worktree("healthy-4732");
 
-    let outcome = remove_session_worktree(&wt, "test");
+    let outcome = remove_session_worktree(
+        &wt,
+        "test",
+        crate::session_manager::DirtyWorktreePolicy::Skip,
+    );
     assert!(outcome.removed(), "{outcome:?}");
     assert!(!wt.exists(), "the worktree directory must be gone");
 
@@ -590,6 +618,19 @@ fn init_repo_with_commit(dir: &std::path::Path) -> bool {
     std::fs::write(dir.join("README.md"), "seed\n").expect("write README");
     assert!(git(&["add", "README.md"]));
     assert!(git(&["commit", "--quiet", "-m", "seed"]));
+    // #8663: pushed, so an owned workspace's decommission sees no unpushed
+    // commit and removes it.
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+    let remote = dir.with_file_name(format!("{name}-remote.git"));
+    let bare = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare"])
+        .arg(&remote)
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(bare, "fixture: bare remote");
+    assert!(git(&["remote", "add", "origin", &remote.to_string_lossy()]));
+    assert!(git(&["push", "--quiet", "origin", "HEAD"]));
+    assert!(git(&["fetch", "--quiet", "origin"]));
     true
 }
 
@@ -621,7 +662,8 @@ fn worktree_list(dir: &std::path::Path) -> String {
 #[tokio::test]
 async fn decommission_prunes_the_base_repo_worktree_registry() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(dir.path(), super::tests::fake_with_pane())
         .await
         .expect("manager");
 
@@ -702,7 +744,8 @@ async fn decommission_prunes_the_base_repo_worktree_registry() {
 #[tokio::test]
 async fn registry_root_to_repair_ignores_a_standalone_owned_clone() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(dir.path(), super::tests::fake_with_pane())
         .await
         .expect("manager");
 

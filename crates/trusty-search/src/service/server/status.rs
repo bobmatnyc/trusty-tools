@@ -231,8 +231,11 @@ pub(super) async fn index_status_handler(
 /// status beside its body, because that status is what
 /// [`crate::service::rpc::error::rpc_error_from_http`] turns into the JSON-RPC
 /// code — so one decision classifies the refusal on both transports.
+/// #9059: an index held by an invalid exclude glob reports `status: "held"`,
+/// and `last_walk_error` carries the hold reason naming the glob.
 /// Test: `index_status_over_the_socket_matches_the_http_body`,
-/// `an_unknown_index_reports_not_found_on_every_index_scoped_read`.
+/// `an_unknown_index_reports_not_found_on_every_index_scoped_read`,
+/// `a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it`.
 pub(crate) async fn index_status_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -290,21 +293,20 @@ pub(crate) async fn index_status_report(
     // or not yet reindexed since the last daemon restart).
     let in_memory_last_indexed = handle.last_indexed_at.read().await.clone();
     let last_indexed = in_memory_last_indexed.or(disk_last_indexed);
-    // Issue #80: surface a coarse lifecycle status. The legacy top-level
-    // `status` field stays for back-compat — it collapses to `indexing` while
-    // any reindex task is running and `ready` otherwise (mirrors the v0.8.x
-    // contract). Callers wanting per-stage granularity should consult the
+    // Issue #80: surface a coarse lifecycle status. The top-level `status`
+    // field is `indexing` while any reindex task is running, `degraded` when a
+    // stage has failed or a migration fault is outstanding (#8134), and
+    // `ready` otherwise. Callers wanting per-stage granularity should consult the
     // `stages` block introduced in v0.9.0 (issue #109, Phase 1) — that field
     // tracks lexical → semantic → graph progress and grows
     // `search_capabilities` as each lane comes online.
-    let legacy_status = match state
-        .reindex_progress
-        .get(&index_id)
-        .map(|p| p.status.load())
-    {
-        Some(ReindexStatus::Running) => "indexing",
-        _ => "ready",
-    };
+    let reindex_running = matches!(
+        state
+            .reindex_progress
+            .get(&index_id)
+            .map(|p| p.status.load()),
+        Some(ReindexStatus::Running)
+    );
     // Issue #109 Phase 1: snapshot the staged-pipeline state so the response
     // can surface per-stage status and derive the public `search_capabilities`
     // array. The legacy `status` field stays at the top level, but
@@ -372,6 +374,20 @@ pub(crate) async fn index_status_report(
                 .collect(),
         )
     });
+    // #8134: `ready` over a failed lane or an outstanding migration fault is
+    // the fail-open this field used to report; `stages` and `migration_error`
+    // name the cause.
+    // #9059: a held index ingests nothing; `last_walk_error` names the glob.
+    let hold = crate::service::exclude_hold::hold(&handle);
+    let legacy_status = if reindex_running {
+        "indexing"
+    } else if hold.is_some() {
+        "held"
+    } else if stages_snapshot.any_failed() || !faults.is_empty() {
+        "degraded"
+    } else {
+        "ready"
+    };
     // #7991: a staged reindex that ran to completion and could not promote.
     // The live corpus is at its PRE-reindex state; nothing else says so.
     let promotion_deferred = indexer.promotion_deferred().map(|d| {
@@ -448,7 +464,8 @@ pub(crate) async fn index_status_report(
         "last_walk_started_at": walk_diag.last_walk_started_at,
         "last_walk_files_seen": walk_diag.last_walk_files_seen,
         "last_walk_files_skipped": walk_diag.last_walk_files_skipped,
-        "last_walk_error": walk_diag.last_walk_error,
+        // #9059: a hold is why no walk runs, so it is the walk error.
+        "last_walk_error": hold.map(|h| h.reason()).or(walk_diag.last_walk_error),
         // #5336: true when the walk started and was then abandoned. Surfaced,
         // not recovered — clear it with `POST /indexes/:id/reindex`.
         "stuck_mid_walk": stuck_mid_walk,

@@ -23,16 +23,30 @@
 /// keeps the deepest directories intact, which is where a repository name
 /// and a worktree name live.
 ///
-/// What it GUARANTEES, and nothing more: when `text` contains `/` and its
-/// last two components fit in `width`, the result keeps the final components
-/// WHOLE — as many as fit, deepest first — behind a leading `…`. Components
-/// nearer the filesystem root are dropped first, so a root-side name can
-/// still be lost; only the tail is promised. Anything else (a path whose own
-/// last two components overflow, or a string with no `/`) falls back to
-/// character elision, which keeps both ends and replaces the middle with
-/// `…`. `text` shorter than `width` is returned unchanged.
+/// What it GUARANTEES, and nothing more: `text` that already fits `width` is
+/// returned unchanged, and the result never exceeds `width` — except at a
+/// `width` of 0 or 1, where the one-column `…` is kept rather than an empty
+/// string. For a path, the deepest components arrive WHOLE behind a leading
+/// `…/`, and the repository directory name survives alongside them: when the
+/// deepest contiguous run that fits does not reach back to the repository —
+/// a linked worktree under `<repo>/.claude/worktrees/<name>` is the
+/// motivating case (#8205) — that run is replaced by `…/<repo>/…/<tail>`, so
+/// the name a reader identifies the checkout by stays on the row. The two
+/// columns each `…/` costs are part of the budget.
+///
+/// Order of surrender, repository name LAST (owner ruling 2026-09-17): tail
+/// components go one at a time, then the tail entirely (`…/<repo>/…`), and
+/// only a repository name too wide for `width` itself is given up — that path
+/// falls back to the gapless `…/<tail>` run, keeping whole components even
+/// though the repository name is no longer among them. Character elision,
+/// which keeps both ends and replaces the middle with `…`, is the last resort:
+/// it takes a string with no `/`, and any path where not even the last two
+/// components fit. Widths count `char`s, never bytes.
 /// Test: `tests::elide_middle_keeps_whole_trailing_path_components`,
+/// `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
 /// `tests::elide_middle_keeps_a_repo_name_that_is_the_leaf`,
+/// `tests::elide_middle_drops_the_tail_before_the_repo_name`,
+/// `tests::elide_middle_keeps_a_fitting_path_unchanged`,
 /// `tests::elide_middle_falls_back_to_character_elision`,
 /// `tests::elide_middle_handles_degenerate_widths`.
 pub fn elide_middle(text: &str, width: usize) -> String {
@@ -47,19 +61,74 @@ pub fn elide_middle(text: &str, width: usize) -> String {
     elide_chars(text, width)
 }
 
-/// [`elide_middle`]'s path arm: `…/` plus the deepest components that fit.
+/// Directory names whose PARENT component names a git repository.
 ///
-/// Why kept separate: it can legitimately fail (a single component wider than
+/// Why (#8205): a bare path is the only input `elide_middle` gets, so the
+/// repository has to be recognised from shape. Both worktree layouts put the
+/// repository directly above an administrative directory —
+/// `<repo>/.claude/worktrees/<name>` (this workspace's own) and
+/// `<repo>/.git/worktrees/<name>` (git's) — which makes the component above
+/// one of these names the repository. Nothing here touches the filesystem.
+const REPO_MARKERS: [&str; 2] = [".claude", ".git"];
+
+/// Index of the component naming the repository, per [`REPO_MARKERS`].
+///
+/// What: the component immediately above the LAST marker, so the nearest
+/// enclosing repository wins on a path that nests two. Returns an index, not
+/// the name, because the caller also has to ask whether a tail it already
+/// kept covers it. A marker at index 0 has no parent and yields `None`.
+/// Test: `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
+/// `tests::elide_middle_keeps_a_repo_name_that_is_the_leaf`.
+fn repo_anchor(components: &[&str]) -> Option<usize> {
+    components
+        .iter()
+        .rposition(|c| REPO_MARKERS.contains(c))
+        .filter(|&marker| marker > 0)
+        .map(|marker| marker - 1)
+}
+
+/// [`elide_middle`]'s path arm: the deepest components that fit, with the
+/// repository name kept alongside them.
+///
+/// Why kept separate: it can legitimately fail (a lone component wider than
 /// `width`), and `None` is what routes the caller to character elision rather
 /// than to a path rendering that does not fit.
-/// What: walks the components from the leaf backwards, accepting each while
-/// `…/<kept>` stays within `width`. Returns `None` unless at least the last
-/// TWO components were accepted — one lone directory name behind an ellipsis
-/// says less than the head-and-tail character elision would.
-/// Test: `tests::elide_middle_keeps_whole_trailing_path_components`,
+/// What: prefers [`deepest_contiguous`], which has no interior gap, and takes
+/// it whenever the path names no repository or the run already reaches the
+/// repository. Otherwise the repository name is spliced back in by
+/// [`anchored_on_repo`] — the #8205 defect was returning the gapless run even
+/// when it had elided the one name identifying the checkout.
+/// Test: `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
+/// `tests::elide_middle_keeps_whole_trailing_path_components`,
 /// `tests::elide_middle_falls_back_to_character_elision`.
 fn elide_path_components(text: &str, width: usize) -> Option<String> {
     let components: Vec<&str> = text.split('/').filter(|c| !c.is_empty()).collect();
+    let anchor = repo_anchor(&components);
+    let contiguous = deepest_contiguous(&components, width);
+    let reaches_repo = |kept: usize| anchor.is_none_or(|a| a >= components.len() - kept);
+    if let Some((kept, rendered)) = &contiguous
+        && reaches_repo(*kept)
+    {
+        return Some(rendered.clone());
+    }
+    // #8205: the repository name outlives the tail, so an anchored rendering
+    // that fits beats the gapless run that dropped the name.
+    match anchor.and_then(|a| anchored_on_repo(&components, a, width)) {
+        Some(anchored) => Some(anchored),
+        None => contiguous.map(|(_, rendered)| rendered),
+    }
+}
+
+/// `…/<tail>`: the deepest run of whole components that fits `width`.
+///
+/// What: walks from the leaf backwards, accepting each component while
+/// `…/<tail>` stays within `width`, and reports how many it kept so the
+/// caller can tell whether the repository name is among them. `None` unless
+/// at least the last TWO were accepted — one lone directory name behind an
+/// ellipsis says less than head-and-tail character elision would.
+/// Test: `tests::elide_middle_keeps_a_repo_name_that_is_the_leaf`,
+/// `tests::elide_middle_falls_back_to_character_elision`.
+fn deepest_contiguous(components: &[&str], width: usize) -> Option<(usize, String)> {
     let mut kept = 0usize;
     let mut rendered = String::new();
     for count in 1..=components.len() {
@@ -71,13 +140,44 @@ fn elide_path_components(text: &str, width: usize) -> Option<String> {
         kept = count;
         rendered = candidate;
     }
-    (kept >= 2).then_some(rendered)
+    (kept >= 2).then_some((kept, rendered))
+}
+
+/// `…/<repo>/…/<tail>`: the repository name, then the deepest tail that fits.
+///
+/// What: tries tails from as deep as the path allows down to the leaf alone,
+/// never reaching back into the repository component itself, and returns the
+/// longest that fits. When no tail fits, the bare `…/<repo>/…` keeps the name
+/// on its own — the repository name is the last thing surrendered (owner
+/// ruling 2026-09-17). `None` only when even that bare form overflows, which
+/// sends a repository name wider than `width` back to the caller's gapless
+/// [`deepest_contiguous`] run — and on to character elision only when there is
+/// no such run either.
+/// Test: `tests::elide_middle_keeps_the_repo_name_at_both_render_budgets`,
+/// `tests::elide_middle_drops_the_tail_before_the_repo_name`.
+fn anchored_on_repo(components: &[&str], anchor: usize, width: usize) -> Option<String> {
+    let repo = components[anchor];
+    let mut rendered: Option<String> = None;
+    for count in 1..components.len() - anchor {
+        let tail = components[components.len() - count..].join("/");
+        let candidate = format!("…/{repo}/…/{tail}");
+        if candidate.chars().count() > width {
+            break;
+        }
+        rendered = Some(candidate);
+    }
+    rendered.or_else(|| {
+        let bare = format!("…/{repo}/…");
+        (bare.chars().count() <= width).then_some(bare)
+    })
 }
 
 /// [`elide_middle`]'s fallback: keep both ends, replace the middle with `…`.
 ///
 /// What: splits the `width - 1` remaining budget between the two ends, the
-/// odd character going to the head. Counts chars, not bytes.
+/// odd character going to the head. Counts chars, not bytes. A `width` of 0
+/// or 1 returns the bare `…`, so a zero budget is overshot by one column
+/// rather than answered with an empty string.
 /// Test: `tests::elide_middle_falls_back_to_character_elision`,
 /// `tests::elide_middle_handles_degenerate_widths`.
 fn elide_chars(text: &str, width: usize) -> String {
@@ -176,24 +276,87 @@ mod tests {
             out.ends_with("/worktrees/agent-af14d84dd34577cee"),
             "the last two components must survive whole: {out}"
         );
-        // Nothing is clipped mid-component: every retained segment is one of
-        // the original path's own components.
+        // Nothing is clipped mid-component: every retained segment is either
+        // one of the original path's own components or the `…` standing in
+        // for the run #8205 replaced with the repository name.
         for segment in out.trim_start_matches("…/").split('/') {
             assert!(
-                path.split('/').any(|c| c == segment),
+                segment == "…" || path.split('/').any(|c| c == segment),
                 "{segment:?} in {out}"
+            );
+        }
+        // #8205: the repository the worktree belongs to is named too.
+        assert!(out.contains("trusty-tools"), "{out}");
+    }
+
+    /// #8205, the owner-reported defect: at the banner's 54-column budget the
+    /// repository name vanished while columns went unused, and only the
+    /// connect line's roomier 60 kept it. Both budgets must name the repo.
+    #[test]
+    fn elide_middle_keeps_the_repo_name_at_both_render_budgets() {
+        let path =
+            "/private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef";
+        for width in [54usize, 60] {
+            let out = elide_middle(path, width);
+            assert!(
+                out.chars().count() <= width,
+                "must fit {width}: {out} ({})",
+                out.chars().count()
+            );
+            assert!(
+                out.contains("trusty-tools-demo"),
+                "the repository name must survive at {width}: {out}"
+            );
+            assert!(
+                out.ends_with("agent-0123456789abcdef"),
+                "the worktree's own name must survive at {width}: {out}"
             );
         }
     }
 
-    /// A plain repository path is short enough that the repo name — its leaf
-    /// — survives, which is the everyday case the guarantee covers.
+    /// Order of surrender (owner ruling 2026-09-17): squeezed hard enough,
+    /// the tail goes and the repository name stays — never the reverse.
+    #[test]
+    fn elide_middle_drops_the_tail_before_the_repo_name() {
+        let path =
+            "/private/tmp/q8230/deep/trusty-tools-demo/.claude/worktrees/agent-0123456789abcdef";
+        let out = elide_middle(path, 26);
+        assert!(out.chars().count() <= 26, "{out}");
+        assert!(
+            out.contains("trusty-tools-demo"),
+            "the repo name outlives the tail: {out}"
+        );
+        assert_eq!(out, "…/trusty-tools-demo/…", "{out}");
+    }
+
+    /// A path already inside its budget is handed back byte-for-byte — no
+    /// ellipsis, no reshaping.
+    #[test]
+    fn elide_middle_keeps_a_fitting_path_unchanged() {
+        let path = "/private/tmp/q8230/repoA";
+        assert_eq!(elide_middle(path, 60), path);
+        assert_eq!(elide_middle(path, path.chars().count()), path);
+    }
+
+    /// A plain repository root — the common case — carries its own name as
+    /// the leaf, so keeping the tail already keeps the repo name and no
+    /// anchoring is needed. True for a deep path with no repository marker
+    /// too: its final component is what survives.
     #[test]
     fn elide_middle_keeps_a_repo_name_that_is_the_leaf() {
         let path = "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools";
         let out = elide_middle(path, 30);
         assert!(out.chars().count() <= 30, "{out}");
         assert!(out.ends_with("/trusty-tools"), "{out}");
+        assert!(!out.contains("/…/"), "no anchor splice is needed: {out}");
+
+        let deep = "/private/var/folders/zz/T/very/deeply/nested/scratch/workspace/repoZ";
+        let out = elide_middle(deep, 40);
+        assert!(out.chars().count() <= 40, "{out}");
+        assert!(
+            out.ends_with("/repoZ"),
+            "the final component survives: {out}"
+        );
     }
 
     /// A string with no `/`, and a path whose last two components alone

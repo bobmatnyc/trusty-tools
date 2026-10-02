@@ -441,6 +441,96 @@ npm test
 npm run test:integration
 ```
 
+## GitHub Actions Spend
+
+<!-- #8630 -->
+Actions minutes on a private repo are billed, and the org spending limit is a
+hard stop. In September 2026 adaptive-crm used 19,667 Linux minutes and hit its
+org's $100 cap at 21:49Z on 2026-09-25; after that every job failed and no PR
+could merge (#8630).
+
+### Four Checks Before a Workflow Edit or a PR on a Billed Repo
+
+When you create or edit a file under `.github/workflows/`, or open a PR on a
+repo billed for private-repo minutes, check each item and report pass or fail
+per item. Fix a fail inside a workflow change you own; flag any other fail.
+
+1. **Push CI runs on the default branch only.** `pull_request` already covers
+   PR branches, so `push` on every branch runs the suite twice per PR commit.
+
+   ```yaml
+   on:
+     push:
+       branches: [main]
+     pull_request:
+   ```
+
+2. **A concurrency group cancels superseded PR runs, never default-branch
+   runs.** A newer push makes the older PR run worthless; a default-branch run
+   is the record of what merged.
+
+   ```yaml
+   concurrency:
+     group: ${{ github.workflow }}-${{ github.ref }}
+     cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+   ```
+
+3. **Every job sets `timeout-minutes`.** The default is 360, so one hung job
+   bills six hours.
+
+   ```yaml
+   jobs:
+     test:
+       runs-on: ubuntu-latest
+       timeout-minutes: 20
+   ```
+
+4. **Expensive jobs (live-DB suites, image builds) run only when their inputs
+   change, and still report success under their required-check names.** A
+   workflow skipped by `on.pull_request.paths` reports nothing, so a required
+   check stays pending forever. Filter inside the workflow: a job skipped by
+   `if:` reports success to branch protection.
+
+   ```yaml
+   jobs:
+     changes:
+       runs-on: ubuntu-latest
+       timeout-minutes: 5
+       outputs:
+         db: ${{ steps.filter.outputs.db }}
+       steps:
+         - uses: actions/checkout@v4
+         - uses: dorny/paths-filter@v3
+           id: filter
+           with:
+             filters: |
+               db: ['migrations/**', 'src/db/**']
+     db-tests:               # the required-check name stays the same
+       needs: changes
+       if: needs.changes.outputs.db == 'true'
+       runs-on: ubuntu-latest
+       timeout-minutes: 30
+   ```
+
+### Spend Runs Only for New Signal
+
+- No empty commit (`git commit --allow-empty`) or same-tree re-push to start
+  CI. It buys a full run and no new information.
+- Batch fixup commits into one push. Every push is a full run.
+- Never re-run a green run.
+
+### Billing Failure Is an Owner Blocker
+
+A job that fails with this text did not run:
+
+> recent account payments have failed or your spending limit needs to be increased
+
+Report it to the PM as an owner blocker, naming the repo and the first failed
+run. Never retry, re-run or push
+to re-trigger: every run fails until the owner raises the limit. Never bypass
+branch protection (`--admin`, dropping a required check) to merge past it; the
+checks did not pass, they never ran.
+
 ## Best Practices
 
 ### ✅ DO

@@ -107,7 +107,9 @@ pub(crate) struct Cli {
     #[arg(long, env = "TRUSTY_MPM_URL", global = true)]
     pub(crate) url: Option<String>,
 
-    /// Select which logged-in `gh` account clones/runs a managed repo (#7166).
+    /// Select which logged-in `gh` account clones/runs a managed repo (alias:
+    /// `--user`). The value must be a login `gh auth status` already lists on
+    /// this host (#7166, #5850).
     ///
     /// Why: `tm <url>` fails on a private repo when every credential path on
     /// the machine resolves to one identity (an exported `GH_TOKEN`, git's
@@ -135,13 +137,57 @@ pub(crate) struct Cli {
     /// then builds and reuses its own isolated `gh` config dir for that login
     /// automatically (#7166); it never runs `gh auth switch`, so a
     /// concurrently-running session under a different account is unaffected.
-    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`.
-    #[arg(long, global = true)]
+    /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
+    /// second one — the owner reached for that spelling (`tm <url> --user
+    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// every parse position and the `is_name_segment` validation in
+    /// [`crate::commands::register_args::resolve_account`] carry over
+    /// unchanged; no validation against `gh auth status` exists for either
+    /// spelling, and none is added here (a network/subprocess call at parse
+    /// time is not this flag's job).
+    /// #9090: `--u <login>` is a third visible alias of the same arg.
+    /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
+    /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_parses_u_alias_for_account_global`,
+    /// `every_account_spelling_selects_the_account_in_every_form_and_position`,
+    /// `cli_rejects_a_blank_account_flag_before_the_repository`.
+    // #5850: a blank value is refused here, not read as absent downstream.
+    // #9090: `--u` joins `--user`; the bare form lifts it in `run_target`.
+    #[arg(
+        long,
+        visible_aliases = ["user", "u"],
+        global = true,
+        value_parser = non_blank_login
+    )]
     pub(crate) account: Option<String>,
+
+    /// Read a token for `--account` from stdin (#8914).
+    ///
+    /// Why: when this machine's own gh cannot yield the account's token, a
+    /// token on stdin is the setup that touches no keyring. `gh auth login`
+    /// activates the account in the machine-wide keyring slot.
+    /// What: tm proves the token with `GET /user` and stores it in its 0600
+    /// per-account `hosts.yml` before any session starts.
+    /// Test: `cli_account_token_stdin_requires_an_account`.
+    #[arg(long, global = true, requires = "account")]
+    pub(crate) account_token_stdin: bool,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// Parse `--account`/`--user`, refusing a blank or whitespace-only login.
+///
+/// Why: `resolve_account` reads a blank flag as absent, so `tm --user= <url>`
+/// would run as the machine's global `gh` account (#5850).
+/// What: returns the value unchanged when it has any non-whitespace character.
+/// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
+fn non_blank_login(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+    }
+    Ok(value.to_string())
 }
 
 /// Top-level CLI subcommands.
@@ -422,9 +468,6 @@ pub(crate) enum Command {
         #[arg(long)]
         single_pane: bool,
     },
-    /// Launch the Tauri desktop GUI (or open the web build in the browser
-    /// when Tauri is unavailable).
-    Gui,
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {
         /// Telegram action to perform.
@@ -659,6 +702,16 @@ pub(crate) enum Command {
     /// Test: `commands::wait::tests`; `cli_parses_wait_*` in
     /// `tests_behavior_a.rs`.
     Wait(WaitArgs),
+    /// Run a heavy build under a machine-wide build slot (#8261).
+    ///
+    /// Why: the machine-wide builder cap is enforced at the build command,
+    /// not the dispatch; the `PreToolUse` hook rewrites heavy builds to this.
+    /// What: waits (bounded by `builders.lease_wait_secs`) for a `flock` slot
+    /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
+    /// slot's pool directory unless one is pinned, runs the command and exits
+    /// with its status; exits 75 naming the holders when no slot frees.
+    /// Test: `tests/tm_build_lease.rs`.
+    BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.
@@ -741,6 +794,14 @@ pub(crate) enum Command {
         /// untouched.
         #[arg(long)]
         worktree: bool,
+        /// Arm the started `claude` for supervisor-twin mode (#8878).
+        ///
+        /// Needs the project in both `[supervisor] projects` and
+        /// `[supervisor.twin] projects` of `~/.trusty-mpm/config.toml`, and
+        /// `profile = "supervisor"` in its `.trusty-mpm.toml`. Refused on a
+        /// reattach and for a checkout with no origin remote.
+        #[arg(long)]
+        twin: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///
@@ -772,6 +833,35 @@ pub(crate) enum Command {
         /// Optimizer action to perform.
         #[command(subcommand)]
         action: OptimizerAction,
+    },
+    /// Set up and inspect the Architect, the one fleet supervisor per user.
+    ///
+    /// `init` creates the project, grants it the supervisor profile and
+    /// starts tmux session `tm-architect`; `status` checks that setup.
+    // #8436. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    Fleet {
+        /// Fleet action to perform.
+        #[command(subcommand)]
+        action: FleetAction,
+    },
+    /// Edit a dotenv file without printing a value: `set` and `keys`.
+    ///
+    /// Only the bound Architect may run either verb.
+    // #8939. Test: `cli_parses_env_set_and_keys`.
+    Env {
+        /// Env-file action to perform.
+        #[command(subcommand)]
+        action: EnvAction,
+    },
+    /// Install, update and inspect the runtime instructional content.
+    ///
+    /// `install --from` is offline; `update` fetches a `content-v*` release;
+    /// `status` shows the source and the pinned tag and sha256.
+    // #8378 PR-C. Test: `cli_parses_content_install_update_and_status`.
+    Content {
+        /// Content action to perform.
+        #[command(subcommand)]
+        action: ContentAction,
     },
     /// Inspect the session overseer.
     Overseer {
@@ -1525,9 +1615,9 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
-/// The `writes` group holds the three whose destructive half DEFAULTS TO A
-/// PREVIEW (`--fix`, `--fix-skills`, `--quarantine-mcp`) so `--yes` can promote
-/// any of them without naming each.
+/// The `writes` group holds the flags whose destructive half DEFAULTS TO A
+/// PREVIEW (`--fix`, `--fix-skills`, `--fix-agents`, `--fix-launchd-secrets`,
+/// `--quarantine-mcp`) so `--yes` can promote any of them without naming each.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
 /// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
 /// `cli_parses_doctor_quarantine_mcp`,
@@ -1541,7 +1631,7 @@ pub(crate) enum Command {
 ))]
 #[command(group(
     clap::ArgGroup::new("writes")
-        .args(["fix", "fix_skills", "fix_agents", "quarantine_mcp"])
+        .args(["fix", "fix_skills", "fix_agents", "fix_launchd_secrets", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1627,6 +1717,25 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_agents: bool,
 
+    /// Run ONLY the LaunchAgent credential strip (`launchd_secrets`). DRY RUN
+    /// unless `--yes`.
+    ///
+    /// Why (#8236): `--fix` runs every repair class machine-wide, so there was
+    /// no way to fix one credential exposure without the other writes.
+    /// What: migrates each registry-mapped plist credential into the store
+    /// when the store holds nothing for it, confirms it by byte-equal
+    /// read-back, and strips only the confirmed keys. A store that already
+    /// holds the same value counts as imported with no write; a store that
+    /// holds a DIFFERENT value is never overwritten, and that key stays in the
+    /// plist. Then tightens every regular-file `com.trusty.*.plist` wider than
+    /// `0600` to `0600`, including one that holds no credential; a symlink is
+    /// never touched. Writes nothing without `--yes`. Prints key names and
+    /// outcomes, never a value. No other repair runs. A running daemon keeps
+    /// its old environment until `launchctl bootout` and `launchctl bootstrap`
+    /// reload the unit; `launchctl kickstart -k` does not.
+    #[arg(long)]
+    pub fix_launchd_secrets: bool,
+
     /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
     ///
     /// Why (#4948): doctor checks were pull-only, so findings persisted
@@ -1663,7 +1772,8 @@ pub struct DoctorFlags {
     /// `--fix-skills` REDEPLOY behind it too — one command previewing half of
     /// itself while writing the other half made the printed "dry run" untrue.
     /// What: promotes `--fix`, BOTH `--fix-skills` halves, `--fix-agents`
-    /// (#6649) and `--quarantine-mcp` from a dry run to an applied run.
+    /// (#6649), `--fix-launchd-secrets` (#8236) and `--quarantine-mcp` from a
+    /// dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
 
@@ -1694,6 +1804,18 @@ pub struct DoctorFlags {
     /// What: promotes `DriftedFrozen` findings into the repair set.
     #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+
+    /// Scope the report to this project directory instead of the current one.
+    ///
+    /// Why (#7757): every project-scoped row (`session_scope`, `instructions`,
+    /// `agents`, `skills`, ...) is read from the cwd, so an operator could not
+    /// ask what a session in ANOTHER project would load without `cd`-ing there.
+    /// What: the path is canonicalized and must be an existing directory; a
+    /// missing or non-directory path is an error, never a silent fall back to
+    /// the cwd. Report-only: it conflicts with every write flag, because the
+    /// repairs act on the cwd and a scoped report beside them would mislead.
+    #[arg(long, value_name = "DIR", conflicts_with = "writes")]
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// Flags for [`Command::Reinstall`].

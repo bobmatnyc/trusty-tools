@@ -206,7 +206,9 @@ async fn prune_refuses_when_the_tmux_probe_fails() {
         "a live session must survive a prune whose liveness probe failed"
     );
 
-    // `include_active` never consults the probe, so it is unaffected.
+    // `include_active` skips the prune's liveness gate, but #8935: the
+    // decommission's own teardown cannot prove whose the session is while the
+    // probe fails, so it refuses and the record stays.
     let outcome = mgr
         .prune_managed(
             crate::session_manager::PruneFilter::All,
@@ -217,7 +219,11 @@ async fn prune_refuses_when_the_tmux_probe_fails() {
         )
         .await
         .expect("include_active skips the liveness gate entirely");
-    assert_eq!(outcome.count(), 1);
+    assert_eq!(outcome.count(), 0);
+    assert_eq!(
+        mgr.get(&id).await.expect("record still tracked").state,
+        ManagedSessionState::Active,
+    );
 }
 
 /// `resume` REFUSES rather than killing and rebuilding the pane when the tmux

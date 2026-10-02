@@ -73,6 +73,21 @@ mod readiness;
 ))]
 mod glibc_probe;
 
+// #8616: a pre-init ONNX Runtime check for load-dynamic builds (`load-dynamic`,
+// and `cuda`, which also loads ORT dynamically). `ort` rc.12 hangs instead of
+// failing on a runtime it cannot load, so the path and version are verified
+// before `ort` initialises. Compiled under `cfg(test)` too so its unit tests
+// run in the default test build.
+#[cfg(all(
+    feature = "daemon",
+    any(feature = "load-dynamic", feature = "cuda", test)
+))]
+mod ort_probe;
+
+// #8616: the crate's one env lock for env-mutating lib tests.
+#[cfg(test)]
+mod test_env;
+
 // Why (issue #250, narrowed by #6289): the daemon's startup sequence (`run`,
 // `run_with_args`, `resolve_transport`, and the `Args` clap struct that drives
 // them) only compiles under the `daemon` feature. The `protocol`,
@@ -326,11 +341,28 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu", feature = "bundled-ort"))]
     glibc_probe::check_bundled_ort_glibc_compat()?;
 
+    let init_timeout = readiness::model_init_timeout();
+
+    // #8616: on a load-dynamic build, verify the runtime at ORT_DYLIB_PATH
+    // (path, loadability, version) before `ort` sees it — `ort` rc.12 hangs
+    // instead of returning an error when that load fails. Bounded like the
+    // model load, since loading a library runs its initialisers.
+    #[cfg(any(feature = "load-dynamic", feature = "cuda"))]
+    {
+        let version = readiness::run_bounded("ONNX Runtime pre-init check", init_timeout, async {
+            tokio::task::spawn_blocking(ort_probe::check_ort_runtime)
+                .await
+                .context("ONNX Runtime pre-init check task panicked")?
+        })
+        .await?;
+        info!("ONNX Runtime {version} passed the pre-init check");
+    }
+
     // Load the ONNX model (expensive one-time init), bounded so a
     // provider-init deadlock (issue #1633 — AL2023/glibc 2.34) fails loudly
-    // instead of hanging forever with no listener ever bound.
+    // instead of hanging forever with no listener ever bound. #8616: a
+    // timeout there ends the process (`readiness::run_bounded`).
     info!("loading embedding model...");
-    let init_timeout = readiness::model_init_timeout();
     let embedder = readiness::run_bounded(
         "FastEmbedder::new (model load)",
         init_timeout,

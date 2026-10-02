@@ -1,0 +1,25 @@
+# Allowlist for scripts/check_tmux_exact_targets.sh (#8443).
+# One row per excused line: path<TAB>perl regex matched against the line<TAB>reason.
+# A row that excuses nothing fails the gate, so remove a row when its line goes.
+crates/trusty-common/src/tmux_tests.rs	assert_eq!\(kill, \["kill-session", "-t", "\$"\]	asserts the unresolvable `$` sentinel an empty session name renders (#8443)
+crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#S"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged
+crates/trusty-mpm/src/bin/tm/commands/tmux_attach.rs	\.args\(\["display-message", "-p", "-t", pane_id, "#\{pane_tty\}"\]\)	pane_id is the caller's immutable %N id (from $TMUX_PANE), which exact_* passes through unchanged
+crates/trusty-mpm/src/bin/tm/commands/hook_notify.rs	\.args\(\["display-message", "-p", "-t", &pane, "#S"\]\)	pane is a validated %N id (from $TMUX_PANE): tmux_session_of returns None before this line for anything tmux_pane_id_from_env rejects (#8392)
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t s:0 \| grep -n error",	#8439 classifier fixture, not a tmux call: the bare target an agent types must be allowed, and the classifier refuses `=`
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -pt main -S -200 \| grep -E \'fail\|error\' \| tail -5",	#8439 classifier fixture, not a tmux call: the clustered `-pt main` form an agent types must be allowed
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	^\s*"tmux capture-pane -t s:0",$	#8439 classifier fixture, not a tmux call: refused for missing `-p`; an `=` target would be refused for a different reason
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t \'#\{session_name\}\'",	#8439 classifier fixture, not a tmux call: a format-expanding `-t` value the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -t \'a b\'",	#8439 classifier fixture, not a tmux call: a `-t` value with a space the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"tmux capture-pane -p -S-200 -t main:0\.1",	#8439 classifier fixture, not a tmux call: the bare session:window.pane form an agent types must be allowed
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_allow_tests.rs	"for x in a; do tmux capture-pane -p -t \\"\$x\\"; done",	#8439 classifier fixture, not a tmux call: a loop variable as `-t` value the classifier must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/tmux_exact_target_tests.rs	format!\("tmux \{verb\} -t \{target\} hi"\)	#9001 classifier fixture, not a tmux call: builds each prefix-only, missing and exact target the exact-target floor judges
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-print",$	`find -print` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-not",$	`find -not` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-mount",$	`find -mount` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	^\s*"-quit",$	`find -quit` primary in FIND_FLAGS; the gate reads a quoted word ending in t as a -t cluster
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/read_only_programs.rs	Some\("-lint"\) => \{$	`plutil -lint` verb match arm; the gate reads a quoted word ending in t as a -t cluster
+scripts/ci-gate-verdict.sh	^tmux-exact-targets\|Every tmux -t target is exact\|tmux_targets_relevant$	the CI gate context row quotes the job's display name verbatim; prose, not a tmux call (#8378)
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/architect_pane_tests.rs	-t 	#8902 classifier fixtures, not tmux calls: the deny rows spell each non-exact target form (a variable, $(...), a backtick, a glob, a special token, an unlexable quote) the guard must refuse
+crates/trusty-mpm/tests/tm_hook_pm_guard_architect_pane_8902.rs	-t (\{pane\}|\{window\}|'\{session\}'|\\\"\$T\\\")	#8902 fixtures judged by tm hook --pm-guard, not tmux calls: runtime %N/@N/$N ids read from the private test server, and an expanded target the guard must refuse
+crates/trusty-mpm/src/bin/tm/commands/pm_guard_bash/tmux_exact_target_tests.rs	-t (nos|x\b|\{target\})	#9001 classifier fixtures, not tmux calls: the deny rows spell the bare (prefix-matching) target forms and bypass shapes the exact-target floor must refuse
+crates/trusty-mpm/tests/tm_hook_pm_guard_tmux_target_9001.rs	-t (nos|x\b)	#9001 fixtures judged by tm hook --pm-guard, not tmux calls: the deny rows spell the bare (prefix-matching) targets and bypass shapes the exact-target floor must refuse

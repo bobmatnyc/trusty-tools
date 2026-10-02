@@ -14,6 +14,9 @@
 mod admin;
 mod components;
 mod contrib_graph;
+mod create_layout;
+// #8167/#8232: a delete closes the index's redb and HNSW files first.
+mod delete_close;
 // #4087: query-time guard so a corpus-failed index fails loudly instead of
 // answering HTTP 200 with an empty result set.
 mod degraded;
@@ -25,6 +28,8 @@ mod embedding_pause;
 mod embedding_pause_tests;
 mod facet_route;
 mod fanout;
+// #9027: per-index deadline and one query embed for the all-index fan-out.
+mod fanout_deadline;
 mod files;
 mod health;
 pub(crate) mod helpers;
@@ -53,6 +58,8 @@ mod typeahead;
 mod upgrade;
 // #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
 mod vector_health;
+// #9027: warm every registered index ahead of an all-index search.
+mod warm_all;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
@@ -101,6 +108,39 @@ mod tests_6363;
 // #6380: a delete whose expected root moved must be refused, not applied.
 #[cfg(test)]
 mod tests_6380;
+// #8438: `delete_data` removes the directory the registry names, per source.
+#[cfg(test)]
+mod tests_8438;
+// #8499: indexing never modifies a tracked file; the index survives git clean.
+#[cfg(test)]
+mod tests_8499;
+// #8499 round 2: store placement, registration claims, relocate vs reindex.
+#[cfg(test)]
+mod registration_8499_tests;
+// #8499 round 3: enclosing work tree, busy store, relocate under the claim.
+#[cfg(test)]
+mod work_tree_8499_tests;
+// #8148: `PATCH …/config {"vector": true}` is the embed-only catch-up trigger.
+#[cfg(test)]
+mod tests_8148;
+// #8134: vectors restored over an empty corpus never register as ready.
+#[cfg(test)]
+mod tests_8134;
+// #8105: a reindex of a write-quarantined index is refused, not queued.
+#[cfg(test)]
+mod tests_8105;
+// #8889: one reindex per index through the HTTP handler.
+#[cfg(test)]
+mod tests_8889;
+// #8167: a delete releases the index's files while a handle clone survives.
+#[cfg(test)]
+mod tests_8167;
+// #8664: a delete closes the files a queued deferred-embed job holds.
+#[cfg(test)]
+mod tests_8664;
+// #8727: parked registrations are listed; an overlap 409 names its blocker.
+#[cfg(test)]
+mod tests_8727;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
@@ -161,9 +201,18 @@ mod tests_exact_match_7675;
 // #5917: a search over an index whose corpus cannot be read must be refused.
 #[cfg(test)]
 mod tests_corpus_read_5917;
+// #8266: a cold, narrow grep must not rehydrate the whole corpus.
+#[cfg(test)]
+mod tests_grep_cold_8266;
 // #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
 #[cfg(test)]
 mod tests_index_routing;
+// #8348: a failed query embed degrades to lexical instead of a 500.
+#[cfg(test)]
+mod tests_8348;
+// #9027: the all-index fan-out's per-index deadline and one query embed.
+#[cfg(test)]
+mod tests_9027;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]
@@ -263,6 +312,8 @@ pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+// #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
+pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 pub(crate) use reindex_handlers::reindex_report;
 pub(crate) use search::{delete_index_report, DeleteIndexParams};
 
@@ -273,6 +324,10 @@ pub(crate) use admin::{
     admin_stop_report, logs_tail_report, patch_config_report, PatchConfigRequest,
 };
 pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest};
+
+// #9027: warm-all, served on both transports.
+pub(crate) use warm_all::{warm_start_report, warm_status_report};
+pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 
 /// Build the axum router with the shared state.
 ///
@@ -457,6 +512,10 @@ pub fn build_router_on(
             get(get_config_handler).patch(patch_config_handler),
         )
         .route("/upgrade", post(upgrade_handler))
+        // #9027: start returns at once (the warm runs on its own task), and
+        // status is a snapshot read — both belong in the free lane.
+        .route("/warm", post(warm_all::warm_start_handler))
+        .route("/warm/status", get(warm_all::warm_status_handler))
         .with_state(Arc::clone(&state_arc));
 
     let mut router = free.merge(interactive_limited).merge(bulk_limited);

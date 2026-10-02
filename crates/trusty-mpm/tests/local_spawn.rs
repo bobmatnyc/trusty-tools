@@ -284,57 +284,42 @@ fn workspace_subpath_produces_owner_repo_path() {
     );
 }
 
-/// `spawn_managed_local` returns an error hinting at `tm connect` when the local
-/// directory has no parseable GitHub remote (#1590).
+/// A repository ROOT with no `origin` is routed local-only; a subdirectory of
+/// it is not, and falls through to the not-a-repository-root refusal (#8934).
 ///
-/// Why: a managed session requires a GitHub remote so it can provision an isolated
-/// clone. When the remote is absent there is no safe place to clone; the error
-/// must point the operator to `tm connect` (or `tm launch --live`) rather than
-/// silently operating in the live checkout. This test locks in that the
-/// no-remote branch produces a user-actionable error message.
-/// What: creates a temp git repo WITHOUT an `origin` remote, verifies that
-/// `get_origin_url` returns `None` (the exact trigger for the error branch in
-/// `spawn_managed_local`), and asserts that the error message `spawn_managed_local`
-/// would produce contains the literal string `tm connect` so the operator knows
-/// the remediation step.
+/// Why: before #8934 every repository with no `origin` was refused with
+/// "managed sessions require a GitHub remote". The owner ruled that such a
+/// repository runs local-only; only a directory that is not a repository root
+/// is still refused, as ADR-0055 refuses a subdirectory of a GitHub checkout.
+/// What: `git init` a repo with no remote, then asks the spawn's routing
+/// predicate about the root and about a subdirectory.
 /// Test: this function IS the test.
 #[test]
-fn spawn_managed_local_errors_on_no_remote() {
-    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
+fn a_non_root_directory_without_an_origin_is_refused() {
+    use trusty_mpm::core::remote_mode::{RemoteMode, is_local_only_root, remote_mode};
 
-    // Create a git repo with no remote — `git init` only, no `git remote add`.
     let no_remote = tempfile::TempDir::new().expect("no-remote tempdir");
     let dir = no_remote.path();
-
     let init = std::process::Command::new("git")
         .args(["init", dir.to_str().expect("utf8 path")])
         .output()
         .expect("git init");
     assert!(init.status.success(), "git init failed");
 
-    // get_origin_url must return Ok(None) — this is what triggers the error branch
-    // in spawn_managed_local. #4734: `Ok`, specifically. A repo that simply has no
-    // `origin` is not a git failure, and turning it into one would swap this
-    // operator-actionable `tm connect` hint for a raw git error.
-    let url = get_origin_url(dir);
-    assert!(
-        matches!(url, Ok(None)),
-        "get_origin_url must return Ok(None) for a git repo with no origin remote, got {url:?}"
+    let root = std::fs::canonicalize(dir).expect("canonical");
+    assert_eq!(remote_mode(dir), Ok(RemoteMode::LocalOnly { root }));
+    assert_eq!(
+        is_local_only_root(dir),
+        Ok(true),
+        "the root spawns local-only"
     );
 
-    // Reconstruct the exact error that spawn_managed_local produces for Ok(None).
-    // This documents and locks in the contract: the error message points operators
-    // to `tm connect` as the remediation step.
-    let error_msg = format!(
-        "spawn failed: '{}' has no git origin remote; \
-             managed sessions require a GitHub remote. \
-             Use `tm connect` / `tm launch --live` to run in the live checkout.",
-        dir.display()
-    );
-    assert!(
-        error_msg.contains("tm connect"),
-        "the no-remote error must mention `tm connect` so the operator knows what to do; \
-         got: {error_msg}"
+    let sub = dir.join("docs");
+    std::fs::create_dir(&sub).expect("mkdir");
+    assert_eq!(
+        is_local_only_root(&sub),
+        Ok(false),
+        "a subdirectory is not a repository root and is refused"
     );
 }
 

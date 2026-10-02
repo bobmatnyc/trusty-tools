@@ -216,6 +216,46 @@ pub struct ProjectLevelConfig {
     /// `project_config_prompt_self_improvement_defaults_to_none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_self_improvement: Option<bool>,
+
+    /// `[style]` — this project's output style (#8533).
+    ///
+    /// Why: a project whose role is not a delegating PM needs its own voice, and
+    /// the host-level `[style] active` is per machine. The committed file is the
+    /// top of the style chain below the `--style` flag.
+    /// What: `active` names a bundled style id or a project style file
+    /// `.claude/output-styles/<id>.md`. `None` → the host config decides. Full
+    /// chain: [`crate::core::output_style::effective_style_id`].
+    /// Test: `project_config_parses_style`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<ProjectStyleConfig>,
+
+    /// The instruction profile this project's sessions run (#8453).
+    ///
+    /// Why: a fleet supervisor needs its own instructions, output style, guard
+    /// behaviour and model, and the launch settings a project commits live
+    /// here. A string rather than an enum, so an unknown value degrades to the
+    /// PM profile instead of rejecting every other key in the file.
+    /// What: `"supervisor"` → the supervisor profile. `None`, `"pm"` or any
+    /// other value → the PM profile. Resolution:
+    /// [`crate::core::session_profile::resolve`].
+    /// Test: `project_config_parses_profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// The `[style]` table of `.trusty-mpm.toml` (#8533).
+///
+/// ```toml
+/// [style]
+/// active = "trusty-supervisor"
+/// ```
+/// Test: `project_config_parses_style`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectStyleConfig {
+    /// The output-style id this project launches with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
 }
 
 /// The `[session]` table: this project's MCP-server and plugin allowlists.

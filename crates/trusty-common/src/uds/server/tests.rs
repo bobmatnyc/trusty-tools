@@ -1718,3 +1718,182 @@ async fn shutdown_returns_when_the_drain_budget_expires() {
     );
     client.abort();
 }
+
+// ── the error object's `data` member (#6285) ────────────────────────────────
+
+/// The structured body trusty-search's index-unavailable refusal carries.
+fn unavailable_body() -> serde_json::Value {
+    json!({
+        "error": "index_not_resident",
+        "index_id": "wt-1",
+        "retryable": true,
+        "restore_via": "search.query",
+        "reason": "cold_parked",
+        "transient": true,
+        "stages": { "lexical": "ready", "semantic": "pending" },
+    })
+}
+
+/// Why: JSON-RPC 2.0 makes `data` optional, so a frame must carry it when set
+/// and must not carry `"data": null` when unset — a peer that reads the
+/// member's presence as "there is detail" would otherwise see detail that is
+/// not there.
+/// Test: itself.
+#[test]
+fn rpc_error_data_round_trips_when_present_and_is_omitted_when_absent() {
+    let with = RpcResponse::failure(
+        json!(1),
+        RpcError::new(-32002, "index_not_resident").with_data(unavailable_body()),
+    );
+    let wire = serde_json::to_value(&with).expect("serialize");
+    assert_eq!(wire["error"]["data"], unavailable_body());
+    let back: RpcResponse = serde_json::from_value(wire).expect("deserialize");
+    assert_eq!(back.error, with.error, "data must survive the round trip");
+
+    let without = RpcResponse::failure(json!(2), RpcError::new(-32002, "index_not_resident"));
+    let wire = serde_json::to_value(&without).expect("serialize");
+    assert!(
+        wire["error"].get("data").is_none(),
+        "an unset data member must be omitted, not sent as null: {wire}"
+    );
+    let back: RpcResponse = serde_json::from_value(wire).expect("deserialize");
+    assert_eq!(back.error.expect("an error").data, None);
+}
+
+/// Why: a peer built before #6285 sends `{code, message}` only. Its frames must
+/// keep parsing, or adding the member would break every older daemon's
+/// refusal on the client side.
+/// Test: itself.
+#[test]
+fn rpc_error_without_a_data_member_still_parses() {
+    let frame = br#"{"jsonrpc":"2.0","id":7,"error":{"code":-32004,"message":"unknown index: x"}}"#;
+    let response: RpcResponse = serde_json::from_slice(frame).expect("an older frame parses");
+    let error = response.error.expect("an error");
+    assert_eq!(error.code, -32004);
+    assert_eq!(error.message, "unknown index: x");
+    assert_eq!(error.data, None);
+}
+
+/// A fallback that refuses every call with a structured `data` member.
+struct DataRefusingFallback;
+
+#[async_trait::async_trait]
+impl RpcFallback for DataRefusingFallback {
+    async fn call(
+        &self,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::new(-32002, "index_not_resident").with_data(unavailable_body()))
+    }
+}
+
+/// Why: the point of #6285's prerequisite is that the fields reach the CALLER,
+/// not only the frame. This dials a real socket with the production client half
+/// and reads `data` back off the decoded response.
+/// Test: itself.
+#[tokio::test]
+async fn a_handlers_error_data_reaches_the_client_verbatim() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let router = RpcRouter::new().fallback(DataRefusingFallback);
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let response = call(&socket, 9, "search.query", json!({})).await;
+
+    let error = response.error.expect("the handler refused");
+    assert_eq!(error.code, -32002);
+    assert_eq!(
+        error.data,
+        Some(unavailable_body()),
+        "every structured field must reach the client unchanged"
+    );
+}
+
+// ── #8531: the connection's peer pid, visible to its handler ────────────────
+
+/// A router whose one method answers the peer pid its handler can read.
+fn whoami_router() -> RpcRouter {
+    RpcRouter::new().typed("whoami", |_req: ()| async move {
+        Ok::<_, RpcError>(request_peer_pid())
+    })
+}
+
+/// #8531: a handler granting by caller identity reads the kernel's pid for
+/// its own connection — here this test process, which dialled the socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_handler_reads_the_peer_pid_of_its_own_connection_8531() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) =
+        spawn_server(tmp.path(), whoami_router(), RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let response = call(&socket, 1, "whoami", json!(null)).await;
+
+    assert_eq!(
+        response.result,
+        Some(json!(std::process::id())),
+        "the handler must see the dialling process's pid: {response:?}"
+    );
+}
+
+/// #8531: with no socket connection there is no kernel word, so the reading
+/// is `None` — never a default a handler could grant on.
+#[tokio::test]
+async fn request_peer_pid_is_none_outside_a_socket_dispatch_8531() {
+    assert_eq!(request_peer_pid(), None);
+    let response = whoami_router()
+        .dispatch(&frame(2, "whoami", json!(null)))
+        .await;
+    assert_eq!(
+        response.result,
+        Some(serde_json::Value::Null),
+        "{response:?}"
+    );
+    assert_eq!(request_peer(), None);
+}
+
+/// #8531 MEDIUM: the accept instant is stamped before the frame is read, so a
+/// client that waits before sending does not move it. The client holds the
+/// connection open 400 ms before writing; the stamp must predate the write.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_handler_reads_its_peer_and_the_accept_instant_8531() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let router = RpcRouter::new().typed("peer", |_req: ()| async move {
+        let peer = request_peer().expect("a socket dispatch has a peer");
+        let millis = peer
+            .accepted_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_millis() as u64;
+        Ok::<_, RpcError>((peer.pid, millis))
+    });
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (socket, _stop, _handle) = spawn_server(tmp.path(), router, RpcServeOptions::default());
+    await_socket(&socket).await;
+
+    let mut stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let sent_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_millis() as u64;
+    let mut request = frame(3, "peer", json!(null));
+    request.push(b'\n');
+    stream.write_all(&request).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+    let response: RpcResponse = serde_json::from_slice(raw.trim_ascii()).expect("one frame");
+
+    let (pid, accepted_ms): (u32, u64) =
+        serde_json::from_value(response.result.clone().expect("result")).expect("shape");
+    assert_eq!(pid, std::process::id(), "{response:?}");
+    assert!(
+        accepted_ms + 300 <= sent_at,
+        "stamped at accept ({accepted_ms}), not at the frame read ({sent_at})"
+    );
+}

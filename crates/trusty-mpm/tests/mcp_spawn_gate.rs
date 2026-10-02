@@ -34,7 +34,7 @@ use trusty_mpm::project::Project;
 // #6671: `spawn_managed` reaches `DaemonState::project_registry()`, which seeds
 // from the config file under `$HOME`, so an isolated framework root alone still
 // admits the developer's registered projects.
-mod common;
+use crate::common;
 
 /// Env var the daemon reads to force-enable MCP spawning (mirrors
 /// `daemon::managed_routes::mcp_spawn_gate::ALLOW_MCP_SPAWN_ENV`, duplicated
@@ -253,7 +253,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
 /// registered a project (or `tm` has auto-registered it from session history)
 /// gets normal behaviour. This drives the target to a local, non-git temp
 /// directory (never real network/git) so passing the gate is proven by
-/// reaching the DIFFERENT downstream "no git origin remote" error rather than
+/// reaching the DIFFERENT downstream "is not a git repository root" error rather than
 /// the gate's own "disabled"/"unregistered" errors.
 /// What: registers a project AT that local path — since #7066 the gate decides
 /// on the canonical full path, so the registered `repo_url` is the checkout
@@ -306,7 +306,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
     .await
     .expect_err("non-git local dir must fail downstream, not at the gate");
     assert!(
-        err.contains("no git origin remote"),
+        err.contains("is not a git repository root"), // #8934: the refusal names the root
         "expected the gate to pass through to the local-path branch, got: {err}"
     );
     assert!(
@@ -412,7 +412,7 @@ async fn cli_origin_spawn_bypasses_mcp_gate_even_when_disabled() {
     .await
     .expect_err("non-git local dir must fail downstream, not at the gate");
     assert!(
-        err.contains("no git origin remote"),
+        err.contains("is not a git repository root"), // #8934: the refusal names the root
         "expected the CLI-origin spawn to bypass the gate entirely, got: {err}"
     );
 }

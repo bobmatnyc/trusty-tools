@@ -65,14 +65,22 @@ pub(crate) fn spawn_with_retry<T>(
 /// Whether a spawn error is transient OS-level contention rather than real
 /// evidence the venv is broken (#5328). See [`spawn_with_retry`] for why the
 /// distinction exists.
-/// What: `true` for `WouldBlock` (EAGAIN — fork() found no process slot) and
-/// `OutOfMemory` (ENOMEM); `false` for everything else, including
+/// What: `true` for `WouldBlock` (EAGAIN — fork() found no process slot),
+/// `OutOfMemory` (ENOMEM) and `ExecutableFileBusy` (ETXTBSY — the file is
+/// open for writing somewhere); `false` for everything else, including
 /// `NotFound`/`PermissionDenied`, which stay real evidence.
-/// Test: `is_transient_spawn_error_classifies_would_block_and_out_of_memory`.
+/// Test: `is_transient_spawn_error_classifies_would_block_and_out_of_memory`,
+/// `spawn_with_retry_retries_executable_file_busy`,
+/// `bootstrap::tests::bounded_python_check_waits_out_a_stub_held_open_for_writing`.
 fn is_transient_spawn_error(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::OutOfMemory
+            // #5328: Linux ETXTBSY lasts only until the fd holder (often a
+            // sibling thread's forked child) closes or execs; it is the flake's
+            // real cause, not EAGAIN.
+            | std::io::ErrorKind::ExecutableFileBusy
     )
 }
 

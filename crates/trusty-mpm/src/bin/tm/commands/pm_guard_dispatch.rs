@@ -126,50 +126,13 @@ use trusty_mpm::core::dispatch_isolation::{
     blocked_by_shared_tree, dispatch_agent, dispatch_isolation,
 };
 
-use crate::commands::hook_payload::build_hook_payload;
+use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
-/// Build the deny message for a blocked concurrent dispatch.
-///
-/// Why: a bare "denied" leaves the model guessing and it retries the identical
-/// call. The text has to name what is already running and say why git will not
-/// catch the collision (the reader's prior is that it would). It offers exactly
-/// ONE remedy — declare isolation — because that is the only one that always
-/// works: `RUNNING_STALE_AFTER_SECS` is six hours, so a crashed subagent that
-/// never emits `SubagentStop` holds its directory for that whole window, and
-/// "wait for it to report back" would be advice to wait for something that may
-/// never happen. Built per call rather than kept as a constant because naming
-/// the actual sibling agent is most of its value.
-///
-/// #5649: the incident showed that single remedy can itself be unavailable, so
-/// the message now names a second one — serialize. Serializing and waiting are
-/// not the same offer: serializing means dispatching one file-mutating agent at
-/// a time GOING FORWARD, which needs nothing from the agent already running, so
-/// it always works. Waiting blocks on an agent that may never return, and stays
-/// excluded for exactly the reason above.
-/// What: a single-paragraph `permissionDecisionReason`.
-/// Test: `denies_a_second_concurrent_unisolated_engineer`,
-/// `deny_reason_offers_only_remedies_that_always_work`.
-fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
-    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names.dedup();
-    let running = names.join(", ");
-    format!(
-        "Concurrent shared-worktree dispatch denied (#4480): {running} is already running in \
-         {} without a worktree of its own — possibly dispatched by a different session standing \
-         in the same directory (ADR-0048) — and this {agent} dispatch would put a second \
-         file-mutating agent on the same git HEAD. Git does not catch this — a `git checkout -b` \
-         refuses only when a tracked file differs between both branches AND has an uncommitted \
-         change, so untracked files and edits the two branches agree on transfer onto the wrong \
-         branch silently, with no error at any step. Re-dispatch this agent with \
-         `isolation: \"worktree\"` so it gets its own tree. If isolation is unavailable here, \
-         serialize instead: dispatch one file-mutating agent at a time from now on. Do not \
-         hand-roll a `git worktree add` in the prompt — this guard reads the declared \
-         isolation parameter, never the prompt, so a self-made worktree still counts as \
-         sharing this HEAD (#5649).",
-        cwd.display()
-    )
-}
+use crate::commands::hook_payload::build_hook_payload;
+// #8257: the writer-deny text lives beside this module, which is over cap.
+use crate::commands::pm_guard_dispatch_deny::{
+    blocking_records, deny_reason, granted_deny_reason, records_in,
+};
 
 /// Classify one dispatch against the set of agents already writing in this tree.
 ///
@@ -370,13 +333,13 @@ async fn claim_shared_tree_on(
         SharedTreeReply::Answered(body) => {
             let live = writers_in(&body);
             warn_on_answer(&body, &live);
-            SharedTreeClaim::Writers(live)
+            SharedTreeClaim::Writers(live, records_in(&body))
         }
         // #5923: no daemon to ask, so the guard cannot function here at all —
         // allow, but never silently.
         SharedTreeReply::Unavailable(detail) => {
             warn_guard_unavailable(&detail);
-            SharedTreeClaim::Writers(Vec::new())
+            SharedTreeClaim::Writers(Vec::new(), Vec::new())
         }
         SharedTreeReply::Unanswered(detail) => SharedTreeClaim::Unknown(detail),
     }
@@ -392,8 +355,12 @@ async fn claim_shared_tree_on(
 /// Test: `claim_is_unknown_when_the_daemon_times_out`,
 /// `claim_is_unknown_when_the_daemon_answers_500`.
 pub(crate) enum SharedTreeClaim {
-    /// The daemon answered: these agents are already writing here.
-    Writers(Vec<String>),
+    /// The daemon answered: these agents are already writing here, and (#8257)
+    /// the records behind them, for the deny text.
+    Writers(
+        Vec<String>,
+        Vec<trusty_mpm::daemon::services::delegation_records::DelegationRecordView>,
+    ),
     /// A running daemon did not answer, so whether a writer is registered here
     /// is unknown.
     Unknown(String),
@@ -509,14 +476,21 @@ pub(crate) async fn live_shared_tree_writers(
 /// for an ANSWERED reply. Every other arm is `Err(detail)`, carrying the
 /// daemon-side reason for the deny text.
 /// Test: `pm_guard_denies_version_control_a_removal_when_the_daemon_is_unreachable`
-/// in `tests/tm_hook_pm_guard.rs`.
+/// in `tests/tm_hook_pm_guard.rs`;
+/// `an_unbuildable_client_is_unavailable_and_the_owner_query_denies`.
 pub(crate) async fn live_shared_tree_writers_or_deny(
     url: &str,
     session_id: &str,
     cwd: &Path,
     payload: &Value,
 ) -> Result<Vec<String>, String> {
-    match post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await {
+    owners_or_deny(post_shared_tree(url, session_id, cwd, payload, SHARED_TREE_ROUTE).await)
+}
+
+/// #8492: the reply-to-verdict step of [`live_shared_tree_writers_or_deny`],
+/// split so a test can feed it the reply of an unbuildable client.
+fn owners_or_deny(reply: SharedTreeReply) -> Result<Vec<String>, String> {
+    match reply {
         SharedTreeReply::Answered(body) => Ok(writers_in(&body)),
         SharedTreeReply::Unavailable(detail) | SharedTreeReply::Unanswered(detail) => Err(detail),
     }
@@ -639,8 +613,11 @@ pub(crate) async fn evaluate_granted_worktree(
     )
     .await
     {
-        SharedTreeClaim::Writers(live) if live.is_empty() => None,
-        SharedTreeClaim::Writers(live) => Some(granted_deny_reason(agent, cwd, &live)),
+        SharedTreeClaim::Writers(live, _) if live.is_empty() => None,
+        // #8257: the deny names each blocking record and how to clear it.
+        SharedTreeClaim::Writers(live, records) => {
+            Some(granted_deny_reason(agent, cwd, &live) + &blocking_records(cwd, &records))
+        }
         SharedTreeClaim::Unknown(detail) => Some(unanswered_grant_deny_reason(agent, cwd, &detail)),
     }
 }
@@ -673,48 +650,6 @@ fn warn_on_unrecorded_grant(body: &Value, live: &[String], cwd: &Path) {
          it. Granting anyway: this path fails open by design.",
         cwd.display()
     );
-}
-
-/// Build the deny message for a granted dispatch the checkout is not free for.
-///
-/// Why: [`deny_reason`]'s remedy is "re-dispatch with `isolation: \"worktree\"`",
-/// which reads as self-contradictory here — the guard had already built exactly
-/// that rewrite and then declined to emit it. The reason this path denies is
-/// different from #4480's: the isolation is available, but the guard cannot rely
-/// on the harness applying its `updatedInput` rewrite, and while another writer
-/// holds the checkout an unapplied rewrite is the reported harm rather than a
-/// hypothetical one.
-///
-/// The reorder this text belongs to also widens what a stale record blocks. A
-/// record nothing ever closed used to block only an unisolated dispatch;
-/// it now blocks every dispatch of a writer — and `Unknown` is a writer — from
-/// this checkout, for the six hours of `RUNNING_STALE_AFTER_SECS`. The two
-/// operator escape hatches still lift it, so that is friction rather than a
-/// lockout, and the message names the possibility so a reader can recognise it.
-/// What: names ADR-0048, the sibling the daemon reports, the directory, and the
-/// three ways forward — dispatch with explicit isolation, serialize, or report a
-/// record believed stale.
-/// Test: `granted_deny_reason_does_not_offer_the_isolation_it_already_built`.
-fn granted_deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
-    let mut names: Vec<&str> = live.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    names.dedup();
-    format!(
-        "Dispatch denied in a shared main checkout (ADR-0048): {} is a project's main checkout, \
-         and the daemon's delegation records name {} as running there with no worktree of its \
-         own — possibly dispatched by a different session standing in the same directory. This \
-         {agent} dispatch was granted a worktree of its own, but that grant is a rewrite of the \
-         dispatch's arguments and this guard cannot confirm the harness applied it; if it did \
-         not, a second file-mutating agent joins the same git HEAD, which is the reported \
-         failure — a commit landing on another workstream's branch, with no error at any step. \
-         Re-issue this dispatch with `isolation: \"worktree\"` declared explicitly, which needs \
-         no rewrite to be applied. If isolation is unavailable here, serialize instead: dispatch \
-         one file-mutating agent at a time. If you believe that record is stale — the agent \
-         finished without its stop signal reaching the daemon — say so rather than retrying, \
-         since nothing here can tell a finished agent from a running one.",
-        cwd.display(),
-        names.join(", ")
-    )
 }
 
 /// Build the deny message for a grant the daemon left unanswered (#5923).
@@ -752,7 +687,7 @@ fn unanswered_grant_deny_reason(agent: &str, cwd: &Path, detail: &str) -> String
 }
 
 /// The route that answers and claims for an unisolated dispatch (#4480).
-const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
+pub(crate) const SHARED_TREE_ROUTE: &str = "shared-tree-dispatch";
 
 /// The route that answers and records the isolation the guard granted (#5769).
 const GRANTED_WORKTREE_ROUTE: &str = "granted-worktree";
@@ -818,14 +753,12 @@ impl SharedTreeReply {
 /// callers share one wire contract — the endpoint, the payload projection, and
 /// the timeout bounds are the parts a second copy would drift on.
 ///
-/// #6892: the builder-slot guard POSTs through this too, on its own `route`.
 /// The endpoint SHAPE is `/api/v1/sessions/{id}/delegations/{route}` for every
 /// delegation-time guard, and the projection and timeout bounds are the parts a
 /// second copy would drift on — so it takes the route rather than owning one.
-/// What it does NOT decide is what a failure MEANS: `commands::pm_guard_builder_cap`
-/// denies on both [`SharedTreeReply::Unavailable`] and
-/// [`SharedTreeReply::Unanswered`], where this module's claim path allows on the
-/// first. That policy stays with each caller.
+/// What it does NOT decide is what a failure MEANS: that policy stays with each
+/// caller. (#8261: the #6892 builder-slot guard that also POSTed here is gone;
+/// the build cap is taken at the build command by `tm build-lease`.)
 /// What: an answered body, or which KIND of failure stopped it (see
 /// [`SharedTreeReply`]). Sent under the same tight connect/total bounds
 /// `pm_guard`'s audit POSTs use (500 ms / 2 s), because this call sits inside a
@@ -845,30 +778,82 @@ pub(crate) async fn post_shared_tree(
     payload: &Value,
     route: &str,
 ) -> SharedTreeReply {
+    post_shared_tree_with(shared_tree_client, url, session_id, cwd, payload, route).await
+}
+
+/// The shared-tree client: 500 ms to connect, 2 s for the whole request.
+fn shared_tree_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+}
+
+/// [`post_shared_tree`] with the client constructor supplied.
+///
+/// Why: #8492 — the constructor is the synchronous step a caller's deadline
+/// must be able to preempt, and only a supplied one can be made slow on demand.
+/// What: runs `build` on a detached thread and awaits it through a oneshot, then
+/// POSTs as [`post_shared_tree`]. Nothing joins that thread, so process exit
+/// never waits on a build a deadline gave up on. A build error, or a thread
+/// that cannot start, is [`SharedTreeReply::Unavailable`]; a build that panics
+/// panics here.
+/// Test: `a_deadline_fires_while_the_client_build_is_still_running`,
+/// `an_unbuildable_client_is_unavailable_and_the_owner_query_denies`,
+/// `a_panicking_client_build_panics_the_caller`.
+async fn post_shared_tree_with<B>(
+    build: B,
+    url: &str,
+    session_id: &str,
+    cwd: &Path,
+    payload: &Value,
+    route: &str,
+) -> SharedTreeReply
+where
+    B: FnOnce() -> reqwest::Result<reqwest::Client> + Send + 'static,
+{
     if session_id.is_empty() {
         return SharedTreeReply::Unavailable(
             "the hook payload carries no session id, so no session's delegations can be addressed"
                 .to_string(),
         );
     }
-    let client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(client) => client,
-        // #5923: a client that cannot be built never reached the network, and
-        // no retry in this process would change that — the guard is off, not
-        // uncertain.
-        Err(error) => {
+    // #8492: built on a detached thread, not inside this poll, so a caller's
+    // deadline (`tokio::time::timeout`) can fire while the build still runs. Not
+    // the blocking pool: runtime drop joins that pool, so the process could not
+    // exit before the build returned and the deny could meet the 5 s hook kill.
+    let (sender, built) = tokio::sync::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pm-guard-shared-tree-client".into())
+        .spawn(move || {
+            // A closed receiver means the caller's deadline already decided.
+            let _ = sender.send(build());
+        });
+    // #5923: a client that cannot be built never reached the network, and no
+    // retry in this process would change that — the guard is off, not uncertain.
+    if let Err(error) = spawned {
+        return SharedTreeReply::Unavailable(format!(
+            "the guard's HTTP client build thread could not be started: {error}"
+        ));
+    }
+    let client = match built.await {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             return SharedTreeReply::Unavailable(format!(
                 "the guard's HTTP client could not be built: {error}"
             ));
         }
+        // #8492: the sender only drops unsent when the build panicked, and a
+        // panicking build panics here, exactly as the inline build did.
+        Err(_) => panic!("the guard's HTTP client build panicked"),
     };
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/{route}");
     let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
     project_dispatch_input(&mut forwarded);
+    // #8161: the builder forwards known keys only, so the tree-holders marker is copied.
+    if let Some(marker) = payload.get(TREE_HOLDERS_MARKER) {
+        forwarded[TREE_HOLDERS_MARKER] = marker.clone();
+    }
     let body = serde_json::json!({ "payload": forwarded });
     let response = match client.post(&endpoint).json(&body).send().await {
         Ok(response) => response,
@@ -923,7 +908,7 @@ fn classify_transport_failure(endpoint: &str, error: &reqwest::Error) -> SharedT
 }
 
 /// The live writers named in a shared-tree answer.
-fn writers_in(body: &Value) -> Vec<String> {
+pub(crate) fn writers_in(body: &Value) -> Vec<String> {
     body.get("agents")
         .and_then(Value::as_array)
         .map(|rows| {
@@ -1038,8 +1023,10 @@ pub(crate) async fn evaluate_with_cwd(
     }
     let cwd = cwd?;
     match claim_shared_tree(url, session_id, &cwd, payload).await {
-        SharedTreeClaim::Writers(live) => {
+        // #8257: the deny names each blocking record and how to clear it.
+        SharedTreeClaim::Writers(live, records) => {
             evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
+                .map(|reason| reason + &blocking_records(&cwd, &records))
         }
         // #5923: a running daemon that did not answer leaves the question open,
         // and admitting on an open question is the fail-open this closes.
@@ -1079,72 +1066,6 @@ mod tests {
             assert!(reason.contains("python-engineer"), "{reason}");
             assert!(reason.contains("/repo"), "{reason}");
             assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
-        }
-    }
-
-    #[test]
-    fn deny_reason_offers_only_remedies_that_always_work() {
-        // `RUNNING_STALE_AFTER_SECS` is six hours, so a crashed subagent that
-        // never emits `SubagentStop` holds its directory for that whole window.
-        // Telling the PM to wait for it would be advice to wait for something
-        // that may never arrive; declaring isolation works immediately.
-        //
-        // #5649: serialize joins isolation as a second offered remedy, because
-        // the incident showed isolation can itself be unavailable. Serializing
-        // constrains only FUTURE dispatches and so needs nothing from the agent
-        // already running — waiting stays banned for the reason above.
-        let reason = deny_reason(
-            "rust-engineer",
-            Path::new("/repo"),
-            &["python-engineer".to_string()],
-        );
-        assert!(reason.contains(r#"isolation: "worktree""#), "{reason}");
-        assert!(
-            reason.contains("serialize"),
-            "the deny must offer the serialize fallback for when isolation is unavailable: \
-             {reason}"
-        );
-        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
-            assert!(
-                !reason.contains(banned),
-                "the deny must not advise waiting on an agent that may never report \
-                 (found {banned:?}): {reason}"
-            );
-        }
-    }
-
-    #[test]
-    fn granted_deny_reason_does_not_offer_the_isolation_it_already_built() {
-        // #5769: this path denies a dispatch the guard had ALREADY rewritten to
-        // carry `isolation: "worktree"`. Reusing #4480's text told the reader to
-        // do the thing the guard had just done and declined to emit, which reads
-        // as arbitrary and gets retried identically.
-        let reason = granted_deny_reason(
-            "rust-engineer",
-            Path::new("/repo/main"),
-            &["python-engineer".to_string(), "python-engineer".to_string()],
-        );
-        assert!(reason.contains("ADR-0048"), "{reason}");
-        assert!(reason.contains("/repo/main"), "{reason}");
-        // The sibling is named once, and attributed rather than asserted.
-        assert_eq!(reason.matches("python-engineer").count(), 1, "{reason}");
-        assert!(
-            reason.contains("the daemon's delegation records name"),
-            "{reason}"
-        );
-        // It must say WHY a grant is not enough here — the rewrite may not be
-        // applied — rather than offering the grant back as the remedy.
-        assert!(
-            reason.contains("cannot confirm the harness applied it"),
-            "{reason}"
-        );
-        assert!(reason.contains("declared explicitly"), "{reason}");
-        assert!(reason.contains("serialize"), "{reason}");
-        // A stale record is the friction case the reorder widened; naming it is
-        // what lets a reader recognise it instead of retrying.
-        assert!(reason.contains("stale"), "{reason}");
-        for banned in ["wait for", "wait on", "wait until", "waiting for"] {
-            assert!(!reason.contains(banned), "found {banned:?}: {reason}");
         }
     }
 
@@ -1290,22 +1211,6 @@ mod tests {
     }
 
     #[test]
-    fn deny_reason_dedupes_concurrent_siblings() {
-        // Two concurrent `rust-engineer`s are the realistic shape; the message
-        // must read as one name, not a repeated list.
-        let reason = deny_reason(
-            "rust-engineer",
-            Path::new("/repo"),
-            &["rust-engineer".to_string(), "rust-engineer".to_string()],
-        );
-        assert_eq!(
-            reason.matches("rust-engineer is already").count(),
-            1,
-            "{reason}"
-        );
-    }
-
-    #[test]
     fn resolve_dispatch_cwd_falls_back_to_the_payload() {
         // The process directory is the primary source; the payload covers the
         // case where `current_dir()` failed.
@@ -1400,7 +1305,7 @@ mod tests {
     /// allows — so it must be loud rather than compared as equal.
     fn writers_of(claim: SharedTreeClaim) -> Vec<String> {
         match claim {
-            SharedTreeClaim::Writers(live) => live,
+            SharedTreeClaim::Writers(live, _) => live,
             SharedTreeClaim::Unknown(detail) => {
                 panic!("expected an answered claim, got Unknown({detail})")
             }
@@ -1477,21 +1382,116 @@ mod tests {
         assert!(writers_of(claim_against("http://127.0.0.1:1").await).is_empty());
     }
 
+    /// A bound listener that never accepts, and its base URL (#8492).
+    ///
+    /// Why: a dial completes its handshake into the kernel's accept queue with
+    /// no `accept` call, so whether anything dialled is a fact read afterwards
+    /// by [`was_dialled`] — not a stopwatch, which loses the race under load.
+    fn unaccepted_listener() -> (std::net::TcpListener, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
+        (listener, url)
+    }
+
+    /// Did anything connect to `listener`? A queued connection accepts at once.
+    fn was_dialled(listener: &std::net::TcpListener) -> bool {
+        listener.set_nonblocking(true).expect("nonblocking");
+        listener.accept().is_ok()
+    }
+
     #[tokio::test]
     async fn claim_shared_tree_is_empty_without_a_session_id() {
         // A hook payload with no `session_id` cannot address a session's
-        // delegations at all. Fail open before dialling anything — an unroutable
-        // URL would cost a real (bounded) wait if this branch were removed.
-        let started = std::time::Instant::now();
-        let claim = claim_shared_tree(
-            "http://127.0.0.1:1",
-            "",
+        // delegations at all. Fail open before dialling anything.
+        let (listener, url) = unaccepted_listener();
+        let claim = claim_shared_tree(&url, "", Path::new("/repo"), &serde_json::json!({})).await;
+        // #8492: whether the daemon was dialled, not how long the call took.
+        assert!(!was_dialled(&listener), "no session id must not dial");
+        assert!(writers_of(claim).is_empty());
+    }
+
+    /// 🔴 REGRESSION (#8492): the client is built off the calling runtime, so a
+    /// caller's deadline fires while a slow build is still running. On
+    /// origin/main the build ran inside the first poll and held the runtime
+    /// thread until it returned, so no deadline could fire before it.
+    #[tokio::test]
+    async fn a_deadline_fires_while_the_client_build_is_still_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let built = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&built);
+        let slow_build = move || {
+            // Released only after the deadline decides; the bound only ends a
+            // run where the build held the runtime and nothing could release it.
+            let _ = gate.recv_timeout(std::time::Duration::from_secs(10));
+            flag.store(true, Ordering::SeqCst);
+            shared_tree_client()
+        };
+        let (_listener, url) = unaccepted_listener();
+        let payload = serde_json::json!({});
+        let post = post_shared_tree_with(
+            slow_build,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &payload,
+            SHARED_TREE_ROUTE,
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), post).await;
+        let built_before_the_deadline = built.load(Ordering::SeqCst);
+        let _ = release.send(());
+        assert!(
+            !built_before_the_deadline,
+            "the deadline fired only after the client build returned: the build held the runtime"
+        );
+        assert!(outcome.is_err(), "the caller's deadline must decide");
+    }
+
+    /// 🔴 REGRESSION (#8492): a client that cannot be built is `Unavailable`,
+    /// and the ADR-0057 owner query denies on it. An arm that read the build
+    /// error as an empty answer would tell the removal re-check "no owners".
+    #[tokio::test]
+    async fn an_unbuildable_client_is_unavailable_and_the_owner_query_denies() {
+        // reqwest rejects an unterminated IPv6 host, so the build fails.
+        let unbuildable = || {
+            reqwest::Proxy::all("http://[::1")
+                .and_then(|proxy| reqwest::Client::builder().proxy(proxy).build())
+        };
+        let (listener, url) = unaccepted_listener();
+        let reply = post_shared_tree_with(
+            unbuildable,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
             &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
         )
         .await;
-        assert!(writers_of(claim).is_empty());
-        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+        assert!(!was_dialled(&listener), "an unbuilt client must not dial");
+        let SharedTreeReply::Unavailable(detail) = &reply else {
+            panic!("a build error must be Unavailable");
+        };
+        assert!(detail.contains("could not be built"), "{detail}");
+        let denied = owners_or_deny(reply).expect_err("the owner query must deny");
+        assert!(denied.contains("could not be built"), "{denied}");
+    }
+
+    /// #8492: a build that panics on its detached thread still panics the
+    /// caller, as the inline build did, rather than reading as any reply.
+    #[tokio::test]
+    #[should_panic(expected = "client build panicked")]
+    async fn a_panicking_client_build_panics_the_caller() {
+        let panicking = || -> reqwest::Result<reqwest::Client> { panic!("build blew up") };
+        let (_listener, url) = unaccepted_listener();
+        let _ = post_shared_tree_with(
+            panicking,
+            &url,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1775,22 +1775,22 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_never_calls_the_daemon_for_a_non_dispatch_tool() {
-        // An unroutable URL would cost a real (bounded) wait if it were dialled;
-        // returning instantly proves the classify-first ordering holds.
+        // Classify first, ask second: a non-dispatch tool never reaches the
+        // daemon. #8492: proven by the listener's accept queue, not a stopwatch.
+        let (listener, url) = unaccepted_listener();
         let payload = serde_json::json!({"cwd": "/repo"});
-        let started = std::time::Instant::now();
         let verdict = evaluate(
-            "http://127.0.0.1:1",
+            &url,
             &payload,
             "Read",
             Some(&input("rust-engineer", None)),
             "11111111-1111-1111-1111-111111111111",
         )
         .await;
-        assert_eq!(verdict, None);
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(400),
+            !was_dialled(&listener),
             "the daemon must not be dialled for a non-dispatch tool"
         );
+        assert_eq!(verdict, None);
     }
 }

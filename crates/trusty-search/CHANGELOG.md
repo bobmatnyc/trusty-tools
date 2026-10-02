@@ -6,6 +6,167 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.7] — 2026-09-29
+
+### Fixed
+
+- A restart or lazy restore no longer demotes `semantic` or queues a backfill for chunks whose embedding the store refused as NaN or all-zero (#8884). Each refusal is now recorded in the index corpus with a fingerprint of the refused content. A restore whose only missing vectors are recorded refusals keeps `semantic` as it was and reports them as `stages.semantic.vectors_rejected`. A refused chunk whose content changes, a missing chunk with no refusal record, or a record that cannot be read is still treated as a real gap and backfilled. Indexes written before this change have no record and behave as before.
+- A reindex that resumes a first walk killed before its promotion now embeds the chunks it adopted from the interrupted run (#8884). The resumed run left the in-memory chunk map and BM25 index holding only the files it walked, so the deferred-embed pass skipped the adopted chunks and `semantic` read `ready` with `vectors_present` below `chunk_count` until the next restart. The adopted corpus is now reloaded before the run commits.
+- A deferred-embed pass that finishes with corpus chunks still lacking a vector now settles `semantic` as `failed`, naming the gap, instead of `ready`. The gap is measured by chunk id, and the settle waits for an in-flight file removal before it decides. A store whose size cannot be read also settles `failed`. The deferred-embed marker is kept, so the next boot re-arms the pass.
+- A chunk whose embedding the store refuses as NaN or all-zero no longer counts as a gap for the deferred-embed pass. That pass settles `semantic` as `ready` and reports those chunks as `stages.semantic.vectors_rejected`.
+
+## [0.54.6] — 2026-09-29
+
+### Fixed
+
+- At most one reindex runs per index (#8889). A second `POST /indexes/{id}/reindex` (and so the MCP `reindex` tool and the CLI) while one is running now answers `409 reindex_already_running`, naming the running job (`running.run_id`, `origin`, `started_unix_ms`, `force`) and its `stream_url`, instead of `queued: true`. The refused request no longer replaces the running job's progress entry, so its SSE stream stays live. Boot reconcile and library callers (`spawn_reindex`, `spawn_reindex_with_cleanup`, which now return `Result`) are refused the same way. If the guard itself cannot be checked, the reindex is refused with `503 reindex_guard_unavailable`. The guard is released when the run ends by success, error, panic, or cancellation.
+- Each reindex stages into its own `index.redb.run-<pid>-<run>-<ms>.tmp` instead of the shared `index.redb.tmp`, so two runs can never swap each other's staging corpus. Earlier runs' leftover staging files are adopted for resume (#3979) or deleted; a leftover that cannot be deleted, such as a directory, no longer fails every later incremental reindex.
+- The CLI prints the daemon's refusal message when a reindex kickoff is rejected.
+
+## [0.54.5] — 2026-09-28
+
+### Fixed
+
+- `build.rs` no longer watches the `ui/` files #6155 deleted. Cargo treats a missing watched path as changed, so every `cargo build` re-ran the build script and recompiled trusty-search and its dependents. The script now watches `ui-dist/`, so a remirrored bundle still reaches the binary.
+- Tests that write process env knobs (redb cache, idle timers, concurrency limits, `FASTEMBED_CACHE_*`, embedderd restarts, memory-policy limits, `TRUSTY_INDEX_DEVICE`, reaper intervals, `TRUSTY_EMBED_WORKERS`) and the denylist tests that read `HOME` now run in the one unnamed `#[serial]` group, replacing three private mutexes and a named key, so a parallel sibling can no longer change the value mid-test (#5937). Test-only.
+- A source-scan ratchet fails the build when a `src/**` test writes the environment outside the unnamed `#[serial]` group (#5937). Test-only.
+- `POST /indexes/{id}/reindex` on an index whose durable corpus failed to open no longer answers `queued: true` and embeds a run that can persist nothing, leaving `chunk_count` null and a completion poll that never ends. It now answers `409 index_write_quarantined` with `queued: false`, `retryable: false`, the corpus-open `failure_kind`, and a message that names the quarantine and the daemon restart that clears it. The socket transport and the MCP `reindex` tool report the same refusal (#8105).
+- A search whose query embed fails, for example because the embedder sidecar cannot spawn, now answers `200` with lexical results instead of `500 internal search error`. The response sets `meta.vector_unavailable: true` and carries the embedder's error in `meta.embedder_error`. A query that pinned `"stage": "semantic"` gets `503 vector_unavailable` with `reason: "embedder_unavailable"` and `retryable: true` (#8348).
+- `/health` now reports `embedder: "stalled"` after a failed query embed, including for a lazily spawned sidecar that was never flagged ready, and the `search_health` MCP tool reports `embedder_unavailable` with `healthy: false` instead of `ok` (#8348).
+- Registering or indexing a repo no longer edits the repo's `.gitignore`. A
+  new index now keeps its store in the data dir, outside the work tree, so
+  `git reset --hard` followed by `git clean -fdx` no longer deletes a live
+  index. A repo that already holds a `.trusty-search/` index keeps it. That
+  directory now hides itself from `git status` and `git clean -fd` with its
+  own `.gitignore` (`*`). Registration refuses with `409` when the store would
+  land inside the repository. An earlier uncommitted `.gitignore` edit is left
+  alone; revert it with `git checkout -- .gitignore`. To move an existing
+  in-repo index out of the work tree, delete it with `delete_data=true` and
+  register it again ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- Registration also refuses with `409` when the data dir itself sits inside
+  the index root, for example `TRUSTY_DATA_DIR` set to a path in the repo, or
+  a dotfiles repo at `$HOME` over the default data dir. Before, the whole
+  store was written into the work tree in that case. `PATCH /indexes/:id`
+  applies the same rule to the new root
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `POST /indexes` no longer waits on every other registration in the daemon.
+  Only registrations under the same id, or over the same or a nested root,
+  wait for each other ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- The `409` also covers a data dir anywhere in the git work tree that holds
+  the index root, not only under the root itself: an index at `<repo>/sub`
+  with its data dir at `<repo>/data` is refused, because `git clean -fdx` at
+  the repository top deletes it. A linked worktree or a submodule counts as
+  its own work tree. An index already in `indexes.toml` keeps registering
+  only while its store still exists there
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- No path creates a new data-dir store inside the work tree that holds the
+  index root: re-registering an `indexes.toml` row whose store is missing, a
+  warm boot, and a lazy restore now refuse (`409` on `POST /indexes`) instead
+  of creating an empty store that `git clean -fdx` then deletes. An existing
+  store keeps working. An unreadable `indexes.toml` exempts nothing
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- The `500` that `POST /indexes` answers when a new index's corpus cannot be
+  opened now carries `failure_kind`, as the `503` does (`null` when the
+  failure was not classified)
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- Re-registering an index whose store an earlier registration still holds
+  open (a background embed pass, or a delete that has not closed the files
+  yet) answers a retryable `503 index_corpus_unavailable` naming the index,
+  instead of `500`. Retry once the earlier holder finishes
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `PATCH /indexes/:id` (relocate) now waits for, and is refused by, a
+  concurrent registration over the same or a nested root, and refuses a new
+  root that overlaps another index's root, as `POST /indexes` does. Before,
+  two relocates into one root could both succeed
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- `PATCH /indexes/:id` (relocate) answers `409` while a reindex,
+  deferred-embed pass or component catch-up runs on that index, instead of
+  moving the root under the running walk. Retry once it finishes
+  ([#8499](https://github.com/bobmatnyc/trusty-tools/issues/8499))
+- A shutdown that lands during a deferred-embed pass now ends the pass. The daemon drains every index's embedding gate when the stop signal arrives, the in-flight embed wave is abandoned, only fully completed waves are committed, and the pass is not re-queued. The semantic stage is never reported `ready` for an abandoned pass, and the pending-embed marker re-arms it on the next boot (#8600).
+- An embed wave that makes no progress for `TRUSTY_EMBED_NO_PROGRESS_SECS` (default 600) now aborts the pass and marks the semantic stage `failed`, instead of holding the background permit indefinitely on an embedder that never answers (#8600).
+- When a deferred-embed pass aborts on `TRUSTY_EMBED_NO_PROGRESS_SECS`, the waves it had already completed are now committed and snapshotted before the semantic stage is marked `failed`. The pending-embed marker is kept, so the next boot embeds only the remainder. Before, the abort discarded every vector the pass had computed (#8600).
+- Warm boot now retries a corpus that is still locked (`DatabaseAlreadyOpen`) with backoff for up to 10 seconds instead of once after 50 ms, so a lock the previous process still holds briefly no longer forces a full cold start (#8600).
+- `GET /indexes/{id}/status` and the `index_status` MCP tool now answer while a deferred-embed pass runs, even with a writer such as a component-toggle `PATCH` queued on the index. The pass holds the indexer lock only to snapshot the owed chunks and to commit them, never across embedding. Before, a queued writer blocked every later status read for the rest of the pass (#8600).
+- A deferred-embed pass whose sub-batch returns an error, such as the sidecar's `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` per-call timeout, now commits and snapshots the waves it had already completed, marks the semantic stage `failed` with that error, and keeps the pending-embed marker. Before, the error discarded every vector the pass had computed (#8600).
+- Two `trusty-search` daemons started together on one data dir can no longer both hold the daemon lock. A starter that found the lock held, with the file still naming a dead predecessor (the winner's window between its flock and its pid write), unlinked the live lock file and locked a new one. A held lock now always means `AlreadyRunning`; the pid in the file is diagnostics only and is written before `acquire_lock` returns, and a pid-write failure stops startup. A lock taken on an inode the path no longer names is retried (#8760).
+- `trusty-search start`'s orphan reaper and `trusty-search doctor --fix` remove `daemon.lock` (and the reaper, `daemon.port`) only while holding the lock themselves, so neither can delete a live daemon's lock or port file (#8760).
+- A file removed while a deferred-embed pass runs no longer gets its vectors back when the pass commits. The commit now keeps only the chunks the corpus still holds, and evicts the vector of any chunk removed while the upsert ran. Before, the removed file's vectors stayed in the HNSW store with no chunk behind them, and nothing removed them. This covers removals through `remove_file` and through the file watcher (#8761).
+- A chunk edited while a deferred-embed pass runs no longer has its current vector replaced by the embedding of its pre-edit content. The pass skips it, and the next pass embeds the new content (#8761).
+- A deferred-embed commit whose chunk map was evicted now waits up to 300 s for the map to reload, instead of the ~27 s a search waits. Before, a reload slower than 27 s, as measured on large NFS corpora, discarded the whole embed pass. The commit fails at once when the corpus read fails, and at the 300 s ceiling. The pending-embed marker is kept, so the next pass retries. An embed pass now also counts as index activity, so idle eviction no longer empties the chunk map while the pass runs (#8761).
+- A deferred-embed commit no longer reads a chunk map that a memory-pressure reclaim or idle eviction emptied just after the commit's wait finished. Before, the commit read the emptied map as an empty corpus: it dropped every embedded chunk as removed, or evicted the vectors it had just written, and still reported success, so the pending-embed marker was cleared with the vectors missing. Eviction now marks the map evicted before other readers can see it empty, and the commit re-checks that mark after it takes the read lock and waits again when it is set (#8761).
+- When several removed chunks need their vectors evicted after the upsert, one failed eviction no longer leaves the rest in place. Every eviction is attempted and the failures are reported together (#8761).
+- The deferred-embed pass reports the number of vectors it kept, not the number of chunks it embedded (#8761).
+- A deferred-embed catch-up job whose task was dropped before it claimed its turn — its runtime shut down, or it was aborted — stayed at the head of the size-ordered queue, and every later index's embed pass waited behind it forever. A dropped job now leaves the queue at any point, and the next job runs (#8770).
+- `trusty-search start` (background) now starts the daemon in its own session, so a group kill or Ctrl-C aimed at the caller no longer takes the daemon down with it. The daemon auto-started by `tga audit` gets the same fix through `trusty-common` (#8783).
+- An index restored with a missing or discarded HNSW snapshot (for example a torn binary/sidecar pair) no longer stays at `semantic: pending` with 0 vectors until a manual reindex. The restore now queues the embed backfill, and the stage reaches `ready` with a vector for every chunk. When the backfill cannot be scheduled, because no embedder is wired or the vector store's size cannot be read, the stage becomes `failed` and names the reason (#8863).
+- A restored index whose semantic stage reads `ready` but whose vector store's size cannot be read is no longer reported as `ready`. The stage becomes `failed` with the same reason the `pending` case gives (#8863).
+
+## [0.54.4] — 2026-09-27
+
+### Fixed
+
+- `index remove` no longer lets `TRUSTY_INDEX` silently outrank an explicit
+  PATH argument, or resolve its target from the environment alone — either
+  case now refuses and names the conflicting values (closes [#8175](https://github.com/bobmatnyc/trusty-tools/issues/8175))
+  - `index-status`/`status` now honour `-i`/`--index` when the positional
+    INDEX argument is omitted, instead of silently falling back to the
+    current working directory's index
+- `DELETE /indexes/{id}` on a cold-parked index now closes `index.redb` and the HNSW mapping that a queued deferred-embed job holds, and that job ends with `IndexDeleted` instead of running its embed pass against the deleted index. Several queued jobs on one index close its files once (#8664).
+- `trusty-search index remove` no longer depends on other indexes' residency: a cold-parked target resolves from its parked row — by PATH, by `-i`, or both — and a PATH whose registration was already deleted has its stale `allowlist.toml` and config rows cleared instead of aborting. A registration whose status cannot be read (any error but `404`) still refuses, naming it (#8687).
+- `trusty-search reindex` of a cold-parked index now refuses before sending anything, naming the index and saying it is parked, instead of failing on the status lookup (#8687).
+- `GET /indexes`, `trusty-search list`, `trusty-search status` and MCP `list_indexes` now list parked registrations (`parked`: id, root, root state) — the same set the create-time overlap check consults. A `?repo_identity=` list carries only that repo's parked rows, in the flat and `?details=true` shapes alike. An overlap `409` reports the blocking root's state and, for a deleted root, the command that removes the stale registration; the CLI prints the blocking id and root (#8727).
+- The semantic stage no longer reports `ready` while the vector store holds fewer vectors than the corpus holds chunks. After warm boot, lazy reload, and a successful boot migration chain, an index whose `vectors_present` is below `chunk_count` has its semantic stage set to `in_progress` and an embed backfill queued for the missing chunks through the serialized deferred-embed queue. The stage returns to `ready` only when the backfill finishes, or goes to `failed` if the backfill cannot embed. Before this fix, an index re-chunked by the M005 migration kept `semantic: ready` with hundreds of chunks unembedded and no backfill queued (#8726).
+
+### Changed
+
+- `reindex`, `quantize` and `index relocate` now refuse a target taken from
+  `TRUSTY_INDEX` alone; pass `-i`/`--index` (or, for `reindex`, a PATH), or
+  unset `TRUSTY_INDEX` and run from inside the project. Before, an exported
+  `TRUSTY_INDEX` could re-point a live index at an unrelated PATH and
+  overwrite its corpus (Refs [#8737](https://github.com/bobmatnyc/trusty-tools/issues/8737))
+  - `reindex PATH` now reindexes the index registered at PATH, not the
+    current directory's; PATH together with `-i`/`TRUSTY_INDEX` must name the
+    same index, and a mismatch — or a daemon that cannot confirm the match —
+    refuses before any reindex is sent
+  - `reindex -i ID` now reindexes ID at its registered root instead of
+    rebasing it onto the current directory
+  - resolving a PATH to an index (`reindex PATH`, `index remove PATH`) now
+    refuses when any registered index's status cannot be read, naming that
+    index, instead of skipping it and matching another index at the same root
+
+## [0.54.3] — 2026-09-26
+
+### Added
+
+- `PATCH /indexes/:id/config` with `vector: true` now runs the C2 embed catch-up when the vector lane is already enabled but the semantic stage is `Pending`/`Failed` — the embed-only trigger for a corpus registered with unembedded chunks, with no full reindex. The pass is queued on the deferred-embed queue, so it waits for the one background permit: re-arming many indexes at once runs their embed passes one at a time, not concurrently. It also sets the `deferred_embed_pending` marker, so a restart re-arms a pass it interrupted. It stays a no-op once the semantic stage is `Ready` or `InProgress`, and the response's `components.catch_up_started` says which happened. A `500` from a failed `indexes.toml` write still starts the catch-up the PATCH asked for, so the stage is never left `InProgress` with nothing running and a retry succeeds ([#8148](https://github.com/bobmatnyc/trusty-tools/issues/8148))
+
+### Fixed
+
+- `POST /indexes` now refuses a root that sits inside, or encloses, an existing index's root with a `409` naming the conflicting index id and root path (#4289). Containment is decided over `(dev, ino)` per path segment, so a symlink alias is caught and a sibling sharing a name prefix is not. A candidate that cannot be canonicalized is a `500`, never an implicit "no overlap".
+- `search`: same-tier filename matches are ordered by their fused lane score instead of by chunk id, so a `src/lib.rs`-shaped query no longer floors the alphabetically-first eight files above everything the semantic lanes ranked; a strictly better path-suffix match still outranks a basename-only one (refs [#7775](https://github.com/bobmatnyc/trusty-tools/issues/7775))
+- `config_over_the_socket_matches_the_http_body` no longer flakes under parallel runs: it pins both process-global memory limits through the daemon's own setter seam and is serialized against every writer of those cells (refs [#7665](https://github.com/bobmatnyc/trusty-tools/issues/7665))
+- An index whose restore yields 0 corpus chunks no longer reports `ready` (#8134). The `chunks.json → index.redb` migration of a colocated index now reads `<root>/.trusty-search/chunks.json`, not only the global data-dir copy; a data-dir index still reads only its own global copy, so it never imports a colocated neighbour's snapshot that shares its root. An index already stamped past that migration over an empty corpus re-imports its own snapshot at boot, and records a `json_to_redb` migration fault when that import fails. When vectors restore over an empty corpus, `POST /indexes`, warm boot and lazy reload mark the semantic stage `failed` with a reason naming both counts, so `vector` is no longer advertised.
+- The `chunks.json → index.redb` import never writes over rows already in redb (#8134). It refuses when the durable corpus holds rows the load could not restore, and runs no migration at all when the redb load fails; with a snapshot present, either case records a `json_to_redb` fault instead. A snapshot that seeded redb is renamed to `chunks.json.migrated`, so an index emptied by a later reindex stays empty across restarts. A snapshot found beside an already-populated redb at boot is retired the same way, since redb supersedes it; a rename that fails records a `json_to_redb` fault. A snapshot that cannot be imported is named in the fault text, which says to remove or rename it to clear the fault.
+- `DELETE /indexes/{id}` now closes the index's `index.redb` before it returns, even while another handle to the index is still alive (a queued deferred-embed job, an in-flight request). A colocated root can be unmounted after the delete instead of failing with `EBUSY` (#8167). If a transient reference does not drop within 5 s, the delete changes nothing and answers `500` with `error: "index files not closed: …"`; re-issue it.
+- A delete that lands during a detached corpus rehydrate now waits up to 30 s for the scan to finish without blocking searches on the index, instead of stalling them for 5 s and answering `500`. A scan still running after 30 s answers `500` with a `rehydrate` reason and nothing changed (#8167).
+- A delete that answers `quiesced: false` (a writer outlived the 30 s wait, `delete_data=false`) now closes `index.redb` and `hnsw.usearch` in the background once that writer finishes, and logs `delete[<id>]: deferred close done`. Before, the files stayed open, and a second delete could not close them because it answers `404` (#8167).
+- A snapshot write that reaches a deleted index is now skipped with an INFO line, instead of an ERROR that blamed a staged reindex swap (#8167).
+- `search_health`: an unpinned session's working-directory fallback now confirms the derived index against the daemon's `root_path` list, the same check `serve`'s startup pin runs. Two checkouts that share a directory name each resolve to the index rooted at them (`resolved_from: "cwd_root_match"` when that index has another id), and an id served from a different tree reports `index_not_registered` naming that tree instead of `ok` (refs [#8229](https://github.com/bobmatnyc/trusty-tools/issues/8229))
+- `DELETE /indexes/{id}` now unmaps the index's `hnsw.usearch` snapshot for every handle that outlived the delete. Before, truncating or replacing that file after the delete made the next search through a surviving handle crash the daemon with SIGBUS (#8232). A surviving handle now gets an "index was deleted" error from search, indexing and snapshot saves instead of an empty result. A delete that answers `quiesced: false` unmaps the snapshot once the writer that outlived it finishes; wait for `delete[<id>]: deferred close done` in the daemon log before replacing the file.
+- `grep` over an idle-evicted index no longer rehydrates the whole corpus to learn which files to scan: it lists the file set straight from the durable corpus, decoding only each row's `file` field, and the index stays evicted. A one-file grep on a large cold index no longer pays the full rehydrate, and an unreadable corpus still answers `503 index_corpus_unavailable` (refs [#8266](https://github.com/bobmatnyc/trusty-tools/issues/8266))
+- macOS `stderr.log` rotation works as a non-root user. The rotation LaunchAgent now runs `newsyslog -r`, which previously exited 1 with "must have root privs" on every run. After a rotation the daemon now reopens its log: about once a minute it compares the file its stderr writes to with the file at the log path, and when the path names a new file (or none), it reopens the path onto stderr. Before this, a rotated daemon kept writing to the renamed and deleted file, so every later log line was lost and no disk space was freed. Lines written between the rotation and the next check go to the rotated file. A reopen that fails keeps the old stderr and logs an error there. The newsyslog conf sends no signal and names no pidfile, so a stale pid can never be signalled. `doctor` reports a user-level install from before this fix as unconfigured, so `doctor --fix` rewrites it, and it accepts an `/etc/newsyslog.d/trusty-search.conf` only when that conf has the current entry ([#8270](https://github.com/bobmatnyc/trusty-tools/issues/8270))
+- Every write path now resolves its target from the index registry's `colocated` flag instead of probing whether `<root>/.trusty-search/` exists: the incremental HNSW persist (and so `index_file` and watcher batches), reindex corpus staging, commit and abort, the HNSW swap, the shutdown flush, and the M003 and M005 migrations. A `colocated=false` index whose repository already holds a `.trusty-search/` directory no longer writes into it, and its chunks and HNSW snapshot stay in the data dir together (#8438).
+- A resolution that would place a non-colocated index's storage inside `<root>/.trusty-search/` is refused with an error and the write is skipped, never redirected (#8438).
+- A write for a colocated index whose root no longer exists is refused and logged at error instead of recreating the root; the incremental persist and the shutdown flush skip it and leave the index marked dirty. The incremental persist resolves its target on every coalesced save, so a root deleted between two saves is not recreated, and a refused staging path during a reindex skips the checkpoint instead of writing the live snapshot. The #484 missing-root guard at warm boot now sees the root is gone (#8438).
+- Every refusal is logged at error, including the ones seen by the residency park and by reindex corpus and HNSW staging (#8438).
+- The shutdown flush writes the legacy `chunks.json` snapshot to the data dir for every layout, where its only reader looks, instead of into a colocated index's `<root>/.trusty-search/` (#8438).
+- `DELETE /indexes/:id?delete_data=true` on a colocated index removes trusty-search's own index files from `<root>/.trusty-search/`, and the directory only when nothing else is left in it, so the daemon's `config.toml`, `http_addr` and `mcp_http_addr` in `$HOME/.trusty-search/` survive. It never touches that directory for a non-colocated index (#8438).
+
+### Changed
+
+- `GET /indexes/{id}/status` has a third `status` value, `"degraded"`, beside `"indexing"` and `"ready"` (#8134). It is reported when a search stage has failed or a migration fault is outstanding; `stages` and `migration_error` name the cause. A client that treats every value other than `"ready"` as not-ready needs no change.
+
 ## [0.54.2] — 2026-09-18
 
 ### Added

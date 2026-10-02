@@ -30,8 +30,9 @@ Risk labels map onto the rungs (1–2 Low, 3–4 Normal, 5–6 High).
   mechanically** instead of by judgment — it maps a changed-file set to its
   owning crate(s) and each owner's reverse-dependency closure
   (`scripts/select-test-crates.sh --cargo-args` prints `-p a -p b ...` ready to
-  paste after `cargo test`/`cargo check`). Agent-first today (#7753); not yet
-  wired into a CI workflow.
+  paste after `cargo test`/`cargo check`). CI's PR job
+  `Rust tests (affected crates)` runs the same selection
+  ([ci-gates.md](ci-gates.md)).
 - 🔴 **`cargo test --workspace` is not the default inner-loop proof for a
   localized change** — it belongs at the publish boundary; a rung-4 PR does not
   owe one to merge.
@@ -63,6 +64,10 @@ scope away" above is what constrains picking a lower rung.
 `memory_ui_mount.rs`, `search_ui_mount.rs`). These pin the served shell's
 `<title>` and asset references; an `index.html` edit that misses them can pass
 every other UI gate green and still fail here (#7593).
+
+A rung chooses the local gates in the dev lane. Releases follow the
+SMALL/LARGE release-scale rule instead, in
+[release-workflow.md](release-workflow.md#dev-lane-and-release-lane).
 
 ### Every rung carries `--no-fail-fast`, and the reason is not politeness
 
@@ -137,6 +142,7 @@ these wherever a rung says `cargo test -p trusty-common`:
 | `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
 | any other gated module | `cargo test -p trusty-common --features <feature>` |
 | only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
+| the whole crate (every test, once) | `./scripts/test_trusty_common_lanes.sh` — runs each coverage lane in `[package.metadata.trusty-test-coverage]` with `--no-fail-fast`; CI's `trusty-common coverage lanes` job runs the same command. Name lanes to run a subset: `./scripts/test_trusty_common_lanes.sh core` |
 
 The same shape exists wherever a non-default feature gates real code —
 `trusty-common`'s `codex-config` is enabled by no crate in the workspace, so even
@@ -344,7 +350,7 @@ disputed results. Agent-to-PM reporting keeps raw output in all cases
 | `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
 | `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` | `crates/trusty-mpm/src/` (test-only) | Parallel-run race on `$HOME` mutation between tests. Fails 3 of 5 runs on a clean baseline worktree with no branch changes. Passes under `-- --test-threads=1` |
 | `safe_session_cwd_replaces_home_and_missing` | `crates/trusty-mpm/src/` (test-only) | Same `$HOME`-mutation race as `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`, same evidence run (5 runs: 3 failed, 2 passed), same remedy (`-- --test-threads=1`) |
-| `meta_run_demo_writes_and_verifies_artifact` | `crates/trusty-mpm/tests/meta_demo_e2e.rs` (`--include-ignored` only) | **ENVIRONMENT-REQUIRED, and it now says so instead of timing out (#7998).** It launches a real Claude Code session, so it needs a logged-in `claude` CLI, tmux, and the installed framework; without them it used to burn 187–220 s and fail `launch_outcome: "timed-out"` on every `--include-ignored` run. It is gated on `TRUSTY_MPM_META_DEMO_E2E=1`: unset, it prints why it skipped and returns in milliseconds; set, the live run is unchanged. `#[ignore]` still keeps it out of a default run. Run it with `TRUSTY_MPM_META_DEMO_E2E=1 cargo test -p trusty-mpm --test meta_demo_e2e -- --include-ignored` |
+| `meta_run_demo_writes_and_verifies_artifact` | `crates/trusty-mpm/tests/meta_demo_e2e.rs` (`--include-ignored` only) | **ENVIRONMENT-REQUIRED, and it now says so instead of timing out (#7998).** It launches a real Claude Code session, so it needs a logged-in `claude` CLI, tmux, and the installed framework; without them it used to burn 187–220 s and fail `launch_outcome: "timed-out"` on every `--include-ignored` run. It is gated on `TRUSTY_MPM_META_DEMO_E2E=1`: unset, it prints why it skipped and returns in milliseconds; set, the live run is unchanged. `#[ignore]` still keeps it out of a default run. Run it with `TRUSTY_MPM_META_DEMO_E2E=1 cargo test -p trusty-mpm --test integration meta_demo_e2e:: -- --include-ignored` |
 | `bench_stale_assets_for_many` | `crates/trusty-mpm/src/` (`--include-ignored` only) | Load-sensitive benchmark: fails under a loaded run, passes in isolation and on a clean `--lib --include-ignored` run (4579 passed, 0 failed) |
 | `ensure_managed_config_dir_emits_the_frozen_skill_warning` | `crates/trusty-mpm/src/` (test-only) | Same `#[serial]`-guard family as `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` above — `#[serial]` only serializes against other `#[serial]` tests, so a parallel non-serial test's globally-installed tracing subscriber can still beat this one's capturing subscriber. Tracked at #4931 |
 | `compose_session_instructions_display_matches_live_prompt` | `crates/trusty-mpm/src/` (test-only) | Asserts by diffing two enumerations of the live `~/.claude/agents` directory instead of a fixture; concurrent agent deployment between the two calls changes the diff (observed: 5 user-tier agents — `copyeditor`, `pangram-editor`, `proofreader`, `writer`, `writing-critic`). Passes in isolation. Same race as `compose_session_instructions_display_matches_live_prompt_with_override` below. Tracked at #4937 |

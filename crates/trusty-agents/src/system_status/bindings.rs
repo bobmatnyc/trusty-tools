@@ -196,7 +196,7 @@ pub(super) async fn collect(agent: &str) -> (Vec<StoreStatus>, Vec<UnresolvedBin
         crate::stores::resolve_store_statuses(
             agent,
             &cfg.stores,
-            trusty_common::resolve_daemon_base_url("trusty-search").as_deref(),
+            trusty_common::search_rpc::search_socket().ok().as_deref(),
             trusty_common::memory_rpc::resolve_memory_socket()
                 .ok()
                 .as_deref(),

@@ -12,23 +12,34 @@
 //! in PR3 of the #914 epic.
 //! Test: Each submodule carries its own unit tests.
 
+// #8645: `audit secrets --count-only` — read-only re-screen of stored drawers.
+pub mod audit_secrets;
 // #4891: ADR-0028 Migration step 3 — the read-only backfill triage report.
 pub mod backfill_report;
 pub mod daemon_guard;
-pub mod daemon_lock;
+// #8759: `daemon_lock` is gone — unused since #6286 and racy; the socket's
+// singleton bind lock (`trusty_common::uds::bind_singleton_hardened`) is the
+// daemon lock.
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;
 // #5401: fold pre-#4678 punctuated entity nodes onto their cleaned twins.
 pub mod kg_twin_merge;
+// #277: `import kuzu` — discover and idempotently import kuzu-memory stores.
+pub mod kuzu_import;
+// #277: deprecated `migrate kuzu-data`, now a forwarder to `kuzu_import`.
 pub mod kuzu_migrate;
+pub mod legacy_kg;
 pub mod link;
+pub(crate) mod maintenance_gate;
 pub mod migrate;
 pub mod migrations;
 pub mod monitor;
 pub mod note;
 // #6652: `palace stats` / `palace compact` — kg.redb measurement and rewrite.
 pub mod palace;
+// #8732: `palace deletions` — read the maintenance deletion journal.
+pub mod palace_deletions;
 pub mod port;
 pub mod prompt_context;
 pub mod rooms;
@@ -41,6 +52,8 @@ pub mod setup;
 pub mod single_instance;
 pub mod start;
 pub mod stop;
+// #8645: private-copy store reads shared by the read-only reports.
+pub(crate) mod store_snapshot;
 pub mod upgrade;
 
 /// Process-wide lock for tests that mutate `TRUSTY_DATA_DIR_OVERRIDE` and

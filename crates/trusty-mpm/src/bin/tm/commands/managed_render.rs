@@ -21,12 +21,17 @@
 //! terminal draws none of them — hence `pad_visible`, which measures the
 //! visible text and appends the padding outside the escape.
 //!
+//! #8506: a row whose state has a color (active, stopped, dead, attached,
+//! provisioning, decommissioned) is painted whole in it instead; the column hues remain only on
+//! a row whose state maps to no color.
+//!
 //! Test: `format_tombstone_row_*`, `format_state_column_*`, `truncate_*`,
 //! `short_timestamp_*`, and the color/alignment cases in `managed_tests.rs`.
 
 use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::session_manager::SessionKind;
 
-use super::session_picker_render::{StateColor, colorize};
+use super::session_picker_render::{DEAD_COLOR, StateColor, colorize, session_color};
 
 /// Hue for the `NUM` column — the stable, global slot number (#3034).
 const NUM_COLOR: StateColor = StateColor::Magenta;
@@ -148,7 +153,7 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     let root = super::managed_root::resolve_managed_paths(None)
         .ok()
         .map(|paths| paths.root);
-    for s in sessions {
+    for s in pinned_first(sessions) {
         if s.deleted {
             // #3034: the slot stays reserved — never silently reused by a
             // later session — so the operator sees exactly which number is
@@ -231,7 +236,7 @@ fn row_state(s: &ManagedSessionSummary) -> String {
     } else {
         s.state.as_str()
     };
-    format_state_column(
+    let cell = format_state_column(
         base_state,
         s.unresumable,
         s.stale_assets,
@@ -239,7 +244,43 @@ fn row_state(s: &ManagedSessionSummary) -> String {
         // #6568: the daemon sends the whole reason; the row shows only that
         // there is one.
         s.auto_resume_parked.is_some(),
-    )
+    );
+    match kind_tag(s.kind) {
+        Some(tag) => format!("{cell} [{tag}]"),
+        None => cell,
+    }
+}
+
+/// The STATE-cell tag of a protected record kind (#8942).
+///
+/// What: `architect` for the Architect, `architect-helper` for its poller or
+/// collector, `protected` for a kind this build does not know; none for an
+/// ordinary session or an older daemon that sends no kind.
+/// Test: `session_table_pins_and_tags_the_architect_row`.
+pub(crate) fn kind_tag(kind: Option<SessionKind>) -> Option<&'static str> {
+    match kind? {
+        SessionKind::Ordinary => None,
+        SessionKind::Supervisor => Some("architect"),
+        SessionKind::SupervisorAux => Some("architect-helper"),
+        SessionKind::Unknown => Some("protected"),
+    }
+}
+
+/// `sessions` with the live Architect rows first (#8942 design §4).
+///
+/// What: a stable reorder — the Architect, then its helpers and any other
+/// protected kind, then everything else in its original order. A deleted row
+/// is never pinned.
+/// Test: `session_table_pins_and_tags_the_architect_row`.
+pub(crate) fn pinned_first(sessions: &[ManagedSessionSummary]) -> Vec<&ManagedSessionSummary> {
+    let rank = |s: &ManagedSessionSummary| match (s.deleted, s.kind) {
+        (false, Some(SessionKind::Supervisor)) => 0,
+        (false, Some(k)) if k.is_protected() => 1,
+        _ => 2,
+    };
+    let mut ordered: Vec<&ManagedSessionSummary> = sessions.iter().collect();
+    ordered.sort_by_key(|s| rank(s));
+    ordered
 }
 
 /// Format one live `tm ls` row.
@@ -269,7 +310,12 @@ fn row_state(s: &ManagedSessionSummary) -> String {
 /// read by [`render_session_table`] from the per-session usage store and passed
 /// in rather than read here, so every column this function renders stays a pure
 /// function of its arguments. `None` — no reading recorded — renders as `-`.
-/// Test: `ls_row_colors_num_and_name_in_distinct_hues`,
+///
+/// #8506: a row whose [`session_color`] is not `Plain` is painted whole in that
+/// color and drops the three column hues; only an unmapped state keeps them.
+/// Test: `ls_rows_are_painted_whole_in_their_state_color`,
+/// `ls_row_state_colors_never_reach_a_plain_table`,
+/// `ls_row_colors_num_and_name_in_distinct_hues`,
 /// `ls_row_colors_id_column_dimmed`, `ls_row_plain_when_color_disabled`,
 /// `ls_row_alignment_matches_with_and_without_color`,
 /// `ls_table_columns_align_when_a_row_carries_an_annotation`,
@@ -295,39 +341,44 @@ pub(crate) fn format_ls_row(
         .as_deref()
         .map(|d| format!(" [pending: {d}]"))
         .unwrap_or_default();
-    format!(
+    // #8506: a row whose state maps to a color is painted whole in it, one
+    // escape pair around the finished row, so the padding inside stays exact.
+    // The column hues apply only to a row with no state color — nested resets
+    // would cut the row color off after the first colored column.
+    let row_color = session_color(s);
+    let column_color = use_color && row_color == StateColor::Plain;
+    let row = format!(
         "{}  {}  {:<state_width$}  {}  {:<TASK_WIDTH$}  {:<STARTUP_WIDTH$}  {}{}",
-        pad_visible(&s.slot.to_string(), NUM_WIDTH, NUM_COLOR, use_color),
-        pad_visible(&s.id, ID_WIDTH, ID_COLOR, use_color),
+        pad_visible(&s.slot.to_string(), NUM_WIDTH, NUM_COLOR, column_color),
+        pad_visible(&s.id, ID_WIDTH, ID_COLOR, column_color),
         row_state(s),
         pad_visible(
             &truncate(&s.name, NAME_WIDTH),
             NAME_WIDTH,
             NAME_COLOR,
-            use_color
+            column_color
         ),
         task,
         format_startup_cell(startup_tokens),
         created,
         pending
-    )
+    );
+    colorize(&row, row_color, use_color)
 }
 
 /// Format the `-- deleted --` tombstone row for a deleted slot (issue #3034).
 ///
 /// Why: extracted as a pure function — mirroring [`format_state_column`] — so
 /// the exact tombstone row text is unit-testable without capturing stdout.
-/// What: the slot number in [`NUM_COLOR`], padded to the live row's `NUM`
-/// column width so the table stays aligned, then `-- deleted --`. The
-/// placeholder itself is left uncolored: it sits under `ID`, not `NAME`, and a
-/// third hue would only add noise.
+/// What: the slot number, padded to the live row's `NUM` column width so the
+/// table stays aligned, then `-- deleted --`; the whole row is painted
+/// [`DEAD_COLOR`] (#8506), the hue [`session_color`] gives a tombstone.
 /// Test: `format_tombstone_row_shows_slot_and_placeholder`,
-/// `ls_row_alignment_matches_with_and_without_color`.
+/// `ls_row_alignment_matches_with_and_without_color`,
+/// `ls_rows_are_painted_whole_in_their_state_color`.
 pub(crate) fn format_tombstone_row(slot: u32, use_color: bool) -> String {
-    format!(
-        "{}  -- deleted --",
-        pad_visible(&slot.to_string(), NUM_WIDTH, NUM_COLOR, use_color)
-    )
+    let row = format!("{:<NUM_WIDTH$}  -- deleted --", slot);
+    colorize(&row, DEAD_COLOR, use_color)
 }
 
 /// Format the STATE column value for one `tm session ls` row (#2595, #2444).

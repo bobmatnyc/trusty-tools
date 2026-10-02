@@ -151,3 +151,58 @@ fn a_traversing_managed_id_is_refused() {
     }
     assert!(linked_claude_ids(root.path(), "claude-a").is_empty());
 }
+
+/// #7771: the reclaim reads the history keyed by Claude id, and one Claude id
+/// resumed into two managed sessions names both.
+#[test]
+fn link_history_maps_each_claude_id_to_its_managed_sessions() {
+    let root = tempfile::tempdir().expect("root");
+    record_link(root.path(), "managed-1", "claude-a");
+    record_link(root.path(), "managed-1", "claude-b");
+    record_link(root.path(), "managed-2", "claude-b");
+    std::fs::write(
+        root.path()
+            .join("usage")
+            .join(SESSION_LINKS_DIR)
+            .join(".DS_Store"),
+        [0xff, 0xfe],
+    )
+    .expect("a Finder dot-file");
+
+    let mut history = link_history(root.path()).expect("a readable store");
+    history.values_mut().for_each(|m| m.sort());
+
+    assert_eq!(
+        history.get("claude-a"),
+        Some(&vec!["managed-1".to_string()])
+    );
+    assert_eq!(
+        history.get("claude-b"),
+        Some(&vec!["managed-1".to_string(), "managed-2".to_string()])
+    );
+    assert_eq!(history.len(), 2, "the dot-file is skipped: {history:?}");
+}
+
+#[test]
+fn link_history_of_an_absent_store_is_empty() {
+    let root = tempfile::tempdir().expect("root");
+    assert_eq!(link_history(root.path()), Ok(HashMap::new()));
+}
+
+/// #7771: a link file that cannot be read fails the whole read — a partial
+/// history must not pass for a complete one on a destructive path.
+#[test]
+fn link_history_refuses_an_unreadable_link_file() {
+    let root = tempfile::tempdir().expect("root");
+    record_link(root.path(), "managed-1", "claude-a");
+    // A directory where a link file belongs: `read_to_string` fails on it for
+    // every user, root included, unlike a mode-000 file.
+    let entry = root
+        .path()
+        .join("usage")
+        .join(SESSION_LINKS_DIR)
+        .join("managed-2");
+    std::fs::create_dir(entry).expect("an unreadable entry");
+    let err = link_history(root.path()).expect_err("an unreadable entry fails the read");
+    assert!(err.contains("managed-2"), "{err}");
+}

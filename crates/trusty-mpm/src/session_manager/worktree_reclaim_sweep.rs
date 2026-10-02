@@ -22,7 +22,7 @@
 //! locked worktree regardless, so this re-check was the ONLY thing honouring
 //! the lock; it now refuses too, and this pass is the outer of two defences.
 //!
-//! So: [`reclaim_with_probes`] re-reads the live session set, git's own
+//! So: [`reclaim_scoped`] re-reads the live session set, git's own
 //! worktree registry, the ownership marker, the pull-request state, and the
 //! working tree PER CANDIDATE, immediately before that candidate's deletion —
 //! mirroring `prune_orphaned_worktrees`' Phase 2, whose comment warns against
@@ -38,23 +38,36 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // #7889: the bounded per-repository fetch that makes gate 6's landing refs
-// current before anything is classified against them.
+// current before anything is classified against them, and the landed-content
+// admission gate 5 asks when no pull request carries the branch's name.
 use super::worktree_landing_refresh::refresh_landing_refs;
+use super::worktree_reclaim_landed::{
+    ReclaimProof, landing_recheck, reclaim_landed_content, reclaim_landed_proof,
+};
 
 use super::worktree_reclaim::{
-    AgentStateProbe, BranchPrState, KeepList, LiveClaims, NOT_INSPECTED_REASON, PrIndex,
-    ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey, ReclaimVerdict,
-    agent_ownership_blocks, classify, measure_bytes_until, session_ownership_blocks,
-    tm_provisioned, unattributed_nested_blocks,
+    AgentStateProbe, BranchPrState, KeepList, LandedContentProbe, LiveClaims, NOT_INSPECTED_REASON,
+    PrIndex, ReclaimCandidate, ReclaimGate, ReclaimMode, ReclaimOutcome, ReclaimSurvey,
+    ReclaimVerdict, agent_ownership_blocks, classify_with_landed_content, measure_bytes_until,
+    session_ownership_blocks, tm_provisioned, unattributed_nested_blocks,
 };
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
 use super::worktree_reclaim_launch::launch_refusal;
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
-use super::worktree_reclaim_pr_match::{GhLandingProbe, resolve_with_index};
-use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
+use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
+// #8109: the own-pull-request proof rule and the reclaimed branch's deletion.
+use super::worktree_reclaim_branch::{
+    OnceProof, cleanup_reclaimed_branch, deletion_proof, own_pr_gate,
+};
+use super::worktree_registry::{
+    ScannedWorktree, list_registered_worktrees, scan_registered_worktrees,
+    scan_registered_worktrees_in,
+};
+use super::worktree_removal_integrity::identity_refusal;
 use super::worktree_safety::inspect_dirt;
+use super::worktree_scope::WorktreeScope;
 
 /// How long a survey may spend measuring bytes, and classifying (#2919).
 ///
@@ -156,9 +169,76 @@ pub(crate) fn survey_with_index(
     // whatever real worktrees it names. `&[]` is the pre-#7357 behaviour.
     adopted: &[PathBuf],
 ) -> ReclaimSurvey {
+    // #7889: gate 5's landed-content admission is opt-in — see
+    // [`survey_with_landed_content`]. A caller that does not ask for it keeps
+    // the pre-#7889 refusal and performs no fetch.
+    survey_with_landed_content(
+        repos_root,
+        in_use,
+        index_for,
+        agent_state,
+        budget,
+        per_branch_fallback,
+        keep_list,
+        adopted,
+        None,
+    )
+}
+
+/// [`survey_with_index`], offering gate 5's landed-content admission (#7889).
+///
+/// Why: the predicate fetches, so it is offered by the operator-invoked reclaim
+/// path and withheld from the doctor's unattended survey. A second entry point
+/// rather than a ninth argument, so the twenty-odd existing call sites keep
+/// their exact shape.
+/// What: as [`survey_with_index`], plus the probe handed down to
+/// [`classify_with_landed_content`].
+/// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`,
+/// `survey_reports_a_merged_worktree_as_reclaimable`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn survey_with_landed_content(
+    repos_root: &Path,
+    in_use: &LiveClaims,
+    index_for: &dyn Fn(&Path) -> PrIndex,
+    agent_state: AgentStateProbe<'_>,
+    budget: SurveyBudget,
+    per_branch_fallback: bool,
+    keep_list: &KeepList,
+    adopted: &[PathBuf],
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimSurvey {
+    survey_scanned(
+        scan_registered_worktrees(repos_root, adopted),
+        in_use,
+        index_for,
+        agent_state,
+        budget,
+        per_branch_fallback,
+        keep_list,
+        landed_content,
+    )
+}
+
+/// [`survey_with_landed_content`] over an already-scanned worktree list (#8782).
+///
+/// Why: the reclaim loop scans ONCE, bounded by its scope, and hands the same
+/// list to the landing-ref refresh and to this survey, so the two cannot see
+/// different sets.
+/// Test: `a_project_scope_admits_only_that_projects_worktrees`.
+#[allow(clippy::too_many_arguments)]
+fn survey_scanned(
+    scanned: Vec<ScannedWorktree>,
+    in_use: &LiveClaims,
+    index_for: &dyn Fn(&Path) -> PrIndex,
+    agent_state: AgentStateProbe<'_>,
+    budget: SurveyBudget,
+    per_branch_fallback: bool,
+    keep_list: &KeepList,
+    landed_content: LandedContentProbe<'_>,
+) -> ReclaimSurvey {
     let mut indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     let mut candidates = Vec::new();
-    for scanned in scan_registered_worktrees(repos_root, adopted) {
+    for scanned in scanned {
         if budget.classify.is_some_and(|d| Instant::now() >= d) {
             // #2919: fail closed. A candidate we ran out of time to inspect is
             // reported as blocked, never omitted and never approved.
@@ -173,7 +253,7 @@ pub(crate) fn survey_with_index(
             continue;
         }
         // #7889: the landing-ref refresh gate 6 depends on runs in
-        // `reclaim_with_probes`, on the destructive path only — a survey never
+        // `reclaim_scoped`, on the destructive path only — a survey never
         // mutates refs (#7652 critic round).
         let index = indexes
             .entry(scanned.registry_root.clone())
@@ -181,7 +261,11 @@ pub(crate) fn survey_with_index(
         // #6561 (the per-branch retry) and #7267 (the round-stem and head-commit
         // widening) both live in `resolve_with_index`, so this call site and the
         // pre-delete re-check below cannot drift apart.
-        let pr = resolve_with_index(
+        // #8109: the by-name answer rides beside the final one.
+        let PrResolution {
+            by_name,
+            landing: pr,
+        } = resolve_with_index(
             &scanned.path,
             &scanned.registry_root,
             scanned.branch.as_deref(),
@@ -196,7 +280,7 @@ pub(crate) fn survey_with_index(
         if let Some(note) = claim.note() {
             tracing::info!(path = %scanned.path.display(), "{note}");
         }
-        let verdict = classify(
+        let verdict = classify_with_landed_content(
             &scanned.path,
             scanned.admission,
             &claim,
@@ -206,7 +290,10 @@ pub(crate) fn survey_with_index(
             // #7652: gate 4b's owner map rides in the claim snapshot.
             &in_use.owners,
             keep_list,
+            landed_content,
         );
+        // #8109: no pull request of its own admits only on the landed proof.
+        let verdict = own_pr_gate(&scanned.path, verdict, &by_name, landed_content);
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
             bytes: None,
@@ -304,8 +391,12 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
     if record.bare {
         return Err("git now reports this as a bare repository".into());
     }
-    if record.locked {
-        return Err("git-locked by the operator since the survey".into());
+    // #7771: a harness lock whose holder is gone or reused is released; the
+    // removal unlocks it immediately before `git worktree remove`.
+    if record.locked
+        && let Some(why) = super::worktree_owner_gate::lock_liveness(path).refusal()
+    {
+        return Err(format!("git-locked since the survey — {why}"));
     }
     if record.prunable {
         return Err("git reports the directory is already gone".into());
@@ -329,10 +420,13 @@ fn git_still_permits(path: &Path) -> Result<(), String> {
 /// could not be re-read at all — that REFUSES, because an unanswerable liveness
 /// question must never resolve to "nothing claims it". Then git's current
 /// verdict ([`git_still_permits`], which honours a lock applied since the
-/// survey), the ownership marker, the current pull-request state, and finally
-/// [`inspect_dirt`], which fails toward dirty. `Some(reason)` refuses;
-/// `None` permits.
-/// Test: one test per branch —
+/// survey), the ownership marker, and finally [`landing_recheck`]: a merged
+/// pull request re-runs [`inspect_dirt`], which fails toward dirty, and #7889's
+/// `landed_content` probe, when offered, re-asks the admission for a branch no
+/// pull request carries. `Some(reason)` refuses; `None` permits.
+/// Test: `worktree_7889_the_recheck_admits_a_landed_tree_with_no_pull_request`,
+/// `worktree_7889_the_recheck_refuses_a_tree_no_longer_landed`; and one test
+/// per branch —
 /// `recheck_refuses_a_worktree_keep_listed_after_the_survey`,
 /// `recheck_refuses_when_the_live_set_cannot_be_read`,
 /// `recheck_refuses_a_worktree_a_session_claims_now`,
@@ -350,6 +444,7 @@ pub(crate) fn recheck_before_delete(
     in_use_now: Option<&LiveClaims>,
     pr_now: &BranchPrState,
     agent_state: AgentStateProbe<'_>,
+    landed_content: LandedContentProbe<'_>,
 ) -> Option<String> {
     // #6927: gate 0, re-asked. The survey read the keep-list once, minutes ago;
     // this reads what the operator has written since — including the
@@ -377,7 +472,7 @@ pub(crate) fn recheck_before_delete(
     // reason #4118 established — an agent can be dispatched into a tree while a
     // survey that takes minutes is still running, and the survey's verdict knows
     // nothing about it.
-    if let Some(reason) = agent_ownership_blocks(path, agent_state) {
+    if let Some(reason) = agent_ownership_blocks(path, agent_state, &in_use_now.owners) {
         return Some(reason);
     }
     // #7652: gate 4b, re-asked against the FRESH owner map — a session that
@@ -390,15 +485,9 @@ pub(crate) fn recheck_before_delete(
     if let Some(reason) = unattributed_nested_blocks(path, &claim_now) {
         return Some(reason);
     }
-    if !matches!(pr_now, BranchPrState::Merged { .. }) {
-        return Some(format!(
-            "pull-request state is no longer a merge ({pr_now:?})"
-        ));
-    }
-    if let Some(dirt) = inspect_dirt(path) {
-        return Some(format!("holds unsaved work: {}", dirt.reason));
-    }
-    None
+    // #7889: a merge still re-runs `inspect_dirt`; no pull request re-asks the
+    // landed-content admission when the caller offered it.
+    landing_recheck(path, pr_now, landed_content)
 }
 
 /// Probes the reclaim loop uses to re-read state per candidate (#2919).
@@ -445,6 +534,12 @@ pub(crate) struct FreshProbes<'a> {
     /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
     /// An empty slice is the pre-#7504 behaviour — a no-op gate.
     pub launched_from: &'a [PathBuf],
+    /// Take a candidate's landed proof before its deletion (#8109).
+    ///
+    /// Production passes [`reclaim_landed_proof`]. A probe so a test can change
+    /// the tree after the proof returns and show the branch deletion still
+    /// judges the SHA the proof judged.
+    pub prove: &'a dyn Fn(&Path) -> ReclaimProof,
 }
 
 /// Gates 2, 4b and 4c re-asked against a claim set read immediately before the
@@ -494,11 +589,8 @@ fn last_moment_refusal(path: &Path, claims: Option<&LiveClaims>) -> Option<Strin
 /// commits, which refuses.
 /// Test: `a_refresh_updates_the_stale_landing_ref`,
 /// `a_refresh_against_a_missing_remote_fails_without_touching_the_refs`.
-fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
-    let roots: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root, adopted)
-        .into_iter()
-        .map(|scanned| scanned.registry_root)
-        .collect();
+fn refresh_repositories(scanned: &[ScannedWorktree]) {
+    let roots: BTreeSet<PathBuf> = scanned.iter().map(|s| s.registry_root.clone()).collect();
     for root in roots {
         if let Err(e) = refresh_landing_refs(&root) {
             tracing::warn!(
@@ -508,6 +600,29 @@ fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
                  remote-tracking refs — the refusing direction (#7889): {e}"
             );
         }
+    }
+}
+
+/// Write ONE info line per surveyed worktree, naming what this pass decided
+/// (#8109).
+///
+/// Why: a reclaimed no-PR worktree's entry carried no reason while its blocked
+/// siblings' did, so the reclaim could not be audited. The line is written
+/// BEFORE the delete loop, so a pass that dies part-way still leaves its
+/// inventory behind (#7885).
+/// What: path, branch, mode and
+/// [`ReclaimVerdict::decision`](super::worktree_reclaim_verdict::ReclaimVerdict::decision)
+/// for each candidate, at INFO. It decides nothing and can refuse nothing.
+/// Test: `worktree_8109_every_surveyed_worktree_gets_one_decision_line`.
+fn log_decisions(survey: &ReclaimSurvey, mode: ReclaimMode) {
+    for candidate in &survey.candidates {
+        tracing::info!(
+            path = %candidate.path.display(),
+            branch = candidate.branch.as_deref().unwrap_or("(detached)"),
+            mode = ?mode,
+            "worktree-reclaim: {} (#8109)",
+            candidate.verdict.decision()
+        );
     }
 }
 
@@ -527,13 +642,26 @@ fn refresh_repositories(repos_root: &Path, adopted: &[PathBuf]) {
 /// `reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey`,
 /// `reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey`,
 /// `reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey`,
-/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`.
-pub(crate) fn reclaim_with_probes(
+/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree`,
+/// `a_merged_pr_path_replaced_by_a_symlink_is_not_removed`.
+///
+/// # Scope (#8782)
+///
+/// Why: a run typed in one repository must neither survey nor reclaim another
+/// project's worktrees, and a `--force` run carries its preview's paths so it
+/// can remove nothing that preview did not list. `adopted` (#7357) is passed
+/// straight through; [`WorktreeScope::all`] is every project.
+/// What: scans once through [`scan_registered_worktrees_in`]; the landing-ref
+/// refresh and the survey both read that one list.
+/// Test: `a_project_scope_admits_only_that_projects_worktrees`,
+/// `the_preview_lists_exactly_what_force_removes`,
+/// `a_force_run_removes_nothing_its_preview_did_not_list`.
+pub(crate) fn reclaim_scoped(
     repos_root: &Path,
     probes: &FreshProbes<'_>,
     mode: ReclaimMode,
-    // #7357: the caller's adopted anchors, passed straight through.
     adopted: &[PathBuf],
+    scope: &WorktreeScope,
 ) -> ReclaimOutcome {
     // 🔴 #7965: `unwrap_or_default()` stood here, and an empty `LiveClaims` reads
     // as "nothing claims anything" — the exact downgrade the fail-closed contract
@@ -553,24 +681,35 @@ pub(crate) fn reclaim_with_probes(
     // #7889: only a DESTRUCTIVE pass refreshes the landing refs. Read after
     // #7965's demotion rather than before it, so a pass demoted to `Report` by
     // an unanswerable claim probe mutates no refs either.
+    // #8782: one scoped scan feeds both the refresh and the survey.
+    let scanned = scan_registered_worktrees_in(repos_root, adopted, scope);
     if mode == ReclaimMode::Remove {
-        refresh_repositories(repos_root, adopted);
+        refresh_repositories(&scanned);
     }
-    let survey = survey_with_index(
-        repos_root,
+    let survey = survey_scanned(
+        scanned,
         &initial,
         probes.index_for,
         probes.agent_state,
         SurveyBudget::for_reclaim(),
         true,
         &(probes.keep_list)(),
-        adopted,
+        // #7889: the operator typed `prune-worktrees --merged-prs`, so the
+        // admission is offered in BOTH modes — a report that hid a candidate
+        // `--force` would then reclaim is a report of the wrong thing. It is
+        // the only fetch a report performs, it is bounded, and it runs only for
+        // a candidate that reached gate 5 with no pull request.
+        Some(&reclaim_landed_content),
     );
+    // #8109: what this pass decided about EVERY worktree it looked at, before
+    // it acts on any of them.
+    log_decisions(&survey, mode);
     let mut out = ReclaimOutcome {
         removed: Vec::new(),
         removed_bytes: 0,
         refused_at_recheck: Vec::new(),
         removal_failed: Vec::new(),
+        partially_removed: Vec::new(),
         survey,
     };
     if mode == ReclaimMode::Report {
@@ -616,7 +755,10 @@ pub(crate) fn reclaim_with_probes(
         // #6561, #7267: the same resolution the survey ran, re-run FRESH — the
         // survey's answer is minutes old, and a widening applied only there
         // would propose a candidate this re-check could not confirm.
-        let pr_now = resolve_with_index(
+        let PrResolution {
+            by_name,
+            landing: pr_now,
+        } = resolve_with_index(
             &path,
             &candidate.registry_root,
             candidate.branch.as_deref(),
@@ -629,12 +771,20 @@ pub(crate) fn reclaim_with_probes(
         let in_use_now = (probes.in_use_now)();
         // #6927: re-read, not reused — see `FreshProbes::keep_list`.
         let keep_list_now = (probes.keep_list)();
+        // #8109: the `merge-tree` proof, taken once per candidate. The re-check
+        // asks it for a no-PR candidate; the own-PR rule and the branch
+        // deletion read that same answer, and the SHA it judged.
+        let once = OnceProof::new(&path, probes.prove);
+        let ask = |p: &Path| once.admission(p);
+        // #7889: the survey offered gate 5's landed-content admission, so the
+        // re-check re-asks it for a candidate no pull request carries.
         if let Some(reason) = recheck_before_delete(
             &path,
             &keep_list_now,
             in_use_now.as_ref(),
             &pr_now,
             probes.agent_state,
+            Some(&ask),
         ) {
             tracing::warn!(
                 path = %path.display(),
@@ -644,6 +794,18 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
+        let proof = match deletion_proof(&by_name, &once) {
+            Ok(proof) => proof,
+            Err(reason) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "worktree-reclaim: re-check refused a surveyed candidate — {reason}"
+                );
+                out.refused_at_recheck
+                    .push(format!("{}: {reason}", path.display()));
+                continue;
+            }
+        };
         // #7885: the route names itself in the audit line the remover emits
         // before it deletes — an operator reading the log after the fact could
         // not otherwise tell this pass from the orphan sweep.
@@ -657,10 +819,17 @@ pub(crate) fn reclaim_with_probes(
                  ({pr_now:?})"
             ),
             &|| {
-                let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref());
+                // #7771: a stale harness lock is released only once every
+                // gate has agreed, so a refused tree keeps its lock.
+                // #8782: identity last before the lock release, so a path
+                // replaced by a symlink is refused and nothing is unlocked.
+                let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref())
+                    .or_else(|| identity_refusal(&path))
+                    .or_else(|| super::worktree_owner_gate::release_stale_lock(&path).err());
                 late_refusal.set(refusal.clone());
                 refusal
             },
+            super::DirtyWorktreePolicy::Skip,
         );
         if let Some(reason) = late_refusal.take() {
             tracing::warn!(
@@ -669,6 +838,13 @@ pub(crate) fn reclaim_with_probes(
                  {reason} (#7652)"
             );
             out.refused_at_recheck
+                .push(format!("{}: {reason}", path.display()));
+            continue;
+        }
+        // #8782: git failed after deleting content — reported apart from kept.
+        if let super::decommission::WorktreeRemoval::PartiallyRemoved(reason) = &outcome {
+            tracing::warn!(path = %path.display(), "worktree-reclaim: {reason}");
+            out.partially_removed
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
@@ -685,13 +861,22 @@ pub(crate) fn reclaim_with_probes(
                 branch = candidate.branch.as_deref().unwrap_or("(detached)"),
                 pr = match &pr_now {
                     BranchPrState::Merged { pr } => Some(*pr),
-                    // Unreachable past `recheck_before_delete`, which refuses
-                    // every other state. Rendered as absent rather than as a
-                    // fabricated number if that ever stops being true.
+                    // #7889: `NoPr` reaches here on landed content, recorded
+                    // by `evidence` below. Rendered as absent rather than as a
+                    // fabricated number.
                     _ => None,
                 },
+                evidence = ?candidate.verdict,
                 bytes_freed = candidate.bytes,
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919, #7504)"
+            );
+            // #8109: the tree is gone, so its branch goes too — on the proof,
+            // at the SHA the proof judged.
+            cleanup_reclaimed_branch(
+                &candidate.registry_root,
+                &path,
+                candidate.branch.as_deref(),
+                &proof,
             );
             out.removed_bytes = out
                 .removed_bytes
@@ -716,7 +901,7 @@ pub(crate) fn reclaim_with_probes(
     out
 }
 
-/// [`reclaim_with_probes`] against the real `gh`-backed index and a live
+/// [`reclaim_scoped`] against the real `gh`-backed index and a live
 /// re-read of the session store (#2919).
 ///
 /// Why: the production entry point for the merged-PR reclaim — reached from the
@@ -731,7 +916,8 @@ pub(crate) fn reclaim_with_probes(
 /// when the set cannot be read, which refuses; `keep_list` returns
 /// `KeepList::unreadable` when the config cannot be parsed, which keeps
 /// everything (#6927).
-/// Test: exercised through `reclaim_with_probes`' tests.
+/// Test: exercised through `reclaim_scoped`' tests.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reclaim_merged_pr_worktrees(
     repos_root: &Path,
     in_use_paths: &dyn Fn() -> Option<LiveClaims>,
@@ -744,8 +930,10 @@ pub(crate) fn reclaim_merged_pr_worktrees(
     // that assembles the probes — never here, so a test can hand in a scratch
     // path without the real process's cwd leaking into the comparison.
     launched_from: &[PathBuf],
+    // #8782: the project and path bounds the route resolved.
+    scope: &WorktreeScope,
 ) -> ReclaimOutcome {
-    reclaim_with_probes(
+    reclaim_scoped(
         repos_root,
         &FreshProbes {
             in_use_now: in_use_paths,
@@ -753,9 +941,11 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             agent_state,
             keep_list,
             launched_from,
+            prove: &reclaim_landed_proof,
         },
         mode,
         adopted,
+        scope,
     )
 }
 

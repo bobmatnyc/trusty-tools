@@ -67,6 +67,9 @@ mod plan;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod registry_layout_8438_tests;
+
 /// Files re-chunked per commit, bounding per-batch memory. Mirrors M001.
 const BATCH_SIZE: usize = 64;
 
@@ -248,7 +251,7 @@ impl Migration for M005ChunkIdEndLine {
         } = outcome?;
 
         // ── Step 4: hand every reused vector to the id that now holds its text
-        let hnsw_path = resolve_hnsw_path(index)?;
+        let hnsw_path = resolve_hnsw_path(index).await?;
         let rekeyed = {
             let indexer = indexer_arc.read().await;
             indexer
@@ -618,17 +621,17 @@ fn text_hash(text: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Resolve the HNSW snapshot path for `index`, colocated first (issue #403).
+/// Resolve the HNSW snapshot path for `index` from the registry-named layout.
 ///
-/// Why: identical requirement to M003's — the sidecar lives in one of two places
-/// and neither migration should re-implement `service::persistence`'s branch.
-/// What: the colocated path when it exists, else the legacy global path.
-/// Test: covered through `apply` by `m005_reuses_the_existing_vectors`.
-fn resolve_hnsw_path(index: &IndexHandle) -> Result<std::path::PathBuf> {
-    let colocated = index.root_path.join(".trusty-search").join("hnsw.usearch");
-    if colocated.exists() {
-        return Ok(colocated);
-    }
-    crate::service::persistence::hnsw_path(&index.id.0)
-        .context("M005: could not resolve legacy hnsw path")
+/// Why (#8438): this used to prefer `<root>/.trusty-search/hnsw.usearch`
+/// whenever that FILE existed, so a `colocated=false` index whose repo held
+/// another instance's snapshot re-keyed and rewrote that snapshot in the repo.
+/// What: `hnsw.usearch` inside the directory the indexer's `StorageLayout`
+/// names, through the shared resolver and its write guard.
+/// Test: `m005_rewrites_the_registry_named_snapshot_not_the_repo_copy` in
+/// `m005::registry_layout_8438_tests`.
+async fn resolve_hnsw_path(index: &IndexHandle) -> Result<std::path::PathBuf> {
+    crate::service::storage_layout::handle_file(index, crate::service::storage_layout::HNSW_FILE)
+        .await
+        .context("M005: could not resolve the hnsw path")
 }

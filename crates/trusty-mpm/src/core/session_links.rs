@@ -32,6 +32,7 @@
 //! never be attributed to a session that did not earn it.
 //! Test: the `tests` module below.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The sidecar directory, under the framework root's `usage/`.
@@ -83,6 +84,7 @@ pub fn record_link(root: &Path, managed_id: &str, claude_id: &str) -> bool {
     let Some(path) = link_file(root, managed_id) else {
         return false;
     };
+    crate::core::home_write_fence::check(&path); // #8545
     if read_ids(&path).iter().any(|id| id == claude_id) {
         return false;
     }
@@ -151,6 +153,51 @@ pub fn linked_claude_ids(root: &Path, claude_id: &str) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+/// Every Claude session id each managed session ever carried, keyed by the
+/// Claude id: Claude id → the managed ids whose link file lists it (#7771).
+///
+/// Why: an agent's owner file names the CLAUDE session that dispatched it, and
+/// the session record keeps only the CURRENT one. After a restart or `/clear`
+/// the dispatching id is recorded nowhere but here, so the worktree reclaim
+/// could not tell a superseded session from one it had never heard of.
+/// What: STRICT, unlike [`linked_claude_ids`] — the reclaim is a destructive
+/// path, so a partial read must not pass for a complete one (ADR-0045). An
+/// absent store is `Ok` and empty. A directory or file that cannot be read, or a
+/// file name that is not UTF-8, is `Err`. Dot-files (`.DS_Store`) are skipped;
+/// [`record_link`] never writes one.
+/// Test: `link_history_maps_each_claude_id_to_its_managed_sessions`,
+/// `link_history_of_an_absent_store_is_empty`,
+/// `link_history_refuses_an_unreadable_link_file`.
+pub fn link_history(root: &Path) -> Result<HashMap<String, Vec<String>>, String> {
+    let dir = root.join("usage").join(SESSION_LINKS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(format!("{} could not be listed: {e}", dir.display())),
+    };
+    let mut history: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{} could not be listed: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let Some(managed) = name.to_str() else {
+            return Err(format!("{} holds a non-UTF-8 file name", dir.display()));
+        };
+        if managed.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let body = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+        for claude in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            history
+                .entry(claude.to_owned())
+                .or_default()
+                .push(managed.to_owned());
+        }
+    }
+    Ok(history)
 }
 
 /// The non-empty lines of `path`, trimmed.

@@ -11,7 +11,8 @@
 //! updates the in-memory handle AND persists to `indexes.toml`. Hygiene edits
 //! don't auto-trigger a reindex — the PATCH response carries
 //! `reindex_required: true` so the caller knows the change takes effect on the
-//! next reindex. Component toggles (`kg`/`vector`) are different: turning a
+//! next reindex. The exception is a PATCH that releases a held index (#9059),
+//! which starts a catch-up reindex itself. Component toggles (`kg`/`vector`) are different: turning a
 //! component OFF is instantaneous (soft-disable); turning one ON spawns a
 //! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
@@ -62,6 +63,11 @@ pub struct IndexConfigView {
     pub extensions: Vec<String>,
     /// Glob patterns excluded on top of the built-in ignores.
     pub exclude_globs: Vec<String>,
+    /// #8922: the `exclude_globs` entries that do not parse. Only a glob
+    /// persisted before entry validation can land here. #9059: non-empty means
+    /// the index is held — it indexes nothing until a PATCH fixes them.
+    #[serde(default)]
+    pub invalid_exclude_globs: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
     pub include_docs: bool,
     /// Whether the walk honours `.gitignore` / `.ignore` / `.rgignore`.
@@ -87,6 +93,9 @@ impl IndexConfigView {
             data_file_max_bytes: handle.data_file_max_bytes,
             extensions: handle.extensions.clone(),
             exclude_globs: handle.exclude_globs.clone(),
+            invalid_exclude_globs: crate::core::repo_config::invalid_exclude_globs(
+                &handle.exclude_globs,
+            ),
             include_docs: handle.include_docs,
             respect_gitignore: handle.respect_gitignore,
             kg: !handle.skip_kg,
@@ -197,9 +206,13 @@ pub(crate) fn index_config_report(
 /// indexer and all Arc-shared state), re-registers it, applies the immediate
 /// component side effects (stage flip + in-memory KG drop on disable), then
 /// upserts the matching `indexes.toml` entry and spawns the catch-up task (if
-/// any). A persistence failure returns **500** with a clear error body so the
+/// any; an embed-only re-arm is queued behind the background permit, #8148).
+/// A persistence failure returns **500** with a clear error body so the
 /// UI never claims success while `indexes.toml` silently went stale.
-/// Test: `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
+/// #9059: a PATCH that releases a held index starts a catch-up reindex and
+/// reports it as `catch_up_reindex`.
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
+/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
 /// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
 /// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
 /// for the component-toggle paths.
@@ -212,6 +225,24 @@ pub(super) async fn patch_index_config_handler(
         Ok(body) => Json(body).into_response(),
         Err((status, body)) => (status, Json(body)).into_response(),
     }
+}
+
+/// Refuse an `exclude_globs` list holding a pattern that does not parse (#8922).
+///
+/// Why: at runtime such a glob is skipped, so accepting it would index what it
+/// was written to exclude. `POST /indexes` and this PATCH share it.
+/// What: `400 invalid_exclude_glob` naming the pattern; `None` passes.
+/// Test: `create_and_patch_reject_an_invalid_exclude_glob`.
+pub(crate) fn reject_invalid_globs(
+    globs: Option<&[String]>,
+) -> Result<(), (StatusCode, serde_json::Value)> {
+    let Some(globs) = globs else { return Ok(()) };
+    crate::core::repo_config::validate_exclude_globs(globs).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "invalid_exclude_glob", "message": message }),
+        )
+    })
 }
 
 /// The update `PATCH /indexes/{id}/config` applies, without the transport
@@ -231,9 +262,12 @@ pub(super) async fn patch_index_config_handler(
 /// `400` for a zero `data_file_max_bytes`, `404` for an unknown index, `409`
 /// when this index already has a reindex or catch-up running, and `500` when the
 /// change applied in memory but could not be persisted — the same four the route
-/// answered before this extraction, with the same bodies.
+/// answered before this extraction. The 500 body also carries `components`: a
+/// catch-up the PATCH asked for starts even when the persist fails, because the
+/// in-memory config it serves is live (#8148 review).
 ///
 /// Test: `index_config_set_over_the_socket_matches_the_http_body`,
+/// `service::server::tests_8148::a_persist_failure_still_runs_the_rearm_and_a_retry_succeeds`,
 /// `a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport`,
 /// `a_config_set_against_an_unknown_index_is_refused_and_registers_nothing`.
 pub(crate) async fn patch_index_config_report(
@@ -242,6 +276,7 @@ pub(crate) async fn patch_index_config_report(
     req: PatchIndexConfigRequest,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
+    reject_invalid_globs(req.exclude_globs.as_deref())?;
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {
@@ -268,6 +303,8 @@ pub(crate) async fn patch_index_config_report(
     // the `indexes.toml` upsert below (which would otherwise resurrect an entry a
     // concurrent delete had just removed) and the catch-up's corpus writes.
     let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
+    // #9059: a PATCH that releases a hold starts a catch-up reindex below.
+    let was_held = crate::service::exclude_hold::hold(&existing).is_some();
 
     // Issue #2984 Phase 1 CRITICAL finding 2: resolve the component
     // transition and, if it needs a catch-up, acquire THIS index's
@@ -285,7 +322,16 @@ pub(crate) async fn patch_index_config_report(
         existing.skip_kg,
         existing.skip_vector,
     );
-    let permit = if transition.needs_catch_up() {
+    // #8148: an explicit `vector: true` against an ALREADY-enabled lane whose
+    // semantic stage never got built is the embed-only trigger. It is queued on
+    // the deferred-embed queue (see `components::spawn_semantic_rearm`), not
+    // run as a component catch-up, so it waits for the background permit.
+    let semantic_status = existing.stages.read().await.semantic.status;
+    let mut rearm =
+        components::should_rearm_vector_catch_up(&transition, req.vector, semantic_status);
+    // The per-index permit is still the 409 guard for a re-arm: a reindex in
+    // flight on this index answers 409 exactly as for a toggle.
+    let permit = if transition.needs_catch_up() || rearm {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
@@ -374,12 +420,26 @@ pub(crate) async fn patch_index_config_report(
     // Apply the in-memory change (shard write-lock).
     let registered = state.registry.register(new_handle);
 
+    // #8148: claim the stage (check-and-set) so a concurrent PATCH that also
+    // saw `Pending` cannot queue a second pass.
+    if rearm {
+        rearm = components::claim_semantic_rearm(&registered).await;
+        if rearm {
+            tracing::info!(
+                "patch_index_config[{}]: vector lane already enabled but semantic is {:?} — \
+                 queueing the embed catch-up over the existing corpus (issue #8148)",
+                index_id.0,
+                semantic_status,
+            );
+        }
+    }
+
     // Persist: load the existing entry (to preserve fields the handle doesn't
     // carry — colocated, LRU timestamps), overlay the hygiene + component
     // fields, upsert. A failure here means the in-memory change took but
     // `indexes.toml` did not — surface it as 500 so the caller does NOT
     // report success and revert on the next daemon restart (review #1372).
-    if let Err(e) = persist_hygiene_update(
+    let persisted = persist_hygiene_update(
         &index_id.0,
         &root_path,
         &view.extra_skip_dirs,
@@ -390,7 +450,45 @@ pub(crate) async fn patch_index_config_report(
         view.respect_gitignore,
         transition.new_skip_kg,
         transition.new_skip_vector,
-    ) {
+    );
+
+    // Issue #2984 Phase 1: spawn the background catch-up. `permit` (held since
+    // the semaphore acquisition above) moves into the task and is released
+    // when it finishes. #8148 review: this runs whether or not the persist
+    // succeeded. The in-memory config is live either way and the stage is
+    // already `InProgress`; a 500 that spawned nothing left the stage
+    // `InProgress` forever, and every retry was refused as "already running".
+    let catch_up_started = transition.needs_catch_up() || rearm;
+    // #9059: work refused while held is caught up once the hold lifts. The
+    // reindex waits on this index's permit, so it queues behind a component
+    // catch-up started below. Like that catch-up, it starts even when the
+    // persist fails: the in-memory config it serves is live.
+    let catch_up_reindex = if was_held && crate::service::exclude_hold::hold(&registered).is_none()
+    {
+        Some(super::reindex_handlers::start_release_catch_up(state, Arc::clone(&registered)).await)
+    } else {
+        None
+    };
+    if let Some(permit) = permit {
+        if transition.needs_catch_up() {
+            // #3049: the teardown guard moves with the permit, so the catch-up's
+            // corpus writes stay covered after this handler returns.
+            components::spawn_component_catch_up(
+                Arc::clone(&registered),
+                transition,
+                permit,
+                teardown_guard,
+            );
+        } else {
+            // A pure re-arm: the queue takes its own permits, background first.
+            drop(permit);
+        }
+    }
+    if rearm {
+        components::spawn_semantic_rearm(registered).await;
+    }
+
+    if let Err(e) = persisted {
         tracing::error!(
             "patch_index_config[{}]: persistence failed: {e}",
             index_id.0
@@ -401,34 +499,28 @@ pub(crate) async fn patch_index_config_report(
         state.emit(DaemonEvent::IndexRegistered {
             id: index_id.0.clone(),
         });
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": format!(
-                    "config applied in memory but could not be persisted to indexes.toml: {e}. \
-                     The change will be lost on the next daemon restart."
-                ),
-                "config": view,
-                "persisted": false,
-            }),
-        ));
-    }
-
-    // Issue #2984 Phase 1: spawn the background catch-up now that the new
-    // state is registered + persisted. `permit` (held since the semaphore
-    // acquisition above) moves into the task and is released when it finishes.
-    let catch_up_started = transition.needs_catch_up();
-    if let Some(permit) = permit {
-        // #3049: the teardown guard moves with the permit, so the catch-up's
-        // corpus writes stay covered after this handler returns.
-        components::spawn_component_catch_up(registered, transition, permit, teardown_guard);
+        let mut body = serde_json::json!({
+            "error": format!(
+                "config applied in memory but could not be persisted to indexes.toml: {e}. \
+                 The change will be lost on the next daemon restart."
+            ),
+            "config": view,
+            "persisted": false,
+            "components": {
+                "kg": view.kg,
+                "vector": view.vector,
+                "catch_up_started": catch_up_started,
+            },
+        });
+        with_catch_up_reindex(&mut body, catch_up_reindex);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
 
     state.emit(DaemonEvent::IndexRegistered {
         id: index_id.0.clone(),
     });
 
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "id": index_id.0,
         "config": view,
         "reindex_required": true,
@@ -438,7 +530,20 @@ pub(crate) async fn patch_index_config_report(
             "vector": view.vector,
             "catch_up_started": catch_up_started,
         },
-    }))
+    });
+    with_catch_up_reindex(&mut body, catch_up_reindex);
+    Ok(body)
+}
+
+/// Add `catch_up_reindex` to a PATCH body when the PATCH released a hold (#9059).
+///
+/// What: `Some` inserts the object [`super::reindex_handlers::start_release_catch_up`]
+/// returned; `None` leaves the body unchanged, so a PATCH of an unheld index
+/// answers exactly as before.
+fn with_catch_up_reindex(body: &mut serde_json::Value, catch_up: Option<serde_json::Value>) {
+    if let (Some(map), Some(catch_up)) = (body.as_object_mut(), catch_up) {
+        map.insert("catch_up_reindex".into(), catch_up);
+    }
 }
 
 /// Trim empties from a directory / glob list and drop blank entries.

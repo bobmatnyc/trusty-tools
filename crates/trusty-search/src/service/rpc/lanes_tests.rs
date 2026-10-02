@@ -94,7 +94,7 @@ impl Lane {
 /// succeed. What each method ANSWERS is the business of its family's parity
 /// tests; this file reads only whether the limiter or the deadline spoke first.
 fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
-    use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
+    use crate::service::rpc::{admin, chat, queries, reads, streams, warm, writes};
 
     let index = serde_json::json!({ "index_id": INDEX });
     let query = serde_json::json!({ "index_id": INDEX, "body": { "text": "anything" } });
@@ -200,6 +200,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
                 "body": { "producer": "lanes", "nodes": [], "edges": [] },
             }),
         ),
+        // #6285 consumer move: the quantize backfill is `bulk_limited` on HTTP.
+        (
+            writes::METHOD_INDEX_QUANTIZE,
+            Lane::Bulk,
+            serde_json::json!({ "index_id": INDEX, "body": { "dry_run": true } }),
+        ),
         // Slice 5's streams: both HTTP routes are in `free`.
         (
             streams::METHOD_STATUS_STREAM,
@@ -257,6 +263,13 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::json!({ "index_id": INDEX }),
         ),
+        // #9027: both warm routes are in `free` on HTTP.
+        (warm::METHOD_WARM_START, Lane::Free, serde_json::Value::Null),
+        (
+            warm::METHOD_WARM_STATUS,
+            Lane::Free,
+            serde_json::Value::Null,
+        ),
     ]
 }
 
@@ -278,7 +291,7 @@ fn state_with(permits: usize, deadline: Duration) -> Arc<SearchAppState> {
 
 /// The whole socket router, exactly as `service::socket` assembles it.
 fn router(state: &Arc<SearchAppState>) -> RpcRouter {
-    use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
+    use crate::service::rpc::{admin, chat, queries, reads, streams, warm, writes};
 
     let held = Arc::clone(state);
     let router = RpcRouter::new()
@@ -294,6 +307,7 @@ fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = writes::register(router, state);
     let router = admin::register(router, state);
     let router = chat::register(router, state);
+    let router = warm::register(router, state);
     streams::register(router, state)
 }
 

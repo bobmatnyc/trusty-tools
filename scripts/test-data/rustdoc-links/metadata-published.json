@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "Fixture for the #8716 `published-*` cases in check_rustdoc_links_selftest.sh.",
+    "`demo` is metadata-units.json's package unchanged (no `publish` key, so",
+    "publishable, with a lib and a bin doc unit). The two extra packages are",
+    "names the gate excludes outright: `trusty-agents-ui` is `publish = false`",
+    "(publish: []) and must pass; `trusty-code-gui` carries no `publish` key,",
+    "so it is publishable yet never documented, and --require-published must",
+    "name it."
+  ],
+  "packages": [
+    {
+      "name": "demo",
+      "manifest_path": "scripts/test-data/rustdoc-links/demo/Cargo.toml",
+      "features": {
+        "default": ["nogate"],
+        "nogate": ["config"],
+        "config": [],
+        "heavy": []
+      },
+      "targets": [
+        {
+          "kind": ["lib"],
+          "name": "demo",
+          "src_path": "crates/demo/src/lib.rs",
+          "doc": true
+        },
+        {
+          "kind": ["bin"],
+          "name": "demo-cli",
+          "src_path": "crates/demo/src/bin/demo-cli.rs",
+          "doc": true,
+          "required-features": ["config"]
+        }
+      ]
+    },
+    {
+      "name": "trusty-agents-ui",
+      "manifest_path": "crates/trusty-agents-ui/Cargo.toml",
+      "publish": [],
+      "features": {},
+      "targets": [
+        {
+          "kind": ["lib"],
+          "name": "trusty_agents_ui",
+          "src_path": "crates/trusty-agents-ui/src/lib.rs",
+          "doc": true
+        }
+      ]
+    },
+    {
+      "name": "trusty-code-gui",
+      "manifest_path": "crates/trusty-code-gui/Cargo.toml",
+      "features": {},
+      "targets": [
+        {
+          "kind": ["lib"],
+          "name": "trusty_code_gui",
+          "src_path": "crates/trusty-code-gui/src/lib.rs",
+          "doc": true
+        }
+      ]
+    }
+  ]
+}

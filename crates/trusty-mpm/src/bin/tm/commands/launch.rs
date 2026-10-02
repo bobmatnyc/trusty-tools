@@ -106,9 +106,12 @@ impl Drop for LaunchSessionGuard {
 /// this function with placement already decided, and resolving it again
 /// relocates their session.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
-/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`;
+/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
+/// `cli_parses_launch_with_twin`,
+/// `a_twin_worktree_launch_is_refused_before_anything_is_touched`;
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// covers the composed fallback path.
+#[allow(clippy::too_many_arguments)] // #8878: `twin` is the eighth.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
@@ -116,7 +119,10 @@ pub(crate) async fn launch(
     style: Option<String>,
     worktree: bool,
     launch_dir: super::managed_workspace::LaunchDir,
+    home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
+    twin: bool,
 ) -> anyhow::Result<()> {
+    super::launch_twin::preflight(twin, worktree)?; // #8878: before anything is touched.
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
@@ -148,8 +154,9 @@ pub(crate) async fn launch(
         .map_err(|e| anyhow::anyhow!(e))?;
     let origin_url = match super::origin_plan::plan_for_origin(raw_origin.as_deref()) {
         super::origin_plan::OriginPlan::LiveCheckout => {
+            super::launch_twin::refuse_live_checkout(twin)?; // #8878
             eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
-            return connect(client, url, Some(live_workdir)).await;
+            return connect(client, url, Some(live_workdir), home).await;
         }
         // Any origin remote keeps the pre-#6276 path exactly: parse it as
         // owner/repo, or stop with the hint below.
@@ -187,10 +194,14 @@ pub(crate) async fn launch(
         find_existing_session(client, url, &live_workdir, Some(&project_dir_str)).await
         && !existing.is_empty()
     {
+        super::launch_twin::refuse_reattach(twin, &existing)?; // #8878
         print_launch_banner_reconnecting(&live_workdir, &existing);
         crate::commands::tmux_attach::tmux_attach(&existing)?;
         return Ok(());
     }
+
+    // #9091: a broken `[accounts]` table refuses before provisioning.
+    super::run_target::accounts_preflight(None, &origin_url)?;
 
     // 5. --style is not yet honoured in managed mode.
     if style.is_some() {
@@ -213,6 +224,11 @@ pub(crate) async fn launch(
     //    `tm launch` from a subdirectory deploys to the project, not the
     //    subdirectory) and owns the uncommitted-changes notice, which only
     //    applies when there IS a clone.
+    // #8878: the hook judges `CLAUDE_PROJECT_DIR`; the grant is checked for the
+    // managed checkout BEFORE provisioning, so a refusal leaves no clone behind.
+    let twin_root = twin
+        .then(|| super::launch_twin::precheck(&project_dir))
+        .transpose()?;
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
         &origin_url,
@@ -224,6 +240,9 @@ pub(crate) async fn launch(
     )
     .await?;
     let managed_path = workspace.path().to_path_buf();
+    if twin_root.is_some() {
+        super::launch_twin::confirm_placement(&project_dir, &managed_path)?; // #8878
+    }
 
     // 7. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can
@@ -233,9 +252,10 @@ pub(crate) async fn launch(
     //     `claude` spawned at step 13 carries `--setting-sources project,local`
     //     and would never read a `$HOME/.claude` deploy.
     let config_dir = {
-        match trusty_mpm::core::session_launch::prepare_isolated_session(
+        match trusty_mpm::core::session_launch::prepare_isolated_session_under(
             &managed_path,
             Some(&origin_url),
+            home,
         ) {
             Ok(report) => {
                 // Issue #2149: a roster-deploy failure no longer aborts
@@ -266,7 +286,7 @@ pub(crate) async fn launch(
         };
         // #4181: relocate CLAUDE_CONFIG_DIR and seed trust into the file the
         // relocated session actually reads.
-        relocate_config_dir(&managed_path)
+        super::launch_home::relocate_config_dir(&managed_path, home)
     };
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
@@ -274,9 +294,7 @@ pub(crate) async fn launch(
     //    Both steps are best-effort — a failure is logged but never fatal.
     // #5875: this strips the two `~/.claude/settings*.json` files only. It used
     // to walk the whole `$HOME` tree here, which blocked a launch indefinitely.
-    if let Err(e) = crate::commands::install::remove_global_trusty_mpm_hooks() {
-        eprintln!("warning: could not remove global MPM hooks: {e:#}");
-    }
+    super::launch_home::strip_global_hooks(home);
     if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&managed_path, None) {
         eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
     }
@@ -340,14 +358,15 @@ pub(crate) async fn launch(
     // paths' default constructor at all, and matches on source text, so even a
     // comment spelling that symbol out would trip it.
     let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
-    let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
+    // #8453: one profile resolution for the prompt, the stamp and the model; a
+    // supervisor launches on the Opus tier alias.
+    let cli = trusty_mpm::core::session_launch::cli_launch(&managed_path, Some(&origin_url));
+    let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
     // framework was deployed at session prep). Style is not supported in managed
     // mode so we always pass `None` here.
-    let prompt =
-        trusty_mpm::core::session_launch::build_system_prompt_for_with_style(&managed_path, None);
-    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt);
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; launching without prompt");
     }
@@ -359,24 +378,25 @@ pub(crate) async fn launch(
     // #7422: compose this session's default-deny MCP config before the line
     // that names it. Fatal — launching without `--mcp-config` would hand the
     // pane the whole shared server map.
-    let scoped_mcp = trusty_mpm::core::session_mcp_scope::provision_for_spawn(
+    let scoped_mcp =
+        super::launch_home::provision_session_mcp(&managed_path, config_dir.as_deref(), home)?;
+    // #8308: the launch travels in a mode-0600 spec; the pane types a short
+    // line naming it, so no token or path is typed.
+    // #4181: `config_dir` selects `--setting-sources user,project,local` and
+    // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
+    let claude_spec = launch_claude_spec(
         &managed_path,
+        // #8405: the operator's config decides the renderer.
+        trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        &pm_model,
+        prompt_path.as_deref(),
         config_dir.as_deref(),
-    )
-    .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))?;
-    let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-        // #4181: `config_dir` selects `--setting-sources user,project,local` and
-        // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
-        &trusty_mpm::core::model_inject::build_claude_command(
-            Some(&pm_model),
-            prompt_path.as_deref(),
-            config_dir.as_deref(),
-            // #4181: the per-project MCP pins the shared user-scope declarations
-            // cannot carry as arguments.
-            &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
-            scoped_mcp.as_deref(),
-        ),
+        // #4181: the per-project MCP pins the shared user-scope declarations
+        // cannot carry as arguments; #8453: plus the profile stamp.
+        &cli.env,
+        scoped_mcp.as_deref(),
     );
+    let spec_dir = launch_spec_dir(home)?;
 
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
@@ -416,24 +436,30 @@ pub(crate) async fn launch(
     let mut session_guard = LaunchSessionGuard::new(&tmux_name);
 
     // 13. Start `claude` inside the tmux session.
-    let send = trusty_mpm::core::tmux::send_line(
-        None,
-        &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
-        &claude_cmd,
-    )
-    .map(|output| output.status);
-    if !matches!(send, Ok(s) if s.success()) {
-        anyhow::bail!("tmux session {tmux_name} created but failed to start claude");
+    let sent =
+        trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
+    if let Err(e) = sent {
+        anyhow::bail!(
+            "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+        );
     }
 
     // 13b. Find the claude process PID inside the tmux pane and report it to
     //      the daemon so it can monitor process liveness.
+    // #8878: twin arming needs the PID even when registration failed.
+    let claude_pid = (session_id.is_some() || twin_root.is_some())
+        .then(|| {
+            trusty_mpm::core::process::find_claude_pid_in_tmux(
+                &tmux_name,
+                10,
+                std::time::Duration::from_millis(500),
+            )
+        })
+        .flatten();
+    if let Some(root) = &twin_root {
+        super::launch_twin::arm(root, claude_pid, &managed_path);
+    }
     if let Some(session_id) = session_id {
-        let claude_pid = trusty_mpm::core::process::find_claude_pid_in_tmux(
-            &tmux_name,
-            10,
-            std::time::Duration::from_millis(500),
-        );
         if let Some(pid) = claude_pid {
             let _ = client
                 .patch(format!("{url}/sessions/{}/pid", session_id.0))
@@ -477,10 +503,10 @@ pub(crate) async fn launch(
 /// (best-effort — logs and continues on any failure, never aborts the
 /// connect), registers the session via `POST /api/v1/sessions/connect`,
 /// builds the PM system prompt via
-/// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
+/// [`trusty_mpm::core::session_launch::cli_launch`]
 /// and writes it to a temp file, creates the tmux host idempotently
 /// (`tmux new-session -A`), and — only when the session is freshly created —
-/// starts `claude` via [`connect_claude_cmd`] (`--append-system-prompt-file`
+/// starts `claude` from the launch spec [`connect_claude_spec`] builds (`--append-system-prompt-file`
 /// plus the shared `--setting-sources project,local` /
 /// `--dangerously-skip-permissions` isolation flags), then `attach`es to it.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.
@@ -488,6 +514,7 @@ pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
+    home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
 ) -> anyhow::Result<()> {
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
@@ -523,7 +550,7 @@ pub(crate) async fn connect(
     //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
     //     the `claude` spawned at step 5 carries `--setting-sources
     //     project,local` and would never read a `$HOME/.claude` deploy.
-    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
+    match trusty_mpm::core::session_launch::prepare_isolated_session_under(&path, None, home) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
@@ -547,17 +574,15 @@ pub(crate) async fn connect(
     }
     // #4181: same relocation `tm launch` performs — `tm connect` reads the same
     // user-tier MCP declaration and needs the same #1269 isolation posture.
-    let config_dir = relocate_config_dir(&path);
+    let config_dir = super::launch_home::relocate_config_dir(&path, home);
 
     // 1d. Build the PM system-prompt text for the live checkout (where 1c just
     //     deployed the framework) and write it to a temp file for
     //     `--append-system-prompt-file` (issue #2230). Non-fatal: a write
     //     failure omits the flag rather than blocking the connect.
-    let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
-    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
-        &path, None, native,
-    );
-    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    // #8453: the prompt and the launch stamp come from one profile resolution.
+    let cli = trusty_mpm::core::session_launch::cli_launch(&path, None);
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt);
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; connecting without prompt");
     }
@@ -639,26 +664,25 @@ pub(crate) async fn connect(
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
         let scoped_mcp =
-            trusty_mpm::core::session_mcp_scope::provision_for_spawn(&path, config_dir.as_deref())
-                .map_err(|err| {
-                    anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}")
-                })?;
-        let claude_cmd =
-            trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
-                prompt_path.as_deref(),
-                config_dir.as_deref(),
-                // #4181: the per-project MCP pins.
-                &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
-                scoped_mcp.as_deref(),
-            ));
-        let send = trusty_mpm::core::tmux::send_line(
-            None,
-            &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
-            &claude_cmd,
-        )
-        .map(|output| output.status);
-        if !matches!(send, Ok(s) if s.success()) {
-            anyhow::bail!("tmux session {tmux_name} created but failed to start claude");
+            super::launch_home::provision_session_mcp(&path, config_dir.as_deref(), home)?;
+        // #8308: same spec carrier as `tm launch`.
+        let claude_spec = connect_claude_spec(
+            &path,
+            prompt_path.as_deref(),
+            config_dir.as_deref(),
+            // #4181: the per-project MCP pins; #8453: plus the profile stamp.
+            &cli.env,
+            scoped_mcp.as_deref(),
+            // #8405: the operator's config decides the renderer.
+            trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
+        );
+        let spec_dir = launch_spec_dir(home)?;
+        let sent =
+            trusty_mpm::runtime::cli_launch::send_spec_launch(&tmux_name, &claude_spec, &spec_dir);
+        if let Err(e) = sent {
+            anyhow::bail!(
+                "tmux session {tmux_name} created but failed to start claude: {e} (report this with `tm doctor` output)"
+            );
         }
     }
 
@@ -671,69 +695,114 @@ pub(crate) async fn connect(
     Ok(())
 }
 
-/// Compose the `claude` invocation `connect` sends to a freshly-created tmux pane.
+/// Compose the launch spec `connect` starts a freshly-created tmux pane with.
 ///
 /// Why (issue #2230): before this fix, `connect` sent a bare
 /// `claude --dangerously-skip-permissions` with no PM system-prompt injection
 /// and no `--setting-sources` isolation — the one launch path that could
 /// silently spawn vanilla Claude Code. This gives `connect` the same carrier
-/// every other launch path (`spawn`/`resume_command` in the daemon adapter,
-/// `launch`'s own `claude_cmd`) already has.
-/// What: thin wrapper over [`trusty_mpm::core::model_inject::build_claude_command`]
+/// every other launch path already has. #8308: a spec, not a typed line.
+/// What: [`trusty_mpm::runtime::cli_launch::isolated_spec`] rooted at `cwd`,
 /// with no `--model` override (`connect` does not resolve a PM model tier);
 /// always carries the `--setting-sources` flag matching `config_dir` and
-/// `PERMISSION_MODE_FLAG` (`--dangerously-skip-permissions`), plus
-/// `--append-system-prompt-file <path>` when `prompt_file` is `Some`.
+/// `--dangerously-skip-permissions`, plus `--append-system-prompt-file <path>`
+/// when `prompt_file` is `Some`.
 ///
 /// #4181: `config_dir` is `Some` whenever the tm-owned config home resolves, in
-/// which case the line relocates `CLAUDE_CONFIG_DIR` and carries
-/// `--setting-sources user,project,local`; `None` (unresolvable home) keeps the
-/// pre-#4181 `project,local`.
+/// which case the spec relocates `CLAUDE_CONFIG_DIR`, carries the OAuth token
+/// and `--setting-sources user,project,local`; `None` (unresolvable home) keeps
+/// the pre-#4181 `project,local`.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir` (in
-/// `tests_behavior_b_tests.rs`) assert both flags are present in the output.
-pub(crate) fn connect_claude_cmd(
+/// `tests_behavior_b_tests.rs`) assert both flags are present in the output;
+/// `connect_claude_spec_follows_the_configured_renderer` pins the #8405 renderer.
+pub(crate) fn connect_claude_spec(
+    cwd: &std::path::Path,
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
     scoped_mcp: Option<&std::path::Path>,
-) -> String {
-    trusty_mpm::core::model_inject::build_claude_command(
+    config_root: Option<&std::path::Path>,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    isolated_claude_spec(
+        cwd,
         None,
         prompt_file,
         config_dir,
         mcp_env,
-        // #7422: the composed default-deny MCP file, already written by the
-        // caller; `None` only when the config dir did not relocate.
         scoped_mcp,
+        config_root,
     )
 }
 
-/// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
-/// trust-seeding it.
+/// The launch spec `tm launch` and the Architect start their pane with (#8405,
+/// #8308).
 ///
-/// Why (issue #4181): thin binary-side wrapper so `tm launch` and `tm connect`
-/// share one call rather than two copies of the same sequence. Why relocation
-/// preserves #1269 lives on the library function.
-/// What: delegates to
-/// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir`], then
-/// warns once when the spawn will relocate with no resolvable
-/// `CLAUDE_CODE_OAUTH_TOKEN` — the #2246 shape where a Keychain credential
-/// stored under the operator's default config dir is unreadable under the
-/// relocated one.
-/// Test: `core::managed_config`'s `interactive_config_dir_*` tests.
-fn relocate_config_dir(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
-    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(workspace);
-    // #2246: relocating moves which Keychain entry `claude` reads. Say so once
-    // rather than let the session present as "logged in, then not logged in".
-    if dir.is_some() && trusty_mpm::core::oauth_token::resolve_oauth_token().is_none() {
-        eprintln!(
-            "warning: no CLAUDE_CODE_OAUTH_TOKEN resolved; this session reads the \
-             keychain entry keyed to the tm-managed config dir. If it starts \
-             unauthenticated, run `claude setup-token | tm auth set-token` \
-             (see issue #2246)."
-        );
-    }
-    dir
+/// Why: the one seam where `tm launch` turns the operator's config into the
+/// renderer, split out so a test can drive it from a config root.
+/// What: [`connect_claude_spec`] plus `--model <pm_model>`.
+/// Test: `launch_claude_spec_follows_the_configured_renderer`.
+pub(crate) fn launch_claude_spec(
+    cwd: &std::path::Path,
+    config_root: Option<&std::path::Path>,
+    pm_model: &str,
+    prompt_file: Option<&std::path::Path>,
+    config_dir: Option<&std::path::Path>,
+    mcp_env: &[(String, String)],
+    scoped_mcp: Option<&std::path::Path>,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    isolated_claude_spec(
+        cwd,
+        Some(pm_model),
+        prompt_file,
+        config_dir,
+        mcp_env,
+        scoped_mcp,
+        config_root,
+    )
+}
+
+/// Shared body of [`connect_claude_spec`] and [`launch_claude_spec`].
+///
+/// What: resolves the OAuth token only when `config_dir` relocates the config
+/// home (#4181/#2246 — a non-relocated spawn uses the operator's own login),
+/// and the renderer from `config_root` (#8405); `scoped_mcp` is the composed
+/// default-deny MCP file the caller already wrote (#7422).
+fn isolated_claude_spec(
+    cwd: &std::path::Path,
+    model: Option<&str>,
+    prompt_file: Option<&std::path::Path>,
+    config_dir: Option<&std::path::Path>,
+    mcp_env: &[(String, String)],
+    scoped_mcp: Option<&std::path::Path>,
+    config_root: Option<&std::path::Path>,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    let token = config_dir.and_then(|_| trusty_mpm::core::oauth_token::resolve_oauth_token());
+    trusty_mpm::runtime::cli_launch::isolated_spec(
+        cwd,
+        &trusty_mpm::runtime::cli_launch::CliLaunch {
+            model,
+            prompt_file,
+            config_dir,
+            oauth_token: token.as_deref(),
+            mcp_env,
+            scoped_mcp,
+            alternate_screen: trusty_mpm::core::alt_screen::configured_alternate_screen_in(
+                config_root,
+            ),
+        },
+    )
+}
+
+/// Where a CLI launch under `home` writes its spec (#8308).
+///
+/// What: [`trusty_mpm::runtime::cli_launch::spec_dir`]; an error when no home
+/// resolves, because there is then nowhere owner-only to put the credentials.
+pub(crate) fn launch_spec_dir(
+    home: Option<&std::path::Path>,
+) -> anyhow::Result<std::path::PathBuf> {
+    trusty_mpm::runtime::cli_launch::spec_dir(home).ok_or_else(|| {
+        anyhow::anyhow!("cannot start claude: no home directory to hold its launch spec (#8308)")
+    })
 }
 
 /// Find the first LIVE session whose `workdir` matches `workdir` (exact) or lies

@@ -84,19 +84,29 @@ pub async fn run_map_reduce(
     // reviewed. Drop any such finding against the whole filtered diff so it can
     // never force the deterministic BLOCK / REQUEST_CHANGES floor in
     // `reduce`/`synthesize`, nor reach the rendered review.
+    // #4044: every finding these passes drop is kept for the review record.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
+    let mut withheld = Vec::new();
     for outcome in &mut outcomes {
         if let MapOutcome::Reviewed {
             findings, verdict, ..
         } = outcome
         {
             let findings_before = findings.len();
-            crate::pipeline::finding_hygiene::sanitize_findings(findings);
-            crate::pipeline::citation_check::enforce_citation_integrity(findings, &cite_index);
+            crate::pipeline::finding_hygiene::sanitize_findings(findings, &mut withheld);
+            crate::pipeline::citation_check::enforce_citation_integrity(
+                findings,
+                &cite_index,
+                &mut withheld,
+            );
             // #1873: a map call sees ONE chunk, so it cannot see the chunk that
             // ADDS the file it is about to call missing. The whole changeset
             // can, and refutes the claim here before it reaches the floor.
-            crate::pipeline::absence_claim::drop_refuted_absence_claims(findings, &cite_index);
+            crate::pipeline::absence_claim::drop_refuted_absence_claims(
+                findings,
+                &cite_index,
+                &mut withheld,
+            );
             // This chunk's own `verdict` field rested on the SAME findings we
             // may have just wiped out — relax it too so a wiped-out chunk
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
@@ -111,6 +121,8 @@ pub async fn run_map_reduce(
         }
     }
 
-    let reduced = reduce(outcomes, config);
+    let mut reduced = reduce(outcomes, config);
+    withheld.append(&mut reduced.withheld_findings);
+    reduced.withheld_findings = withheld;
     synthesize_review(reduced, llm, ctx, config).await
 }

@@ -1,0 +1,2 @@
+Fixed
+- Session preparation now advances the DOC-28 catch-up watermark under the framework root it was given (`<root>/projects/<palace>/catchup-state.json`) instead of under the user home. A launch with no home named no longer falls back to the process home, so a test driving session prep under a temporary framework root cannot leave a `projects/<palace>` directory in the operator's `~/.trusty-mpm` (#8311).

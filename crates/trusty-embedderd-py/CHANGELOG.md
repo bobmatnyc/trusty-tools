@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.5] — 2026-09-28
+
+### Fixed
+
+- `run_bounded_python_check` no longer reports a venv recheck as `Failed`
+  when the spawn itself is starved by CI contention (EAGAIN/ENOMEM) — the
+  check budget now covers the spawn attempt, and a transient spawn error
+  retries within it instead of returning a false-negative failure (#5328).
+- A venv recheck no longer reports `Failed` when Linux refuses to exec the interpreter with ETXTBSY ("Text file busy") because another process briefly holds it open for writing; the spawn retries within its budget like EAGAIN/ENOMEM (#5328).
+
+### Documentation
+
+- Repaired every broken rustdoc intra-doc link in this crate and added
+  `#![deny(rustdoc::broken_intra_doc_links)]` to its crate root(s), so a new
+  one fails the build instead of shipping as dead text on docs.rs (#5744).
+
 ## [0.1.2] — 2026-08-04
 
 ### Fixed

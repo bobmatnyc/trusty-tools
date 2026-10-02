@@ -119,7 +119,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
     // `_with` keeps the probe hermetic (no ambient token resolution).
-    let launch_line = crate::core::model_inject::build_claude_command_with(
+    let launch_line = crate::core::model_inject::build_claude_command_with_configured(
         None,
         None,
         Some(&config_dir),
@@ -128,30 +128,40 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         // #7422: the probe reads the env prefix only; a scoped MCP file would
         // add flags it does not inspect and a path that does not exist.
         None,
+        false,
     );
+    // #8405: the `false` renderer argument above and below is immaterial — the
+    // probe reads the `-u` scrub, which no renderer value changes.
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    // #8286: the in-place line now requires the prompt file it names.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command(
+    // #8286: the prompt-carrying twin of the spec the in-place launch sends.
+    let inplace_line = crate::core::model_inject::build_inplace_session_command_with_prompt(
         std::path::Path::new("/probe/prompt.txt"),
+        false,
     );
-    let client_line = crate::core::model_inject::build_client_session_command(Some(
-        std::path::Path::new("/probe/prompt.txt"),
-    ));
+    let client_line = crate::core::model_inject::build_client_session_command_configured(
+        Some(std::path::Path::new("/probe/prompt.txt")),
+        false,
+    );
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
     // #7422: `None` for the composed MCP file — this probe checks env scrubbing
     // and composes nothing, so it must not name a file that does not exist.
-    let run_cmd = crate::core::standalone::run::build_launch_command(
+    let run_cmd = crate::core::standalone::run::build_launch_command_configured(
         std::path::Path::new("/probe/repo"),
         &config_dir,
         None,
         None,
+        false,
     );
     let stream_cmd = crate::control::backend::stream_json::build_claude_command(
         std::path::Path::new("/probe"),
         None,
     );
+    // #8453: the control-plane pane line, scrubbed since the stamp fix. A
+    // `None` config root reads no operator file; only the `-u` flags matter.
+    let control_pane_line =
+        crate::control::backend::tmux::pane_claude_line(None, "claude", None).unwrap_or_default();
 
     vec![
         (
@@ -163,12 +173,44 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
             owned(parse_env_unset_vars(&launch_line)),
         ),
         (
-            "core::model_inject::build_inplace_session_command (tm session start, in place)",
+            "core::model_inject::build_inplace_session_command_with_prompt (tm session start, in place)",
             owned(parse_env_unset_vars(&inplace_line)),
         ),
         (
             "core::model_inject::build_client_session_command (DaemonClient launch/connect)",
             owned(parse_env_unset_vars(&client_line)),
+        ),
+        // #8308: the CLI and fleet paths now launch from these specs; the
+        // string builders above stay covered while they remain public API.
+        (
+            "runtime::cli_launch::isolated_spec (tm launch / tm connect / tm fleet)",
+            crate::runtime::cli_launch::isolated_spec(
+                std::path::Path::new("/probe"),
+                &crate::runtime::cli_launch::CliLaunch {
+                    model: None,
+                    prompt_file: None,
+                    config_dir: Some(&config_dir),
+                    oauth_token: Some(PROBE_TOKEN),
+                    mcp_env: &[],
+                    scoped_mcp: None,
+                    alternate_screen: false,
+                },
+            )
+            .env_unset,
+        ),
+        (
+            "runtime::cli_launch::inplace_spec (tm session start, in place)",
+            crate::runtime::cli_launch::inplace_spec(
+                std::path::Path::new("/probe"),
+                std::path::Path::new("/probe/prompt.txt"),
+                false,
+            )
+            .env_unset,
+        ),
+        (
+            "runtime::cli_launch::client_spec (DaemonClient launch/connect)",
+            crate::runtime::cli_launch::client_spec(std::path::Path::new("/probe"), None, false)
+                .env_unset,
         ),
         (
             "daemon::spawn_command::relaunch_command (pane relaunch)",
@@ -181,6 +223,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         (
             "control::backend::stream_json::build_claude_command (headless)",
             removed_env_keys(&stream_cmd),
+        ),
+        (
+            "control::backend::tmux::pane_claude_line (control-plane pane)",
+            owned(parse_env_unset_vars(&control_pane_line)),
         ),
     ]
 }

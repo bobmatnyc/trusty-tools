@@ -116,7 +116,10 @@ fi
 if [ "$DENY_RC" -ne 0 ]; then
   echo "[FAIL] deny-duplicates: 'cargo deny check bans' exited ${DENY_RC} — a hard" >&2
   echo "       ban violation, not a duplicate-count question:" >&2
-  grep -E '^(error|warning)\[' "$TMP_OUT" | head -40 | sed 's/^/       /' >&2
+  # `head -40` exits once it has its lines; under `set -euo pipefail`, on a
+  # large `cargo deny` output the upstream `grep` can then take SIGPIPE
+  # writing the rest — capture first, then trim (#8716).
+  grep -E '^(error|warning)\[' "$TMP_OUT" | sed -n '1,40p' | sed 's/^/       /' >&2
   exit 1
 fi
 

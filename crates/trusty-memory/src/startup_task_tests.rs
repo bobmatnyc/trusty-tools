@@ -65,14 +65,21 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Outer wall-clock bound on [`spawn_startup_tasks_populates_pin_map`].
+///
+/// #5937: a hang guard, not a timing assertion. The scan finishes in
+/// milliseconds; this only turns a wedged runtime into a failure.
+const PIN_MAP_HANG_GUARD: Duration = Duration::from_secs(60);
+
 /// Why: the pin scan inside `spawn_startup_tasks` must populate
 /// `AppState::pin_project_map` so handlers can resolve a palace id to a
 /// project path without a filesystem walk at request time (issue #470).
 /// This test verifies the full wiring: a real `AppState` with a real temp
 /// search root, a pinned project, and the async background task.
-/// What: creates a project with a pin file under a temp search root; then
-/// calls `spawn_startup_tasks` and yields to the tokio runtime until the
-/// task completes; asserts the pin map contains the expected entry.
+/// What: creates a project with a pin file under a temp search root, runs
+/// `spawn_startup_tasks` on a runtime owned by a dedicated thread, and waits
+/// at most [`PIN_MAP_HANG_GUARD`] for the pin map to gain the entry. The bound
+/// lives outside the runtime so it fires even when the runtime is wedged.
 /// Test: itself (issue #474 regression guard, plus #5937 and #5821).
 #[serial_test::serial]
 #[test]
@@ -106,41 +113,58 @@ fn spawn_startup_tasks_populates_pin_map() {
     let state_root = tmp.path().join("data");
     fs::create_dir_all(&state_root).expect("create data dir");
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build test runtime");
+    // #5937: the runtime lives on its own thread so the bound below does not
+    // depend on that runtime being able to poll a timer.
+    let (map_tx, map_rx) = std::sync::mpsc::channel();
+    let (found_tx, found_rx) = std::sync::mpsc::channel();
+    let runtime_thread = std::thread::Builder::new()
+        .name("pin-map-runtime".to_string())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            let found = rt.block_on(async move {
+                let state = AppState::new(state_root);
+                let _ = map_tx.send(std::sync::Arc::clone(&state.pin_project_map));
+                spawn_startup_tasks(&state);
+                loop {
+                    if let Some(entry) = state.pin_project_map.get("my-palace") {
+                        return entry.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            // #5937: shut down without waiting. Dropping a runtime blocks until
+            // every blocking-pool task it started has finished, and the startup
+            // fan-out is free to leave one in flight.
+            rt.shutdown_timeout(Duration::ZERO);
+            let _ = found_tx.send(found);
+        })
+        .expect("spawn the test runtime thread");
 
-    let found = rt.block_on(async {
-        let state = AppState::new(state_root);
-
-        // Fire the background task.
-        spawn_startup_tasks(&state);
-
-        // Yield to the tokio runtime repeatedly until the task populates the
-        // pin map or a timeout is reached (50 × 10 ms = 500 ms ceiling).
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
-        loop {
-            if let Some(entry) = state.pin_project_map.get("my-palace") {
-                return Some(entry.clone());
-            }
-            if std::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let found = match found_rx.recv_timeout(PIN_MAP_HANG_GUARD) {
+        Ok(found) => found,
+        // The runtime thread panicked before sending: re-raise its panic.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+            runtime_thread
+                .join()
+                .expect_err("the runtime thread dropped its sender without panicking"),
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let keys: Vec<String> = map_rx
+                .try_recv()
+                .map(|map| map.iter().map(|e| e.key().clone()).collect())
+                .unwrap_or_default();
+            panic!(
+                "#5937 hang guard: pin_project_map had no 'my-palace' {PIN_MAP_HANG_GUARD:?} \
+                 after spawn_startup_tasks. Keys present: {keys:?}. HOME is now {:?}; \
+                 the scan must read {:?}.",
+                std::env::var_os("HOME"),
+                tmp.path(),
+            );
         }
-    });
-
-    // #5937: shut down without waiting. Dropping a runtime blocks until every
-    // blocking-pool task it started has finished, and the startup fan-out is
-    // free to leave one in flight — that wait, not the pin scan, is what held
-    // this test open for as long as the model fetch took.
-    rt.shutdown_timeout(Duration::ZERO);
-
-    let found = found.expect(
-        "pin_project_map must contain 'my-palace' after spawn_startup_tasks; \
-         the scan did not populate it within 500 ms",
-    );
+    };
     // Canonicalize to handle macOS /private symlinks.
     let actual = fs::canonicalize(found).expect("canonicalize actual");
     let expected = fs::canonicalize(&project_dir).expect("canonicalize expected");
@@ -165,6 +189,10 @@ fn spawn_startup_tasks_populates_pin_map() {
 /// over a 94-palace copy of the reporter's store, which is the resource #7106
 /// is about.
 /// Test: this test.
+// #5937: serial because it sets `HOME`. Run in parallel, it swapped `HOME`
+// under `spawn_startup_tasks_populates_pin_map`, whose scan then read the
+// wrong root and found 0 pins.
+#[serial_test::serial]
 #[test]
 fn hydration_never_exceeds_the_startup_open_limit() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -74,7 +74,10 @@
     <key>StandardErrorPath</key>
     <string>__HOME__/.trusty-mpm/logs/supervisor.err.log</string>
 
+    <!-- #8415: Interactive, never Background. Every tmux server this job
+         resumes, and every session inside it, inherits the job's class;
+         Background pinned them to Darwin priority 4 and efficiency cores. -->
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Interactive</string>
 </dict>
 </plist>

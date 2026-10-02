@@ -41,10 +41,15 @@ const SPLASH_CONTINUATION_INDENT: &str = "   ";
 
 /// Floor on the wrap width a splash row is given.
 ///
-/// Why: the right column is derived from the terminal width, and a narrow
-/// enough terminal drives it to zero — at which point every splash row would
-/// render as an empty string and the launch facts would vanish rather than
-/// merely overflow. Overflowing a tiny frame is the better failure.
+/// Why: the right column is not derived from the terminal width alone —
+/// `left_w` is widened to fit [`ReplApp::banner_art`] unclipped, so art
+/// wider than the frame squeezes the right column to a handful of columns.
+/// Below this floor [`crate::text::elide_middle`] shortens
+/// every word of a splash row to a two-character stub, so the launch facts
+/// render as punctuation rather than as words. Shaping the rows for 12
+/// columns and letting the renderer clip them is the better failure: what
+/// survives is then a readable prefix.
+/// Test: `tests::banner_lines_keeps_splash_words_when_the_right_column_collapses`.
 const MIN_SPLASH_WIDTH: usize = 12;
 
 /// Break one splash line into rows that each fit `width` columns.
@@ -102,7 +107,8 @@ fn fit_splash_line(line: &str, width: usize) -> Vec<String> {
 /// `tests::banner_lines_lists_recent_activity_and_commands`,
 /// `tests::banner_lines_renders_with_no_art_or_commands`,
 /// `tests::banner_lines_splash_replaces_the_identity_row`,
-/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`.
+/// `tests::banner_lines_keep_the_mismatch_warning_readable_at_80_columns`,
+/// `tests::banner_lines_keeps_splash_words_when_the_right_column_collapses`.
 pub fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     let art_width = app
         .banner_art
@@ -354,6 +360,40 @@ mod tests {
                 line_text(line)
             );
         }
+    }
+
+    /// `MIN_SPLASH_WIDTH` is not reachable through `width` alone — with no
+    /// art, `total_w = width.max(40)` and `left_w = total_w / 4` keep
+    /// `right_w >= 27`. It is reached when `banner_art` is WIDER than the
+    /// frame, because `left_w` is widened to fit the art unclipped and what
+    /// remains for the right column is a handful of columns. Without the
+    /// floor, every word of the splash is elided to a two-character stub
+    /// before the renderer ever clips the row.
+    #[test]
+    fn banner_lines_keeps_splash_words_when_the_right_column_collapses() {
+        let mut app = ReplApp::new("tcode", "masa");
+        // 27 columns of art on a 40-column frame: left_w = 29, right_w = 8,
+        // so the un-floored wrap width would be 5.
+        app.banner_art = vec![Line::from("x".repeat(27))];
+        app.splash = vec!["tcode v0.7.0".to_string(), "project /repo".to_string()];
+        let text: String = banner_lines(&app, 40)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            text.contains("project"),
+            "a splash word must survive whole: {text}"
+        );
+        assert!(
+            text.contains("tcode v"),
+            "the header row must stay readable: {text}"
+        );
+        assert!(
+            !text.contains('…'),
+            "words that fit 12 columns must not be elided: {text}"
+        );
     }
 
     /// A line longer than the column becomes more rows, never a clipped one.

@@ -377,14 +377,16 @@ pub async fn start_service(port: u16) -> Result<ServiceState> {
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null);
 
-    let child = std::process::Command::new(&exe)
-        .arg("--serve")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--serve")
         .arg("--port")
         .arg(port.to_string())
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr_stdio)
+        .stderr(stderr_stdio);
+    // #8783: own session, so a group kill aimed at this CLI spares the daemon.
+    let child = trusty_common::daemon_guard::start_in_new_session(&mut cmd)
         .spawn()
         .with_context(|| format!("spawning {} --serve", exe.display()))?;
 

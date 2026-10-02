@@ -87,6 +87,19 @@ pub(crate) enum ReclaimVerdict {
         /// The merged pull request that proves the branch's work landed.
         pr: u64,
     },
+    /// Every gate passed with NO pull request: the tree's content is already
+    /// on `base`, byte for byte (#7889).
+    ///
+    /// Why a separate variant rather than a `Reclaimable` with no number: the
+    /// operator surfaces print "landing evidence is PR #N", and a zero there
+    /// would read as a pull request. The evidence here is of a different kind,
+    /// so it is a different variant — and a reader matching on
+    /// `Reclaimable { pr }` cannot silently treat it as one.
+    /// Test: `worktree_7889_classify_admits_a_landed_tree_with_no_pull_request`.
+    ReclaimableLandedContent {
+        /// The ref the content was judged against, e.g. `origin/main`.
+        base: String,
+    },
     /// Refused — `reason` names the FIRST gate that said no.
     Blocked {
         /// Which gate refused (#6507).
@@ -138,7 +151,43 @@ impl ReclaimVerdict {
     }
 
     /// True when this verdict permits deletion.
+    ///
+    /// #7889: two kinds of landing evidence admit — a merged pull request, and
+    /// content that is already on the landing base. Both still require every
+    /// gate ahead of gate 5 to have passed.
     pub(crate) fn is_reclaimable(&self) -> bool {
-        matches!(self, Self::Reclaimable { .. })
+        matches!(
+            self,
+            Self::Reclaimable { .. } | Self::ReclaimableLandedContent { .. }
+        )
+    }
+
+    /// This verdict as ONE operator-facing decision sentence (#8109).
+    ///
+    /// Why: a reclaim entry carried no reason while a blocked entry did, so a
+    /// no-PR worktree reclaimed on 2026-09-16 could not be audited the way its
+    /// blocked siblings could. #7885 has the same root: a pass that logs only
+    /// its deletions leaves no record of what it decided about the rest.
+    /// What: a rendered string rather than a `tracing` call, so a unit test
+    /// asserts the wording — the shape
+    /// [`RemovalAudit::line`](super::worktree_removal_audit::RemovalAudit::line)
+    /// already uses. A refusal names its gate and reason; a grant names its
+    /// landing evidence — the pull request, or the base holding its content.
+    /// Test: `a_decision_line_names_the_gate_and_the_reason`,
+    /// `a_decision_line_for_a_grant_names_its_landing_evidence`.
+    pub(crate) fn decision(&self) -> String {
+        match self {
+            Self::Reclaimable { pr } => format!("reclaimable — landing evidence is PR #{pr}"),
+            Self::ReclaimableLandedContent { base } => {
+                format!("reclaimable — landing evidence is its content, already on {base}")
+            }
+            Self::Blocked { gate, reason } | Self::BlockedByAgent { gate, reason } => {
+                format!("refused at {} — {reason}", gate.label())
+            }
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "worktree_reclaim_verdict_tests.rs"]
+mod worktree_reclaim_verdict_tests;

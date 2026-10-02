@@ -456,6 +456,54 @@ pub struct Finding {
     /// Whether this finding is eligible for tracker-issue filing.
     #[serde(default)]
     pub issue_eligible: bool,
+    /// #8905: set when the citation gate moved `line` to the line that holds
+    /// the code the finding quotes or names; `None` when the cited line held it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation_correction: Option<CitationCorrection>,
+    /// #8949: set when the citation gate verified some of the code this finding
+    /// quotes but not all of it. The finding is advisory only: it cannot drive
+    /// the verdict and is posted in the review body, never inline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub citation_partial: bool,
+}
+
+/// A finding a gate withheld, kept for the review record (#8949, #4044).
+///
+/// Why: a withheld finding left no trace outside a log line, so a drop could
+/// not be audited as a true or a false positive after the fact.
+/// What: the finding as the gate saw it, the reason it was dropped (the
+/// reason names the gate, e.g. `#4044 self-negated …`, `#4042 citation: …`,
+/// `unverifiable`), and the quoted fragment that failed to match when that
+/// was the cause.
+/// Test: `a_dropped_finding_names_its_missing_snippet`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithheldFinding {
+    /// The finding the gate dropped.
+    pub finding: Finding,
+    /// Why the gate dropped it, naming the gate.
+    pub reason: String,
+    /// The quoted fragment that is not in the cited file, when that was the cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_fragment: Option<String>,
+}
+
+/// A line correction the citation gate applied to a finding (#8905).
+///
+/// Why: a re-anchored finding is posted at a line the model did not emit, so
+/// the move is recorded on the finding itself, not only in the log.
+/// What: `from_line` is the line the model cited (`None` when it cited none);
+/// `to_line` is the line the gate verified holds the quoted or named code.
+/// Test: `a_finding_cited_twelve_lines_off_is_reanchored`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitationCorrection {
+    /// The line the model cited.
+    pub from_line: Option<u32>,
+    /// The line the gate moved the citation to (a new-side line number).
+    pub to_line: u32,
+    /// The code sits on a line the change REMOVES; `to_line` is the new-side
+    /// position of that deletion (#8905 row 2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed_code: bool,
 }
 
 impl Finding {
@@ -488,6 +536,8 @@ impl Finding {
             code_provable: false,
             verified: None,
             issue_eligible: false,
+            citation_correction: None,
+            citation_partial: false,
         }
     }
 
@@ -592,15 +642,40 @@ pub struct ReviewResult {
     /// `verified` variants. One integer says how much of this review went
     /// unchecked, so a consumer can hold a review whose safety net was down
     /// instead of trusting or discarding it blindly.
-    /// What: the count of findings whose `verified` outcome answers true to
-    /// `VerifyOutcome::is_unverified` — unreachable verifier, truncated
-    /// response, or a claim the pipeline declined to check. Synced at the same
-    /// two canonical exit points as `findings_count`. `#[serde(default)]` keeps
-    /// pre-#4459 serialised results deserialising with `0`.
+    /// What: the posted findings whose `verified` outcome answers true to
+    /// `VerifyOutcome::is_unverified` (unreachable verifier, truncated
+    /// response, or a claim the pipeline declined to check), plus
+    /// `withheld_unverified_count` — the findings #8904 withheld because the
+    /// verifier could not judge them or the call cap left them unsent. Synced at
+    /// the same two canonical exit points as `findings_count`.
+    /// `#[serde(default)]` keeps pre-#4459 serialised results deserialising
+    /// with `0`.
     /// Test: `unverified_count_matches_the_unverified_findings` (post_tests),
-    /// `verify_permanent_transport_failure_lands_in_unverified`.
+    /// `run_review_partial_verifier_outage_reports_the_withheld_count`.
     #[serde(default)]
     pub unverified_count: usize,
+    /// How many findings the verifier round withheld unjudged (#8904).
+    ///
+    /// Why: a withheld finding leaves `findings`, so counting `findings` alone
+    /// reads 0 during a verifier outage.
+    /// What: `VerifyReport::unjudged + over_cap + unverifiable` (#4044), set by
+    /// `verify_posted::gate_then_verify`; `unverified_count` includes it.
+    /// Test: `run_review_unjudged_finding_is_counted_as_withheld_unverified`.
+    #[serde(default)]
+    pub withheld_unverified_count: usize,
+    /// Every finding any gate withheld, with its reason, so the review record
+    /// can be audited. Never posted. Written by the hygiene and grounding passes
+    /// (#4044 self-negated, #4042 citation, #1873 absence claim), the
+    /// map-reduce dedup and cap, the #8905 citation gate (#8949), and the
+    /// verifier round (refuted, unjudged, over-cap, unverifiable), and every
+    /// finding when no round ran ("no verifier") — owner rulings of 2026-09-30.
+    /// Test: `run_review_records_self_negated_findings_as_withheld`,
+    /// `run_review_mapreduce_records_hygiene_withholds`,
+    /// `gate_posted_findings_records_the_withheld_finding`,
+    /// `run_review_records_a_refuted_finding_as_withheld`,
+    /// `run_review_withholds_an_unverifiable_finding`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld_findings: Vec<WithheldFinding>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -768,6 +843,8 @@ impl ReviewResult {
             findings: Vec::new(),
             findings_count: 0,
             unverified_count: 0,
+            withheld_unverified_count: 0,
+            withheld_findings: Vec::new(),
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,

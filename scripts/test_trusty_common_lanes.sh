@@ -19,13 +19,14 @@
 #   executes and the statement CI checks cannot drift apart.
 #
 #   Exits non-zero if any lane fails, after running them all. Lane output goes
-#   to a per-lane file under a temp directory; a passing lane prints its counts
-#   only, a failing lane prints its full output.
+#   to a per-lane file under a temp directory; a passing lane prints one line of
+#   summed counts and its wall time, a failing lane prints its full output.
+#   CI runs this script as the `trusty-common-lanes` job in ci.yml.
 #
 # Usage:
-#   bash scripts/test_trusty_common_lanes.sh              # every lane
-#   bash scripts/test_trusty_common_lanes.sh core symgraph # named lanes only
-#   CARGO_TEST_ARGS="--release" bash scripts/test_trusty_common_lanes.sh
+#   ./scripts/test_trusty_common_lanes.sh              # every lane
+#   ./scripts/test_trusty_common_lanes.sh core symgraph # named lanes only
+#   CARGO_TEST_ARGS="--release" ./scripts/test_trusty_common_lanes.sh
 #
 # This is a hardening/pre-publish gate, not an inner-loop command — the `core`
 # lane alone builds a bundled ONNX Runtime. For an ordinary change, run the
@@ -84,14 +85,19 @@ while IFS=$'\t' read -r name features; do
 
     log="${outdir}/${name}.txt"
     echo "==> lane ${name}: --features ${features}"
+    lane_start=${SECONDS}
     # shellcheck disable=SC2086  # CARGO_TEST_ARGS is a deliberate word-split.
     cargo test -p trusty-common --features "${features}" --no-fail-fast \
         ${CARGO_TEST_ARGS:-} >"${log}" 2>&1
     status=$?
     ran=$((ran + 1))
+    # Summed over every target's `test result:` line, so a lane's count can be
+    # compared against the bare run and the other lanes in one line.
+    counts="$(awk '/^test result:/ { p += $4; f += $6; i += $8 }
+        END { printf "%d passed, %d failed, %d ignored", p, f, i }' "${log}")"
+    echo "    ${counts} in $((SECONDS - lane_start))s"
 
     if [[ ${status} -eq 0 ]]; then
-        grep -E '^test result:' "${log}" | sed 's/^/    /'
         echo "    [PASS] lane ${name}"
     else
         echo "    [FAIL] lane ${name} (exit ${status})"

@@ -19,7 +19,9 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
-use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_wrapper_prefix};
+use crate::commands::hook_rewrite::strip_wrapper_prefix;
+// #8735: the xargs option table moved beside the other wrapper grammars.
+use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word};
 
 /// Shell programs that run their `-c` argument as a command string.
 ///
@@ -35,37 +37,6 @@ use crate::commands::hook_rewrite::{COMMAND_WRAPPERS, is_env_assignment, strip_w
 // here-document operator line — a body fed to one of these IS shell source, so
 // its separators must keep splitting.
 pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
-
-/// `xargs` options that consume the FOLLOWING token as their value.
-///
-/// Why: skipping only the flag would leave its value (`4` in `xargs -n 4 git …`)
-/// read as the program. The separated spelling is the one that needs a table;
-/// an attached (`-n4`) or `=`-joined (`--max-args=4`) value is one token and
-/// skips itself.
-/// What: the separated-value option spellings, short and long.
-/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
-const XARGS_OPTS_WITH_ARG: &[&str] = &[
-    "-a",
-    "-d",
-    "-E",
-    "-e",
-    "-I",
-    "-i",
-    "-L",
-    "-l",
-    "-n",
-    "-P",
-    "-s",
-    "--arg-file",
-    "--delimiter",
-    "--eof",
-    "--replace",
-    "--max-lines",
-    "--max-args",
-    "--max-procs",
-    "--max-chars",
-    "--process-slot-var",
-];
 
 /// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
 ///
@@ -106,7 +77,8 @@ pub(super) fn has_live_ansi_c_quoting(segment: &str) -> bool {
 /// What: see the variants.
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
 /// `an_unparseable_wrapped_command_is_denied`,
-/// `wrappers_around_benign_commands_still_allow`.
+/// `wrappers_around_benign_commands_still_allow`,
+/// `refuses_a_dump_run_through_eval`.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum WrappedCommand {
     /// No wrapper — classify the segment as given.
@@ -117,62 +89,76 @@ pub(super) enum WrappedCommand {
     Unlexable,
 }
 
-/// Resolve the command a leading `sh -c` / `bash -c` / `env -S` / `xargs`
-/// wrapper would actually run (#6660).
+/// Resolve the command a leading `sh -c` / `bash -c` / `env -S` / `xargs` /
+/// `eval` wrapper would actually run (#6660).
 ///
 /// Why: [`strip_wrapper_prefix`] advances past a wrapper TOKEN but never
 /// descends into an argument that is itself a command — a `-c` string or an
 /// `xargs` argv. Every rule downstream therefore classified the wrapper instead
 /// of the command. Doing the descent here, on the shared segment text, is what
 /// makes one fix reach all of them.
-/// What: shlex-splits `segment`, skips leading `KEY=value` assignments and
-/// [`COMMAND_WRAPPERS`] tokens, then: a [`DASH_C_SHELLS`] program yields the
-/// token after its `-c` (a short cluster ending in `c`, such as `-lc`, counts);
-/// `env` yields the value of `-S`/`--split-string` in any of its three
-/// spellings; `xargs` yields its argv past [`XARGS_OPTS_WITH_ARG`], re-joined.
+/// What: shlex-splits `segment` and asks [`resolve_program_word`] for its
+/// program, past assignments, wrappers and their options (#8735 round 2 — a
+/// `timeout 60` or `nice -n 5` in front hid the string). The stop word then
+/// names the string: a [`DASH_C_SHELLS`] program's `-c` string
+/// ([`dash_c_argument`]); an `xargs` argv past [`XARGS_OPTS_WITH_ARG`],
+/// re-joined; `eval`'s operands joined by spaces, as the shell does. `env -S`
+/// and `flock -c` fail the resolution by design, so when it fails the words are
+/// scanned for the first of those carriers, `env -S`/`--split-string` and
+/// `flock -c` included ([`carried_string`]).
 /// The result is [`WrappedCommand::Unlexable`] when the inner text will not
 /// shlex-split, and [`WrappedCommand::None`] when the segment carries no such
 /// wrapper — an unlexable OUTER segment included, since that case already falls
-/// back to the quote-unaware scan and is not this function's to change.
-/// Test: as [`WrappedCommand`].
+/// back to the quote-unaware scan and is not this function's to change. A
+/// lookup (`command -v bash`) runs nothing and is `None`.
+/// Test: as [`WrappedCommand`], and
+/// `denies_a_delete_in_a_command_string_behind_a_wrapper`,
+/// `denies_a_command_string_behind_a_wrapper_option_8735`,
+/// `denies_a_delete_in_a_command_string_behind_an_unknown_option`.
 pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
     let Some(argv) = shlex::split(segment) else {
         return WrappedCommand::None;
     };
-    let mut i = 0;
-    while i < argv.len() {
-        let raw = argv[i].as_str();
-        let tok = raw.strip_prefix('\\').unwrap_or(raw);
-        if is_env_assignment(tok) {
-            i += 1;
-            continue;
-        }
-        let base = tok.rsplit('/').next().unwrap_or(tok);
-        let rest = &argv[i + 1..];
-        if DASH_C_SHELLS.contains(&base) {
-            return inner_or_none(dash_c_argument(rest));
-        }
-        if base == "env" {
-            match env_split_string(rest) {
-                Some(inner) => return inner_or_none(Some(inner)),
-                // Plain `env` / `env FOO=1 cmd` — keep walking to the real
-                // program, exactly as `strip_wrapper_prefix` would.
-                None => {
-                    i += 1;
-                    continue;
-                }
+    match resolve_program_word(&argv) {
+        Ok(word) if word.lookup => WrappedCommand::None,
+        Ok(word) => {
+            // `xargs` runs its whole argv, whatever program heads it.
+            let at = word.xargs_at.unwrap_or(word.index);
+            match argv.get(at) {
+                Some(program) => inner_or_none(carried_string(program, &argv[at + 1..])),
+                None => WrappedCommand::None,
             }
         }
-        if base == "xargs" {
-            return inner_or_none(xargs_argument(rest));
-        }
-        if COMMAND_WRAPPERS.contains(&tok) {
-            i += 1;
-            continue;
-        }
-        return WrappedCommand::None;
+        // #8735 round 2: an option the resolver cannot measure hides the
+        // program, so the first word that carries a command string stands in,
+        // as `evaluator_at` does for the credential rules.
+        Err(Unresolved) => (0..argv.len())
+            .find_map(|at| carried_string(&argv[at], &argv[at + 1..]))
+            .map_or(WrappedCommand::None, |inner| inner_or_none(Some(inner))),
     }
-    WrappedCommand::None
+}
+
+/// The command string word `program` runs from its arguments `rest`, if it
+/// is a carrier: a shell's `-c`, `env`/`genv` `-S`, `flock -c`, `xargs`' argv
+/// or `eval`'s operands.
+fn carried_string(program: &str, rest: &[String]) -> Option<String> {
+    let tok = program.strip_prefix('\\').unwrap_or(program);
+    let base = tok.rsplit('/').next().unwrap_or(tok);
+    match base {
+        _ if DASH_C_SHELLS.contains(&base) => dash_c_argument(rest),
+        "env" | "genv" => env_split_string(rest),
+        "flock" => flock_command(rest),
+        "xargs" => xargs_argument(rest),
+        // #8756: `eval "pm2 jlist"` runs its operands; unread, it hid them.
+        "eval" => {
+            let operands = rest
+                .split_first()
+                .filter(|(head, _)| *head == "--")
+                .map_or(rest, |(_, tail)| tail);
+            Some(operands.join(" "))
+        }
+        _ => None,
+    }
 }
 
 /// Classify an extracted inner command string.
@@ -195,24 +181,46 @@ fn inner_or_none(inner: Option<String>) -> WrappedCommand {
     }
 }
 
+/// Shell long options that consume the FOLLOWING token as their value.
+const SHELL_LONG_OPTS_WITH_ARG: &[&str] = &["--rcfile", "--init-file"];
+
 /// The command string a shell's `-c` option carries, if present.
 ///
-/// Why: shells accept their options in any order and in clusters, so scanning
-/// for the exact token `-c` alone would miss `bash -lc "…"`, a spelling a
-/// wrapper script reaches for routinely.
-/// What: the token after the first `-c`, or after the first short cluster
-/// (`-`-led, not `--`-led) ending in `c`. `None` when the shell runs a script
-/// file instead, or when `-c` ends the argv.
-/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
+/// Why: shells accept their options in any order and in clusters (`bash -lc`).
+/// `-c` is a flag, not an option taking a value: the shell runs its FIRST
+/// operand, so reading the token after `-c` missed `bash -ce "…"`,
+/// `bash -c -e "…"` and `sh -c -- "…"` (#8756).
+/// What: walks the options — a `-`/`+` short cluster (an `o`/`O` in it takes
+/// the next token as its value), a long option (those in
+/// [`SHELL_LONG_OPTS_WITH_ARG`] take the next token), and a `--` or `-` that
+/// ends them. When a `-` cluster contained `c`, the first operand is the
+/// command string. `None` when the shell runs a script file instead, or when
+/// no operand follows.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
+/// `refuses_a_dump_through_every_dash_c_spelling`.
 fn dash_c_argument(rest: &[String]) -> Option<String> {
-    for (n, tok) in rest.iter().enumerate() {
-        let cluster =
-            tok.starts_with('-') && !tok.starts_with("--") && tok.len() > 1 && tok.ends_with('c');
-        if tok == "-c" || cluster {
-            return rest.get(n + 1).cloned();
+    let mut saw_c = false;
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        if tok == "--" || tok == "-" {
+            i += 1;
+            break;
         }
+        if tok.starts_with("--") {
+            i += if SHELL_LONG_OPTS_WITH_ARG.contains(&tok.as_str()) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        let Some(cluster) = tok.strip_prefix('-').or_else(|| tok.strip_prefix('+')) else {
+            break;
+        };
+        saw_c |= tok.starts_with('-') && cluster.contains('c');
+        i += if cluster.contains(['o', 'O']) { 2 } else { 1 };
     }
-    None
+    if saw_c { rest.get(i).cloned() } else { None }
 }
 
 /// The command string `env -S` / `--split-string` carries, if present.
@@ -220,24 +228,88 @@ fn dash_c_argument(rest: &[String]) -> Option<String> {
 /// Why: `env -S "git worktree remove …"` runs the string as a command, and
 /// [`strip_wrapper_prefix`] refuses a wrapper followed by a flag — so this shape
 /// resolved to nothing at all and every rule allowed it.
-/// What: handles `-S <str>`, `-S<str>` and `--split-string=<str>`. `None` for a
-/// plain `env`, which stays an ordinary wrapper for the caller to walk past.
+/// What: handles `-S <str>`, `-S<str>`, a flag cluster ending in `S`
+/// (`-iS <str>`) and `--split-string[=]<str>`, read only among env's own
+/// options — `env git commit -S` signs a commit. `None` for a plain `env`.
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
 fn env_split_string(rest: &[String]) -> Option<String> {
-    for (n, tok) in rest.iter().enumerate() {
-        if tok == "-S" || tok == "--split-string" {
-            return rest.get(n + 1).cloned();
+    option_string(
+        rest,
+        'S',
+        "--split-string",
+        &["-C", "-P", "-u", "--chdir", "--unset"],
+    )
+}
+
+/// The command string `flock -c` / `--command` runs, before or right after
+/// the lock file (`flock -c 'cmd' FILE`, `flock FILE -c 'cmd'`).
+fn flock_command(rest: &[String]) -> Option<String> {
+    let valued = &["-E", "-w", "--conflict-exit-code", "--timeout", "--wait"];
+    if let Some(string) = option_string(rest, 'c', "--command", valued) {
+        return Some(string);
+    }
+    let file = options_end(rest, valued);
+    option_string(rest.get(file + 1..)?, 'c', "--command", &[])
+}
+
+/// The value of the string option `-<short>` / `<long>` among the leading
+/// options of `rest`; `valued` options there consume the next token.
+fn option_string(rest: &[String], short: char, long: &str, valued: &[&str]) -> Option<String> {
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        // `env -` is `-i`; `--` or any other non-option ends the options.
+        if tok == "-" {
+            i += 1;
+            continue;
         }
-        if let Some(value) = tok.strip_prefix("--split-string=") {
+        if tok == "--" || !tok.starts_with('-') {
+            return None;
+        }
+        if tok == long {
+            return rest.get(i + 1).cloned();
+        }
+        if let Some(value) = tok.strip_prefix(long).and_then(|v| v.strip_prefix('=')) {
             return Some(value.to_string());
         }
-        if let Some(value) = tok.strip_prefix("-S")
-            && !value.is_empty()
-        {
-            return Some(value.to_string());
+        let mut width = 1;
+        if !tok.starts_with("--") {
+            for (at, c) in tok.char_indices().skip(1) {
+                let value = &tok[at + c.len_utf8()..];
+                if c == short {
+                    // Letters before it were flags (`-iS`); the rest is its value.
+                    return if value.is_empty() {
+                        rest.get(i + 1).cloned()
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                if valued.iter().any(|v| v.len() == 2 && v.ends_with(c)) {
+                    // A value-taking letter ends the cluster (`-uNAME`, `-u NAME`).
+                    width = if value.is_empty() { 2 } else { 1 };
+                    break;
+                }
+            }
+        } else if valued.contains(&tok.as_str()) {
+            width = 2;
         }
+        i += width;
     }
     None
+}
+
+/// The index of the first non-option word of `rest`.
+fn options_end(rest: &[String], valued: &[&str]) -> usize {
+    let mut i = 0;
+    while let Some(tok) = rest.get(i) {
+        if tok == "--" {
+            return i + 1;
+        }
+        if !tok.starts_with('-') || tok == "-" {
+            return i;
+        }
+        i += if valued.contains(&tok.as_str()) { 2 } else { 1 };
+    }
+    i
 }
 
 /// The command `xargs` would run, re-joined into a command string.
@@ -403,10 +475,11 @@ impl QuoteScan {
 ///
 /// Why: to reach the real subcommand the parser must skip both the flag and its
 /// argument (`git -C /path commit` → skip `-C` and `/path`, land on `commit`).
-/// The `=`-joined forms (`--git-dir=/p`) carry their value in the same token
-/// and are handled separately.
-/// What: the exhaustive set of value-taking git global options in their
-/// space-separated spelling.
+/// The `=`-joined long forms (`--git-dir=/p`) carry their value in the same
+/// token; only a long name listed here may be spelled that way.
+/// What: every value-taking git global option git 2.54 documents, in its
+/// space-separated spelling. `--attr-source` is here since #8439: it was
+/// walked as valueless, so its VALUE was read as the subcommand.
 const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
     "-C",
     "-c",
@@ -415,7 +488,154 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
     "--namespace",
     "--super-prefix",
     "--config-env",
+    "--attr-source",
 ];
+
+/// Git global options that take no value (#8439).
+///
+/// Why: every dash-led token that was not in [`GIT_GLOBAL_OPTS_WITH_ARG`] used
+/// to be walked as valueless, so an option git gives a value — the internal
+/// `--shallow-file <path>`, or any option a later git adds — had its value read
+/// as the subcommand, and `git --shallow-file status checkout -- f` resolved to
+/// `status`. The walk now knows every option it skips and stops on any other.
+/// What: the valueless global options git 2.54 documents. `--exec-path` and
+/// `--list-cmds` also take an `=`-joined value; see [`GIT_GLOBAL_OPTS_JOINED`].
+const GIT_GLOBAL_FLAGS: &[&str] = &[
+    "-p",
+    "--paginate",
+    "-P",
+    "--no-pager",
+    "--bare",
+    "--no-replace-objects",
+    "--no-lazy-fetch",
+    "--no-optional-locks",
+    "--no-advice",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--exec-path",
+    "--html-path",
+    "--man-path",
+    "--info-path",
+    "--version",
+    "--help",
+    "-v",
+    "-h",
+];
+
+/// Long global options that accept only an `=`-joined value (#8439).
+const GIT_GLOBAL_OPTS_JOINED: &[&str] = &["--exec-path", "--list-cmds"];
+
+/// Where the global-option walk of a git argv stopped.
+///
+/// Why (#8439): `None` from [`git_argv_at_subcommand`] used to mean only "not
+/// git, or no subcommand". An unknown global option now also stops the walk,
+/// and a caller deciding a deny must tell that apart from "not git" — see
+/// [`git_subcommand_candidates`].
+/// What: the index of the subcommand, the end of the argv, or an option the
+/// walk does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitWalk {
+    /// The subcommand token's index.
+    At(usize),
+    /// Only known global options; no subcommand follows.
+    End,
+    /// An unknown global option, a value-taking one with no value, or `--`.
+    Unknown,
+}
+
+/// Walk git's global options from `start` (the token after `git`).
+///
+/// Why: one walk serves the strict resolver and the candidate list, so the two
+/// cannot disagree on which options are known.
+/// What: skips [`GIT_GLOBAL_FLAGS`], a [`GIT_GLOBAL_OPTS_WITH_ARG`] option plus
+/// its value (or `=`-joined for a long one), and a [`GIT_GLOBAL_OPTS_JOINED`]
+/// `=` form. Anything else dash-led, a missing value, or `--` is
+/// [`GitWalk::Unknown`].
+/// Test: `git_subcommand_none_for_an_unknown_global_flag`,
+/// `git_subcommand_resolves_every_known_global_flag`.
+fn walk_git_globals(argv: &[String], start: usize) -> GitWalk {
+    let mut i = start;
+    while let Some(tok) = argv.get(i) {
+        if !tok.starts_with('-') || tok == "-" {
+            return GitWalk::At(i);
+        }
+        if GIT_GLOBAL_FLAGS.contains(&tok.as_str()) {
+            i += 1;
+            continue;
+        }
+        if GIT_GLOBAL_OPTS_WITH_ARG.contains(&tok.as_str()) {
+            if argv.get(i + 1).is_none() {
+                return GitWalk::Unknown;
+            }
+            i += 2;
+            continue;
+        }
+        let joined = tok.split_once('=').is_some_and(|(name, _)| {
+            name.starts_with("--")
+                && (GIT_GLOBAL_OPTS_WITH_ARG.contains(&name)
+                    || GIT_GLOBAL_OPTS_JOINED.contains(&name))
+        });
+        if joined {
+            i += 1;
+            continue;
+        }
+        return GitWalk::Unknown;
+    }
+    GitWalk::End
+}
+
+/// The argv of `segment` and the index of its program token, when that
+/// program is `git`.
+///
+/// Why: shared by the strict resolver and the candidate list.
+/// What: shlex-split (`None` on unbalanced quotes), [`strip_wrapper_prefix`],
+/// and a `git` basename check.
+fn git_program_argv(segment: &str) -> Option<(Vec<String>, usize)> {
+    let argv = shlex::split(segment)?;
+    let i = strip_wrapper_prefix(&argv)?;
+    let program = argv.get(i)?;
+    let program = program.strip_prefix('\\').unwrap_or(program);
+    if program.rsplit('/').next().unwrap_or(program) != "git" {
+        return None;
+    }
+    Some((argv, i))
+}
+
+/// Every token of a git segment that could be its subcommand (#8439).
+///
+/// Why: a rule that DENIES a git verb cannot treat an unresolvable git argv as
+/// "not that verb" — that is how `git --shallow-file status checkout -- f`
+/// passed the main-checkout rule. When the global options resolve, the one
+/// subcommand is the answer; when they do not, every later token that is not
+/// an option might be it, and a deny rule must check each.
+/// What: `None` when the segment is not git (or does not lex). Otherwise the
+/// argv and the candidate indices: the resolved subcommand alone, none when
+/// only global options follow `git`, or — for [`GitWalk::Unknown`] — every
+/// later token that does not start with `-`.
+/// Test: `git_subcommand_candidates_cover_every_position_when_unresolved`.
+pub(crate) fn git_subcommand_candidates(segment: &str) -> Option<(Vec<String>, Vec<usize>)> {
+    let (argv, program) = git_program_argv(segment)?;
+    let candidates = match walk_git_globals(&argv, program + 1) {
+        GitWalk::At(i) => vec![i],
+        GitWalk::End => Vec::new(),
+        GitWalk::Unknown => (program + 1..argv.len())
+            .filter(|&i| !argv[i].starts_with('-'))
+            .collect(),
+    };
+    Some((argv, candidates))
+}
+
+/// Whether any candidate subcommand of `segment` is `verb` (#8439).
+///
+/// Why: the fail-closed form of `git_subcommand(segment) == Some(verb)` for a
+/// rule that denies `verb`.
+/// What: [`git_subcommand_candidates`] contains a token equal to `verb`.
+/// Test: `git_subcommand_candidates_cover_every_position_when_unresolved`.
+pub(crate) fn git_may_run(segment: &str, verb: &str) -> bool {
+    git_subcommand_candidates(segment).is_some_and(|(argv, at)| at.iter().any(|&i| argv[i] == verb))
+}
 
 /// Resolve the real `git` subcommand of a single pipeline segment.
 ///
@@ -434,11 +654,12 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// (quote-aware; `None` on unbalanced quotes →
 /// caller falls back), delegates the leading `KEY=value`/wrapper skip to
 /// [`strip_wrapper_prefix`], requires the program basename to be `git`, then
-/// walks past global options — those in [`GIT_GLOBAL_OPTS_WITH_ARG`] consume
-/// an extra token, `=`-joined long options consume none, other dash-prefixed
-/// tokens are valueless global flags — and returns the first non-option token
-/// (the subcommand). `None` when the segment is not `git`, is unparseable, or
-/// has no subcommand after the options.
+/// walks past global options ([`walk_git_globals`]) and returns the first
+/// non-option token (the subcommand). `None` when the segment is not `git`, is
+/// unparseable, has no subcommand after the options, or carries a global
+/// option the walk does not know (#8439). A rule that DENIES a verb must not
+/// read that `None` as "not this verb" — it asks [`git_may_run`] or
+/// [`git_subcommand_candidates`] instead.
 /// This is where every git rule in the guard decides that a segment IS a git
 /// invocation, and it decides on POSITION: the program token, resolved through
 /// the wrapper/env-assignment prefix and its own basename. `git` inside any
@@ -468,49 +689,17 @@ pub(crate) fn git_subcommand(segment: &str) -> Option<String> {
 /// What: the body [`git_subcommand`] used to carry — shlex-split (`None` on
 /// unbalanced quotes), [`strip_wrapper_prefix`], a `git` basename check, then
 /// the global-option walk described on [`git_subcommand`]. Returns the argv
-/// alongside the index of the first non-option token.
+/// alongside the index of the first non-option token; `None` on an unknown
+/// global option (#8439).
 /// Test: every `git_subcommand_*` test, plus
 /// `git_output_file_finds_both_spellings`.
 pub(crate) fn git_argv_at_subcommand(segment: &str) -> Option<(Vec<String>, usize)> {
-    let argv = shlex::split(segment)?;
-    let mut i = strip_wrapper_prefix(&argv)?;
-    let program = argv.get(i)?;
-    let program = program.strip_prefix('\\').unwrap_or(program);
-    if program.rsplit('/').next().unwrap_or(program) != "git" {
-        return None;
+    let (argv, program) = git_program_argv(segment)?;
+    // #8439: an unknown global option is `None`, never a guess at its arity.
+    match walk_git_globals(&argv, program + 1) {
+        GitWalk::At(i) => Some((argv, i)),
+        GitWalk::End | GitWalk::Unknown => None,
     }
-    i += 1;
-    // Skip git global options to reach the subcommand.
-    while i < argv.len() {
-        let tok = &argv[i];
-        if tok == "--" {
-            // POSIX end-of-options; git has no subcommand before `--`, so
-            // whatever follows is not a subcommand context we allowlist.
-            return None;
-        }
-        if tok.starts_with("--") {
-            if tok.contains('=') {
-                i += 1;
-                continue;
-            }
-            if GIT_GLOBAL_OPTS_WITH_ARG.contains(&tok.as_str()) {
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if tok.starts_with('-') && tok.len() > 1 {
-            if GIT_GLOBAL_OPTS_WITH_ARG.contains(&tok.as_str()) {
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        return Some((argv, i));
-    }
-    None
 }
 
 /// Per-subcommand options whose value is a path git WRITES, beyond the
@@ -559,6 +748,8 @@ const GIT_OUTPUT_OPT: &[&str] = &["--output"];
 /// options. Two subcommands are decided by shape rather than by an option:
 /// `format-patch` writes unless `--stdout` is present, and `bundle create`
 /// writes to its first positional unless that positional is `-` (stdout).
+/// Every candidate subcommand is asked when the global options do not resolve
+/// ([`git_subcommand_candidates`], #8439).
 /// `Some("")` when the write is real but names no readable path — a valueless
 /// flag, or `format-patch`'s implicit working directory: the caller still
 /// denies and has no path to report. `None` when the segment is not a git
@@ -573,7 +764,16 @@ const GIT_OUTPUT_OPT: &[&str] = &["--output"];
 /// `git_diff_output_flag_is_refused_as_a_file_write` and
 /// `git_short_output_options_are_refused_as_file_writes`.
 pub(crate) fn git_file_write_target(segment: &str) -> Option<String> {
-    let (argv, subcommand) = git_argv_at_subcommand(segment)?;
+    // #8439: an unresolvable global option leaves several tokens that could be
+    // the subcommand; a write through any of them is a write.
+    let (argv, candidates) = git_subcommand_candidates(segment)?;
+    candidates
+        .into_iter()
+        .find_map(|at| write_target_at(&argv, at))
+}
+
+/// [`git_file_write_target`] for the subcommand at index `subcommand`.
+fn write_target_at(argv: &[String], subcommand: usize) -> Option<String> {
     let sub = argv[subcommand].as_str();
     let args = &argv[subcommand + 1..];
     if sub == "bundle" {
@@ -756,6 +956,58 @@ mod tests {
         assert_eq!(git_subcommand("ls -la"), None);
         assert_eq!(git_subcommand("cargo test"), None);
         assert_eq!(git_subcommand("gitfoo status"), None);
+    }
+
+    // #8439: an unknown global option stops the walk; its value is never read
+    // as the subcommand.
+    #[test]
+    fn git_subcommand_none_for_an_unknown_global_flag() {
+        for command in [
+            "git --shallow-file status checkout -- Cargo.toml",
+            "git --shallow-file log reset --hard",
+            "git --bogus=x status",
+            "git -C",
+            "git -- status",
+        ] {
+            assert_eq!(git_subcommand(command), None, "{command}");
+            assert_eq!(git_argv_at_subcommand(command), None, "{command}");
+        }
+    }
+
+    // #8439: every documented global option still resolves, including the
+    // valued `--attr-source` that used to be walked as valueless.
+    #[test]
+    fn git_subcommand_resolves_every_known_global_flag() {
+        for (command, sub) in [
+            (
+                "git --attr-source status checkout -- Cargo.toml",
+                "checkout",
+            ),
+            ("git --attr-source=HEAD log", "log"),
+            ("git --no-pager -P --no-optional-locks diff", "diff"),
+            ("git --exec-path=/x --literal-pathspecs status", "status"),
+            ("git --config-env=a=B commit", "commit"),
+        ] {
+            assert_eq!(git_subcommand(command).as_deref(), Some(sub), "{command}");
+        }
+        assert_eq!(git_subcommand("git --version"), None);
+    }
+
+    // #8439: an unresolved walk offers every later non-option token, so a
+    // deny rule sees `checkout` behind `--shallow-file status`.
+    #[test]
+    fn git_subcommand_candidates_cover_every_position_when_unresolved() {
+        let (argv, at) = git_subcommand_candidates("git --shallow-file status checkout -- f")
+            .expect("a git segment");
+        let names: Vec<&str> = at.iter().map(|&i| argv[i].as_str()).collect();
+        assert_eq!(names, ["status", "checkout", "f"]);
+        assert!(git_may_run("git --shallow-file x apply p.diff", "apply"));
+        assert!(!git_may_run("git status", "apply"));
+        assert!(!git_may_run("ls apply", "apply"));
+        assert_eq!(
+            git_file_write_target("git --shallow-file x diff --output=/tmp/o.diff").as_deref(),
+            Some("/tmp/o.diff")
+        );
     }
 
     #[test]
