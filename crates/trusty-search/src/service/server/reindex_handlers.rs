@@ -21,8 +21,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{
-    root_gate, spawn_claimed_reindex, try_claim_reindex, ReindexClaimError, ReindexProgress,
-    ReindexStatus,
+    root_gate, spawn_claimed_reindex, ReindexClaimError, ReindexProgress, ReindexStatus,
 };
 
 use super::degraded::write_quarantine_refusal;
@@ -142,8 +141,9 @@ pub(crate) async fn reindex_report(
     // #8889: claim the index before anything below changes it — the root
     // override re-registers the handle and the progress entry is replaced — so
     // a refused second request leaves the running job and its stream intact.
+    // #9059: a held index is refused at the claim, naming the invalid glob.
     let force = body.as_ref().and_then(|req| req.force).unwrap_or(false);
-    let claim = try_claim_reindex(&index_id, "http", force)
+    let claim = crate::service::exclude_hold::claim_reindex(&handle, "http", force)
         .map_err(|refused| claim_refusal(&index_id, refused))?;
 
     // If caller supplied a root_path and the stored handle doesn't have one
@@ -418,9 +418,11 @@ pub(crate) async fn reindex_report(
 /// follow it, and a broken guard must read as the daemon's fault, not the
 /// caller's.
 /// What: `AlreadyRunning` → `409` naming the running job and its stream URL;
-/// `GuardUnavailable` → `503`. Both carry `queued: false`.
+/// `GuardUnavailable` → `503`; `Held` (#9059) → `409 index_held` naming the
+/// invalid globs. All carry `queued: false`.
 /// Test: `a_second_reindex_request_is_refused_while_the_first_runs`,
-/// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`.
+/// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`,
+/// `every_ingest_path_refuses_a_held_index`.
 fn claim_refusal(
     index_id: &IndexId,
     refused: ReindexClaimError,
@@ -450,6 +452,20 @@ fn claim_refusal(
                 "retryable": false,
             }),
         ),
+        // #9059: the same 409 body a held index answers a pushed write with.
+        ReindexClaimError::Held {
+            index_id,
+            invalid_exclude_globs,
+            ..
+        } => {
+            let hold = crate::service::exclude_hold::ExcludeHold {
+                index_id,
+                patterns: invalid_exclude_globs,
+            };
+            let (status, mut body) = hold.refusal();
+            body["queued"] = false.into();
+            (status, body)
+        }
     }
 }
 

@@ -131,8 +131,13 @@ fn resolve_failure(path: &Path, err: &std::io::Error) -> Admission {
 /// it too, so no ingest path admits a file the walker skips.
 /// What: check configured subtrees and filters, then the walker's ignore engine along only this path.
 /// Test: `live_admission_observes_registry_replacement`,
-/// `every_ingest_path_skips_a_file_the_walker_excludes`.
+/// `every_ingest_path_skips_a_file_the_walker_excludes`,
+/// `every_ingest_path_refuses_a_held_index`.
 pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
+    // #9059: a held index admits nothing and removes nothing.
+    if crate::service::exclude_hold::hold(handle).is_some() {
+        return Admission::Undetermined;
+    }
     let path = match path.canonicalize() {
         Ok(path) => path,
         Err(err) => return resolve_failure(path, &err),
@@ -291,7 +296,10 @@ pub(crate) async fn apply_modified(
             .await;
         }
         Admission::Undetermined => {
-            defer_to_rescan(index_id, path, "path could not be resolved", rescan);
+            // #9059: name the hold, not a resolution failure, when that is why.
+            let reason = crate::service::exclude_hold::hold(&handle)
+                .map_or_else(|| "path could not be resolved".to_string(), |h| h.reason());
+            defer_to_rescan(index_id, path, &reason, rescan);
         }
     }
 }

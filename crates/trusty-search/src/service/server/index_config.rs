@@ -62,8 +62,9 @@ pub struct IndexConfigView {
     pub extensions: Vec<String>,
     /// Glob patterns excluded on top of the built-in ignores.
     pub exclude_globs: Vec<String>,
-    /// #8922: the `exclude_globs` entries that do not parse and are skipped.
-    /// Only a glob persisted before entry validation can land here.
+    /// #8922: the `exclude_globs` entries that do not parse. Only a glob
+    /// persisted before entry validation can land here. #9059: non-empty means
+    /// the index is held — it indexes nothing until a PATCH fixes them.
     #[serde(default)]
     pub invalid_exclude_globs: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
