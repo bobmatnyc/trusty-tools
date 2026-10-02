@@ -35,6 +35,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
 | `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
+| `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
 | `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
 | `tm-circuit-breaker` | pm-framework | no | Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM |
@@ -52,7 +53,6 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |
 | `tm-slack` | pm-workflow | no | Deliver messages, canvases, and files to the user via Slack — routes through the native slack-mcp connector, not claude.ai's hosted Slack connector; canvas creation alone is never delivery |
-| `tm-supervisor-setup` | pm-reference | yes | Set up the Architect, the one fleet supervisor session per user, with `tm fleet init` — its project directory, a local-only git repo, the supervisor profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
 | `tm-teaching-templates` | pm-workflow | no | Progressive-disclosure teaching templates for onboarding users to trusty-mpm concepts |
 | `tm-ticketing` | pm-workflow | yes | The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, attribution, and the project-root TICKETING.md that overrides these defaults |
 | `tm-tool-usage-guide` | pm-reference | no | Detailed tool usage patterns and examples for the trusty-mpm PM agent |

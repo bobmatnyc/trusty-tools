@@ -1,14 +1,14 @@
 ---
-name: tm-supervisor-setup
-description: Set up the Architect, the one fleet supervisor session per user, with `tm fleet init` — its project directory, a local-only git repo, the supervisor profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect.
+name: tm-architect-setup
+description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect.
 user-invocable: true
 version: "0.1.0"
 category: pm-reference
-tags: [architect, supervisor, fleet, setup, pm-recommended]
+tags: [architect, fleet, setup, pm-recommended]
 effort: medium
 ---
 
-# tm-supervisor-setup — Set Up the Architect
+# tm-architect-setup — Set Up the Architect
 
 🔴 **`tm fleet init` and `tm fleet status` ship; `add` and `remove` do not.**
 They land in phase P3 of trusty-tools #8436. Run `tm fleet --help` first.
@@ -17,9 +17,9 @@ When it reports an unknown command, your `tm` predates `tm fleet`: use
 
 ## What the Architect is
 
-The Architect is the one supervisor session per user. It watches the PM
+The Architect is the one fleet session per user. It watches the PM
 sessions of the projects you name, relays between them and you, and does not
-implement. It runs the supervisor profile (trusty-tools #8453): the supervisor
+implement. It runs the `supervisor` profile (trusty-tools #8453): the Architect
 instructions, the `trusty-mpm-supervisor` output style, and the Opus tier
 alias `opus` as its model.
 
@@ -29,7 +29,7 @@ alias `opus` as its model.
    `~/trusty-mpm-projects/architect`. `--dir <path>` overrides the location.
 2. **One Architect per user.** A second run in the same directory changes
    nothing and says so. `init` refuses when another allow-listed project
-   already requests the supervisor profile, or when `tm-architect` runs in
+   already requests the `supervisor` profile, or when `tm-architect` runs in
    another directory. Editing the watched set is `tm fleet add` (P3).
 3. **Local git repo, no remote.** It runs `git init` and adds no remote. The
    repo never inherits an `origin`. A private remote is added only when you
@@ -50,7 +50,7 @@ alias `opus` as its model.
    #3981 rule that a project must not grant itself the profile. Without this
    entry the launch falls back to the PM profile.
 7. **Launch.** It starts the Architect's session detached, as tmux session
-   `tm-architect` on the `opus` alias, and records the supervisor launch
+   `tm-architect` on the `opus` alias, and records the Architect launch
    stamp on that session. Attach with `tmux attach -t =tm-architect`.
    It then starts the poller, `scripts/fleet-poll.py`, in tmux session
    `tm-architect-poll` unless it already runs; a poller that cannot start
@@ -67,7 +67,7 @@ project's notification hook (#8392). `tm fleet remove <dir>` removes that
 project's hook only and leaves every other watched project unchanged.
 `tm fleet status [--dir <path>] [--json]` reports four checks, read-only:
 the allowlist entry, the profile request, the running `tm-architect` session
-in that directory, and its supervisor launch stamp. It exits 1 when any check
+in that directory, and its Architect launch stamp. It exits 1 when any check
 fails. The watched set joins the report in P3.
 
 ## Without `tm fleet`
@@ -98,10 +98,10 @@ Then launch the session: `tm launch "$dir"`.
 - `git -C "$dir" remote` prints nothing.
 - `tm doctor`, run in the Architect's directory, shows the `session_profile`
   row saying that a launch here runs the `supervisor` profile.
-- The running session shows the `opus` model and the supervisor output style.
+- The running session shows the `opus` model and the Architect output style (`trusty-mpm-supervisor`).
 
 ## Rules
 
 - Never create a second Architect. Edit the watched set of the existing one.
 - Never add a public remote to the Architect's repo.
-- Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The supervisor profile replaces it.
+- Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The `supervisor` profile replaces it.

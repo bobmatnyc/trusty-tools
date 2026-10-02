@@ -198,7 +198,12 @@ pub async fn register_index_reporting_collision(
             let refusal = format!("daemon returned {} for POST /indexes", resp.status());
             // #7758: only the root-collision 409 carries `existing_id`; it is
             // the sole refusal a reindex can satisfy instead.
-            let body = if resp.status() == reqwest::StatusCode::CONFLICT {
+            // #8922: a 400 (refused exclude glob) names the pattern only in its
+            // body, so it is read too.
+            let status = resp.status();
+            let body = if status == reqwest::StatusCode::CONFLICT
+                || status == reqwest::StatusCode::BAD_REQUEST
+            {
                 resp.json::<serde_json::Value>().await.ok()
             } else {
                 None
@@ -220,6 +225,11 @@ pub async fn register_index_reporting_collision(
             // in its body; print that text rather than the bare status line.
             if field("existing_index_id").is_some() {
                 if let Some(reason) = field("error") {
+                    anyhow::bail!("{refusal}: {reason}");
+                }
+            }
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                if let Some(reason) = field("message").or_else(|| field("error")) {
                     anyhow::bail!("{refusal}: {reason}");
                 }
             }

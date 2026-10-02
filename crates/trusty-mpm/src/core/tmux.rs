@@ -387,6 +387,39 @@ pub fn run_tmux_argv(args: &[String]) -> std::io::Result<std::process::Output> {
     run_tmux_argv_with_bin(&resolve_tmux_binary_or_bare(), args)
 }
 
+/// [`run_tmux_argv`] under a deadline: a tmux that outlives `budget` is
+/// killed with its process group, and the call is `ErrorKind::TimedOut`.
+///
+/// Why: #9001 — pm-guard lists tmux panes inside a hook Claude Code kills at
+/// 5 s, and a stopped tmux server held the unbounded listing for minutes.
+/// What: the host-state guard, then [`crate::core::bounded_proc::run_bounded`]
+/// over the resolved binary, stdin from `/dev/null`. It is not TCC-disclaimed:
+/// the disclaimed spawns have no kill-on-timeout, and a tmux client that only
+/// reads its socket touches no TCC-protected resource.
+/// Test: `a_stopped_tmux_server_times_out_the_listing`.
+pub fn run_tmux_argv_bounded(
+    args: &[String],
+    budget: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use crate::core::bounded_proc::{BoundedError, run_bounded};
+    host_state_guard()?;
+    let mut cmd = std::process::Command::new(resolve_tmux_binary_or_bare());
+    cmd.args(args).stdin(std::process::Stdio::null());
+    match run_bounded(cmd, budget) {
+        Ok(out) => Ok(std::process::Output {
+            status: out.status,
+            stdout: out.stdout.into_bytes(),
+            stderr: out.stderr.into_bytes(),
+        }),
+        Err(BoundedError::Spawn(err)) => Err(err),
+        Err(BoundedError::TimedOut) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("tmux did not answer within {budget:?}"),
+        )),
+        Err(err) => Err(std::io::Error::other(format!("tmux {err}"))),
+    }
+}
+
 /// Build the exact ordered [`TmuxCommand`] sequence [`create_managed_session`]
 /// issues, given already-resolved tmux options (#3004).
 ///

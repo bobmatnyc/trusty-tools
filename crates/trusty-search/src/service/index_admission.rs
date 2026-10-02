@@ -4,25 +4,34 @@ use crate::service::walker::{self, walk_source_files_with_options, WalkOptions};
 use crate::service::watch_rescan::RescanGate;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
-    let include_paths: Vec<PathBuf> = if handle.include_paths.is_empty() {
+/// The subtrees an index walks: its `include_paths`, or its whole root.
+pub(crate) fn configured_roots(handle: &IndexHandle) -> Vec<PathBuf> {
+    if handle.include_paths.is_empty() {
         vec![handle.root_path.clone()]
     } else {
         handle.include_paths.clone()
-    };
-    let mut walked_files: Vec<PathBuf> = Vec::new();
-    let mut total_skipped_dirs: usize = 0;
-    // Issue #1372: resolve the per-index hygiene knobs onto the walk options.
-    // `data_file_max_bytes` is an `Option<u64>` on the handle's config source;
-    // it was already resolved to a concrete `u64` field on the handle, so the
-    // walker always receives a concrete cap.
-    let walk_opts = WalkOptions {
+    }
+}
+
+/// The walker options an index's hygiene knobs resolve to.
+///
+/// Issue #1372: `data_file_max_bytes` was already resolved to a concrete `u64`
+/// on the handle, so the walker always receives a concrete cap.
+pub(crate) fn walk_options(handle: &IndexHandle) -> WalkOptions {
+    WalkOptions {
         include_docs: handle.include_docs,
         respect_gitignore: handle.respect_gitignore,
         follow_links: handle.follow_links,
         extra_skip_dirs: handle.extra_skip_dirs.clone(),
         data_file_max_bytes: handle.data_file_max_bytes,
-    };
+    }
+}
+
+pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
+    let include_paths = configured_roots(handle);
+    let mut walked_files: Vec<PathBuf> = Vec::new();
+    let mut total_skipped_dirs: usize = 0;
+    let walk_opts = walk_options(handle);
     for subtree in &include_paths {
         let w = walk_source_files_with_options(subtree, &walk_opts);
         walked_files.extend(w.files);
@@ -40,7 +49,9 @@ pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
         skipped_dirs: total_skipped_dirs,
     }
 }
-fn configured_file(handle: &IndexHandle, path: &Path) -> bool {
+/// The per-index filters the walker applies after the walk: tombstones,
+/// `exclude_globs`, `extensions` and `path_filter`.
+pub(crate) fn configured_file(handle: &IndexHandle, path: &Path) -> bool {
     !tombstone_file(path)
         && !crate::core::repo_config::path_matches_any_glob(path, &handle.exclude_globs)
         && (handle.extensions.is_empty()
@@ -115,9 +126,12 @@ fn resolve_failure(path: &Path, err: &std::io::Error) -> Admission {
     }
 }
 
-/// Why: watcher saves must honor the same current policy as reindex.
+/// Why: watcher saves must honor the same current policy as reindex. #8922:
+/// boot reconcile, the reindex prune, the rescan sweep and `index_file` ask
+/// it too, so no ingest path admits a file the walker skips.
 /// What: check configured subtrees and filters, then the walker's ignore engine along only this path.
-/// Test: `live_admission_observes_registry_replacement`.
+/// Test: `live_admission_observes_registry_replacement`,
+/// `every_ingest_path_skips_a_file_the_walker_excludes`.
 pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
     let path = match path.canonicalize() {
         Ok(path) => path,
@@ -126,26 +140,16 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
     if !configured_file(handle, &path) {
         return Admission::Excluded;
     }
-    let roots = if handle.include_paths.is_empty() {
-        vec![handle.root_path.clone()]
-    } else {
-        handle.include_paths.clone()
-    };
-    let opts = WalkOptions {
-        include_docs: handle.include_docs,
-        respect_gitignore: handle.respect_gitignore,
-        follow_links: handle.follow_links,
-        extra_skip_dirs: handle.extra_skip_dirs.clone(),
-        data_file_max_bytes: handle.data_file_max_bytes,
-    };
+    let roots = configured_roots(handle);
+    let opts = walk_options(handle);
     // #7396: a root we could not resolve is not evidence that the file left the
     // index, so it downgrades the fall-through answer rather than being skipped.
-    let mut unresolved_root = false;
+    let mut undecided = false;
     for root in roots {
         let root = match root.canonicalize() {
             Ok(root) => root,
             Err(err) => {
-                unresolved_root |= resolve_failure(&root, &err) == Admission::Undetermined;
+                undecided |= resolve_failure(&root, &err) == Admission::Undetermined;
                 continue;
             }
         };
@@ -155,19 +159,47 @@ pub(crate) fn admits(handle: &IndexHandle, path: &Path) -> Admission {
         let target = path.clone();
         let mut builder = walker::configured_builder(&root, &opts);
         builder.filter_entry(move |entry| target.starts_with(entry.path()));
-        if builder
-            .build()
-            .filter_map(Result::ok)
-            .any(|entry| entry.path() == path && entry.file_type().is_some_and(|t| t.is_file()))
-        {
-            return Admission::Included;
+        match walk_verdict(builder.build(), &path) {
+            Some(Admission::Included) => return Admission::Included,
+            // #8922: a walk error along the path is not an exclusion (#7396).
+            Some(_) => undecided = true,
+            None => {}
         }
     }
-    if unresolved_root {
+    if undecided {
         Admission::Undetermined
     } else {
         Admission::Excluded
     }
+}
+
+/// What the targeted walk along `path` says about it.
+///
+/// Why (#8922): the walk used to drop its errors, so an `EACCES` or `ESTALE`
+/// on a directory along the path read as "the walker skips this file" and the
+/// caller purged it — the destructive answer #7396 forbids on an uncertain one.
+/// What: `Included` when the walk yields `path` as a file; `Undetermined` when
+/// it did not but some entry errored; `None` when it finished cleanly without
+/// the file, which is a genuine exclusion.
+/// Test: `a_walk_error_along_the_path_is_undetermined_not_excluded`.
+fn walk_verdict(
+    entries: impl IntoIterator<Item = Result<ignore::DirEntry, ignore::Error>>,
+    path: &Path,
+) -> Option<Admission> {
+    let mut errored = false;
+    for entry in entries {
+        match entry {
+            Ok(e) if e.path() == path && e.file_type().is_some_and(|t| t.is_file()) => {
+                return Some(Admission::Included);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "admission walk error");
+                errored = true;
+            }
+        }
+    }
+    errored.then_some(Admission::Undetermined)
 }
 
 /// Leave the index untouched and ask a rescan to settle this path.
@@ -429,6 +461,20 @@ mod tests {
             .chunk_ids_for_file("notes/maya.md")
             .await
             .is_empty());
+    }
+
+    /// #8922: a walk error along the path answers `Undetermined`, never
+    /// `Excluded`; a clean walk that misses the file is still an exclusion.
+    /// Fails with `walk_verdict` dropping errors as `filter_map(Result::ok)` did.
+    #[test]
+    fn a_walk_error_along_the_path_is_undetermined_not_excluded() {
+        let path = Path::new("/repo/src/lib.rs");
+        let denied = ignore::Error::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            walk_verdict(vec![Err(denied)], path),
+            Some(Admission::Undetermined)
+        );
+        assert_eq!(walk_verdict(Vec::new(), path), None);
     }
 
     /// Why (#7396): `apply_modified` used to route EVERY negative answer from

@@ -19,8 +19,18 @@
  * carry internal scope notes below that divider, and those never reach the
  * page. The `Roadmap:` line itself is stripped from the published prose;
  * it is a machine directive, not copy. Selected milestones are grouped by
- * stage, sorted by due date then milestone number, and rendered as
+ * stage, sorted by release order, due date, then milestone number, and rendered as
  * `### <heading>` blocks with a progress line and a link back to GitHub.
+ *
+ * Release order (#9085, owner ruling 23): a milestone description may carry a
+ * line `Release-order: <non-negative integer>`, anywhere in the description,
+ * with surrounding whitespace tolerated. Milestones that have the key sort
+ * first, in ascending key order; milestones without it follow, ordered by
+ * due date then milestone number (the order used before the key existed).
+ * Equal keys fall back to that same due-date/number order. A malformed value
+ * (`Release-order: soon`, `-1`, `2.5`, empty) counts as "no key" and prints a
+ * warning to stderr; the generator never aborts on it. The line is a machine
+ * directive and is stripped from the published prose, like `Roadmap:`.
  * The result REPLACES only the text between
  * `<!-- BEGIN GENERATED: roadmap -->` / `<!-- END GENERATED: roadmap -->`
  * markers (`scripts/check_generated_regions.sh`'s marker syntax) in the
@@ -37,7 +47,8 @@
  *
  * Test: scripts/roadmap/generate.test.mjs — splice-preserves-hand-written-
  * text, idempotency, below-the-divider text never appears in output, and a
- * milestone with no `Roadmap:` line is excluded.
+ * milestone with no `Roadmap:` line is excluded; release-order ordering is
+ * covered by the `release-order` tests.
  *
  * Usage:
  *   node scripts/roadmap/generate.mjs --crate trusty-mpm \
@@ -71,6 +82,32 @@ function endLine(id = REGION_ID) {
   return `<!-- END GENERATED: ${id} -->`;
 }
 
+const RELEASE_ORDER_LINE = /^\s*Release-order:(.*)$/im;
+
+/**
+ * Parse a milestone description's `Release-order:` key (#9085).
+ *
+ * Returns the non-negative integer, or `null` when the line is absent or its
+ * value is malformed; a malformed value also warns on stderr (`label` names
+ * the milestone) and never throws.
+ */
+function parseReleaseOrder(description, label = "milestone") {
+  const desc = typeof description === "string" ? description : "";
+  const match = desc.match(RELEASE_ORDER_LINE);
+  if (!match) {
+    return null;
+  }
+  const raw = match[1].trim();
+  const value = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(value)) {
+    console.error(
+      `warning: ${label}: ignoring malformed Release-order value ${JSON.stringify(raw)} (expected a non-negative integer)`,
+    );
+    return null;
+  }
+  return value;
+}
+
 /**
  * Extract the `{crate, stage, body}` a milestone's description publishes,
  * or `null` when it carries no `Roadmap:` line.
@@ -98,7 +135,9 @@ function parseMilestoneRoadmap(description) {
     return null;
   }
 
-  const bodyLines = lines.slice(0, roadmapIdx);
+  const bodyLines = lines
+    .slice(0, roadmapIdx)
+    .filter((line) => !RELEASE_ORDER_LINE.test(line));
   while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1].trim() === "") {
     bodyLines.pop();
   }
@@ -118,7 +157,15 @@ function displayTitle(title, crate) {
   return stripped.length > 0 ? stripped : String(title);
 }
 
+/** Order by `releaseOrder` (keyed first, ascending), then due date, then number. */
 function compareMilestones(a, b) {
+  const keyA = a.releaseOrder ?? null;
+  const keyB = b.releaseOrder ?? null;
+  if (keyA !== keyB) {
+    if (keyA === null) return 1;
+    if (keyB === null) return -1;
+    return keyA - keyB;
+  }
   const dueA = a.due_on ? new Date(a.due_on).getTime() : Number.POSITIVE_INFINITY;
   const dueB = b.due_on ? new Date(b.due_on).getTime() : Number.POSITIVE_INFINITY;
   if (dueA !== dueB) {
@@ -135,7 +182,11 @@ function groupByStage(milestones, crate) {
     if (!meta || meta.crate.toLowerCase() !== crate.toLowerCase()) {
       continue;
     }
-    groups[meta.stage].push({ ...milestone, roadmapBody: meta.body });
+    const releaseOrder = parseReleaseOrder(
+      milestone.description,
+      `milestone #${milestone.number ?? "?"} (${milestone.title})`,
+    );
+    groups[meta.stage].push({ ...milestone, roadmapBody: meta.body, releaseOrder });
   }
   for (const stage of STAGE_ORDER) {
     groups[stage].sort(compareMilestones);
@@ -291,6 +342,7 @@ export {
   beginLine,
   endLine,
   parseMilestoneRoadmap,
+  parseReleaseOrder,
   displayTitle,
   compareMilestones,
   groupByStage,

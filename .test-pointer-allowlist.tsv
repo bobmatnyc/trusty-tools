@@ -760,7 +760,6 @@ crates/trusty-search/src/core/registry.rs	stage_states_advance_through_pipeline
 crates/trusty-search/src/core/registry.rs	test_results_may_be_stale_when_head_changes
 crates/trusty-search/src/core/registry.rs	walk_diagnostics_error_captured_on_failure
 crates/trusty-search/src/core/repo_config.rs	defer_embed_round_trips_yaml
-crates/trusty-search/src/core/repo_config.rs	test_glob_match_recursive
 crates/trusty-search/src/core/search/hierarchy.rs	flat_peers_sharing_file_not_deduped
 crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_deep_nesting
 crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_from_root_paths_*
