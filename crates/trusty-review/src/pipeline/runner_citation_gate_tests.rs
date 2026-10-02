@@ -57,7 +57,16 @@ async fn review_one(body: &str, line: u32) -> ReviewResult {
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    run_review(&default_config(), input, ready_deps(Arc::new(llm), None)).await
+    // #4044: only a verifier-confirmed finding is posted.
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
+        judgment: "CONFIRMED",
+    });
+    run_review(
+        &default_config(),
+        input,
+        ready_deps(Arc::new(llm), Some(verifier)),
+    )
+    .await
 }
 
 /// (a) A finding citing a line 12 off from its quoted code is re-anchored.

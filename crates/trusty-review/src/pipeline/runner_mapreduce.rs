@@ -115,7 +115,12 @@ pub(super) async fn run_mapreduce_branch(
         files = run.filtered.files.len(),
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
-    let reduced: ReducedReview = run_map_reduce(&run.filtered, &deps.llm, &ctx, mr_config).await;
+    let mut reduced: ReducedReview =
+        run_map_reduce(&run.filtered, &deps.llm, &ctx, mr_config).await;
+    // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
+    result
+        .withheld_findings
+        .append(&mut reduced.withheld_findings);
 
     // Pathological all-failed case: nothing was actually reviewed.  This is the
     // residual #1639 backstop — fail CLOSED to UNKNOWN rather than emit a green

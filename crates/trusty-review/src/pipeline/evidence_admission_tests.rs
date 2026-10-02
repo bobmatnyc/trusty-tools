@@ -183,7 +183,8 @@ fn advisory_note_does_not_trip_sibling_pass_markers() {
         0.9,
         Effort::High,
     )];
-    let counts = crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated);
+    let counts =
+        crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated, &mut Vec::new());
     assert_eq!(annotated.len(), 1, "the note must not cause a drop");
     assert_eq!(counts.dropped_self_negated, 0);
     assert_eq!(counts.demoted_diff_absent, 0);

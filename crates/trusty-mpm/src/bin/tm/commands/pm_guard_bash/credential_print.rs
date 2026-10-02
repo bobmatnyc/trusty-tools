@@ -48,8 +48,9 @@
 //!    builtins (`credential_print_taint_sinks`) are known to print their
 //!    arguments. The #8697 follow-up replaces this class with a consumer
 //!    allowlist.
-//! 3. Script files run by name (`bash deploy.sh`): the guard does not read
-//!    the script.
+//! 3. Script files run by name (`bash deploy.sh`): this rule does not read
+//!    the script. Since #8879 `pm_guard_secret_script` runs this rule over a
+//!    readable script's body; its own residuals are listed there.
 //! 4. Shell history: `history -s …; history`, and `fc`, where history is on.
 //! 5. Descriptors read across stages: a descriptor opened in one stage and
 //!    read in a later one (`exec N< <(…)`). The `coproc` form refuses outright
@@ -240,7 +241,8 @@ struct Lifted {
 /// `credential_print_tests::denies_a_command_string_behind_a_wrapper_option_8735`,
 /// `credential_print_tests::denies_a_trigger_word_behind_a_wrapper_option_8735`,
 /// `credential_print_tests::denies_a_printer_behind_a_new_wrapper_8735`,
-/// `credential_print_tests::allows_the_new_wrapper_neighbours_8735`.
+/// `credential_print_tests::allows_the_new_wrapper_neighbours_8735`,
+/// `credential_print_tests::the_refusal_says_stop_and_report_to_the_architect_8879`.
 pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String> {
     if !has_trigger(command) {
         return None;
@@ -270,15 +272,16 @@ pub(crate) fn evaluate_credential_print_command(command: &str) -> Option<String>
     ))
 }
 
-/// The capture forms every deny reason points at.
-const HOW_TO: &str = "Check existence by exit status alone \
-     (`security find-generic-password -s <service> >/dev/null 2>&1`, no `-w`/`-g`), and \
-     consume a value inside the command that needs it \
-     (`curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" …`, or a pipe \
-     to `--password-stdin`), never echoing it and never behind `set -x`. To keep \
-     a value in a file, write it to a literal `~/…` path under `umask 077` \
-     (`(umask 077; gcloud auth print-access-token > ~/.gcloud-token)`); a variable \
-     target such as `$HOME/…` refuses.";
+/// What every deny reason tells the caller to do.
+// #8879, owner ruling 263: a refusal stops the action and goes to the
+// Architect; it no longer suggests another way to obtain the value.
+const HOW_TO: &str = "Stop and report this refusal to the Architect, who decides \
+     whether the value is needed. Do not retry the read in another form: not in a script \
+     (the guard reads the body of a script a command runs, refuses a body that reads a \
+     secret the same way, and refuses a script whose body it cannot judge; #8879), a \
+     variable, a file or a different command (owner ruling 263). To check only that an \
+     entry exists, test the exit status alone \
+     (`security find-generic-password -s <service> >/dev/null 2>&1`, no `-w`/`-g`).";
 
 /// Whether `text`, quotes removed and lowercased, names a [`TRIGGERS`] entry,
 /// an interactive `security`, or a sibling credential call (#8677).

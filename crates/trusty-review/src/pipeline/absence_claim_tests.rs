@@ -81,7 +81,9 @@ fn refutes_a_missing_file_claim_when_the_file_is_in_the_diff() {
          possible compile break.",
     )];
 
-    let dropped = drop_refuted_absence_claims(&mut findings, &index);
+    let mut withheld = Vec::new();
+
+    let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut withheld);
 
     assert_eq!(
         dropped, 1,
@@ -90,6 +92,12 @@ fn refutes_a_missing_file_claim_when_the_file_is_in_the_diff() {
     assert!(
         findings.is_empty(),
         "a finding resting on a refuted premise must not reach the verdict floor"
+    );
+    assert_eq!(withheld.len(), 1, "the drop must be recorded (#4044)");
+    assert!(
+        withheld[0].reason.starts_with(ABSENCE_REASON),
+        "unexpected reason: {}",
+        withheld[0].reason
     );
 }
 
@@ -103,7 +111,7 @@ fn keeps_a_missing_file_claim_for_a_file_the_diff_does_not_touch() {
         "`crates/trusty-mpm/src/daemon/doctor_net_checks.rs` is not present in diff.",
     )];
 
-    let dropped = drop_refuted_absence_claims(&mut findings, &index);
+    let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut Vec::new());
 
     assert_eq!(dropped, 0, "nothing in the changeset refutes this claim");
     assert_eq!(findings.len(), 1);
@@ -119,7 +127,7 @@ fn keeps_an_ordinary_finding() {
          filesystem failure.",
     )];
 
-    let dropped = drop_refuted_absence_claims(&mut findings, &index);
+    let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut Vec::new());
 
     assert_eq!(dropped, 0);
     assert_eq!(findings.len(), 1);
@@ -134,7 +142,7 @@ fn refutes_using_the_findings_own_file_when_the_sentence_names_no_path() {
         "The referenced module is not present in the diff, so this will not compile.",
     )];
 
-    let dropped = drop_refuted_absence_claims(&mut findings, &index);
+    let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut Vec::new());
 
     assert_eq!(dropped, 1);
     assert!(findings.is_empty());
@@ -151,7 +159,7 @@ fn ignores_a_present_path_in_a_different_sentence() {
          `crates/trusty-mpm/src/daemon/doctor_net_checks.rs` is not present in diff.",
     )];
 
-    let dropped = drop_refuted_absence_claims(&mut findings, &index);
+    let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut Vec::new());
 
     assert_eq!(
         dropped, 0,
@@ -172,7 +180,7 @@ fn matches_each_absence_marker() {
                 "`crates/trusty-mpm/src/daemon/doctor_fs_checks.rs` {marker} — compile break."
             ),
         )];
-        let dropped = drop_refuted_absence_claims(&mut findings, &index);
+        let dropped = drop_refuted_absence_claims(&mut findings, &index, &mut Vec::new());
         assert_eq!(dropped, 1, "marker not recognised: {marker:?}");
     }
 }
