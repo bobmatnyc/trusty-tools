@@ -754,6 +754,39 @@ fn a_resume_grant_holds_a_reap_only_for_a_bounded_time_9010() {
     assert!(state.session(expired).is_none());
 }
 
+/// #9010: a rebind honours a resume grant only while it holds a reap. An
+/// expired grant is refused and dropped; a fresh one rebinds.
+#[test]
+fn an_expired_resume_grant_does_not_rebind_9010() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let resumed = resumed_claude();
+    let grant_at = |issued_at: u64| {
+        let session = SessionId::new();
+        state.bind_session_claude(session, CLAUDE).expect("vacant");
+        state.session_claudes().grant_resume(
+            session,
+            ResumeGrant {
+                tmux_name: "tm-resumed".to_string(),
+                pane_id: Some("%7".to_string()),
+                issued_at,
+            },
+        );
+        session
+    };
+
+    let expired = grant_at(now_secs() - RESUME_HOLD_SECS - 1);
+    let got = state.rebind_resumed_claude_with(expired, resumed, |_| Ok(resumed));
+    assert!(got.is_err_and(|e| e.contains("expired")));
+    assert_eq!(state.session_claudes().get(expired), Some(CLAUDE));
+    assert!(state.session_claudes().resume_grant(expired).is_none());
+
+    let fresh = grant_at(now_secs());
+    let got = state.rebind_resumed_claude_with(fresh, resumed, |_| Ok(resumed));
+    assert_eq!(got, Ok(()));
+    assert_eq!(state.session_claudes().get(fresh), Some(resumed));
+}
+
 /// #8984 LOW: the socket ingest holds the bind's in-flight guard through the
 /// bind, so a later event racing it leaves the id to the bind. Dropping the
 /// guard before the bind — `let _ = begin_bind(..)` — fails this test.

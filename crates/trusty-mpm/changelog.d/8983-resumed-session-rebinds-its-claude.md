@@ -9,3 +9,5 @@ Fixed
   started after the resume. A sibling's `claude` announcing the same id is
   not bound. A record with no stored pane, or a pane lookup that fails,
   rebinds nothing; the daemon never looks in the session's active pane.
+  A resume grant older than five reap intervals (300 s) is dropped and
+  rebinds nothing.

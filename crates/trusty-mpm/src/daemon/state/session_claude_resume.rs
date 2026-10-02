@@ -80,7 +80,8 @@ impl DaemonState {
     /// Rebind `session` to `claude`, the kernel-verified sender of its
     /// `SessionStart`, when the daemon resumed it there (#8983).
     ///
-    /// What: `Ok` and the grant consumed when `session` has a grant, `claude`
+    /// What: `Ok` and the grant consumed when `session` has a fresh grant
+    /// (an expired one is dropped and refused), `claude`
     /// started no earlier than it, and `pane_claude` names exactly `claude`
     /// as the `claude` in the granted pane. `Err` naming the failed step
     /// otherwise — no grant, an earlier start, a pane lookup that fails or
@@ -88,7 +89,8 @@ impl DaemonState {
     /// binding is left as it was.
     /// Test: `a_daemon_resumed_claude_rebinds_its_session_8983`,
     /// `a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983`,
-    /// `a_resume_rebind_fails_closed_8983`.
+    /// `a_resume_rebind_fails_closed_8983`,
+    /// `an_expired_resume_grant_does_not_rebind_9010`.
     pub(crate) fn rebind_resumed_claude_with(
         &self,
         session: SessionId,
@@ -99,6 +101,24 @@ impl DaemonState {
         let grant = claudes
             .resume_grant(session)
             .ok_or("the daemon has not resumed this session")?;
+        // #9010: the reaper stops holding an expired grant, so a rebind must
+        // not honour it either; one rule, [`ResumeGrant::holds_reap`]. Fail
+        // closed: drop the grant and rebind nothing.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if !grant.holds_reap(now) {
+            claudes.revoke_resume(session, &grant);
+            tracing::warn!(
+                session = ?session,
+                issued_at = grant.issued_at,
+                "dropped an expired resume grant; nothing rebound (#9010)"
+            );
+            return Err(format!(
+                "the daemon's resume grant for {} expired before the claude announced",
+                grant.tmux_name
+            ));
+        }
         if claude.start_time < grant.issued_at {
             return Err(format!(
                 "claude pid {} started before the daemon resumed the session",
