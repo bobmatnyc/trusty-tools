@@ -1,7 +1,7 @@
 # The Architect — Fleet Specifics
 
-This is the Architect's project: the one fleet supervisor session per user.
-The supervisor profile supplies the rules. This file supplies the fleet
+This is the Architect's project: the one fleet session per user.
+The `supervisor` profile supplies the rules. This file supplies the fleet
 specifics they point to. `tm fleet init` seeded it and never overwrites it;
 edit it freely.
 
