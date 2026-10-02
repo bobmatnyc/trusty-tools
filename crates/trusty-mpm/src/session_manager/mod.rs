@@ -31,7 +31,6 @@ mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;
-/// #9004: a pane id plus the tmux server instance it was read on.
 pub mod pane_identity;
 pub mod prune;
 pub mod reactivate;
