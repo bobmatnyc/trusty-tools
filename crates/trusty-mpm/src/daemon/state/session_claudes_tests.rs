@@ -3,6 +3,7 @@
 use super::*;
 use crate::core::agent::Delegation;
 use crate::core::hook::HookEvent;
+use crate::daemon::state::session_claude_liveness::claude_liveness_with;
 
 const CLAUDE: ClaudeProcess = ClaudeProcess {
     pid: 300,
@@ -710,6 +711,49 @@ fn a_session_rebound_during_the_reap_is_kept_9010() {
     assert!(state.session(announced).is_none());
 }
 
+/// #9010: a resume grant holds a dead session only for [`RESUME_HOLD_SECS`].
+/// A grant no rebind consumed — a failed launch, rebind or HTTP announce —
+/// lets the reaper remove the session once it is that old.
+#[test]
+fn a_resume_grant_holds_a_reap_only_for_a_bounded_time_9010() {
+    let none = std::collections::HashSet::new();
+    let gone = |_| ClaudeLiveness::Gone("exited".to_string());
+    let grant = |issued_at| ResumeGrant {
+        tmux_name: "tm-resumed".to_string(),
+        pane_id: Some("%7".to_string()),
+        issued_at,
+    };
+    let now = now_secs();
+    assert!(
+        grant(now + 30).holds_reap(now),
+        "a clock stepped back holds"
+    );
+    assert!(grant(now - RESUME_HOLD_SECS + 1).holds_reap(now));
+    assert!(!grant(now - RESUME_HOLD_SECS).holds_reap(now));
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let fresh = bound_session(&state, CLAUDE);
+    state
+        .session_claudes()
+        .grant_resume(fresh, grant(now_secs()));
+    let result = state.reap_against_with(&none, gone);
+    assert_eq!(result.reaped, 0, "a fresh grant keeps it: {result:?}");
+    assert!(state.session(fresh).is_some());
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let expired = bound_session(&state, CLAUDE);
+    let stale = now_secs() - RESUME_HOLD_SECS - 1;
+    state.session_claudes().grant_resume(expired, grant(stale));
+    let result = state.reap_against_with(&none, gone);
+    assert_eq!(
+        result.reaped, 1,
+        "an expired grant holds nothing: {result:?}"
+    );
+    assert!(state.session(expired).is_none());
+}
+
 /// #8984 LOW: the socket ingest holds the bind's in-flight guard through the
 /// bind, so a later event racing it leaves the id to the bind. Dropping the
 /// guard before the bind — `let _ = begin_bind(..)` — fails this test.
@@ -909,6 +953,52 @@ async fn a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983() {
         .get(&not_resumed)
         .copied();
     assert_eq!(noted, Some(sibling));
+    assert!(
+        matches!(
+            caller_of(&state, not_resumed, sibling, sibling),
+            RepairCaller::Unestablished(_)
+        ),
+        "a noted announcer is never the owner"
+    );
+}
+
+/// #9010: a process walk that fails for an already-settled id notes no later
+/// announcer and is logged at WARN with the session id, not dropped.
+#[tokio::test]
+async fn a_failed_walk_on_a_settled_id_notes_no_announcer_9010() {
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude_with;
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    crate::test_support::enable_event_capture();
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = SessionId::new();
+    state.bind_session_claude(session, CLAUDE).expect("vacant");
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+
+    let got = bind_announcing_claude_with(
+        &state,
+        session,
+        kernel_peer(),
+        |_, _, _| Err("the peer exited".to_string()),
+        |_| panic!("no pane lookup without a grant"),
+    )
+    .with_subscriber(subscriber)
+    .await;
+
+    assert_eq!(got, Ok(()));
+    assert!(state.session_claudes().announcers.lock().is_empty());
+    assert_eq!(state.session_claudes().get(session), Some(CLAUDE));
+    let lines = buffer.tail(64);
+    assert!(
+        lines.iter().any(|l| l.contains("WARN")
+            && l.contains(&format!("{session:?}"))
+            && l.contains("the peer exited")),
+        "the failed walk is logged at WARN with the session id: {lines:#?}"
+    );
 }
 
 /// #8983 Fail-Open Check: no grant, a `claude` older than the grant, a pane

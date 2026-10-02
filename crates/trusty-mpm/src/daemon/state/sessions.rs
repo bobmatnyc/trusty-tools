@@ -436,7 +436,7 @@ impl DaemonState {
     /// `a_settled_session_whose_claude_exited_is_reaped_9010`,
     /// `a_settled_session_with_a_recent_event_is_kept_9010`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
-        self.reap_against_with(live, super::session_claudes::claude_liveness)
+        self.reap_against_with(live, super::session_claude_liveness::claude_liveness)
     }
 
     /// [`Self::reap_against`] over an injected bound-`claude` probe (#9010).
@@ -446,7 +446,7 @@ impl DaemonState {
     pub(super) fn reap_against_with(
         &self,
         live: &std::collections::HashSet<String>,
-        probe: impl Fn(ClaudeProcess) -> super::session_claudes::ClaudeLiveness,
+        probe: impl Fn(ClaudeProcess) -> super::session_claude_liveness::ClaudeLiveness,
     ) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 

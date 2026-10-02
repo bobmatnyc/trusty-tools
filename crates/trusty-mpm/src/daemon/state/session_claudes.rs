@@ -55,12 +55,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::DaemonState;
+use super::session_claude_liveness::ClaudeLiveness;
 use crate::core::session::SessionId;
 use crate::core::twin_arming::{
     ProcessFacts, STATUS_MAX_ANCESTOR_HOPS, nearest_claude_for_status_in, process_facts,
@@ -118,6 +119,19 @@ pub struct ResumeGrant {
     pub pane_id: Option<String>,
     /// Unix seconds, taken before the launch line was sent.
     pub issued_at: u64,
+}
+
+/// How long a resume grant holds its session off the reaper (#9010): five
+/// reap intervals. A grant that a failed launch, rebind or HTTP announce
+/// never consumed must not keep a dead session for the daemon's life.
+pub(crate) const RESUME_HOLD_SECS: u64 = 5 * crate::daemon::REAP_INTERVAL_SECS;
+
+impl ResumeGrant {
+    /// Whether this grant still holds its session off the reaper at `now`
+    /// (Unix seconds); a clock stepped behind `issued_at` still holds (#9010).
+    pub(crate) fn holds_reap(&self, now: u64) -> bool {
+        now.saturating_sub(self.issued_at) < RESUME_HOLD_SECS
+    }
 }
 
 impl SessionClaudes {
@@ -371,99 +385,6 @@ pub(crate) fn peer_claude_with(
     }
 }
 
-/// What a probe of a bound `claude` found (#9010).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClaudeLiveness {
-    /// A process with the bound pid AND start time runs.
-    Alive,
-    /// Proven gone: no process holds the pid, or a later process does.
-    Gone(String),
-    /// The process table could not answer; nothing may act on it.
-    Unknown(String),
-}
-
-impl ClaudeLiveness {
-    /// Whether this probe of `session`'s bound `claude` proves it gone, and
-    /// so lets the reaper remove the session (#9010).
-    ///
-    /// What: `true` only for [`Self::Gone`], logged at INFO. An
-    /// [`Self::Unknown`] is logged at WARN and keeps the session.
-    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`.
-    pub(crate) fn proves_gone(&self, session: SessionId) -> bool {
-        match self {
-            Self::Alive => false,
-            Self::Gone(why) => {
-                tracing::info!(session = ?session, "a settled session's claude is gone: {why} (#9010)");
-                true
-            }
-            // #9010: fail closed — an unanswered probe reaps nothing.
-            Self::Unknown(why) => {
-                tracing::warn!(session = ?session, "kept a settled session, its claude's liveness is unknown: {why} (#9010)");
-                false
-            }
-        }
-    }
-}
-
-/// Whether the bound `claude` still runs, over the live process table (#9010).
-///
-/// What: [`claude_liveness_with`] over `kill(pid, 0)`
-/// (`session_manager::worktree_registry::pid_liveness`), [`process_facts`]
-/// and the hook walk's `claude` name rule.
-/// Test: `a_settled_session_whose_claude_exited_is_reaped_9010`.
-pub(crate) fn claude_liveness(claude: ClaudeProcess) -> ClaudeLiveness {
-    let exists = |pid| {
-        crate::session_manager::worktree_registry::pid_liveness(pid)
-            .ok_or_else(|| format!("kill(0) could not tell whether pid {pid} runs"))
-    };
-    claude_liveness_with(
-        claude,
-        exists,
-        process_facts,
-        crate::core::twin_arming::is_claude,
-    )
-}
-
-/// [`claude_liveness`] over an injected existence probe, process table and
-/// `claude` name check.
-///
-/// Why: the reaper removes a session on [`ClaudeLiveness::Gone`], so only
-/// proof may produce it; an unanswered probe must leave the session alone.
-/// What: `Unknown` when `exists` errs, or the pid exists and `facts` cannot
-/// read it. `Gone` when no process holds the pid, or the one holding it
-/// started at another time AND `is_claude` says it is no `claude` (a reused
-/// pid). Any other start-time mismatch is `Unknown`: on Linux the start time
-/// is derived from the boot time, which a wall-clock step moves. `Alive`
-/// otherwise.
-/// Test: `claude_liveness_needs_proof_to_call_a_claude_gone_9010`.
-pub(crate) fn claude_liveness_with(
-    claude: ClaudeProcess,
-    exists: impl Fn(u32) -> Result<bool, String>,
-    facts: impl Fn(u32) -> Result<ProcessFacts, String>,
-    is_claude: impl Fn(u32) -> Result<bool, String>,
-) -> ClaudeLiveness {
-    let pid = claude.pid;
-    let started = match exists(pid) {
-        Err(e) => return ClaudeLiveness::Unknown(e),
-        Ok(false) => return ClaudeLiveness::Gone(format!("no process holds pid {pid}")),
-        Ok(true) => match facts(pid) {
-            Ok(f) if f.start_time == claude.start_time => return ClaudeLiveness::Alive,
-            Ok(f) => f.start_time,
-            Err(e) => return ClaudeLiveness::Unknown(format!("pid {pid} could not be read: {e}")),
-        },
-    };
-    let shifted = format!(
-        "pid {pid} names a process started at {started}, not {}",
-        claude.start_time
-    );
-    // #9010: a mismatch proves a reused pid only when its holder is no claude.
-    match is_claude(pid) {
-        Ok(false) => ClaudeLiveness::Gone(format!("{shifted}, and it is not a claude")),
-        Ok(true) => ClaudeLiveness::Unknown(format!("{shifted}, but it is a claude")),
-        Err(e) => ClaudeLiveness::Unknown(format!("{shifted}, and it could not be named: {e}")),
-    }
-}
-
 impl SessionClaudes {
     /// Note that a hook event for `session` arrived now (#9010).
     pub(crate) fn note_event(&self, session: SessionId) {
@@ -482,12 +403,14 @@ impl SessionClaudes {
     /// Why: the reaper's walk and probe run on a snapshot, and a session can
     /// outlive its first `claude` — a resume rebinds it, a daemon resume is
     /// still announcing, or `claude --resume <id>` was run by hand.
-    /// What: `Some(reason)` when the binding is no longer `probed`, a resume
-    /// grant is pending, a hook event for `session` arrived within `quiet`,
-    /// or its latest announcer is not proven gone by `probe`. `None` lets the
-    /// reaper remove it.
+    /// What: `Some(reason)` when a resume grant younger than
+    /// [`RESUME_HOLD_SECS`] is pending, the binding is no longer `probed`, a
+    /// hook event for `session` arrived within `quiet`, or its latest
+    /// announcer is not proven gone by `probe`. `None` lets the reaper
+    /// remove it.
     /// Test: `a_settled_session_with_a_recent_event_is_kept_9010`,
-    /// `a_session_rebound_during_the_reap_is_kept_9010`.
+    /// `a_session_rebound_during_the_reap_is_kept_9010`,
+    /// `a_resume_grant_holds_a_reap_only_for_a_bounded_time_9010`.
     pub(crate) fn reap_hold(
         &self,
         session: SessionId,
@@ -495,11 +418,21 @@ impl SessionClaudes {
         quiet: Duration,
         probe: impl Fn(ClaudeProcess) -> ClaudeLiveness,
     ) -> Option<String> {
+        // #9010: the grant BEFORE the binding. `rebind_resumed_claude_with`
+        // writes the binding, then revokes the grant, so a grant read as
+        // revoked here means the binding read below is already the rebound
+        // one. An expired grant holds nothing.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if self
+            .resume_grant(session)
+            .is_some_and(|g| g.holds_reap(now))
+        {
+            return Some("the daemon is resuming it".to_string());
+        }
         if self.get(session) != Some(probed) {
             return Some("it was rebound after the probe".to_string());
-        }
-        if self.resume_grant(session).is_some() {
-            return Some("the daemon is resuming it".to_string());
         }
         if self
             .events
