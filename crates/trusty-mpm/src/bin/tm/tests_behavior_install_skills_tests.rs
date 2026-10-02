@@ -94,7 +94,7 @@ fn install_then_deploy_deploys_skills() {
          rust-build-performance entry + 1 self-improvement-loop entry (#7723) \
          + 1 rust-delivery-workflow entry (#8192) \
          + 5 tm-epic entries: SKILL.md + 4 references (#8376) \
-         + 1 tm-supervisor-setup entry (#8436)); got {:?}",
+         + 1 tm-architect-setup entry (#8436)); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
