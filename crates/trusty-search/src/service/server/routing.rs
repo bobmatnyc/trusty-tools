@@ -101,7 +101,7 @@ impl RoutingMode {
     }
 }
 
-/// Embed the query once and compute cosine similarity against every index's
+/// Compute cosine similarity between the query embedding and every index's
 /// stored `context_embedding` (issue #112).
 ///
 /// Why: the fan-out router needs a single relevance score per index. Indexes
@@ -110,37 +110,19 @@ impl RoutingMode {
 /// normally — the absence of a fingerprint is not a relevance signal.
 /// What: returns a `HashMap<IndexId, f32>` where every id in `index_ids` has
 /// an entry; the value is either `cosine_similarity(query, context)` or
-/// `1.0` for indexes with no context. Failures embedding the query (e.g.
-/// embedder not wired) also fall back to 1.0 across the board so the global
-/// search keeps working as a plain fan-out.
+/// `1.0` for indexes with no context. `query_embedding` is the fan-out's one
+/// embed (#9027 — this function used to embed the text itself, and every
+/// per-index search embedded it again); `None` (no embedder, or the embed
+/// failed) falls back to 1.0 across the board so the global search keeps
+/// working as a plain fan-out.
+/// Test: `routing_mode_all_preserves_every_index_with_weights`,
+/// `global_search_embeds_the_query_once_for_every_index`.
 pub(super) async fn compute_context_weights(
     registry: &crate::core::registry::IndexRegistry,
     index_ids: &[IndexId],
-    query: &str,
+    query_embedding: Option<&[f32]>,
 ) -> std::collections::HashMap<IndexId, f32> {
     use crate::core::mmr::cosine_similarity;
-
-    // Try to obtain a query embedding from any index that has an embedder
-    // wired. Every index in the registry shares the same machine-wide
-    // FastEmbedder, so the first successful embed is reused for all.
-    let mut query_embedding: Option<Vec<f32>> = None;
-    for id in index_ids {
-        let Some(handle) = registry.get(id) else {
-            continue;
-        };
-        let indexer = handle.indexer.read().await;
-        match indexer.embed_text(query).await {
-            Ok(Some(vec)) => {
-                query_embedding = Some(vec);
-                break;
-            }
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::debug!("context_routing: embed_text failed on {}: {e}", id.0);
-                continue;
-            }
-        }
-    }
 
     let mut out = std::collections::HashMap::with_capacity(index_ids.len());
     let Some(q) = query_embedding else {
@@ -158,7 +140,7 @@ pub(super) async fn compute_context_weights(
         };
         let ctx_guard = handle.context_embedding.read().await;
         let weight = match ctx_guard.as_ref() {
-            Some(ctx) if ctx.len() == q.len() => cosine_similarity(&q, ctx).max(0.0),
+            Some(ctx) if ctx.len() == q.len() => cosine_similarity(q, ctx).max(0.0),
             _ => 1.0,
         };
         out.insert(id.clone(), weight);

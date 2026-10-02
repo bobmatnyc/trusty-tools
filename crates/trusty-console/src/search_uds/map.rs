@@ -47,6 +47,7 @@ use super::{
     METHOD_INDEX_PAUSE_EMBEDDING, METHOD_INDEX_REINDEX, METHOD_INDEX_REINDEX_STREAM,
     METHOD_INDEX_RESUME_EMBEDDING, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
     METHOD_QUERY, METHOD_QUERY_ALL, METHOD_REGISTRY_ORPHANS, METHOD_STATUS_STREAM,
+    METHOD_WARM_START, METHOD_WARM_STATUS,
 };
 
 /// What one mapped request asks the daemon for.
@@ -171,6 +172,10 @@ pub(crate) fn map_request(
         (&Method::GET, ["logs", "tail"]) => unary(METHOD_LOGS_TAIL, q),
         (&Method::GET, ["registry", "orphans"]) => unary(METHOD_REGISTRY_ORPHANS, json!({})),
         (&Method::GET, ["status", "stream"]) => stream(METHOD_STATUS_STREAM, json!({})),
+        // #9027: warm-all. An empty `POST /warm` body maps to `null`, which the
+        // daemon reads as "start with the defaults", same as its HTTP route.
+        (&Method::POST, ["warm"]) => unary(METHOD_WARM_START, body_json(body)?),
+        (&Method::GET, ["warm", "status"]) => unary(METHOD_WARM_STATUS, json!({})),
 
         _ => Err(format!(
             "no trusty-search socket method serves {method} /{}. The console reaches \
@@ -415,6 +420,36 @@ mod tests {
             Call::Stream {
                 method: METHOD_INDEX_FILE_EVENTS,
                 params: json!({ "index_id": "a" })
+            }
+        );
+    }
+
+    /// Why: the dashboard's "Warm all indexes" control reaches the daemon only
+    /// through these two rows (#9027); an unmapped row answers `501`.
+    /// What: an empty start body maps to `null` (the daemon's defaults), a
+    /// populated one passes through, and status takes `{}`.
+    /// Test: this is the test.
+    #[test]
+    fn maps_the_warm_all_routes() {
+        assert_eq!(
+            unary(&Method::POST, "warm", None, ""),
+            Call::Unary {
+                method: METHOD_WARM_START,
+                params: Value::Null
+            }
+        );
+        assert_eq!(
+            unary(&Method::POST, "warm", None, r#"{"window_secs":60}"#),
+            Call::Unary {
+                method: METHOD_WARM_START,
+                params: json!({ "window_secs": 60 })
+            }
+        );
+        assert_eq!(
+            unary(&Method::GET, "warm/status", None, ""),
+            Call::Unary {
+                method: METHOD_WARM_STATUS,
+                params: json!({})
             }
         );
     }

@@ -132,6 +132,7 @@ impl SearchAppState {
             // Issue #3748 slice A: 0 until the first deferred-embed catch-up
             // drain is observed by `health_handler`.
             last_seen_defer_embed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            warm: Arc::new(super::warm_all::WarmTracker::default()),
         }
     }
 

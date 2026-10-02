@@ -34,7 +34,47 @@ pub struct EmbedderUnavailable {
     pub detail: String,
 }
 
+/// A query vector the caller already computed, or the reason it could not
+/// (#9027).
+///
+/// Why: the all-index fan-out embeds once and hands the result to every
+/// per-index search. A failed embed travels too, so each index degrades to
+/// lexical at once rather than retrying the same failing embedder per index.
+/// Test: `global_search_embeds_the_query_once_for_every_index`,
+/// `a_precomputed_embed_failure_degrades_without_re_embedding`.
+#[derive(Debug, Clone, Copy)]
+pub enum PrecomputedQueryVector<'a> {
+    /// The embedded query text.
+    Embedded(&'a [f32]),
+    /// The embedder's error, rendered with its full context chain.
+    Failed(&'a str),
+}
+
 impl CodeIndexer {
+    /// Resolve a [`PrecomputedQueryVector`] exactly as
+    /// [`Self::embed_query_or_degrade`] resolves a fresh embed.
+    ///
+    /// Why: one rule for a failed embed, whoever ran it (#8348, #9027).
+    /// What: `Embedded` is the vector; `Failed` degrades an unpinned query to
+    /// lexical and refuses a pinned semantic one with [`EmbedderUnavailable`].
+    /// Test: `a_precomputed_embed_failure_degrades_without_re_embedding`.
+    pub(crate) fn precomputed_or_degrade(
+        &self,
+        pre: PrecomputedQueryVector<'_>,
+        pinned_semantic: bool,
+    ) -> anyhow::Result<(Option<Vec<f32>>, Option<String>)> {
+        match pre {
+            PrecomputedQueryVector::Embedded(v) => Ok((Some(v.to_vec()), None)),
+            PrecomputedQueryVector::Failed(detail) if pinned_semantic => {
+                Err(anyhow::Error::new(EmbedderUnavailable {
+                    index_id: self.index_id.clone(),
+                    detail: detail.to_string(),
+                }))
+            }
+            PrecomputedQueryVector::Failed(detail) => Ok((None, Some(detail.to_string()))),
+        }
+    }
+
     /// Embed `text` for a query, degrading an embed failure instead of raising
     /// it unless the caller pinned the semantic lane (#8348).
     ///

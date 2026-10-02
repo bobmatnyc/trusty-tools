@@ -292,3 +292,44 @@ async fn sweep_aborts_park_when_a_reindex_starts_inside_the_park_window() {
     );
     clear_env();
 }
+
+/// #9027: a warm-all pin keeps an index resident past the cap for its window.
+///
+/// Why: warm-all promises a resident window; a sweep that parked the warmed
+/// index two minutes later would undo it silently.
+/// What: the tier-default case above, with the coldest index pinned — nothing
+/// is parked.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn sweep_never_parks_a_warm_pinned_index() {
+    clear_env();
+    let entries = vec![
+        entry("coldest", Some(100)),
+        entry("warm", Some(200)),
+        entry("hottest", Some(300)),
+    ];
+    let _tmp = isolate_and_seed_toml(&entries);
+    let state = state_on_tier(trusty_common::machine_tier::MemoryTier::Degraded);
+    for e in &entries {
+        state.registry.register(bare_handle(&e.id));
+    }
+    state
+        .warm
+        .pin_for_test("coldest", std::time::Duration::from_secs(60));
+
+    run_residency_sweep_tick(&Arc::new(state.clone())).await;
+
+    assert!(
+        state
+            .registry
+            .get(&IndexId::new("coldest".to_string()))
+            .is_some(),
+        "a pinned index must stay resident past the cap"
+    );
+    assert!(
+        state.cold_store.is_empty(),
+        "nothing else was beyond the cap"
+    );
+    clear_env();
+}

@@ -28,6 +28,8 @@ mod embedding_pause;
 mod embedding_pause_tests;
 mod facet_route;
 mod fanout;
+// #9027: per-index deadline and one query embed for the all-index fan-out.
+mod fanout_deadline;
 mod files;
 mod health;
 pub(crate) mod helpers;
@@ -56,6 +58,8 @@ mod typeahead;
 mod upgrade;
 // #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
 mod vector_health;
+// #9027: warm every registered index ahead of an all-index search.
+mod warm_all;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
@@ -206,6 +210,9 @@ mod tests_index_routing;
 // #8348: a failed query embed degrades to lexical instead of a 500.
 #[cfg(test)]
 mod tests_8348;
+// #9027: the all-index fan-out's per-index deadline and one query embed.
+#[cfg(test)]
+mod tests_9027;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]
@@ -317,6 +324,10 @@ pub(crate) use admin::{
     admin_stop_report, logs_tail_report, patch_config_report, PatchConfigRequest,
 };
 pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest};
+
+// #9027: warm-all, served on both transports.
+pub(crate) use warm_all::{warm_start_report, warm_status_report};
+pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 
 /// Build the axum router with the shared state.
 ///
@@ -501,6 +512,10 @@ pub fn build_router_on(
             get(get_config_handler).patch(patch_config_handler),
         )
         .route("/upgrade", post(upgrade_handler))
+        // #9027: start returns at once (the warm runs on its own task), and
+        // status is a snapshot read — both belong in the free lane.
+        .route("/warm", post(warm_all::warm_start_handler))
+        .route("/warm/status", get(warm_all::warm_status_handler))
         .with_state(Arc::clone(&state_arc));
 
     let mut router = free.merge(interactive_limited).merge(bulk_limited);

@@ -40,6 +40,9 @@ pub mod admin;
 /// Registration for grounded conversational Q&A (#6285 slice 5.6).
 pub mod chat;
 
+/// Registration for warm-all: start and status (#9027).
+pub mod warm;
+
 /// Per-method admission and deadline lane pins for the whole socket surface
 /// (#6285 slice 5, widened in slice 5.5 to every lock-taking method).
 #[cfg(test)]

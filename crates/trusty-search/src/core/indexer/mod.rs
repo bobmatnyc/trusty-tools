@@ -61,6 +61,9 @@ pub(crate) mod snapshot_guard;
 pub use snapshot_guard::SnapshotOverwriteRefused;
 pub mod typeahead;
 mod types;
+// #9027: warm-all rehydrates a corpus to completion.
+mod warm;
+pub(crate) use warm::warm_corpus;
 
 pub(crate) use ingest::deferred::VectorCoverage;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
@@ -114,7 +117,7 @@ pub(crate) use files::TEST_FAIL_REMOVE;
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
 // #8348: the typed error a pinned semantic query raises when its embed fails.
-pub use search::embed_degrade::EmbedderUnavailable;
+pub use search::embed_degrade::{EmbedderUnavailable, PrecomputedQueryVector};
 // #8600: test-only no-progress deadline override for the embed wave loop.
 #[cfg(test)]
 pub(crate) use ingest::embed::WAVE_DEADLINE_OVERRIDE;

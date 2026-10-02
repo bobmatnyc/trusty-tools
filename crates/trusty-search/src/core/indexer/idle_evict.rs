@@ -582,10 +582,39 @@ impl CodeIndexer {
     /// `rehydrate_dedupes_concurrent_callers_onto_one_scan` in
     /// `indexer::cost_scaled_threshold_tests`.
     pub(super) async fn ensure_corpus_rehydrated(&self) {
-        if !self.chunks_evicted.load(Ordering::Relaxed)
-            && !self.bm25_entities_evicted.load(Ordering::Relaxed)
-        {
+        let Some(notify) = self.begin_corpus_rehydrate() else {
             return;
+        };
+        // Bounded wait only — never let an interactive caller block on the
+        // full O(corpus) scan. Whether this returns because the task
+        // notified us or because the budget elapsed, the task itself is
+        // untouched: it is not owned by this future and keeps running.
+        let _ = tokio::time::timeout(rehydrate_wait_budget(), notify.notified()).await;
+    }
+
+    /// `true` while the chunk map or the BM25/entity maps are idle-evicted.
+    ///
+    /// Why: the all-index fan-out and the warm-all status (#9027) report an
+    /// index as cold without touching its corpus.
+    /// Test: `warm_all_rehydrates_an_evicted_index_and_reports_it_warm`.
+    pub fn corpus_evicted(&self) -> bool {
+        self.chunks_evicted.load(Ordering::Relaxed)
+            || self.bm25_entities_evicted.load(Ordering::Relaxed)
+    }
+
+    /// Start (or join) the detached rehydrate without waiting for it.
+    ///
+    /// Why: [`Self::ensure_corpus_rehydrated`] always waits a bounded budget; the
+    /// all-index fan-out kicks every evicted index at request start, and warm-all
+    /// waits on the returned notification itself (#9027).
+    /// What: `None` when nothing is evicted (or no corpus is wired, in which case
+    /// both flags are cleared as before). Otherwise the notification of the one
+    /// in-flight rehydrate — joined when one is running, spawned when not.
+    /// Test: `detached_rehydrate_survives_caller_cancellation`,
+    /// `warm_all_rehydrates_an_evicted_index_and_reports_it_warm`.
+    pub(crate) fn begin_corpus_rehydrate(&self) -> Option<Arc<Notify>> {
+        if !self.corpus_evicted() {
+            return None;
         }
         let Some(corpus) = self.corpus.clone() else {
             // Defensive: eviction requires a wired corpus, so this shouldn't
@@ -593,7 +622,7 @@ impl CodeIndexer {
             // rehydrate from — just clear both flags rather than spin.
             self.chunks_evicted.store(false, Ordering::Relaxed);
             self.bm25_entities_evicted.store(false, Ordering::Relaxed);
-            return;
+            return None;
         };
 
         let notify = {
@@ -627,12 +656,7 @@ impl CodeIndexer {
                 }
             }
         };
-
-        // Bounded wait only — never let an interactive caller block on the
-        // full O(corpus) scan. Whether this returns because the task
-        // notified us or because the budget elapsed, the task itself is
-        // untouched: it is not owned by this future and keeps running.
-        let _ = tokio::time::timeout(rehydrate_wait_budget(), notify.notified()).await;
+        Some(notify)
     }
 
     /// Spawn the detached rehydrate task itself (issue #3683 slice 1; panic

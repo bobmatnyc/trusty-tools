@@ -558,6 +558,10 @@ pub struct SearchAppState {
     /// hermetic and unaffected by unrelated catch-up activity elsewhere in
     /// the test binary.
     pub last_seen_defer_embed_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// The warm-all job and the residency pins it grants (#9027). Shared by
+    /// `POST /warm`, `GET /warm/status`, their socket twins, and the
+    /// idle-eviction and residency tickers that honour the pins.
+    pub warm: Arc<super::warm_all::WarmTracker>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
