@@ -239,18 +239,18 @@ async fn a_dead_socket_is_a_bad_gateway_not_an_empty_success() {
     );
 }
 
-/// Why: `POST /chat` and `POST /admin/stop` are called by the SPA and have no
-/// socket method. They must refuse loudly and name the gap, not answer an
-/// approximate `502` that reads as "the daemon is down".
+/// Why: `POST /admin/stop` is called by the SPA and this table does not map
+/// it. It must refuse loudly and name the gap, not answer an approximate `502`
+/// that reads as "the daemon is down".
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unmapped_path_is_not_implemented_and_names_itself() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket = stub_daemon(tmp.path(), |_| vec![result_frame(json!({}))]);
 
-    let (status, _, body) = through_router(socket, "POST", "/api/search/chat", "{}").await;
+    let (status, _, body) = through_router(socket, "POST", "/api/search/admin/stop", "{}").await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
-    assert!(body.contains("chat"), "{body}");
+    assert!(body.contains("admin/stop"), "{body}");
 }
 
 /// Why: the SPA's own `base.js` documents `/proxy/search/` as a supported mount,
@@ -653,4 +653,174 @@ async fn a_stream_against_a_dead_socket_is_a_bad_gateway() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(!content_type.contains("event-stream"), "{content_type}");
+}
+
+// ─── typeahead (#9028) ───────────────────────────────────────────────────────
+
+/// A stub `search.typeahead` that decodes `params` the way the daemon's
+/// `IndexScoped<TypeaheadParams>` does: `index_id` and `q` strings, `limit` an
+/// unsigned integer when present, `mode` one of the two named modes. Anything
+/// else is the daemon's own `invalid_params` refusal.
+fn typeahead_daemon(request: &Value) -> Vec<String> {
+    let p = &request["params"];
+    let limit_ok = p.get("limit").is_none_or(Value::is_u64);
+    let mode_ok = p
+        .get("mode")
+        .is_none_or(|m| m == "lexical" || m == "blended");
+    if request["method"] != "search.typeahead"
+        || !p["index_id"].is_string()
+        || !p["q"].is_string()
+        || !limit_ok
+        || !mode_ok
+    {
+        return vec![error_frame(-32602, &format!("invalid params: {p}"))];
+    }
+    vec![result_frame(json!({
+        "hits": [{ "label": p["q"].clone(), "path": "src/lib.rs", "start_line": 1,
+                   "score": 1.0, "source": "lexical", "snippet": "" }],
+        "mode": p["mode"].clone(),
+        "latency_ms": 1,
+    }))]
+}
+
+/// Why (#9028): the query box asks every index per keystroke, and before this
+/// row the console answered `501`, so the box stopped asking. The SPA's exact
+/// URL — `URLSearchParams` over `q`, a stringified `limit` and `mode` — must
+/// reach `search.typeahead` with each field in its own type, and a digit-only
+/// prefix must stay text.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_keystroke_reaches_the_daemon_and_returns_its_hits() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), typeahead_daemon);
+
+    let (status, content_type, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=404&limit=6&mode=lexical",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(content_type.contains("application/json"), "{content_type}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["hits"][0]["label"], json!("404"), "{body}");
+    assert_eq!(parsed["mode"], json!("lexical"));
+}
+
+/// Why (#9028, the fail-open check): a typeahead against a daemon that is not
+/// running must read as the daemon being down — `502` naming it — and never as
+/// an empty suggestion list, which the box would render as "no matches".
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_against_a_dead_socket_is_a_bad_gateway() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (status, _, body) = through_router(
+        tmp.path().join("absent.sock"),
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=fn&limit=6&mode=lexical",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("trusty-search"), "{body}");
+}
+
+/// Why (#9028): a `limit` that is not a number must reach the daemon as text
+/// and come back as the daemon's `invalid_params`, rendered `400` with its
+/// words — not be coerced into some other valid value, and not read as `501`.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_with_a_bad_limit_is_a_bad_request() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), typeahead_daemon);
+
+    let (status, _, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=fn&limit=many",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let words = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        words.contains(r#""limit":"many""#),
+        "the daemon's words must reach the caller, limit still text: {body}"
+    );
+}
+
+// ─── chat (#6285) ────────────────────────────────────────────────────────────
+
+/// A stub `search.chat` that decodes `params` the way the daemon's
+/// `ChatRequest` does: an object with a string `index_id`. Anything else is the
+/// daemon's own `invalid_params` refusal.
+fn chat_daemon(request: &Value) -> Vec<String> {
+    let p = &request["params"];
+    if request["method"] != "search.chat" || !p["index_id"].is_string() {
+        return vec![error_frame(-32602, &format!("invalid params: {p}"))];
+    }
+    vec![result_frame(json!({
+        "answer": format!("about {}", p["message"].as_str().unwrap_or_default()),
+        "sources": [],
+        "model": "stub/model",
+    }))]
+}
+
+/// Why (#6285 owner ruling): chat is served by the console over the socket.
+/// The SPA's `api.chat` body must reach `search.chat` as its `params`
+/// unchanged, and the daemon's one JSON envelope must come back as the HTTP
+/// body — not as an event stream, and not as `501`.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_question_reaches_the_daemon_and_returns_its_answer() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), chat_daemon);
+
+    let (status, content_type, body) = through_router(
+        socket,
+        "POST",
+        "/api/search/chat",
+        r#"{"index_id":"scratch","message":"the reindex path","history":[]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(content_type.contains("application/json"), "{content_type}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["answer"], json!("about the reindex path"), "{body}");
+    assert_eq!(parsed["model"], json!("stub/model"));
+}
+
+/// Why (#6285, the fail-open check): a chat against a daemon that is not
+/// running must read as the daemon being down — `502` naming it — and never as
+/// an empty answer the panel would render as the model saying nothing.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_against_a_dead_socket_is_a_bad_gateway() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (status, _, body) = through_router(
+        tmp.path().join("absent.sock"),
+        "POST",
+        "/api/search/chat",
+        r#"{"index_id":"scratch","message":"hi"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("trusty-search"), "{body}");
+}
+
+/// Why (#6285): a chat with no body, or one missing `index_id`, must come back
+/// as the daemon's `invalid_params` — `400` with its words — rather than be
+/// padded into a request the daemon would accept.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_without_an_index_is_a_bad_request() {
+    for body in ["", r#"{"message":"hi"}"#] {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let socket = stub_daemon(tmp.path(), chat_daemon);
+        let (status, _, answer) = through_router(socket, "POST", "/api/search/chat", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body {body:?}: {answer}");
+        assert!(answer.contains("invalid params"), "body {body:?}: {answer}");
+    }
 }
