@@ -243,6 +243,9 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   ```json
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
+- **Response 400** `invalid_exclude_glob` (#8922): an `exclude_globs` entry
+  does not parse. Nothing is registered. `PATCH /indexes/:id/config` refuses
+  the same way.
 - **Response 409** (#8499): the index store would land inside the git work
   tree that holds the index root — `TRUSTY_DATA_DIR` anywhere in that
   repository (not only under `<root_path>`), or the default data dir under a
@@ -670,6 +673,18 @@ Add or replace one file in the index.
     `removed: true`. It is the one reply where `indexed: true` comes with zero
     chunks.
   - `chunks` (#8976): chunks the write committed.
+- **Response 403** `index_file_excluded` (#8922): the write is refused and
+  nothing is indexed. `reason` is `excluded_path` — the reindex walker would
+  skip this path (`exclude_globs`, `extensions`, `include_paths`,
+  `path_filter`, ignore files when the file is on disk, skip dirs, source
+  extensions, size caps measured on `content`, or a `..` segment) — or
+  `sops_encrypted` — the content is a sops-encrypted file. Either way any
+  chunks an earlier write left for the path are removed (`removed_chunks`).
+  Carries `indexed: false` and `chunks: 0`. A tombstone write is never refused.
+- **Response 503** `index_file_admission_undetermined` (#8922): the
+  filesystem could not say whether the path is admitted (an unresolvable
+  symlink, a permission error). Nothing is indexed or removed;
+  `retryable: true`.
 - **Response 500** `index_file_failed`: the write did not land (quarantine,
   chunk cap, embed failure). Carries `indexed: false` and `message`.
 

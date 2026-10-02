@@ -334,6 +334,8 @@ pub(crate) async fn create_index_report(
     mut req: CreateIndexRequest,
 ) -> Result<serde_json::Value, (axum::http::StatusCode, serde_json::Value)> {
     let id = IndexId::new(req.id.clone());
+    // #8922: refused before anything is registered.
+    super::index_config::reject_invalid_globs(req.exclude_globs.as_deref())?;
     // Issue #63: validate root_path is absolute and points at an existing
     // directory before registering. Previously the handler accepted any
     // `PathBuf` the client supplied, so a relative path (e.g. `claude-mpm`)

@@ -565,18 +565,41 @@ pub fn should_skip_path(path: &Path) -> bool {
     // documents (issue #2923) get the larger MAX_OFFICE_FILE_BYTES cap since
     // real PDFs/spreadsheets routinely exceed the 1 MiB source-file cap from
     // embedded fonts/images even when their extractable text is small.
-    let size_cap = if crate::core::extract::is_extractable_ext(&ext) {
-        crate::core::extract::MAX_OFFICE_FILE_BYTES
-    } else {
-        MAX_FILE_BYTES
-    };
     if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > size_cap {
+        if meta.len() > size_cap_for_ext(&ext) {
             return true;
         }
     }
 
     false
+}
+
+/// The global size cap for a lowercased extension: office documents get
+/// [`crate::core::extract::MAX_OFFICE_FILE_BYTES`], everything else
+/// [`MAX_FILE_BYTES`].
+fn size_cap_for_ext(ext: &str) -> u64 {
+    if crate::core::extract::is_extractable_ext(ext) {
+        crate::core::extract::MAX_OFFICE_FILE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
+
+/// Whether `len` bytes of content at `path` exceed a size cap the walker
+/// applies from file metadata (#8922).
+///
+/// Why: `index_file` receives content, not a file, so the walker's
+/// metadata-based caps in [`should_skip_path`] and [`exceeds_data_cap`] see
+/// nothing for it.
+/// What: the global cap for the extension, then the tighter [`DATA_EXTS`] cap.
+/// Test: `pushed_write_over_a_size_cap_is_refused`.
+pub(crate) fn len_exceeds_caps(path: &Path, len: u64, data_file_max_bytes: u64) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    len > size_cap_for_ext(&ext) || (DATA_EXTS.contains(&ext.as_str()) && len > data_file_max_bytes)
 }
 
 /// Return `true` when any path component of `path` is an excluded directory

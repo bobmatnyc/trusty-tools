@@ -514,7 +514,17 @@ pub async fn handle_modified(
     // redb + HNSW in this call, and a DELETE that found no contention would
     // remove the data directory mid-write (#3049).
     let idx = indexer.read().await;
-    if let Err(err) = idx.index_file(&path_str, &content).await {
+    let outcome = idx.index_file_outcome(&path_str, &content).await;
+    // #8922: the indexer refused sops content and removed the file's chunks,
+    // so there is nothing to track; recording the parsed ids would track
+    // chunks that never landed.
+    if matches!(
+        outcome,
+        Ok(crate::core::indexer::IndexFileOutcome::SopsEncrypted)
+    ) {
+        return;
+    }
+    if let Err(err) = outcome {
         tracing::warn!(?err, ?path, "index_file failed");
         // #100: `index_file` refuses a write the `TRUSTY_MAX_CHUNKS` cap
         // discarded, and raises that refusal AFTER committing the chunks that

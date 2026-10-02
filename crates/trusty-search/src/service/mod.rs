@@ -70,6 +70,12 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #8922: the walker's admission decision for a pushed `index_file` write.
+pub(crate) mod write_admission;
+
+// #8922: every ingest path against one fixture tree.
+#[cfg(test)]
+mod excludes_8922_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 
