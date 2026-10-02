@@ -246,22 +246,24 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// What, in order:
 /// 1. Skip when `.claude/agents/` or `.open-mpm/agents/` currently wins
 ///    discovery — see this module's docs.
-/// 2. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
+/// 2. Stage every source into a scratch directory, including the five `BASE-*`
+///    templates so the deployer's own `extends:` composer resolves the chains
+///    from disk exactly as it does for trusty-mpm. The shared texts come from
+///    content (#9011); with none, this fails before anything below creates the
+///    agents directory or its lock (D5).
+/// 3. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
 ///    which applies the unchanged ADR-0044 membership rule and then holds the
 ///    directory open on a descriptor. Every write below is `openat`-relative to
 ///    it, so a symlink swapped in afterwards cannot redirect one (#7779).
-/// 3. Take the project's ledger lock through the pinned handle, so concurrent
+/// 4. Take the project's ledger lock through the pinned handle, so concurrent
 ///    `tcode` daemons still serialise on the same sidecar the shared deployer
 ///    would have used. It is a blocking `LOCK_EX` held across the whole
-///    mirror/stage/compose/publish sequence — wider than the shared deployer's,
+///    mirror/compose/publish sequence — wider than the shared deployer's,
 ///    which takes it around the compose only, and deliberately so: the mirror
 ///    that decides "hand-edited" and the publish that acts on that decision have
 ///    to see the same directory.
-/// 4. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
-/// 5. Stage every compiled-in source into a scratch directory, including the
-///    five `BASE-*` templates so the deployer's own `extends:` composer resolves
-///    the chains from disk exactly as it does for trusty-mpm.
-/// 6. PIN the skill-refs tree — after step 4, so a refused deploy leaves no
+/// 5. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
+/// 6. PIN the skill-refs tree — after step 5, so a refused deploy leaves no
 ///    empty directory behind — and materialize the roster's skill pointers.
 /// 7. Deploy into a second scratch directory seeded from the pinned handle,
 ///    selecting the dispatchable roster only and deselecting any tracked file
@@ -276,13 +278,18 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// `symlinked_skill_refs_dir_is_refused_before_any_write`,
 /// `symlinked_skill_folder_is_refused_before_any_write`,
 /// `symlinked_skill_ref_file_is_refused_before_any_write`,
-/// `tests/roster_deploy_e2e.rs`.
+/// `tests/roster_deploy_e2e.rs`,
+/// `no_content_writes_no_agents_dir_and_no_lock` (`tests/no_content_e2e.rs`).
 ///
 /// [`Origin`]: trusty_agents_common::agents::manifest::Origin
 pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, RosterDeployError> {
     if !paths::agents_dir(project_root).source.is_native() {
         return Ok(RosterDeploy::Skipped(SkipReason::CompatRootWins));
     }
+
+    // #9011 D5: load content BEFORE pinning anything. Pinning creates the agents
+    // directory and the lock, so with no content those were left behind empty.
+    let staged = stage_embedded_sources()?;
 
     // #7779: both write targets are PINNED here, not merely checked. Opening
     // them creates every missing component with `mkdirat`/`O_NOFOLLOW`, so the
@@ -317,8 +324,6 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         }
     };
 
-    // #9011: the shared texts come from content; none means nothing is staged.
-    let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
     // #7779: pinned only now. Opening a handle CREATES its directory, so pinning
