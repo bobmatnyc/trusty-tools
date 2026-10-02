@@ -36,7 +36,7 @@ fn drops_finding_containing_each_self_negation_marker() {
     ];
     for closer in verbatim_closers {
         let mut findings = vec![finding(Effort::Medium, closer)];
-        let dropped = drop_self_negated_or_leaked_findings(&mut findings);
+        let dropped = drop_self_negated_or_leaked_findings(&mut findings, &mut Vec::new());
         assert_eq!(dropped, 1, "must drop self-negated finding: {closer:?}");
         assert!(findings.is_empty());
     }
@@ -51,9 +51,34 @@ fn does_not_drop_legitimate_finding_using_the_word_correct() {
         "The OLD validation path was correct, but this diff removes the null \
          check that made it so, introducing a panic on empty input.",
     )];
-    let dropped = drop_self_negated_or_leaked_findings(&mut findings);
+    let dropped = drop_self_negated_or_leaked_findings(&mut findings, &mut Vec::new());
     assert_eq!(dropped, 0, "a legitimate finding must not be false-dropped");
     assert_eq!(findings.len(), 1);
+}
+
+#[test]
+fn self_negated_escapes_from_the_0_37_re_measure_are_withheld() {
+    // #4044: phrasings that passed the filter on the 0.37.0 re-measure
+    // (code-intelligence#6067). Mixed case: matching is case-insensitive.
+    let escapes = [
+        "The retry loop re-reads the cursor each pass. This Is Fine.",
+        "Both branches release the lock. No issue here.",
+        "Flagging the ordering for completeness — a NON-FINDING.",
+    ];
+    for text in escapes {
+        let mut findings = vec![finding(Effort::Medium, text)];
+        let mut withheld = Vec::new();
+        let dropped = drop_self_negated_or_leaked_findings(&mut findings, &mut withheld);
+        assert_eq!(dropped, 1, "must drop: {text:?}");
+        assert!(findings.is_empty());
+        assert_eq!(withheld.len(), 1, "a drop is recorded: {text:?}");
+        assert!(
+            withheld[0].reason.starts_with(SELF_NEGATED_REASON),
+            "{}",
+            withheld[0].reason
+        );
+        assert_eq!(withheld[0].finding.description, text);
+    }
 }
 
 // ─── #4044 defect 2: chain-of-thought leak ────────────────────────────────────
@@ -68,7 +93,7 @@ fn drops_finding_with_leaked_chain_of_thought() {
         with a malformed body against a closed round returns 400. Withdrawing this \
         finding — confidence too low.";
     let mut findings = vec![finding(Effort::Medium, leaked)];
-    let dropped = drop_self_negated_or_leaked_findings(&mut findings);
+    let dropped = drop_self_negated_or_leaked_findings(&mut findings, &mut Vec::new());
     assert_eq!(
         dropped, 1,
         "a finding leaking raw deliberation must be dropped"
@@ -86,7 +111,7 @@ fn drops_finding_with_deliberation_marker_even_without_withdrawal() {
         "Wait — actually looking at the code more carefully, this does look like \
          a real null-deref on line 42.",
     )];
-    let dropped = drop_self_negated_or_leaked_findings(&mut findings);
+    let dropped = drop_self_negated_or_leaked_findings(&mut findings, &mut Vec::new());
     assert_eq!(
         dropped, 1,
         "raw deliberation text must never reach user-visible output"
@@ -116,7 +141,7 @@ fn sanitize_findings_removes_withdrawn_before_verdict_would_see_them() {
     // Give the real finding a citation so it clears the escalation gate.
     findings[0].code_provable = true;
 
-    sanitize_findings(&mut findings);
+    sanitize_findings(&mut findings, &mut Vec::new());
     assert_eq!(
         findings.len(),
         1,
@@ -157,7 +182,7 @@ fn sanitize_findings_floor_no_longer_counts_withdrawn_findings() {
          forces the BLOCK floor"
     );
 
-    sanitize_findings(&mut findings);
+    sanitize_findings(&mut findings, &mut Vec::new());
     assert_eq!(findings.len(), 1, "only the real Low finding survives");
 
     let after = derive_verdict(Verdict::Approve, &findings);
@@ -260,7 +285,7 @@ fn sanitize_findings_runs_every_pass() {
         ),
         finding(Effort::High, "Real SQL injection provable from the diff."),
     ];
-    let counts = sanitize_findings(&mut findings);
+    let counts = sanitize_findings(&mut findings, &mut Vec::new());
     assert_eq!(counts.dropped_self_negated, 1);
     assert_eq!(counts.demoted_diff_absent, 1);
     assert_eq!(counts.demoted_ungrounded_registry, 1, "#4081 pass is wired");

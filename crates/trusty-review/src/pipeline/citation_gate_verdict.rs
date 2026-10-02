@@ -87,8 +87,8 @@ pub(super) fn withhold_verdict(
 /// Whether a finding, on its own, cannot move a review past APPROVE* (#8949).
 ///
 /// What: asks the verdict engine itself: a model APPROVE with only this
-/// finding derives APPROVE or APPROVE*.
-fn is_advisory(f: &Finding) -> bool {
+/// finding derives APPROVE or APPROVE*. Shared with the verifier round (#4044).
+pub(crate) fn is_advisory(f: &Finding) -> bool {
     matches!(
         derive_verdict(Verdict::Approve, std::slice::from_ref(f)),
         Verdict::Approve | Verdict::ApproveWithReservations

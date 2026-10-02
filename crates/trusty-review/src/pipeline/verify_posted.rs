@@ -8,12 +8,14 @@
 //! What: [`gate_then_verify`] is the one post-grading seam both review paths
 //! call: the #8905 citation gate first (a dropped citation saves a verifier
 //! call), then `verify::maybe_verify` on the survivors. [`enforce_outcomes`]
-//! records each verifier outcome and DROPS three kinds of finding, logging
-//! each: one the verifier refuted, one it could not judge (error, timeout,
-//! unparseable or truncated answer), and one past the `max_calls` cap. A
-//! dropped finding is never posted; the verdict then follows the #8905
-//! withhold policy (`citation_gate::verdict::settle_withheld`), so a drop
-//! never turns a non-APPROVE verdict into APPROVE, and the body leads with
+//! records each verifier outcome and keeps only CONFIRMED findings (owner
+//! ruling on #8905, 2026-09-30). It drops one the verifier refuted, one it
+//! could not judge (error, timeout, unparseable or truncated answer), one past
+//! the `max_calls` cap, and one judged or pre-stamped UNVERIFIABLE, logging
+//! each and recording each in `ReviewResult::withheld_findings`. A dropped
+//! finding is never posted; the verdict then follows the #8905 withhold policy
+//! (`citation_gate::verdict::settle_withheld`), so a drop never turns a
+//! non-APPROVE verdict into APPROVE, and the body leads with
 //! "N findings withheld: …".
 //! Test: `verify_posted_tests.rs`.
 
@@ -24,7 +26,7 @@ use tracing::warn;
 use crate::{
     config::ReviewConfig,
     llm::LlmProvider,
-    models::{Finding, ReviewResult, Verdict, VerifyOutcome},
+    models::{Finding, ReviewResult, Verdict, VerifyOutcome, WithheldFinding},
     pipeline::{
         citation_gate::{gate_posted_findings, verdict as withhold},
         diff_analyzer::models::FilteredDiff,
@@ -32,8 +34,24 @@ use crate::{
     },
 };
 
+/// `WithheldFinding::reason` for a finding the verifier refuted.
+pub const REFUTED_REASON: &str = "refuted by the verifier";
+/// `WithheldFinding::reason` for a finding the verifier could not judge.
+pub const UNJUDGED_REASON: &str = "the verifier could not judge it";
+/// `WithheldFinding::reason` for a finding past the verifier-call cap.
+pub const OVER_CAP_REASON: &str = "past the verifier-call cap";
+/// `WithheldFinding::reason` for a finding judged or pre-stamped
+/// `Unverifiable` (owner ruling on #8905, 2026-09-30).
+pub const UNVERIFIABLE_REASON: &str = "unverifiable";
+/// `WithheldFinding::reason` for any other finding the verifier did not
+/// confirm (for example a pre-recorded `Skipped`).
+pub const UNCONFIRMED_REASON: &str = "not confirmed by the verifier";
+
 /// What one verification round did (#8904).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// No `PartialEq`/`Eq`: `withheld_findings` holds `Finding`, which implements
+/// neither (#4044).
+#[derive(Debug, Clone)]
 pub struct VerifyReport {
     /// The settled verdict.
     pub verdict: Verdict,
@@ -45,14 +63,21 @@ pub struct VerifyReport {
     pub unjudged: usize,
     /// Findings dropped because they fell past the `max_calls` cap.
     pub over_cap: usize,
+    /// Findings dropped because they were judged or pre-stamped
+    /// `Unverifiable` (#4044; owner ruling on #8905, 2026-09-30).
+    pub unverifiable: usize,
+    /// Findings dropped because they carried any other non-CONFIRMED outcome.
+    pub unconfirmed: usize,
     /// `file:line` of every dropped finding that cited a line.
     pub withheld: Vec<String>,
+    /// Every dropped finding with its reason (#4044).
+    pub withheld_findings: Vec<WithheldFinding>,
 }
 
 impl VerifyReport {
     /// Findings the round dropped, for any reason.
     pub fn dropped(&self) -> usize {
-        self.refuted + self.unjudged + self.over_cap
+        self.refuted + self.unjudged + self.over_cap + self.unverifiable + self.unconfirmed
     }
 
     /// The body line naming what was withheld, or `None` when nothing was.
@@ -64,6 +89,8 @@ impl VerifyReport {
             (self.refuted, "refuted by the verifier"),
             (self.unjudged, "the verifier could not judge"),
             (self.over_cap, "past the verifier-call cap"),
+            (self.unverifiable, "unverifiable"),
+            (self.unconfirmed, "not confirmed"),
         ]
         .iter()
         .filter(|(n, _)| *n > 0)
@@ -82,23 +109,30 @@ impl VerifyReport {
 /// Why (#8904): a refuted finding is false; an unjudged or over-cap finding
 /// was never checked. Posting either is what put 7 fabrications on PRs, and a
 /// label does not keep the fabricated text off the PR, so all three are
-/// dropped. A verifier-judged UNVERIFIABLE (#5309) is a judgment, not a
-/// failure: it stays, demoted to an advisory that cannot escalate, with its
-/// "never verified" caveat.
+/// dropped. #4044 (owner ruling on #8905, 2026-09-30): only a CONFIRMED
+/// finding is posted, so an UNVERIFIABLE one — judged by the verifier (#5309)
+/// or pre-stamped by a hygiene pass (#4081) — is withheld too.
 /// What: applies each outcome with `apply_outcome`; drops `Refuted`, every
-/// `VerifierReach::Failed` outcome, and every `over_cap` index, logging each;
-/// then settles the verdict — `Unknown` stays `Unknown`; nothing dropped →
-/// `rederive_verdict`; anything dropped → `settle_withheld`, which never turns
-/// a non-APPROVE verdict into APPROVE but may relax a blocking one. When any
-/// finding went unjudged the result is floored at `primary` (the #8653
-/// verdict), so a verifier failure never relaxes a review. Refuted and
-/// over-cap drops are not floored: with no unjudged finding, either may relax
-/// the verdict through `settle_withheld` (owner ruling on #8904, 2026-09-29).
+/// `VerifierReach::Failed` outcome, every `over_cap` index, and every other
+/// finding whose outcome is not `Confirmed` (reason `"unverifiable"` for
+/// `Unverifiable`), logging each and recording each in
+/// `report.withheld_findings`; then settles the verdict — `Unknown` stays
+/// `Unknown`; nothing dropped, or an APPROVE/APPROVE* review that lost only
+/// advisory unverifiable findings (the #8949 rule) → `rederive_verdict`;
+/// anything else dropped → `settle_withheld`, which never turns a non-APPROVE
+/// verdict into APPROVE but may relax a blocking one. When any finding went
+/// unjudged the result is floored at `primary` (the #8653 verdict), so a
+/// verifier failure never relaxes a review. Refuted and over-cap drops are not
+/// floored: with no unjudged finding, either may relax the verdict through
+/// `settle_withheld` (owner ruling on #8904, 2026-09-29).
 /// Test: `verify_refuted_drops_and_block_is_withheld`,
 /// `verify_permanent_transport_failure_is_withheld`,
 /// `verify_cap_withholds_findings_past_the_last_call`,
 /// `verify_refuting_every_finding_of_a_block_review_is_unknown`,
-/// `run_review_withheld_blocker_keeps_its_block_floor`.
+/// `run_review_withheld_blocker_keeps_its_block_floor`,
+/// `run_review_records_a_refuted_finding_as_withheld`,
+/// `verify_unverifiable_finding_is_withheld_not_posted`,
+/// `verify_unverifiable_advisory_keeps_an_approving_verdict`.
 pub(crate) fn enforce_outcomes(
     primary: Verdict,
     findings: &mut Vec<Finding>,
@@ -112,22 +146,42 @@ pub(crate) fn enforce_outcomes(
         refuted: 0,
         unjudged: 0,
         over_cap: over_cap.len(),
+        unverifiable: 0,
+        unconfirmed: 0,
         withheld: Vec::new(),
+        withheld_findings: Vec::new(),
     };
     let mut drop_reason: Vec<Option<&'static str>> = vec![None; findings.len()];
     for (idx, outcome, reach) in outcomes {
         // #8904: fail closed — only a parseable judgment keeps a finding.
         if matches!(outcome, VerifyOutcome::Refuted) {
             report.refuted += 1;
-            drop_reason[idx] = Some("refuted by the verifier");
+            drop_reason[idx] = Some(REFUTED_REASON);
         } else if reach == VerifierReach::Failed {
             report.unjudged += 1;
-            drop_reason[idx] = Some("the verifier could not judge it");
+            drop_reason[idx] = Some(UNJUDGED_REASON);
         }
         apply_outcome(&mut findings[idx], outcome);
     }
     for &idx in over_cap {
-        drop_reason[idx] = Some("past the verifier-call cap");
+        drop_reason[idx] = Some(OVER_CAP_REASON);
+    }
+    // #4044 (owner ruling on #8905, 2026-09-30): post only CONFIRMED findings.
+    for (f, reason) in findings.iter().zip(drop_reason.iter_mut()) {
+        if reason.is_some() {
+            continue;
+        }
+        match &f.verified {
+            Some(VerifyOutcome::Confirmed) => {}
+            Some(VerifyOutcome::Unverifiable { .. }) => {
+                report.unverifiable += 1;
+                *reason = Some(UNVERIFIABLE_REASON);
+            }
+            _ => {
+                report.unconfirmed += 1;
+                *reason = Some(UNCONFIRMED_REASON);
+            }
+        }
     }
     let mut kept = Vec::with_capacity(findings.len());
     for (f, reason) in std::mem::take(findings).into_iter().zip(drop_reason) {
@@ -139,11 +193,24 @@ pub(crate) fn enforce_outcomes(
         if let Some(line) = f.line {
             report.withheld.push(format!("{}:{line}", f.file));
         }
+        report.withheld_findings.push(WithheldFinding {
+            finding: f,
+            reason: reason.to_string(),
+            missing_fragment: None,
+        });
     }
     *findings = kept;
+    // #8949 rule, applied to the advisory findings #4044 now withholds: an
+    // approving review that lost only those keeps its verdict.
+    let advisory_only = report.dropped() == report.unverifiable
+        && report
+            .withheld_findings
+            .iter()
+            .all(|w| withhold::is_advisory(&w.finding));
+    let approving = matches!(primary, Verdict::Approve | Verdict::ApproveWithReservations);
     report.verdict = if primary == Verdict::Unknown {
         Verdict::Unknown
-    } else if report.dropped() == 0 {
+    } else if report.dropped() == 0 || (approving && advisory_only) {
         rederive_verdict(primary, findings)
     } else {
         let settled = withhold::settle_withheld(primary.clone(), findings);
@@ -168,19 +235,18 @@ pub(crate) fn enforce_outcomes(
 /// the citation gate first saves a verifier call on every finding it drops.
 /// What: runs `gate_posted_findings` (#8905), then `maybe_verify` on
 /// `result.findings` with `result.verdict` as the primary verdict. Records
-/// the unjudged and over-cap drops in `result.withheld_unverified_count`. When
+/// the unjudged, over-cap and unverifiable drops in
+/// `result.withheld_unverified_count`, and every drop with its reason in
+/// `result.withheld_findings` (#4044). When
 /// the round withheld findings, scrubs their citations from the body, prepends
 /// the report's note, and on `Unknown` clears the grade and records the note as
-/// the error — the same shape the citation gate uses. When no round ran, the
-/// findings are posted behind [`not_verified_note`] and the verdict is left
-/// alone: with verification enabled but no verifier wired, each finding is
-/// marked `Unverifiable` so `unverified_count` raises the #4459 alarm; with
-/// verification disabled by config — an operator choice — the findings keep
-/// no outcome and are not counted (owner ruling on #8904, 2026-09-29).
+/// the error — the same shape the citation gate uses. When no round ran,
+/// [`withhold_unverified`] withholds every finding and the review is UNKNOWN
+/// (Bob's "withhold all" ruling, 2026-09-30; supersedes #8904's 09-29 rule).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
-/// `run_review_enabled_without_a_verifier_notes_unverified_findings`,
-/// `run_review_disabled_verification_notes_unverified_findings`,
+/// `run_review_enabled_without_a_verifier_withholds_every_finding`,
+/// `run_review_disabled_verification_withholds_every_finding`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
@@ -204,21 +270,15 @@ pub(crate) async fn gate_then_verify(
     )
     .await
     else {
-        if result.findings.is_empty() {
-            return;
-        }
-        let why = if config.verification.enabled {
-            mark_unverifiable(&mut result.findings, NO_VERIFIER);
-            NO_VERIFIER
-        } else {
-            VERIFICATION_DISABLED
-        };
-        let note = not_verified_note(result.findings.len(), why);
-        result.review_body = format!("{note}\n\n{}", result.review_body);
+        withhold_unverified(result, config.verification.enabled);
         return;
     };
     result.verdict = report.verdict.clone();
-    result.withheld_unverified_count = report.unjudged + report.over_cap;
+    // #4044: a withheld UNVERIFIABLE was never confirmed either.
+    result.withheld_unverified_count = report.unjudged + report.over_cap + report.unverifiable;
+    result
+        .withheld_findings
+        .extend(report.withheld_findings.iter().cloned());
     let Some(note) = report.note() else {
         return;
     };
@@ -236,19 +296,63 @@ const NO_VERIFIER: &str = "no verifier provider could be built";
 /// Why no round ran when `[verification] enabled` is false.
 const VERIFICATION_DISABLED: &str = "verification is disabled";
 
-/// Body line for `n` findings posted without a verification round (#8904).
-fn not_verified_note(n: usize, why: &str) -> String {
-    format!("{n} findings not verified: {why}")
+/// `WithheldFinding::reason` for a finding no verifier round checked.
+pub const NO_VERIFIER_REASON: &str = "no verifier";
+
+/// Withhold every finding when no verification round ran (#4044).
+///
+/// Why: Bob's ruling of 2026-09-30 ("withhold all") supersedes the 09-29
+/// #8904 rule that posted unchecked findings behind a note: only a CONFIRMED
+/// finding is posted, so with no round nothing is.
+/// What: no findings → nothing to do, verdict untouched. Otherwise moves every
+/// finding into `result.withheld_findings` with reason [`NO_VERIFIER_REASON`],
+/// prepends "N findings withheld: no verifier (<why>)", and sets the verdict
+/// to `Unknown` with no grade and the note as the error — no verdict rests on
+/// findings nobody checked. With verification enabled but no verifier built,
+/// each finding is first marked `Unverifiable` and counted in
+/// `withheld_unverified_count` (the #4459 alarm); with verification disabled by
+/// config, an operator choice, they keep no outcome and are not counted.
+/// Test: `run_review_enabled_without_a_verifier_withholds_every_finding`,
+/// `run_review_disabled_verification_withholds_every_finding`.
+fn withhold_unverified(result: &mut ReviewResult, enabled: bool) {
+    if result.findings.is_empty() {
+        return;
+    }
+    let count = result.findings.len();
+    let why = if enabled {
+        mark_unverifiable(&mut result.findings, NO_VERIFIER);
+        result.withheld_unverified_count = count;
+        NO_VERIFIER
+    } else {
+        VERIFICATION_DISABLED
+    };
+    let mut cites = Vec::new();
+    for f in std::mem::take(&mut result.findings) {
+        warn!(file = %f.file, line = ?f.line, kind = %f.kind, why, "verifier: withholding unchecked finding (#4044)");
+        if let Some(line) = f.line {
+            cites.push(format!("{}:{line}", f.file));
+        }
+        result.withheld_findings.push(WithheldFinding {
+            finding: f,
+            reason: NO_VERIFIER_REASON.to_string(),
+            missing_fragment: None,
+        });
+    }
+    let note = format!("{count} findings withheld: no verifier ({why})");
+    result.review_body = withhold::scrub_body(&result.review_body, &cites);
+    result.review_body = format!("{note}\n\n{}", result.review_body);
+    result.verdict = Verdict::Unknown;
+    result.grade = None;
+    result.error.get_or_insert(note);
 }
 
 /// Mark every finding with no recorded outcome `Unverifiable` (#8904).
 ///
-/// Why: a finding posted because no verifier could be built was never
-/// checked, and `count_unverified` counts only a recorded outcome.
-/// What: sets `verified` directly, skipping `apply_outcome`'s #5309 demotion,
-/// so the verdict and grade stay as graded. A finding a hygiene pass already
-/// stamped keeps its own outcome and reason.
-/// Test: `run_review_enabled_without_a_verifier_notes_unverified_findings`.
+/// Why: a finding no verifier could check was never checked, and
+/// `count_unverified` counts only a recorded outcome.
+/// What: sets `verified` directly, skipping `apply_outcome`'s #5309 demotion.
+/// A finding a hygiene pass already stamped keeps its own outcome and reason.
+/// Test: `run_review_enabled_without_a_verifier_withholds_every_finding`.
 fn mark_unverifiable(findings: &mut [Finding], reason: &str) {
     for f in findings.iter_mut().filter(|f| f.verified.is_none()) {
         f.verified = Some(VerifyOutcome::Unverifiable {

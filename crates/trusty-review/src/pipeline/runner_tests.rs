@@ -500,7 +500,13 @@ async fn run_review_request_changes_parsed_correctly() {
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    let deps = ready_deps(Arc::new(FakeLlm::request_changes()), None);
+    // #4044: only a verifier-confirmed finding is posted.
+    let deps = ready_deps(
+        Arc::new(FakeLlm::request_changes()),
+        Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
+    );
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(result.verdict, Verdict::RequestChanges);
@@ -1759,8 +1765,10 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
     );
 }
 
-/// When verification is disabled by config, the verifier is never consulted and
-/// the verdict is the un-verified grade.
+/// When verification is disabled by config, the verifier is never consulted.
+/// Since #4044 ("withhold all", 2026-09-30) nothing is posted: the finding is
+/// withheld as "no verifier" — not "refuted", which would mean the verifier
+/// ran — and the review is UNKNOWN.
 #[tokio::test]
 async fn run_review_verification_disabled_skips_round() {
     let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
@@ -1786,15 +1794,17 @@ async fn run_review_verification_disabled_skips_round() {
     );
 
     let result = run_review(&config, input, deps).await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_findings.len(), 1);
     assert_eq!(
-        result.verdict,
-        Verdict::RequestChanges,
-        "with verification disabled the verdict must remain REQUEST_CHANGES"
+        result.withheld_findings[0].reason, "no verifier",
+        "the REFUTED verifier must not have been consulted"
     );
     assert!(
-        result.findings[0].verified.is_none(),
+        result.withheld_findings[0].finding.verified.is_none(),
         "disabled verification must not mark any finding"
     );
+    assert_eq!(result.verdict, Verdict::Unknown);
 }
 
 /// Live post + dedup-skip end-to-end requires a real PR + GitHub creds, so
@@ -2436,22 +2446,24 @@ async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
 
     let result = run_review(&default_config(), input, deps).await;
 
-    assert_eq!(
-        result.findings.len(),
-        1,
-        "the finding must still be reported"
-    );
+    // #4044 (owner ruling on #8905, 2026-09-30): only CONFIRMED findings are
+    // posted, so the pre-stamped claim is withheld as "unverifiable" and kept
+    // verbatim in the review record.
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_findings.len(), 1);
+    let withheld = &result.withheld_findings[0];
+    assert_eq!(withheld.reason, "unverifiable");
     assert!(
         !matches!(
-            result.findings[0].verified,
+            withheld.finding.verified,
             Some(crate::models::VerifyOutcome::Confirmed)
         ),
         "nothing read the signatures — the claim must not wear a confirmation \
          (#5309), got {:?}",
-        result.findings[0].verified
+        withheld.finding.verified
     );
     assert!(
-        !result.findings[0].code_provable,
+        !withheld.finding.code_provable,
         "a claim the finding says the diff cannot settle is not diff-provable"
     );
     assert_ne!(
@@ -2460,8 +2472,8 @@ async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
         "an unchecked claim must not drive BLOCK (#5309)"
     );
     assert!(
-        result.findings[0].description.contains("incidents::run"),
-        "the original claim must still reach the author verbatim"
+        withheld.finding.description.contains("incidents::run"),
+        "the original claim is kept verbatim in the record"
     );
 }
 

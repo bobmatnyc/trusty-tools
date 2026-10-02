@@ -467,18 +467,20 @@ pub struct Finding {
     pub citation_partial: bool,
 }
 
-/// A finding the citation gate withheld, kept for the review record (#8949).
+/// A finding a gate withheld, kept for the review record (#8949, #4044).
 ///
 /// Why: a withheld finding left no trace outside a log line, so a drop could
 /// not be audited as a true or a false positive after the fact.
-/// What: the finding as the gate saw it, the reason it was dropped, and the
-/// quoted fragment that failed to match when that was the cause.
+/// What: the finding as the gate saw it, the reason it was dropped (the
+/// reason names the gate, e.g. `#4044 self-negated …`, `#4042 citation: …`,
+/// `unverifiable`), and the quoted fragment that failed to match when that
+/// was the cause.
 /// Test: `a_dropped_finding_names_its_missing_snippet`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WithheldFinding {
     /// The finding the gate dropped.
     pub finding: Finding,
-    /// Why the gate dropped it.
+    /// Why the gate dropped it, naming the gate.
     pub reason: String,
     /// The quoted fragment that is not in the cited file, when that was the cause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -656,13 +658,22 @@ pub struct ReviewResult {
     ///
     /// Why: a withheld finding leaves `findings`, so counting `findings` alone
     /// reads 0 during a verifier outage.
-    /// What: `VerifyReport::unjudged + over_cap`, set by
+    /// What: `VerifyReport::unjudged + over_cap + unverifiable` (#4044), set by
     /// `verify_posted::gate_then_verify`; `unverified_count` includes it.
     /// Test: `run_review_unjudged_finding_is_counted_as_withheld_unverified`.
     #[serde(default)]
     pub withheld_unverified_count: usize,
-    /// #8949: every finding the citation gate withheld, with its reason, so the
-    /// review record can be audited. Never posted.
+    /// Every finding any gate withheld, with its reason, so the review record
+    /// can be audited. Never posted. Written by the hygiene and grounding passes
+    /// (#4044 self-negated, #4042 citation, #1873 absence claim), the
+    /// map-reduce dedup and cap, the #8905 citation gate (#8949), and the
+    /// verifier round (refuted, unjudged, over-cap, unverifiable), and every
+    /// finding when no round ran ("no verifier") — owner rulings of 2026-09-30.
+    /// Test: `run_review_records_self_negated_findings_as_withheld`,
+    /// `run_review_mapreduce_records_hygiene_withholds`,
+    /// `gate_posted_findings_records_the_withheld_finding`,
+    /// `run_review_records_a_refuted_finding_as_withheld`,
+    /// `run_review_withholds_an_unverifiable_finding`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub withheld_findings: Vec<WithheldFinding>,
     /// Per-line inline review comments that were (or, in dry-run, would be)

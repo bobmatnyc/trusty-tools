@@ -151,7 +151,7 @@ fn drops_cross_file_misattribution() {
     )];
     findings[0].line = Some(35271);
 
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(n, 1, "the misattributed finding must be dropped");
     assert!(findings.is_empty());
 }
@@ -165,7 +165,7 @@ fn keeps_grounded_code_provable() {
         "api/chat.js",
         "Suspicious call `const bundleVar = compiledThing(42);` may overflow.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(n, 0, "a grounded finding must survive");
     assert_eq!(findings.len(), 1);
     assert!(findings[0].code_provable);
@@ -182,12 +182,31 @@ fn drops_citation_to_path_outside_diff() {
         "src/never/changed.rs",
         "Off-by-one in the loop bound `for i in 0..=len { arr[i] }`.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(
         n, 1,
         "a citation to a path outside the diff must be dropped"
     );
     assert!(findings.is_empty());
+}
+
+#[test]
+fn a_dropped_citation_is_recorded_as_withheld() {
+    // #4044 (owner ruling on #8905, 2026-09-30): a #4042 drop reaches the
+    // review record with a reason naming the gate and the cause.
+    let idx = repro_index();
+    let mut findings = vec![code_provable_finding(
+        "src/never/changed.rs",
+        "Off-by-one in the loop bound `for i in 0..=len { arr[i] }`.",
+    )];
+    let mut withheld = Vec::new();
+    enforce_citation_integrity(&mut findings, &idx, &mut withheld);
+    assert_eq!(withheld.len(), 1);
+    assert_eq!(
+        withheld[0].reason,
+        format!("{CITATION_REASON}: cited file is not part of the diff at all")
+    );
+    assert_eq!(withheld[0].finding.file, "src/never/changed.rs");
 }
 
 #[test]
@@ -200,7 +219,7 @@ fn fail_open_when_no_quote() {
         "api/chat.js",
         "There may be a subtle logic issue in this function.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(n, 0, "no verifiable quote → fail open");
     assert_eq!(findings.len(), 1);
 }
@@ -222,7 +241,7 @@ fn every_finding_is_checked_not_just_code_provable() {
     );
     f.source_citation = Some("jira:PROJ-1".to_string());
     let mut findings = vec![f];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(
         n, 1,
         "path resolution now applies to every finding, not only code_provable ones"
@@ -243,7 +262,7 @@ fn unknown_file_sentinel_is_exempt_from_path_check() {
         0.6,
         Effort::Low,
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(
         n, 0,
         "the unknown-file sentinel is exempt from path checking"
@@ -264,7 +283,7 @@ fn code_citation_bracket_content_is_now_verified() {
          [code: `api/chat.js:1` — \"import { describe, it, expect } from 'vitest';\"].",
     );
     f.line = Some(1);
-    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx);
+    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx, &mut Vec::new());
     assert_eq!(
         n, 1,
         "a fabricated bracket-citation excerpt must now be caught"
@@ -288,7 +307,7 @@ fn code_citation_bracket_grounded_content_survives() {
     );
     f.line = Some(35271);
     let mut findings = findings_of(f);
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(n, 0, "a grounded bracket citation must survive");
     assert_eq!(findings.len(), 1);
 }
@@ -304,7 +323,7 @@ fn code_citation_bracket_path_outside_diff_is_dropped() {
         "Race condition in the loser branch \
          [code: `hotelPage.ts:207` — \"await Promise.race([a, b])\"].",
     );
-    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx);
+    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx, &mut Vec::new());
     assert_eq!(
         n, 1,
         "an unresolvable bracket citation path must be dropped"
@@ -331,7 +350,7 @@ fn drops_findings_with_line_contradiction() {
              [code: `api/chat.js:1` — \"import { describe, expect, it } from 'vitest'\"].",
         ),
     ];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(n, 2, "both contradictory findings must be dropped");
     assert!(findings.is_empty());
 }
@@ -353,7 +372,7 @@ fn distinct_lines_are_never_contradictory() {
              [code: `api/chat.js:35272` — \"return bundleVar;\"].",
         ),
     ];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = enforce_citation_integrity(&mut findings, &idx, &mut Vec::new());
     assert_eq!(
         n, 0,
         "distinct real lines in the same file must not be treated as contradictory"

@@ -291,6 +291,47 @@ fn reduce_caps_findings() {
     assert_eq!(reduced.stats.findings_surfaced, 2);
 }
 
+/// #4044: a finding the cap or the dedup drops is recorded in
+/// `withheld_findings` with its reason, never discarded unrecorded.
+#[test]
+fn reduce_records_capped_findings_as_withheld() {
+    let mut config = cfg();
+    config.max_findings = 1;
+    let outcomes = vec![reviewed(
+        "src/a.rs",
+        Verdict::Block,
+        vec![
+            finding(
+                "src/a.rs",
+                "high1",
+                "critical security hole alpha",
+                0.95,
+                Effort::High,
+            ),
+            finding(
+                "src/a.rs",
+                "high1",
+                "critical security hole alpha",
+                0.95,
+                Effort::High,
+            ),
+            finding("src/a.rs", "low1", "minor style nit one", 0.9, Effort::Low),
+        ],
+    )];
+    let reduced = reduce(outcomes, &config);
+    assert_eq!(reduced.findings.len(), 1);
+    let reasons: Vec<&str> = reduced
+        .withheld_findings
+        .iter()
+        .map(|w| w.reason.as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![super::DUPLICATE_REASON, super::OVER_MAX_FINDINGS_REASON]
+    );
+    assert_eq!(reduced.withheld_findings[1].finding.kind, "low1");
+}
+
 /// Guard the load-bearing ordinal invariant: `Verdict::Unknown` MUST have the
 /// highest ordinal of all variants so the UNKNOWN filter in `aggregate_verdict`
 /// is sufficient to prevent poisoning.

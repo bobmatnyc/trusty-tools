@@ -30,8 +30,11 @@
 
 use tracing::warn;
 
-use crate::models::Finding;
+use crate::models::{Finding, WithheldFinding};
 use crate::pipeline::citation_check::DiffContentIndex;
+
+/// `WithheldFinding::reason` prefix for a refuted diff-absence claim.
+pub const ABSENCE_REASON: &str = "#1873 refuted absence claim";
 
 /// Case-insensitive substrings asserting that something is not in the diff.
 ///
@@ -67,7 +70,8 @@ const ABSENCE_MARKERS: &[&str] = &[
 /// sentence at a time; a sentence carrying an [`ABSENCE_MARKERS`] phrase is
 /// searched for path-like tokens, and the finding is dropped when any of those
 /// paths — or the finding's own `file`, when the marker sentence names none —
-/// resolves in `index`. Returns how many were dropped.
+/// resolves in `index`. Each drop is pushed onto `withheld` with the reason
+/// `#1873 refuted absence claim: <path>`. Returns how many were dropped.
 ///
 /// Scoping the path search to the marker's own sentence is what keeps a finding
 /// that names two files (one genuinely absent, one present) from being dropped
@@ -77,7 +81,11 @@ const ABSENCE_MARKERS: &[&str] = &[
 /// `keeps_an_ordinary_finding`,
 /// `refutes_using_the_findings_own_file_when_the_sentence_names_no_path`,
 /// `ignores_a_present_path_in_a_different_sentence`.
-pub fn drop_refuted_absence_claims(findings: &mut Vec<Finding>, index: &DiffContentIndex) -> usize {
+pub fn drop_refuted_absence_claims(
+    findings: &mut Vec<Finding>,
+    index: &DiffContentIndex,
+    withheld: &mut Vec<WithheldFinding>,
+) -> usize {
     let mut dropped = 0usize;
     let mut kept = Vec::with_capacity(findings.len());
     for f in std::mem::take(findings) {
@@ -92,6 +100,11 @@ pub fn drop_refuted_absence_claims(findings: &mut Vec<Finding>, index: &DiffCont
                      missing from the diff (#1873)"
                 );
                 dropped += 1;
+                withheld.push(WithheldFinding {
+                    finding: f,
+                    reason: format!("{ABSENCE_REASON}: {path}"),
+                    missing_fragment: None,
+                });
             }
             None => kept.push(f),
         }

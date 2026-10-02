@@ -142,7 +142,7 @@ async fn repro_fabricated_finding_no_longer_forces_block() {
 
     // AFTER: verify citations, then re-derive.
     let mut findings = vec![fabricated_finding()];
-    let n = enforce_citation_integrity(&mut findings, &index);
+    let n = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(n, 1, "the misattributed finding must be dropped");
     // #4042: dropped, not downgraded-in-place — it does not survive at all.
     assert!(findings.is_empty());
@@ -176,7 +176,7 @@ async fn repro_reduce_recovers_after_downgrade() {
 
     let findings_before = 1;
     let mut findings = vec![fabricated_finding()];
-    enforce_citation_integrity(&mut findings, &index);
+    enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
 
     // The bundle chunk's model verdict was REQUEST_CHANGES (driven by the
     // finding) — mirror production's `run_map_reduce` wiring, which relaxes a

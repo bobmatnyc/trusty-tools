@@ -219,7 +219,8 @@ fn advisory_note_does_not_trip_finding_hygiene_markers() {
     demote_ungrounded_registry_claims(&mut findings);
     let mut annotated: Vec<Finding> = findings.clone();
 
-    let counts = crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated);
+    let counts =
+        crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated, &mut Vec::new());
     assert_eq!(counts.dropped_self_negated, 0, "note must not self-negate");
     assert_eq!(
         counts.demoted_diff_absent, 0,

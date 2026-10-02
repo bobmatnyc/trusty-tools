@@ -12,7 +12,7 @@
 //!
 //! Test: `mapreduce/reduce_tests.rs` and `mapreduce/map_tests.rs`.
 
-use crate::models::{Finding, Verdict};
+use crate::models::{Finding, Verdict, WithheldFinding};
 
 // ─── TokenUsage ────────────────────────────────────────────────────────────────
 
@@ -223,6 +223,12 @@ pub struct ReducedReview {
     /// Test: `reduce_sums_output_tokens` (reduce_tests.rs); end-to-end coverage in
     /// `run_review_mapreduce_shallow_clean_flags_low_tokens` (runner_mapreduce_tests.rs).
     pub tokens: TokenUsage,
+    /// Every finding a per-chunk hygiene/grounding pass, the dedup, or the
+    /// `max_findings` cap dropped, with its reason (#4044). The runner copies
+    /// it into `ReviewResult::withheld_findings`; none of it is posted.
+    /// Test: `run_review_mapreduce_records_hygiene_withholds`,
+    /// `reduce_records_capped_findings_as_withheld`.
+    pub withheld_findings: Vec<WithheldFinding>,
 }
 
 #[cfg(test)]

@@ -411,18 +411,31 @@ pub(super) async fn finalize_run(
 ///      every finding, the model's own verdict rested on the same evidence and
 ///      is relaxed with it (#4042, #4044).
 ///
+/// Returns every finding passes 1–3 dropped, each with its reason, for the
+/// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
+/// on #8905, 2026-09-30).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
-/// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`.
+/// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
+/// `run_review_records_self_negated_findings_as_withheld`.
 pub(super) fn ground_parsed_findings(
     parsed: &mut crate::pipeline::parser::ParsedReview,
     filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
-) {
+) -> Vec<crate::models::WithheldFinding> {
     let findings_before = parsed.findings.len();
-    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings);
+    let mut withheld = Vec::new();
+    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings, &mut withheld);
 
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
-    crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
-    crate::pipeline::absence_claim::drop_refuted_absence_claims(&mut parsed.findings, &cite_index);
+    crate::pipeline::citation_check::enforce_citation_integrity(
+        &mut parsed.findings,
+        &cite_index,
+        &mut withheld,
+    );
+    crate::pipeline::absence_claim::drop_refuted_absence_claims(
+        &mut parsed.findings,
+        &cite_index,
+        &mut withheld,
+    );
 
     crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
         &mut parsed.verdict,
@@ -430,6 +443,7 @@ pub(super) fn ground_parsed_findings(
         findings_before,
         &parsed.findings,
     );
+    withheld
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

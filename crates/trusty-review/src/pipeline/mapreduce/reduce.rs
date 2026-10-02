@@ -23,7 +23,7 @@ use tracing::{debug, info};
 
 use crate::{
     config::{constants::FINDING_SIMILARITY_THRESHOLD, mapreduce::MapReduceConfig},
-    models::{Effort, Finding, Verdict},
+    models::{Effort, Finding, Verdict, WithheldFinding},
     pipeline::grade::derive_verdict,
 };
 
@@ -87,9 +87,11 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
         }
     }
 
-    // Dedup the same-file finding union, then prioritise + cap.
-    let deduped = dedup_findings(all_findings);
-    let findings = prioritise_and_cap(deduped, config.max_findings);
+    // Dedup the same-file finding union, then prioritise + cap. #4044: every
+    // finding either step drops is kept for the review record.
+    let mut withheld_findings = Vec::new();
+    let deduped = dedup_findings(all_findings, &mut withheld_findings);
+    let findings = prioritise_and_cap(deduped, config.max_findings, &mut withheld_findings);
     stats.findings_surfaced = findings.len();
 
     // Derive the aggregate verdict deterministically.
@@ -119,6 +121,7 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
         summary: String::new(),
         // Map-stage token total; the synthesis pass adds its own call on top.
         tokens,
+        withheld_findings,
     }
 }
 
@@ -185,10 +188,11 @@ fn aggregate_verdict(chunk_verdicts: &[Verdict], findings: &[Finding]) -> Verdic
 /// `FINDING_SIMILARITY_THRESHOLD`.  Requiring matching `kind` prevents merging
 /// two genuinely distinct issues (e.g. a `"security"` and a `"logic-error"`
 /// finding) that happen to share similar prose.  Findings on different files are
-/// never merged (a cross-file coincidence is not a duplicate).
+/// never merged (a cross-file coincidence is not a duplicate). Each dropped
+/// duplicate is pushed onto `withheld` (#4044).
 /// Test: `reduce_dedups_identical_findings`, `reduce_keeps_distinct_findings`,
 /// `reduce_keeps_same_text_different_kind`.
-fn dedup_findings(findings: Vec<Finding>) -> Vec<Finding> {
+fn dedup_findings(findings: Vec<Finding>, withheld: &mut Vec<WithheldFinding>) -> Vec<Finding> {
     let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
     for f in findings {
         let is_dup = kept.iter().any(|k| {
@@ -201,9 +205,25 @@ fn dedup_findings(findings: Vec<Finding>) -> Vec<Finding> {
             kept.push(f);
         } else {
             debug!(file = %f.file, kind = %f.kind, "reduce: dropped duplicate finding");
+            withheld.push(withhold(f, DUPLICATE_REASON));
         }
     }
     kept
+}
+
+/// `WithheldFinding::reason` for a near-duplicate the dedup dropped.
+pub const DUPLICATE_REASON: &str = "map-reduce duplicate of another finding";
+
+/// `WithheldFinding::reason` for a finding past `max_findings`.
+pub const OVER_MAX_FINDINGS_REASON: &str = "past the map-reduce max_findings cap";
+
+/// Wrap a dropped finding for the review record.
+fn withhold(finding: Finding, reason: &str) -> WithheldFinding {
+    WithheldFinding {
+        finding,
+        reason: reason.to_string(),
+        missing_fragment: None,
+    }
 }
 
 /// Prioritise findings by (Effort desc, confidence desc) and cap at `max`.
@@ -213,10 +233,16 @@ fn dedup_findings(findings: Vec<Finding>) -> Vec<Finding> {
 /// finding behind low-effort nits).  This mirrors the design's
 /// "prioritize by (Effort, confidence), cap surfaced findings" rule (§2.3).
 /// What: stable-sorts by effort rank (High > Medium > Low) then confidence
-/// descending, then truncates to `max`.  A `max` of 0 is treated as "no cap"
-/// (defensive — config default is 50, never 0).
-/// Test: `reduce_caps_findings`, `reduce_prioritises_high_effort`.
-fn prioritise_and_cap(mut findings: Vec<Finding>, max: usize) -> Vec<Finding> {
+/// descending, then truncates to `max`, pushing each finding past the cap onto
+/// `withheld` (#4044).  A `max` of 0 is treated as "no cap" (defensive —
+/// config default is 50, never 0).
+/// Test: `reduce_caps_findings`, `reduce_prioritises_high_effort`,
+/// `reduce_records_capped_findings_as_withheld`.
+fn prioritise_and_cap(
+    mut findings: Vec<Finding>,
+    max: usize,
+    withheld: &mut Vec<WithheldFinding>,
+) -> Vec<Finding> {
     findings.sort_by(|a, b| {
         effort_rank(&b.effort).cmp(&effort_rank(&a.effort)).then(
             b.confidence
@@ -225,7 +251,11 @@ fn prioritise_and_cap(mut findings: Vec<Finding>, max: usize) -> Vec<Finding> {
         )
     });
     if max > 0 && findings.len() > max {
-        findings.truncate(max);
+        withheld.extend(
+            findings
+                .drain(max..)
+                .map(|f| withhold(f, OVER_MAX_FINDINGS_REASON)),
+        );
     }
     findings
 }
