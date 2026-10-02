@@ -393,14 +393,12 @@ pub(super) fn spawn_watcher_idle_suspend_ticker(state: Arc<SearchAppState>) {
 /// registration removed, on-disk data preserved. [`is_reapable_orphan`] only
 /// fires when the root is missing AND its parent survives, so an unmounted
 /// external volume is never reaped.
-/// Test: `orphan_reaper` unit tests cover the predicate + interval; this is a
-/// thin scheduling wrapper.
+/// Test: `orphan_reaper` unit tests cover the predicate + interval; one pass
+/// is [`reap_orphans_once`].
 ///
 /// [`is_reapable_orphan`]: crate::service::orphan_reaper::is_reapable_orphan
 pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
-    use crate::service::orphan_reaper::{
-        is_reapable_orphan, reap_interval_secs, REAP_INTERVAL_ENV,
-    };
+    use crate::service::orphan_reaper::{reap_interval_secs, REAP_INTERVAL_ENV};
     let Some(secs) = reap_interval_secs() else {
         tracing::info!("orphan-reaper: disabled via {REAP_INTERVAL_ENV}=0");
         return;
@@ -416,46 +414,7 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
             let Some(state) = weak.upgrade() else {
                 break;
             };
-            // Snapshot (id, root_path) and run existence checks off the async
-            // runtime — a stat-per-index is blocking filesystem I/O.
-            let candidates: Vec<(String, std::path::PathBuf)> = state
-                .registry
-                .list_handles()
-                .into_iter()
-                .map(|h| (h.id.0.clone(), h.root_path.clone()))
-                .collect();
-            let reapable: Vec<String> = tokio::task::spawn_blocking(move || {
-                candidates
-                    .into_iter()
-                    .filter(|(_, root)| is_reapable_orphan(root))
-                    .map(|(id, _)| id)
-                    .collect()
-            })
-            .await
-            .unwrap_or_default();
-
-            let mut reaped = 0usize;
-            for id in reapable {
-                // delete_data=false: never destroy on-disk data automatically —
-                // a false-positive detection stays recoverable by re-registering.
-                // #3049: `unregister_index` now reports what it did rather than
-                // a bare bool; the reaper only ever cares about deregistration.
-                // #6380: no expectation. The reaper reads the registration and
-                // deletes it in the same pass, so it has no earlier census whose
-                // root could have gone stale.
-                if super::search::unregister_index(&state, &id, false, None)
-                    .await
-                    .removed
-                {
-                    reaped += 1;
-                    // #9027: a warm-all pin never outlives its index.
-                    state.warm.unpin(&id);
-                    tracing::info!(
-                        "orphan-reaper: unregistered index '{id}' — root_path deleted \
-                         (data preserved)"
-                    );
-                }
-            }
+            let reaped = reap_orphans_once(&state).await;
             if reaped > 0 {
                 tracing::info!(
                     "orphan-reaper: reaped {reaped} orphaned registration(s) this cycle"
@@ -463,6 +422,56 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
             }
         }
     });
+}
+
+/// One orphan-reaper pass: unregister every index whose root was deleted.
+///
+/// What: see [`spawn_orphan_reaper_ticker`]; returns how many were reaped.
+/// #9027: also drops each reaped index's warm-all pin.
+/// Test: `the_orphan_reaper_unpins_a_warmed_index`.
+pub(super) async fn reap_orphans_once(state: &Arc<SearchAppState>) -> usize {
+    use crate::service::orphan_reaper::is_reapable_orphan;
+    // Snapshot (id, root_path) and run existence checks off the async
+    // runtime — a stat-per-index is blocking filesystem I/O.
+    let candidates: Vec<(String, std::path::PathBuf)> = state
+        .registry
+        .list_handles()
+        .into_iter()
+        .map(|h| (h.id.0.clone(), h.root_path.clone()))
+        .collect();
+    let reapable: Vec<String> = tokio::task::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter(|(_, root)| is_reapable_orphan(root))
+            .map(|(id, _)| id)
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+
+    let mut reaped = 0usize;
+    for id in reapable {
+        // delete_data=false: never destroy on-disk data automatically —
+        // a false-positive detection stays recoverable by re-registering.
+        // #3049: `unregister_index` now reports what it did rather than
+        // a bare bool; the reaper only ever cares about deregistration.
+        // #6380: no expectation. The reaper reads the registration and
+        // deletes it in the same pass, so it has no earlier census whose
+        // root could have gone stale.
+        if super::search::unregister_index(state, &id, false, None)
+            .await
+            .removed
+        {
+            reaped += 1;
+            // #9027: a warm-all pin never outlives its index.
+            state.warm.unpin(&id);
+            tracing::info!(
+                "orphan-reaper: unregistered index '{id}' — root_path deleted \
+                 (data preserved)"
+            );
+        }
+    }
+    reaped
 }
 
 /// Spawn the usage-based resident-index cap sweep (issue #2161).

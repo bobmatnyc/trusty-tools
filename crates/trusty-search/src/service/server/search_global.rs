@@ -167,7 +167,8 @@ pub(super) async fn global_search_handler(
 /// Test: `global_search_over_the_socket_matches_the_http_body`,
 /// `a_slow_embed_degrades_to_lexical_and_still_searches_every_index`,
 /// `the_fan_out_deadline_starts_after_the_query_embed`,
-/// `global_search_skips_an_index_that_misses_the_deadline`.
+/// `global_search_skips_an_index_that_misses_the_deadline`,
+/// `an_index_whose_search_errors_marks_the_fan_out_partial`.
 pub(crate) async fn global_search_report(
     state: &Arc<SearchAppState>,
     req: GlobalSearchRequest,
@@ -468,6 +469,7 @@ pub(crate) async fn global_search_report(
         + skips.corpus_failed
         + skips.corpus_read_failed
         + skips.migration_in_progress
+        + skips.errored
         + deadline_skipped
         > 0
         || embed.status.degraded();
@@ -493,6 +495,8 @@ pub(crate) async fn global_search_report(
         // Non-zero means this result set is not the complete answer over the
         // fan-out and the missing lanes are transient — retry once they settle.
         "migration_in_progress_indexes_skipped": skips.migration_in_progress,
+        // #9027: indexes whose search failed for any other reason (logged).
+        "errored_indexes_skipped": skips.errored,
         // #9027: indexes that missed the fan-out deadline (often rehydrating
         // after idle eviction; a held lock or a slow search counts too). Any
         // rehydrate keeps running in the background. `rehydrating_…` is the

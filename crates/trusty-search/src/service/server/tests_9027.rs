@@ -385,3 +385,89 @@ async fn global_search_kicks_rehydrates_only_for_routed_indexes() {
         "routing dropped this index, so nothing may rehydrate it"
     );
 }
+
+/// Why: Fail-Open Check — an index whose search errored contributed no lane,
+/// so the answer is not complete; `partial` must say so, the same as for a
+/// deadline skip (code-critic r2 on #9027).
+/// What: one healthy index and one detached for delete, whose search refuses
+/// with `IndexDeleted` (an error no other skip reason classifies). The fan-out
+/// answers from the healthy index and reports `partial: true`.
+/// Test: this test.
+#[tokio::test]
+async fn an_index_whose_search_errors_marks_the_fan_out_partial() {
+    let registry = IndexRegistry::new();
+    let _ok = add_index(&registry, "ok", None).await;
+    let _broken = add_index(&registry, "broken", None).await;
+    let state = Arc::new(SearchAppState::new(registry));
+    let broken = state
+        .registry
+        .get(&IndexId::new("broken".to_string()))
+        .expect("broken");
+    let _detached = broken.indexer.write().await.detach_for_delete();
+
+    let body = super::search_global::global_search_report(&state, request("shared_symbol"))
+        .await
+        .expect("200");
+
+    assert_eq!(
+        body["indexes_searched"],
+        serde_json::json!(["ok"]),
+        "{body}"
+    );
+    assert_eq!(body["deadline_indexes_skipped"], serde_json::json!(0));
+    assert_eq!(body["partial"], serde_json::json!(true), "{body}");
+    assert_eq!(body["errored_indexes_skipped"], serde_json::json!(1));
+}
+
+/// Why: the embed timeout is operator-tunable (`TRUSTY_SEARCH_FANOUT_EMBED_TIMEOUT_MS`);
+/// the configured value, not the 1 s default, must bound the embed (critic r2).
+/// What: sets the env var to 2000 ms — above the default, so no other test in
+/// this module changes outcome while it is set. An embed of 1.5 s (past the
+/// default) answers `Embedded`; one of 2.5 s answers `TimedOut` with a message
+/// naming the env var. Paused clock: no real time is spent.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn the_embed_timeout_env_is_honoured_and_a_slower_embed_times_out() {
+    use super::fanout_deadline::{
+        embed_query_once, resolve_embed_timeout, EmbedStatus, FANOUT_EMBED_TIMEOUT_ENV,
+    };
+    // SAFETY: test-only, in the unnamed serial group (#5937); every reader
+    // in this binary tolerates 2000 ms.
+    unsafe { std::env::set_var(FANOUT_EMBED_TIMEOUT_ENV, "2000") };
+    let timeout = resolve_embed_timeout();
+    unsafe { std::env::remove_var(FANOUT_EMBED_TIMEOUT_ENV) };
+    assert_eq!(timeout, Duration::from_millis(2_000));
+
+    let within = IndexRegistry::new();
+    let _w = add_corpus_index(
+        &within,
+        "within",
+        Arc::new(SlowEmbedder(Duration::from_millis(1_500))),
+    )
+    .await;
+    let ids = [IndexId::new("within".to_string())];
+    let embed = embed_query_once(&within, &ids, "shared_symbol", timeout).await;
+    assert_eq!(
+        embed.status,
+        EmbedStatus::Embedded,
+        "the configured 2 s holds"
+    );
+
+    let past = IndexRegistry::new();
+    let _p = add_corpus_index(
+        &past,
+        "past",
+        Arc::new(SlowEmbedder(Duration::from_millis(2_500))),
+    )
+    .await;
+    let ids = [IndexId::new("past".to_string())];
+    let embed = embed_query_once(&past, &ids, "shared_symbol", timeout).await;
+    assert_eq!(embed.status, EmbedStatus::TimedOut);
+    let err = embed
+        .vector
+        .as_deref()
+        .and_then(|r| r.as_ref().err().cloned())
+        .expect("a timed-out embed carries its failure text");
+    assert!(err.contains(FANOUT_EMBED_TIMEOUT_ENV), "{err}");
+}

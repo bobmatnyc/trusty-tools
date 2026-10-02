@@ -426,30 +426,85 @@ async fn an_index_is_pinned_while_it_warms() {
     assert!(state.warm.is_pinned("mid"));
 }
 
-/// Why: Fail-Open Check — with no RSS reading the ceiling is not checked, and
-/// the status must say so rather than imply it was enforced (#9027).
-/// What: a probe that cannot read RSS; the start still runs, and both the
-/// start body and the status report `ceiling_unenforced: true`.
+/// Why: Fail-Open Check — with no RSS reading the ceiling cannot be checked,
+/// and that must refuse the warm, never fall open to unbounded pins (#9027,
+/// code-critic r2).
+/// What: a probe that cannot read RSS; the start is refused with
+/// `warm_rss_unreadable`, no run is left behind, and nothing is pinned.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
-async fn a_start_with_no_rss_reading_runs_and_reports_the_ceiling_unenforced() {
+async fn a_start_with_no_rss_reading_is_refused_and_pins_nothing() {
     fn no_rss() -> Option<u64> {
         None
     }
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "blind").await;
     let state = new_state(registry);
+    evict(&state, "blind").await;
     state.warm.set_rss_probe(no_rss);
 
-    let started = start_with(&state, config(60)).expect("not refused");
+    let (status, body) = start_with(&state, config(60)).expect_err("refused");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], json!("warm_rss_unreadable"), "{body}");
+    assert_eq!(warm_status_report(&state)["run"], Value::Null);
+    assert!(!state.warm.is_pinned("blind"));
+}
+
+/// Why: Fail-Open Check — RSS can become unreadable after the start check
+/// passed. Every later index must be skipped and reported failed, never
+/// warmed or pinned (#9027, code-critic r2).
+/// What: a probe that reads RSS once (the start check) and never again.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn rss_unreadable_mid_run_fails_the_remaining_indexes_unpinned() {
+    static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn vanishing() -> Option<u64> {
+        let n = READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (n == 0).then_some(100)
+    }
+    let registry = IndexRegistry::new();
+    let _a = add_index(&registry, "one").await;
+    let _b = add_index(&registry, "two").await;
+    let state = new_state(registry);
+    evict(&state, "one").await;
+    evict(&state, "two").await;
+    state.warm.set_rss_probe(vanishing);
+
+    start_with(&state, config(60)).expect("the start check passes");
     let status = wait_for_run_end(&state).await;
 
-    assert_eq!(
-        status["memory"]["ceiling_unenforced"],
-        json!(true),
-        "{status}"
-    );
+    assert_eq!(status["totals"]["failed"], json!(2), "{status}");
+    assert_eq!(status["memory"]["ceiling_unenforced"], json!(false));
+    for row in status["indexes"].as_array().expect("rows") {
+        assert!(
+            row["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("could not be read")),
+            "{row}"
+        );
+    }
+    assert!(!state.warm.is_pinned("one") && !state.warm.is_pinned("two"));
+}
+
+/// Why: an operator who disabled the ceiling gets an unmetered warm, and the
+/// status must say the ceiling was not enforced (#9027).
+/// What: `max_rss_mb: None`; the run warms and reports `ceiling_unenforced`.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn a_disabled_ceiling_warms_and_reports_the_ceiling_unenforced() {
+    let registry = IndexRegistry::new();
+    let _a = add_index(&registry, "open").await;
+    let state = new_state(registry);
+    let mut cfg = config(60);
+    cfg.max_rss_mb = None;
+
+    let started = start_with(&state, cfg).expect("not refused");
+    let status = wait_for_run_end(&state).await;
+
     assert_eq!(started["ceiling_unenforced"], json!(true), "{started}");
+    assert_eq!(status["memory"]["ceiling_unenforced"], json!(true));
     assert_eq!(status["totals"]["warm"], json!(1), "{status}");
 }
 

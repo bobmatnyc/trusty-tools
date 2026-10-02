@@ -72,7 +72,7 @@ pub(super) fn resolve_index_deadline(request_ms: Option<u64>) -> Duration {
 
 /// The fan-out's query-embed timeout: the env var, else the default.
 ///
-/// Test: `parse_deadline_env`.
+/// Test: `the_embed_timeout_env_is_honoured_and_a_slower_embed_times_out`.
 pub(super) fn resolve_embed_timeout() -> Duration {
     parse_ms_env(
         std::env::var(FANOUT_EMBED_TIMEOUT_ENV).ok(),
@@ -222,7 +222,7 @@ pub(super) enum SkipReason {
     MigrationInProgress,
     /// #9027: the search missed the fan-out deadline.
     Deadline,
-    /// Any other search error; logged, not counted (pre-#9027 behaviour).
+    /// Any other search error. #9027: counted, so the fan-out reports `partial`.
     Errored,
 }
 
@@ -300,13 +300,16 @@ pub(super) struct SkipTally {
     pub(super) corpus_failed: usize,
     pub(super) corpus_read_failed: usize,
     pub(super) migration_in_progress: usize,
+    /// #9027: indexes whose search failed for any other reason.
+    pub(super) errored: usize,
     /// Sorted ids of the indexes that missed the deadline.
     pub(super) deadline_ids: Vec<String>,
 }
 
 /// Split fan-out outcomes into the searched lanes and the skip tally.
 ///
-/// Test: `global_search_skips_an_index_that_misses_the_deadline`.
+/// Test: `global_search_skips_an_index_that_misses_the_deadline`,
+/// `an_index_whose_search_errors_marks_the_fan_out_partial`.
 pub(super) fn split_outcomes(
     outcomes: Vec<LaneOutcome>,
 ) -> (Vec<(IndexId, Vec<CodeChunk>)>, SkipTally) {
@@ -321,7 +324,9 @@ pub(super) fn split_outcomes(
                 tally.migration_in_progress += 1
             }
             LaneOutcome::Skipped(id, SkipReason::Deadline) => tally.deadline_ids.push(id.0),
-            LaneOutcome::Skipped(_, SkipReason::Errored) | LaneOutcome::Gone => {}
+            // #9027: an errored index contributed no lane, so it counts.
+            LaneOutcome::Skipped(_, SkipReason::Errored) => tally.errored += 1,
+            LaneOutcome::Gone => {}
         }
     }
     tally.deadline_ids.sort();

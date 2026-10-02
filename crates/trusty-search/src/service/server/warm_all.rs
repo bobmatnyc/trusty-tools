@@ -161,8 +161,9 @@ struct WarmRun {
     rss_mb_before: Option<u64>,
     rss_mb_after: Option<u64>,
     ceiling_hit: bool,
-    /// #9027: no ceiling configured, or the RSS probe could not read RSS, so
-    /// the ceiling was not checked at least once in this run.
+    /// #9027: the operator disabled the ceiling (`TRUSTY_MEMORY_LIMIT_MB=0`
+    /// and no `TRUSTY_WARM_ALL_MAX_RSS_MB`). Unreadable RSS never sets this: it
+    /// refuses the warm instead.
     ceiling_unenforced: bool,
 }
 
@@ -368,12 +369,14 @@ pub(super) async fn warm_status_handler(State(state): State<Arc<SearchAppState>>
 /// `503 warm_memory_ceiling` and nothing runs — and a new run is spawned over
 /// [`warm_targets`]. Must be called inside a tokio runtime.
 /// A window above [`MAX_WARM_WINDOW_SECS`] is refused with `400
-/// invalid_warm_request` before anything starts. With no ceiling or no RSS
-/// reading the start proceeds and the run reports `ceiling_unenforced`.
+/// invalid_warm_request` before anything starts. With a ceiling but no RSS
+/// reading the start is refused with `503 warm_rss_unreadable` (#9027: an
+/// unchecked ceiling must not fall open to unbounded pins). With the ceiling
+/// disabled the start proceeds and the run reports `ceiling_unenforced`.
 /// Test: `a_second_start_joins_the_running_warm`,
 /// `a_start_past_the_memory_ceiling_is_refused_and_runs_nothing`,
 /// `a_warm_window_past_the_cap_is_refused_with_400`,
-/// `a_start_with_no_rss_reading_runs_and_reports_the_ceiling_unenforced`.
+/// `a_start_with_no_rss_reading_is_refused_and_pins_nothing`.
 pub(crate) fn warm_start_report(
     state: &Arc<SearchAppState>,
     req: Option<WarmStartRequest>,
@@ -403,23 +406,12 @@ pub(crate) fn start_with(
         return Ok(start_body(run, true));
     }
     let rss_now = tracker.rss_mb();
-    if let (Some(max), Some(now)) = (config.max_rss_mb, rss_now) {
-        if now >= max {
-            tracing::warn!("warm-all: refused — daemon RSS {now} MB is at the {max} MB ceiling");
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({
-                    "error": "warm_memory_ceiling",
-                    "retryable": true,
-                    "rss_mb": now,
-                    "max_rss_mb": max,
-                    "message": format!(
-                        "daemon RSS {now} MB is at or past the warm ceiling {max} MB \
-                         ({WARM_MAX_RSS_ENV}); nothing was warmed"
-                    ),
-                }),
-            ));
-        }
+    // #9027: unreadable RSS is refused too, never read as "no ceiling".
+    if let Some(refusal) = config
+        .max_rss_mb
+        .and_then(|max| ceiling_refusal(max, rss_now))
+    {
+        return Err(refusal);
     }
     let ids = warm_targets(state);
     inner.last_run_id += 1;
@@ -444,7 +436,7 @@ pub(crate) fn start_with(
         rss_mb_before: rss_now,
         rss_mb_after: None,
         ceiling_hit: false,
-        ceiling_unenforced: config.max_rss_mb.is_none() || rss_now.is_none(),
+        ceiling_unenforced: config.max_rss_mb.is_none(),
     };
     let body = start_body(&run, false);
     let run_id = run.run_id;
@@ -463,6 +455,34 @@ pub(crate) fn start_with(
         tracing::info!("warm-all: run {run_id} finished; daemon RSS {after:?} MB");
     });
     Ok(body)
+}
+
+/// The `503` a start gets with RSS at or past `max`, or unreadable (#9027).
+fn ceiling_refusal(max: u64, rss: Option<u64>) -> Option<(StatusCode, Value)> {
+    let (error, detail) = match rss {
+        Some(now) if now < max => return None,
+        Some(now) => (
+            "warm_memory_ceiling",
+            format!("daemon RSS {now} MB is at or past"),
+        ),
+        None => (
+            "warm_rss_unreadable",
+            "daemon RSS could not be read to check it against".to_string(),
+        ),
+    };
+    tracing::warn!("warm-all: refused — {detail} the {max} MB ceiling");
+    Some((
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({
+            "error": error,
+            "retryable": true,
+            "rss_mb": rss,
+            "max_rss_mb": max,
+            "message": format!(
+                "{detail} the warm ceiling {max} MB ({WARM_MAX_RSS_ENV}); nothing was warmed"
+            ),
+        }),
+    ))
 }
 
 fn start_body(run: &WarmRun, joined: bool) -> Value {
@@ -490,23 +510,33 @@ async fn run_warm(state: Arc<SearchAppState>, run_id: u64, ids: Vec<String>, con
 
 async fn warm_one_tracked(state: &Arc<SearchAppState>, run_id: u64, id: &str, config: WarmConfig) {
     let tracker = &state.warm;
-    match (config.max_rss_mb, tracker.rss_mb()) {
-        (Some(max), Some(now)) if now >= max => {
-            tracing::warn!("warm-all: not warming '{id}' — daemon RSS {now} MB >= {max} MB");
-            tracker.note_ceiling_hit(run_id);
+    if let Some(max) = config.max_rss_mb {
+        let skip = match tracker.rss_mb() {
+            Some(now) if now < max => None,
+            Some(now) => {
+                tracker.note_ceiling_hit(run_id);
+                Some(format!(
+                    "daemon RSS {now} MB reached the warm ceiling {max} MB"
+                ))
+            }
+            // #9027: RSS unreadable mid-run — fail closed; never pin unmetered.
+            None => Some(format!(
+                "daemon RSS could not be read, so the warm ceiling {max} MB cannot be checked"
+            )),
+        };
+        if let Some(why) = skip {
+            tracing::warn!("warm-all: not warming '{id}' — {why}");
             tracker.set(
                 run_id,
                 id,
                 WarmState::Failed,
-                Some(format!(
-                    "skipped: daemon RSS {now} MB reached the warm ceiling {max} MB"
-                )),
+                Some(format!("skipped: {why}")),
             );
             return;
         }
-        (Some(_), Some(_)) => {}
-        // #9027: say so rather than silently warming past an unchecked ceiling.
-        _ => tracker.note_ceiling_unenforced(run_id),
+    } else {
+        // #9027: the operator disabled the ceiling; the status says so.
+        tracker.note_ceiling_unenforced(run_id);
     }
     // #9027: pinned before the load, so no sweep parks it mid-warm.
     tracker.begin_warming(run_id, id, config.window);
@@ -551,7 +581,7 @@ async fn warm_one(state: &Arc<SearchAppState>, id: &str) -> Result<(), String> {
 /// held elsewhere falls back to the run's record. `all_warm` is true only when
 /// no run is in progress and every row is `warm`. `expires_at_unix_ms` is the
 /// earliest residency-pin expiry among pinned rows. `memory.ceiling_unenforced`
-/// is true when the run had no ceiling or could not read RSS (#9027).
+/// is true when the run had the ceiling disabled (#9027).
 /// Test: `warm_all_rehydrates_an_evicted_index_and_reports_it_warm`,
 /// `a_failed_index_is_reported_failed_and_the_set_is_not_warm`,
 /// `a_warmed_index_is_pinned_for_the_window_then_released`.

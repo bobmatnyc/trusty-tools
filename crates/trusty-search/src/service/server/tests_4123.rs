@@ -184,3 +184,38 @@ async fn delete_clears_a_warm_pin() {
         "a deleted index keeps no warm pin"
     );
 }
+
+/// #9027: the orphan reaper drops a reaped index's warm-all pin.
+///
+/// Why: the reaper unregisters an index whose root was deleted; a pin left
+/// behind would outlive the index, as on the delete route (code-critic r2).
+/// What: pins the index, deletes its root (parent kept, so it is reapable),
+/// runs one reaper pass, and asserts the index is gone and unpinned.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_orphan_reaper_unpins_a_warmed_index() {
+    let isolated = super::tests_components::IsolatedDataDir::new();
+    let registry = IndexRegistry::new();
+    let root_path = isolated.path().join("orphan-root");
+    std::fs::create_dir_all(&root_path).expect("create index root");
+    registry.register(IndexHandle::bare(
+        IndexId::new(INDEX_ID),
+        Arc::new(RwLock::new(CodeIndexer::new(INDEX_ID, root_path.clone()))),
+        root_path.clone(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+    state
+        .warm
+        .pin_for_test(INDEX_ID, std::time::Duration::from_secs(600));
+    std::fs::remove_dir_all(&root_path).expect("delete the root");
+
+    let reaped = super::tickers::reap_orphans_once(&state).await;
+
+    assert_eq!(reaped, 1, "the orphaned index is reaped");
+    assert!(state.registry.get(&IndexId::new(INDEX_ID)).is_none());
+    assert!(
+        !state.warm.is_pinned(INDEX_ID),
+        "a reaped index keeps no warm pin"
+    );
+}
