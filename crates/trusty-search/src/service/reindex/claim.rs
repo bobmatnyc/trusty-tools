@@ -70,6 +70,14 @@ pub enum ReindexClaimError {
         "the reindex guard for index '{index_id}' is unavailable ({reason}); refusing the reindex"
     )]
     GuardUnavailable { index_id: String, reason: String },
+    /// #9059: an exclude glob does not parse, so the index takes no reindex
+    /// until a PATCH fixes it. `message` names the patterns and the fix.
+    #[error("{message}")]
+    Held {
+        index_id: String,
+        invalid_exclude_globs: Vec<String>,
+        message: String,
+    },
 }
 
 type Slot = Arc<Mutex<Option<RunningReindex>>>;
