@@ -15,15 +15,18 @@
 //! own copy of that flow is gone — #6923 made the Search tab display-only and
 //! #6928 did the same for the Memory tab.
 //!
-//! ## Two endpoints the SPA calls have no method to map to
+//! ## Chat is one unary row; `admin/stop` is still unmapped
 //!
-//! `POST /chat` and `POST /admin/stop` are HTTP-only on trusty-search: slice 5.5
-//! left them out on the grounds that "chat serves the embedded `/ui` alone", and
-//! #6384 moved that `/ui` here — so the console-served SPA IS the consumer that
-//! reasoning said did not exist. Both answer `501` naming the gap. The same
-//! finding the #6285 consumer-map correction recorded for trusty-mpm's TUI stop
-//! key: the retire slice needs an owner decision on `admin.stop`, and the chat
-//! lane needs one too.
+//! `POST /chat` maps to `search.chat` (#6285 owner ruling: chat is served by
+//! the console over the socket, no TCP listener). The HTTP shape is the daemon
+//! route's own: a JSON `ChatRequest` body in, ONE JSON envelope out. The daemon
+//! streams from the provider internally and collects the deltas before it
+//! answers, so this row is `Unary` rather than an SSE stream. The body is the
+//! `params` object verbatim — no `index_id` path segment, as with `POST
+//! /search`. A chat call gets `CHAT_TIMEOUT` rather than the 30 s budget.
+//!
+//! `POST /admin/stop` answers `501` naming the gap: the retire slice needs an
+//! owner decision on `search.admin.stop` before the dashboard may reach it.
 //!
 //! ## Query values are coerced, and that is visible when it is wrong
 //!
@@ -35,18 +38,24 @@
 //! be REFUSED by the daemon's own deserialiser rather than silently mis-read,
 //! which is why the coercion is safe to make blind.
 //!
+//! The one row where a string field routinely carries such a value is
+//! typeahead: `q` is whatever the operator typed, `404` included. That row
+//! names `q` as text and coerces only the rest (#9028).
+//!
 //! Test: `maps_every_endpoint_the_spa_calls`, `refuses_an_unmapped_path`,
-//! `query_json_coerces_bools_and_integers`, `body_json_reads_an_empty_body_as_absent`.
+//! `query_json_coerces_bools_and_integers`, `a_typeahead_prefix_is_never_coerced`,
+//! `body_json_reads_an_empty_body_as_absent`.
 
 use axum::http::Method;
 use serde_json::{Map, Value, json};
 
 use super::{
-    METHOD_CONFIG_GET, METHOD_CONFIG_SET, METHOD_HEALTH, METHOD_INDEX_CONFIG_GET,
+    METHOD_CHAT, METHOD_CONFIG_GET, METHOD_CONFIG_SET, METHOD_HEALTH, METHOD_INDEX_CONFIG_GET,
     METHOD_INDEX_CONFIG_SET, METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_EVENTS,
     METHOD_INDEX_PAUSE_EMBEDDING, METHOD_INDEX_REINDEX, METHOD_INDEX_REINDEX_STREAM,
     METHOD_INDEX_RESUME_EMBEDDING, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
     METHOD_QUERY, METHOD_QUERY_ALL, METHOD_REGISTRY_ORPHANS, METHOD_STATUS_STREAM,
+    METHOD_TYPEAHEAD, METHOD_WARM_START, METHOD_WARM_STATUS,
 };
 
 /// What one mapped request asks the daemon for.
@@ -81,8 +90,8 @@ pub(crate) enum Call {
 /// Turn one `/api/search/…` request into the call it stands for.
 ///
 /// Why the `Err` is a sentence rather than a code: it is rendered into the `501`
-/// body an operator reads, and "no socket method serves POST /chat" is what
-/// makes the gap actionable.
+/// body an operator reads, and "no socket method serves POST /admin/stop" is
+/// what makes the gap actionable.
 ///
 /// What: `path` is the sub-path with no leading slash — what axum's `{*path}`
 /// captures. `body` is the raw request body, parsed as JSON only for the methods
@@ -134,6 +143,14 @@ pub(crate) fn map_request(
             METHOD_QUERY,
             json!({ "index_id": id, "body": body_json(body)? }),
         ),
+        // #9028: `q` is what the operator typed, and the daemon's
+        // `TypeaheadParams::q` is a `String` — a prefix of `404` or `true`
+        // coerced blind would be refused, so `q` stays text. `limit` still
+        // becomes the integer `Option<usize>` expects; `mode` is text anyway.
+        (&Method::GET, ["indexes", id, "typeahead"]) => unary(
+            METHOD_TYPEAHEAD,
+            with_index(id, query_json_keeping_text(query, &["q"])),
+        ),
         // `ReindexParams::body` is `Option`, so an absent body maps to `null`
         // rather than to `{}` — the same "no overrides" the HTTP route reads
         // from an empty request body.
@@ -171,12 +188,19 @@ pub(crate) fn map_request(
         (&Method::GET, ["logs", "tail"]) => unary(METHOD_LOGS_TAIL, q),
         (&Method::GET, ["registry", "orphans"]) => unary(METHOD_REGISTRY_ORPHANS, json!({})),
         (&Method::GET, ["status", "stream"]) => stream(METHOD_STATUS_STREAM, json!({})),
+        // #6285: the body is `ChatRequest` verbatim. An empty body maps to
+        // `null`, which the daemon refuses as `invalid_params` — `400` here.
+        (&Method::POST, ["chat"]) => unary(METHOD_CHAT, body_json(body)?),
+        // #9027: warm-all. An empty `POST /warm` body maps to `null`, which the
+        // daemon reads as "start with the defaults", same as its HTTP route.
+        (&Method::POST, ["warm"]) => unary(METHOD_WARM_START, body_json(body)?),
+        (&Method::GET, ["warm", "status"]) => unary(METHOD_WARM_STATUS, json!({})),
 
         _ => Err(format!(
             "no trusty-search socket method serves {method} /{}. The console reaches \
              trusty-search over its Unix socket (ADR-0032, #6285); only the endpoints the \
-             dashboard uses are mapped. `POST /chat` and `POST /admin/stop` have no socket \
-             method at all and are pending an owner decision on #6285.",
+             dashboard uses are mapped. `POST /admin/stop` is pending an owner decision \
+             on #6285.",
             path.trim_matches('/')
         )),
     }
@@ -227,6 +251,16 @@ fn body_json(body: &[u8]) -> Result<Value, String> {
 /// Test: `query_json_coerces_bools_and_integers`,
 /// `query_json_is_an_empty_object_for_no_query`.
 fn query_json(query: Option<&str>) -> Value {
+    query_json_keeping_text(query, &[])
+}
+
+/// [`query_json`], except the keys in `text` are never coerced.
+///
+/// Why: blind coercion is safe only while no string-typed field can carry a
+/// literal `true` or a bare integer. A typed prefix can (#9028), and the
+/// daemon would refuse it as `invalid_params` on every digit the operator types.
+/// Test: `a_typeahead_prefix_is_never_coerced`.
+fn query_json_keeping_text(query: Option<&str>, text: &[&str]) -> Value {
     let mut out = Map::new();
     let Some(raw) = query.filter(|q| !q.is_empty()) else {
         return Value::Object(out);
@@ -237,6 +271,10 @@ fn query_json(query: Option<&str>) -> Value {
         return Value::Object(out);
     };
     for (key, value) in url.query_pairs() {
+        if text.contains(&key.as_ref()) {
+            out.insert(key.into_owned(), Value::String(value.into_owned()));
+            continue;
+        }
         let coerced = match value.as_ref() {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
@@ -339,6 +377,18 @@ mod tests {
             }
         );
         assert_eq!(
+            unary(
+                &Method::GET,
+                "indexes/a/typeahead",
+                Some("q=auth&limit=6&mode=lexical"),
+                ""
+            ),
+            Call::Unary {
+                method: METHOD_TYPEAHEAD,
+                params: json!({ "index_id": "a", "q": "auth", "limit": 6, "mode": "lexical" })
+            }
+        );
+        assert_eq!(
             unary(&Method::POST, "indexes/a/reindex", None, "{}"),
             Call::Unary {
                 method: METHOD_INDEX_REINDEX,
@@ -350,6 +400,19 @@ mod tests {
             Call::Unary {
                 method: METHOD_QUERY_ALL,
                 params: json!({ "query": "q", "top_k": 5 })
+            }
+        );
+        // #6285: the SPA's `api.chat` body, verbatim, as a unary call.
+        assert_eq!(
+            unary(
+                &Method::POST,
+                "chat",
+                None,
+                r#"{"index_id":"a","message":"why?","history":[]}"#
+            ),
+            Call::Unary {
+                method: METHOD_CHAT,
+                params: json!({ "index_id": "a", "message": "why?", "history": [] })
             }
         );
         assert_eq!(
@@ -419,6 +482,36 @@ mod tests {
         );
     }
 
+    /// Why: the dashboard's "Warm all indexes" control reaches the daemon only
+    /// through these two rows (#9027); an unmapped row answers `501`.
+    /// What: an empty start body maps to `null` (the daemon's defaults), a
+    /// populated one passes through, and status takes `{}`.
+    /// Test: this is the test.
+    #[test]
+    fn maps_the_warm_all_routes() {
+        assert_eq!(
+            unary(&Method::POST, "warm", None, ""),
+            Call::Unary {
+                method: METHOD_WARM_START,
+                params: Value::Null
+            }
+        );
+        assert_eq!(
+            unary(&Method::POST, "warm", None, r#"{"window_secs":60}"#),
+            Call::Unary {
+                method: METHOD_WARM_START,
+                params: json!({ "window_secs": 60 })
+            }
+        );
+        assert_eq!(
+            unary(&Method::GET, "warm/status", None, ""),
+            Call::Unary {
+                method: METHOD_WARM_STATUS,
+                params: json!({})
+            }
+        );
+    }
+
     /// Why: the two pause writes take the index id and nothing else, so the
     /// body is ignored — but ignoring it must be a decision the table proves,
     /// not an accident. A row that folded the body into `params` would send the
@@ -472,13 +565,13 @@ mod tests {
     }
 
     /// Why: an unmapped request must be refused with a sentence an operator can
-    /// act on, never forwarded on a guess. `POST /chat` is the live instance —
-    /// the SPA calls it and no socket method serves it.
+    /// act on, never forwarded on a guess. `POST /admin/stop` is the live
+    /// instance — the SPA calls it and this table does not map it.
     /// Test: this is the test.
     #[test]
     fn refuses_an_unmapped_path() {
         for (method, path) in [
-            (Method::POST, "chat"),
+            (Method::GET, "chat"),
             (Method::POST, "admin/stop"),
             (Method::POST, "upgrade"),
             (Method::GET, "metrics"),
@@ -539,6 +632,32 @@ mod tests {
         assert_eq!(v["n"], json!(200));
         assert_eq!(v["format"], json!("json"));
         assert_eq!(v["repo"], json!("own/repo"));
+    }
+
+    /// Why (#9028): the daemon's `TypeaheadParams::q` is a `String`, so a
+    /// prefix of `404` coerced to a number is refused and the operator's
+    /// digits get no suggestions. `limit` must still arrive as an integer.
+    /// What: digit, boolean and empty prefixes all stay strings; the
+    /// neighbouring `limit` is still coerced.
+    /// Test: this is the test.
+    #[test]
+    fn a_typeahead_prefix_is_never_coerced() {
+        for (raw, prefix) in [("404", "404"), ("true", "true"), ("", ""), ("a+b", "a b")] {
+            let call = unary(
+                &Method::GET,
+                "indexes/a/typeahead",
+                Some(&format!("q={raw}&limit=6")),
+                "",
+            );
+            assert_eq!(
+                call,
+                Call::Unary {
+                    method: METHOD_TYPEAHEAD,
+                    params: json!({ "index_id": "a", "q": prefix, "limit": 6 })
+                },
+                "prefix {raw:?}"
+            );
+        }
     }
 
     /// Why: a method whose params struct has all-default fields still refuses

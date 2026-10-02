@@ -27,6 +27,7 @@ pub mod registry;
 pub mod repo_config;
 pub mod scip_ingest;
 pub mod search;
+pub mod sops;
 pub mod store;
 pub mod store_config;
 pub mod symbol_graph;

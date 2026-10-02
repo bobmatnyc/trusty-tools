@@ -23,7 +23,7 @@ const FANOUT_CONCURRENCY = 4;
 
 /**
  * Why: a 501 means the server in front of the daemon has no route for
- * typeahead (the console bridge before it maps `search.typeahead`). Asking
+ * typeahead (an older console that predates the #9028 `search.typeahead` row). Asking
  * again on every keystroke cannot succeed, so the caller stops asking.
  * What: true for an error carrying HTTP status 501.
  * @param {unknown} e

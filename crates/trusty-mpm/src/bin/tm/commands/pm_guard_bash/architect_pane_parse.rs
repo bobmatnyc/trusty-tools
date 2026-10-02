@@ -19,10 +19,14 @@ use super::ansi_c_decode::{Decoded, decode_ansi_c};
 use super::architect_pane_env::{
     ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, assigns_dynamic_name, moves_server_env, resets_env,
 };
+use super::architect_pane_reach::{
+    dynamic_name, names_tmux, opaque_route, with_dynamics, without_data_bodies,
+};
 use super::architect_pane_verbs::{DENY_VERBS, Resolved, Verb, resolve};
 use super::floor_d4::{program_positions, segments};
 use super::shell_lex::QuoteScan;
 use super::{command_substitutions, unclassifiable_command};
+use crate::commands::hook_rewrite::is_env_assignment;
 
 /// Nesting depth past which arguments are no longer read as commands.
 const MAX_DEPTH: usize = 3;
@@ -90,11 +94,25 @@ impl Hit {
 
     /// #9001: an unparseable command, naming the text that did not parse.
     fn unparsed(text: &str) -> Self {
-        let mut hit = Self::opaque("", &[], "the command does not parse");
+        Self::named(UNPARSED, text)
+    }
+
+    /// #9001: an opaque hit naming the text it could not read.
+    fn named(why: &'static str, text: &str) -> Self {
+        let mut hit = Self::opaque("", &[], why);
         hit.token = Some(text.chars().take(80).collect());
         hit
     }
 }
+
+/// The [`Hit::opaque`] reason of a command that does not parse.
+pub(super) const UNPARSED: &str = "the command does not parse";
+
+/// #9001 critic r1: a program word the shell expands (`T=tmux; $T …`).
+const DYNAMIC_PROGRAM: &str = "its program word is one the shell expands";
+
+/// The [`Hit::opaque`] reason of a top-level word tmux does not know.
+const UNKNOWN_COMMAND: &str = "an unknown command, possibly an alias";
 
 /// Where a tmux command runs, which decides what an omitted target means.
 #[derive(Debug, Clone)]
@@ -145,6 +163,8 @@ struct Scan {
 /// `a_nested_tmux_in_typed_keys_is_judged_on_the_default_server_too`,
 /// `a_tmux_assignment_inside_a_word_or_through_an_unread_name_denies`.
 pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
+    // #9001 critic r2: a here-document body that is stdin data is not shell.
+    let command = &without_data_bodies(command);
     let mut scan = Scan {
         hits: Vec::new(),
         retargets: false,
@@ -165,7 +185,7 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
 /// Whether shell text that does not parse could run a deny-set tmux command:
 /// it names `tmux` and, below the top level, also a deny verb — so typed
 /// prose with an apostrophe that mentions tmux is not refused.
-fn may_run_tmux(text: &str, depth: usize) -> bool {
+pub(super) fn may_run_tmux(text: &str, depth: usize) -> bool {
     let words = || text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
     words().any(|w| w == "tmux")
         && (depth == 0 || words().any(|w| DENY_VERBS.iter().any(|v| v.name == w || v.alias == w)))
@@ -201,7 +221,8 @@ fn quote_escaped_semicolons(command: &str) -> String {
 
 /// Read `command` as shell text.
 fn shell(command: &str, depth: usize, out: &mut Scan) {
-    let command = &quote_escaped_semicolons(command);
+    // #9001 critic r2: a body inside `"$(cat <<'EOF' … EOF)"` too.
+    let command = &quote_escaped_semicolons(&without_data_bodies(command));
     // #8902: `$'\x74mux'` hides the program name itself, so at the top level
     // any command the guard cannot classify counts.
     if unclassifiable_command(command).is_some() && (depth == 0 || may_run_tmux(command, depth)) {
@@ -227,7 +248,19 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
         let texts: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         for (pos, base) in program_positions(&texts) {
             out.dynamic_env |= assigns_dynamic_name(&texts[pos..]);
-            if base == "tmux" {
+            // #9001 critic r2: a program NAME the shell expands counts when its
+            // segment reads as tmux or the text names tmux, whatever the
+            // literal spelling (`T=tm''ux; $T`, `${T}ux`, `$a$b`).
+            let dynamic = dynamic_name(&words[pos]) && !is_env_assignment(&texts[pos]);
+            if dynamic && (names_tmux(command) || reads_as_tmux(&words[pos + 1..], out)) {
+                out.hits.push(Hit::named(DYNAMIC_PROGRAM, &texts[pos]));
+            }
+            // #9001 critic r2: `xargs`, `find -exec … +`, `| sh`, `bash <<<`.
+            if let Some(why) = opaque_route(&texts, pos, seg.piped, command) {
+                out.hits.push(Hit::named(why, &texts[pos]));
+            }
+            // APFS is case-insensitive: `TMUX send-keys …` runs tmux.
+            if base.eq_ignore_ascii_case("tmux") {
                 let reset = resets_env(&texts[..pos]);
                 invocation(&words[pos + 1..], depth, reset, out);
             }
@@ -240,53 +273,24 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
     }
 }
 
-/// Pair each shlex word with whether the shell expands it.
-fn with_dynamics(segment: &str, argv: Vec<String>) -> Vec<Word> {
-    let flags = word_dynamics(segment.trim());
-    let aligned = flags.len() == argv.len();
-    argv.into_iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let dynamic = if aligned {
-                flags[i]
-            } else {
-                text.contains(['$', '`'])
-            };
-            Word { text, dynamic }
-        })
-        .collect()
-}
-
-/// For each unquoted-whitespace-separated word of `segment`, whether it holds
-/// a `$` or backtick outside single quotes and not escaped, or starts with an
-/// unquoted `~`.
-fn word_dynamics(segment: &str) -> Vec<bool> {
-    let (mut out, mut single, mut double, mut escaped) = (Vec::new(), false, false, false);
-    let mut current: Option<bool> = None;
-    for c in segment.chars() {
-        if escaped {
-            escaped = false;
-            current.get_or_insert(false);
-            continue;
-        }
-        let quoted = single || double;
-        if !quoted && c.is_whitespace() {
-            out.extend(current.take());
-            continue;
-        }
-        let at_start = current.is_none();
-        let live = current.get_or_insert(false);
-        match c {
-            '\\' if !single => escaped = true,
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '$' | '`' if !single => *live = true,
-            '~' if !quoted && at_start => *live = true,
-            _ => {}
-        }
-    }
-    out.extend(current);
-    out
+/// #9001 critic r2, supervisor ruling 2026-10-02 (narrow reading): whether
+/// `args`, read as a tmux argv after a program word the shell expands, put a
+/// deny verb — its name, alias or unique prefix — in a verb position. A word
+/// tmux does not know (`$EDITOR notes.md`) or one the shell expands
+/// (`$P "$A"`, an accepted residual) does not count.
+/// Test: `a_program_name_the_shell_expands_denies`.
+fn reads_as_tmux(args: &[Word], out: &Scan) -> bool {
+    let mut probe = Scan {
+        hits: Vec::new(),
+        retargets: false,
+        dynamic_env: false,
+        context: out.context.clone(),
+    };
+    options_then_commands(args, MAX_DEPTH, &mut probe);
+    probe
+        .hits
+        .iter()
+        .any(|h| DENY_VERBS.iter().any(|v| v.name == h.verb))
 }
 
 /// Parse one `tmux` invocation: its global options, then its commands.
@@ -428,11 +432,8 @@ fn command(argv: &[Word], server: &[String], depth: usize, nested: bool, out: &m
             return;
         }
         Resolved::Unknown => {
-            out.hits.push(Hit::opaque(
-                &head.text,
-                server,
-                "an unknown command, possibly an alias",
-            ));
+            out.hits
+                .push(Hit::opaque(&head.text, server, UNKNOWN_COMMAND));
             return;
         }
         Resolved::Opaque => out.hits.push(Hit::opaque(
@@ -559,10 +560,12 @@ fn deny_targets(verb: &Verb, args: &[Word]) -> Result<Option<Vec<Target>>, &'sta
     if verb.name == "send-keys" && has('c') {
         return Err("`-c` sends keys through a client whose pane is unknown");
     }
-    if verb.name == "kill-server" || (verb.name == "kill-session" && has('a')) {
-        return Ok(Some(vec![Target::Server]));
-    }
     let mut targets = values('t');
+    if verb.name == "kill-server" || (verb.name == "kill-session" && has('a')) {
+        // #9001 critic r1: `kill-session -a -t X` still names `X`.
+        targets.insert(0, Target::Server);
+        return Ok(Some(targets));
+    }
     if targets.is_empty() {
         targets.push(Target::Current);
     }
@@ -582,11 +585,16 @@ fn parse_flags(opts: &str, args: &[Word]) -> Result<Vec<(char, Option<Word>)>, &
     let mut i = 0;
     while let Some(word) = args.get(i) {
         let text = word.text.as_str();
-        if text == "--" || !text.starts_with('-') || text == "-" {
+        if text == "--" {
             break;
         }
+        // #9001 critic r2: `$F -t x`, `"$@"` may expand to options, so a word
+        // the shell expands before the options end is unreadable.
         if word.dynamic {
-            return Err("an option the shell expands");
+            return Err("a word the shell expands before `--` ends the options");
+        }
+        if !text.starts_with('-') || text == "-" {
+            break;
         }
         for (k, c) in text.char_indices().skip(1) {
             let at = opts
