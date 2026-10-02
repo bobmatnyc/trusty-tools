@@ -344,6 +344,9 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
 /// --gh-account <login> --gh-config-dir <dir>`) is the operator-facing
 /// workaround today; wiring a config_dir-aware caller into this cold-start
 /// path is the follow-up.
+/// #9091: `None` consults the `[accounts]` org map for the origin's owner
+/// ([`crate::core::gh_org_accounts::resolve_gh_account_default`]) before
+/// falling back to the ambient identity; `Some` always wins.
 /// Test: see [`account_clone`]'s and `ensure_base_clone_with_no_account_is_the_pre_7166_shape`'s
 /// (`inproject/tests.rs`) own doc comments for the exact test names.
 pub fn ensure_base_clone(
@@ -403,7 +406,12 @@ pub fn ensure_base_clone(
     cmd.args(["clone", "--no-local", origin_url])
         .arg(base_path)
         .current_dir(cwd);
-    if let Some(account) = account {
+    // #9091: no explicit account → the `[accounts]` org map. Resolved only on an
+    // actual clone, and a malformed table refuses the clone rather than running
+    // it as the ambient identity.
+    let resolved = crate::core::gh_org_accounts::resolve_gh_account_default(account, origin_url)
+        .map_err(|e| format!("inproject: cannot choose the gh account to clone with: {e}"))?;
+    if let Some(account) = resolved.as_ref().map(|r| r.login.as_str()) {
         let env = account_clone_env(account)
             .map_err(|e| format!("inproject: cannot clone as {account}: {e}"))?;
         env.apply(&mut cmd);

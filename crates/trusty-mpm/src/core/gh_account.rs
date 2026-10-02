@@ -713,7 +713,8 @@ pub fn resolve_gh_account_env(
 /// a git work tree with no `origin`, which gets
 /// [`crate::core::remote_mode::local_only_spawn_vars`] — gh cannot run at all
 /// unless the root is the allow-listed supervisor — and an origin git cannot
-/// read, which gets the nobody token.
+/// read, which gets the nobody token. #9091: an origin no record pins takes the
+/// `[accounts]` org map's login ([`crate::core::gh_org_accounts::org_map_pin`]).
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`,
 /// `a_local_only_repo_spawns_with_gh_disabled`,
 /// `an_unreadable_origin_spawns_with_the_nobody_token`,
@@ -752,7 +753,15 @@ pub async fn resolve_gh_account_env_for_registry(
     // closed; it never spawns as the machine's active account.
     let pinned = match find_pinned_gh_identity(registry, &origin).await {
         Ok(Some(pinned)) => pinned,
-        Ok(None) => return Vec::new(),
+        // #9091: no pin → the `[accounts]` org map; a broken table fails closed.
+        Ok(None) => match crate::core::gh_org_accounts::org_map_pin(
+            &origin,
+            crate::core::gh_org_accounts::OrgAccounts::load_default,
+        ) {
+            Ok(Some(pinned)) => pinned,
+            Ok(None) => return Vec::new(),
+            Err(env) => return log_spawn_env(Some(Ok(env)), cwd),
+        },
         Err(reason) => {
             let env = refused_spawn_env(None, &origin, &reason);
             return log_spawn_env(Some(Ok(env)), cwd);

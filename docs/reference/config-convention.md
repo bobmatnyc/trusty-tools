@@ -213,6 +213,35 @@ to guarded. The `tm doctor` `pm_guard` row reports the state, and warns
 A running Claude Code session keeps the hooks it loaded at startup, so the
 change takes effect at the session's next launch.
 
+### The `[accounts]` section (#9091)
+
+```toml
+# Which gh account clones and spawns sessions for a GitHub org.
+[accounts]
+duettoresearch = "bob-duetto"
+```
+
+Each key is a GitHub org (or user) name, matched without case, and each value
+is a `gh` login already logged in on this host. Precedence, highest first:
+
+1. An explicit selection: `--account`, `--user` or `--u`, a
+   `<login>@<owner>/<repo>` positional, or the registry pin an earlier flag
+   wrote.
+2. This table, looked up by the repository owner.
+3. The ambient identity, exactly as before. An org with no entry stays here.
+
+The table applies at the managed base clone (`tm <owner>/<repo>`, `tm run`) and
+at every session spawn whose project pins no account. It is never written to
+the project registry, so editing the table changes the next clone or spawn.
+
+This table is read strictly, unlike the rest of the file. A malformed table is
+an error that names the problem: a value that is not a string, a blank or
+invalid login, two orgs that differ only in case, `accounts` that is not a
+table, or a file that is not valid TOML (an unquoted login is the common case).
+A clone refuses with that error. A spawn gets a `gh` token that authenticates
+as nobody and logs the error. Neither falls back to the machine's active
+account. A command that names its account explicitly never reads the table.
+
 ## Adding this convention to a crate
 
 Crate maintainers implementing this convention in a new trusty-* crate should
