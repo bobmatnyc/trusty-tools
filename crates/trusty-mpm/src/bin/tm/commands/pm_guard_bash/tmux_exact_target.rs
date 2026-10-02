@@ -18,6 +18,10 @@
 //! too, naming its token or reason, Architect live or not; an unparseable
 //! command counts only when it names `tmux`. A pane-position word (`top`,
 //! `bottom-left`, …) is no exact target for a pane verb.
+//! #9001 critic r2: so does a program name the shell expands in a segment
+//! that reads as tmux, a word it expands before the options end, tmux behind
+//! `xargs` or `find -exec … +`, and a shell fed program text on stdin
+//! (`architect_pane_reach`). A here-document data body is not read.
 //! Residual: an omitted target is left to the #8902 floor. The listing is
 //! read before the command runs, so a session the same command creates denies.
 //! Test: `tmux_exact_target_tests.rs`; end to end in
@@ -26,6 +30,7 @@
 use super::architect_pane::PaneProbe;
 use super::architect_pane_parse::{Hit, Target, UNPARSED, may_run_tmux, tmux_hits};
 use super::architect_pane_probe::Listed;
+use super::architect_pane_reach::without_data_bodies;
 
 /// The rule name recorded with an exact-target deny.
 pub(crate) const TMUX_TARGET_RULE: &str = "tmux-target-unresolved";
@@ -89,7 +94,8 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
         // #9001 critic r1: #8902 judges an opaque hit only while an Architect
         // is live; this floor binds every caller.
         if let Some(why) = hit.opaque {
-            if why != UNPARSED || may_run_tmux(command, 0) {
+            // #9001 critic r2: a here-document body is not a tmux mention.
+            if why != UNPARSED || may_run_tmux(&without_data_bodies(command), 0) {
                 return Some(unreadable(hit, why));
             }
             continue;
@@ -101,7 +107,10 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
                 Target::Dynamic(text) => {
                     return Some(refusal(hit, text, "the shell expands it"));
                 }
-                _ => continue,
+                // An omitted target is the #8902 floor's. #9001 critic r2: a
+                // route that appends words to it (`xargs`, `find -exec … +`,
+                // a shell fed on stdin) is an opaque hit, refused above.
+                Target::Current | Target::Marked | Target::Server | Target::Picked => continue,
             };
             if !listed.iter().any(|(s, _)| *s == hit.server.as_slice()) {
                 listed.push((&hit.server, probe.objects(&hit.server)));
@@ -355,8 +364,9 @@ fn pane_exists(part: &str, rows: &[&TmuxObject]) -> Result<(), &'static str> {
 /// The pane list one `list-panes` run gives, as [`TmuxObject`]s.
 ///
 /// What: no tmux binary, a spawn that failed or was refused, and a failure
-/// other than "no server" are `Err`. No server running, or a socket nothing
-/// listens on, is an empty list: no target exists there.
+/// other than "no server" are `Err`. No server running, or a socket that is
+/// missing or that nothing listens on, is an empty list: no target exists
+/// there. A socket the guard may not open (`Permission denied`) is `Err`.
 /// Test: `an_unlistable_server_denies_every_target`.
 pub(super) fn classify_objects(listed: Listed<'_>) -> Result<Vec<TmuxObject>, String> {
     match listed {
@@ -366,9 +376,11 @@ pub(super) fn classify_objects(listed: Listed<'_>) -> Result<Vec<TmuxObject>, St
             ok: false, stderr, ..
         } => {
             let err = stderr.trim();
-            if ["no server running", "error connecting to"]
+            // #9001 critic r2: only an absent server lists nothing.
+            let absent = ["(No such file or directory)", "(Connection refused)"]
                 .iter()
-                .any(|m| err.contains(m))
+                .any(|m| err.contains(m));
+            if err.contains("no server running") || (err.contains("error connecting to") && absent)
             {
                 return Ok(Vec::new());
             }

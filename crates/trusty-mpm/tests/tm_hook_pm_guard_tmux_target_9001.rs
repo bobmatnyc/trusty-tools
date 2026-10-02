@@ -89,6 +89,71 @@ fn an_unlistable_tmux_target_is_refused_under_each_bypass() {
     }
 }
 
+/// #9001 critic r2: each bypass its probe of the built binary found ALLOWED
+/// is refused under each bypass variable, and each over-denial and read verb
+/// passes. With the listing refused, any judged tmux target denies, so a pass
+/// here means the floor never saw the command.
+#[test]
+fn every_r2_bypass_is_refused_and_prose_passes_under_each_bypass() {
+    let refused = [
+        "T=tm''ux; $T send-keys -t nos hi",
+        "T=tm; ${T}ux send-keys -t nos hi",
+        "a=t b=mux; $a$b send-keys -t nos hi",
+        "set -- -t nos; tmux send-keys \"$@\" hi",
+        "F=; tmux send-keys $F -t nos hi",
+        "A='-t nos'; tmux send-keys $A hi",
+        "echo '-t nos hi' | xargs tmux send-keys",
+        "f(){ tmux send-keys -t nos hi; }; f",
+        "time { tmux send-keys -t nos hi; }",
+        "coproc tmux send-keys -t nos hi",
+        "case x in (x) tmux send-keys -t nos hi;; esac",
+        "bash <<< 'tmux send-keys -t nos hi'",
+        "echo 'tmux send-keys -t nos hi' | sh",
+    ];
+    let passes = [
+        "~/.cargo/bin/tm doctor | grep tmux",
+        "cat <<'EOF' > notes.md\nThe PM's tmux pane is fine\nEOF",
+        "gh issue comment 1 --body \"$(cat <<'EOF'\nWe can't trust tmux send-keys here\nEOF\n)\"",
+        "tmux capture-pane -t =pm:0 -p",
+        "tmux has-session -t nos",
+        "tmux ls",
+        "tmux display-message -p '#{session_name}'",
+        "tmux list-panes -a",
+    ];
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        for command in refused {
+            let out = guard(command, &env);
+            assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
+            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+        for command in passes {
+            let out = guard(command, &env);
+            assert!(!out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+    }
+}
+
+/// Supervisor ruling 2026-10-02, narrow reading of rule (a): a program word
+/// the shell expands is refused when its arguments put a tmux deny verb in a
+/// verb position, and passes when no tmux text appears (`$P "$A"` is the
+/// accepted residual), under each bypass variable.
+#[test]
+fn a_dynamic_program_word_denies_only_with_a_tmux_verb_or_text() {
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        for command in ["$T send-keys -t nos hi", "$T kill-session -t x"] {
+            let out = guard(command, &env);
+            assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
+            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+        for command in ["$EDITOR \"$FILE\"", "$P \"$A\""] {
+            let out = guard(command, &env);
+            assert!(!out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+    }
+}
+
 /// #9001 critic r1: a tmux command the guard cannot read, one behind shell
 /// grammar, and `kill-session -a` with a target are refused under each
 /// bypass with no Architect live.

@@ -98,6 +98,7 @@ mod architect_pane;
 mod architect_pane_env;
 mod architect_pane_parse;
 mod architect_pane_probe;
+mod architect_pane_reach;
 mod architect_pane_verbs;
 #[cfg(test)]
 pub(crate) use architect_pane::Pane;

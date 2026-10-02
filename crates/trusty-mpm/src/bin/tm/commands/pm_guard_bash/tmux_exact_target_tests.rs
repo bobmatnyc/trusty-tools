@@ -175,6 +175,23 @@ fn an_unlistable_server_denies_every_target() {
         let shown = format!("{listed:?}");
         assert!(classify_objects(listed).is_err(), "{shown}");
     }
+    // #9001 critic r2: a socket the guard may not open is no empty server.
+    let unreadable = Fake {
+        objects: classify_objects(Listed::Ran {
+            ok: false,
+            stdout: "",
+            stderr: "error connecting to /tmp/tmux-1/default (Permission denied)",
+        }),
+    };
+    assert!(unreadable.objects.is_err(), "{:?}", unreadable.objects);
+    let reason = denied(&unreadable, &command).expect("an unreadable socket denies");
+    assert!(reason.contains("cannot list"), "{reason}");
+    let missing = Listed::Ran {
+        ok: false,
+        stdout: "",
+        stderr: "error connecting to /tmp/tmux-1/x (No such file or directory)",
+    };
+    assert_eq!(classify_objects(missing), Ok(Vec::new()));
     let no_server = Listed::Ran {
         ok: false,
         stdout: "",
@@ -291,11 +308,137 @@ fn a_tmux_command_after_shell_grammar_is_judged() {
         format!("f () {{ {send}; }}; f"),
         format!("function f {{ {send}; }}; f"),
         format!("case x in x) {send};; esac"),
+        // #9001 critic r2.
+        format!("f(){{ {send}; }}; f"),
+        format!("f (){{ {send}; }}; f"),
+        format!("time {{ {send}; }}"),
+        format!("time ({send})"),
+        format!("coproc {send}"),
+        format!("coproc NAME {{ {send}; }}"),
+        format!("case x in (x) {send};; esac"),
     ] {
         let reason = denied(&probe, &command).unwrap_or_else(|| panic!("{command} passed"));
         assert!(reason.contains("`nosuch`"), "{command}: {reason}");
     }
     assert_eq!(denied(&probe, &format!("if {has}; then echo up; fi")), None);
+}
+
+/// #9001 critic r2: the bypasses its probe found ALLOWED, each now denied.
+/// The grammar rows are judged, so their `nos` target is named; the rest are
+/// unreadable, so the guard says it cannot read them.
+const R2_BYPASSES: [(&str, &str); 13] = [
+    ("T=tm''ux; $T send-keys -t nos hi", "cannot read"),
+    ("T=tm; ${T}ux send-keys -t nos hi", "cannot read"),
+    ("a=t b=mux; $a$b send-keys -t nos hi", "cannot read"),
+    ("set -- -t nos; tmux send-keys \"$@\" hi", "cannot read"),
+    ("F=; tmux send-keys $F -t nos hi", "cannot read"),
+    ("A='-t nos'; tmux send-keys $A hi", "cannot read"),
+    ("echo '-t nos hi' | xargs tmux send-keys", "cannot read"),
+    ("f(){ tmux send-keys -t nos hi; }; f", "`nos`"),
+    ("time { tmux send-keys -t nos hi; }", "`nos`"),
+    ("coproc tmux send-keys -t nos hi", "`nos`"),
+    ("case x in (x) tmux send-keys -t nos hi;; esac", "`nos`"),
+    ("bash <<< 'tmux send-keys -t nos hi'", "cannot read"),
+    ("echo 'tmux send-keys -t nos hi' | sh", "cannot read"),
+];
+
+/// Assert each `(command, named)` row denies under #9001, naming `named`.
+fn assert_rows_deny(probe: &dyn PaneProbe, rows: &[(&str, &str)]) {
+    for (command, named) in rows {
+        let reason = denied(probe, command).unwrap_or_else(|| panic!("{command} passed"));
+        assert!(reason.contains(named), "{command}: {reason}");
+    }
+}
+
+/// #9001 critic r2, rule (a): a program name the shell expands, in a segment
+/// that reads as tmux, is unreadable whatever its literal spelling.
+#[test]
+fn a_program_name_the_shell_expands_denies() {
+    assert_rows_deny(&fake(), &R2_BYPASSES[..3]);
+    assert_rows_deny(
+        &fake(),
+        &[
+            ("$(printf 't%sux' m) kill-server", "cannot read"),
+            ("X=x; $X -L s9001 send-keys -t =pm:0 hi", "cannot read"),
+            ("$T send-keys -t nos hi", "`$T`"),
+            ("$T kill-session -t x", "`$T`"),
+            ("$T killp -t =pm:0", "`$T`"),
+            ("$T send-k -t =pm:0 hi", "`$T`"),
+            ("Tmux send-keys -t nos hi", "`nos`"),
+        ],
+    );
+    // Supervisor ruling 2026-10-02, narrow reading: with no tmux text and no
+    // deny verb in a verb position, a dynamic program word passes. `$P "$A"`
+    // is the accepted residual.
+    for command in ["$EDITOR \"$FILE\"", "$P \"$A\"", "X=x; $X $Y -t =pm:0"] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// #9001 critic r2, rule (a): a word the shell expands before `--` ends the
+/// options may expand to `-t <target>`, so it is unreadable.
+#[test]
+fn a_word_the_shell_expands_before_the_options_end_denies() {
+    assert_rows_deny(&fake(), &R2_BYPASSES[3..6]);
+    let message = "tmux send-keys -t =pm:0 \"$MSG\"";
+    assert_rows_deny(&fake(), &[(message, "before `--`")]);
+    let after = "tmux send-keys -t =pm:0 -- \"$MSG\"";
+    assert_eq!(denied(&fake(), after), None, "{after}");
+}
+
+/// #9001 critic r2, rule (b): tmux behind `xargs` or `find -exec … +`, and a
+/// shell that reads tmux program text on stdin, are opaque.
+#[test]
+fn every_opaque_or_dynamic_tmux_route_denies() {
+    assert_rows_deny(&fake(), &R2_BYPASSES[6..7]);
+    assert_rows_deny(&fake(), &R2_BYPASSES[11..]);
+    assert_rows_deny(
+        &fake(),
+        &[
+            ("echo nos | xargs -n1 tmux send-keys -t =pm:0", "`xargs`"),
+            ("find . -exec tmux send-keys -t =pm:0 {} +", "`find -exec"),
+            ("echo 'tmux send-keys -t nos hi' | bash -s", "stdin"),
+            ("tmux ls; sh < /tmp/x9001.sh", "stdin"),
+        ],
+    );
+    // A literal `find -exec … \;` is read; a fed shell with inline code is
+    // the wrapper's to judge; a fed shell in a command naming no tmux passes.
+    for command in [
+        "find . -maxdepth 0 -exec tmux send-keys -t =pm:0 hi \\;",
+        "echo hi | bash -c 'tmux ls'",
+        "echo 'make test' | sh",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// #9001 critic r2, rules (c) and (d): every grammar row is judged and every
+/// over-denial passes — a literal program path, prose in a here-document
+/// data body, and the read verbs the P10 exception relies on.
+#[test]
+fn prose_and_a_literal_program_path_are_not_refused() {
+    assert_rows_deny(&fake(), &R2_BYPASSES[7..11]);
+    for command in [
+        "~/.cargo/bin/tm doctor | grep tmux",
+        "cat <<'EOF' > notes.md\nThe PM's tmux pane is fine\nEOF",
+        "gh issue comment 1 --body \"$(cat <<'EOF'\nWe can't trust tmux send-keys here\nEOF\n)\"",
+        "\"$CARGO_TARGET_DIR/debug/tm\" fleet status --tmux",
+        "$EDITOR notes.md",
+        "tmux capture-pane -t =pm:0 -p",
+        "tmux has-session -t nos",
+        "tmux ls",
+        "tmux display-message -p '#{session_name}'",
+        "tmux list-panes -a",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+    // A body a shell runs, or one that expands a substitution, is still read.
+    for command in [
+        "bash <<'EOF'\ntmux send-keys -t nos hi\nEOF",
+        "cat <<EOF > notes.md\n$(tmux send-keys -t nos hi)\nEOF",
+    ] {
+        assert!(denied(&fake(), command).is_some(), "{command}");
+    }
 }
 
 /// #9001 critic r1, finding 3: `kill-session -a` still names its `-t`.
@@ -389,7 +532,8 @@ fn a_stopped_tmux_server_times_out_the_listing() {
     let started = std::time::Instant::now();
     let listing = probe.objects(&argv);
     let first = started.elapsed();
-    assert!(listing.is_err(), "{listing:?}");
+    let err = listing.expect_err("a stopped server lists nothing");
+    assert!(err.contains("did not answer"), "{err}");
     assert!(first < std::time::Duration::from_secs(4), "took {first:?}");
     let again = std::time::Instant::now();
     assert!(probe.panes(&argv).is_err());

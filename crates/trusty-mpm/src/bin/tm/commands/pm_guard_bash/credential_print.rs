@@ -92,12 +92,15 @@ use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::program_word::resolve_program_word;
 use credential_print_clis::{interactive_security, judge_cli_echoes, names_cli_trigger};
 use credential_print_heredoc::strip_comments_and_heredocs;
+pub(super) use credential_print_programs::{basename, code_operands, evaluator_name};
 use credential_print_programs::{
-    basename, code_operands, consumes_stdin, credential_fds, enables_xtrace, evaluator_name,
-    first_credential_program, keyword_words,
+    consumes_stdin, credential_fds, enables_xtrace, first_credential_program, keyword_words,
 };
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
+// #9001 critic r2: the tmux floors reuse the evaluator and grammar readings.
+pub(super) use credential_print_programs::COMPOUND_OPENERS;
+pub(super) use credential_print_taint::is_identifier;
 // #8869: the secret-read key-consumer rule reads an fd-0 key redirect with it.
 pub(crate) use credential_print_redirect::input_redirect_operand;
 use credential_print_redirect::{

