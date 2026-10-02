@@ -28,6 +28,7 @@ pub mod rooms;
 pub mod vector;
 // ADR-0027 T9: wing record shape, default-wing seeding, create/rename/list.
 pub mod wings;
+pub mod write_deadline;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
 pub use concurrent_open::{OpenIntent, OpenMode, ReadOnlyRedb};
@@ -53,3 +54,4 @@ pub use wings::{
     WingRecord, WingSummary, ensure_default_wing, ensure_default_wing_fail_open, list_wings,
     rename_wing, resolve_or_create_wing, resolve_wing_selector, rooms_in_wing,
 };
+pub use write_deadline::{DeadlinedWrite, WriteTxnError};

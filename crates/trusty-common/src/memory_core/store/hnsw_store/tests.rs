@@ -166,6 +166,46 @@ fn compact_orphans_removes_dangling() {
     assert_eq!(hits[0].0, u1);
 }
 
+/// Why (#8749): the orphan sweep holds the vector file's write lock while it
+/// loops, and every `upsert` waits behind it. Past its deadline it must roll
+/// back and say so — not commit late, and not report success.
+/// What: seeds one orphan, runs `compact_orphans` under a zero budget, asserts
+/// the typed `WriteDeadline` error and that the orphan is still there; then
+/// restores the budget and asserts the sweep removes it (the lock was freed).
+/// Test: itself.
+#[test]
+fn compact_orphans_past_its_deadline_removes_nothing() {
+    let (_dir, store) = open_store(8);
+    let store = store.with_palace("vec-palace".into());
+    let encoded = postcard::to_allocvec(&unit_vec(8, 99)).unwrap();
+    {
+        let wtx = store.db.begin_write().unwrap();
+        {
+            let mut vectors = wtx.open_table(VECTORS).unwrap();
+            vectors.insert(999_999u64, encoded.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+    *store.txn_budget.write() = Some(std::time::Duration::ZERO);
+    let err = store
+        .compact_orphans()
+        .expect_err("#8749: an over-deadline sweep must not report success");
+    assert!(
+        matches!(err, HnswStoreError::WriteDeadline(_)),
+        "want the typed deadline error, got {err}"
+    );
+    assert!(err.to_string().contains("palace 'vec-palace'"), "{err}");
+    assert_eq!(
+        store.len().unwrap(),
+        1,
+        "the rolled-back sweep removed nothing"
+    );
+
+    *store.txn_budget.write() = None;
+    assert_eq!(store.compact_orphans().unwrap(), 1);
+    assert_eq!(store.len().unwrap(), 0);
+}
+
 /// Why (#6195): `compact_orphans` classes orphan candidates from read-txn
 /// snapshots taken before its delete transaction. A real `upsert` that commits
 /// AFTER the live-id snapshot but BEFORE the orphan scan leaves its brand-new

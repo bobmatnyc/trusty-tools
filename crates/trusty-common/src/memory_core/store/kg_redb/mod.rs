@@ -29,6 +29,9 @@ mod copy_tables;
 pub mod stats;
 mod store;
 mod tests;
+// #8749: the write-transaction deadline, end to end through `apply_batch`.
+#[cfg(test)]
+mod txn_deadline_tests;
 mod types;
 // ADR-0027 T9: WINGS / WING_KEYS accessors. Insert-only except the rename pair.
 mod wing_ops;

@@ -42,6 +42,7 @@
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg::Triple;
 use crate::memory_core::store::kg_redb::{BatchOpResult, BatchWriteOp, KgStoreRedb};
+use crate::memory_core::store::write_deadline::WriteTxnError;
 use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -464,7 +465,8 @@ async fn writer_loop(store: Arc<KgStoreRedb>, mut rx: mpsc::Receiver<QueuedOp>) 
 /// batch was atomic — none of them committed). On success, each reply
 /// gets its op's result.
 /// Test: `writer_batches_burst_into_single_commit`,
-/// `writer_reports_error_per_op`.
+/// `writer_reports_error_per_op`,
+/// `a_deadline_abort_reaches_every_queued_caller_as_a_typed_error`.
 async fn commit_and_reply(store: &Arc<KgStoreRedb>, buf: &mut Vec<QueuedOp>) {
     if buf.is_empty() {
         return;
@@ -504,8 +506,15 @@ async fn commit_and_reply(store: &Arc<KgStoreRedb>, buf: &mut Vec<QueuedOp>) {
         Ok(Err(e)) => {
             // Transaction error: redb rolled back. Every op failed.
             let msg = format!("kg writer batch failed: {e:#}");
+            // #8749: keep a deadline abort typed for every caller, so it reads
+            // as "rolled back, nothing landed" rather than an opaque string.
+            let deadline = e.downcast_ref::<WriteTxnError>().cloned();
             for queued in buf.drain(..) {
-                queued.reply.send_err(anyhow!(msg.clone()));
+                let err = match &deadline {
+                    Some(d) => anyhow::Error::new(d.clone()).context(msg.clone()),
+                    None => anyhow!(msg.clone()),
+                };
+                queued.reply.send_err(err);
             }
         }
         Err(join_err) => {

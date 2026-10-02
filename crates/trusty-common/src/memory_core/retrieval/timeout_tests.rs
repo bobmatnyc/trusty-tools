@@ -115,7 +115,8 @@ mod tests {
     /// sleep that exceeds the configured timeout).
     /// What: Acquires the per-palace `write_mutex` in a background task,
     /// then sets `TRUSTY_WRITE_LOCK_TIMEOUT_SECS=0` and attempts `remember`,
-    /// which must time out on lock acquisition.
+    /// which must time out on lock acquisition with the typed
+    /// `WriteTimeout::LockWait` (#8749).
     /// Test: itself.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
@@ -175,6 +176,15 @@ mod tests {
         assert!(
             msg.contains("timed out") || msg.contains("write-lock"),
             "error must mention lock timeout: {msg}"
+        );
+        // #8749: a waiter that gives up gets a typed timeout naming the palace.
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::memory_core::timeouts::WriteTimeout>(),
+                Some(crate::memory_core::timeouts::WriteTimeout::LockWait { palace, .. })
+                    if palace == "lock-timeout"
+            ),
+            "#8749: the lock-wait timeout must be typed: {msg}"
         );
     }
 }
