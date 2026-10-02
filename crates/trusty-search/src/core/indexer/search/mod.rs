@@ -39,6 +39,7 @@ use super::{
     STRUCT_DEFINITION_BOOST,
 };
 use drops::SearchDrops;
+use embed_degrade::PrecomputedQueryVector;
 use exact::ExactMatchReport;
 
 /// Everything one search produced: the page, the drop tally, and the
@@ -209,6 +210,33 @@ impl CodeIndexer {
     /// discarding wrappers.
     /// Test: `search_meta_reports_the_exact_match_floor`.
     pub async fn search_with_outcome(&self, query: &SearchQuery) -> Result<SearchOutcome> {
+        self.search_with_outcome_vec(query, None).await
+    }
+
+    /// [`Self::search`], with the query vector computed by the caller (#9027).
+    ///
+    /// Why: the all-index fan-out embedded the same text once per index; one
+    /// embedder call per request is enough when every index shares it.
+    /// What: `query_vector` replaces this index's own query embed, a failed one
+    /// included. `None`, or an index with no embedder wired (BM25-only), embeds
+    /// as `search` does.
+    /// Test: `global_search_embeds_the_query_once_for_every_index`.
+    pub async fn search_with_query_vector(
+        &self,
+        query: &SearchQuery,
+        query_vector: Option<PrecomputedQueryVector<'_>>,
+    ) -> Result<Vec<CodeChunk>> {
+        Ok(self
+            .search_with_outcome_vec(query, query_vector)
+            .await?
+            .results)
+    }
+
+    async fn search_with_outcome_vec(
+        &self,
+        query: &SearchQuery,
+        query_vector: Option<PrecomputedQueryVector<'_>>,
+    ) -> Result<SearchOutcome> {
         self.touch_activity();
         // #8232: a handle that outlived DELETE must not answer from closed files.
         self.refuse_if_deleted()?;
@@ -268,6 +296,9 @@ impl CodeIndexer {
         // #8348: an embed failure degrades an unpinned query to lexical.
         let (embedding, mut vector_lane_error) = if lexical_only {
             (None, None)
+        } else if let (Some(pre), Some(_)) = (query_vector, self.embedder.as_ref()) {
+            // #9027: the fan-out already embedded this text once.
+            self.precomputed_or_degrade(pre, semantic_lane)?
         } else {
             self.embed_query_or_degrade(&query.text, semantic_lane)
                 .await?

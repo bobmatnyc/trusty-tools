@@ -164,3 +164,34 @@ async fn run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one() {
         "costly index's cost-scaled window must keep it resident despite equal idle time"
     );
 }
+
+/// #9027: the idle tick skips an index a warm-all pinned.
+///
+/// Why: warm-all promises a resident window longer than the idle threshold.
+/// What: one cheap index, idle past a 1 s base window but pinned — nothing is
+/// evicted and its chunks stay in memory.
+/// Test: this test.
+#[tokio::test]
+async fn run_idle_eviction_tick_spares_a_warm_pinned_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = SearchAppState::new(IndexRegistry::new());
+    let handle = bare_corpus_handle("pinned", &dir.path().join("index.redb"));
+    {
+        let idx = handle.indexer.read().await;
+        idx.index_files_batch(&[("src/a.rs".to_string(), "fn a() {}".to_string())])
+            .await
+            .expect("index");
+    }
+    state.registry.register(handle);
+    state.warm.pin_for_test("pinned", Duration::from_secs(60));
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let evicted = run_idle_eviction_tick(&Arc::new(state.clone()), 1).await;
+    assert_eq!(evicted, 0, "a pinned index is not evicted");
+    let h = state
+        .registry
+        .get(&IndexId::new("pinned".to_string()))
+        .expect("registered");
+    assert!(h.indexer.read().await.in_memory_chunk_count().await > 0);
+}

@@ -404,6 +404,7 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
             serial: false,
             path_prefix: None,
             repos: Vec::new(),
+            per_index_deadline_ms: None,
         }),
     )
     .await;
