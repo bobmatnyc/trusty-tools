@@ -9,13 +9,17 @@ spec_refs:
 
 **Status:** Draft. Design record only — no code in this PR.
 **Spec ID:** `SPEC-UNIDASH-01~draft` … `SPEC-UNIDASH-17~draft`
-**Subsystem:** `trusty-console` — the event bus itself (the UDS ingest socket,
-`seq` assignment, the ring, the durable log), the dashboard routes, and the SSE
-fan-out (`src/routes/`, `src/metrics_poller.rs`, `ui/src/`); `trusty-common` —
-the `HarnessEvent` envelope, the `ActionEvent` taxonomy, and the shared
-`PushClient` (§4.1, owner ruling 2026-09-05, superseding the prospective
-`control_bus` home in #3157); `trusty-agents-common` — the taxonomy's prior
-home, retired once its producers push to console (§3.4, §4.1); `trusty-mpm`,
+**Subsystem:** `trusty-events` — the event bus itself (the UDS ingest socket,
+`seq` assignment, the ring, the durable log), run as its own launchd-supervised
+daemon ([ADR-0065](../adr/0065-trusty-events-process-placement.md), owner ruling
+2a, 2026-10-02; it moved out of console, which hosted it under the 2026-09-05
+ruling); `trusty-console` — the dashboard routes, the SSE fan-out, and the
+`events.subscribe` reader (`src/routes/`, `src/metrics_poller.rs`, `ui/src/`);
+`trusty-common` — the `HarnessEvent` envelope, the `ActionEvent` taxonomy, the
+shared `PushClient`, and the bus wire contract in `control_bus` (§4.1,
+ADR-0065; the prospective `control_bus` home in #3157 was superseded
+2026-09-05); `trusty-agents-common` — the taxonomy's prior
+home, retired once its producers push to the bus (§3.4, §4.1); `trusty-mpm`,
 `trusty-code`, `trusty-agents`, `trusty-analyze` — the four event sources and
 their adapters.
 **Owner:** Bob Matsuoka
@@ -464,11 +468,20 @@ Three placements were considered.
 
 | Option | What it means | Status |
 |---|---|---|
-| **A. Console-hosted** | Console owns the bus; the harnesses push to it | **Decided.** Owner ruling, 2026-09-05 — see below |
-| **B. A new crate** | `trusty-eventbus`, a fourth daemon | Rejected. ADR-0032 says no new service binds HTTP, and a UDS-only fourth daemon adds a supervision target, an install step, and a failure mode for no capability the existing crates lack. #3157 explicitly wanted *fewer* bus implementations |
+| **A. Console-hosted** | Console owns the bus; the harnesses push to it | **Superseded** by [ADR-0065](../adr/0065-trusty-events-process-placement.md) (owner ruling 2a, 2026-10-02). Was decided by the 2026-09-05 ruling — see below |
+| **B. A new crate** | `trusty-eventbus`, a fourth daemon | **Decided** by ADR-0065 as `trusty-events` (owner rulings 27 and 2a, 2026-10-02). Originally rejected: ADR-0032 says no new service binds HTTP, and a UDS-only fourth daemon adds a supervision target, an install step, and a failure mode for no capability the existing crates lack. #3157 explicitly wanted *fewer* bus implementations |
 | **C. `trusty-common::control_bus`** | The bus promoted into the common layer, as epic #3157 had scoped it | Superseded 2026-09-05. #3157 closed not-planned on 2026-09-02; the owner ruling below decides placement directly rather than through that epic |
 
-**Decided: Option A, console-hosted (owner ruling, 2026-09-05).**
+**Decided: Option B, `trusty-events` as its own daemon (ADR-0065, owner ruling 2a,
+2026-10-02).** This supersedes the 2026-09-05 "console is the only event bus"
+ruling below, which is kept as history. `trusty-events` is a launchd-supervised
+daemon on `daemon_socket_path("trusty-events")`. No other crate links its
+library, the wire contract stays in `trusty-common::control_bus`, and no daemon
+needs the bus to do its own job. Read "console" in the history below as
+"`trusty-events`" wherever it names the bus host, ingester, sequencer or log
+writer; console is now a client that reads the stream (§4.4).
+
+*History — Option A, console-hosted (owner ruling, 2026-09-05; superseded 2026-10-02).*
 
 > "The only event bus actually."
 > — Bob, 2026-09-05
@@ -495,7 +508,7 @@ single owner and everyone else a client of it.
 is retired once its producers push to console instead of publishing locally —
 not before, so no consumer of the current API breaks mid-migration.
 
-This supersedes Option C above and the 2026-07-18 "single hub on the tm
+Option A superseded Option C above and the 2026-07-18 "single hub on the tm
 daemon" decision, which placed the hub role on `trusty-mpm` rather than
 console. It is consistent with ADR-0032 (console is the single external
 surface — this extends the same reasoning from HTTP to the event bus) and the
@@ -509,15 +522,17 @@ producer whose console connection is down keeps working and keeps buffering
 disconnected longer than its buffer holds loses events, and it reports how
 many via the `dropped` count.
 
-**Ownership boundary (owner ruling, 2026-09-05).**
+**Ownership boundary (owner ruling, 2026-09-05; the event-bus core moved to
+`trusty-events` by ADR-0065, 2026-10-02).**
 
 > "The console crate should also hold dashboard code. It can call APIs in
 > other crates."
 > — Bob, 2026-09-05
 
-`crates/trusty-console` owns all dashboard code — the UI views (§5), the
-HTTP/SSE routes (§4.4), and the event-bus core this section decides (the
-ingest socket, `seq` assignment, the ring, and the log, §4.2–§4.3). No other
+`crates/trusty-console` owns all dashboard code — the UI views (§5) and the
+HTTP/SSE routes (§4.4). The event-bus core (the ingest socket, `seq`
+assignment, the ring, and the log, §4.2–§4.3) belongs to `trusty-events`
+(ADR-0065); console keeps no bus core. No other
 crate gains dashboard code of its own. Console reaches every other crate only
 through that crate's UDS or library API — the object viewer (§6) dials the
 owning harness for a session record rather than reading its internals
@@ -544,7 +559,8 @@ states the mechanism; this is the invariant the mechanism exists to serve.
 
 ### 4.2 Ingestion — the push contract
 
-Producers push; console is the only ingester. There is no per-daemon cursor
+Producers push; `trusty-events` is the only ingester (ADR-0065; console was the
+ingester under the 2026-09-05 ruling). There is no per-daemon cursor
 method for console to drain — §4.1's ruling retires the pull-based
 `bus_events { since_seq, max }` shape this section specified before
 2026-09-05.
@@ -558,23 +574,24 @@ method for console to drain — §4.1's ruling retires the pull-based
   line prefixed `__OMPM_EVENT__ ` and the parent re-publishes it. This already
   works (`EVENT_LINE_PREFIX`, `bus.rs:53`) and is how a `--workflow` child
   reaches its API server today. The parent's own adapter then pushes the
-  re-published event to console exactly as it would one of its own.
-- **`PushClient`, over console's UDS ingest socket.** One shared client in
+  re-published event to `trusty-events` exactly as it would one of its own.
+- **`PushClient`, over the `trusty-events` UDS ingest socket.** One shared client in
   `trusty-common`, used by every producer:
 
   ```
   PushClient::send(event)
-    -> enqueue in a local bounded buffer, flush to console's ingest socket
+    -> enqueue in a local bounded buffer, flush to the trusty-events ingest socket
   ```
 
   - **Frame shape.** One `HarnessEvent` per frame, newline-delimited JSON — the
     push contract changes the transport, not the envelope.
-  - **The ingest socket.** Console binds one UDS socket for this, using the
+  - **The ingest socket.** `trusty-events` binds one UDS socket for this, using the
     same per-daemon convention every other socket in the workspace already
     uses (`trusty_common::daemon_socket_path`,
     [port-assignments.md](../architecture/port-assignments.md)):
-    `daemon_socket_path("trusty-console")` resolves to
-    `<data dir>/trusty-console/trusty-console.sock`. Every producer, regardless
+    `daemon_socket_path("trusty-events")` resolves to
+    `<data dir>/trusty-events/trusty-events.sock` (ADR-0065; it was
+    `trusty-console.sock` under the 2026-09-05 ruling). Every producer, regardless
     of source, dials this one socket.
   - **Buffering.** `PushClient` holds a local bounded buffer, default capacity
     4096 frames, so a producer never blocks on a slow or absent console —
@@ -594,9 +611,10 @@ method for console to drain — §4.1's ruling retires the pull-based
   surface, and this UDS socket is console's ingest side of the same aggregation
   ADR-0035 already directs for reads.
 
-### 4.3 Ordering, retention, and backpressure — all console-side
+### 4.3 Ordering, retention, and backpressure — all bus-side
 
-**Ordering.** `seq` is now minted once, by console, for every frame it accepts
+**Ordering.** `seq` is now minted once, by `trusty-events` (ADR-0065; console under
+the 2026-09-05 ruling), for every frame it accepts
 — not per-process. §4.1's ruling removes the cross-process ordering problem
 this section used to solve: with exactly one process assigning `seq`, `seq`
 alone is already a total, deterministic order, and the list view uses it
@@ -608,7 +626,8 @@ Clock skew no longer affects ordering (`at` is still recorded and still used
 for display and duration arithmetic). A cross-machine bus is still out of
 scope, and this spec still has no answer for one (§10 Q3).
 
-**Retention.** Two tiers, both held by console.
+**Retention.** Two tiers, both held by `trusty-events` (ADR-0065). The log lives under
+`<data dir>/trusty-events/event_log/`.
 
 - **The ring.** An in-memory ring, capacity configurable, defaulting to 8192,
   held by console rather than by each harness. Live subscribers — the SSE
@@ -645,11 +664,13 @@ make telemetry able to break the work it observes.
 
 ### 4.4 Fan-out to viewers
 
-Console is the only HTTP surface and, per §4.1, the only event bus — the
-frames every producer pushed to console's ingest socket (§4.2) and the ring
-and log console built from them (§4.3) are what these routes read. Every
-viewer reads console; nothing upstream of console is a fan-out point of its
-own.
+Console is the only HTTP surface. Per §4.1 and ADR-0065 the bus is
+`trusty-events`; console opens the streaming `events.subscribe { since_seq,
+filters }` method on `trusty-events`' socket (built on
+`trusty-common/src/uds/server/stream.rs`) and relays it. The frames every
+producer pushed to the ingest socket (§4.2) and the ring and log
+`trusty-events` built from them (§4.3) are what these routes read. Every
+viewer reads console; console is the only fan-out point to browsers.
 
 | Route | Shape | Consumer |
 |---|---|---|
@@ -676,8 +697,8 @@ since_seq, max } -> {events, next_seq, dropped}` from `metrics_poller.rs` and
 republished at `/api/console/events/analyze/lsp`. Under the 2026-09-05 ruling
 that per-daemon cursor is retired the same way §4.2 retires every other
 service's: `trusty-analyze` becomes a `PushClient` producer alongside
-`trusty-mpm`, `trusty-code`, and `trusty-agents`, pushing over console's one
-ingest socket instead of being polled. Two reconciliations:
+`trusty-mpm`, `trusty-code`, and `trusty-agents`, pushing over the one
+`trusty-events` ingest socket (ADR-0065) instead of being polled. Two reconciliations:
 
 - The analyze payloads become `ActionEvent::Tool` with `tool: "lsp.<method>"`,
   so they appear as leaves in the tree beside every other tool call rather than
@@ -943,7 +964,7 @@ harness to the row or node being painted.
 | Hop | Budget | Note |
 |---|---|---|
 | `publish` to the harness's ring | < 1 ms | An in-process broadcast send |
-| Ring to console, over UDS | ≤ 250 ms | Cursor drain interval. This is the dominant term and the one to tune |
+| Ring to console, over UDS (`events.subscribe`, ADR-0065) | ≤ 250 ms | Cursor drain interval. This is the dominant term and the one to tune |
 | Console to browser, over SSE | < 20 ms | Loopback |
 | Browser parse, insert, paint | ≤ 100 ms | Includes the tree's 300 ms reflow animation, which starts inside the budget and finishes outside it |
 
@@ -1130,14 +1151,17 @@ Rotation, and the measurements that only a long run can produce.
 
 Eight. Each names what changes depending on the answer.
 
-**Q1 — Where does the bus live?** **Answered, 2026-09-05.** Owner ruling: "The
-only event bus actually." `trusty-console` hosts the event bus and is the ONLY
+**Q1 — Where does the bus live?** **Answered, revised 2026-10-02.** Owner rulings 27
+and 2a (ADR-0065): the bus is the `trusty-events` crate, run as its own
+launchd-supervised daemon; console is a UDS client. That reverses the
+2026-09-05 answer below, which is kept as history. *History, 2026-09-05:* Owner ruling: "The
+only event bus actually." `trusty-console` hosted the event bus and was the ONLY
 event bus; producers push over UDS through a shared `trusty-common::PushClient`
 (§4.1). `trusty-common` carries only the envelope, the `ActionEvent` taxonomy,
 and `PushClient` — no broadcast channel, no `control_bus` module, no
 process-global. This also settles the choice between a console-hosted bus and
 a fourth daemon that §4.1's original recommendation left open on rejection: it
-is console, not a new daemon.
+was console, not a new daemon; ADR-0065 reversed that choice.
 
 **Q2 — Is the durable log in scope for phase 1, or deferred?**
 Without it, a viewer that opens mid-session sees an empty tree until the next
@@ -1181,7 +1205,9 @@ browser ceilings are initial values rather than derived ones.
 ## {#SPEC-UNIDASH-11~draft} 11. Implementation issues to cut
 
 Milestone 72 cut these as ten slices, re-scoped to the 2026-09-05
-push-to-console ruling (§4.1). Each references #6611. Milestone 72's title
+push-to-console ruling (§4.1). The bus placement then moved to `trusty-events`
+([ADR-0065](../adr/0065-trusty-events-process-placement.md)); slice 3 now
+points at #9075, and #9076 adds console's subscriber. Each references #6611. Milestone 72's title
 now names the deferred machine-wide phase, not the per-session phase these
 slices build first — see §5.4.
 
@@ -1192,9 +1218,13 @@ slices build first — see §5.4.
 2. [#6847](https://github.com/bobmatnyc/trusty-tools/issues/6847) — Envelope
    fields (`id`, `parent_id`) plus the `ActionEvent` payload arm plus
    `PushClient`, in `trusty-common` (§3.1, §3.2, §4.2).
-3. [#6848](https://github.com/bobmatnyc/trusty-tools/issues/6848) — The
-   console event-bus core: the UDS ingest socket, single-`seq` assignment, and
-   the durable day-rotated NDJSON log (§4.1, §4.3).
+3. [#9075](https://github.com/bobmatnyc/trusty-tools/issues/9075) — The
+   `trusty-events` crate and daemon: the UDS ingest socket, single-`seq`
+   assignment, and the durable day-rotated NDJSON log, moved out of console
+   (§4.1, §4.3, ADR-0065). [#6848](https://github.com/bobmatnyc/trusty-tools/issues/6848)
+   built the console-hosted original.
+   [#9076](https://github.com/bobmatnyc/trusty-tools/issues/9076) — console
+   becomes a UDS client of `trusty-events` and relays the stream (§4.4).
 4. [#6849](https://github.com/bobmatnyc/trusty-tools/issues/6849) —
    `trusty-mpm` emits `ActionEvent` with `parent_id` threading and the named-hook
    projection, pushed via `PushClient` (§3.4, §4.2).
@@ -1214,7 +1244,7 @@ slices build first — see §5.4.
 9. [#6854](https://github.com/bobmatnyc/trusty-tools/issues/6854) —
    `trusty-code` and `trusty-agents` publish `ActionEvent` via `PushClient`;
    `trusty-agents-common`'s in-process bus is retired now that its producers
-   push to console instead (§3.4, §4.1).
+   push to the bus instead (§3.4, §4.1).
 10. [#6855](https://github.com/bobmatnyc/trusty-tools/issues/6855) — The
     object viewer: `/ui/object/<type>/<id>` for every type in §6, read-only,
     new-tab, stated-absence handling, plus list/tree in the screensaver
@@ -1398,7 +1428,8 @@ The three colours the ruling asks for map onto three kinds, one of them new:
 
 ### 15.2 Producers
 
-Three producers push these events over console's ingest socket (§4.2),
+Three producers push these events over the `trusty-events` ingest socket (§4.2,
+ADR-0065),
 through the shared `PushClient`:
 
 - `trusty-mpm` — already a producer (§3.4); its session and file events

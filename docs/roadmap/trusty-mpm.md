@@ -19,7 +19,7 @@ changes are approved.
 |---|---|---|
 | 1 | trusty-mpm 1.8.0 | The base before the architect: content fully extracted, Unix sockets everywhere except the console, worktrees, a smaller starting context, and a pm-guard with only the checks it needs |
 | 2 | trusty-secrets 0.1.0 | Secrets as a standalone, public crate with its own releases; trusty-mpm and the console use it |
-| 3 | trusty-mpm 1.9.0 | Every event captured on one event bus, in the internal `trusty-events` crate over a Unix socket; the console reads from it |
+| 3 | trusty-mpm 1.9.0 | Every event captured on one event bus, in the internal `trusty-events` crate, run as its own supervised daemon over a Unix socket; the console reads from it |
 | 4 | trusty-mpm 2.0.0 | The architect |
 | 5 | trusty-mpm 2.1.0 | The mpm dashboard, with list and tree views of events |
 | 6 | trusty-mpm 2.2.0 | Claude Code mods support |
@@ -42,9 +42,11 @@ contain it.
 **3. trusty-mpm 1.9.0 — every event on one bus.** trusty-mpm, trusty-code,
 trusty-agents and trusty-analyze record what they do as typed events on one
 event bus. The bus moves out of the console into `trusty-events`, a crate for
-trusty components only, served over a Unix socket. The console reads from it.
-`trusty-events` is published to crates.io only because the published crates
-that host it must be, and it makes no stability promise to outside users.
+trusty components only, run as its own launchd-supervised daemon over a Unix
+socket ([ADR-0065](../adr/0065-trusty-events-process-placement.md)). The
+console reads from it. `trusty-events` is published to crates.io because it
+ships its own binary, and ADR-0043 allows installs from the registry only. It
+makes no stability promise to outside users, and no other crate links it.
 
 **4. trusty-mpm 2.0.0 — the architect.** See "What 2.0.0 brings" below.
 

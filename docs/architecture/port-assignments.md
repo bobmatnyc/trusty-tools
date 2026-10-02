@@ -53,6 +53,13 @@ else's guard test too).
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
 
+Socket-only daemons hold no row above. `trusty-events` (the event bus,
+[ADR-0065](../adr/0065-trusty-events-process-placement.md)) is one: it binds no
+TCP port and listens on `trusty_common::daemon_socket_path("trusty-events")`,
+`<data dir>/trusty-events/trusty-events.sock`. It is launchd-supervised
+(`com.trusty.events`). Until #9075 lands the same ingest still binds
+`trusty-console.sock`.
+
 ## Next Free Port
 
 The next unclaimed value in the `78xx`/`79xx` block used by this workspace
