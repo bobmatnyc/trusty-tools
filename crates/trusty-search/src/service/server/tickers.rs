@@ -281,6 +281,10 @@ async fn run_idle_eviction_tick(state: &Arc<SearchAppState>, base_secs: u64) -> 
     // threshold rather than one flat window shared by every index.
     let mut total_evicted = 0usize;
     for (id, _idle) in candidates {
+        // #9027: a warm-all pin keeps the index resident for its window.
+        if state.warm.is_pinned(&id.0) {
+            continue;
+        }
         let Some(handle) = state.registry.get(&id) else {
             continue;
         };

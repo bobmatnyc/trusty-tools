@@ -24,6 +24,7 @@ fn base_global_search_request(query: &str, top_k: usize) -> GlobalSearchRequest 
         serial: false,
         path_prefix: None,
         repos: Vec::new(),
+        per_index_deadline_ms: None,
     }
 }
 
