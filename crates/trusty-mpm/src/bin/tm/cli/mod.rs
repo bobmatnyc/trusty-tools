@@ -844,6 +844,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
+    /// Install, update and inspect the runtime instructional content.
+    ///
+    /// `install --from` is offline; `update` fetches a `content-v*` release;
+    /// `status` shows the source and the pinned tag and sha256.
+    // #8378 PR-C. Test: `cli_parses_content_install_update_and_status`.
+    Content {
+        /// Content action to perform.
+        #[command(subcommand)]
+        action: ContentAction,
+    },
     /// Inspect the session overseer.
     Overseer {
         /// Overseer action to perform.

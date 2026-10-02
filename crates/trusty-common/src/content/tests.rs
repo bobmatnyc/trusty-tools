@@ -14,6 +14,11 @@ fn bundle(manifest_tag: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         "bundle_version = \"0.1.0\"\ntag = \"{manifest_tag}\"\nschema_major = 1\nfile_count = {}\n",
         files.len()
     );
+    bundle_with_manifest(&manifest, files)
+}
+
+/// [`bundle`] with the manifest text given verbatim.
+fn bundle_with_manifest(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
     let mut entries: Vec<(&str, &[u8])> = vec![(bundle::MANIFEST_ENTRY, manifest.as_bytes())];
@@ -97,7 +102,7 @@ impl<'a> Raw<'a> {
 fn raw_bundle(entries: &[Raw<'_>]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
-    let manifest = format!("tag = \"{TAG}\"\n");
+    let manifest = format!("tag = \"{TAG}\"\nschema_major = 1\n");
     let mut manifest_header = tar::Header::new_gnu();
     manifest_header.set_size(manifest.len() as u64);
     manifest_header.set_mode(0o644);
@@ -292,6 +297,56 @@ fn resolve_refuses_a_bundle_whose_manifest_names_another_tag() {
         }
         other => panic!("expected TagMismatch, got {other:?}"),
     }
+}
+
+/// #8378 PR-C, ADR-0064 PHASE_3 (iv): a newer layout is refused, naming both
+/// majors; the same major with a newer bundle version still loads.
+#[test]
+fn resolve_refuses_a_newer_schema_major() {
+    let newer = SUPPORTED_SCHEMA_MAJOR + 1;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = format!("tag = \"{TAG}\"\nschema_major = {newer}\n");
+    let bytes = bundle_with_manifest(&manifest, &[("skills/a.md", b"a")]);
+    install(dir.path(), &bytes, &Sha256Digest::of_bytes(&bytes));
+    match resolve_err(&options(dir.path(), DevOverride::Off)) {
+        ContentError::UnsupportedSchema {
+            bundle, supported, ..
+        } => {
+            assert_eq!(bundle, newer);
+            assert_eq!(supported, SUPPORTED_SCHEMA_MAJOR);
+        }
+        other => panic!("expected UnsupportedSchema, got {other:?}"),
+    }
+
+    let same = tempfile::tempdir().expect("tempdir");
+    let manifest = format!(
+        "bundle_version = \"0.9.0\"\ntag = \"{TAG}\"\nschema_major = {SUPPORTED_SCHEMA_MAJOR}\n"
+    );
+    let bytes = bundle_with_manifest(&manifest, &[("skills/a.md", b"a")]);
+    install(same.path(), &bytes, &Sha256Digest::of_bytes(&bytes));
+    resolve(&options(same.path(), DevOverride::Off)).expect("same major loads");
+}
+
+/// #8378 PR-C: the major is read before the rest of the manifest, so a newer
+/// layout that renamed `tag` is refused as too new, not as malformed.
+#[test]
+fn a_newer_schema_major_without_a_tag_key_is_unsupported_not_corrupt() {
+    let newer = SUPPORTED_SCHEMA_MAJOR + 1;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = format!("release_tag = \"{TAG}\"\nschema_major = {newer}\n");
+    let bytes = bundle_with_manifest(&manifest, &[("skills/a.md", b"a")]);
+    install(dir.path(), &bytes, &Sha256Digest::of_bytes(&bytes));
+    match resolve_err(&options(dir.path(), DevOverride::Off)) {
+        ContentError::UnsupportedSchema { bundle, .. } => assert_eq!(bundle, newer),
+        other => panic!("expected UnsupportedSchema, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_refuses_a_manifest_without_a_schema_major() {
+    let manifest = format!("tag = \"{TAG}\"\n");
+    let bytes = bundle_with_manifest(&manifest, &[("skills/a.md", b"a")]);
+    assert_corrupt(&bytes, "no schema_major");
 }
 
 #[test]

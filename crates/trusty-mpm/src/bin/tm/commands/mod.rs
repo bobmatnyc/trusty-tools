@@ -53,6 +53,8 @@ pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 // #8939: `tm env set|keys` — dotenv edits that print no value.
 pub(crate) mod env_file;
+// #8378 PR-C: `tm content install|update|status`.
+pub(crate) mod content;
 // #8939 fix round: `tm env`'s no-follow file access and its guard grant.
 pub(crate) mod env_file_fs;
 pub(crate) mod env_file_grant;

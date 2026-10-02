@@ -18,6 +18,8 @@
 mod agent;
 mod auth;
 mod catalog;
+// #8378 PR-C: `tm content install|update|status` (ADR-0064).
+mod content;
 mod coordinator;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
@@ -52,6 +54,7 @@ mod watch;
 pub(crate) use agent::AgentAction;
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
+pub(crate) use content::ContentAction;
 pub(crate) use coordinator::CoordinatorAction;
 pub(crate) use deliverables::{
     DeliverableKindArg, DeliverableStatusArg, DeliverablesAction, EstimationTierArg,
