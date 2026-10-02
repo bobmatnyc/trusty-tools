@@ -52,7 +52,7 @@ pub(crate) fn classify_process(name: &str, cmd: &[String]) -> PidIdentity {
 /// is not mistaken for the subcommand.
 const GLOBAL_VALUE_FLAGS: &[&str] = &["--url", "--account", "--user"];
 
-/// The subcommand in a `tm` argv: the first non-flag argument after argv[0].
+/// The subcommand in a `tm` argv: the first non-flag argument after `argv[0]`.
 ///
 /// Why: #9034 — `daemon` anywhere in argv made `tm build-lease -- cargo test
 /// daemon` or `tm doctor daemon` a "daemon" that `tm stop` would kill.
