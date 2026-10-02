@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::core::agent::{Delegation, DelegationId, DelegationSource, DelegationStatus};
 use crate::core::project::ProjectInfo;
 use crate::core::session::{Session, SessionId};
+use crate::core::twin_identity::ClaudeProcess;
 
 use super::core::PAIR_CODE_TTL;
 use super::core::{DaemonState, ReapResult};
@@ -423,24 +424,45 @@ impl DaemonState {
     /// Returns the [`ReapResult`] with both counts. Native sessions are left
     /// untouched, and so is any session whose id a `SessionStart` settled in
     /// the session-claude registry, or every session while it is sealed
-    /// (#8980).
+    /// (#8980). #9010: a settled id bound to a `claude` is removed once that
+    /// `claude` — pid AND start time — is proven gone; one whose probe
+    /// cannot answer is kept.
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
     /// `reap_marks_stopped_when_pid_dead`,
     /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`,
-    /// `a_sealed_registry_reaps_nothing_8980`.
+    /// `a_sealed_registry_reaps_nothing_8980`,
+    /// `a_settled_session_whose_claude_exited_is_reaped_9010`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
+        self.reap_against_with(live, super::session_claudes::claude_liveness)
+    }
+
+    /// [`Self::reap_against`] over an injected bound-`claude` probe (#9010).
+    ///
+    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`.
+    pub(super) fn reap_against_with(
+        &self,
+        live: &std::collections::HashSet<String>,
+        probe: impl Fn(ClaudeProcess) -> super::session_claudes::ClaudeLiveness,
+    ) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 
         let mut dead: Vec<SessionId> = Vec::new();
         let mut stopped_ids: Vec<SessionId> = Vec::new();
+        let mut bound: Vec<(SessionId, ClaudeProcess)> = Vec::new();
         for entry in self.sessions.iter() {
             let session = entry.value();
             // #8980: a `SessionStart`-announced id is a harness session, whose
             // uuid-derived tmux name is never live; reaping it would stale its
             // live agents on any forged or `compact`/`resume` SessionStart. A
             // sealed registry settles every id, so it skips every session.
-            if session.origin != SessionHost::Tmux || self.session_claudes.is_settled(*entry.key())
-            {
+            if self.session_claudes.is_settled(*entry.key()) {
+                // #9010: probed after the walk, so no shard lock spans it.
+                if let Some(claude) = self.session_claudes.get(*entry.key()) {
+                    bound.push((*entry.key(), claude));
+                }
+                continue;
+            }
+            if session.origin != SessionHost::Tmux {
                 continue;
             }
             if !live.contains(&session.tmux_name) {
@@ -450,6 +472,11 @@ impl DaemonState {
                 && !crate::core::process::is_process_alive(pid)
             {
                 stopped_ids.push(*entry.key());
+            }
+        }
+        for (id, claude) in bound {
+            if probe(claude).proves_gone(id) {
+                dead.push(id);
             }
         }
         for id in &dead {

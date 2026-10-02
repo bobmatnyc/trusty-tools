@@ -305,7 +305,10 @@ async fn the_reaper_keeps_an_announced_session_and_its_live_records_8980() {
     let root = tempfile::tempdir().expect("tempdir");
     let state = std::sync::Arc::new(daemon_at(root.path()));
     let owner = SessionId::new();
-    state.bind_session_claude(owner, CLAUDE).expect("vacant");
+    // #9010: bound to a claude that still runs, so the reaper keeps it.
+    state
+        .bind_session_claude(owner, this_process())
+        .expect("vacant");
     state.upsert_delegation(Delegation::observed(owner, "version-control", "task", None));
     let forged = crate::daemon::api::HookPost {
         session_id: owner.0.to_string(),
@@ -452,4 +455,133 @@ fn an_unsaved_settle_after_an_event_still_refuses_a_bind_8984() {
     let got = sealed.settle_after_event(session);
     assert!(got.is_err_and(|e| e.contains("sealed")));
     assert_eq!(sealed.get(session), None);
+}
+
+/// This test process, as a bound `claude` that runs for the whole test.
+fn this_process() -> ClaudeProcess {
+    let pid = std::process::id();
+    let facts = process_facts(pid).expect("this process is in the table");
+    ClaudeProcess {
+        pid,
+        start_time: facts.start_time,
+    }
+}
+
+/// A pid no process holds: this test's own child, spawned and reaped.
+fn reaped_child_pid() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits at once");
+    let pid = child.id();
+    child.wait().expect("reap the child");
+    pid
+}
+
+/// Register a harness-shaped record for a new id bound to `claude`, with one
+/// live delegation; returns the id.
+fn bound_session(state: &DaemonState, claude: ClaudeProcess) -> SessionId {
+    use crate::core::session::{ControlModel, Session};
+    let session = SessionId::new();
+    state.bind_session_claude(session, claude).expect("vacant");
+    state.register_session(Session::new(session, "", ControlModel::Tmux, None));
+    state.upsert_delegation(Delegation::observed(session, "engineer", "task", None));
+    session
+}
+
+/// The status of `session`'s one delegation.
+fn delegation_status(
+    state: &DaemonState,
+    session: SessionId,
+) -> crate::core::agent::DelegationStatus {
+    state
+        .all_delegations()
+        .into_iter()
+        .find(|d| d.session == session)
+        .expect("one delegation")
+        .status
+}
+
+/// #9010: a settled session whose bound claude exited — or whose pid now
+/// names a later process — is reaped and its live records staled; one whose
+/// claude still runs is kept.
+#[test]
+fn a_settled_session_whose_claude_exited_is_reaped_9010() {
+    use crate::core::agent::DelegationStatus;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let alive = bound_session(&state, this_process());
+    let exited = bound_session(
+        &state,
+        ClaudeProcess {
+            pid: reaped_child_pid(),
+            start_time: 1,
+        },
+    );
+    let reused = bound_session(
+        &state,
+        ClaudeProcess {
+            pid: std::process::id(),
+            start_time: this_process().start_time.saturating_sub(1),
+        },
+    );
+
+    let result = state.reap_against(&std::collections::HashSet::new());
+
+    assert_eq!(result.reaped, 2, "{result:?}");
+    assert!(state.session(alive).is_some(), "a running claude keeps it");
+    assert_eq!(delegation_status(&state, alive), DelegationStatus::Running);
+    for gone in [exited, reused] {
+        assert!(state.session(gone).is_none(), "reaped");
+        assert_eq!(delegation_status(&state, gone), DelegationStatus::Stale);
+    }
+}
+
+/// #9010 Fail-Open Check: a probe that cannot answer keeps the session and
+/// its live records.
+#[test]
+fn an_unanswered_probe_keeps_a_settled_session_9010() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let session = bound_session(&state, CLAUDE);
+
+    let result = state.reap_against_with(&std::collections::HashSet::new(), |_| {
+        ClaudeLiveness::Unknown("the process table is unreadable".to_string())
+    });
+
+    assert_eq!(result.reaped, 0);
+    assert!(state.session(session).is_some());
+    assert_eq!(
+        delegation_status(&state, session),
+        crate::core::agent::DelegationStatus::Running
+    );
+}
+
+/// #9010: only proof calls a bound claude gone; every unanswered arm is
+/// `Unknown`.
+#[test]
+fn claude_liveness_needs_proof_to_call_a_claude_gone_9010() {
+    let facts = |start_time| {
+        move |_| {
+            Ok(ProcessFacts {
+                parent: None,
+                start_time,
+            })
+        }
+    };
+    let alive = claude_liveness_with(CLAUDE, |_| Ok(true), facts(CLAUDE.start_time));
+    assert_eq!(alive, ClaudeLiveness::Alive);
+    let gone = claude_liveness_with(CLAUDE, |_| Ok(false), |_| panic!("no read of a gone pid"));
+    assert!(matches!(gone, ClaudeLiveness::Gone(_)), "{gone:?}");
+    let reused = claude_liveness_with(CLAUDE, |_| Ok(true), facts(CLAUDE.start_time + 1));
+    assert!(matches!(reused, ClaudeLiveness::Gone(ref why) if why.contains("started at")));
+    let unanswered = claude_liveness_with(CLAUDE, |_| Err("EIO".to_string()), facts(0));
+    assert!(
+        matches!(unanswered, ClaudeLiveness::Unknown(_)),
+        "{unanswered:?}"
+    );
+    let unreadable = claude_liveness_with(CLAUDE, |_| Ok(true), |_| Err("gone".to_string()));
+    assert!(
+        matches!(unreadable, ClaudeLiveness::Unknown(_)),
+        "{unreadable:?}"
+    );
 }

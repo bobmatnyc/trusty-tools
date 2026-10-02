@@ -299,6 +299,82 @@ pub(crate) fn peer_claude_with(
     }
 }
 
+/// What a probe of a bound `claude` found (#9010).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaudeLiveness {
+    /// A process with the bound pid AND start time runs.
+    Alive,
+    /// Proven gone: no process holds the pid, or a later process does.
+    Gone(String),
+    /// The process table could not answer; nothing may act on it.
+    Unknown(String),
+}
+
+impl ClaudeLiveness {
+    /// Whether this probe of `session`'s bound `claude` proves it gone, and
+    /// so lets the reaper remove the session (#9010).
+    ///
+    /// What: `true` only for [`Self::Gone`], logged at INFO. An
+    /// [`Self::Unknown`] is logged at WARN and keeps the session.
+    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`.
+    pub(crate) fn proves_gone(&self, session: SessionId) -> bool {
+        match self {
+            Self::Alive => false,
+            Self::Gone(why) => {
+                tracing::info!(session = ?session, "reaping a settled session, its claude is gone: {why} (#9010)");
+                true
+            }
+            // #9010: fail closed — an unanswered probe reaps nothing.
+            Self::Unknown(why) => {
+                tracing::warn!(session = ?session, "kept a settled session, its claude's liveness is unknown: {why} (#9010)");
+                false
+            }
+        }
+    }
+}
+
+/// Whether the bound `claude` still runs, over the live process table (#9010).
+///
+/// What: [`claude_liveness_with`] over `kill(pid, 0)`
+/// (`session_manager::worktree_registry::pid_liveness`) and [`process_facts`].
+/// Test: `a_settled_session_whose_claude_exited_is_reaped_9010`.
+pub(crate) fn claude_liveness(claude: ClaudeProcess) -> ClaudeLiveness {
+    let exists = |pid| {
+        crate::session_manager::worktree_registry::pid_liveness(pid)
+            .ok_or_else(|| format!("kill(0) could not tell whether pid {pid} runs"))
+    };
+    claude_liveness_with(claude, exists, process_facts)
+}
+
+/// [`claude_liveness`] over an injected existence probe and process table.
+///
+/// Why: the reaper removes a session on [`ClaudeLiveness::Gone`], so only
+/// proof may produce it; an unanswered probe must leave the session alone.
+/// What: `Unknown` when `exists` errs, or the pid exists and `facts` cannot
+/// read it. `Gone` when no process holds the pid, or the one holding it
+/// started at another time (a reused pid). `Alive` otherwise.
+/// Test: `claude_liveness_needs_proof_to_call_a_claude_gone_9010`.
+pub(crate) fn claude_liveness_with(
+    claude: ClaudeProcess,
+    exists: impl Fn(u32) -> Result<bool, String>,
+    facts: impl Fn(u32) -> Result<ProcessFacts, String>,
+) -> ClaudeLiveness {
+    let pid = claude.pid;
+    match exists(pid) {
+        Err(e) => ClaudeLiveness::Unknown(e),
+        Ok(false) => ClaudeLiveness::Gone(format!("no process holds pid {pid}")),
+        Ok(true) => match facts(pid) {
+            Ok(f) if f.start_time == claude.start_time => ClaudeLiveness::Alive,
+            // #9010: pid reuse — the bound process is gone.
+            Ok(f) => ClaudeLiveness::Gone(format!(
+                "pid {pid} now names a process started at {}, not {}",
+                f.start_time, claude.start_time
+            )),
+            Err(e) => ClaudeLiveness::Unknown(format!("pid {pid} could not be read: {e}")),
+        },
+    }
+}
+
 /// The registry file's shape: a version and one entry per session id.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
