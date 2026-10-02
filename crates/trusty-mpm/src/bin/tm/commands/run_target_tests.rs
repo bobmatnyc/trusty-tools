@@ -513,3 +513,74 @@ fn bare_form_trailing_user_reaches_the_repo_target() {
     );
     assert_eq!(account.as_deref(), Some("bob-duetto"));
 }
+
+/// 🔴 #9090 REGRESSION: a trailing `--u <login>` is lifted like `--user`.
+///
+/// Why this is the assertion: the owner's
+/// `tm duettoresearch/duetto-blast-mfes --u bob-duetto` was refused with
+/// "takes no further arguments", because `--u` was not an account spelling.
+/// Test: itself.
+#[test]
+fn bare_form_lifts_a_trailing_u_flag() {
+    for tokens in [
+        &["duettoresearch/duetto-blast-mfes", "--u", "bob-duetto"][..],
+        &["duettoresearch/duetto-blast-mfes", "--u=bob-duetto"][..],
+    ] {
+        let (rest, account) = split_trailing_account(&toks(tokens)).expect("lifted");
+        assert_eq!(
+            rest,
+            toks(&["duettoresearch/duetto-blast-mfes"]),
+            "{tokens:?}"
+        );
+        assert_eq!(account.as_deref(), Some("bob-duetto"), "{tokens:?}");
+    }
+}
+
+/// The account a parsed invocation selects, read the way `main` reads it: the
+/// global field, plus — for the bare form — the trailing-token lift.
+fn selected_account(argv: &[&str]) -> Option<String> {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from(argv)
+        .unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+    match cli.command {
+        Some(crate::cli::Command::External(tokens)) => {
+            match resolve_external(&tokens, cli.account)
+                .unwrap_or_else(|e| panic!("{argv:?} must resolve: {e}"))
+            {
+                Some(RunTarget::Repo { account, .. }) => account,
+                other => panic!("{argv:?}: expected a repository target, got {other:?}"),
+            }
+        }
+        Some(crate::cli::Command::Run { .. } | crate::cli::Command::Register { .. }) => cli.account,
+        other => panic!("{argv:?}: unexpected command {other:?}"),
+    }
+}
+
+/// 🔴 #9090 REGRESSION: every account spelling selects the account in the bare
+/// form, `tm run` and `tm register`, before the repository and after it.
+///
+/// Why this is the assertion: the closure condition is the whole matrix, and a
+/// spelling that works in one cell but not another is the #5850 / #9090 shape.
+/// `--account` and `--user` rows prove those spellings are unchanged.
+/// Test: itself.
+#[test]
+fn every_account_spelling_selects_the_account_in_every_form_and_position() {
+    const REPO: &str = "duettoresearch/duetto-blast-mfes";
+    for flag in ["--account", "--user", "--u"] {
+        let cases: [Vec<&str>; 6] = [
+            vec!["tm", flag, "bob-duetto", REPO],
+            vec!["tm", REPO, flag, "bob-duetto"],
+            vec!["tm", "run", flag, "bob-duetto", REPO],
+            vec!["tm", "run", REPO, flag, "bob-duetto"],
+            vec!["tm", "register", flag, "bob-duetto", REPO],
+            vec!["tm", "register", REPO, flag, "bob-duetto"],
+        ];
+        for argv in cases {
+            assert_eq!(
+                selected_account(&argv).as_deref(),
+                Some("bob-duetto"),
+                "{argv:?}"
+            );
+        }
+    }
+}

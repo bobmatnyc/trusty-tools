@@ -145,11 +145,20 @@ pub(crate) struct Cli {
     /// unchanged; no validation against `gh auth status` exists for either
     /// spelling, and none is added here (a network/subprocess call at parse
     /// time is not this flag's job).
+    /// #9090: `--u <login>` is a third visible alias of the same arg.
     /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
     /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_parses_u_alias_for_account_global`,
+    /// `every_account_spelling_selects_the_account_in_every_form_and_position`,
     /// `cli_rejects_a_blank_account_flag_before_the_repository`.
     // #5850: a blank value is refused here, not read as absent downstream.
-    #[arg(long, visible_alias = "user", global = true, value_parser = non_blank_login)]
+    // #9090: `--u` joins `--user`; the bare form lifts it in `run_target`.
+    #[arg(
+        long,
+        visible_aliases = ["user", "u"],
+        global = true,
+        value_parser = non_blank_login
+    )]
     pub(crate) account: Option<String>,
 
     /// Read a token for `--account` from stdin (#8914).
