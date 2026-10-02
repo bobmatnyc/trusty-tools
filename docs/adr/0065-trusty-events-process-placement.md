@@ -100,10 +100,6 @@ feature. That is the substance of "first-class" in ruling 27.
   `com.trusty.mpm.plist` and none of `com.trusty.console.plist`. The trusty-mpm
   daemon is the most frequently changed and restarted daemon (dev lane
   live-checks the debug build, per CLAUDE.md).
-- `~/.cargo/.crates2.json` records `trusty-console 0.12.0` as a path install
-  and `trusty-mpm 1.7.10` as a git install. Neither is the registry install
-  ADR-0043 requires. Each added binary adds one more provenance row to keep
-  correct.
 
 ## Options
 
