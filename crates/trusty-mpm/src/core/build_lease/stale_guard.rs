@@ -19,16 +19,83 @@
 //! package list cannot be read, it deletes EVERY fingerprint: a cold build is
 //! the price of certainty. The slot's flock is held throughout, so no build
 //! is running in the directory while it is edited.
-//! Test: the `#[cfg(test)]` suite below.
+//!
+//! Cost (#9045): the guard lists the slot root and nothing below it. Cargo's
+//! layout puts `.cargo-lock` and `.fingerprint` at `<profile>/` and
+//! `<triple>/<profile>/`, so both are probed by direct path. A slot's `deps`,
+//! `build` and `incremental` grow without bound — one held 458,794 entries and
+//! a readdir of it stalled `tm build-lease` for 30+ minutes.
+//! Test: `stale_guard_tests.rs`.
 
+use std::ffi::OsString;
+use std::fs::FileType;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// The marker file inside a slot directory naming its last checkout.
 pub const LAST_CHECKOUT_MARKER: &str = ".trusty-slot-last-checkout";
 
-/// How far below the slot directory `.fingerprint` directories are searched:
-/// `<profile>/.fingerprint` and `<triple>/<profile>/.fingerprint`.
-const FINGERPRINT_DEPTH: usize = 3;
+/// The lock cargo holds on a profile directory for a build's life.
+const CARGO_LOCK: &str = ".cargo-lock";
+
+/// The per-profile directory of cargo's freshness records.
+const FINGERPRINT_DIR: &str = ".fingerprint";
+
+/// The filesystem calls the guard makes — a seam so tests can count them.
+///
+/// Why (#9045): the regression test must measure what the guard visits, not
+/// wall time. What: [`RealFs`] is the only production implementation.
+/// Test: `the_lock_guard_lists_only_the_slot_root`.
+trait SlotFs {
+    /// Names of the directories directly inside `dir` — one `read_dir`.
+    fn child_dirs(&self, dir: &Path) -> io::Result<Vec<OsString>>;
+    /// The type of `path`, following symlinks.
+    fn file_type(&self, path: &Path) -> io::Result<FileType>;
+    /// Try `flock(LOCK_EX | LOCK_NB)` on `lock`; `Ok(true)` when taken (and
+    /// released at once), `Ok(false)` when another description holds it.
+    fn try_lock(&self, lock: &Path) -> io::Result<bool>;
+}
+
+/// [`SlotFs`] over the real filesystem.
+struct RealFs;
+
+impl SlotFs for RealFs {
+    fn child_dirs(&self, dir: &Path) -> io::Result<Vec<OsString>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                out.push(entry.file_name());
+            }
+        }
+        Ok(out)
+    }
+
+    fn file_type(&self, path: &Path) -> io::Result<FileType> {
+        std::fs::metadata(path).map(|m| m.file_type())
+    }
+
+    fn try_lock(&self, lock: &Path) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open(lock)?;
+        // SAFETY: `file` owns a valid descriptor for both calls.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            return Ok(false);
+        }
+        // SAFETY: as above; releases the probe lock at once.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        Ok(true)
+    }
+}
+
+/// Whether `err` means the path is not there (as opposed to unreadable).
+fn is_absent(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
 
 /// What [`invalidate_if_checkout_changed`] did.
 ///
@@ -95,7 +162,7 @@ pub fn invalidate_if_checkout_changed(
     let all = names.is_err();
     let names = names.unwrap_or_default();
     let mut removed = 0;
-    for dir in fingerprint_dirs(slot_dir) {
+    for dir in fingerprint_dirs(&RealFs, slot_dir) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -130,44 +197,74 @@ pub fn invalidate_if_checkout_changed(
 /// once while the build it spawned keeps running in the slot's directory. Cargo
 /// holds `flock(LOCK_EX)` on `<profile>/.cargo-lock` for a build's life, so that
 /// lock — not the slot file — says whether the directory is still in use.
-/// What: `true` when any `.cargo-lock` within the fingerprint search depth is
-/// locked by another open file description. An unopenable lock file counts as
-/// busy: the directory's state is unknown, so it is not reused.
-/// Test: `a_held_cargo_lock_marks_the_directory_busy`.
+/// What: `true` when a `<profile>/.cargo-lock` or `<triple>/<profile>/.cargo-lock`
+/// is locked by another open file description. Profiles are the slot root's
+/// child directories holding a `.cargo-lock`; cargo locks the host profile on
+/// every build, `--target` builds included. A slot that does not exist is free.
+/// Fail-closed (#9045): a slot root that cannot be listed, or a lock file that
+/// cannot be stat'ed or opened, counts as busy — its state is unknown.
+/// Cost (#9045): one `read_dir` of the slot root and direct-path probes; no
+/// directory below the root is listed.
+/// Test: `a_held_cargo_lock_marks_the_directory_busy`,
+/// `a_held_cross_target_lock_marks_the_directory_busy`,
+/// `the_lock_guard_lists_only_the_slot_root`, `a_lock_inside_deps_is_never_probed`,
+/// `an_unlistable_slot_counts_as_held`, `an_unstatable_cargo_lock_counts_as_held`,
+/// `an_unopenable_cargo_lock_counts_as_held`, `a_missing_slot_reads_free`.
 #[must_use]
 pub fn cargo_lock_held(slot_dir: &Path) -> bool {
-    use std::os::fd::AsRawFd;
-    let mut frontier = vec![slot_dir.to_path_buf()];
-    for _ in 0..FINGERPRINT_DEPTH {
-        let mut next = Vec::new();
-        for dir in frontier {
-            let lock = dir.join(".cargo-lock");
-            if lock.is_file() {
-                let Ok(file) = std::fs::File::open(&lock) else {
-                    return true;
-                };
-                // SAFETY: `file` owns a valid descriptor for both calls.
-                let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-                if rc != 0 {
-                    return true;
-                }
-                // SAFETY: as above; releases the probe lock at once.
-                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-            }
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            next.extend(
-                entries
-                    .flatten()
-                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-                    .filter(|e| e.file_name() != ".fingerprint")
-                    .map(|e| e.path()),
-            );
+    cargo_lock_held_in(&RealFs, slot_dir)
+}
+
+/// [`cargo_lock_held`] over any [`SlotFs`].
+fn cargo_lock_held_in(fs: &impl SlotFs, slot_dir: &Path) -> bool {
+    // #9045: the slot root is the only directory listed; it holds profile,
+    // triple and tool directories, never per-unit files.
+    let children = match fs.child_dirs(slot_dir) {
+        Ok(children) => children,
+        Err(err) if is_absent(&err) => return false,
+        Err(_) => return true,
+    };
+    let mut profiles = Vec::new();
+    for child in &children {
+        match probe_lock(fs, &slot_dir.join(child).join(CARGO_LOCK)) {
+            LockProbe::Absent => {}
+            LockProbe::Free => profiles.push(child),
+            LockProbe::Busy => return true,
         }
-        frontier = next;
     }
-    false
+    // #9045: a `--target` layout reuses the host profile names, so each
+    // `<triple>/<profile>/.cargo-lock` is a direct path, never a listing.
+    children.iter().any(|child| {
+        profiles.iter().any(|profile| {
+            let lock = slot_dir.join(child).join(profile).join(CARGO_LOCK);
+            probe_lock(fs, &lock) == LockProbe::Busy
+        })
+    })
+}
+
+/// The state of one `.cargo-lock` path.
+#[derive(Debug, PartialEq, Eq)]
+enum LockProbe {
+    /// No lock file at the path (or a non-file, which no cargo locks).
+    Absent,
+    /// A lock file nobody holds.
+    Free,
+    /// Held by a live build, or its state could not be read.
+    Busy,
+}
+
+/// Probe `lock` by direct path.
+fn probe_lock(fs: &impl SlotFs, lock: &Path) -> LockProbe {
+    match fs.file_type(lock) {
+        Err(err) if is_absent(&err) => LockProbe::Absent,
+        // #9045: EACCES or similar — unknown state, so never reported free.
+        Err(_) => LockProbe::Busy,
+        Ok(kind) if !kind.is_file() => LockProbe::Absent,
+        Ok(_) => match fs.try_lock(lock) {
+            Ok(true) => LockProbe::Free,
+            Ok(false) | Err(_) => LockProbe::Busy,
+        },
+    }
 }
 
 /// Whether a fingerprint entry `<pkg>-<16 hex>` belongs to package `pkg`.
@@ -178,28 +275,36 @@ fn is_unit_of(entry: &str, pkg: &str) -> bool {
         .is_some_and(|hash| hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-/// Every `.fingerprint` directory within [`FINGERPRINT_DEPTH`] of `root`.
-fn fingerprint_dirs(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut frontier = vec![root.to_path_buf()];
-    for _ in 0..FINGERPRINT_DEPTH {
-        let mut next = Vec::new();
-        for dir in frontier {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    continue;
-                }
-                if entry.file_name() == ".fingerprint" {
-                    out.push(entry.path());
-                } else {
-                    next.push(entry.path());
-                }
-            }
-        }
-        frontier = next;
+/// Every `<profile>/.fingerprint` and `<triple>/<profile>/.fingerprint` in `root`.
+///
+/// What: profiles are the root's child directories holding a `.fingerprint`;
+/// the triple layouts reuse their names. An unlistable root yields nothing,
+/// as before.
+/// Cost (#9045): one `read_dir` of `root` and direct-path stats; no `deps`,
+/// `build` or `incremental` listing.
+/// Test: `fingerprint_search_lists_only_the_slot_root`.
+fn fingerprint_dirs(fs: &impl SlotFs, root: &Path) -> Vec<PathBuf> {
+    let Ok(children) = fs.child_dirs(root) else {
+        return Vec::new();
+    };
+    let fingerprints = |dir: PathBuf| {
+        let fp = dir.join(FINGERPRINT_DIR);
+        fs.file_type(&fp).is_ok_and(|t| t.is_dir()).then_some(fp)
+    };
+    let profiles: Vec<&OsString> = children
+        .iter()
+        .filter(|child| fingerprints(root.join(child)).is_some())
+        .collect();
+    let mut out: Vec<PathBuf> = profiles
+        .iter()
+        .map(|profile| root.join(profile).join(FINGERPRINT_DIR))
+        .collect();
+    for child in &children {
+        out.extend(
+            profiles
+                .iter()
+                .filter_map(|profile| fingerprints(root.join(child).join(profile))),
+        );
     }
     out
 }
@@ -243,186 +348,5 @@ pub fn workspace_packages(checkout: &Path) -> Result<Vec<String>, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A slot directory with fingerprints for one workspace crate and one dependency.
-    fn slot() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for unit in [
-            "debug/.fingerprint/trusty-mpm-0123456789abcdef",
-            "debug/.fingerprint/trusty-mpm-fedcba9876543210",
-            "debug/.fingerprint/trusty-mpm-extra-0123456789abcdef",
-            "debug/.fingerprint/serde-0123456789abcdef",
-            "aarch64-apple-darwin/debug/.fingerprint/trusty-mpm-00000000000000aa",
-        ] {
-            std::fs::create_dir_all(dir.path().join(unit)).expect("mkdir");
-        }
-        dir
-    }
-
-    fn exists(root: &Path, rel: &str) -> bool {
-        root.join(rel).exists()
-    }
-
-    #[test]
-    fn a_different_checkout_clears_only_workspace_fingerprints() {
-        let slot = slot();
-        std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
-        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/b"), || {
-            Ok(vec!["trusty-mpm".into()])
-        })
-        .expect("cleared");
-        assert_eq!(
-            got,
-            Invalidation::Cleared {
-                previous: Some("/wt/a".into()),
-                removed: 3,
-                all: false
-            }
-        );
-        let root = slot.path();
-        assert!(!exists(
-            root,
-            "debug/.fingerprint/trusty-mpm-0123456789abcdef"
-        ));
-        assert!(!exists(
-            root,
-            "aarch64-apple-darwin/debug/.fingerprint/trusty-mpm-00000000000000aa"
-        ));
-        assert!(
-            exists(root, "debug/.fingerprint/serde-0123456789abcdef"),
-            "deps stay warm"
-        );
-        assert!(
-            exists(root, "debug/.fingerprint/trusty-mpm-extra-0123456789abcdef"),
-            "a different package sharing a prefix is not this one"
-        );
-        let marker = std::fs::read_to_string(root.join(LAST_CHECKOUT_MARKER)).expect("marker");
-        assert_eq!(marker, "/wt/b");
-    }
-
-    #[test]
-    fn the_same_checkout_touches_nothing() {
-        let slot = slot();
-        std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
-        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/a"), || {
-            panic!("the package list is not needed for the same checkout")
-        })
-        .expect("ok");
-        assert_eq!(got, Invalidation::SameCheckout);
-        assert!(exists(
-            slot.path(),
-            "debug/.fingerprint/trusty-mpm-0123456789abcdef"
-        ));
-    }
-
-    #[test]
-    fn a_missing_marker_clears() {
-        let slot = slot();
-        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/a"), || {
-            Ok(vec!["trusty-mpm".into()])
-        })
-        .expect("cleared");
-        assert!(
-            matches!(
-                got,
-                Invalidation::Cleared {
-                    previous: None,
-                    removed: 3,
-                    ..
-                }
-            ),
-            "{got:?}"
-        );
-    }
-
-    #[test]
-    fn an_unreadable_package_list_clears_every_fingerprint() {
-        let slot = slot();
-        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/a"), || {
-            Err("cargo metadata failed".into())
-        })
-        .expect("cleared");
-        assert!(
-            matches!(
-                got,
-                Invalidation::Cleared {
-                    removed: 5,
-                    all: true,
-                    ..
-                }
-            ),
-            "{got:?}"
-        );
-        assert!(!exists(
-            slot.path(),
-            "debug/.fingerprint/serde-0123456789abcdef"
-        ));
-    }
-
-    /// #8261 round 3: a fingerprint that cannot be removed fails the whole
-    /// invalidation, and the marker still names the previous checkout.
-    #[test]
-    fn a_failed_removal_is_an_error_and_keeps_the_marker() {
-        use std::os::unix::fs::PermissionsExt;
-        let slot = slot();
-        std::fs::write(slot.path().join(LAST_CHECKOUT_MARKER), "/wt/a").expect("marker");
-        let parent = slot.path().join("debug/.fingerprint");
-        std::fs::create_dir(parent.join("trusty-mpm-0123456789abcdef/inner")).expect("mkdir");
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-        let got = invalidate_if_checkout_changed(slot.path(), Path::new("/wt/b"), || {
-            Ok(vec!["trusty-mpm".into()])
-        });
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).expect("restore");
-        let err = got.expect_err("a fingerprint that survives must fail the call");
-        assert!(err.contains("could not clear stale fingerprint"), "{err}");
-        let marker = std::fs::read_to_string(slot.path().join(LAST_CHECKOUT_MARKER)).expect("m");
-        assert_eq!(marker, "/wt/a", "the marker is unchanged");
-    }
-
-    #[test]
-    #[serial_test::serial(build_slot_fds)] // #8736: probes after a release; see `slots::tests`.
-    fn a_held_cargo_lock_marks_the_directory_busy() {
-        use std::os::fd::AsRawFd;
-        let slot = slot();
-        assert!(!cargo_lock_held(slot.path()), "no lock file");
-        let lock = slot.path().join("debug/.cargo-lock");
-        std::fs::write(&lock, "").expect("lock file");
-        assert!(!cargo_lock_held(slot.path()), "an unheld lock");
-        let held = std::fs::File::open(&lock).expect("open");
-        // SAFETY: `held` owns a valid descriptor.
-        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
-        assert!(cargo_lock_held(slot.path()), "a held lock");
-        // #8850: a child another test thread spawns holds a copy of this open
-        // file description until its exec, so a bare close can leave the flock
-        // held. The clone stands in for that copy; `LOCK_UN` releases the lock
-        // on the description itself, as `slots::unlock` does in production.
-        let inherited = held.try_clone().expect("dup");
-        // SAFETY: `held` owns a valid descriptor.
-        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) }, 0);
-        drop(held);
-        assert!(!cargo_lock_held(slot.path()), "released");
-        drop(inherited);
-    }
-
-    #[test]
-    #[serial_test::serial(build_slot_fds)] // #8736: spawns `cargo`; see `slots::tests`.
-    fn workspace_packages_lists_this_workspace() {
-        let names = workspace_packages(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("metadata");
-        assert!(names.iter().any(|n| n == "trusty-mpm"), "{names:?}");
-        assert!(
-            !names.iter().any(|n| n == "serde"),
-            "--no-deps lists no registry crate"
-        );
-    }
-
-    #[test]
-    fn the_checkout_root_is_found_from_a_subdirectory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere").expect("linked .git");
-        let sub = dir.path().join("crates/x");
-        std::fs::create_dir_all(&sub).expect("mkdir");
-        assert_eq!(checkout_root(&sub), dir.path());
-    }
-}
+#[path = "stale_guard_tests.rs"]
+mod tests;
