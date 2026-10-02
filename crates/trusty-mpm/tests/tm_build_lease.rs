@@ -1104,6 +1104,56 @@ fn cargo_releases_its_build_lock_while_test_binaries_run() {
     );
 }
 
+/// #9045: the production guard against a real cargo, beside a 20,000-entry
+/// `debug/deps`. A compile in progress reads held, the finished build free.
+#[test]
+fn a_live_cargo_compile_reads_held_beside_a_large_deps_dir() {
+    use trusty_mpm::core::build_lease::stale_guard::cargo_lock_held;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let krate = tmp.path().join("probe");
+    std::fs::create_dir_all(krate.join("src")).expect("crate dir");
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"leaseprobe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .expect("manifest");
+    std::fs::write(krate.join("src/lib.rs"), "pub fn probe() {}\n").expect("lib");
+    std::fs::write(
+        krate.join("build.rs"),
+        "fn main() {\n    let dir = std::path::PathBuf::from(std::env::var(\"PROBE_DIR\").unwrap());\n    \
+         std::fs::write(dir.join(\"building\"), \"\").unwrap();\n    for _ in 0..600 {\n        \
+         if dir.join(\"release\").exists() {\n            return;\n        }\n        \
+         std::thread::sleep(std::time::Duration::from_millis(100));\n    }\n}\n",
+    )
+    .expect("build script");
+    let target = tmp.path().join("target");
+    let deps = target.join("debug/deps");
+    std::fs::create_dir_all(&deps).expect("deps");
+    for i in 0..20_000 {
+        std::fs::write(deps.join(format!("libunit{i}-0123456789abcdef.rlib")), "").expect("file");
+    }
+    let run = Command::new(real_cargo())
+        .args(["build", "--offline", "--quiet", "--manifest-path"])
+        .arg(krate.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .env("PROBE_DIR", tmp.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn cargo build");
+    let building = wait_for_file(&tmp.path().join("building"), 180);
+    let held = cargo_lock_held(&target);
+    std::fs::write(tmp.path().join("release"), "").expect("release");
+    let out = run.wait_with_output().expect("cargo build exits");
+    assert!(building, "the build script never ran: {}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(held, "cargo holds .cargo-lock while it compiles");
+    assert!(
+        !cargo_lock_held(&target),
+        "the finished build left the slot free"
+    );
+}
+
 /// #8261: a holder SIGKILLed while its `cargo test`
 /// runs the test binary leaves that run alive with no flock and no
 /// `.cargo-lock`. Its slot must stay taken until the run exits — before the
