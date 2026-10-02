@@ -7,206 +7,132 @@
 //!
 //! Why: The harness mental model, per-harness signals, and intervention decision
 //!      protocol must live in one place so both the SM prompt (trusty-mpm) and a
-//!      future t-code overseer can consume the same authoritative content. This
-//!      module exposes it as static `&str` slices compiled in at build time.
-//! What: Four structured accessors — `agnostic()`, `mpm_session_manager()`,
-//!       `tcode()`, `overseer()` — plus a `harness_understanding()` convenience
-//!       that concatenates all four sections for consumers that want the full doc.
-//! Test: `harness_doc::tests` verifies non-empty content, canonical marker
-//!       presence (`✻`, and the `events::EVENT_LINE_PREFIX` relay marker the
-//!       emitting harness actually writes), and the structured-accessor sum
-//!       equals the full-doc output.
+//!      future t-code overseer consume the same authoritative content. Since
+//!      #9011 it is instructional content (ADR-0064), read at runtime from the
+//!      same resolved source as the agent roster, never compiled in.
+//! What: [`HarnessDoc::load`] reads the four files from one
+//!       [`ResolvedContent`]; four accessors plus [`HarnessDoc::harness_understanding`],
+//!       which joins all four for consumers that want the full doc.
+//! Test: `harness_doc_tests` — canonical markers (`✻`, the
+//!       `events::EVENT_LINE_PREFIX` relay marker), the sum of parts, the
+//!       legacy bundle key, and the missing-file error arm.
 
-/// Harness-agnostic mental model: session lifecycle, pane/IO model, prompt
-/// shapes, completion/error signals, observability, and the WHEN-TO-INTERVENE
-/// decision protocol with deterministic LLM-free fallback.
+use crate::agent_content::{AgentContentError, ContentError, ResolvedContent, describe_source};
+
+/// Bundle directories searched in order: the post-#8378 nested key, then the
+/// `harness_understanding` class a content-v0.1.0 bundle carries.
+pub const HARNESS_DOC_DIRS: [&str; 2] = [
+    "instructions/harness_understanding",
+    "harness_understanding",
+];
+
+/// The four section files, in assembly order.
+const SECTION_FILES: [&str; 4] = [
+    "HARNESS_AGNOSTIC.md",
+    "HARNESS_MPM_SM.md",
+    "HARNESS_TCODE.md",
+    "HARNESS_OVERSEER.md",
+];
+
+/// The four harness-understanding sections of one content source.
 ///
-/// Why: Every consumer (SM, overseer, future tooling) needs the same foundation
-///      — session states, idle/working/error patterns, and when to act.
-/// What: Returns the full text of `HARNESS_AGNOSTIC.md`, compiled in at build
-///       time via `include_str!`.
-/// Test: `agnostic_non_empty`, `agnostic_contains_claude_code_glyph`,
-///       `harness_doc_names_the_relay_prefix`.
-pub fn agnostic() -> &'static str {
-    include_str!("../../../content/instructions/harness_understanding/HARNESS_AGNOSTIC.md")
+/// Why: the free functions this replaces returned compiled-in `&'static str`;
+/// content is runtime-only now, so the doc is a loaded value and a missing
+/// file is an error, never an empty section.
+/// What: each section's full text; see the accessors for what each covers.
+/// Test: `harness_doc_names_the_relay_prefix`, `full_doc_sum_of_parts`,
+/// `a_missing_harness_doc_is_an_error`.
+#[derive(Debug, Clone)]
+pub struct HarnessDoc {
+    agnostic: String,
+    mpm_session_manager: String,
+    tcode: String,
+    overseer: String,
 }
 
-/// trusty-mpm session-manager specifics: how OBSERVE/VERIFY consume the
-/// harness model, managed states, adopt semantics, chat-core verb mapping,
-/// RawObservation/Summary two-tier, and the override convention.
-///
-/// Why: The SM prompt needs SM-specific wiring on top of the agnostic model —
-///      the two-tier observation model, the override path, and chat-core verbs.
-/// What: Returns the full text of `HARNESS_MPM_SM.md`.
-/// Test: `mpm_sm_non_empty`, `mpm_sm_contains_raw_observation`.
-pub fn mpm_session_manager() -> &'static str {
-    include_str!("../../../content/instructions/harness_understanding/HARNESS_MPM_SM.md")
-}
+impl HarnessDoc {
+    /// Reads the four files from `content`. For each file the first directory
+    /// of [`HARNESS_DOC_DIRS`] holding it wins; `NotFound` moves on to the
+    /// next directory, any other error is returned, and a file in neither
+    /// directory is [`AgentContentError::Missing`]. Both directories are read
+    /// from this one source; there is no fallback to another source.
+    ///
+    /// Test: `a_missing_harness_doc_is_an_error`,
+    /// `the_legacy_bundle_key_still_resolves`.
+    pub fn load(content: &ResolvedContent) -> Result<Self, AgentContentError> {
+        let [agnostic, mpm_session_manager, tcode, overseer] =
+            SECTION_FILES.map(|file| read_section(content, file));
+        Ok(Self {
+            agnostic: agnostic?,
+            mpm_session_manager: mpm_session_manager?,
+            tcode: tcode?,
+            overseer: overseer?,
+        })
+    }
 
-/// tcode-specific signals: task banners, `__OMPM_EVENT__` NDJSON lines,
-/// agent-delegation patterns, and diff/edit confirmation output.
-///
-/// Why: tcode emits structured NDJSON events that differ from Claude Code's
-///      pane-text signals; both consumers need the tcode specifics.
-/// What: Returns the full text of `HARNESS_TCODE.md`.
-/// Test: `tcode_non_empty`, `harness_doc_names_the_relay_prefix`.
-pub fn tcode() -> &'static str {
-    include_str!("../../../content/instructions/harness_understanding/HARNESS_TCODE.md")
-}
+    /// Harness-agnostic mental model: session lifecycle, pane/IO model, prompt
+    /// shapes, completion/error signals, and the WHEN-TO-INTERVENE protocol
+    /// (`HARNESS_AGNOSTIC.md`).
+    pub fn agnostic(&self) -> &str {
+        &self.agnostic
+    }
 
-/// Forward-looking t-code-as-overseer contract: the `Overseer` trait +
-/// `HarnessSource::Code` filter seam, event-to-decision mapping, and
-/// `__OMPM_EVENT__` as structured overseer input.
-///
-/// Why: The overseer seam is already defined (`Overseer` trait,
-///      `HarnessSource::Code`); this section codifies the behavioral contract
-///      so the first t-code overseer implementer has a spec to build against.
-/// What: Returns the full text of `HARNESS_OVERSEER.md`.
-/// Test: `overseer_non_empty`, `overseer_contains_flag_for_human`.
-pub fn overseer() -> &'static str {
-    include_str!("../../../content/instructions/harness_understanding/HARNESS_OVERSEER.md")
-}
+    /// trusty-mpm session-manager specifics: OBSERVE/VERIFY wiring, the
+    /// RawObservation/Summary two-tier model, the override convention
+    /// (`HARNESS_MPM_SM.md`).
+    pub fn mpm_session_manager(&self) -> &str {
+        &self.mpm_session_manager
+    }
 
-/// Full harness-understanding document: all four sections concatenated in
-/// order (agnostic → mpm_session_manager → tcode → overseer), separated by
-/// a plain `"\n\n"`.
-///
-/// Why: SM prompt assembly joins top-level sections with `SECTION_SEPARATOR`
-///      (`"\n\n---\n\n"`). Using that same separator internally would cause
-///      the harness block to fragment into spurious top-level sections when
-///      the assembler splits on `---`. Each sub-section starts with its own
-///      `#`/`##` heading, so a plain double-newline is sufficient visual
-///      separation without colliding with the outer separator.
-/// What: Concatenates `agnostic()`, `mpm_session_manager()`, `tcode()`, and
-///       `overseer()` with a `"\n\n"` separator (not `---`).
-/// Test: `full_doc_contains_all_markers`, `full_doc_sum_of_parts`.
-pub fn harness_understanding() -> String {
-    [agnostic(), mpm_session_manager(), tcode(), overseer()]
+    /// tcode-specific signals: task banners, `__OMPM_EVENT__` NDJSON lines,
+    /// delegation patterns (`HARNESS_TCODE.md`).
+    pub fn tcode(&self) -> &str {
+        &self.tcode
+    }
+
+    /// The t-code-as-overseer contract: the `Overseer` trait, the
+    /// `HarnessSource::Code` seam, event-to-decision mapping
+    /// (`HARNESS_OVERSEER.md`).
+    pub fn overseer(&self) -> &str {
+        &self.overseer
+    }
+
+    /// All four sections, trimmed and joined with a plain `"\n\n"`.
+    ///
+    /// Why: SM prompt assembly joins top-level sections with
+    /// `"\n\n---\n\n"`; using that separator here would split the harness
+    /// block into spurious top-level sections. Each section opens with its own
+    /// heading, so a blank line is enough.
+    /// Test: `full_doc_contains_all_markers`, `full_doc_sum_of_parts`.
+    pub fn harness_understanding(&self) -> String {
+        [
+            self.agnostic(),
+            self.mpm_session_manager(),
+            self.tcode(),
+            self.overseer(),
+        ]
         .iter()
         .map(|s| s.trim())
         .collect::<Vec<_>>()
         .join("\n\n")
+    }
+}
+
+/// Reads one section file from the first [`HARNESS_DOC_DIRS`] entry holding it.
+fn read_section(content: &ResolvedContent, file: &str) -> Result<String, AgentContentError> {
+    for dir in HARNESS_DOC_DIRS {
+        match content.read_to_string(&format!("{dir}/{file}")) {
+            Ok(text) => return Ok(text),
+            Err(ContentError::NotFound { .. }) => continue,
+            Err(other) => return Err(other.into()),
+        }
+    }
+    Err(AgentContentError::Missing {
+        origin: describe_source(content.source()),
+        path: format!("{}/{file}", HARNESS_DOC_DIRS[0]),
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agnostic_non_empty() {
-        assert!(!agnostic().trim().is_empty());
-    }
-
-    #[test]
-    fn agnostic_contains_claude_code_glyph() {
-        // The ✻ glyph is the canonical Claude Code working signal (DOC-21 §5.1)
-        assert!(
-            agnostic().contains('✻'),
-            "agnostic section must document the ✻ glyph"
-        );
-    }
-
-    /// #5129: these sections are the session manager's instructions for which
-    /// stderr marker to watch, so they are pinned to the constant tcode and
-    /// tagent actually emit — never to a copy of its text, which is how the
-    /// doc and the producer drifted apart unnoticed.
-    #[test]
-    fn harness_doc_names_the_relay_prefix() {
-        let marker = crate::events::EVENT_LINE_PREFIX.trim_end();
-        let full = harness_understanding();
-        for (section, text) in [
-            ("agnostic", agnostic()),
-            ("tcode", tcode()),
-            ("overseer", overseer()),
-            ("full doc", full.as_str()),
-        ] {
-            assert!(
-                text.contains(marker),
-                "{section} must document the `{marker}` NDJSON relay prefix \
-                 (DOC-21 §5.2) — it is what the emitting harness writes"
-            );
-        }
-    }
-
-    #[test]
-    fn mpm_sm_non_empty() {
-        assert!(!mpm_session_manager().trim().is_empty());
-    }
-
-    #[test]
-    fn mpm_sm_contains_raw_observation() {
-        assert!(
-            mpm_session_manager().contains("RawObservation")
-                || mpm_session_manager().contains("raw observation")
-                || mpm_session_manager().contains("raw pane"),
-            "SM section must reference the RawObservation/raw-pane two-tier model"
-        );
-    }
-
-    #[test]
-    fn tcode_non_empty() {
-        assert!(!tcode().trim().is_empty());
-    }
-
-    #[test]
-    fn overseer_non_empty() {
-        assert!(!overseer().trim().is_empty());
-    }
-
-    #[test]
-    fn overseer_contains_flag_for_human() {
-        assert!(
-            overseer().contains("FlagForHuman") || overseer().contains("flag_for_human"),
-            "overseer section must reference FlagForHuman escalation"
-        );
-    }
-
-    #[test]
-    fn full_doc_contains_all_markers() {
-        let doc = harness_understanding();
-        assert!(doc.contains('✻'), "full doc must contain ✻ glyph");
-        assert!(
-            doc.contains("FlagForHuman") || doc.contains("flag_for_human"),
-            "full doc must contain FlagForHuman"
-        );
-    }
-
-    #[test]
-    fn full_doc_sum_of_parts() {
-        // The full doc is a join of the four parts; every part's distinctive
-        // body content must appear in the full doc. Each anchor is chosen from
-        // the interior body of that section — unique to it and stable against
-        // heading or prefix changes.
-        let doc = harness_understanding();
-
-        // AGNOSTIC: the canonical mental-model section (DOC-21 §1).
-        // "WHEN-TO-INTERVENE" is the unique label for the intervention protocol
-        // described only in the agnostic section.
-        assert!(
-            doc.contains("WHEN-TO-INTERVENE"),
-            "full doc must contain AGNOSTIC body phrase 'WHEN-TO-INTERVENE'"
-        );
-
-        // MPM_SM: session-manager specifics (DOC-21 SM Wiring section).
-        // "RawObservation" is the struct name unique to the SM two-tier model.
-        assert!(
-            doc.contains("RawObservation"),
-            "full doc must contain MPM_SM body phrase 'RawObservation'"
-        );
-
-        // TCODE: tcode-specific signals (DOC-21 tcode section).
-        // "structured NDJSON event lines" is the unique description of tcode's
-        // event emission that does not appear in the other three sections.
-        assert!(
-            doc.contains("structured NDJSON event lines"),
-            "full doc must contain TCODE body phrase 'structured NDJSON event lines'"
-        );
-
-        // OVERSEER: the t-code-as-overseer contract (DOC-21 Overseer section).
-        // "HarnessSource::Code" is the reserved source tag unique to this section.
-        assert!(
-            doc.contains("HarnessSource::Code"),
-            "full doc must contain OVERSEER body phrase 'HarnessSource::Code'"
-        );
-    }
-}
+#[path = "harness_doc_tests.rs"]
+mod tests;
