@@ -412,6 +412,63 @@ pub(crate) async fn reindex_report(
     }))
 }
 
+/// Start the catch-up reindex for an index a config PATCH just released (#9059).
+///
+/// Why: while an index is held, watcher saves, rescans, the boot delta and
+/// reindexes all refuse, so its corpus misses every change made in that
+/// window. Releasing the hold without a catch-up left the index stale until
+/// some unrelated reindex ran.
+/// What: refuses a write-quarantined index (#8105) like [`reindex_report`];
+/// otherwise claims the index (origin `config-release`), registers a fresh
+/// progress entry so the reindex stream follows it, and spawns a non-forced
+/// interactive reindex. Returns the PATCH response's `catch_up_reindex`
+/// object: `started`, plus `stream_url` or the refusal `reason`.
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`.
+pub(super) async fn start_release_catch_up(
+    state: &Arc<SearchAppState>,
+    handle: Arc<IndexHandle>,
+) -> serde_json::Value {
+    let index_id = handle.id.clone();
+    let refused = |reason: String| {
+        tracing::warn!(
+            index_id = %index_id.0,
+            "hold released, but the catch-up reindex did not start (#9059): {reason}"
+        );
+        serde_json::json!({ "started": false, "reason": reason })
+    };
+    if let Some((_, body)) = write_quarantine_refusal(&index_id.0, &handle).await {
+        return refused(body.to_string());
+    }
+    let claim = match crate::service::exclude_hold::claim_reindex(&handle, "config-release", false)
+    {
+        Ok(claim) => claim,
+        Err(err) => return refused(err.to_string()),
+    };
+    let progress = Arc::new(ReindexProgress::new());
+    state
+        .reindex_progress
+        .insert(index_id.clone(), Arc::clone(&progress));
+    spawn_claimed_reindex(
+        claim,
+        handle,
+        progress,
+        false,
+        Some(Arc::clone(&state.reindex_progress)),
+        Some(Arc::clone(&state.last_reindex_aborted_at)),
+        Some(Arc::clone(&state.embedderd_pid_slot)),
+        true,
+        None,
+    );
+    tracing::info!(
+        index_id = %index_id.0,
+        "hold released: catch-up reindex started (#9059)"
+    );
+    serde_json::json!({
+        "started": true,
+        "stream_url": format!("/indexes/{}/reindex/stream", index_id.0),
+    })
+}
+
 /// The HTTP answer to a refused reindex claim (#8889).
 ///
 /// Why: a second request must learn which job holds the index and where to

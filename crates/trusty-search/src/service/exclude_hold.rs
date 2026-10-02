@@ -9,7 +9,7 @@
 //! `Undetermined`, the rescan, the boot delta and the reindex claim refuse,
 //! and a pushed write answers 409. Reads are untouched. The hold is derived
 //! from the handle the registry holds, so the PATCH that replaces it with
-//! valid globs releases it without a restart.
+//! valid globs releases it without a restart and starts a catch-up reindex.
 //! Test: `crate::service::exclude_hold_9059_tests`.
 
 use axum::http::StatusCode;
@@ -31,7 +31,8 @@ pub(crate) struct ExcludeHold {
 /// Why: an invalid glob cannot exclude anything, so admitting any path would
 /// admit what it names; nothing can be admitted until it is fixed.
 /// What: `Some` when [`crate::core::repo_config::invalid_exclude_globs`] finds
-/// at least one pattern. Cheap for an unheld index: no allocation.
+/// at least one pattern. Each call compiles every exclude glob once, held or
+/// not, so callers on a per-file path pay one glob compile per pattern.
 /// Test: `every_ingest_path_refuses_a_held_index`.
 pub(crate) fn hold(handle: &IndexHandle) -> Option<ExcludeHold> {
     let patterns = crate::core::repo_config::invalid_exclude_globs(&handle.exclude_globs);
@@ -47,7 +48,8 @@ impl ExcludeHold {
         format!(
             "index '{id}' is held: exclude glob(s) {patterns:?} do not parse, so the paths they \
              name cannot be excluded. Nothing is indexed until PATCH /indexes/{id}/config sets \
-             valid exclude_globs; search keeps serving what is already indexed (#9059)",
+             valid exclude_globs; that PATCH then starts a catch-up reindex for the changes \
+             refused while held. Search keeps serving what is already indexed (#9059)",
             id = self.index_id,
             patterns = self.patterns,
         )

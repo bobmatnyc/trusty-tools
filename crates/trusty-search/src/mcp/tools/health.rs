@@ -290,7 +290,9 @@ pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> V
                     index,
                     format!("{answered} Index '{index_id}' ({source}) is HELD: {why}"),
                     "Fix `exclude_globs` with `PATCH /indexes/<id>/config`; the hold lifts \
-                     without a restart. Do NOT reindex — a held index refuses it.",
+                     without a restart, and the PATCH starts a catch-up reindex for the \
+                     changes refused while held (`catch_up_reindex` in its response). \
+                     A reindex before the fix is refused.",
                 );
             }
             // #5633: the daemon's `chunk_count` is `Option<usize>` and a null

@@ -265,3 +265,59 @@ async fn a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it() 
     assert!(!ids(&released, "src/new.rs").await.is_empty(), "{stats:?}");
     assert!(ids(&released, SECRET).await.is_empty(), "{stats:?}");
 }
+
+/// #9059: work refused while held is caught up once a valid PATCH releases
+/// the hold. A file added during the hold, whose boot delta was refused, is
+/// indexed by the catch-up reindex the PATCH starts and reports; the secrets
+/// file stays out. Fails against 61dacee785, whose PATCH started no reindex.
+#[tokio::test]
+async fn a_valid_patch_catches_up_what_the_hold_refused() {
+    const MISSED: &str = "src/missed.rs";
+    let (_temp, root) = tree();
+    let id = "x9059-catch-up";
+    let (state, handle, _files) = restored(id, &root).await;
+    std::fs::write(root.join(MISSED), "pub fn missed() {}\n").unwrap();
+    let delta = vec![MISSED.to_string()];
+    assert!(
+        !super::reconcile::apply_delta(&handle, id, &delta, "sha-9059").await,
+        "setup: the held index refuses the boot delta"
+    );
+    assert!(ids(&handle, MISSED).await.is_empty(), "setup");
+
+    let patch = PatchIndexConfigRequest {
+        exclude_globs: Some(vec![FIXED.to_string()]),
+        ..Default::default()
+    };
+    let body = crate::service::server::patch_index_config_report(&state, id, patch)
+        .await
+        .expect("a valid PATCH is accepted");
+
+    let progress = state
+        .reindex_progress
+        .get(&IndexId::new(id))
+        .map(|entry| Arc::clone(entry.value()))
+        .unwrap_or_else(|| panic!("the release started no catch-up reindex: {body}"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while progress.status.load() == crate::service::reindex::ReindexStatus::Running {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the catch-up reindex did not finish within 60s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        progress.status.load(),
+        crate::service::reindex::ReindexStatus::Complete
+    );
+    assert_eq!(body["catch_up_reindex"]["started"], true, "{body}");
+    let released = state.registry.get(&IndexId::new(id)).expect("registered");
+    assert!(
+        !ids(&released, MISSED).await.is_empty(),
+        "the refused file was not caught up"
+    );
+    assert!(ids(&released, SECRET).await.is_empty(), "secrets indexed");
+    assert!(
+        !ids(&released, KEPT).await.is_empty(),
+        "existing chunks lost"
+    );
+}

@@ -443,7 +443,10 @@ Per-index stats.
       serves reads but indexes nothing: watcher saves, `index-file`, rescans,
       boot reconcile and reindexes all refuse. `last_walk_error` names the
       glob, and `GET /indexes/:id/config` lists it in `invalid_exclude_globs`.
-      A `PATCH /indexes/:id/config` with valid globs lifts it, no restart.
+      A `PATCH /indexes/:id/config` with valid globs lifts it, no restart,
+      and starts a catch-up reindex for the changes refused while held. The
+      PATCH response reports it as `catch_up_reindex` (`started`, then
+      `stream_url` or the refusal `reason`).
     - `"degraded"` (#8134) — a stage in `stages` has `failed`, or
       `migration_error` is non-null. Both fields name the cause. An index
       that restored vectors over an empty corpus reports this, not `ready`.

@@ -433,6 +433,9 @@ async fn search_health_reports_a_held_index() {
     assert_eq!(report["healthy"], Value::Bool(false));
     let message = report["message"].as_str().expect("message");
     assert!(message.contains("**/secrets/[**"), "{message}");
+    // The remediation names what happens after the fix, not only what to avoid.
+    let remediation = report["remediation"].as_str().expect("remediation");
+    assert!(remediation.contains("catch-up reindex"), "{remediation}");
 }
 
 /// A 200 status body that simply omits `chunk_count` is also unknown, not zero.
