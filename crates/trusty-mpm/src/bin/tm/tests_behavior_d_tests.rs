@@ -846,7 +846,9 @@ fn cli_parses_session_catchup() {
     .unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Catchup { all_projects, full },
+            action: SessionAction::Catchup {
+                all_projects, full, ..
+            },
         } => {
             assert!(all_projects, "--all-projects should be true");
             assert!(full, "--full should be true");
@@ -861,13 +863,55 @@ fn cli_parses_session_catchup_defaults() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "catchup"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Catchup { all_projects, full },
+            action: SessionAction::Catchup {
+                all_projects, full, ..
+            },
         } => {
             assert!(!all_projects, "--all-projects should default to false");
             assert!(!full, "--full should default to false");
         }
         other => panic!("expected session catchup, got {other:?}"),
     }
+}
+
+/// #8017: the CLI fallback pages like the `session_context_catchup` MCP tool —
+/// `--json` with `--sessions-offset`, which is refused without `--json`.
+#[test]
+fn cli_parses_session_catchup_json_page() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "catchup",
+        "--json",
+        "--sessions-offset",
+        "20",
+    ])
+    .expect("--json --sessions-offset must parse");
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action:
+                SessionAction::Catchup {
+                    json,
+                    sessions_offset,
+                    ..
+                },
+        } => {
+            assert!(json);
+            assert_eq!(sessions_offset, 20);
+        }
+        other => panic!("expected sessions catchup, got {other:?}"),
+    }
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "sessions",
+            "catchup",
+            "--sessions-offset",
+            "20"
+        ])
+        .is_err(),
+        "--sessions-offset pages the JSON form only"
+    );
 }
 
 // ── `tm ls` inline sort/filter grammar (#3483, PM correction) ───────────

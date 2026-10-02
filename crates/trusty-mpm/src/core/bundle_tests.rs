@@ -2536,7 +2536,8 @@ fn local_ops_honours_diagnose_only_briefs_8027() {
 /// deprecated verb there is a warning on every fallback, and an unnamed paging
 /// knob is a paging knob nobody uses.
 /// What: asserts the singular verb is gone from the skill and that the paged
-/// and JSON forms `session_context_catchup` offers are named.
+/// and JSON forms are named — the MCP tool's and, since #8017's CLI half, the
+/// CLI's `--json --sessions-offset`.
 /// Test: this test.
 #[test]
 fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
@@ -2551,7 +2552,7 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
         "--full",
         "sessions_offset",
         "sessions_next_offset",
-        "no JSON mode and no paging",
+        "--json --sessions-offset",
         "#8017",
     ] {
         assert!(
