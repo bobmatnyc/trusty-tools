@@ -44,7 +44,12 @@ impl KgStoreRedb {
     pub fn import_all(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
         self.check_writable()?;
         // #6652: the swap-exclusion guard must outlive the txn.
-        let gw = self.begin_write_guarded().context("begin import txn")?;
+        // #8749: exempt from the transaction deadline — a one-shot migration
+        // that aborted at the deadline would retry the same rows and never
+        // finish.
+        let gw = self
+            .begin_write_guarded_within(std::time::Duration::MAX)
+            .context("begin import txn")?;
         let wtx = &gw.txn;
         {
             let mut triples_t = wtx.open_table(TRIPLES).context("open triples table")?;
@@ -196,9 +201,12 @@ impl KgStoreRedb {
     /// delegating to a free-function helper that takes already-opened
     /// tables, and commits once. On any per-op error the transaction is
     /// aborted and the error is returned together with the index of the
-    /// failing op so callers can log it.
+    /// failing op so callers can log it. #8749: the deadline is checked before
+    /// every op and before the commit; past it the batch rolls back with a
+    /// `WriteTxnError`, so a slow batch cannot hold redb's lock indefinitely.
     /// Test: `apply_batch_groups_asserts_into_single_commit` and
-    /// `apply_batch_rolls_back_on_error` in this module.
+    /// `apply_batch_rolls_back_on_error` in this module;
+    /// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.
     pub fn apply_batch(&self, ops: &[BatchWriteOp]) -> Result<Vec<BatchOpResult>> {
         self.check_writable()?;
         if ops.is_empty() {
@@ -227,6 +235,10 @@ impl KgStoreRedb {
                 .context("open drawers_by_fact_key table")?;
 
             for (idx, op) in ops.iter().enumerate() {
+                // #8749: a batch past its deadline stops here and rolls back
+                // (the `?` drops the transaction) rather than holding redb's
+                // write lock for every op still queued behind it.
+                gw.txn.check("between batch ops")?;
                 let res: Result<BatchOpResult> = match op {
                     BatchWriteOp::Assert(triple) => {
                         batch_assert(&mut triples, &mut by_object, &mut counts, triple)
@@ -249,6 +261,16 @@ impl KgStoreRedb {
                             .map(|_| BatchOpResult::DrawerDeleted)
                     }
                 };
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .test_hooks()
+                    .after_batch_op
+                    .lock()
+                    .expect("hook")
+                    .clone()
+                {
+                    hook(op);
+                }
                 match res {
                     Ok(r) => results.push(r),
                     Err(e) => {
