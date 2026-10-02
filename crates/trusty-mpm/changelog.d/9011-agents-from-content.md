@@ -1,0 +1,5 @@
+Changed
+- The agent roster and the session manager's harness docs are read from instructional content at runtime (#9011, ADR-0064): a trusty-tools checkout above the cwd, else the bundle `tm content install` pinned. The 43 agent consts and the `agents/*.md` rows of `bundle::ALL` are removed; `tm install` writes the roster from content and fails, naming `tm content install`, when none resolves.
+- With no content, `tm hook --pm-guard` refuses a PM's subagent dispatch (owner ruling 09(a)), the daemon's shared-tree classifier counts every agent as a writer, session provisioning keeps the already-deployed agents and warns once, the shadow quarantine and the project-tier stray sweep skip with the error, and an SM turn fails with the same message.
+- `tm doctor` grades "no content installed" WARN and `tm content status` exits non-zero (`BUILTIN_CONTENT_EMBEDDED` is now `false`).
+- The framework manifest is checked for shape at runtime; a roster agent it does not declare deploys uncategorized with a warning instead of panicking the launch. `tm generate capabilities` renders the agent reference from the checkout's `content/agents`.

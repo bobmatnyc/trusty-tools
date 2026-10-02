@@ -46,6 +46,7 @@ use super::project_lang::MarkerProbe;
 use super::schema::{
     AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
 };
+use crate::core::content_source::AgentRoster;
 
 /// The nested walk's declared depth, re-exported beside [`StackDetection`].
 ///
@@ -175,21 +176,20 @@ pub enum FrameworkManifestError {
     DuplicateSkill(String),
 }
 
-/// Every bundled agent stem the binary can actually deploy.
+/// Every agent stem `roster` can deploy.
 ///
 /// Why: the partition invariant is only meaningful against the real catalog.
-/// Deriving the catalog from `core::bundle::ALL` — the same embedded artifact
-/// table the installer writes — means a newly added agent that nobody declared
-/// fails the invariant loudly instead of quietly never deploying.
-/// What: the `agents/<stem>.md` entries of [`crate::core::bundle::ALL`], minus
-/// the `BASE-*` foundation templates, which are inheritance fragments rather
-/// than dispatchable agents and are never selected by name.
+/// Deriving it from the content roster (#9011) — the same files `tm install`
+/// writes — means a newly added agent that nobody declared fails the
+/// invariant loudly instead of quietly never deploying.
+/// What: the `<stem>.md` files of `roster`, minus the `BASE-*` foundation
+/// templates, which are inheritance fragments rather than dispatchable agents
+/// and are never selected by name.
 /// Test: `bundled_agent_stems_excludes_foundations`.
-pub fn bundled_agent_stems() -> BTreeSet<String> {
-    crate::core::bundle::ALL
+pub fn bundled_agent_stems(roster: &AgentRoster) -> BTreeSet<String> {
+    roster
         .iter()
-        .filter_map(|artifact| {
-            let file_name = artifact.rel_path.strip_prefix("agents/")?;
+        .filter_map(|(file_name, _)| {
             let stem = file_name.strip_suffix(".md")?;
             if crate::core::delegation_authority::is_foundation_file(stem) {
                 return None;
@@ -376,13 +376,67 @@ pub fn framework_skill_categories() -> Result<SkillCategories, FrameworkManifest
     parse_framework_skills(FRAMEWORK_MANIFEST_TOML, &bundled_skill_stems())
 }
 
-/// The validated categories declared by the bundled framework manifest.
+/// The categories declared by the bundled framework manifest, as the runtime
+/// reads them.
 ///
-/// Why/What/Test: [`parse_framework_manifest`] over [`FRAMEWORK_MANIFEST_TOML`]
-/// and the real [`bundled_agent_stems`] catalog. Test:
-/// `bundled_framework_manifest_is_valid`.
+/// Why (#9011, spec F5): the roster is runtime content on its own release
+/// cadence, so a content release may add an agent this binary's manifest does
+/// not name. ADR-0064 decision 6 forbids making that a hard gate — and
+/// [`framework_agent_scope`] panics on `Err`. So the runtime checks the
+/// manifest's own shape only; an undeclared roster agent is uncategorized and
+/// deploys (the scope is an exclusion list), and [`warn_on_roster_drift`] says
+/// so. The full partition stays a test against the checkout roster.
+/// What: [`parse_framework_manifest`] over [`FRAMEWORK_MANIFEST_TOML`] and the
+/// catalog the manifest itself declares.
+/// Test: `bundled_framework_manifest_is_valid`,
+/// `bundled_manifest_partitions_the_whole_catalog`.
 pub fn framework_agent_categories() -> Result<AgentCategories, FrameworkManifestError> {
-    parse_framework_manifest(FRAMEWORK_MANIFEST_TOML, &bundled_agent_stems())
+    parse_framework_manifest(FRAMEWORK_MANIFEST_TOML, &declared_stems()?)
+}
+
+/// [`framework_agent_categories`] validated against `roster`: the strict
+/// partition check, for tests and tooling.
+pub fn framework_agent_categories_for(
+    roster: &AgentRoster,
+) -> Result<AgentCategories, FrameworkManifestError> {
+    parse_framework_manifest(FRAMEWORK_MANIFEST_TOML, &bundled_agent_stems(roster))
+}
+
+/// Every stem the bundled manifest declares, in any category.
+fn declared_stems() -> Result<BTreeSet<String>, FrameworkManifestError> {
+    let categories = HarnessManifest::from_toml(FRAMEWORK_MANIFEST_TOML)
+        .map_err(|err| FrameworkManifestError::Malformed(err.to_string()))?
+        .agent_categories
+        .ok_or(FrameworkManifestError::MissingCategories)?;
+    Ok(labelled_stems(&categories)
+        .into_iter()
+        .map(|(_, stem)| stem.clone())
+        .collect())
+}
+
+/// Logs one warning when the resolved roster and the manifest disagree (#9011).
+///
+/// What: resolves the roster; on success names the roster agents the manifest
+/// does not declare (they deploy uncategorized) and the declared stems the
+/// roster lacks. Silent when they agree or when content cannot be resolved —
+/// the roster's own consumers report that.
+fn warn_on_roster_drift() {
+    let Ok(roster) = crate::core::content_source::agent_roster() else {
+        return;
+    };
+    let Ok(declared) = declared_stems() else {
+        return;
+    };
+    let shipped = bundled_agent_stems(&roster);
+    let undeclared: Vec<&String> = shipped.difference(&declared).collect();
+    let absent: Vec<&String> = declared.difference(&shipped).collect();
+    if !undeclared.is_empty() || !absent.is_empty() {
+        tracing::warn!(
+            "{FRAMEWORK_MANIFEST_FILE} and the agent roster from {} disagree: undeclared \
+             (deploy uncategorized) {undeclared:?}; declared but absent {absent:?}",
+            roster.origin()
+        );
+    }
 }
 
 /// Compose declared categories with detected markers into a deploy selection.
@@ -568,6 +622,7 @@ pub fn detected_stack_engineers(project_dir: &Path) -> StackDetection {
 fn detection_for(project_dir: &Path) -> Result<Arc<Detection>, FrameworkManifestError> {
     super::detect_memo::memoized(project_dir, || {
         let categories = framework_agent_categories()?;
+        warn_on_roster_drift();
         let probe = MarkerProbe::new(project_dir, &categories);
         let mut engineers = probe.detect(&categories.language);
         engineers.extend(probe.detect(&categories.framework));

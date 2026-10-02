@@ -352,7 +352,10 @@ fn body_headings_are_named_verbatim_in_the_assets() {
     for f in FIELDS {
         let heading = format!("## {}", f.heading());
         assert!(
-            trusty_agents_common::agent_assets::VERSION_CONTROL.contains(&heading),
+            crate::commands::install::test_roster_ref()
+                .require("version-control.md")
+                .unwrap()
+                .contains(&heading),
             "version-control.md is missing {heading:?}"
         );
         assert!(
