@@ -4,19 +4,21 @@
 //! Why: the shadow quarantine logged a WARN and also returned the same failure
 //! as a provisioning gap, which the caller printed, so one root cause produced
 //! two lines; a later roster consumer in the same process added a third.
+//! Code-critic r1: no content also means zero agents, even when the framework
+//! source still holds a previous binary's roster.
 //! What: runs the real `tm sessions start` against a git repository with no
 //! remote (the in-place path that provisions in this process) under an empty
-//! `$HOME`, and counts the output lines that name the remedy.
+//! `$HOME`, optionally seeded with a stale agent source, and checks the deploy
+//! count and the output lines that name the remedy.
 //! Test: this file IS the test.
 
+use std::path::Path;
 use std::process::Command;
 
 use crate::common;
 
-/// No content installed: one `error:` line names `tm content install`, and the
-/// session still provisions with no agents rather than with a guessed roster.
-#[test]
-fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
+/// A scratch `$HOME` and a git repository with no remote, both under `/tmp`.
+fn scratch_home_and_project() -> (tempfile::TempDir, tempfile::TempDir) {
     let home = tempfile::Builder::new()
         .prefix("tm-test-no-content-")
         .tempdir_in("/tmp")
@@ -31,16 +33,30 @@ fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
         .status()
         .expect("git init");
     assert!(init.success(), "git init failed");
+    (home, project)
+}
 
-    let out = common::tm_command_in(home.path())
+/// Runs `tm sessions start` in `project` under `home`; returns stdout, stderr.
+fn sessions_start(home: &Path, project: &Path) -> (String, String) {
+    let out = common::tm_command_in(home)
         .args(["sessions", "start", "--dir"])
-        .arg(project.path())
-        .current_dir(project.path())
+        .arg(project)
+        .current_dir(project)
         .env_remove("RUST_LOG")
         .output()
         .expect("spawn tm sessions start");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// No content installed: one `error:` line names `tm content install`, and the
+/// session still provisions with no agents rather than with a guessed roster.
+#[test]
+fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
+    let (home, project) = scratch_home_and_project();
+    let (stdout, stderr) = sessions_start(home.path(), project.path());
 
     // The in-place provisioning ran, and deployed no agent.
     assert!(
@@ -58,4 +74,32 @@ fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
         "exactly one line must name the remedy\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(remedy[0].starts_with("error:"), "{}", remedy[0]);
+}
+
+/// #9011 code-critic r1: no content means zero agents, even when the framework
+/// source still holds a previous binary's roster (an upgrade with no `tm
+/// content install`). Nothing deploys from it, and the remedy line stays the
+/// only one.
+#[test]
+fn sessions_start_without_content_deploys_no_stale_agent() {
+    let (home, project) = scratch_home_and_project();
+    let stale = home.path().join(".trusty-mpm/framework/agents");
+    std::fs::create_dir_all(&stale).expect("stale source dir");
+    std::fs::write(
+        stale.join("stale-agent.md"),
+        "---\nname: stale-agent\ndescription: left by an earlier binary\n---\n\nStale.\n",
+    )
+    .expect("stale agent");
+
+    let (stdout, stderr) = sessions_start(home.path(), project.path());
+    assert!(
+        stdout.contains("Agents: 0 deployed"),
+        "a stale source must not deploy\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let remedy = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter(|l| l.contains("tm content install"))
+        .count();
+    assert_eq!(remedy, 1, "stdout: {stdout}\nstderr: {stderr}");
 }

@@ -319,10 +319,10 @@ pub(crate) fn has_agent_markdown(dir: &Path) -> bool {
 /// nothing is installed (#9011) it adds no warning — the one ERROR per process
 /// naming `tm content install` comes from
 /// [`trusty_agents_common::agent_content::report_not_installed`]; any other
-/// content error is a warning line. Either way it deploys whatever
-/// `source_dir` already holds — nothing when it is empty.
+/// content error is a warning line. Either way it deploys nothing: whatever
+/// `source_dir` holds came from an earlier roster and is stale.
 /// Test: `autodeploy_agents_deploys_when_bundle_differs`,
-/// `autodeploy_agents_keeps_the_existing_source_without_content`,
+/// `autodeploy_agents_deploys_nothing_without_content`,
 /// `autodeploy_agents_is_a_noop_when_already_current`,
 /// `autodeploy_agents_fails_open_when_target_is_unwritable`,
 /// `autodeploy_agents_warns_when_it_skips_a_user_modified_file`.
@@ -354,17 +354,16 @@ pub fn autodeploy_agents_with(
             // #9011 D4: no content is reported once per process, not here too.
             if !trusty_agents_common::agent_content::report_not_installed(
                 &err,
-                "the agent roster is unavailable; the agents already deployed stay in place",
+                "the agent roster is unavailable, so no agent is deployed",
             ) {
                 out.warnings.push(format!(
-                    "warning: the agent roster is unavailable ({err}) — the agents \
-                     already deployed from {} stay in place",
+                    "warning: the agent roster is unavailable ({err}) — no agent is \
+                     deployed from {}",
                     source_dir.display()
                 ));
             }
-            if has_agent_markdown(source_dir) {
-                deploy_into(source_dir, target_dir, skills_root, &mut out);
-            }
+            // #9011 critic r1: no content means zero agents. The source dir may
+            // still hold a previous binary's roster; deploying it would be stale.
             return out;
         }
     };

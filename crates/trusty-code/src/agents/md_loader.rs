@@ -735,7 +735,7 @@ mod tests {
     /// Why: mirrors `load_md_agent`'s error-surfacing contract for the fs
     /// path -- a caller iterating the embedded catalog with a typo'd name
     /// must get a message it can log, not an unwind.
-    /// What: requests a name absent from `EMBEDDED_TM_AGENT_SOURCES` and
+    /// What: requests a name absent from the `tm_agent_sources` catalog and
     /// asserts the call errors.
     /// Test: this test.
     #[test]

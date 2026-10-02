@@ -545,9 +545,10 @@ pub fn shared_tree_dispatch_op(
     // guard's admission question, so the two halves stay one policy.
     let is_dispatch = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool);
     // #9011: no content roster makes the classifier fail closed (`None`).
+    // Critic r1: resolved from the query's cwd, and a content error is logged.
     let roster = is_dispatch
-        .then(crate::core::content_source::agent_roster)
-        .and_then(Result::ok);
+        .then(|| crate::core::content_source::agent_roster_for_query(&cwd))
+        .flatten();
     let eligible = is_dispatch
         && dispatch_agent(input).is_some_and(|agent| {
             blocked_by_shared_tree(roster.as_ref(), agent, dispatch_isolation(input))

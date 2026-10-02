@@ -885,7 +885,10 @@ impl DaemonState {
                         d,
                         cwd,
                         roster
-                            .get_or_init(|| crate::core::content_source::agent_roster().ok())
+                            // #9011 critic r1: the query's cwd, error logged.
+                            .get_or_init(|| {
+                                crate::core::content_source::agent_roster_for_query(cwd)
+                            })
                             .as_ref(),
                     )
             })

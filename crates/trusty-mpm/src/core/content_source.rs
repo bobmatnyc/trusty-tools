@@ -40,6 +40,30 @@ pub fn agent_roster_in(
     AgentRoster::load(&resolve_content_in(cache_dir, dev)?)
 }
 
+/// The roster for a daemon query about `cwd`, or `None` (#9011).
+///
+/// Why: the daemon's own cwd says nothing about the project a query names, so
+/// a dispatch from inside a trusty-tools checkout must see that checkout's
+/// roster, exactly as `tm hook --pm-guard` running there does.
+/// What: the checkout enclosing `cwd`, else the installed bundle; failing
+/// both, [`agent_roster`] (the checkout enclosing the daemon's own cwd, the
+/// resolution this replaced). A content error is logged at WARN and answered
+/// `None`, which makes the shared-tree classifiers fail closed.
+/// Test: `the_query_roster_resolves_from_the_query_cwd`.
+pub fn agent_roster_for_query(cwd: &Path) -> Option<AgentRoster> {
+    let resolved = resolve_content(DevOverride::DetectFrom(cwd.to_path_buf()))
+        .and_then(|content| AgentRoster::load(&content))
+        .or_else(|_| agent_roster());
+    resolved
+        .inspect_err(|err| {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                "agent roster unavailable for this query, so every agent counts as a writer: {err}"
+            );
+        })
+        .ok()
+}
+
 /// The harness-understanding docs, resolved like [`agent_roster`].
 pub fn harness_doc() -> Result<HarnessDoc, AgentContentError> {
     HarnessDoc::load(&resolve_content(dev_override())?)
@@ -92,6 +116,14 @@ mod tests {
             "got {err:?}"
         );
         assert!(err.to_string().contains("tm content install"), "{err}");
+    }
+
+    /// #9011: a daemon query resolves from the cwd it names, not the daemon's.
+    #[test]
+    fn the_query_roster_resolves_from_the_query_cwd() {
+        let roster = agent_roster_for_query(&test_support::repo_root().join("crates/trusty-mpm"))
+            .expect("checkout roster from the query cwd");
+        assert_eq!(roster.len(), test_support::repo_roster().len());
     }
 
     /// From inside the checkout the dev override serves the working tree.

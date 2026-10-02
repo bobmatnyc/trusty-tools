@@ -421,16 +421,16 @@ fn workflow_agents_declare_the_prefixes_the_pm_parses() {
 }
 
 /// `crate::assets::DEFAULT_AGENTS`'s 28 `EmbeddedAgent::Composed` entries
-/// every resolve to a real key in `EMBEDDED_TM_AGENT_SOURCES` — no typo'd
+/// every resolve to a real key in the `tm_agent_sources` catalog — no typo'd
 /// roster name that would silently degrade to a skipped agent at runtime.
 ///
 /// Why: `load_embedded_default_agents` logs-and-skips a `Composed` entry
-/// whose name isn't found in `EMBEDDED_TM_AGENT_SOURCES` rather than
+/// whose name isn't found in the catalog rather than
 /// panicking (see that function's doc) — a typo there would silently shrink
 /// the roster below 31 with only a log line as evidence. This test fails
 /// loudly in CI instead.
 /// What: for every `Composed` entry, asserts its (lowercased) name matches
-/// some `EMBEDDED_TM_AGENT_SOURCES` key with the `.md` suffix stripped.
+/// some catalog key with the `.md` suffix stripped.
 /// Test: this test.
 #[test]
 fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
@@ -575,7 +575,8 @@ fn default_skills_names_are_unique() {
     }
 }
 
-/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 31 entries (5
+/// The `tm_agent_sources` catalog (`SHARED_TM_AGENT_FILES` plus
+/// `LOCAL_TM_AGENT_FORKS`; Slice E2, #2958) has exactly 31 entries (5
 /// `BASE-*` templates + 26 roster agents — #8129 removed `ticketing.md`,
 /// `local-ops.md` and `documentation.md`, whose dispatch names tcode-native
 /// `Direct` agents took over), every key is unique, and every
