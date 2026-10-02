@@ -29,8 +29,21 @@
 //! [`unknown_key_paths`]: crate::core::config_keys::unknown_key_paths
 //! [`report_unknown_keys`]: crate::core::config_keys::report_unknown_keys
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock, PoisonError};
+
 use serde::Serialize;
 use serde_json::Value;
+
+/// Host-config keys a reader OUTSIDE the parsed struct owns (#9097).
+///
+/// Why: `tm fleet init --session` writes `[supervisor] session` into
+/// `~/.trusty-mpm/config.toml` and reads it back through `toml_edit`
+/// (`bin/tm/commands/fleet/session_name.rs`), so `MpmConfig` never declares it.
+/// A key the product itself wrote is not a typo and must not be reported as one.
+/// Test: `a_product_written_supervisor_session_is_not_reported`,
+/// `the_recorded_session_key_is_exempt_from_the_unknown_key_report`.
+pub const KEYS_READ_ELSEWHERE: &[&str] = &["supervisor.session"];
 
 /// Convert a TOML document to the common `serde_json::Value` tree.
 ///
@@ -78,6 +91,8 @@ pub fn unknown_key_paths<T: Serialize>(raw: &Value, parsed: &T) -> Vec<String> {
     // #8261: `[builders]` also carries the build-lease keys, read by a separate
     // struct so `BuildersConfig` keeps its published shape.
     out.retain(|path| !crate::core::build_lease::config::LEASE_KEYS.contains(&path.as_str()));
+    // #9097: `supervisor.session` is written and read by `tm fleet`, not serde.
+    out.retain(|path| !KEYS_READ_ELSEWHERE.contains(&path.as_str()));
     // #9091: `[accounts]` is read strictly by `core::gh_org_accounts`, not by
     // `MpmConfig`, so a broken table is an error there instead of a reset here.
     out.retain(|path| path != "accounts");
@@ -116,11 +131,24 @@ fn diff_into(raw: &Value, known: &Value, prefix: &str, out: &mut Vec<String>) {
 /// mechanical. `warn` rather than `error`: the file still applied, and every key
 /// the schema does define took effect.
 /// What: one warning listing all unrecognised paths; silent when there are none
-/// (the overwhelmingly common case).
-/// Test: `report_is_silent_for_a_clean_document`.
+/// (the overwhelmingly common case). A given file and key set warns once per
+/// process (#9097): `tm doctor` loads the same config about twenty times.
+/// Test: `report_is_silent_for_a_clean_document`,
+/// `an_unknown_key_warns_once_per_process_across_repeated_loads`.
 pub fn report_unknown_keys<T: Serialize>(file: &str, raw: &Value, parsed: &T) {
     let unknown = unknown_key_paths(raw, parsed);
     if unknown.is_empty() {
+        return;
+    }
+    // #9097: once per (file, key set) per process, not once per load. A new
+    // typo in the same file is a new key set, so it still warns.
+    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = REPORTED
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(format!("{file}\0{}", unknown.join(",")));
+    if !first {
         return;
     }
     tracing::warn!(
