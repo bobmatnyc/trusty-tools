@@ -257,8 +257,49 @@ fn dir_overrides_the_default() {
     );
     init(&other, fx.home(), false, NO_TMUX).unwrap();
     assert!(other.join(".trusty-mpm.toml").exists());
-    assert!(!fx.dir().exists(), "the default directory was created");
+    let default = fx.home().join(DEFAULT_DIR);
+    assert!(!default.exists(), "the default directory was created");
     assert!(fx.config().contains(&canonical(&other)));
+}
+
+/// #8995: with no `--dir`, status checks the Architect `init` recorded
+/// elsewhere, and its hint names that directory.
+#[test]
+fn status_without_dir_checks_the_recorded_architect() {
+    let fx = Fixture::new();
+    let other = fx.home().join("elsewhere/supervisor");
+    init(&other, fx.home(), false, NO_TMUX).unwrap();
+
+    let resolved = resolve_dir(None, fx.home()).unwrap();
+    assert_eq!(resolved, std::fs::canonicalize(&other).unwrap());
+    let report = status(&resolved, fx.home(), NO_TMUX, None);
+    let ok: Vec<_> = report.checks.iter().map(|c| (c.name, c.ok)).collect();
+    assert_eq!(
+        ok[..2],
+        [("allowlist", true), ("profile", true)],
+        "{}",
+        report.render()
+    );
+    let hint = format!("tm fleet init --dir {}", resolved.display());
+    assert!(report.render().contains(&hint), "{}", report.render());
+}
+
+/// #8995: two recorded Architects are never resolved by guessing.
+#[test]
+fn two_recorded_architects_ask_for_dir() {
+    let fx = Fixture::new();
+    let (a, b) = (fx.home().join("a"), fx.home().join("b"));
+    for dir in [&a, &b] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(".trusty-mpm.toml"), "profile = \"supervisor\"\n").unwrap();
+    }
+    fx.write_config(&format!(
+        "[supervisor]\nprojects = [{:?}, {:?}]\n",
+        a.display().to_string(),
+        b.display().to_string()
+    ));
+    let err = resolve_dir(None, fx.home()).expect_err("two Architects");
+    assert!(format!("{err:#}").contains("pass --dir"), "{err:#}");
 }
 
 #[test]

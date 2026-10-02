@@ -37,7 +37,8 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// daemon costs it exactly one row rather than the whole report (#6336).
 /// What: runs the check battery in-process via [`local_report`], prints one
 /// status-tagged line per check, appends the daemon rows from
-/// [`daemon_rows`], and folds every status into one overall verdict. When
+/// [`daemon_rows`] and the `gcloud_auth` row (#8371, which spawns `gcloud`
+/// only under `--network`), and folds every status into one overall verdict. When
 /// `prune_stale_skills` is set (hidden `--prune-stale-skills` flag), also runs
 /// `prune_stale_skills_locally` as a manual troubleshooting escape hatch —
 /// normal operation cleans up pre-rename `mpm-*` skill directories
@@ -46,7 +47,8 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// startup (#1905), so this flag should rarely be needed.
 /// Test: `cli_parses_doctor` / `cli_parses_doctor_prune_stale_skills` cover
 /// parsing; `tm_doctor_reports_every_local_check_with_no_daemon` covers the
-/// daemonless path end to end; the stale-daemon comparison logic is covered by
+/// daemonless path end to end; `tm_doctor_never_spawns_gcloud_without_network`
+/// covers the opt-in gate; the stale-daemon comparison logic is covered by
 /// `core::version_staleness`'s own unit tests.
 pub(crate) async fn doctor(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -65,6 +67,10 @@ pub(crate) async fn doctor(
         overall = overall.worst(check.status);
         print_check(&check);
     }
+    // #8371: opt-in; without `--network` this spawns nothing.
+    let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
+    overall = overall.worst(gcloud.status);
+    print_check(&gcloud);
 
     println!(
         "\noverall: {} {}",

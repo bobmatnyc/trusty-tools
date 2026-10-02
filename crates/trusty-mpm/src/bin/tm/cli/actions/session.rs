@@ -446,7 +446,10 @@ pub(crate) enum SessionAction {
     /// and prints the resulting markdown to stdout.
     /// The `--full` flag is accepted for forward-compatibility with PR2 (watermark
     /// logic); for PR1 it forces full history and is otherwise a no-op.
-    /// Test: `cli_parses_session_catchup` in `tests.rs`.
+    /// `--json` prints the `session_context_catchup` MCP tool's paged JSON
+    /// instead, one page per `--sessions-offset` (#8017).
+    /// Test: `cli_parses_session_catchup` in `tests.rs`,
+    /// `cli_parses_session_catchup_json_page`.
     ///
     // CUTOVER BRIDGE — remove post-migration (#1762)
     Catchup {
@@ -457,6 +460,14 @@ pub(crate) enum SessionAction {
         /// forward-compatibility).
         #[arg(long)]
         full: bool,
+        /// Print the `session_context_catchup` JSON page instead of markdown.
+        // #8017: the MCP tool's paged shape, for a caller that lost the MCP server.
+        #[arg(long)]
+        json: bool,
+        /// First paused session of the JSON page; pass the previous page's
+        /// `sessions_next_offset`.
+        #[arg(long, default_value_t = 0, requires = "json")]
+        sessions_offset: usize,
     },
     /// Prune managed sessions by state + compact tombstones (#1508).
     ///

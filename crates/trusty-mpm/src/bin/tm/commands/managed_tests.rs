@@ -1087,7 +1087,19 @@ fn record_ledger_7660(wt: &std::path::Path) {
 /// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
 /// `.gitignore` block, untracked settings files, and `CLAUDE.md`.
 fn provision_dirt_7660(ws: &std::path::Path) {
-    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(ws).expect("scaffold");
+    use trusty_mpm::core::scaffold_gitignore::{
+        SCAFFOLD_GITIGNORE_BEGIN, SCAFFOLD_GITIGNORE_END, SCAFFOLD_IGNORED_PATHS,
+    };
+    // The block a pre-#8758 launch appended; nothing writes it any more.
+    let mut gitignore = std::fs::read_to_string(ws.join(".gitignore")).unwrap_or_default();
+    if !gitignore.is_empty() {
+        gitignore.push('\n');
+    }
+    gitignore.push_str(&format!(
+        "{SCAFFOLD_GITIGNORE_BEGIN}\n{}\n{SCAFFOLD_GITIGNORE_END}\n",
+        SCAFFOLD_IGNORED_PATHS.join("\n")
+    ));
+    std::fs::write(ws.join(".gitignore"), gitignore).expect("scaffold");
     std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
     std::fs::write(ws.join(".claude/settings.json"), "{}\n").expect("settings");
     std::fs::write(ws.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");

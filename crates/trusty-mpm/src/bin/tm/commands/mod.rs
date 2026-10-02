@@ -47,6 +47,8 @@ pub(crate) mod doctor_fix_agents;
 // #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
 pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
+// #8371: the opt-in `--network` gcloud auth row.
+pub(crate) mod doctor_gcloud;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
 // #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
@@ -137,6 +139,8 @@ pub(crate) mod pm_guard_budget;
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;
 pub(crate) mod pm_guard_cost;
+// #9011: the content roster pm-guard classifies dispatches against.
+pub(crate) mod pm_guard_content;
 pub(crate) mod pm_guard_deny_by_default;
 // #8722: the denial record and audit POST every pm-guard deny makes.
 pub(crate) mod pm_guard_deny_log;

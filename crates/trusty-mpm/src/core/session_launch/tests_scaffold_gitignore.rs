@@ -6,40 +6,85 @@
 //! `native_mcp_tests.rs` / `custom_mcp_tests.rs` this used to name went with
 //! their modules under ADR-0042.)
 //! What: covers the `prepare_session_inner` call into
-//! `core::scaffold_gitignore::ensure_scaffold_gitignored` — a git-repo
-//! `project_dir` gets the managed `.gitignore` block, a non-git one does not.
+//! `core::harness_exclude::ensure_scaffold_excluded` — a git-repo
+//! `project_dir` gets the paths in `.git/info/exclude` and a tracked
+//! `.gitignore` stays as committed (#8758); a non-git one gets no block.
 //! Test: this module IS the test suite for that wiring.
 
 use super::tests::EnvVarGuard;
 use super::*;
 
+/// Run `git -C dir args`, asserting success; returns stdout.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A git repository at `dir` with `.gitignore` committed as `gitignore`.
+fn repo_tracking_gitignore(dir: &std::path::Path, gitignore: &str) {
+    git(dir, &["init", "-q", "--initial-branch=main"]);
+    git(dir, &["config", "user.email", "ci@test.invalid"]);
+    git(dir, &["config", "user.name", "CI"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join(".gitignore"), gitignore).unwrap();
+    git(dir, &["add", ".gitignore"]);
+    git(dir, &["commit", "-q", "-m", "base"]);
+}
+
+/// #8758: a launch leaves the tracked `.gitignore` byte-identical and
+/// `.gitignore` out of `git status`, even when it holds an old managed block with operator
+/// lines inside it and CRLF line endings (the old refresh dropped those lines
+/// and converted CRLF to LF). The paths go to the shared `info/exclude`.
 #[test]
 #[serial_test::serial]
-fn prepare_session_gitignores_scaffolding_when_project_is_git_repo() {
-    // Issue #3427 (Part 1 — prevent): a managed workspace deploys agents,
-    // skills, and output styles project-locally; when `project_dir` is a git
-    // working tree, `prepare_session` must ALSO ensure those paths are
-    // gitignored so they never enter this project's history (the
-    // precondition for the "would be overwritten by merge" collision).
+fn launch_leaves_a_tracked_gitignore_untouched() {
     // #3965: `prepare_session` seeds `$HOME/.claude.json` via the REAL
-    // process `$HOME`, not `fw` — `#[serial]` + the override below keep this
-    // test off the operator's real file and off every sibling test doing the
-    // same (see `session_launch::tests::prepare_session_writes_claude_md_and_stash`).
+    // process `$HOME` — `#[serial]` + this override keep it off the
+    // operator's file.
     let tmp_home = crate::test_support::hermetic_temp_dir();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = crate::test_support::hermetic_temp_dir();
     let project = tmp.path();
-    std::fs::create_dir_all(project.join(".git")).unwrap();
+    // An outdated block from a pre-#8758 launch: it lacks most managed paths,
+    // carries two operator lines between the markers, and uses CRLF.
+    let tracked = format!(
+        "target/\r\n\r\n{}\r\n.claude/agents/\r\nmy-private-notes/\r\n*.secret\r\n{}\r\n",
+        crate::core::scaffold_gitignore::SCAFFOLD_GITIGNORE_BEGIN,
+        crate::core::scaffold_gitignore::SCAFFOLD_GITIGNORE_END
+    );
+    repo_tracking_gitignore(project, &tracked);
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");
 
-    let gitignore = std::fs::read_to_string(project.join(".gitignore"))
-        .expect("prepare_session must write .gitignore for a git-repo project_dir");
+    let after = std::fs::read(project.join(".gitignore")).unwrap();
+    assert_eq!(
+        after,
+        tracked.as_bytes(),
+        "launch edited the tracked .gitignore"
+    );
+    // The launch still writes `CLAUDE.md` and `.claude/` (untracked, not this
+    // fix's concern); `.gitignore` must not appear in `git status` at all.
+    let status = git(project, &["status", "--porcelain"]);
+    assert!(
+        !status.contains(".gitignore"),
+        ".gitignore is dirty after launch:\n{status}"
+    );
+    let exclude = std::fs::read_to_string(project.join(".git/info/exclude")).unwrap();
     for path in crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS {
         assert!(
-            gitignore.contains(path),
-            "expected {path} in .gitignore:\n{gitignore}"
+            exclude.lines().any(|l| l == *path),
+            "expected {path} in info/exclude:\n{exclude}"
         );
     }
 }

@@ -35,6 +35,8 @@
 
 pub mod builder;
 pub mod builder_in_memory;
+// #9011: `builder`'s `metadata:` map, kept out of the at-cap `builder.rs`.
+mod builder_metadata;
 // #4698: `builder`'s YAML scalar encoding, split out when adding `provenance:`
 // pushed `builder.rs` over the 500-SLOC production cap.
 mod builder_yaml;

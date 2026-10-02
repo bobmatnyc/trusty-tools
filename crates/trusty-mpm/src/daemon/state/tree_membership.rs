@@ -27,6 +27,7 @@
 use std::path::Path;
 
 use crate::core::agent::Delegation;
+use crate::core::content_source::AgentRoster;
 use crate::core::dispatch_isolation::{AgentWriteRisk, agent_write_risk, shares_the_callers_tree};
 use crate::core::project_aliases::worktree_root;
 
@@ -48,12 +49,14 @@ use crate::core::project_aliases::worktree_root;
 ///
 /// Test: see the module doc; `an_agent_that_leaves_its_worktree_blocks_the_shared_tree_again`
 /// pins that an agent back in the dispatcher's checkout still counts.
-pub(super) fn writes_in(d: &Delegation, cwd: &Path) -> bool {
+/// `roster` is `None` when content is unavailable (#9011); every classifier
+/// then fails closed, so an unidentifiable agent counts as a writer.
+pub(super) fn writes_in(d: &Delegation, cwd: &Path, roster: Option<&AgentRoster>) -> bool {
     let here = worktree_root(cwd);
     let standing = d.last_agent_cwd.as_deref().and_then(worktree_root);
     // #8161: a live agent standing in this linked worktree writes in it.
     if here.is_some() && standing == here {
-        return agent_write_risk(&d.agent) != AgentWriteRisk::ReadsOnly;
+        return agent_write_risk(roster, &d.agent) != AgentWriteRisk::ReadsOnly;
     }
     if d.cwd.as_deref() != Some(cwd) {
         return false;
@@ -62,5 +65,5 @@ pub(super) fn writes_in(d: &Delegation, cwd: &Path) -> bool {
     if standing.is_some() {
         return false;
     }
-    shares_the_callers_tree(&d.agent, d.isolation.as_deref())
+    shares_the_callers_tree(roster, &d.agent, d.isolation.as_deref())
 }

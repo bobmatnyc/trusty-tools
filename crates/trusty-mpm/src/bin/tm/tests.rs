@@ -427,7 +427,27 @@ fn cli_parses_doctor() {
                 include_frozen: false,
                 quarantine_mcp: None,
                 dir: None,
+                network: false,
             }
+        }
+    ));
+}
+
+/// #8371: `--network` is opt-in; a bare `tm doctor` leaves it off.
+#[test]
+fn cli_parses_doctor_network() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--network"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags { network: true, .. }
+        }
+    ));
+    let bare = Cli::try_parse_from(["trusty-mpm", "doctor"]).unwrap();
+    assert!(matches!(
+        bare.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags { network: false, .. }
         }
     ));
 }
@@ -459,6 +479,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 include_frozen: false,
                 quarantine_mcp: None,
                 dir: None,
+                network: false,
             }
         }
     ));
@@ -487,6 +508,7 @@ fn cli_parses_doctor_fix_skills() {
                 include_frozen: false,
                 quarantine_mcp: None,
                 dir: None,
+                network: false,
             }
         }
     ));

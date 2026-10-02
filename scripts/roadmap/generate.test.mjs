@@ -9,7 +9,9 @@
  * failure mode `check_generated_regions.sh`'s header describes. This suite is
  * that owner: it proves the splice never touches hand-written text, that
  * regeneration is idempotent, that a milestone's internal notes below `---`
- * never reach the page, and that an untagged milestone is excluded.
+ * never reach the page, that an untagged milestone publishes no prose, and
+ * that every open milestone lands in the right crate section of the one
+ * trusty-tools page, in a stable order.
  *
  * What: exercises the exported pure functions directly, against small inline
  * fixtures — never the real `gh api` or the real docs/roadmap page — so these
@@ -29,6 +31,8 @@ import {
   endLine,
   parseMilestoneRoadmap,
   displayTitle,
+  crateOf,
+  groupByCrate,
   renderRegion,
   spliceRegion,
   groupByStage,
@@ -87,10 +91,10 @@ test("splice preserves the hand-written intro and trailer byte for byte", () => 
 
 test("regenerating twice from the same milestones produces no diff", () => {
   const milestones = [milestoneFixture()];
-  const regionA = renderRegion(milestones, "trusty-mpm");
+  const regionA = renderRegion(milestones);
   const splicedOnce = spliceRegion(HAND_WRITTEN_FILE, regionA);
 
-  const regionB = renderRegion(milestones, "trusty-mpm");
+  const regionB = renderRegion(milestones);
   const splicedTwice = spliceRegion(splicedOnce, regionB);
 
   assert.equal(splicedTwice, splicedOnce, "a second regeneration must be a no-op");
@@ -101,34 +105,37 @@ test("text below the --- divider never appears in the rendered output", () => {
     description:
       "Public paragraph readers may see.\n\nRoadmap: trusty-mpm · now\n---\nINTERNAL SCOPE NOTE, NEVER PUBLISHED",
   });
-  const region = renderRegion([milestone], "trusty-mpm");
+  const region = renderRegion([milestone]);
 
   assert.ok(region.includes("Public paragraph readers may see."));
   assert.ok(!region.includes("INTERNAL SCOPE NOTE"));
   assert.ok(!region.includes("---"));
 });
 
-test("a milestone with no Roadmap: line is excluded", () => {
+test("a milestone with no Roadmap: line is listed as a link and publishes no prose", () => {
   const tagged = milestoneFixture({ number: 1, title: "trusty-mpm 9.9.9" });
   const untagged = milestoneFixture({
     number: 2,
     title: "trusty-mpm 8.8.8",
     description: "Plain prose with no machine-readable roadmap line at all.",
+    html_url: "https://github.com/bobmatnyc/trusty-tools/milestone/2",
   });
 
-  const region = renderRegion([tagged, untagged], "trusty-mpm");
+  const region = renderRegion([tagged, untagged]);
 
-  assert.ok(region.includes("9.9.9"));
-  assert.ok(!region.includes("8.8.8"));
+  assert.ok(region.includes("#### 9.9.9 · Next"));
+  assert.ok(region.includes("- [8.8.8](https://github.com/bobmatnyc/trusty-tools/milestone/2) · 1 of 4 items done"));
+  assert.ok(!region.includes("Plain prose"), "an untagged description is never published");
 });
 
-test("a milestone tagged for a different crate is excluded from this crate's page", () => {
+test("a milestone tagged for a different crate goes to that crate's section only", () => {
   const other = milestoneFixture({
     title: "trusty-search 3.0.0",
     description: "Not ours.\n\nRoadmap: trusty-search · next",
   });
-  const region = renderRegion([other], "trusty-mpm");
-  assert.equal(region, "_No trusty-mpm milestone currently carries a `Roadmap:` line._");
+  assert.equal(groupByStage([other], "trusty-mpm").next.length, 0);
+  assert.ok(renderRegion([other]).startsWith("### trusty-search\n\n#### 3.0.0 · Next"));
+  assert.equal(renderRegion([]), "_No open milestones._");
 });
 
 test("displayTitle drops a leading crate-name prefix but leaves a bare version alone", () => {
@@ -161,13 +168,13 @@ test("main() end to end: fixture milestones splice cleanly and --check reports n
     );
     writeFileSync(targetPath, HAND_WRITTEN_FILE);
 
-    main(["--crate", "trusty-mpm", "--file", targetPath, "--fixture", fixturePath]);
+    main(["--file", targetPath, "--fixture", fixturePath]);
     const written = readFileSync(targetPath, "utf8");
-    assert.ok(written.includes("### 9.9.9"));
+    assert.ok(written.includes("#### 9.9.9 · Next"));
     assert.ok(written.includes("Hand-written intro paragraph"));
 
     process.exitCode = undefined;
-    main(["--crate", "trusty-mpm", "--file", targetPath, "--fixture", fixturePath, "--check"]);
+    main(["--file", targetPath, "--fixture", fixturePath, "--check"]);
     assert.equal(process.exitCode, undefined, "--check must report no drift once regenerated");
   } finally {
     process.exitCode = undefined;
@@ -253,7 +260,7 @@ test("release-order: a malformed key warns, counts as unkeyed, and does not cras
 });
 
 test("release-order: the line is not published; unkeyed input keeps due/number order", () => {
-  const region = renderRegion([ordered(2, 1)], "trusty-mpm");
+  const region = renderRegion([ordered(2, 1)]);
   assert.ok(!region.includes("Release-order"));
 
   // Same milestones, unkeyed: today's due_on/number order. Keyed: reordered,
@@ -262,4 +269,118 @@ test("release-order: the line is not published; unkeyed input keeps due/number o
   assert.deepEqual(numbersOf(plain), [72, 97, 124]);
   const keyed = [ordered(72, 3), ordered(97, 2), ordered(124, 1)];
   assert.notDeepEqual(numbersOf(keyed), numbersOf(plain));
+});
+
+// --- one page for every crate (owner instruction 2026-10-02) ---------------
+
+/** An untagged milestone: no `Roadmap:` line, optional Release-order key. */
+function untagged(number, title, extra = {}) {
+  return milestoneFixture({
+    number,
+    title,
+    description: "Internal notes only.",
+    html_url: `https://github.com/bobmatnyc/trusty-tools/milestone/${number}`,
+    ...extra,
+  });
+}
+
+test("crate assignment: title prefix, Roadmap line, area alias, else none", () => {
+  const cases = [
+    ["trusty-search 0.54.5 · bugfix", "", "trusty-search"],
+    ["trusty-agents-common 0.8.3 · bugfix", "", "trusty-agents-common"],
+    ["trusty agents mvp", "", "trusty-agents"],
+    ["trusty-code R1 · Reliable independent core", "", "trusty-code"],
+    // Title prefix wins over the Roadmap line's crate: the real secrets milestone.
+    ["trusty-secrets 0.1.0", "Prose.\n\nRoadmap: trusty-mpm · next", "trusty-secrets"],
+    ["cross-harness", "Prose.\n\nRoadmap: trusty-mpm · later", "trusty-mpm"],
+    ["Backlog · mpm/core", "", "trusty-mpm"],
+    ["Session, worktree & daemon lifecycle · mpm/core", "", "trusty-mpm"],
+    ["Backlog · memory (triaged)", "", "trusty-memory"],
+    ["Backlog · tc-services", "", "tc-services"],
+    ["Backlog · analyze/review", "", null],
+    ["Backlog · optimize", "", null],
+    ["Issue management", "Ticketing standard.", null],
+  ];
+  for (const [title, description, expected] of cases) {
+    assert.equal(crateOf({ title, description }), expected, title);
+  }
+});
+
+test("grouping: keyed crates by lowest Release-order, then by name, workspace last", () => {
+  const milestones = [
+    untagged(5, "Issue management"),
+    untagged(4, "trusty-search 0.54.5 · bugfix"),
+    untagged(3, "Backlog · console"),
+    milestoneFixture({
+      number: 2,
+      title: "trusty-secrets 0.1.0",
+      description: "Secrets prose.\n\nRoadmap: trusty-mpm · next\n---\nRelease-order: 2",
+    }),
+    milestoneFixture({
+      number: 1,
+      title: "trusty-mpm 1.8.0",
+      description: "Base prose.\n\nRoadmap: trusty-mpm · now\n---\nRelease-order: 1",
+    }),
+    milestoneFixture({
+      number: 6,
+      title: "trusty-mpm 2.2.0",
+      description: "Mods prose.\n\nRoadmap: trusty-mpm · later\n---\nRelease-order: 6",
+    }),
+  ];
+  assert.deepEqual(
+    groupByCrate(milestones).map((g) => g.crate),
+    ["trusty-mpm", "trusty-secrets", "trusty-console", "trusty-search", null],
+  );
+
+  const region = renderRegion(milestones);
+  const headings = region.split("\n").filter((l) => l.startsWith("#"));
+  assert.deepEqual(headings, [
+    "### trusty-mpm",
+    "#### 1.8.0 · Now",
+    "#### 2.2.0 · Later",
+    "### trusty-secrets",
+    "#### 0.1.0 · Next",
+    "### trusty-console",
+    "### trusty-search",
+    "### Across the workspace",
+  ]);
+  assert.ok(region.includes("Open milestones:\n\n- [Backlog · console]"));
+  assert.ok(region.includes("- [Issue management](https://github.com/bobmatnyc/trusty-tools/milestone/5)"));
+  assert.ok(!region.includes("Internal notes only."));
+});
+
+test("grouping: a crate's Roadmap milestones precede its other-milestones list", () => {
+  const region = renderRegion([
+    untagged(9, "trusty-mpm 1.7.10 · bugfix"),
+    milestoneFixture({ number: 8, title: "trusty-mpm 2.0.0" }),
+  ]);
+  assert.equal(
+    region,
+    "### trusty-mpm\n\n#### 2.0.0 · Next\n\nA public paragraph.\n\n" +
+      "1 of 4 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/1)\n\n" +
+      "Other open milestones:\n\n" +
+      "- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/9) · 1 of 4 items done",
+  );
+});
+
+test("grouping: closed milestones are dropped and input order never changes the output", () => {
+  const milestones = [
+    untagged(1, "trusty-memory 0.28.1 · bugfix"),
+    untagged(2, "trusty-memory 0.26.3 · bugfix", { state: "closed" }),
+    untagged(3, "Backlog · memory (triaged)"),
+    untagged(4, "trusty-review 0.37.0 · feature", { due_on: "2026-11-01T00:00:00Z" }),
+    untagged(5, "trusty-review 0.36.1 · bugfix"),
+    milestoneFixture({ number: 6, title: "trusty-search 0.54.3", description: "Fix.\n\nRoadmap: trusty-search · now" }),
+  ];
+  const region = renderRegion(milestones);
+  assert.ok(!region.includes("0.26.3"), "a closed milestone is not on the roadmap");
+  assert.equal(renderRegion([...milestones].reverse()), region);
+  assert.equal(renderRegion([milestones[3], milestones[0], milestones[5], milestones[2], milestones[4], milestones[1]]), region);
+  // Due-dated 0.37.0 sorts before undated 0.36.1 within trusty-review.
+  assert.ok(region.indexOf("0.37.0") < region.indexOf("0.36.1"));
+});
+
+test("an empty milestone reads 'no items yet', not '0 of 0'", () => {
+  const region = renderRegion([untagged(7, "trusty-review 0.36.3 · bugfix", { open_issues: 0, closed_issues: 0 })]);
+  assert.ok(region.endsWith("· no items yet"));
 });

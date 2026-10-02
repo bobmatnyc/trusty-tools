@@ -20,7 +20,12 @@
 use std::collections::BTreeSet;
 use std::fs;
 
-use crate::agent_assets::AGENT_ASSETS;
+use crate::agent_content::AgentRoster;
+
+/// The repository roster (`content/agents`, #9011) — what `AGENT_ASSETS` embedded.
+fn repo_roster() -> AgentRoster {
+    AgentRoster::load(&crate::agent_content::tests::repo_content()).expect("repo roster")
+}
 use crate::agents::deployer::deploy_agents;
 
 /// Built-ins every agent gets: read the tree, and nothing that writes it.
@@ -188,12 +193,12 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
 /// Why: the assertion has to read what Claude Code reads. Composing in memory
 /// would skip the strict-YAML validation the deployer runs, which is exactly
 /// the gate a malformed `tools:` line would trip.
-/// What: writes every [`AGENT_ASSETS`] entry to a temp source dir, runs
+/// What: writes every roster file to a temp source dir, runs
 /// [`deploy_agents`], and asserts nothing failed to compose.
 fn deploy_roster() -> (tempfile::TempDir, tempfile::TempDir) {
     let src = tempfile::tempdir().expect("source tempdir");
     let tgt = tempfile::tempdir().expect("target tempdir");
-    for (file_name, contents) in AGENT_ASSETS {
+    for (file_name, contents) in repo_roster().iter() {
         fs::write(src.path().join(file_name), contents).expect("write roster asset");
     }
     let skills = std::env::temp_dir().join("tm-roster-skills");
@@ -250,12 +255,12 @@ fn every_roster_agent_deploys_with_its_declared_tools() {
 /// Why: a new agent added to the roster with no table row would deploy with
 /// the all-tools default and nothing would say so. This is the gate that makes
 /// adding a row mandatory.
-/// What: compares the table's key set to `AGENT_ASSETS` minus the `BASE-*`
+/// What: compares the table's key set to the roster minus the `BASE-*`
 /// templates.
 /// Test: this test.
 #[test]
 fn tools_table_covers_every_dispatchable_roster_agent() {
-    let dispatchable: BTreeSet<String> = AGENT_ASSETS
+    let dispatchable: BTreeSet<String> = repo_roster()
         .iter()
         .map(|(file_name, _)| file_name.trim_end_matches(".md").to_string())
         .filter(|stem| !stem.starts_with("BASE-"))
@@ -280,7 +285,7 @@ fn tools_table_covers_every_dispatchable_roster_agent() {
 #[test]
 fn base_templates_declare_no_tools() {
     let (_src, tgt) = deploy_roster();
-    for (file_name, _) in AGENT_ASSETS {
+    for (file_name, _) in repo_roster().iter() {
         let stem = file_name.trim_end_matches(".md");
         if !stem.starts_with("BASE-") {
             continue;
@@ -430,7 +435,7 @@ fn no_skill_agent_points_at_unloadable_skill() {
 
     let skills = bundled_skill_names();
     let src = tempfile::tempdir().expect("source tempdir");
-    for (file_name, contents) in AGENT_ASSETS {
+    for (file_name, contents) in repo_roster().iter() {
         fs::write(src.path().join(file_name), contents).expect("write roster asset");
     }
     let mut dead = Vec::new();
@@ -500,7 +505,7 @@ fn no_skill_agent_points_at_unloadable_skill() {
 #[test]
 fn roster_agents_declare_no_tcode_tools() {
     let (_src, tgt) = deploy_roster();
-    for (file_name, _) in AGENT_ASSETS {
+    for (file_name, _) in repo_roster().iter() {
         let raw = fs::read_to_string(tgt.path().join(file_name)).expect("deployed file");
         assert!(
             !raw.contains("tcode_tools:"),

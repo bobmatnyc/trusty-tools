@@ -132,7 +132,7 @@ fn bundled_framework_manifest_is_valid() {
 
 #[test]
 fn bundled_agent_stems_excludes_foundations() {
-    let stems = bundled_agent_stems();
+    let stems = bundled_agent_stems(&crate::core::content_source::test_support::repo_roster());
     assert!(
         stems.contains("engineer"),
         "dispatchable agents are included"
@@ -163,7 +163,9 @@ fn bundled_agent_stems_excludes_foundations() {
 fn bundled_manifest_partitions_the_whole_catalog() {
     // Every bundled agent is declared exactly once — the invariant that makes a
     // newly added agent fail loudly instead of quietly never deploying.
-    let categories = framework_agent_categories().expect("valid");
+    // #9011: the strict partition, against the checkout roster.
+    let roster = crate::core::content_source::test_support::repo_roster();
+    let categories = framework_agent_categories_for(&roster).expect("valid");
     let declared: Vec<String> = labelled_stems(&categories)
         .into_iter()
         .map(|(_, stem)| stem.clone())
@@ -174,7 +176,7 @@ fn bundled_manifest_partitions_the_whole_catalog() {
     assert_eq!(sorted.len(), declared.len(), "no stem declared twice");
     assert_eq!(
         sorted,
-        bundled_agent_stems().into_iter().collect::<Vec<_>>(),
+        bundled_agent_stems(&roster).into_iter().collect::<Vec<_>>(),
         "the five categories must exactly cover the bundled catalog"
     );
 }

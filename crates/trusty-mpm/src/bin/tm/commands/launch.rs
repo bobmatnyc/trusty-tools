@@ -260,9 +260,11 @@ pub(crate) async fn launch(
             Ok(report) => {
                 // Issue #2149: a roster-deploy failure no longer aborts
                 // preparation — surface it loudly rather than let it hide.
+                // #9011 D4: printed, since `tm launch` has no tracing subscriber
+                // and no content would otherwise show no line at all.
                 for err in &report.roster_errors {
-                    tracing::error!(
-                        "roster provisioning gap for worktree {}: {err}",
+                    eprintln!(
+                        "error: roster provisioning gap for worktree {}: {err}",
                         managed_path.display()
                     );
                 }
@@ -553,8 +555,12 @@ pub(crate) async fn connect(
     //     project,local` and would never read a `$HOME/.claude` deploy.
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(&path, None, home) {
         Ok(report) => {
+            // #9011 D4: printed — `tm connect` has no tracing subscriber.
             for err in &report.roster_errors {
-                tracing::error!("roster provisioning gap for {}: {err}", path.display());
+                eprintln!(
+                    "error: roster provisioning gap for {}: {err}",
+                    path.display()
+                );
             }
             // #6649: silent on a clean checkout; one line per unclean kind.
             for notice in &report.asset_notices {

@@ -108,7 +108,19 @@ pub fn remove_project_tier_agent_strays(
     // #6649 fail-open deliverable: an empty roster classifies nothing. Treating
     // it as "nothing is bundled" would sweep nothing and report a clean tier —
     // the #4605 shape. It is reported as a refusal instead.
-    let roster = bundled_roster(paths);
+    // #9011: no resolvable content roster is a refusal too, naming the fix.
+    let roster = match bundled_roster(paths) {
+        Ok(roster) => roster,
+        Err(err) => {
+            return vec![refusal(
+                dir,
+                format!(
+                    "the bundled agent roster is unavailable ({err}) — cannot tell which \
+                     project-tier agents are bundled duplicates"
+                ),
+            )];
+        }
+    };
     if roster.is_empty() {
         return vec![refusal(
             dir,

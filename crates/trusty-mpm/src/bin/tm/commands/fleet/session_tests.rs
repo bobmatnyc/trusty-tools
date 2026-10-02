@@ -401,3 +401,14 @@ fn the_start_command_carries_the_chosen_session_names() {
         )
     );
 }
+
+/// #9097: the key `record_name` writes is one the host-config unknown-key
+/// report exempts, so renaming either side cannot bring the warning back.
+#[test]
+fn the_recorded_session_key_is_exempt_from_the_unknown_key_report() {
+    let path = format!("supervisor.{}", super::SESSION_KEY);
+    assert!(
+        trusty_mpm::core::config_keys::KEYS_READ_ELSEWHERE.contains(&path.as_str()),
+        "{path} is written by `tm fleet init` but would be reported as unrecognised"
+    );
+}

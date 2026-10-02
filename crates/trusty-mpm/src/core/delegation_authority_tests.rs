@@ -400,8 +400,7 @@ fn every_bundled_non_base_agent_reaches_the_roster() {
     // `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
     // asserts at the scanner level — one guards the shipped files, the
     // other guards the rule, and #4589 needed both.
-    let assets =
-        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf();
+    let assets = crate::core::content_source::test_support::repo_agents_dir();
 
     let mut expected: Vec<String> = fs::read_dir(&assets)
         .expect("bundled agent assets dir")
