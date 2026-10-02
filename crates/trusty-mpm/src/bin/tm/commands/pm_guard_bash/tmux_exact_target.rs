@@ -14,14 +14,17 @@
 //! tmux will not list (no binary, a query error, a refused spawn), and an
 //! empty session part when the caller's pane is unknown all deny. No server
 //! running lists nothing, so every target on it denies.
-//! Residual: a hit this guard cannot read (`Hit::opaque`) and an omitted
-//! target are left to the #8902 floor. The listing is read before the command
-//! runs, so a session the same command creates denies.
+//! #9001 critic r1: a hit the guard cannot read (`Hit::opaque`) denies here
+//! too, naming its token or reason, Architect live or not; an unparseable
+//! command counts only when it names `tmux`. A pane-position word (`top`,
+//! `bottom-left`, …) is no exact target for a pane verb.
+//! Residual: an omitted target is left to the #8902 floor. The listing is
+//! read before the command runs, so a session the same command creates denies.
 //! Test: `tmux_exact_target_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_tmux_target_9001.rs`.
 
 use super::architect_pane::PaneProbe;
-use super::architect_pane_parse::{Hit, Target, tmux_hits};
+use super::architect_pane_parse::{Hit, Target, UNPARSED, may_run_tmux, tmux_hits};
 use super::architect_pane_probe::Listed;
 
 /// The rule name recorded with an exact-target deny.
@@ -70,7 +73,8 @@ const SPECIAL: &[char] = &[
 /// exactly ([`resolve_exactly`]) denies, naming the target.
 /// Test: `an_exact_target_passes_and_a_prefix_or_missing_one_denies`,
 /// `an_unlistable_server_denies_every_target`,
-/// `a_live_prefix_collision_denies_on_a_private_server`.
+/// `a_live_prefix_collision_denies_on_a_private_server`,
+/// `every_unreadable_tmux_command_denies_naming_why`.
 pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -> Option<String> {
     let hits = tmux_hits(command);
     if hits.is_empty() {
@@ -81,7 +85,16 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
         .then(|| probe.current_pane())
         .flatten();
     let mut listed: Vec<(&[String], Listing)> = Vec::new();
-    for hit in hits.iter().filter(|h| h.opaque.is_none()) {
+    for hit in &hits {
+        // #9001 critic r1: #8902 judges an opaque hit only while an Architect
+        // is live; this floor binds every caller.
+        if let Some(why) = hit.opaque {
+            if why != UNPARSED || may_run_tmux(command, 0) {
+                return Some(unreadable(hit, why));
+            }
+            continue;
+        }
+        let pane = PANE_VERBS.contains(&hit.verb.as_str());
         for target in &hit.targets {
             let text = match target {
                 Target::Literal(text) => text,
@@ -101,7 +114,7 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
                 Ok(objects) => objects,
                 Err(err) => return Some(unlisted(hit, text, err)),
             };
-            if let Err(why) = resolve_exactly(text, objects, current.as_deref()) {
+            if let Err(why) = resolve_exactly(text, objects, current.as_deref(), pane) {
                 return Some(refusal(hit, text, why));
             }
         }
@@ -109,18 +122,58 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
     None
 }
 
+/// The verbs whose `-t` names a pane, so a bare word is first read as a pane
+/// of the caller's window (tmux `cmd_find_target`).
+const PANE_VERBS: &[&str] = &[
+    "send-keys",
+    "send-prefix",
+    "paste-buffer",
+    "pipe-pane",
+    "kill-pane",
+    "respawn-pane",
+    "swap-pane",
+    "join-pane",
+    "move-pane",
+    "break-pane",
+    "clear-history",
+];
+
+/// Words tmux reads as a pane position in a window (`window_find_string`,
+/// case-insensitive) — plus the hyphenless and `-of` spellings, refused too.
+const PANE_POSITIONS: &[&str] = &[
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "top-left",
+    "top-right",
+    "bottom-left",
+    "bottom-right",
+    "topleft",
+    "topright",
+    "bottomleft",
+    "bottomright",
+    "up-of",
+    "down-of",
+    "left-of",
+    "right-of",
+];
+
 /// `Ok` when `text` names existing objects with no prefix or pattern step.
 ///
 /// What: `session:window.pane` resolves each part in turn; an empty session
 /// part is the caller's session. A word with no colon is an id (`%N`, `@N`,
 /// `$N`, a `.pane` allowed after `@N`), an `=name`, or a session name that
 /// no window name starts with — tmux tries windows of a session it picks
-/// before sessions.
-/// Test: `an_exact_target_passes_and_a_prefix_or_missing_one_denies`.
+/// before sessions. With `pane`, a [`PANE_POSITIONS`] word is refused: tmux
+/// reads it as a pane of the caller's window before any session (#9001).
+/// Test: `an_exact_target_passes_and_a_prefix_or_missing_one_denies`,
+/// `a_pane_position_word_is_no_exact_pane_target`.
 pub(super) fn resolve_exactly(
     text: &str,
     rows: &[TmuxObject],
     current: Option<&str>,
+    pane: bool,
 ) -> Result<(), &'static str> {
     if text.is_empty() || text == "=" || text.contains(SPECIAL) {
         return Err("it is empty, a special token, a glob or a format");
@@ -129,6 +182,13 @@ pub(super) fn resolve_exactly(
         return Err("it is a relative token");
     }
     let Some((session, rest)) = text.split_once(':') else {
+        // #9001 critic r1: `-t top` reached the top pane, not session `top`.
+        if pane && PANE_POSITIONS.iter().any(|w| text.eq_ignore_ascii_case(w)) {
+            return Err(
+                "it is a pane position word, which tmux reads as a pane of the \
+                 caller's window before any session",
+            );
+        }
         return bare(text, rows);
     };
     let in_session = session_rows(session, rows, current)?;
@@ -367,6 +427,21 @@ fn refusal(hit: &Hit, target: &str, why: &str) -> String {
          prefix, so the command could reach another live session (owner ruling 2026-10-01). \
          {REMEDY}",
         hit.verb
+    )
+}
+
+/// The deny for a tmux command the guard cannot read (#9001 critic r1).
+fn unreadable(hit: &Hit, why: &str) -> String {
+    let shown = match (&hit.token, hit.verb.as_str()) {
+        (Some(token), _) => token.clone(),
+        (None, "") => "tmux".to_owned(),
+        (None, verb) => format!("tmux {verb}"),
+    };
+    format!(
+        "Hard-floor deny (#9001): the guard cannot read the tmux command at `{shown}` ({why}), \
+         so it cannot check that its target resolves exactly to an existing tmux session, \
+         window or pane. A target the guard cannot resolve is refused (owner ruling \
+         2026-10-01). {REMEDY}"
     )
 }
 

@@ -134,8 +134,55 @@ fn mentions_d4_word(text: &str) -> bool {
 /// every token right after a wrapper word, a `timeout` duration, or a
 /// [`EXEC_FLAGS`] flag. A wrapper followed by a flag makes EVERY token a
 /// candidate — fail closed.
-/// Test: `a_wrapped_program_is_still_found`.
+/// #9001 critic r1: leading shell grammar ([`grammar_prefix`]) is skipped
+/// first, and a `(` glued to the program word (`(tmux …`) is dropped.
+/// Test: `a_wrapped_program_is_still_found`,
+/// `a_program_after_shell_grammar_is_found`.
 pub(super) fn program_positions(argv: &[String]) -> Vec<(usize, String)> {
+    let lead = grammar_prefix(argv);
+    let words: Vec<String> = argv[lead..]
+        .iter()
+        .map(|t| t.trim_start_matches('(').to_string())
+        .collect();
+    positions_past_wrappers(&words)
+        .into_iter()
+        .map(|(i, program)| (i + lead, program))
+        .collect()
+}
+
+/// Shell words after which the next word starts a command (#9001).
+const COMMAND_STARTERS: &[&str] = &[
+    "{", "(", "!", "if", "then", "else", "elif", "do", "while", "until",
+];
+
+/// How many leading words of `argv` are shell grammar, not a command: the
+/// [`COMMAND_STARTERS`], a function header (`f()`, `f ()`, `function f`), and
+/// a `case WORD in` header and a `case` pattern (`a)`, `*)`).
+///
+/// Why: #9001 critic r1 — `{ tmux …; }`, `if …; then tmux …; fi` and
+/// `f() { tmux …; }` hid the program word behind the grammar before it.
+/// Test: `a_program_after_shell_grammar_is_found`.
+fn grammar_prefix(argv: &[String]) -> usize {
+    let mut i = 0;
+    while let Some(tok) = argv.get(i).map(String::as_str) {
+        let next = argv.get(i + 1).map(String::as_str);
+        i += if COMMAND_STARTERS.contains(&tok) || (tok.len() > 2 && tok.ends_with("()")) {
+            1
+        } else if tok == "function" || next == Some("()") {
+            2
+        } else if tok == "case" && argv.get(i + 2).is_some_and(|w| w == "in") {
+            3
+        } else if tok.len() > 1 && tok.ends_with(')') && !tok.contains(['(', '$', '`']) {
+            1
+        } else {
+            break;
+        };
+    }
+    i.min(argv.len())
+}
+
+/// [`program_positions`] for words that start with a command.
+fn positions_past_wrappers(argv: &[String]) -> Vec<(usize, String)> {
     let base = |tok: &str| {
         let tok = tok.strip_prefix('\\').unwrap_or(tok);
         tok.rsplit('/').next().unwrap_or(tok).to_string()

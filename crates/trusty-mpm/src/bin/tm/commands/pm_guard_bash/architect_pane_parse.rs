@@ -23,6 +23,7 @@ use super::architect_pane_verbs::{DENY_VERBS, Resolved, Verb, resolve};
 use super::floor_d4::{program_positions, segments};
 use super::shell_lex::QuoteScan;
 use super::{command_substitutions, unclassifiable_command};
+use crate::commands::hook_rewrite::is_env_assignment;
 
 /// Nesting depth past which arguments are no longer read as commands.
 const MAX_DEPTH: usize = 3;
@@ -90,11 +91,22 @@ impl Hit {
 
     /// #9001: an unparseable command, naming the text that did not parse.
     fn unparsed(text: &str) -> Self {
-        let mut hit = Self::opaque("", &[], "the command does not parse");
+        Self::named(UNPARSED, text)
+    }
+
+    /// #9001: an opaque hit naming the text it could not read.
+    fn named(why: &'static str, text: &str) -> Self {
+        let mut hit = Self::opaque("", &[], why);
         hit.token = Some(text.chars().take(80).collect());
         hit
     }
 }
+
+/// The [`Hit::opaque`] reason of a command that does not parse.
+pub(super) const UNPARSED: &str = "the command does not parse";
+
+/// #9001 critic r1: a program word the shell expands (`T=tmux; $T …`).
+const DYNAMIC_PROGRAM: &str = "its program word is one the shell expands";
 
 /// Where a tmux command runs, which decides what an omitted target means.
 #[derive(Debug, Clone)]
@@ -165,7 +177,7 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
 /// Whether shell text that does not parse could run a deny-set tmux command:
 /// it names `tmux` and, below the top level, also a deny verb — so typed
 /// prose with an apostrophe that mentions tmux is not refused.
-fn may_run_tmux(text: &str, depth: usize) -> bool {
+pub(super) fn may_run_tmux(text: &str, depth: usize) -> bool {
     let words = || text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
     words().any(|w| w == "tmux")
         && (depth == 0 || words().any(|w| DENY_VERBS.iter().any(|v| v.name == w || v.alias == w)))
@@ -227,6 +239,10 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
         let texts: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
         for (pos, base) in program_positions(&texts) {
             out.dynamic_env |= assigns_dynamic_name(&texts[pos..]);
+            // #9001 critic r1: `T=tmux; $T send-keys …` runs a tmux it names.
+            if words[pos].dynamic && !is_env_assignment(&texts[pos]) && may_run_tmux(command, 0) {
+                out.hits.push(Hit::named(DYNAMIC_PROGRAM, &texts[pos]));
+            }
             if base == "tmux" {
                 let reset = resets_env(&texts[..pos]);
                 invocation(&words[pos + 1..], depth, reset, out);
@@ -559,10 +575,12 @@ fn deny_targets(verb: &Verb, args: &[Word]) -> Result<Option<Vec<Target>>, &'sta
     if verb.name == "send-keys" && has('c') {
         return Err("`-c` sends keys through a client whose pane is unknown");
     }
-    if verb.name == "kill-server" || (verb.name == "kill-session" && has('a')) {
-        return Ok(Some(vec![Target::Server]));
-    }
     let mut targets = values('t');
+    if verb.name == "kill-server" || (verb.name == "kill-session" && has('a')) {
+        // #9001 critic r1: `kill-session -a -t X` still names `X`.
+        targets.insert(0, Target::Server);
+        return Ok(Some(targets));
+    }
     if targets.is_empty() {
         targets.push(Target::Current);
     }

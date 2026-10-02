@@ -10,12 +10,16 @@
 //! the `*.architect-session` sidecars (`tm fleet init --session`) are marked
 //! too; when those do not read either, the listing is `Err` and the command
 //! is denied. Read only when a deny-set tmux command is in the call.
+//! #9001 critic r1: every listing of one probe shares [`LISTING_BUDGET`]; a
+//! tmux that does not answer in time is `Err`, which denies.
 //! Test: `a_pane_listing_marks_the_architect_by_lineage_and_session`,
-//! `a_pane_listing_run_is_classified`; end to end in
+//! `a_pane_listing_run_is_classified`,
+//! `a_stopped_tmux_server_times_out_the_listing`; end to end in
 //! `tests/tm_hook_pm_guard_architect_pane_8902.rs`.
 
 use std::cell::OnceCell;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use trusty_mpm::core::architect_launch::live_architect_lineage;
 use trusty_mpm::core::architect_session::recorded_session_names;
@@ -33,7 +37,15 @@ pub(crate) struct LivePanes {
     root: Option<PathBuf>,
     lineage: OnceCell<Result<Vec<u32>, String>>,
     marks: OnceCell<Result<ArchitectMarks, String>>,
+    /// When [`LISTING_BUDGET`] runs out, set by the first listing.
+    deadline: OnceCell<Instant>,
 }
+
+/// How long one probe may spend in every tmux listing it runs (#9001).
+///
+/// Why: the hook is killed at 5 s, and a stopped server never answers; the
+/// #8902 and #9001 floors may each list the same server.
+pub(super) const LISTING_BUDGET: Duration = Duration::from_secs(2);
 
 /// What marks a pane as the Architect's, beside the `tm-architect` name.
 #[derive(Debug, Default)]
@@ -81,7 +93,35 @@ impl LivePanes {
                 .map(|home| home.join(".trusty-mpm")),
             lineage: OnceCell::new(),
             marks: OnceCell::new(),
+            deadline: OnceCell::new(),
         }
+    }
+
+    /// What is left of [`LISTING_BUDGET`]; the first call starts it.
+    fn budget(&self) -> Duration {
+        let end = *self
+            .deadline
+            .get_or_init(|| Instant::now() + LISTING_BUDGET);
+        end.saturating_duration_since(Instant::now())
+    }
+
+    /// One listing on `server`, bounded by what is left of the budget.
+    fn list<T>(
+        &self,
+        server: &[String],
+        format: &str,
+        classify: impl FnOnce(Listed<'_>) -> T,
+    ) -> T {
+        let budget = self.budget();
+        list_panes(server, format, classify, |argv| {
+            if budget.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the tmux listing budget is spent",
+                ));
+            }
+            trusty_mpm::core::tmux::run_tmux_argv_bounded(argv, budget)
+        })
     }
 
     fn lineage(&self) -> &Result<Vec<u32>, String> {
@@ -110,7 +150,7 @@ impl PaneProbe for LivePanes {
     }
 
     fn panes(&self, server: &[String]) -> Result<Vec<Pane>, String> {
-        list_panes(server, PANE_FORMAT, |listed| {
+        self.list(server, PANE_FORMAT, |listed| {
             classify_listing(listed, self.marks())
         })
     }
@@ -120,16 +160,21 @@ impl PaneProbe for LivePanes {
     }
 
     fn objects(&self, server: &[String]) -> Result<Vec<TmuxObject>, String> {
-        list_panes(server, OBJECT_FORMAT, classify_objects)
+        self.list(server, OBJECT_FORMAT, classify_objects)
     }
 }
 
-/// Run `tmux <server> list-panes -a -F <format>` and hand what it gave to
-/// `classify`.
-fn list_panes<T>(server: &[String], format: &str, classify: impl FnOnce(Listed<'_>) -> T) -> T {
+/// Run `tmux <server> list-panes -a -F <format>` through `run` and hand what
+/// it gave to `classify`; a run that timed out is [`Listed::Failed`].
+pub(super) fn list_panes<T>(
+    server: &[String],
+    format: &str,
+    classify: impl FnOnce(Listed<'_>) -> T,
+    run: impl FnOnce(&[String]) -> std::io::Result<std::process::Output>,
+) -> T {
     let mut argv = server.to_vec();
     argv.extend(["list-panes", "-a", "-F", format].map(str::to_owned));
-    let run = trusty_mpm::core::tmux::run_tmux_argv(&argv);
+    let run = run(&argv);
     let (stdout, stderr) = match &run {
         Ok(out) => (
             String::from_utf8_lossy(&out.stdout),

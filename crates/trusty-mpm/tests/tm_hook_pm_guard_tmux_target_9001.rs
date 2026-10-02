@@ -88,3 +88,27 @@ fn an_unlistable_tmux_target_is_refused_under_each_bypass() {
         assert!(!out.contains("#9001"), "{command}: {out}");
     }
 }
+
+/// #9001 critic r1: a tmux command the guard cannot read, one behind shell
+/// grammar, and `kill-session -a` with a target are refused under each
+/// bypass with no Architect live.
+#[test]
+fn an_unreadable_or_grammar_wrapped_tmux_command_is_refused_under_each_bypass() {
+    let send = "tmux send-keys -t =nosuch9001:0 hi";
+    let commands = [
+        format!("sudo {send}"),
+        format!("TMUX_TMPDIR=/tmp/x9001 {send}"),
+        format!("{{ {send}; }}"),
+        format!("if true; then {send}; fi"),
+        format!("f() {{ {send}; }}; f"),
+        "tmux kill-session -a -t =nosuch9001".to_owned(),
+    ];
+    for command in &commands {
+        for bypass in BYPASSES {
+            let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+            let out = guard(command, &env);
+            assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
+            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+    }
+}
