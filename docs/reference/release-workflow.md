@@ -160,10 +160,6 @@ Owner ruling: item 47, 2026-09-30.
    live verification (`status:merged` or `status:tested`) stays in the
    milestone that just closed.
 
-For trusty-mpm and other daemon/service binaries, follow
-[Install Checkpoint Runbook](./install-checkpoint.md) for safe restart,
-pairing validation, and rollback procedures.
-
 > **Site link (owner ruling):** every crate's `Cargo.toml` `homepage` field
 > points at `https://trustytools.dev`, and the `release` job in
 > `.github/workflows/release.yml` prepends `Site: https://trustytools.dev` to
