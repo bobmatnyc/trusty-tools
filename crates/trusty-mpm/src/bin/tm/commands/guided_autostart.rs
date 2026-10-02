@@ -139,16 +139,19 @@ enum LaunchctlOutcome {
 /// skips the spawn step when the service is already loaded (EALREADY) — the
 /// check targets the main daemon, NOT the optional supervisor (#1900);
 /// (2) when launchd is unavailable, the main-daemon plist is absent, or on
-/// non-macOS, removes any stale lock file and spawns the current executable with
+/// non-macOS, asks [`plan_autostart_at`] (#9034): a live lock pid keeps the
+/// lock and skips the spawn; otherwise it spawns the current executable with
 /// the `daemon` subcommand in a detached process (recording the child PID in a
 /// discoverable pidfile); (3) polls `/health` every 500 ms for up to 5 s via
 /// lock-file URL resolution; (4) returns the resolved daemon URL on success or,
 /// on timeout, removes any pidfile written by this call's fallback spawn (so a
-/// failed autostart leaves no stale PID) and returns `Err`. The `_url` parameter
-/// is intentionally unused: after auto-start the lock file records the actual
-/// bound address.
-/// Test: launchd path requires a macOS launchd environment; the pure gate
-/// (`main_daemon_managed_by_launchd_in`) and pidfile helpers are unit-tested;
+/// failed autostart leaves no stale PID) and returns `Err` — a
+/// [`super::guided_liveness::DaemonAliveUnresponsive`] when liveness evidence
+/// skipped the spawn. The `_url` parameter is intentionally unused: after
+/// auto-start the lock file records the actual bound address.
+/// Test: launchd path requires a macOS launchd environment; the pure gates
+/// (`main_daemon_managed_by_launchd_in`, `plan_autostart_at`,
+/// `classify_bootstrap_failure`) and pidfile helpers are unit-tested;
 /// detached-spawn and polling paths are covered by the guided-default e2e suite.
 pub(crate) async fn ensure_daemon_started(
     client: &reqwest::Client,
@@ -180,11 +183,17 @@ pub(crate) async fn ensure_daemon_started(
     // launchd path (or when no spawn happened) this stays `None` and no pidfile
     // is touched — we only ever remove a pidfile this call actually created.
     let mut spawned_root: Option<std::path::PathBuf> = None;
-    if needs_spawn {
+    // #9034: a loaded service or a live lock pid keeps the lock and skips the
+    // spawn; the poll below then waits for that daemon instead.
+    let plan = plan_autostart_at(&trusty_mpm::core::lock_file_path(), !needs_spawn);
+    let evidence = match plan {
+        AutostartPlan::AwaitExisting(evidence) => Some(evidence),
+        AutostartPlan::Spawn => None,
+    };
+    if evidence.is_none() {
         // launchd not available or plist absent — fall back to detached spawn,
-        // the same approach used by `commands::daemon::start`.
-        let lock_path = trusty_mpm::core::lock_file_path();
-        let _ = std::fs::remove_file(&lock_path);
+        // the same approach used by `commands::daemon::start`. A dead-pid lock
+        // was already removed by `plan_autostart_at`.
         let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
         std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
         let log_path = root.join("daemon.log");
@@ -238,7 +247,47 @@ pub(crate) async fn ensure_daemon_started(
     if let Some(root) = spawned_root.as_deref() {
         remove_autostart_pidfile(root);
     }
+    // #9034: the daemon exists but is slow — the caller must not go offline.
+    if let Some(evidence) = evidence {
+        return Err(super::guided_liveness::DaemonAliveUnresponsive { evidence }.into());
+    }
     anyhow::bail!("daemon did not become healthy within 5 s after auto-start")
+}
+
+/// What autostart does about `daemon.lock` and the spawn.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AutostartPlan {
+    /// No live daemon evidence: spawn one. Any dead-pid lock is already gone.
+    Spawn,
+    /// A daemon exists; keep the lock and wait. The string names the evidence.
+    AwaitExisting(String),
+}
+
+/// Decide whether autostart may spawn, removing `daemon.lock` only when stale.
+///
+/// Why: #9034 — autostart deleted the lock unconditionally before spawning,
+/// even while launchd held the service and the lock's pid was serving. Seven
+/// spawns were refused and the live daemon lost its discovery record.
+/// What: `service_loaded` → `AwaitExisting`, lock untouched. Otherwise
+/// [`trusty_mpm::core::daemon_identity::read_lock_at`] decides: a live pid →
+/// `AwaitExisting`, lock kept; a dead pid of ours is removed by that call →
+/// `Spawn`; a missing or foreign file → `Spawn`, foreign file left in place.
+/// Test: `autostart_keeps_lock_with_live_pid`,
+/// `autostart_keeps_lock_when_service_loaded`,
+/// `autostart_clears_dead_pid_lock_and_spawns`.
+pub(crate) fn plan_autostart_at(
+    lock_path: &std::path::Path,
+    service_loaded: bool,
+) -> AutostartPlan {
+    if service_loaded {
+        return AutostartPlan::AwaitExisting("the launchd service is loaded".to_string());
+    }
+    match trusty_mpm::core::daemon_identity::read_lock_at(lock_path) {
+        Some(lock) => {
+            AutostartPlan::AwaitExisting(format!("daemon.lock names live pid {}", lock.pid))
+        }
+        None => AutostartPlan::Spawn,
+    }
 }
 
 /// Attempt to start the daemon via launchd `bootstrap` (macOS only).
@@ -282,15 +331,50 @@ fn try_launchctl_start(plist_path: &std::path::Path) -> LaunchctlOutcome {
     if output.status.success() {
         return LaunchctlOutcome::Launched;
     }
-    // exit 37 = EALREADY; some launchctl versions surface this in stderr instead.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.code() == Some(37)
+    classify_bootstrap_failure(output.status.code(), &stderr, || {
+        launchd_service_loaded(&domain, MAIN_DAEMON_PLIST_LABEL)
+    })
+}
+
+/// Classify a failed `launchctl bootstrap` as already-loaded or unavailable.
+///
+/// Why: #9034 — current macOS answers a bootstrap of a loaded service with
+/// `Bootstrap failed: 5: Input/output error`, not exit 37, so a loaded
+/// service read as Unavailable and autostart deleted the lock and spawned.
+/// What: exit 37 (EALREADY) or a matching stderr is `AlreadyLoaded` as before;
+/// any other failure asks `service_loaded` and is `AlreadyLoaded` when it says
+/// yes, `Unavailable` otherwise.
+/// Test: `bootstrap_exit_5_on_loaded_service_is_already_loaded`,
+/// `bootstrap_failure_on_unloaded_service_is_unavailable`.
+#[cfg(target_os = "macos")]
+fn classify_bootstrap_failure(
+    code: Option<i32>,
+    stderr: &str,
+    service_loaded: impl FnOnce() -> bool,
+) -> LaunchctlOutcome {
+    // exit 37 = EALREADY; some launchctl versions surface this in stderr instead.
+    if code == Some(37)
         || stderr.contains("already bootstrapped")
         || stderr.contains("service already loaded")
+        || service_loaded()
     {
         return LaunchctlOutcome::AlreadyLoaded;
     }
     LaunchctlOutcome::Unavailable
+}
+
+/// Whether launchd has `label` loaded in `domain` (`launchctl print` exits 0).
+///
+/// Test: I/O probe; the decision it feeds is `classify_bootstrap_failure`.
+#[cfg(target_os = "macos")]
+fn launchd_service_loaded(domain: &str, label: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", &format!("{domain}/{label}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Extract the host token from a git remote URL (lowercased input expected).
@@ -439,6 +523,33 @@ mod tests {
             !path.exists(),
             "remove_autostart_pidfile must delete the pidfile"
         );
+    }
+
+    /// #9034: `Bootstrap failed: 5` on a loaded service must not read as
+    /// Unavailable — that verdict deletes `daemon.lock` and spawns.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bootstrap_exit_5_on_loaded_service_is_already_loaded() {
+        let outcome =
+            classify_bootstrap_failure(Some(5), "Bootstrap failed: 5: Input/output error", || true);
+        assert!(
+            matches!(outcome, LaunchctlOutcome::AlreadyLoaded),
+            "a loaded service must be AlreadyLoaded whatever bootstrap's exit code"
+        );
+    }
+
+    /// #9034: the probe only rescues a loaded service; an unloaded one with an
+    /// unknown failure is still Unavailable, so a real down daemon is started.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bootstrap_failure_on_unloaded_service_is_unavailable() {
+        let outcome =
+            classify_bootstrap_failure(Some(5), "Bootstrap failed: 5: Input/output error", || {
+                false
+            });
+        assert!(matches!(outcome, LaunchctlOutcome::Unavailable));
+        let ealready = classify_bootstrap_failure(Some(37), "", || false);
+        assert!(matches!(ealready, LaunchctlOutcome::AlreadyLoaded));
     }
 
     /// Verify github_host strips a port suffix from scheme-style URLs.
