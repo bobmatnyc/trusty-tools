@@ -573,6 +573,31 @@ fn installed_bundle_serves_its_files() {
     assert!(content.list("agents").expect("list").is_empty());
 }
 
+/// #8378: a former class name fails loud in both backings; a valid class with
+/// no files stays `Ok(empty)`.
+#[test]
+fn list_of_an_unknown_class_is_an_error_in_both_backings() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    install_valid(dir.path());
+    let installed = resolve(&options(dir.path(), DevOverride::Off)).expect("resolve");
+    let checkout = tempfile::tempdir().expect("tempdir");
+    make_checkout(checkout.path());
+    let dev = resolve(&options(
+        &checkout.path().join("no-cache"),
+        DevOverride::At(checkout.path().to_path_buf()),
+    ))
+    .expect("resolve");
+    for content in [&installed, &dev] {
+        for class in ["output-styles", "output-styles/tm", "", "agentsX"] {
+            assert!(
+                matches!(content.list(class), Err(ContentError::UnknownClass { .. })),
+                "{class:?} must be UnknownClass"
+            );
+        }
+        assert!(content.list("agents").expect("known class").is_empty());
+    }
+}
+
 #[test]
 fn dev_checkout_serves_working_tree_files() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -591,7 +616,10 @@ fn dev_checkout_serves_working_tree_files() {
         content.list("skills").expect("list"),
         ["skills/tm/SKILL.md"]
     );
-    assert!(content.list("no-such-class").expect("list").is_empty());
+    assert!(matches!(
+        content.list("no-such-class"),
+        Err(ContentError::UnknownClass { .. })
+    ));
 }
 
 #[test]
@@ -996,7 +1024,10 @@ fn dev_checkout_serves_a_nested_destination_from_its_own_source() {
         content.list("instructions/output-styles").expect("list"),
         ["instructions/output-styles/tm.md"]
     );
-    assert!(content.list("output-styles").expect("list").is_empty());
+    assert!(matches!(
+        content.list("output-styles"),
+        Err(ContentError::UnknownClass { .. })
+    ));
     assert!(matches!(
         content.read("output-styles/tm.md"),
         Err(ContentError::NotFound { .. })

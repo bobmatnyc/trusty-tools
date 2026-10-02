@@ -145,6 +145,13 @@ pub enum ContentError {
         /// The rejected path.
         path: String,
     },
+    /// A listing named a class other than `agents`, `skills` or `instructions`
+    /// (#8378): a former class name fails loud instead of listing nothing.
+    #[error("{class:?} is not a content class (expected agents, skills or instructions)")]
+    UnknownClass {
+        /// The rejected class or destination.
+        class: String,
+    },
     /// The content path does not exist in the resolved source.
     #[error("content path {path:?} does not exist")]
     NotFound {

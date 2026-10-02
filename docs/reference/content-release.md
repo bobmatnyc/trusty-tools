@@ -181,6 +181,7 @@ files = 4
 
 `schema_major` starts at 1. It changes only when the archive layout or the
 manifest keys change in a way an older reader cannot handle.
+A reader ignores manifest tables it does not know; a new table is not a schema change.
 
 ## Determinism
 

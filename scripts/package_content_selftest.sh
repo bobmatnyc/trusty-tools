@@ -23,9 +23,10 @@
 #                   bundle-manifest.toml and the three class directories
 #                   agents/, skills/, instructions/ at the top (#8378)
 #     sha256        the sidecar verifies against the tarball
-#     fail-open     a missing class directory, an empty one, and a symlink
-#                   each exit 1 and leave no tarball behind (the missing
-#                   case runs into an out-dir that already held a bundle)
+#     fail-open     a missing class directory, an empty one, a symlink, and
+#                   a table repeating a destination each exit 1 and leave
+#                   no tarball behind (the missing case runs into an out-dir
+#                   that already held a bundle)
 #     usage         a non-SemVer --version, a multi-line one and one holding
 #                   a carriage return each exit 2 and write nothing
 #     relative      a relative --out-dir and --source-root resolve against
@@ -216,6 +217,23 @@ expect_refusal "empty class directory" "$TMP_ROOT/empty" "$TMP_ROOT/out-empty"
 new_tree "$TMP_ROOT/link"
 ln -s /etc/hosts "$TMP_ROOT/link/agents/escape.md"
 expect_refusal "symlink in a class" "$TMP_ROOT/link" "$TMP_ROOT/out-link"
+# Two table rows with one destination put one path in the bundle twice (#8378).
+# No source tree can do that: a nested destination's directory is skipped by its
+# parent's walk. So run a copy of the packer whose table repeats `agents`.
+mkdir -p "$TMP_ROOT/dup-packer/scripts"
+awk '{ print } /^agents=/ { print }' "$PACKER" > "$TMP_ROOT/dup-packer/scripts/package_content.sh"
+chmod +x "$TMP_ROOT/dup-packer/scripts/package_content.sh"
+new_tree "$TMP_ROOT/dup"
+rc=0
+"$TMP_ROOT/dup-packer/scripts/package_content.sh" --version 1.2.3 \
+  --out-dir "$TMP_ROOT/out-dup" --source-root "$TMP_ROOT/dup" \
+  > "$TMP_ROOT/last.log" 2>&1 || rc=$?
+if [ "$rc" = 1 ] && grep -q "two sources put" "$TMP_ROOT/last.log" \
+    && [ ! -e "$TMP_ROOT/out-dup/$TARBALL" ] && [ ! -e "$TMP_ROOT/out-dup/$TARBALL.sha256" ]; then
+  pass "two sources for one bundle path -> exit 1, no bundle"
+else
+  fail "duplicate destination: exit $rc; log: $(cat "$TMP_ROOT/last.log")"
+fi
 
 echo "usage:"
 # expect_usage <label> <version>: exit 2 and nothing written to the out-dir.
