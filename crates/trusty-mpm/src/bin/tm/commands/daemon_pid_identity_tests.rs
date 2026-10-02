@@ -114,12 +114,17 @@ fn real_pid_identity_never_calls_sleep_a_daemon() {
 
 #[test]
 fn find_daemon_pids_finds_a_tm_daemon_process() {
-    // A process named `tm` whose argv is exactly `tm daemon`: a copy of bash
-    // running the script `./daemon`, which blocks in the `read` builtin on a
-    // piped stdin — no child process. This is what `tm stop` must find.
+    // A process named `tm` whose argv is exactly `tm daemon`: bash, reached
+    // through a SYMLINK named `tm`, running the script `./daemon`, which blocks
+    // in the `read` builtin on a piped stdin — no child process. This is what
+    // `tm stop` must find.
+    // #9034: a symlink, never a copied executable. Writing a binary and then
+    // exec'ing it races a sibling test thread's fork, which inherits the open
+    // write fd and fails the exec with ETXTBSY. Only the `daemon` script is
+    // written, and bash reads it, never execs it.
     let tmp = tempfile::tempdir().expect("tempdir");
     let tm = tmp.path().join("tm");
-    std::fs::copy("/bin/bash", &tm).expect("copy bash as tm");
+    std::os::unix::fs::symlink("/bin/bash", &tm).expect("symlink bash as tm");
     std::fs::write(tmp.path().join("daemon"), "read -r _\n").expect("write script");
     let child = KillOnDrop(
         std::process::Command::new(&tm)
