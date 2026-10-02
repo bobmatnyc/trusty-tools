@@ -416,6 +416,8 @@ async fn run_managed(
     account: Option<&str>,
     account_token: Option<&str>,
 ) -> anyhow::Result<()> {
+    // #9091: a broken `[accounts]` table refuses here, before anything is touched.
+    accounts_preflight(account, clone_url)?;
     let checkout =
         trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout(
             owner, repo, clone_url, account,
@@ -483,6 +485,33 @@ async fn run_managed(
     .await
 }
 
+/// Refuse a launch whose `gh` account cannot be chosen (#9091).
+///
+/// Why: a malformed `[accounts]` table used to surface only in the daemon log,
+/// while the session's `gh` silently authenticated as nobody.
+/// What: [`trusty_mpm::core::gh_org_accounts::resolve_gh_account`] — the rule
+/// the clone and the spawn use — and [`preflight_verdict`] on its result.
+/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`.
+pub(crate) fn accounts_preflight(explicit: Option<&str>, origin: &str) -> anyhow::Result<()> {
+    let resolved = trusty_mpm::core::gh_org_accounts::resolve_gh_account(explicit, origin);
+    preflight_verdict(origin, resolved)
+}
+
+/// `Ok` for a chosen (or ambient) account; an operator-facing refusal naming
+/// the resolver's error — for a broken table, the file and the parse error.
+/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`.
+pub(crate) fn preflight_verdict(
+    origin: &str,
+    resolved: Result<Option<trusty_mpm::core::gh_org_accounts::ResolvedAccount>, String>,
+) -> anyhow::Result<()> {
+    resolved.map(drop).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot choose the gh account for {origin}: {e}\n\
+             No session was started. `tm doctor` reports the [accounts] table."
+        )
+    })
+}
+
 /// Resolve the bare form's raw tokens into a [`RunTarget`], before any I/O.
 ///
 /// Why (#5850): clap stops applying global flags once it starts COLLECTING an
@@ -514,8 +543,8 @@ pub(crate) fn resolve_external(
     classified.map(Some)
 }
 
-/// Lift an `--account`/`--user <login>` out of an external subcommand's raw
-/// tokens (#5850).
+/// Lift an `--account`/`--user`/`--u <login>` out of an external subcommand's
+/// raw tokens (#5850, #9090).
 ///
 /// Why: the bare form `tm <url>` reaches clap's `External` catch-all, and clap
 /// applies no global flag to the argv it collects there — so the owner's
@@ -524,7 +553,7 @@ pub(crate) fn resolve_external(
 /// with the flag FIRST worked. The flag has no other meaning in this position,
 /// so lifting it is a rewrite of nothing.
 /// What: returns the tokens with the flag and its value removed, plus the
-/// login. Both spellings are accepted in both `--user <login>` and
+/// login. Every spelling is accepted in both `--user <login>` and
 /// `--user=<login>` forms; a flag with no value is an error rather than a
 /// silent drop, and so is a blank value (`--user=`), which `resolve_account`
 /// would otherwise read as absent. Two occurrences naming DIFFERENT logins are
@@ -532,6 +561,7 @@ pub(crate) fn resolve_external(
 /// [`super::register_args::resolve_account`] owns that and runs on this value
 /// downstream, so the two spellings cannot diverge.
 /// Test: `bare_form_lifts_a_trailing_user_flag`,
+/// `bare_form_lifts_a_trailing_u_flag`,
 /// `bare_form_lifts_an_inline_account_value`,
 /// `bare_form_rejects_a_trailing_flag_with_no_value`,
 /// `bare_form_rejects_an_empty_account_value`,
@@ -571,14 +601,16 @@ pub(crate) fn split_trailing_account(
 
 /// Is `token` the account flag, and does it carry its value inline?
 ///
-/// Why: four spellings (`--account`, `--user`, each with or without `=value`)
-/// decided in one place, so [`split_trailing_account`] stays a loop rather than
-/// a nest of string tests.
+/// Why: six spellings (`--account`, `--user`, `--u`, each with or without
+/// `=value`) decided in one place, so [`split_trailing_account`] stays a loop
+/// rather than a nest of string tests.
 /// What: `None` when `token` is not the flag; `Some(None)` for the bare flag
 /// (its value is the next token); `Some(Some(v))` for the `=` form.
 /// Test: `bare_form_lifts_an_inline_account_value`.
 fn account_flag_value(token: &str) -> Option<Option<&str>> {
-    ["--account", "--user"].into_iter().find_map(|flag| {
+    // #9090: `--u` is the third spelling; `--user` is tested first, and
+    // `--user=x` cannot match `--u` because `ser=x` has no leading `=`.
+    ["--account", "--user", "--u"].into_iter().find_map(|flag| {
         if token == flag {
             return Some(None);
         }

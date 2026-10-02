@@ -155,6 +155,7 @@ async fn provision(
 
     // #7166: no `--account` selector on this CLI-side provisioning path today
     // — it operates on a repo the operator already named a checkout for.
+    // #9091: `None` clones as the registry pin, else the `[accounts]` login.
     inproject::ensure_base_clone(origin_url, base_path, None)?;
     // NOTE (#2032): the CLI flows have no `SessionManager` to resolve a
     // semantic tmux name from, so they keep the pre-#2032 UUID-named

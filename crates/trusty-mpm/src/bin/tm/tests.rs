@@ -1304,6 +1304,14 @@ fn cli_parses_user_alias_for_account_global() {
     assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
 }
 
+/// 🔴 #9090 REGRESSION: `--u <login>` binds the same field as `--account`.
+/// The form × position matrix is in `run_target_tests.rs`.
+#[test]
+fn cli_parses_u_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--u", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
 /// 🔴 #5850 REGRESSION (fail-open): a blank `--user`/`--account` given BEFORE
 /// the repository is refused at parse time.
 ///

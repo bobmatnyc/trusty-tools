@@ -258,6 +258,10 @@ use doctor_session_profile::check_session_profile;
 #[path = "doctor_pm_guard.rs"]
 mod doctor_pm_guard;
 use doctor_pm_guard::check_pm_guard;
+// #9091: whether the `[accounts]` org → gh account table reads.
+#[path = "doctor_org_accounts.rs"]
+mod doctor_org_accounts;
+use doctor_org_accounts::check_org_accounts;
 
 // #7616: the fold's decline was reported only as a one-time daemon-log line, so
 // nothing an operator reads said whether the instruction fold saves anything.
@@ -436,7 +440,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_six_checks`,
+/// Test: `run_doctor_produces_sixty_seven_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -564,6 +568,8 @@ pub(crate) async fn run_doctor_with_claims(
         check_session_profile(project_dir, &home),
         // #9018: and whether the PM guard that profile is enforced by is on.
         check_pm_guard(&home),
+        // #9091: a broken table refuses clones and fails spawns closed.
+        check_org_accounts(&home),
         // #7616: states whether the instruction fold is saving anything for this
         // project, so a daemon-log line stops being the only evidence.
         check_instruction_fold(project_dir),
@@ -831,7 +837,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_six_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_seven_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

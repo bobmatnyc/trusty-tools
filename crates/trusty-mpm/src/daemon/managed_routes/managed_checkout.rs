@@ -102,9 +102,9 @@ pub fn resolve_placement_at(
 
     // #7166: this redirect path provisions from an already-known `origin_url`
     // (the local-checkout-launch redirect), with no `--account` selector to
-    // apply — a project pinned to a `gh_account` still authenticates via the
-    // spawn-time `GH_TOKEN` injection (`gh_account::resolve_gh_account_env_for_registry`),
-    // which runs one layer up from this clone.
+    // apply. #9091: `None` clones as the registry pin, else the `[accounts]`
+    // login — the account `gh_account::resolve_gh_account_env_for_registry`
+    // spawns the session as.
     super::inproject::ensure_base_clone(origin_url, &managed, None).map_err(|e| {
         format!(
             "managed checkout could not be established at {}: {e} — refusing to start a \

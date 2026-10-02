@@ -158,6 +158,8 @@ pub(crate) mod gh_account_proof;
 // resolves a pin from a bare directory.
 pub(crate) mod gh_account_registry;
 pub mod gh_identity;
+// #9091: `[accounts]` org → gh account map and the one account resolver.
+pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
 pub mod gh_session_account;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test

@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::core::gh_account::PinnedGhIdentity;
 #[cfg(test)]
 use crate::core::gh_account_dir::AccountDirSources;
 use crate::core::gh_account_proof::{AccountProver, normalize_gh_host};
@@ -181,7 +182,7 @@ impl RegistryPin {
 
     /// The login this pin selects: `gh_account`, else `github.account`.
     /// Test: `same_login_in_a_different_case_agrees`.
-    fn login(&self) -> Option<&str> {
+    pub(crate) fn login(&self) -> Option<&str> {
         self.account.as_deref().or_else(|| {
             self.github
                 .as_ref()?
@@ -210,13 +211,14 @@ impl RegistryPin {
 /// What: `Ok(None)` for an absent file, no matching record, or matching records
 /// that pin nothing; `Err` for an I/O failure, a document that does not parse,
 /// ANY matching record that does not parse as a [`Project`], or matching records
-/// that pin different identities — see [`select_pin`].
+/// that pin different identities — see [`select_pin`]. #9091: the clone path
+/// reads the pin here too (`gh_org_accounts::resolve_gh_account`).
 /// Test: `an_absent_registry_file_is_not_a_pin`,
 /// `an_unreadable_registry_fails_closed`,
 /// `a_malformed_matching_record_fails_closed`,
 /// `a_malformed_second_matching_record_fails_closed`,
 /// `a_malformed_unrelated_record_does_not_block_a_match`.
-fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
+pub(crate) fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
     let path = registry_dir.join(REGISTRY_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -245,6 +247,60 @@ fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, St
         candidates.push((name.clone(), RegistryPin::from_project(&project)));
     }
     select_pin(candidates)
+}
+
+/// Look up the pinned `gh` identity among the registered projects whose
+/// `repo_url` matches `origin` — the async, `ProjectRegistry`-backed form of
+/// [`read_pin`] the session spawn uses (#3025, #5851).
+///
+/// Why: #9091 r2 — the spawn kept only `gh_account` and `config_dir`, so a
+/// record pinned by `github.account` or `github.token_env` read as unpinned and
+/// fell through to the `[accounts]` map while the clone used the pin's login.
+/// Both paths now take "is pinned" from [`select_pin`] and "which login" from
+/// [`pinned_identity`].
+/// What: `Ok(None)` when no matching record pins anything. `Ok(Some)` for a pin
+/// of ANY shape, even one naming no login and no config dir. #8914 HIGH 2:
+/// records that pin different identities, or a registry that cannot be read,
+/// are an `Err` the caller fails closed on.
+/// Test: `resolve_gh_account_env_for_registry_picks_up_registered_gh_account`,
+/// `resolve_gh_account_env_for_registry_no_match_is_none`,
+/// `resolve_gh_account_env_for_registry_registered_without_gh_account_is_none`,
+/// `find_pinned_gh_identity_reads_config_dir`,
+/// `find_pinned_gh_identity_skips_an_unpinned_duplicate`,
+/// `find_pinned_gh_identity_refuses_disagreeing_pins`,
+/// `a_github_account_only_pin_spawns_as_that_login_without_the_map`.
+pub(crate) async fn find_pinned_gh_identity(
+    registry: &crate::project::ProjectRegistry,
+    origin: &str,
+) -> Result<Option<PinnedGhIdentity>, String> {
+    // #8914 HIGH 2: an unreadable registry cannot say "unpinned".
+    let projects = registry
+        .list()
+        .await
+        .map_err(|e| format!("the project registry could not be read ({e})"))?;
+    // #5850: every matching record, chosen by the same rule the daemon uses.
+    let candidates = projects
+        .iter()
+        .filter(|p| repo_url_matches(&p.repo_url, origin))
+        .map(|p| (p.name.clone(), RegistryPin::from_project(p)))
+        .collect();
+    Ok(select_pin(candidates)?.map(|pin| pinned_identity(&pin)))
+}
+
+/// The spawn identity a selected pin names (#9091 r2).
+///
+/// What: `account` is [`RegistryPin::login`] — the login the clone path uses —
+/// and `config_dir` is the pin's own `github.config_dir` through
+/// [`selected_config_dir`], so a blank one is absent.
+/// Test: `a_github_account_only_pin_spawns_as_that_login_without_the_map`,
+/// `a_token_env_only_pin_spawns_as_before_without_the_map`.
+pub(crate) fn pinned_identity(pin: &RegistryPin) -> PinnedGhIdentity {
+    PinnedGhIdentity {
+        account: pin.login().map(str::to_string),
+        // #9091 r3: a blank dir is absent, as `select_pin` reads it.
+        config_dir: pin.github.as_ref().and_then(selected_config_dir),
+        ..Default::default()
+    }
 }
 
 /// Choose the one pin among every registry record that names a repository.
@@ -406,7 +462,7 @@ fn resolve_pin(
     }
     // The record's own binding, with `gh_account` supplying `account` when the
     // binding does not name one itself — the same two keys
-    // `gh_account::find_pinned_gh_identity` reads for a session spawn.
+    // [`find_pinned_gh_identity`] reads for a session spawn.
     let mut cfg = pin.github.clone().unwrap_or_default();
     if cfg.account.is_none() {
         cfg.account = pin.account.clone();
