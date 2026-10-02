@@ -684,6 +684,13 @@ fn dev_checkout_detects_this_repository() {
     ))
     .expect("resolve");
     assert!(!content.list("agents").expect("agents").is_empty());
+    // #8378: a former class is served from its subfolder of instructions/.
+    assert!(
+        content
+            .list("instructions/harness_understanding")
+            .expect("harness_understanding")
+            .contains(&"instructions/harness_understanding/HARNESS_AGNOSTIC.md".to_owned())
+    );
 }
 
 #[test]
@@ -895,28 +902,105 @@ fn read_of_an_absent_path_is_not_found() {
     ));
 }
 
-/// The dev table must name the same class directories the packager bundles,
-/// or a path would resolve to different files in the two modes. PHASE_1
-/// (#8387) changes both together.
-#[test]
-fn dev_class_table_matches_the_packager() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/package_content.sh");
-    let text = std::fs::read_to_string(&script).expect("read package_content.sh");
+/// Reads a repository script, relative to the workspace root.
+fn repo_script(rel: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+}
+
+/// The packager's `LEGACY_SOURCES` rows as `(destination, source)`.
+fn packager_table() -> Vec<(String, String)> {
+    let text = repo_script("scripts/package_content.sh");
     let block = text
         .split("LEGACY_SOURCES=\"")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
         .expect("LEGACY_SOURCES block");
-    let packager: Vec<(String, String)> = block
+    block
         .lines()
         .filter_map(|line| line.trim().split_once('='))
-        .map(|(class, path)| (class.to_owned(), path.to_owned()))
-        .collect();
+        .map(|(dest, path)| (dest.to_owned(), path.to_owned()))
+        .collect()
+}
+
+/// The dev table must name the same destinations and sources the packager
+/// bundles, or a path would resolve to different files in the two modes.
+/// PHASE_1 (#8387) changes both together.
+#[test]
+fn dev_class_table_matches_the_packager() {
     let table: Vec<(String, String)> = DEV_CLASS_SOURCES
         .iter()
-        .map(|(class, path)| ((*class).to_owned(), (*path).to_owned()))
+        .map(|(dest, path)| ((*dest).to_owned(), (*path).to_owned()))
         .collect();
-    assert_eq!(table, packager);
+    assert_eq!(table, packager_table());
+}
+
+/// #8378 (owner ruling 2026-10-01): the bundle's top level is the three class
+/// directories `scripts/check_content.py` enforces for `content/`, so every
+/// packaged destination starts with one of them.
+#[test]
+fn packaged_destinations_lie_under_the_three_content_classes() {
+    let checker = repo_script("scripts/check_content.py");
+    let line = checker
+        .lines()
+        .find_map(|l| l.strip_prefix("CLASSES = ("))
+        .expect("CLASSES tuple in check_content.py");
+    let classes: Vec<&str> = line
+        .trim_end_matches(')')
+        .split(',')
+        .map(|c| c.trim().trim_matches('"'))
+        .filter(|c| !c.is_empty())
+        .collect();
+    assert_eq!(classes.len(), 3, "three content classes: {classes:?}");
+    let outside: Vec<String> = packager_table()
+        .into_iter()
+        .map(|(dest, _)| dest)
+        .filter(|dest| !classes.contains(&dest.split('/').next().unwrap_or_default()))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "destinations outside {classes:?}: {outside:?}"
+    );
+}
+
+/// A nested destination reads from its own source and lists under its class;
+/// a former class name lists nothing (#8378).
+#[test]
+fn dev_checkout_serves_a_nested_destination_from_its_own_source() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    make_checkout(dir.path());
+    let styles = dir
+        .path()
+        .join("crates/trusty-mpm/src/assets/output-styles");
+    std::fs::write(styles.join("tm.md"), b"style").expect("style");
+    let rules = dir.path().join("crates/trusty-mpm/src/assets/instructions");
+    std::fs::write(rules.join("BASE.md"), b"base").expect("instruction");
+    let content = resolve(&options(
+        &dir.path().join("no-cache"),
+        DevOverride::At(dir.path().to_path_buf()),
+    ))
+    .expect("resolve");
+    assert_eq!(
+        content
+            .read_to_string("instructions/output-styles/tm.md")
+            .expect("read"),
+        "style"
+    );
+    assert_eq!(
+        content.list("instructions").expect("list"),
+        ["instructions/BASE.md", "instructions/output-styles/tm.md"]
+    );
+    assert_eq!(
+        content.list("instructions/output-styles").expect("list"),
+        ["instructions/output-styles/tm.md"]
+    );
+    assert!(content.list("output-styles").expect("list").is_empty());
+    assert!(matches!(
+        content.read("output-styles/tm.md"),
+        Err(ContentError::NotFound { .. })
+    ));
 }
 
 /// The published seed release verifies and unpacks. Needs the real asset:

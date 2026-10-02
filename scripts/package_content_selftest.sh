@@ -17,7 +17,11 @@
 #                   bundle-manifest.toml; entries are sorted; every entry has
 #                   mtime 0, uid/gid 0, empty owner names, mode 0644/0755
 #     manifest      carries bundle_version, tag and schema_major = 1;
-#                   file_count and each class's `files` match the fixture
+#                   file_count, each class's and each source's `files` match
+#                   the fixture (a nested destination is counted once)
+#     layout        the fixture bundle and the live one hold only
+#                   bundle-manifest.toml and the three class directories
+#                   agents/, skills/, instructions/ at the top (#8378)
 #     sha256        the sidecar verifies against the tarball
 #     fail-open     a missing class directory, an empty one, and a symlink
 #                   each exit 1 and leave no tarball behind (the missing
@@ -26,8 +30,8 @@
 #                   a carriage return each exit 2 and write nothing
 #     relative      a relative --out-dir and --source-root resolve against
 #                   the caller's cwd, not the repo root
-#     live          the default path table packages every class of this
-#                   checkout with at least one file each
+#     live          the default path table packages every destination of
+#                   this checkout with at least one file each
 #
 # Test: this IS the test. Run directly: bash scripts/package_content_selftest.sh
 #   CI runs it in ci.yml's `changes` job and before packaging in
@@ -42,7 +46,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKER="$SCRIPT_DIR/package_content.sh"
-CLASSES="agents skills instructions output-styles sm_instructions harness_understanding"
+# The packager's destinations; the last three are subfolders of instructions/.
+DESTS="agents skills instructions instructions/output-styles instructions/sm_instructions instructions/harness_understanding"
+CLASSES="agents skills instructions"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/package-content.XXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -56,11 +62,11 @@ sha_check() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$1"; else shasum -a 256 -c "$1"; fi
 }
 
-# new_tree <dir>: a content tree holding every class, files created in
+# new_tree <dir>: a content tree holding every destination, files created in
 # reverse name order so a walk-order dependency would show.
 new_tree() {
   local t="$1" c
-  for c in $CLASSES; do
+  for c in $DESTS; do
     mkdir -p "$t/$c/z-sub/deeper" "$t/$c/a-sub"
     printf 'z %s\n' "$c" > "$t/$c/z-sub/deeper/zz.md"
     printf 'a %s\n' "$c" > "$t/$c/a-sub/aa.md"
@@ -139,25 +145,47 @@ for want in 'bundle_version = "1.2.3"' 'tag = "content-v1.2.3"' 'schema_major = 
     fail "manifest lacks '$want'; got: $manifest"
   fi
 done
-# new_tree writes 3 files per class (the skipped .DS_Store is not one of them).
+# new_tree writes 3 files per destination (the skipped .DS_Store is not one
+# of them); instructions/ holds its own 3 plus its three subfolders' 9.
 want_files=3
 want_total=0
-for c in $CLASSES; do want_total=$((want_total + want_files)); done
+for c in $DESTS; do want_total=$((want_total + want_files)); done
 if printf '%s\n' "$manifest" | grep -qxF "file_count = ${want_total}"; then
   pass "manifest file_count = ${want_total}"
 else
   fail "manifest file_count is not ${want_total}; got: $manifest"
 fi
+# files_of <key> <value>: the `files` line after `<key> = "<value>"`.
+files_of() {
+  printf '%s\n' "$manifest" | awk -v n="$1 = \"$2\"" \
+    '$0 == n { f = 1; next } f && /^files = / { print $3; exit }'
+}
 miscounted=""
-for c in $CLASSES; do
-  got="$(printf '%s\n' "$manifest" | awk -v n="name = \"$c\"" \
-    '$0 == n { f = 1; next } f && /^files = / { print $3; exit }')"
+for c in $DESTS; do
+  got="$(files_of path "$c")"
   [ "$got" = "$want_files" ] || miscounted="$miscounted $c=${got:-none}"
 done
+for pair in agents=3 skills=3 instructions=12; do
+  got="$(files_of name "${pair%%=*}")"
+  [ "$got" = "${pair#*=}" ] || miscounted="$miscounted class:${pair%%=*}=${got:-none}"
+done
 if [ -z "$miscounted" ]; then
-  pass "every class has files = ${want_files}"
+  pass "every source has files = ${want_files}; classes 3/3/12"
 else
-  fail "class file counts differ from ${want_files}:${miscounted}"
+  fail "file counts differ:${miscounted}"
+fi
+
+echo "layout:"
+# top_level <tarball>: the distinct first path segments, one per line.
+top_level() {
+  python3 -c 'import sys, tarfile; print("\n".join(sorted({m.name.split("/")[0] for m in tarfile.open(sys.argv[1]).getmembers()})))' "$1"
+}
+want_top="$(printf '%s\n' agents bundle-manifest.toml instructions skills)"
+got_top="$(top_level "$TMP_ROOT/out1/$TARBALL" 2>&1 || true)"
+if [ "$got_top" = "$want_top" ]; then
+  pass "fixture bundle top level is the three classes plus the manifest"
+else
+  fail "fixture bundle top level: $(printf '%s' "$got_top" | tr '\n' ' ')"
 fi
 
 echo "sha256:"
@@ -179,7 +207,7 @@ expect_refusal() {
   fi
 }
 new_tree "$TMP_ROOT/missing"
-rm -rf "$TMP_ROOT/missing/output-styles"
+rm -rf "$TMP_ROOT/missing/instructions/output-styles"
 cp -R "$TMP_ROOT/out1" "$TMP_ROOT/out-missing"   # holds a good bundle already
 expect_refusal "missing class directory" "$TMP_ROOT/missing" "$TMP_ROOT/out-missing"
 new_tree "$TMP_ROOT/empty"
@@ -226,13 +254,19 @@ missing_classes=""
 # checkout's real manifest (hundreds of file entries), and under
 # `set -euo pipefail` `grep -q` exiting at its first match can SIGPIPE the
 # printf still writing the rest (#8716).
-for c in $CLASSES; do
-  grep -qxF "name = \"$c\"" <<<"$live" || missing_classes="$missing_classes $c"
+for c in $DESTS; do
+  grep -qxF "path = \"$c\"" <<<"$live" || missing_classes="$missing_classes $c"
 done
 if [ "$rc" = 0 ] && [ -z "$missing_classes" ] && ! grep -qx 'files = 0' <<<"$live"; then
-  pass "default path table packages every class of this checkout"
+  pass "default path table packages every destination of this checkout"
 else
-  fail "live run: exit $rc, missing classes:${missing_classes:- none}; $(cat "$TMP_ROOT/live.log")"
+  fail "live run: exit $rc, missing destinations:${missing_classes:- none}; $(cat "$TMP_ROOT/live.log")"
+fi
+got_top="$(top_level "$TMP_ROOT/out-live/content-v0.0.0.tar.gz" 2>&1 || true)"
+if [ "$got_top" = "$want_top" ]; then
+  pass "live bundle top level is the three classes plus the manifest"
+else
+  fail "live bundle top level: $(printf '%s' "$got_top" | tr '\n' ' ')"
 fi
 
 echo

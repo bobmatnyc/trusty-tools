@@ -211,10 +211,15 @@ impl ResolvedContent {
         })
     }
 
-    /// Lists every file of one content class as sorted bundle paths.
+    /// Lists every file of one content class (`instructions`), or of a
+    /// subfolder destination under one (`instructions/output-styles`), as
+    /// sorted bundle paths.
     ///
-    /// An unknown class lists nothing.
-    /// Test: `installed_bundle_serves_its_files`, `dev_checkout_serves_working_tree_files`.
+    /// An unknown class lists nothing. Since #8378 the bundle has three
+    /// classes; a former class name such as `output-styles` lists nothing
+    /// from a current bundle or checkout.
+    /// Test: `installed_bundle_serves_its_files`, `dev_checkout_serves_working_tree_files`,
+    /// `dev_checkout_serves_a_nested_destination_from_its_own_source`.
     pub fn list(&self, class: &str) -> Result<Vec<String>, ContentError> {
         let prefix = format!("{class}/");
         match &self.backing {
@@ -223,10 +228,7 @@ impl ResolvedContent {
                 .filter(|k| k.starts_with(&prefix))
                 .cloned()
                 .collect()),
-            Backing::Checkout(root) => match dev::class_dir(root, class) {
-                Some(dir) => dev::list_class(&dir, class),
-                None => Ok(Vec::new()),
-            },
+            Backing::Checkout(root) => dev::list(root, class),
         }
     }
 }
