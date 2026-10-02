@@ -137,13 +137,17 @@ pub(crate) async fn ensure_daemon_started(
     _url: &str,
 ) -> anyhow::Result<String> {
     use super::guided_autostart_plan::{
-        AutostartPlan, autostart_timeout_error, prepare_autostart, timeout_evidence,
+        AutostartPlan, autostart_timeout_error, blocked_error, prepare_autostart, timeout_evidence,
     };
     let launchd = launchd_target();
     let run = run_launchctl;
-    let is_daemon_pid = |pid: u32| super::daemon::find_daemon_pids().contains(&pid);
+    let identify = super::daemon_pid_identity::pid_identity;
     let lock_path = trusty_mpm::core::lock_file_path();
-    let plan = prepare_autostart(&run, launchd.as_ref(), &lock_path, &is_daemon_pid);
+    let plan = prepare_autostart(&run, launchd.as_ref(), &lock_path, &identify);
+    // #9034: an unverified live lock pid fails closed — no poll, no spawn.
+    if let AutostartPlan::Blocked(evidence) = &plan {
+        return Err(blocked_error(evidence));
+    }
 
     // When we take the fallback-spawn path we keep the child and the framework
     // root: the timeout branch below asks the child whether it still runs

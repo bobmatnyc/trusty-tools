@@ -26,6 +26,8 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 pub(crate) mod daemon;
+// #9034: three-state daemon pid identity, read from argv.
+pub(crate) mod daemon_pid_identity;
 pub(crate) mod delete;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;

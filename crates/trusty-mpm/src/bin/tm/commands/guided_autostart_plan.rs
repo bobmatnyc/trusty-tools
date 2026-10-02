@@ -7,13 +7,14 @@
 //! bare `tm` waited on a daemon that nothing would start. A lock pid was also
 //! trusted on `kill(pid, 0)` alone, so a reused pid blocked autostart forever.
 //! What: [`prepare_autostart`] probes launchd through an injected `launchctl`
-//! runner and the lock through an injected daemon-pid check, then waits on a
+//! runner and the lock through an injected pid-identity check, then waits on a
 //! running daemon, asks launchd to start a stopped one (`bootstrap`, then
 //! `kickstart`), or spawns. [`timeout_evidence`] and [`autostart_timeout_error`]
 //! decide whether a poll timeout is a slow daemon or a down one.
 //! Test: `guided_autostart_plan_tests.rs`.
 
-use super::guided_liveness::DaemonAliveUnresponsive;
+use super::daemon_pid_identity::PidIdentity;
+use super::guided_liveness::{DaemonAliveUnresponsive, DaemonLockUnverified};
 
 /// One finished `launchctl` call: whether it exited 0, and its stdout.
 pub(crate) struct LaunchctlReply {
@@ -98,33 +99,83 @@ pub(crate) enum AutostartPlan {
     AwaitLaunchd,
     /// No daemon and launchd cannot help: spawn one.
     Spawn,
+    /// A live lock pid is not confirmed a daemon: stop, keep the lock, and
+    /// report. The string names the evidence and the recovery.
+    Blocked(String),
 }
 
-/// The live trusty-mpm daemon pid named by the lock at `lock_path`.
+/// The production pid-identity check, injectable for tests.
+pub(crate) type IdentifyPid<'a> = &'a dyn Fn(u32) -> PidIdentity;
+
+/// What `daemon.lock` proves about a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LockVerdict {
+    /// No lock of ours.
+    Absent,
+    /// Ours, and its pid is dead: the ONLY state whose lock may be deleted.
+    Stale(u32),
+    /// Its pid is alive and is a tm/trusty-mpm daemon.
+    LiveDaemon(u32),
+    /// Its pid is alive but is not confirmed a daemon (another program, or an
+    /// unreadable argv). Never deleted; the operator decides.
+    Unverified(u32, PidIdentity),
+}
+
+/// Read `daemon.lock` against the process table.
 ///
-/// Why: #9034 — `kill(pid, 0)` proves a pid exists, not that it is the
-/// daemon; a reused pid made a stale lock look live forever.
-/// What: parses the lock without mutating it; `Some(pid)` only when the pid is
-/// alive AND `is_daemon_pid(pid)` says it is a tm/trusty-mpm daemon process.
-/// Test: `prepare_removes_a_reused_pid_lock_and_spawns`,
-/// `live_pid_requires_a_daemon_process`.
-pub(crate) fn live_lock_daemon_pid(
-    lock_path: &std::path::Path,
-    is_daemon_pid: &dyn Fn(u32) -> bool,
-) -> Option<u32> {
+/// Why: #9034 — the lock-removal rule. A lock is deleted ONLY when its pid is
+/// not alive. A live pid whose identity is a daemon is awaited; a live pid
+/// that is not confirmed a daemon — another program on a reused pid, or an
+/// argv that cannot be read — is never deleted by `tm`: bare `tm` stops and
+/// tells the operator to remove the lock if no tm daemon is running. An
+/// identity check that fails must fail closed, because the wrong answer
+/// deletes a live daemon's lock and starts a second daemon.
+/// What: parses without mutating; dead pid → `Stale`; live → `identify(pid)`:
+/// `Daemon` → `LiveDaemon`, otherwise `Unverified`.
+/// Test: `lock_verdict_follows_the_removal_rule`,
+/// `prepare_never_deletes_an_unverified_lock`.
+pub(crate) fn lock_verdict(lock_path: &std::path::Path, identify: IdentifyPid<'_>) -> LockVerdict {
     use trusty_mpm::core::daemon_identity::{parse_lock, pid_alive};
-    let lock = parse_lock(&std::fs::read_to_string(lock_path).ok()?)?;
-    (pid_alive(lock.pid) && is_daemon_pid(lock.pid)).then_some(lock.pid)
+    let Some(lock) = std::fs::read_to_string(lock_path)
+        .ok()
+        .as_deref()
+        .and_then(parse_lock)
+    else {
+        return LockVerdict::Absent;
+    };
+    if !pid_alive(lock.pid) {
+        return LockVerdict::Stale(lock.pid);
+    }
+    match identify(lock.pid) {
+        PidIdentity::Daemon => LockVerdict::LiveDaemon(lock.pid),
+        other => LockVerdict::Unverified(lock.pid, other),
+    }
 }
 
-/// Operator-facing evidence for a live lock pid, with its recovery.
+/// Operator-facing evidence for a lock that keeps `tm` from starting a
+/// daemon, with its recovery; `None` for `Absent` and `Stale`.
 ///
-/// Test: `prepare_awaits_a_live_daemon_lock_pid`.
-pub(crate) fn lock_pid_evidence(pid: u32) -> String {
-    format!(
-        "daemon.lock names live daemon pid {pid}; if that process is not serving, \
-         stop it or remove ~/.trusty-mpm/daemon.lock, then run `tm start`"
-    )
+/// Test: `prepare_awaits_a_live_daemon_lock_pid`,
+/// `prepare_never_deletes_an_unverified_lock`.
+pub(crate) fn lock_evidence(verdict: LockVerdict) -> Option<String> {
+    match verdict {
+        LockVerdict::LiveDaemon(pid) => Some(format!(
+            "daemon.lock names live daemon pid {pid}; if that process is not serving, \
+             stop it or remove ~/.trusty-mpm/daemon.lock, then run `tm start`"
+        )),
+        LockVerdict::Unverified(pid, identity) => {
+            let what = if identity == PidIdentity::NotDaemon {
+                "it is another program"
+            } else {
+                "its identity could not be read"
+            };
+            Some(format!(
+                "daemon.lock names live pid {pid}, not confirmed as a tm daemon ({what}); \
+                 remove ~/.trusty-mpm/daemon.lock if no tm daemon is running, then run `tm start`"
+            ))
+        }
+        LockVerdict::Absent | LockVerdict::Stale(_) => None,
+    }
 }
 
 /// Decide, and perform the launchd side of, the autostart.
@@ -132,22 +183,23 @@ pub(crate) fn lock_pid_evidence(pid: u32) -> String {
 /// Why: #9034 — see the module doc; every input that touches the host is
 /// injected so the decision runs against a fake `launchctl` and temp lock.
 /// What: (1) a launchd job reporting `state = running` → `AwaitExisting`;
-/// (2) a lock naming a live daemon pid → `AwaitExisting` with the recovery;
-/// a lock of ours naming anything else is removed as stale; (3) with a
-/// launchd target, a not-loaded job is bootstrapped and re-probed; running →
-/// `AwaitLaunchd`; stopped → `launchctl kickstart`, `AwaitLaunchd` when it
-/// succeeds; (4) otherwise `Spawn`.
+/// (2) [`lock_verdict`]: a live daemon pid → `AwaitExisting`; an unverified
+/// live pid → `Blocked`, lock kept; a stale (dead-pid) lock is removed;
+/// (3) with a launchd target, a not-loaded job is bootstrapped and re-probed;
+/// running → `AwaitLaunchd`; stopped → `launchctl kickstart`, `AwaitLaunchd`
+/// when it succeeds; (4) otherwise `Spawn`.
 /// Test: `prepare_awaits_a_running_launchd_job`,
 /// `prepare_kickstarts_a_loaded_but_stopped_job`,
 /// `prepare_bootstraps_then_kickstarts_an_unloaded_job`,
 /// `prepare_spawns_when_launchd_cannot_start_the_job`,
 /// `prepare_awaits_a_live_daemon_lock_pid`,
-/// `prepare_removes_a_reused_pid_lock_and_spawns`.
+/// `prepare_never_deletes_an_unverified_lock`,
+/// `prepare_clears_dead_pid_lock_and_spawns`.
 pub(crate) fn prepare_autostart(
     run: LaunchctlRunner<'_>,
     launchd: Option<&LaunchdTarget>,
     lock_path: &std::path::Path,
-    is_daemon_pid: &dyn Fn(u32) -> bool,
+    identify: IdentifyPid<'_>,
 ) -> AutostartPlan {
     let mut job = launchd.map(|t| probe_job(run, t));
     if job == Some(LaunchdJob::Running) {
@@ -156,17 +208,20 @@ pub(crate) fn prepare_autostart(
             launchd.map_or("the service", |t| t.label.as_str())
         ));
     }
-    if let Some(pid) = live_lock_daemon_pid(lock_path, is_daemon_pid) {
-        return AutostartPlan::AwaitExisting(lock_pid_evidence(pid));
-    }
-    // #9034: a lock of ours whose pid is dead or not a daemon is stale; the
-    // spawned daemon's duplicate guard would otherwise refuse to start.
-    if let Some(lock) = std::fs::read_to_string(lock_path)
-        .ok()
-        .as_deref()
-        .and_then(trusty_mpm::core::daemon_identity::parse_lock)
-    {
-        trusty_mpm::core::daemon_identity::remove_lock_owned_by_at(lock_path, &[lock.pid]);
+    match lock_verdict(lock_path, identify) {
+        verdict @ LockVerdict::LiveDaemon(_) => {
+            return AutostartPlan::AwaitExisting(lock_evidence(verdict).unwrap_or_default());
+        }
+        // #9034: a live pid that is not confirmed a daemon fails closed.
+        verdict @ LockVerdict::Unverified(..) => {
+            return AutostartPlan::Blocked(lock_evidence(verdict).unwrap_or_default());
+        }
+        // #9034: only a dead pid's lock is deleted; the spawned daemon's
+        // duplicate guard would otherwise refuse to start.
+        LockVerdict::Stale(pid) => {
+            trusty_mpm::core::daemon_identity::remove_lock_owned_by_at(lock_path, &[pid]);
+        }
+        LockVerdict::Absent => {}
     }
     let Some(target) = launchd else {
         return AutostartPlan::Spawn;
@@ -202,7 +257,9 @@ pub(crate) fn timeout_evidence(
     spawned_running: Option<u32>,
 ) -> Option<String> {
     match plan {
-        AutostartPlan::AwaitExisting(evidence) => Some(evidence.clone()),
+        AutostartPlan::AwaitExisting(evidence) | AutostartPlan::Blocked(evidence) => {
+            Some(evidence.clone())
+        }
         AutostartPlan::AwaitLaunchd => launchd
             .filter(|t| probe_job(run, t) == LaunchdJob::Running)
             .map(|t| format!("launchd reports {} running", t.label)),
@@ -222,6 +279,16 @@ pub(crate) fn timeout_evidence(
 /// `spawned_child_that_exited_reports_none`.
 pub(crate) fn spawned_still_running(child: &mut std::process::Child) -> Option<u32> {
     matches!(child.try_wait(), Ok(None)).then(|| child.id())
+}
+
+/// The error autostart returns, without polling, for a `Blocked` plan.
+///
+/// Test: `prepare_never_deletes_an_unverified_lock`.
+pub(crate) fn blocked_error(evidence: &str) -> anyhow::Error {
+    DaemonLockUnverified {
+        evidence: evidence.to_string(),
+    }
+    .into()
 }
 
 /// The error a timed-out autostart returns.

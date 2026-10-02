@@ -6,6 +6,7 @@
 //! touches the daemon on 7880, `~/.trusty-mpm/daemon.lock`, or launchd.
 
 use super::*;
+use crate::commands::daemon_pid_identity::PidIdentity;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -63,23 +64,23 @@ fn write_lock(path: &std::path::Path, addr: &str, pid: u32) {
 /// The restart command the stop message must name.
 const RESTART_CMD: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
 
-/// [`run_flow_with`] where this test process counts as the daemon.
+/// [`run_flow_with`] where every live pid counts as a daemon.
 async fn run_flow(
     client: &reqwest::Client,
     url: &str,
     lock: &std::path::Path,
     autostart_result: anyhow::Result<String>,
 ) -> (PickerFlow, bool) {
-    run_flow_with(client, url, lock, &[std::process::id()], autostart_result).await
+    run_flow_with(client, url, lock, PidIdentity::Daemon, autostart_result).await
 }
 
-/// Run [`picker_or_autostart_with`] with a recording autostart stub; only
-/// `daemon_pids` count as daemon processes.
+/// Run [`picker_or_autostart_with`] with a recording autostart stub; every
+/// pid has `identity`.
 async fn run_flow_with(
     client: &reqwest::Client,
     url: &str,
     lock: &std::path::Path,
-    daemon_pids: &[u32],
+    identity: PidIdentity,
     autostart_result: anyhow::Result<String>,
 ) -> (PickerFlow, bool) {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -91,10 +92,10 @@ async fn run_flow_with(
     };
     let called = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&called);
-    let is_daemon_pid = |pid: u32| daemon_pids.contains(&pid);
+    let identify = move |_: u32| identity;
     let host = HostProbe {
         lock_path: lock,
-        is_daemon_pid: &is_daemon_pid,
+        identify: &identify,
         restart_cmd: RESTART_CMD,
     };
     let flow = picker_or_autostart_with(client, url, &project, &host, move || async move {
@@ -128,7 +129,7 @@ async fn classify_timeout_is_unknown_not_down() {
 async fn classify_refused_with_live_lock_pid_is_unknown() {
     let client = short_timeout_client();
     let err = listing_error(&client, REFUSED_URL).await;
-    let reach = classify_list_failure(&err, Some(std::process::id()));
+    let reach = classify_list_failure(&err, Some("daemon.lock names live pid 1"));
     assert!(
         matches!(reach, DaemonReach::Unknown(_)),
         "refused with a live pid must be Unknown, got {reach:?}"
@@ -146,32 +147,19 @@ async fn classify_refused_without_live_pid_is_down() {
 fn live_pid_requires_matching_addr() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    let me = std::process::id();
-    write_lock(&lock, "http://127.0.0.1:47001", me);
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|p| p == me),
-        Some(me)
-    );
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001/", &lock, &|p| p == me),
-        Some(me)
-    );
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47002", &lock, &|p| p == me),
-        None,
+    let daemon = |_: u32| PidIdentity::Daemon;
+    write_lock(&lock, "http://127.0.0.1:47001", std::process::id());
+    assert!(lock_evidence_for("http://127.0.0.1:47001", &lock, &daemon).is_some());
+    assert!(lock_evidence_for("http://127.0.0.1:47001/", &lock, &daemon).is_some());
+    assert!(
+        lock_evidence_for("http://127.0.0.1:47002", &lock, &daemon).is_none(),
         "a lock for another address is no evidence about this one"
     );
     write_lock(&lock, "http://127.0.0.1:47001", DEAD_PID);
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|p| p == me),
-        None
-    );
+    assert!(lock_evidence_for("http://127.0.0.1:47001", &lock, &daemon).is_none());
     assert!(lock.exists(), "classification must not delete the lock");
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &tmp.path().join("absent"), &|p| p
-            == me),
-        None
-    );
+    let absent = tmp.path().join("absent");
+    assert!(lock_evidence_for("http://127.0.0.1:47001", &absent, &daemon).is_none());
 }
 
 #[tokio::test]
@@ -280,21 +268,27 @@ fn flags_connect_phase_timeout_is_unknown() {
 }
 
 #[test]
-fn live_pid_requires_a_daemon_process() {
-    // #9034: a live pid that is not a daemon process (a reused pid) is no
-    // evidence of a daemon.
+fn unverified_lock_pid_is_evidence_not_absence() {
+    // #9034: a live pid whose identity is unknown, or that is another program,
+    // is still evidence — never "down", never a reason to delete.
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    let me = std::process::id();
-    write_lock(&lock, "http://127.0.0.1:47001", me);
-    assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|_| false),
-        None
-    );
+    write_lock(&lock, "http://127.0.0.1:47001", std::process::id());
+    for identity in [PidIdentity::Unknown, PidIdentity::NotDaemon] {
+        let identify = move |_: u32| identity;
+        let evidence = lock_evidence_for("http://127.0.0.1:47001", &lock, &identify)
+            .expect("a live unverified pid is evidence");
+        assert!(
+            evidence.contains("remove ~/.trusty-mpm/daemon.lock if no tm daemon is running"),
+            "the recovery must be named: {evidence}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn refused_with_reused_lock_pid_autostarts() {
+async fn refused_with_unknown_identity_lock_pid_stops_and_keeps_the_lock() {
+    // #9034 regression: live pid, unknown identity, refused port → neither
+    // delete the lock nor spawn.
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
     write_lock(&lock, REFUSED_URL, std::process::id());
@@ -303,12 +297,34 @@ async fn refused_with_reused_lock_pid_autostarts() {
         &client,
         REFUSED_URL,
         &lock,
-        &[],
+        PidIdentity::Unknown,
         Err(anyhow::anyhow!("stub: spawn failed")),
     )
     .await;
-    assert!(autostarted, "a reused lock pid must not block autostart");
-    assert!(matches!(flow, PickerFlow::Offline));
+    assert!(!autostarted, "an unverified live lock pid must not spawn");
+    let msg = assert_stopped(flow);
+    assert!(
+        msg.contains("daemon.lock"),
+        "the stop names the lock: {msg}"
+    );
+    assert!(lock.exists(), "an unverified live lock is never deleted");
+}
+
+#[tokio::test]
+async fn unverified_lock_autostart_error_stops_not_offline() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let client = short_timeout_client();
+    let blocked = DaemonLockUnverified {
+        evidence: "daemon.lock names live pid 1".to_string(),
+    };
+    let (flow, _) = run_flow(
+        &client,
+        REFUSED_URL,
+        &tmp.path().join("daemon.lock"),
+        Err(blocked.into()),
+    )
+    .await;
+    assert_stopped(flow);
 }
 
 #[tokio::test]

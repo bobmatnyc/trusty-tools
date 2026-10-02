@@ -65,12 +65,21 @@ pub(crate) struct DaemonAliveUnresponsive {
     pub evidence: String,
 }
 
+/// Autostart found a live `daemon.lock` pid it could not confirm as a
+/// daemon, and kept the lock (#9034). The operator decides.
+#[derive(Debug, thiserror::Error)]
+#[error("not starting a daemon: {evidence}")]
+pub(crate) struct DaemonLockUnverified {
+    /// The lock evidence and its recovery.
+    pub evidence: String,
+}
+
 /// The host facts [`picker_or_autostart_with`] reads, injected for tests.
 pub(crate) struct HostProbe<'a> {
     /// The daemon lock file.
     pub lock_path: &'a Path,
-    /// Is this pid a tm/trusty-mpm daemon process?
-    pub is_daemon_pid: &'a dyn Fn(u32) -> bool,
+    /// What the process table says about a pid.
+    pub identify: super::guided_autostart_plan::IdentifyPid<'a>,
     /// The restart command named in the stop message.
     pub restart_cmd: &'a str,
 }
@@ -85,11 +94,19 @@ pub(crate) struct HostProbe<'a> {
 /// Test: `classify_timeout_is_unknown_not_down`,
 /// `classify_refused_with_live_lock_pid_is_unknown`,
 /// `classify_refused_without_live_pid_is_down`.
-pub(crate) fn classify_list_failure(err: &anyhow::Error, live_pid: Option<u32>) -> DaemonReach {
+pub(crate) fn classify_list_failure(
+    err: &anyhow::Error,
+    lock_evidence: Option<&str>,
+) -> DaemonReach {
     let Some(re) = err.chain().find_map(|c| c.downcast_ref::<reqwest::Error>()) else {
         return DaemonReach::Unknown(format!("it answered with an unusable reply: {err}"));
     };
-    reach_from_flags(re.is_timeout(), re.is_connect(), live_pid, &re.to_string())
+    reach_from_flags(
+        re.is_timeout(),
+        re.is_connect(),
+        lock_evidence,
+        &re.to_string(),
+    )
 }
 
 /// The down/unknown decision over a `reqwest` error's flags.
@@ -97,14 +114,14 @@ pub(crate) fn classify_list_failure(err: &anyhow::Error, live_pid: Option<u32>) 
 /// Why: a connect-phase timeout sets BOTH `is_connect` and `is_timeout`; it is
 /// a listener too busy to accept, so the timeout check must win.
 /// What: timeout → `Unknown`; not a connect error → `Unknown`; a connect error
-/// with a live daemon lock pid → `Unknown` naming the recovery; otherwise
-/// `Down`.
+/// while the lock holds a live pid (`lock_evidence`, daemon or unverified) →
+/// `Unknown` naming the recovery; otherwise `Down`.
 /// Test: `flags_connect_phase_timeout_is_unknown`,
 /// `classify_refused_with_live_lock_pid_is_unknown`.
 pub(crate) fn reach_from_flags(
     is_timeout: bool,
     is_connect: bool,
-    live_pid: Option<u32>,
+    lock_evidence: Option<&str>,
     detail: &str,
 ) -> DaemonReach {
     // #9034: timeout check must precede is_connect — a connect-phase timeout
@@ -115,38 +132,38 @@ pub(crate) fn reach_from_flags(
     if !is_connect {
         return DaemonReach::Unknown(format!("it answered with an error: {detail}"));
     }
-    match live_pid {
-        // #9034: a refused connection with a live daemon pid is a daemon that
-        // is starting or restarting, not an absent one.
-        Some(pid) => DaemonReach::Unknown(format!(
-            "the connection failed, but {}",
-            super::guided_autostart_plan::lock_pid_evidence(pid)
-        )),
+    match lock_evidence {
+        // #9034: a refused connection while the lock names a live pid is not
+        // positive evidence of absence — the same rule as lock removal.
+        Some(evidence) => DaemonReach::Unknown(format!("the connection failed, but {evidence}")),
         None => DaemonReach::Down,
     }
 }
 
-/// The live daemon pid recorded in the lock at `lock_path`, when that lock is
-/// ours and names the address `url` points at.
+/// What the lock at `lock_path` proves about the daemon `url` points at.
 ///
 /// Why: a live pid is evidence about the daemon at the lock's own address
 /// only; a lock for port 7880 says nothing about an explicit `--url` elsewhere.
-/// #9034: and only when the pid is a daemon process — a reused pid is not.
-/// What: [`super::guided_autostart_plan::live_lock_daemon_pid`] (no mutation),
-/// plus `url` starting with the lock's `addr`.
-/// Test: `live_pid_requires_matching_addr`, `live_pid_requires_a_daemon_process`.
-pub(crate) fn live_daemon_pid_for(
+/// #9034: the same rule as lock removal — a live pid counts unless it is
+/// positively dead, whether or not its identity is confirmed.
+/// What: `None` when the lock is absent, not ours, for another address, or
+/// stale; otherwise [`super::guided_autostart_plan::lock_evidence`] of
+/// [`super::guided_autostart_plan::lock_verdict`] (no mutation).
+/// Test: `live_pid_requires_matching_addr`,
+/// `unverified_lock_pid_is_evidence_not_absence`.
+pub(crate) fn lock_evidence_for(
     url: &str,
     lock_path: &Path,
-    is_daemon_pid: &dyn Fn(u32) -> bool,
-) -> Option<u32> {
+    identify: super::guided_autostart_plan::IdentifyPid<'_>,
+) -> Option<String> {
+    use super::guided_autostart_plan::{lock_evidence, lock_verdict};
     let text = std::fs::read_to_string(lock_path).ok()?;
     let lock = trusty_mpm::core::daemon_identity::parse_lock(&text)?;
     let addr = lock.addr.trim_end_matches('/');
     if addr.is_empty() || !url.trim_end_matches('/').starts_with(addr) {
         return None;
     }
-    super::guided_autostart_plan::live_lock_daemon_pid(lock_path, is_daemon_pid)
+    lock_evidence(lock_verdict(lock_path, identify))
 }
 
 /// The error bare `tm` stops with when the daemon may be running.
@@ -167,7 +184,8 @@ pub(crate) fn slow_daemon_error(url: &str, why: &str, restart_cmd: &str) -> anyh
 ///
 /// Why: #9034 — this sequence decided "down" from any failed listing.
 /// What: [`picker_or_autostart_with`] against the real lock file, the
-/// `find_daemon_pids` process walk, the host's restart command, and
+/// argv-reading [`super::daemon_pid_identity::pid_identity`], the host's
+/// restart command, and
 /// [`super::guided_autostart::ensure_daemon_started`].
 /// Test: `slow_listing_stops_without_autostart` and siblings, through
 /// [`picker_or_autostart_with`].
@@ -177,11 +195,11 @@ pub(crate) async fn picker_or_autostart(
     project: &PickerProject<'_>,
 ) -> PickerFlow {
     let lock = trusty_mpm::core::lock_file_path();
-    let is_daemon_pid = |pid: u32| super::daemon::find_daemon_pids().contains(&pid);
+    let identify = super::daemon_pid_identity::pid_identity;
     let restart_cmd = super::launchd_probe::daemon_restart_command();
     let host = HostProbe {
         lock_path: &lock,
-        is_daemon_pid: &is_daemon_pid,
+        identify: &identify,
         restart_cmd: &restart_cmd,
     };
     picker_or_autostart_with(client, url, project, &host, || {
@@ -203,7 +221,8 @@ pub(crate) async fn picker_or_autostart(
 /// autostart error is [`PickerFlow::Offline`].
 /// Test: `slow_listing_stops_without_autostart`,
 /// `refused_with_live_lock_pid_stops_without_autostart`,
-/// `refused_with_reused_lock_pid_autostarts`,
+/// `refused_with_unknown_identity_lock_pid_stops_and_keeps_the_lock`,
+/// `unverified_lock_autostart_error_stops_not_offline`,
 /// `refused_without_live_pid_autostarts_then_goes_offline`,
 /// `slow_listing_after_autostart_stops_not_offline`,
 /// `alive_unresponsive_autostart_stops_not_offline`.
@@ -225,8 +244,8 @@ where
         PickerAttempt::ListFailed(e) => e,
     };
     // #9034: only positive evidence of absence may start a daemon.
-    let live_pid = live_daemon_pid_for(url, host.lock_path, host.is_daemon_pid);
-    if let DaemonReach::Unknown(why) = classify_list_failure(&err, live_pid) {
+    let evidence = lock_evidence_for(url, host.lock_path, host.identify);
+    if let DaemonReach::Unknown(why) = classify_list_failure(&err, evidence.as_deref()) {
         return stop(url, &why);
     }
     eprintln!("tm: daemon not running — starting it…");
@@ -238,7 +257,11 @@ where
         },
         // #9034: a running launchd job, a live daemon lock pid, or a spawned
         // child still starting is a slow daemon.
-        Err(e) if e.downcast_ref::<DaemonAliveUnresponsive>().is_some() => {
+        // #9034: an unverified live lock pid fails closed too.
+        Err(e)
+            if e.downcast_ref::<DaemonAliveUnresponsive>().is_some()
+                || e.downcast_ref::<DaemonLockUnverified>().is_some() =>
+        {
             stop(url, &format!("{e}"))
         }
         Err(e) => {

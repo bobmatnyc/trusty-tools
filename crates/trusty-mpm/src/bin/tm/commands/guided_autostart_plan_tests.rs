@@ -4,6 +4,7 @@
 //! lock. None calls the real `launchctl`, port 7880, or `~/.trusty-mpm`.
 
 use super::*;
+use crate::commands::guided_liveness::DaemonLockUnverified;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
@@ -72,18 +73,17 @@ fn write_lock(path: &std::path::Path, pid: u32) {
     .expect("write lock");
 }
 
-/// Run [`prepare_autostart`] against `fake`, with `daemon_pids` as the
-/// process table's daemon processes.
+/// Run [`prepare_autostart`] against `fake`; every pid has `identity`.
 fn prepare(
     fake: &FakeLaunchctl,
     launchd: bool,
     lock: &std::path::Path,
-    daemon_pids: &[u32],
+    identity: PidIdentity,
 ) -> AutostartPlan {
     let run = |args: &[String]| fake.run(args);
-    let is_daemon_pid = |pid: u32| daemon_pids.contains(&pid);
+    let identify = move |_: u32| identity;
     let t = target();
-    prepare_autostart(&run, launchd.then_some(&t), lock, &is_daemon_pid)
+    prepare_autostart(&run, launchd.then_some(&t), lock, &identify)
 }
 
 #[test]
@@ -116,7 +116,12 @@ fn parse_state_absent_is_none() {
 fn prepare_awaits_a_running_launchd_job() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeLaunchctl::new(vec![Some("running")], true);
-    let plan = prepare(&fake, true, &tmp.path().join("daemon.lock"), &[]);
+    let plan = prepare(
+        &fake,
+        true,
+        &tmp.path().join("daemon.lock"),
+        PidIdentity::Unknown,
+    );
     assert!(matches!(plan, AutostartPlan::AwaitExisting(ref e) if e.contains("running")));
     assert_eq!(fake.calls(), vec!["print gui/501/com.trusty.mpm"]);
 }
@@ -127,7 +132,12 @@ fn prepare_kickstarts_a_loaded_but_stopped_job() {
     // state) is down and startable, never awaited.
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeLaunchctl::new(vec![Some("not running")], true);
-    let plan = prepare(&fake, true, &tmp.path().join("daemon.lock"), &[]);
+    let plan = prepare(
+        &fake,
+        true,
+        &tmp.path().join("daemon.lock"),
+        PidIdentity::Unknown,
+    );
     assert_eq!(plan, AutostartPlan::AwaitLaunchd);
     assert_eq!(
         fake.calls(),
@@ -142,7 +152,12 @@ fn prepare_kickstarts_a_loaded_but_stopped_job() {
 fn prepare_bootstraps_then_kickstarts_an_unloaded_job() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeLaunchctl::new(vec![None, Some("not running")], true);
-    let plan = prepare(&fake, true, &tmp.path().join("daemon.lock"), &[]);
+    let plan = prepare(
+        &fake,
+        true,
+        &tmp.path().join("daemon.lock"),
+        PidIdentity::Unknown,
+    );
     assert_eq!(plan, AutostartPlan::AwaitLaunchd);
     assert_eq!(
         fake.calls(),
@@ -160,7 +175,12 @@ fn prepare_spawns_when_launchd_cannot_start_the_job() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let fake = FakeLaunchctl::new(vec![Some("not running")], false);
     assert_eq!(
-        prepare(&fake, true, &tmp.path().join("daemon.lock"), &[]),
+        prepare(
+            &fake,
+            true,
+            &tmp.path().join("daemon.lock"),
+            PidIdentity::Unknown
+        ),
         AutostartPlan::Spawn
     );
 }
@@ -172,7 +192,7 @@ fn prepare_awaits_a_live_daemon_lock_pid() {
     let me = std::process::id();
     write_lock(&lock, me);
     let fake = FakeLaunchctl::new(vec![], true);
-    let plan = prepare(&fake, false, &lock, &[me]);
+    let plan = prepare(&fake, false, &lock, PidIdentity::Daemon);
     assert!(
         matches!(plan, AutostartPlan::AwaitExisting(ref e) if e.contains("tm start")),
         "a live daemon lock pid is awaited and names its recovery: {plan:?}"
@@ -181,14 +201,59 @@ fn prepare_awaits_a_live_daemon_lock_pid() {
 }
 
 #[test]
-fn prepare_removes_a_reused_pid_lock_and_spawns() {
-    // #9034 MEDIUM: a live pid that is not a daemon process is a reused pid.
+fn prepare_never_deletes_an_unverified_lock() {
+    // #9034: a live pid that is another program, or whose argv cannot be read,
+    // fails closed — blocked, lock kept, no spawn.
+    for identity in [PidIdentity::NotDaemon, PidIdentity::Unknown] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lock = tmp.path().join("daemon.lock");
+        write_lock(&lock, std::process::id());
+        let fake = FakeLaunchctl::new(vec![Some("not running")], true);
+        let plan = prepare(&fake, true, &lock, identity);
+        assert!(
+            matches!(plan, AutostartPlan::Blocked(ref e) if e.contains("remove ~/.trusty-mpm/daemon.lock")),
+            "{identity:?}: an unverified live lock pid must block: {plan:?}"
+        );
+        assert!(
+            lock.exists(),
+            "{identity:?}: the lock must never be deleted"
+        );
+        assert!(
+            !fake.calls().iter().any(|c| c.starts_with("kickstart")),
+            "{identity:?}: nothing is started while the lock is unverified"
+        );
+        let err = blocked_error(&match plan {
+            AutostartPlan::Blocked(e) => e,
+            _ => unreachable!(),
+        });
+        assert!(err.downcast_ref::<DaemonLockUnverified>().is_some());
+    }
+}
+
+#[test]
+fn lock_verdict_follows_the_removal_rule() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, std::process::id());
-    let fake = FakeLaunchctl::new(vec![], true);
-    assert_eq!(prepare(&fake, false, &lock, &[]), AutostartPlan::Spawn);
-    assert!(!lock.exists(), "a reused-pid lock is stale and is removed");
+    let me = std::process::id();
+    assert_eq!(
+        lock_verdict(&lock, &|_| PidIdentity::Daemon),
+        LockVerdict::Absent
+    );
+    write_lock(&lock, DEAD_PID);
+    assert_eq!(
+        lock_verdict(&lock, &|_| PidIdentity::Daemon),
+        LockVerdict::Stale(DEAD_PID)
+    );
+    write_lock(&lock, me);
+    assert_eq!(
+        lock_verdict(&lock, &|_| PidIdentity::Daemon),
+        LockVerdict::LiveDaemon(me)
+    );
+    assert_eq!(
+        lock_verdict(&lock, &|_| PidIdentity::Unknown),
+        LockVerdict::Unverified(me, PidIdentity::Unknown)
+    );
+    assert!(lock.exists(), "reading a verdict never deletes");
 }
 
 #[test]
@@ -197,7 +262,10 @@ fn prepare_clears_dead_pid_lock_and_spawns() {
     let lock = tmp.path().join("daemon.lock");
     write_lock(&lock, DEAD_PID);
     let fake = FakeLaunchctl::new(vec![], true);
-    assert_eq!(prepare(&fake, false, &lock, &[]), AutostartPlan::Spawn);
+    assert_eq!(
+        prepare(&fake, false, &lock, PidIdentity::Unknown),
+        AutostartPlan::Spawn
+    );
     assert!(!lock.exists(), "a dead-pid lock is stale and is removed");
 }
 
