@@ -25,6 +25,7 @@ fn record_named(name: &str) -> SessionRecord {
         "id": super::record::ManagedSessionId::new().to_string(),
         "task": "t", "tmux_name": name, "cwd": "/tmp", "state": "active",
         "created_at": "2026-09-30T00:00:00Z", "pane_id": "%1",
+        "tmux_server": super::tests::FAKE_TMUX_SERVER,
     }))
     .expect("record")
 }

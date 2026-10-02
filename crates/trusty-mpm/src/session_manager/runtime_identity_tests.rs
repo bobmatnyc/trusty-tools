@@ -4,7 +4,8 @@
 //! Hermetic: every manager runs the production `RealTmuxDriver` against a
 //! scripted fake tmux binary, inside a `with_tmux_binary` scope so the pid
 //! probe reaches the fake too. The fake only logs its argv and prints canned
-//! answers; no test reaches a real tmux server, a real pane or the daemon.
+//! answers. #9004: the `live_*` tests instead run a private `-L` tmux server
+//! (`PrivateTmuxServer`), never the default one, and skip without tmux.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,10 +16,22 @@ use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, RealTmuxDriver, SessionManager,
     SessionRecord, StopCause, SupervisorFloor,
 };
+use crate::test_support::tmux_session::{
+    PrivateTmuxServer, ScratchTmuxSession, reserved_session_name,
+};
 
 /// The name every fixture's live session carries. Reserved test prefix, so
 /// even a leak could never collide with an operator's session.
 const LIVE: &str = "tmpm-test-8935-reuse";
+
+/// #9004: the live tmux server instance, `<pid>:<start_time>`.
+const LIVE_SERVER: &str = "4242:1700000000";
+
+/// #9004: the server instance before a restart — same socket, other pid.
+const OLD_SERVER: &str = "1111:1600000000";
+
+/// #9004: what the live server's `display-message` prints for pane %9.
+const LIVE_IDENTITY: &str = "%9|$3|4242:1700000000|tmpm-test-8935-reuse";
 
 /// What the fake tmux answers.
 struct FakeTmux {
@@ -26,9 +39,24 @@ struct FakeTmux {
     sessions_fail: bool,
     /// The panes `list-panes` prints, or `None` to exit 1.
     panes: Option<&'static str>,
+    /// #9004: what the pane-identity `display-message` prints, or `None` to
+    /// exit 1.
+    identity: Option<&'static str>,
     /// What tmux answers once a `send-keys` reached it — the state the
     /// post-grace re-check sees — or `None` to keep the answers above.
     after_signal: Option<AfterSignal>,
+}
+
+impl Default for FakeTmux {
+    /// A live session [`LIVE`] holding only pane %9, on [`LIVE_SERVER`].
+    fn default() -> Self {
+        Self {
+            sessions_fail: false,
+            panes: Some("%9:1"),
+            identity: Some(LIVE_IDENTITY),
+            after_signal: None,
+        }
+    }
 }
 
 /// tmux's state after the teardown's signal (#8935 critic round).
@@ -39,6 +67,16 @@ enum AfterSignal {
     Panes(&'static str),
     /// `list-panes` fails: ownership can no longer be proved.
     Unlistable,
+    /// #9004: the pane-identity read prints this line, or exits 1 on `None`.
+    Identity(Option<&'static str>),
+}
+
+/// The fake's answer to a pane-identity `display-message`.
+fn identity_answer(identity: Option<&str>) -> String {
+    match identity {
+        Some(line) => format!("echo '{line}'; exit 0"),
+        None => "echo 'lost server' >&2; exit 1".to_string(),
+    }
 }
 
 /// One `echo` per row: `printf` would read `%9` as a conversion.
@@ -82,18 +120,32 @@ impl Fixture {
             Some(AfterSignal::Unlistable) => {
                 "if [ \"$1\" = list-panes ]; then echo 'lost server' >&2; exit 1; fi".into()
             }
+            Some(AfterSignal::Identity(line)) => format!(
+                "case \"$*\" in *session_id*) {};; esac",
+                identity_answer(line)
+            ),
         };
+        // #9004: only the pane-identity read asks for `session_id`; the pid
+        // probe's `#{pane_pid}` read keeps its empty answer.
+        let identity = identity_answer(fake.identity);
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{log}'\n\
              if [ \"$1\" = send-keys ]; then touch '{signalled}'; fi\n\
              if [ -f '{signalled}' ]; then :; {after}\nfi\n\
              if [ \"$1\" = list-sessions ]; then {sessions}; fi\n\
+             case \"$*\" in *session_id*) {identity};; esac\n\
              if [ \"$1\" = list-panes ]; then {panes}; fi\nexit 0\n",
             log = log.display(),
             signalled = signalled.display(),
         );
         std::fs::write(&bin, script).expect("write fake tmux");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Self::with_bin(dir, bin).await
+    }
+
+    /// A manager whose every tmux call runs `bin` — the fake, or a private
+    /// server's shim (#9004).
+    async fn with_bin(dir: tempfile::TempDir, bin: PathBuf) -> Self {
         let data = dir.path().join(".trusty-mpm").join("session-manager");
         std::fs::create_dir_all(&data).expect("data dir");
         let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned())
@@ -107,15 +159,40 @@ impl Fixture {
         Self { dir, bin, mgr }
     }
 
-    /// Seed an ordinary record named [`LIVE`], bound to `pane_id`.
+    /// Seed an ordinary record named [`LIVE`], bound to `pane_id`, with no
+    /// tmux server identity — the shape of a record written before #9004.
     async fn seed(&self, state: &str, pane_id: Option<&str>) -> ManagedSessionId {
+        self.seed_on(state, pane_id, None).await
+    }
+
+    /// [`Self::seed`], with the pane captured on tmux server `server` (#9004).
+    async fn seed_on(
+        &self,
+        state: &str,
+        pane_id: Option<&str>,
+        server: Option<&str>,
+    ) -> ManagedSessionId {
+        self.seed_named(LIVE, state, pane_id, server).await
+    }
+
+    /// [`Self::seed_on`] for a record named `name`.
+    async fn seed_named(
+        &self,
+        name: &str,
+        state: &str,
+        pane_id: Option<&str>,
+        server: Option<&str>,
+    ) -> ManagedSessionId {
         let id = ManagedSessionId::new();
         let mut raw = serde_json::json!({
-            "id": id.to_string(), "task": "t", "tmux_name": LIVE, "cwd": "/tmp",
+            "id": id.to_string(), "task": "t", "tmux_name": name, "cwd": "/tmp",
             "state": state, "created_at": "2026-09-22T19:41:12Z",
         });
         if let Some(pane) = pane_id {
             raw["pane_id"] = serde_json::json!(pane);
+        }
+        if let Some(server) = server {
+            raw["tmux_server"] = serde_json::json!(server);
         }
         let record: SessionRecord = serde_json::from_value(raw).expect("record");
         self.mgr
@@ -186,6 +263,7 @@ async fn stopping_a_stale_record_never_signals_the_live_session_that_reused_its_
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("errored", Some("%2077")).await;
@@ -206,6 +284,7 @@ async fn deleting_a_stale_record_never_touches_the_live_session_that_reused_its_
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -227,6 +306,7 @@ async fn deleting_a_stale_record_leaves_the_live_session_and_says_so() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -252,6 +332,7 @@ async fn the_stop_report_says_the_runtime_was_left_running() {
         sessions_fail: false,
         panes: Some("%9:1\n%10:0"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("active", Some("%2077")).await;
@@ -279,9 +360,10 @@ async fn stopping_a_record_whose_pane_is_live_still_kills_it() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
 
     let report = f
         .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
@@ -298,9 +380,16 @@ async fn stopping_a_record_whose_pane_is_live_still_kills_it() {
             .any(|l| l.starts_with("send-keys") && l.contains("%9") && l.contains("C-c")),
         "the record's pane %9 was signalled: {calls}"
     );
-    assert!(
-        calls.contains("kill-session"),
-        "the session was reclaimed: {calls}"
+    // #9004 closure condition 2: the kill names the session by the `$3` id
+    // the re-check read, never by its reusable name.
+    let kills: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("kill-session"))
+        .collect();
+    assert_eq!(
+        kills,
+        ["kill-session -t $3"],
+        "the session was reclaimed by id: {calls}"
     );
 }
 
@@ -313,9 +402,10 @@ async fn an_unlistable_pane_set_leaves_the_runtime_running() {
         sessions_fail: false,
         panes: None,
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
 
     let report = f
         .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
@@ -339,9 +429,10 @@ async fn an_unreadable_session_probe_leaves_the_runtime_running() {
         sessions_fail: true,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
 
     let err = f
         .scoped(f.mgr.delete_record(&id, false))
@@ -369,6 +460,7 @@ async fn delete_refuses_an_unverifiable_live_name_without_force() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("active", None).await;
@@ -409,6 +501,7 @@ async fn decommissioning_a_stale_record_never_kills_the_live_session() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("stopped", Some("%2077")).await;
@@ -434,9 +527,10 @@ async fn decommission_with_an_unlistable_pane_set_changes_nothing() {
         sessions_fail: false,
         panes: None,
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     let (root, ws) = f.own_workspace(&id).await;
 
     let err = f
@@ -474,6 +568,7 @@ async fn a_foreign_stop_writes_no_scrollback_and_keeps_last_cwd() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
     let id = f.seed("active", Some("%2077")).await;
@@ -512,9 +607,10 @@ async fn decommission_with_a_failed_probe_says_liveness_unknown() {
         sessions_fail: true,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     let (root, ws) = f.own_workspace(&id).await;
 
     let err = f
@@ -542,9 +638,10 @@ async fn a_pane_list_lost_after_the_signal_refuses_decommission() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: Some(AfterSignal::Unlistable),
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     let (root, ws) = f.own_workspace(&id).await;
 
     let err = f
@@ -578,9 +675,10 @@ async fn a_forced_delete_survives_a_failed_tmux_probe() {
         sessions_fail: true,
         panes: Some("%9:1"),
         after_signal: None,
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
 
     let (_, note) = f
         .scoped(f.mgr.delete_record_reporting(&id, true))
@@ -603,9 +701,10 @@ async fn a_pane_that_changes_hands_during_the_grace_window_is_not_killed() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: Some(AfterSignal::Panes("%10:1")),
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     let record = f.mgr.get(&id).await.expect("record");
 
     let teardown = f
@@ -634,9 +733,10 @@ async fn a_session_gone_after_the_grace_window_is_terminated_without_a_kill() {
         sessions_fail: false,
         panes: Some("%9:1"),
         after_signal: Some(AfterSignal::Gone),
+        ..FakeTmux::default()
     })
     .await;
-    let id = f.seed("active", Some("%9")).await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
     let record = f.mgr.get(&id).await.expect("record");
 
     let teardown = f
@@ -651,4 +751,330 @@ async fn a_session_gone_after_the_grace_window_is_terminated_without_a_kill() {
         "the pane was signalled: {calls}"
     );
     assert!(!calls.contains("kill-session"), "{calls}");
+}
+
+/// #9004 closure condition 1: the record's pane %9 was captured on a server
+/// that has since restarted, and the new server's session under the same name
+/// holds a new %9. The stop and the delete leave it alone.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_record_from_before_a_server_restart_never_owns_the_new_session() {
+    let f = Fixture::new(FakeTmux::default()).await;
+    let id = f.seed_on("active", Some("%9"), Some(OLD_SERVER)).await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Foreign(why)
+            if why.contains(OLD_SERVER) && why.contains(LIVE_SERVER)),
+        "{:?}",
+        report.runtime
+    );
+    f.scoped(f.mgr.delete_record(&id, false))
+        .await
+        .expect("a record from an earlier server is not running");
+
+    f.assert_untouched();
+}
+
+/// #9004 closure condition 3: a record written before the server identity
+/// existed cannot prove its %9 is not a restarted server's. Decommission
+/// refuses, the stop is record-only, the delete needs `--force`.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_record_without_a_server_identity_never_owns_its_pane() {
+    let f = Fixture::new(FakeTmux::default()).await;
+    let id = f.seed("active", Some("%9")).await;
+    let (root, ws) = f.own_workspace(&id).await;
+
+    let err = f
+        .scoped(f.mgr.decommission_with_root(&id, &root, None))
+        .await
+        .expect_err("an unproven runtime refuses the decommission");
+    assert!(err.to_string().contains("no tmux server identity"), "{err}");
+    assert!(ws.join("target/sentinel.txt").exists(), "workspace removed");
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Unproven { why, signalled: false, .. }
+            if why.contains("no tmux server identity")),
+        "{:?}",
+        report.runtime
+    );
+    let err = f
+        .scoped(f.mgr.delete_record(&id, false))
+        .await
+        .expect_err("the live session may be this record's");
+    assert!(matches!(err, ManagedError::InvalidState(..)), "{err}");
+
+    f.assert_untouched();
+}
+
+/// #9004 error arm (Fail-Open Check): the discriminator read,
+/// `display-message`, fails. Ownership is unproven and nothing is killed.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_unreadable_pane_identity_leaves_the_runtime_running() {
+    let f = Fixture::new(FakeTmux {
+        identity: None,
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Unproven { why, .. }
+            if why.contains("could not be read")),
+        "{:?}",
+        report.runtime
+    );
+    f.assert_untouched();
+}
+
+/// #9004 error arm: tmux 3.6b answers `display-message -t %N` for a missing
+/// pane with exit 0 and empty fields. That answer proves nothing.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_missing_pane_identity_answer_leaves_the_runtime_running() {
+    let f = Fixture::new(FakeTmux {
+        identity: Some("||4242:1700000000|"),
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Unproven { why, .. }
+            if why.contains("unreadable identity")),
+        "{:?}",
+        report.runtime
+    );
+    f.assert_untouched();
+}
+
+/// #9004 error arm: the pane's identity places it in another session than
+/// the one that listed it, so ownership is unproven.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_pane_identity_naming_another_session_leaves_the_runtime_running() {
+    let f = Fixture::new(FakeTmux {
+        identity: Some("%9|$3|4242:1700000000|tmpm-test-9004-other"),
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+
+    assert!(
+        matches!(&report.runtime, RuntimeTeardown::Unproven { why, .. }
+            if why.contains("tmpm-test-9004-other")),
+        "{:?}",
+        report.runtime
+    );
+    f.assert_untouched();
+}
+
+/// #9004 post-grace re-check, error arm: the record's pane %9 is signalled,
+/// then its identity cannot be read. Nothing is killed, and the verdict says
+/// the pane was signalled.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_identity_lost_after_the_signal_is_not_killed() {
+    let f = Fixture::new(FakeTmux {
+        after_signal: Some(AfterSignal::Identity(None)),
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+    let record = f.mgr.get(&id).await.expect("record");
+
+    let teardown = f
+        .scoped(f.mgr.graceful_terminate_runtime(&record, "test"))
+        .await
+        .expect("teardown");
+
+    assert!(
+        matches!(
+            &teardown,
+            RuntimeTeardown::Unproven {
+                signalled: true,
+                ..
+            }
+        ),
+        "{teardown:?}"
+    );
+    let calls = f.calls();
+    assert!(
+        calls.contains("send-keys"),
+        "the pane was signalled: {calls}"
+    );
+    assert!(!calls.contains("kill-session"), "{calls}");
+}
+
+/// #9004 TOCTOU: the server restarts during the grace window and a new
+/// session under the name gets a new %9. The re-check sees another server, so
+/// nothing is killed.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_server_restart_during_the_grace_window_is_not_killed() {
+    let f = Fixture::new(FakeTmux {
+        after_signal: Some(AfterSignal::Identity(Some(
+            "%9|$0|5555:1700000099|tmpm-test-8935-reuse",
+        ))),
+        ..FakeTmux::default()
+    })
+    .await;
+    let id = f.seed_on("active", Some("%9"), Some(LIVE_SERVER)).await;
+    let record = f.mgr.get(&id).await.expect("record");
+
+    let teardown = f
+        .scoped(f.mgr.graceful_terminate_runtime(&record, "test"))
+        .await
+        .expect("teardown");
+
+    assert!(
+        matches!(&teardown, RuntimeTeardown::Foreign(why) if why.contains("5555:1700000099")),
+        "{teardown:?}"
+    );
+    let calls = f.calls();
+    assert!(!calls.contains("kill-session"), "{calls}");
+}
+
+/// The private server's `(pane_id, server)` for `name`'s active pane, plus
+/// the pane's pid, which changes if the pane is replaced.
+fn live_pane(server: &PrivateTmuxServer, name: &str) -> Option<(String, String, String)> {
+    let line = server.query(&[
+        "display-message",
+        "-p",
+        "-t",
+        &trusty_common::tmux::exact_window_target(name),
+        "#{pane_id}|#{pid}:#{start_time}|#{pane_pid}",
+    ])?;
+    let mut parts = line.split('|').map(str::to_owned);
+    Some((parts.next()?, parts.next()?, parts.next()?))
+}
+
+/// A manager over a private tmux server's shim, or `None` without tmux.
+async fn live_fixture(tag: &str) -> Option<(PrivateTmuxServer, Fixture)> {
+    if !ScratchTmuxSession::tmux_available(TMUX) {
+        eprintln!("tmux not available; skipping");
+        return None;
+    }
+    let server = PrivateTmuxServer::new(TMUX, tag);
+    let bin = PathBuf::from(server.shim_bin());
+    let f = Fixture::with_bin(crate::test_support::hermetic_temp_dir(), bin).await;
+    Some((server, f))
+}
+
+/// The pane command for a live fixture: Ctrl-C does not end it, so only a
+/// kill can.
+const LIVE_PANE: &str = "trap '' INT; sleep 600";
+
+const TMUX: &str = "tmux";
+
+/// #9004 closure condition 1, on a real tmux: a record captures `%0` on a
+/// private server; the server exits and restarts, and `tm fleet init`'s
+/// fixed launch order gives a new session the same name and the same `%0`.
+/// Stopping and deleting the stale record leaves the new session's pane
+/// untouched. Red on e4fbd4d39e, which killed it.
+#[serial_test::serial]
+#[tokio::test]
+async fn live_a_server_restart_never_hands_a_stale_record_the_new_session() {
+    let Some((server, f)) = live_fixture("9004-restart").await else {
+        return;
+    };
+    let name = reserved_session_name("9004-restart");
+    let first = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, LIVE_PANE);
+    let (pane, old_server, _) = live_pane(&server, &name).expect("the first session is live");
+    drop(first);
+    // The server exits with its last session; make sure it is gone before
+    // the next session starts a new one.
+    let _ = server.query(&["kill-server"]);
+    for _ in 0..50 {
+        if server.query(&["list-sessions"]).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _second = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, LIVE_PANE);
+    let before = live_pane(&server, &name).expect("the second session is live");
+    assert_eq!(
+        before.0, pane,
+        "precondition: the restarted server reused the pane id"
+    );
+    assert_ne!(before.1, old_server, "precondition: a new server instance");
+    let id = f
+        .seed_named(&name, "active", Some(&pane), Some(&old_server))
+        .await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("record-only stop");
+    assert!(
+        matches!(report.runtime, RuntimeTeardown::Foreign(_)),
+        "{:?}",
+        report.runtime
+    );
+    f.scoped(f.mgr.delete_record(&id, false))
+        .await
+        .expect("a record from an earlier server is not running");
+
+    assert_eq!(
+        live_pane(&server, &name),
+        Some(before),
+        "the new session's pane was killed or replaced"
+    );
+}
+
+/// #9004 closure condition 2, on a real tmux: a record captured on the live
+/// server owns its session, which the stop kills by `$N` id. A session whose
+/// name extends the record's survives.
+#[serial_test::serial]
+#[tokio::test]
+async fn live_a_record_on_its_own_server_is_killed_by_session_id() {
+    let Some((server, f)) = live_fixture("9004-own").await else {
+        return;
+    };
+    let name = reserved_session_name("9004-own");
+    let sibling_name = format!("{name}-suffix");
+    let _own = ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, LIVE_PANE);
+    let _sibling =
+        ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &sibling_name, LIVE_PANE);
+    let (pane, live_server, _) = live_pane(&server, &name).expect("the session is live");
+    let sibling = live_pane(&server, &sibling_name).expect("the sibling is live");
+    let id = f
+        .seed_named(&name, "active", Some(&pane), Some(&live_server))
+        .await;
+
+    let report = f
+        .scoped(f.mgr.stop_reporting(&id, StopCause::Deliberate))
+        .await
+        .expect("stop");
+
+    assert_eq!(report.runtime, RuntimeTeardown::Terminated);
+    assert!(
+        !ScratchTmuxSession::exists_on_socket(TMUX, Some(server.name()), &name),
+        "the record's own session survived the stop"
+    );
+    assert_eq!(live_pane(&server, &sibling_name), Some(sibling));
 }

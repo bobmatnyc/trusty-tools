@@ -1900,6 +1900,34 @@ async fn make_state_with_active_managed(
         fn get_pane_id(&self, _name: &str) -> Option<String> {
             Some("%1".to_owned())
         }
+        /// #9004: the pane on one server, in the one session it holds.
+        fn pane_identity(
+            &self,
+            pane_id: &str,
+        ) -> Result<
+            crate::session_manager::pane_identity::PaneIdentity,
+            crate::session_manager::ManagedError,
+        > {
+            Ok(crate::session_manager::pane_identity::PaneIdentity {
+                pane_id: pane_id.to_owned(),
+                session_id: "$0".into(),
+                server: "1:1".into(),
+                session_name: self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+        }
+        fn kill_session_id(
+            &self,
+            name: &str,
+            _: &str,
+        ) -> Result<(), crate::session_manager::ManagedError> {
+            self.kill_session(name)
+        }
     }
 
     let tmp = tempfile::TempDir::new().unwrap();

@@ -143,8 +143,10 @@ impl SessionManager {
     /// → the `claude` PID of the record's pane, `signal_terminate_pane`
     /// (SIGTERM when the PID is known, else one Ctrl-C to that pane), a
     /// [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests), a second
-    /// ownership check, and `kill_session` only when the pane is still the
-    /// session's; a session gone by then reports `Terminated`. A `kill_session` failure is logged, not returned, because
+    /// ownership check, and a kill only when the pane is still the
+    /// session's; a session gone by then reports `Terminated`. #9004: the kill
+    /// is `kill_session_id` on the `$N` id that re-check read, never the name.
+    /// A kill failure is logged, not returned, because
     /// the caller still needs to mark the record `Stopped` / decommissioned.
     /// #8942 (critic HIGH): the one failure that IS returned is a kill-floor
     /// refusal, [`ManagedError::KillRefused`] — from [`Self::kill_gate`] under
@@ -180,8 +182,8 @@ impl SessionManager {
         if let Some(why) = self.tmux.supervisor_floor().refuse(tmux_name, caller) {
             return Err(ManagedError::KillRefused(why));
         }
-        let pane_id = match owned_pane(record, caller, ownership, liveness_known, false) {
-            Ok(pane_id) => pane_id,
+        let (pane_id, _) = match owned_pane(record, caller, ownership, liveness_known, false) {
+            Ok(owned) => owned,
             Err(teardown) => return Ok(teardown),
         };
         // #8935: the record's own pane's claude, not the session's active pane;
@@ -192,17 +194,23 @@ impl SessionManager {
         // #8935: the grace window is long enough for the name to change hands.
         // #8935 delta critic: an unproven verdict here says the pane was signalled.
         let (ownership, liveness_known) = self.classify_runtime(record);
-        if let Err(teardown) = owned_pane(record, caller, ownership, liveness_known, true) {
-            return Ok(match teardown {
-                RuntimeTeardown::Absent => RuntimeTeardown::Terminated,
-                other => other,
-            });
-        }
-        match self.tmux.kill_session(tmux_name) {
+        let session_id = match owned_pane(record, caller, ownership, liveness_known, true) {
+            Ok((_, session_id)) => session_id,
+            Err(teardown) => {
+                return Ok(match teardown {
+                    RuntimeTeardown::Absent => RuntimeTeardown::Terminated,
+                    other => other,
+                });
+            }
+        };
+        // #9004: kill the `$N` session the re-check just proved holds the
+        // record's pane. A by-name kill here would reach a session that took
+        // the name after the re-check; a new session never gets this `$N`.
+        match self.tmux.kill_session_id(tmux_name, &session_id) {
             Err(refused @ ManagedError::KillRefused(_)) => return Err(refused),
             Err(e) => warn!(
-                name = %tmux_name,
-                "graceful_terminate_runtime: kill_session failed (may already be gone): {e}"
+                name = %tmux_name, session_id = %session_id,
+                "graceful_terminate_runtime: kill by session id failed (may already be gone): {e}"
             ),
             Ok(()) => {}
         }
@@ -288,9 +296,9 @@ fn unproven_refusal(
     )
 }
 
-/// `Ok(pane_id)` when `ownership` proves `record` owns its live tmux session;
-/// otherwise the [`RuntimeTeardown`] to report, with a warning naming
-/// `caller` (#8935).
+/// `Ok((pane_id, session_id))` when `ownership` proves `record` owns its live
+/// tmux session; otherwise the [`RuntimeTeardown`] to report, with a warning
+/// naming `caller` (#8935, #9004).
 /// Test: `stopping_a_stale_record_never_signals_the_live_session_that_reused_its_name`.
 fn owned_pane(
     record: &SessionRecord,
@@ -298,9 +306,12 @@ fn owned_pane(
     ownership: RuntimeOwnership,
     liveness_known: bool,
     signalled: bool,
-) -> Result<String, RuntimeTeardown> {
+) -> Result<(String, String), RuntimeTeardown> {
     match ownership {
-        RuntimeOwnership::Owned { pane_id } => Ok(pane_id),
+        RuntimeOwnership::Owned {
+            pane_id,
+            session_id,
+        } => Ok((pane_id, session_id)),
         RuntimeOwnership::Absent => Err(RuntimeTeardown::Absent),
         // #8935 critic round: the two verdicts stay apart so a destructive
         // caller can refuse an unproven one.

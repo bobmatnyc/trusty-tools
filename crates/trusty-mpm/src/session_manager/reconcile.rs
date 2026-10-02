@@ -415,6 +415,8 @@ impl SessionManager {
                 Some(r) => ManagedSessionId::for_supervisor(&canon, r.role),
                 None => ManagedSessionId::for_adopted_tmux_name(name),
             };
+            // #9004: the pane id with the server it was read on.
+            let (pane_id, tmux_server) = super::pane_identity::capture(self.tmux.as_ref(), name);
             let external = SessionRecord {
                 id,
                 tmux_name: name.clone(),
@@ -451,7 +453,8 @@ impl SessionManager {
                 // Best-effort capture (#2453 review finding 1, round 2) —
                 // the adopted pane already exists, so this is available
                 // immediately, mirroring `adopt.rs`'s explicit adoption path.
-                pane_id: self.tmux.get_pane_id(name),
+                pane_id,
+                tmux_server,
                 injection_status: Default::default(),
                 worktree_owner: None,
                 terminal_at: None,

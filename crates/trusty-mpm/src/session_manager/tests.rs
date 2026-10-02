@@ -56,6 +56,9 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     HomeGuard(prior)
 }
 
+/// #9004: the one tmux server instance [`FakeTmuxDriver`] reports.
+pub const FAKE_TMUX_SERVER: &str = "1:1";
+
 /// A fake tmux driver for unit testing.
 ///
 /// Why: the manager must be testable without a real tmux binary; this
@@ -107,6 +110,8 @@ pub struct FakeTmuxDriver {
     /// to simulate the recorded pane having been closed while a sibling
     /// window keeps the tmux session alive.
     pub pane_exists_override: Mutex<Option<bool>>,
+    /// #9004: the session the last pane lookup named, for `pane_identity`.
+    pane_session: Mutex<Option<String>>,
     /// Controllable `pane_claude` answer (#8942); `Absent` when unset.
     pub pane_claude_override: Mutex<Option<crate::core::process::PaneClaude>>,
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
@@ -165,6 +170,7 @@ impl FakeTmuxDriver {
             pane_cwd_override: Mutex::new(None),
             pane_id_override: Mutex::new(None),
             pane_exists_override: Mutex::new(None),
+            pane_session: Mutex::new(None),
             pane_claude_override: Mutex::new(None),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
@@ -325,7 +331,8 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// follow-up to #2456) instead of the trait's silent `None` default, so
     /// tests can simulate a real driver having captured a `pane_id` at
     /// `create_session` time.
-    fn get_pane_id(&self, _name: &str) -> Option<String> {
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        *self.pane_session.lock().unwrap() = Some(name.to_owned());
         self.pane_id_override.lock().unwrap().clone()
     }
 
@@ -333,8 +340,33 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// fix, follow-up to #2456) when set; otherwise fall through to the
     /// trait's optimistic `true` default — matches every existing test's
     /// implicit assumption that a reused pane is still there.
-    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+    fn pane_exists(&self, name: &str, _pane_id: &str) -> bool {
+        *self.pane_session.lock().unwrap() = Some(name.to_owned());
         self.pane_exists_override.lock().unwrap().unwrap_or(true)
+    }
+
+    /// #9004: one fake server, [`FAKE_TMUX_SERVER`]; the pane sits in the
+    /// session the last pane lookup named.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        Ok(super::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: FAKE_TMUX_SERVER.into(),
+            session_name: self
+                .pane_session
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default(),
+        })
+    }
+
+    /// #9004: recorded in `kill_calls` under the session's name.
+    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
+        self.kill_session(name)
     }
 
     /// Records `(name, pane_id, text)` instead of delegating to `send_line`
@@ -436,6 +468,7 @@ pub(super) fn fake_with_pane() -> Arc<FakeTmuxDriver> {
 pub(super) async fn bind_pane(mgr: &SessionManager, id: &ManagedSessionId) {
     let mut record = mgr.get(id).await.expect("record");
     record.pane_id = Some("%1".into());
+    record.tmux_server = Some(FAKE_TMUX_SERVER.into()); // #9004
     mgr.store
         .write()
         .await
@@ -1236,6 +1269,7 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1367,6 +1401,7 @@ async fn manager_reconcile_skips_decommissioned() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1430,6 +1465,7 @@ async fn manager_reconcile_skips_deleted() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1503,6 +1539,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -2087,6 +2124,7 @@ pub(super) async fn seed_record(
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -2611,6 +2649,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -2703,6 +2742,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

@@ -187,7 +187,8 @@ impl SessionManager {
                 &dir,
                 *kind,
                 prior,
-                self.tmux.get_pane_id(name),
+                // #9004: the pane id with the server it was read on.
+                super::pane_identity::capture(self.tmux.as_ref(), name),
             ));
             report.registered.push(RegisteredSession {
                 id: id.to_string(),
@@ -268,7 +269,7 @@ fn supervisor_record(
     dir: &Path,
     kind: SessionKind,
     prior: Option<&SessionRecord>,
-    pane_id: Option<String>,
+    (pane_id, tmux_server): (Option<String>, Option<String>),
 ) -> SessionRecord {
     let task = match kind {
         SessionKind::Supervisor => "the Architect (tm fleet init)",
@@ -298,6 +299,7 @@ fn supervisor_record(
         last_cwd: None,
         deliverable_id: None,
         pane_id,
+        tmux_server,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

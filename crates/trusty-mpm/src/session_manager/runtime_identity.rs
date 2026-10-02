@@ -5,7 +5,9 @@
 //! session took the name since, so stopping or deleting it killed an unrelated
 //! live session — on 2026-09-30, the relaunched Architect. The record's
 //! `pane_id` is tmux's own `%N` id, which one tmux server never hands out
-//! twice: a later session that reuses the name gets a new pane id.
+//! twice: a later session that reuses the name gets a new pane id. #9004: a
+//! RESTARTED server does hand the ids out again, so the record also carries
+//! the server instance, and ownership needs both to match.
 //! What: [`RuntimeOwnership`](crate::session_manager::runtime_identity::RuntimeOwnership)
 //! and [`runtime_ownership`](crate::session_manager::runtime_identity::runtime_ownership), the one
 //! classification the stop/decommission teardown and the delete guard share,
@@ -20,10 +22,14 @@ use super::record::SessionRecord;
 pub enum RuntimeOwnership {
     /// No tmux session carries the record's name.
     Absent,
-    /// The named session holds the record's own pane, `pane_id`.
+    /// The named session holds the record's own pane, `pane_id`, on the
+    /// tmux server instance the record captured it on (#9004).
     Owned {
         /// The record's `%N` pane id, confirmed present in the session.
         pane_id: String,
+        /// #9004: the `$N` id of the session holding the pane, which the
+        /// teardown kills by instead of the reusable name.
+        session_id: String,
     },
     /// A live session carries the name but not the record's pane: another
     /// session took the name. Carries the operator-facing reason.
@@ -53,7 +59,7 @@ impl RuntimeOwnership {
     pub fn left_running_note(&self, name: &str) -> Option<String> {
         match self {
             Self::Absent => None,
-            Self::Owned { pane_id } => Some(format!(
+            Self::Owned { pane_id, .. } => Some(format!(
                 "tmux session '{name}' still runs this record's pane {pane_id}; \
                  the record was removed and the session left running"
             )),
@@ -67,11 +73,16 @@ impl RuntimeOwnership {
 /// Classify the live tmux state against `record`'s runtime (#8935).
 ///
 /// Why: see the module doc — the name alone cannot say whose session it is.
-/// What: `Absent` when no session carries `record.tmux_name`; otherwise
-/// `Owned` when the session's pane list holds `record.pane_id`, `Foreign` when
-/// it does not, and `Unverifiable` when the record has no pane id or the pane
-/// list cannot be read. `Err` only when the session probe itself fails, so
-/// each caller picks its own direction for "cannot tell" (#5859).
+/// What: `Absent` when no session carries `record.tmux_name`. Otherwise
+/// `Foreign` when the session's pane list lacks `record.pane_id`, and
+/// `Unverifiable` when the record has no pane id or the pane list cannot be
+/// read. A listed pane is then checked against the live server (#9004):
+/// `Owned` only when the pane's identity reads, its server is
+/// `record.tmux_server` and its session is the named one; `Foreign` when the
+/// server differs; `Unverifiable` when the record has no server, the
+/// identity cannot be read, or the session name differs. `Err` only when the
+/// session probe itself fails, so each caller picks its own direction for
+/// "cannot tell" (#5859).
 /// Test: `runtime_identity_tests.rs`.
 pub fn runtime_ownership(
     record: &SessionRecord,
@@ -87,19 +98,75 @@ pub fn runtime_ownership(
              to prove the session is its own"
         )));
     };
-    Ok(match tmux.pane_exists_checked(name, pane_id) {
-        Some(true) => RuntimeOwnership::Owned {
-            pane_id: pane_id.to_owned(),
-        },
-        Some(false) => RuntimeOwnership::Foreign(format!(
-            "tmux session '{name}' is live but does not hold this record's pane \
-             {pane_id}, so another session now uses the name"
-        )),
-        None => RuntimeOwnership::Unverifiable(format!(
-            "tmux session '{name}' is live, and its panes could not be listed \
-             to find this record's pane {pane_id}"
-        )),
-    })
+    match tmux.pane_exists_checked(name, pane_id) {
+        Some(true) => {}
+        Some(false) => {
+            return Ok(RuntimeOwnership::Foreign(format!(
+                "tmux session '{name}' is live but does not hold this record's pane \
+                 {pane_id}, so another session now uses the name"
+            )));
+        }
+        None => {
+            return Ok(RuntimeOwnership::Unverifiable(format!(
+                "tmux session '{name}' is live, and its panes could not be listed \
+                 to find this record's pane {pane_id}"
+            )));
+        }
+    }
+    Ok(same_server(record, name, pane_id, tmux))
+}
+
+/// The verdict for a record whose pane id `name`'s session lists (#9004):
+/// a pane id proves ownership only on the server instance it was read on.
+/// Every failure is `Unverifiable`, never `Owned`.
+/// Test: `a_record_from_before_a_server_restart_never_owns_the_new_session`,
+/// `a_record_without_a_server_identity_never_owns_its_pane`,
+/// `an_unreadable_pane_identity_leaves_the_runtime_running`,
+/// `a_pane_identity_naming_another_session_leaves_the_runtime_running`.
+fn same_server(
+    record: &SessionRecord,
+    name: &str,
+    pane_id: &str,
+    tmux: &dyn ManagedTmuxDriver,
+) -> RuntimeOwnership {
+    // #9004: a record written before the server identity existed cannot tell
+    // its pane from a restarted server's pane with the same id.
+    let Some(server) = record.tmux_server.as_deref() else {
+        return RuntimeOwnership::Unverifiable(format!(
+            "tmux session '{name}' holds a pane {pane_id}, and this record has no \
+             tmux server identity to prove the pane is not a restarted server's"
+        ));
+    };
+    // #9004: display-message, the discriminator read, denies on any failure.
+    let identity = match tmux.pane_identity(pane_id) {
+        Ok(identity) => identity,
+        Err(e) => {
+            return RuntimeOwnership::Unverifiable(format!(
+                "tmux session '{name}' holds a pane {pane_id}, and its server \
+                 identity could not be read ({e})"
+            ));
+        }
+    };
+    if identity.server != server {
+        return RuntimeOwnership::Foreign(format!(
+            "tmux session '{name}' holds a pane {pane_id} on tmux server {live}, \
+             but this record's pane {pane_id} was on server {server}, so another \
+             session now uses the name and the pane id",
+            live = identity.server
+        ));
+    }
+    let expected = trusty_common::tmux::check_session_name(name).ok();
+    if expected.as_deref() != Some(identity.session_name.as_str()) {
+        return RuntimeOwnership::Unverifiable(format!(
+            "tmux session '{name}' listed pane {pane_id}, but tmux then placed it \
+             in session '{}'",
+            identity.session_name
+        ));
+    }
+    RuntimeOwnership::Owned {
+        pane_id: pane_id.to_owned(),
+        session_id: identity.session_id,
+    }
 }
 
 /// What a stop or decommission teardown did to the tmux runtime (#8935).
