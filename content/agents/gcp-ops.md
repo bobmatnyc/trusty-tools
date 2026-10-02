@@ -6,6 +6,8 @@ model: sonnet
 extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
+metadata:
+  version: "1.0.0"
 ---
 
 # GCP Ops — Google Cloud Platform Operations Specialist

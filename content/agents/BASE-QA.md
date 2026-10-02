@@ -2,6 +2,8 @@
 name: base-qa
 role: base-qa
 extends: base-agent
+metadata:
+  version: "1.0.0"
 ---
 
 # BASE-QA — Foundation for all QA agents

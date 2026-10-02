@@ -58,6 +58,7 @@ assert_eq "tmux: rust source"                   "true"  "$(rel tmux-targets 'cra
 assert_eq "tmux: shell script"                  "true"  "$(rel tmux-targets 'scripts/foo.sh')"
 assert_eq "tmux: svelte"                        "true"  "$(rel tmux-targets 'website/src/routes/+page.svelte')"
 assert_eq "tmux: instruction asset"             "true"  "$(rel tmux-targets 'crates/trusty-agents-common/src/assets/agents/BASE-AGENT.md')"
+assert_eq "tmux: content-tree asset (#9011)"     "true"  "$(rel tmux-targets 'content/agents/BASE-AGENT.md')"
 assert_eq "tmux: its allowlist"                 "true"  "$(rel tmux-targets 'scripts/tmux-exact-targets-allowlist.tsv')"
 assert_eq "tmux: docs only"                     "false" "$(rel tmux-targets 'docs/a.md
 README.md')"

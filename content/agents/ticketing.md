@@ -5,6 +5,8 @@ description: Ticket management specialist. Creates, updates, and tracks issues w
 model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
+metadata:
+  version: "1.0.0"
 ---
 
 # Ticketing Agent

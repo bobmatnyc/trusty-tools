@@ -6,6 +6,8 @@ model: sonnet
 extends: base-ops
 skills: [git-workflow]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-review]
+metadata:
+  version: "1.0.0"
 ---
 
 # Version Control Agent

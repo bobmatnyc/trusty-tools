@@ -17,8 +17,9 @@
 //! every consumer's compose step (and `trusty-mpm`'s asset tests) needs.
 //!
 //! What: 43 `pub const &str` items, each an `include_str!` of the matching file
-//! under `assets/agents/`, plus [`AGENT_ASSETS`] pairing every original
-//! filename with its content.
+//! under the repo-root `content/agents/` (ADR-0064; moved from
+//! `src/assets/agents/` by #9011), plus [`AGENT_ASSETS`] pairing every
+//! original filename with its content.
 //! Test: `agent_assets::tests` — every const non-empty, filenames unique, each
 //! row embedding the file it names, no two rows sharing a string, the `BASE-*`
 //! templates present, and the table an exact match for the directory listing.
@@ -31,138 +32,141 @@
 //! [`AGENT_ASSETS`]: crate::agent_assets::AGENT_ASSETS
 
 /// Root of every trusty-mpm inheritance chain.
-pub const BASE_AGENT: &str = include_str!("assets/agents/BASE-AGENT.md");
+pub const BASE_AGENT: &str = include_str!("../../../content/agents/BASE-AGENT.md");
 
 /// Foundation for all engineer agents.
-pub const BASE_ENGINEER: &str = include_str!("assets/agents/BASE-ENGINEER.md");
+pub const BASE_ENGINEER: &str = include_str!("../../../content/agents/BASE-ENGINEER.md");
 
 /// Foundation for all ops agents.
-pub const BASE_OPS: &str = include_str!("assets/agents/BASE-OPS.md");
+pub const BASE_OPS: &str = include_str!("../../../content/agents/BASE-OPS.md");
 
 /// Foundation for all QA agents.
-pub const BASE_QA: &str = include_str!("assets/agents/BASE-QA.md");
+pub const BASE_QA: &str = include_str!("../../../content/agents/BASE-QA.md");
 
 /// Foundation for all research agents.
-pub const BASE_RESEARCH: &str = include_str!("assets/agents/BASE-RESEARCH.md");
+pub const BASE_RESEARCH: &str = include_str!("../../../content/agents/BASE-RESEARCH.md");
 
 /// API/backend testing specialist (`extends: base-qa`).
-pub const API_QA: &str = include_str!("assets/agents/api-qa.md");
+pub const API_QA: &str = include_str!("../../../content/agents/api-qa.md");
 
 /// Static-analysis and code-health analyst (`extends: base-research`).
-pub const CODE_ANALYZER: &str = include_str!("assets/agents/code-analyzer.md");
+pub const CODE_ANALYZER: &str = include_str!("../../../content/agents/code-analyzer.md");
 
 /// Adversarial reviewer (`extends: base-qa`).
-pub const CODE_CRITIC: &str = include_str!("assets/agents/code-critic.md");
+pub const CODE_CRITIC: &str = include_str!("../../../content/agents/code-critic.md");
 
 /// Dart/Flutter engineer (`extends: base-engineer`).
-pub const DART_ENGINEER: &str = include_str!("assets/agents/dart-engineer.md");
+pub const DART_ENGINEER: &str = include_str!("../../../content/agents/dart-engineer.md");
 
 /// ETL / data-transformation engineer (`extends: base-engineer`).
-pub const DATA_ENGINEER: &str = include_str!("assets/agents/data-engineer.md");
+pub const DATA_ENGINEER: &str = include_str!("../../../content/agents/data-engineer.md");
 
 /// Technical-documentation specialist (`extends: base-agent`).
-pub const DOCUMENTATION: &str = include_str!("assets/agents/documentation.md");
+pub const DOCUMENTATION: &str = include_str!("../../../content/agents/documentation.md");
 
 /// C#/.NET engineer with VB.NET awareness (`extends: base-engineer`).
-pub const DOTNET_ENGINEER: &str = include_str!("assets/agents/dotnet-engineer.md");
+pub const DOTNET_ENGINEER: &str = include_str!("../../../content/agents/dotnet-engineer.md");
 
 /// Elixir/OTP engineer (`extends: base-engineer`).
-pub const ELIXIR_ENGINEER: &str = include_str!("assets/agents/elixir-engineer.md");
+pub const ELIXIR_ENGINEER: &str = include_str!("../../../content/agents/elixir-engineer.md");
 
 /// General-purpose implementation engineer (`extends: base-engineer`).
 ///
 /// Distinct from `trusty-code`'s own `engineer` default, which deliberately
 /// does not track this one — that name collision is why #2958 left this agent
 /// out of the tcode roster.
-pub const ENGINEER: &str = include_str!("assets/agents/engineer.md");
+pub const ENGINEER: &str = include_str!("../../../content/agents/engineer.md");
 
 /// Google Cloud Platform operations (`extends: base-ops`).
-pub const GCP_OPS: &str = include_str!("assets/agents/gcp-ops.md");
+pub const GCP_OPS: &str = include_str!("../../../content/agents/gcp-ops.md");
 
 /// Go engineer (`extends: base-engineer`).
-pub const GOLANG_ENGINEER: &str = include_str!("assets/agents/golang-engineer.md");
+pub const GOLANG_ENGINEER: &str = include_str!("../../../content/agents/golang-engineer.md");
 
 /// Java engineer (`extends: base-engineer`).
-pub const JAVA_ENGINEER: &str = include_str!("assets/agents/java-engineer.md");
+pub const JAVA_ENGINEER: &str = include_str!("../../../content/agents/java-engineer.md");
 
 /// Vanilla-JavaScript engineer (`extends: base-engineer`).
-pub const JAVASCRIPT_ENGINEER: &str = include_str!("assets/agents/javascript-engineer.md");
+pub const JAVASCRIPT_ENGINEER: &str =
+    include_str!("../../../content/agents/javascript-engineer.md");
 
 /// Local dev-environment operations (`extends: base-ops`).
-pub const LOCAL_OPS: &str = include_str!("assets/agents/local-ops.md");
+pub const LOCAL_OPS: &str = include_str!("../../../content/agents/local-ops.md");
 
 /// trusty-memory MCP memory curator (`extends: base-agent`).
-pub const MEMORY_MANAGER: &str = include_str!("assets/agents/memory-manager.md");
+pub const MEMORY_MANAGER: &str = include_str!("../../../content/agents/memory-manager.md");
 
 /// Bundled-asset catalog lifecycle (`extends: base-agent`).
-pub const MPM_AGENT_MANAGER: &str = include_str!("assets/agents/mpm-agent-manager.md");
+pub const MPM_AGENT_MANAGER: &str = include_str!("../../../content/agents/mpm-agent-manager.md");
 
 /// Skill lifecycle and recommendations (`extends: base-agent`).
-pub const MPM_SKILLS_MANAGER: &str = include_str!("assets/agents/mpm-skills-manager.md");
+pub const MPM_SKILLS_MANAGER: &str = include_str!("../../../content/agents/mpm-skills-manager.md");
 
 /// Next.js engineer (`extends: base-engineer`).
-pub const NEXTJS_ENGINEER: &str = include_str!("assets/agents/nextjs-engineer.md");
+pub const NEXTJS_ENGINEER: &str = include_str!("../../../content/agents/nextjs-engineer.md");
 
 /// Phoenix web-layer engineer (`extends: base-engineer`).
-pub const PHOENIX_ENGINEER: &str = include_str!("assets/agents/phoenix-engineer.md");
+pub const PHOENIX_ENGINEER: &str = include_str!("../../../content/agents/phoenix-engineer.md");
 
 /// PHP/Laravel engineer (`extends: base-engineer`).
-pub const PHP_ENGINEER: &str = include_str!("assets/agents/php-engineer.md");
+pub const PHP_ENGINEER: &str = include_str!("../../../content/agents/php-engineer.md");
 
 /// Prompt/LLM-optimization engineer (`extends: base-engineer`).
-pub const PROMPT_ENGINEER: &str = include_str!("assets/agents/prompt-engineer.md");
+pub const PROMPT_ENGINEER: &str = include_str!("../../../content/agents/prompt-engineer.md");
 
 /// Python engineer (`extends: base-engineer`).
-pub const PYTHON_ENGINEER: &str = include_str!("assets/agents/python-engineer.md");
+pub const PYTHON_ENGINEER: &str = include_str!("../../../content/agents/python-engineer.md");
 
 /// Quality-assurance engineer (`extends: base-qa`).
-pub const QA: &str = include_str!("assets/agents/qa.md");
+pub const QA: &str = include_str!("../../../content/agents/qa.md");
 
 /// React engineer (`extends: base-engineer`).
-pub const REACT_ENGINEER: &str = include_str!("assets/agents/react-engineer.md");
+pub const REACT_ENGINEER: &str = include_str!("../../../content/agents/react-engineer.md");
 
 /// Behavior-preserving refactoring engineer (`extends: base-engineer`).
-pub const REFACTORING_ENGINEER: &str = include_str!("assets/agents/refactoring-engineer.md");
+pub const REFACTORING_ENGINEER: &str =
+    include_str!("../../../content/agents/refactoring-engineer.md");
 
 /// Codebase/architecture research analyst (`extends: base-research`).
-pub const RESEARCH: &str = include_str!("assets/agents/research.md");
+pub const RESEARCH: &str = include_str!("../../../content/agents/research.md");
 
 /// Ruby/Rails engineer (`extends: base-engineer`).
-pub const RUBY_ENGINEER: &str = include_str!("assets/agents/ruby-engineer.md");
+pub const RUBY_ENGINEER: &str = include_str!("../../../content/agents/ruby-engineer.md");
 
 /// Rust engineer (`extends: base-engineer`).
-pub const RUST_ENGINEER: &str = include_str!("assets/agents/rust-engineer.md");
+pub const RUST_ENGINEER: &str = include_str!("../../../content/agents/rust-engineer.md");
 
 /// Secrets-vault operator — `tm secrets` configure/import/add/copy/exec/doctor
 /// (`extends: base-agent`).
-pub const SECRETS_MANAGER: &str = include_str!("assets/agents/secrets-manager.md");
+pub const SECRETS_MANAGER: &str = include_str!("../../../content/agents/secrets-manager.md");
 
 /// Security / vulnerability-assessment specialist (`extends: base-agent`).
-pub const SECURITY: &str = include_str!("assets/agents/security.md");
+pub const SECURITY: &str = include_str!("../../../content/agents/security.md");
 
 /// Svelte 5 / SvelteKit engineer (`extends: base-engineer`).
-pub const SVELTE_ENGINEER: &str = include_str!("assets/agents/svelte-engineer.md");
+pub const SVELTE_ENGINEER: &str = include_str!("../../../content/agents/svelte-engineer.md");
 
 /// Tauri desktop-application engineer (`extends: base-engineer`).
-pub const TAURI_ENGINEER: &str = include_str!("assets/agents/tauri-engineer.md");
+pub const TAURI_ENGINEER: &str = include_str!("../../../content/agents/tauri-engineer.md");
 
 /// Issue/ticket lifecycle specialist (`extends: base-agent`).
-pub const TICKETING: &str = include_str!("assets/agents/ticketing.md");
+pub const TICKETING: &str = include_str!("../../../content/agents/ticketing.md");
 
 /// TypeScript engineer (`extends: base-engineer`).
-pub const TYPESCRIPT_ENGINEER: &str = include_str!("assets/agents/typescript-engineer.md");
+pub const TYPESCRIPT_ENGINEER: &str =
+    include_str!("../../../content/agents/typescript-engineer.md");
 
 /// Vercel platform operations (`extends: base-ops`).
-pub const VERCEL_OPS: &str = include_str!("assets/agents/vercel-ops.md");
+pub const VERCEL_OPS: &str = include_str!("../../../content/agents/vercel-ops.md");
 
 /// Git/branch/release operations (`extends: base-ops`).
-pub const VERSION_CONTROL: &str = include_str!("assets/agents/version-control.md");
+pub const VERSION_CONTROL: &str = include_str!("../../../content/agents/version-control.md");
 
 /// Browser-driven web QA (`extends: base-qa`).
-pub const WEB_QA: &str = include_str!("assets/agents/web-qa.md");
+pub const WEB_QA: &str = include_str!("../../../content/agents/web-qa.md");
 
 /// Front-end web/UI engineer (`extends: base-engineer`).
-pub const WEB_UI_ENGINEER: &str = include_str!("assets/agents/web-ui-engineer.md");
+pub const WEB_UI_ENGINEER: &str = include_str!("../../../content/agents/web-ui-engineer.md");
 
 /// Every agent asset as `(original_filename, content)`, `BASE-*` first then
 /// alphabetical.
@@ -171,7 +175,7 @@ pub const WEB_UI_ENGINEER: &str = include_str!("assets/agents/web-ui-engineer.md
 /// keyed by filename (`BASE-QA.md` resolves an `extends: base-qa` reference
 /// after that map's own case-folding), so it needs the filenames, not just the
 /// named items. The table also carries the completeness guarantee: a `.md`
-/// added to `assets/agents/` but never wired up fails
+/// added to `content/agents/` but never wired up fails
 /// `table_matches_the_directory` rather than shipping as a file nothing embeds.
 /// What: 42 pairs, each value the same `&'static str` as the matching named
 /// const above.
@@ -231,10 +235,11 @@ pub const AGENT_ASSETS: &[(&str, &str)] = &[
 /// `src/assets/agents`; now that the roster lives here, they need this path,
 /// and hard-coding `../trusty-agents-common/...` in a sibling crate would break
 /// the moment either crate moved.
-/// What: `CARGO_MANIFEST_DIR` of THIS crate joined with `src/assets/agents`,
-/// resolved at compile time.
+/// What: `CARGO_MANIFEST_DIR` of THIS crate joined with `../../content/agents`
+/// (the repo-root content tree, #9011), resolved at compile time. It names a
+/// workspace path, so it exists only in a source checkout.
 /// Test: `agent_assets::tests::table_matches_the_directory` reads it.
-pub const AGENT_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/assets/agents");
+pub const AGENT_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../content/agents");
 
 #[cfg(test)]
 mod tests {

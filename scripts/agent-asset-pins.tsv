@@ -11,8 +11,8 @@
 # shared asset it was derived from.
 #
 # Every OTHER agent asset is not copied at all — trusty-mpm and trusty-code
-# both embed the one file under crates/trusty-agents-common/src/assets/
-# agents/ via trusty_agents_common::agent_assets, so there is nothing to
+# both embed the one file under content/agents/ (repo root, ADR-0064)
+# via trusty_agents_common::agent_assets, so there is nothing to
 # pin. check_agent_assets.sh hashes the CURRENT shared source for these 4
 # and compares against the pin here; if it no longer matches, the shared
 # source changed behind a deliberately deviated fork and the guard fails so
@@ -20,7 +20,7 @@
 #
 # Regenerate (only after manually reconciling the trusty-code fork with the
 # new shared content) with: scripts/check_agent_assets.sh --update
-crates/trusty-agents-common/src/assets/agents/code-analyzer.md	e8c8b7b4a524a254ff4dfabab6166189d90ac43aa7bca3689f587be99b8d8ea6
-crates/trusty-agents-common/src/assets/agents/code-critic.md	99491e466cd7433e783784579a1f072708d5c5e94d91b21ab00f9232cc2deac0
-crates/trusty-agents-common/src/assets/agents/qa.md	287119f5f981e9947dcb5d3b30ffd71832a60384f3ac6b1fcd39dafd0465bf8d
-crates/trusty-agents-common/src/assets/agents/web-qa.md	59b4468bf342d3c201b7e376ccc1ad1c7b28ff443fbb065685a2f71eb62e5492
+content/agents/code-analyzer.md	859cdeae6dffd677e37342f48ba97e987b7629f3fcd2682d0f3911286a3795c1
+content/agents/code-critic.md	f6c84aba3df85374307ac5ae24a8105e2419c13274c1bad3980487a70ea48fb8
+content/agents/qa.md	db23d9098f7aa09ea84893c680a892f6bf861a8ef1be5c0e5785c1be1a433024
+content/agents/web-qa.md	803b7ba2a3158fb6927185e1aad49d90aa5e846c792f1495072ae34476aa8267

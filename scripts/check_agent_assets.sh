@@ -7,7 +7,7 @@
 #   their trusty-mpm sources, because both crates shipped their own copy of the
 #   same file and nothing stopped one from drifting. That comparison is gone
 #   along with the duplication: all 42 agent assets now live once, in
-#   crates/trusty-agents-common/src/assets/agents/, and both crates embed THAT
+#   content/agents/ (moved from trusty-agents-common by #9011), and both crates embed THAT
 #   file via `trusty_agents_common::agent_assets`. One physical file consumed by
 #   two crates is a COMPILE-TIME property — strictly stronger than a CI diff,
 #   which could only report drift after it had already landed on main.
@@ -82,7 +82,7 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TCODE_DIR="crates/trusty-code/src/assets/agents"
-SHARED_DIR="crates/trusty-agents-common/src/assets/agents"
+SHARED_DIR="content/agents"
 PINS="scripts/agent-asset-pins.tsv"
 
 # tcode's own defaults — no shared counterpart, never tracked against one.
@@ -185,8 +185,8 @@ if [ "$MODE" = "update" ]; then
     echo "# shared asset it was derived from."
     echo "#"
     echo "# Every OTHER agent asset is not copied at all — trusty-mpm and trusty-code"
-    echo "# both embed the one file under crates/trusty-agents-common/src/assets/"
-    echo "# agents/ via trusty_agents_common::agent_assets, so there is nothing to"
+    echo "# both embed the one file under content/agents/ (repo root, ADR-0064)"
+    echo "# via trusty_agents_common::agent_assets, so there is nothing to"
     echo "# pin. check_agent_assets.sh hashes the CURRENT shared source for these 4"
     echo "# and compares against the pin here; if it no longer matches, the shared"
     echo "# source changed behind a deliberately deviated fork and the guard fails so"

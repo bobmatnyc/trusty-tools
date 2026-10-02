@@ -5,6 +5,8 @@ description: Secrets specialist. Operates `tm secrets` (configure/import/add/lis
 model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
+metadata:
+  version: "1.0.0"
 ---
 
 # Secrets Manager Agent

@@ -3,6 +3,8 @@ name: base-engineer
 role: base-engineer
 extends: base-agent
 skills: [documentation-style]
+metadata:
+  version: "1.0.0"
 ---
 
 # BASE-ENGINEER — Foundation for all engineer agents

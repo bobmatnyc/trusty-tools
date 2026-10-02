@@ -5,6 +5,8 @@ description: 'Expert prompt engineer specializing in LLM optimization: model sel
 model: sonnet
 extends: base-engineer
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # Prompt Engineer

@@ -6,6 +6,8 @@ model: haiku
 extends: base-agent
 skills: [documentation-style]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # Documentation Agent

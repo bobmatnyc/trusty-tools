@@ -5,6 +5,8 @@ description: 'Modern C#/.NET 8+ specialist: ASP.NET Core, EF Core, xUnit, nullab
 model: sonnet
 extends: base-engineer
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # .NET Engineer

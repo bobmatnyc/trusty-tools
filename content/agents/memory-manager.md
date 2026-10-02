@@ -5,6 +5,8 @@ description: Manages project memory via the trusty-memory MCP backend — store,
 model: haiku
 extends: base-agent
 tools: [Read, Grep, mcp__trusty-memory]
+metadata:
+  version: "1.0.0"
 ---
 
 # Memory Manager

@@ -13,14 +13,15 @@
 > in `BASE-AGENT.md`, the Rust build levers in the `rust-build-performance`
 > skill. This page states only what is specific to this repo.
 
-## 1. Markdown under `crates/*/src/assets/**` is not a rung-1 change
+## 1. Markdown under `crates/*/src/assets/**` and `content/**` is not a rung-1 change
 
 These files look like docs and are not. They are compiled into the binary with
 `include_str!`, and bundle tests assert on their text. Verified embed sites:
 
 | Asset tree | Embedded at |
 |---|---|
-| `crates/trusty-agents-common/src/assets/agents/*.md` | `crates/trusty-agents-common/src/agent_assets.rs` |
+| `content/agents/*.md` | `crates/trusty-agents-common/src/agent_assets.rs` |
+| `content/instructions/harness_understanding/*.md` | `crates/trusty-agents-common/src/harness_doc.rs` |
 | `crates/trusty-mpm/src/assets/skills/*.md` | `crates/trusty-mpm/src/core/bundle_tm_skills.rs`, `bundle_skills_*.rs` |
 
 Two consequences the rung-1 row does not cover. Editing one recompiles the

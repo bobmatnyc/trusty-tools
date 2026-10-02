@@ -192,6 +192,20 @@ mod m {
 }'
 check "planted: a manifest naming a .md asset" 1 "$M" "$M/scripts/list.tsv" "fix lib m::idx"
 
+# #9011: the agent roster moved to the repo-root content/ tree; a literal
+# naming it from a crate (AGENT_ASSETS_DIR's shape) is a read.
+C="$WORK/content-literal"
+new_fixture "$C"
+mkdir -p "$C/content/agents"
+echo "# agent" > "$C/content/agents/qa.md"
+plant "$C" "src/lib.rs" '
+#[cfg(test)]
+mod c {
+    #[test]
+    fn lit() { let _ = concat!(env!("CARGO_MANIFEST_DIR"), "/../../content/agents"); }
+}'
+check "planted: a repo-root content/ literal" 1 "$C" "$C/scripts/list.tsv" "fix lib c::lit"
+
 echo "not asset-content readers (#8378 round 2b):"
 N="$WORK/non-md"
 new_fixture "$N"
@@ -247,6 +261,8 @@ R="$WORK/real"
 mkdir -p "$R/crates" "$R/scripts"
 cp -R "$REPO_ROOT/crates/trusty-agents-common" "$R/crates/"
 rm -rf "$R/crates/trusty-agents-common/target"
+# #9011: the crate embeds its agents and harness docs from the repo-root content/.
+cp -R "$REPO_ROOT/content" "$R/"
 awk -F'\t' '$1 == "trusty-agents-common"' "$REPO_ROOT/scripts/asset-content-tests.tsv" > "$R/scripts/list.tsv"
 check "copy of trusty-agents-common, unmodified" 0 "$R" "$R/scripts/list.tsv"
 printf '\n#[cfg(test)]\nmod planted_8378 {\n    #[test]\n    fn reads_base_ops() {\n        assert!(!crate::agent_assets::BASE_OPS.is_empty());\n    }\n}\n' \

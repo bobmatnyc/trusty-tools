@@ -6,6 +6,8 @@ model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # API QA Agent

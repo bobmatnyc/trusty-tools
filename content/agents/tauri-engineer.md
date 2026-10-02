@@ -6,6 +6,8 @@ model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development, rust-build-performance]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # Tauri Engineer

@@ -2,6 +2,8 @@
 name: base-research
 role: base-research
 extends: base-agent
+metadata:
+  version: "1.0.0"
 ---
 
 # BASE-RESEARCH — Foundation for all research agents

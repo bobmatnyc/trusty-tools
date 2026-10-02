@@ -6,6 +6,8 @@ model: sonnet
 extends: base-research
 skills: [code-review-standards]
 tools: [Read, Write, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search]
+metadata:
+  version: "1.0.0"
 ---
 
 # Code Analyzer Agent

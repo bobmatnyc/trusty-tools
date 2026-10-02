@@ -28,7 +28,7 @@
 /// Test: `agnostic_non_empty`, `agnostic_contains_claude_code_glyph`,
 ///       `harness_doc_names_the_relay_prefix`.
 pub fn agnostic() -> &'static str {
-    include_str!("assets/harness_understanding/HARNESS_AGNOSTIC.md")
+    include_str!("../../../content/instructions/harness_understanding/HARNESS_AGNOSTIC.md")
 }
 
 /// trusty-mpm session-manager specifics: how OBSERVE/VERIFY consume the
@@ -40,7 +40,7 @@ pub fn agnostic() -> &'static str {
 /// What: Returns the full text of `HARNESS_MPM_SM.md`.
 /// Test: `mpm_sm_non_empty`, `mpm_sm_contains_raw_observation`.
 pub fn mpm_session_manager() -> &'static str {
-    include_str!("assets/harness_understanding/HARNESS_MPM_SM.md")
+    include_str!("../../../content/instructions/harness_understanding/HARNESS_MPM_SM.md")
 }
 
 /// tcode-specific signals: task banners, `__OMPM_EVENT__` NDJSON lines,
@@ -51,7 +51,7 @@ pub fn mpm_session_manager() -> &'static str {
 /// What: Returns the full text of `HARNESS_TCODE.md`.
 /// Test: `tcode_non_empty`, `harness_doc_names_the_relay_prefix`.
 pub fn tcode() -> &'static str {
-    include_str!("assets/harness_understanding/HARNESS_TCODE.md")
+    include_str!("../../../content/instructions/harness_understanding/HARNESS_TCODE.md")
 }
 
 /// Forward-looking t-code-as-overseer contract: the `Overseer` trait +
@@ -64,7 +64,7 @@ pub fn tcode() -> &'static str {
 /// What: Returns the full text of `HARNESS_OVERSEER.md`.
 /// Test: `overseer_non_empty`, `overseer_contains_flag_for_human`.
 pub fn overseer() -> &'static str {
-    include_str!("assets/harness_understanding/HARNESS_OVERSEER.md")
+    include_str!("../../../content/instructions/harness_understanding/HARNESS_OVERSEER.md")
 }
 
 /// Full harness-understanding document: all four sections concatenated in

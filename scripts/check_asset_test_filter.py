@@ -31,7 +31,7 @@ What: three subcommands over scripts/asset-content-tests.tsv.
         or of a directory holding one;
     R2  a string literal naming a crates/<crate>/src/assets path that is an
         asset, a directory holding one, or a prefix of one:
-        `<crate>/src/assets…`, or a bare `src/assets…` inside that crate;
+        `<crate>/src/assets…`, a bare `src/assets…`, or `…content/…` (#9011);
     R3  a reference to an ASSET SYMBOL. Asset symbols are found by search, to
         a fixed point, in non-test code:
           - a const/static whose initializer holds R1, R2 or an asset symbol;
@@ -83,7 +83,9 @@ QUALIFIED = re.compile(r"(?<!\w)(?=(" + IDENT + r")\s*::\s*(" + IDENT + r")\b)")
 BARE = re.compile(r"(?<![\w:.])(" + IDENT + r")\b(?!\s*::)")
 TEST_ATTR = re.compile(r"#\[\s*(?:" + IDENT + r"\s*::\s*)*(?:test|rstest|test_case)\b")
 CFG_TEST = re.compile(r"#\[\s*cfg\s*\((?![^\]]*\bnot\s*\(\s*test)[^\]]*\btest\b")
-ASSET_DIR = re.compile(r"(?:^|/)(?:([\w.-]+)/)?src/assets(?:/|$)")
+# Group 1: a sibling crate's `src/assets`. Group 2 (#9011): the repo-root content/
+# tree, which a crate names as `../../content/…` from its manifest dir.
+ASSET_DIR = re.compile(r"(?:^|/)(?:(?:([\w.-]+)/)?src/assets(?:/|$)|(content)/)")
 DETECT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detect-docs-only.sh")
 
 
@@ -341,7 +343,8 @@ class Source:
             crate_dir = os.path.join(os.path.dirname(self.crate_dir), m.group(1)) if m.group(1) else self.crate_dir
             # A format string (`src/assets/agents/{name}.md`) names the prefix before its first hole.
             tail = re.split(r"[{}*?]", value[m.end():], maxsplit=1)[0]
-            prefix = os.path.normpath(os.path.join(crate_dir, "src", "assets", tail))
+            # #9011: group 2 is the repo-root content tree (AGENT_ASSETS_DIR's `/../../content/agents`).
+            prefix = os.path.normpath(os.path.join(crate_dir, *(("..", "..", "content") if m.group(2) else ("src", "assets")), tail))
             if any(a.startswith(prefix) for a in self.assets):
                 return f"literal {value!r}"
         if value and not value.startswith("/"):
