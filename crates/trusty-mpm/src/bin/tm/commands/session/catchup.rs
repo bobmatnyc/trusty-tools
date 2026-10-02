@@ -13,6 +13,7 @@
 //! claude-mpm session registry DB.
 //! Manual catchup (both full and non-full) does NOT advance the watermark;
 //! only auto-inject on session start advances it (PR4).
+//! `--json` prints the MCP tool's paged JSON instead (#8017).
 //! Test: `handle_catchup_no_sessions_produces_notice`,
 //! `handle_catchup_full_flag_is_accepted` in the inline test block.
 //!
@@ -83,6 +84,37 @@ pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Re
         print!("{context}");
     }
 
+    Ok(())
+}
+
+/// Handle `tm sessions catchup --json [--sessions-offset N]` (#8017).
+///
+/// Why: a session whose MCP server is down falls back to this CLI, and the
+/// markdown digest has no paging (163 KB for 23 sessions in the #8017 run).
+/// What: calls the same in-process function behind the
+/// `session_context_catchup` MCP tool for the current project and prints its
+/// JSON page. The caller's managed session id comes from this process's own
+/// environment, as the `serve --stdio` bridge stamps it for the MCP tool.
+/// Test: `cli_parses_session_catchup_json_page`; the payload itself is
+/// covered by `session_context_catchup_returns_expected_shape`.
+pub(crate) async fn handle_catchup_json(
+    all_projects: bool,
+    full: bool,
+    sessions_offset: usize,
+) -> anyhow::Result<()> {
+    let dir = resolve_dir(None)?;
+    let session_id = trusty_common::catchup::session_id::managed_session_id_from_env();
+    let page = trusty_mpm::daemon::mcp_context::session_context_catchup(
+        &dir.to_string_lossy(),
+        session_id.as_deref(),
+        None,
+        all_projects,
+        full,
+        sessions_offset,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    println!("{}", serde_json::to_string_pretty(&page)?);
     Ok(())
 }
 

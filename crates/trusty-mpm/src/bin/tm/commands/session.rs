@@ -288,8 +288,18 @@ pub(crate) async fn session(
         }
         // DOC-28 cutover bridge — dispatches to session/catchup.rs
         // CUTOVER BRIDGE — remove post-migration (#1762)
-        SessionAction::Catchup { all_projects, full } => {
-            catchup::handle_catchup(all_projects, full).await?;
+        SessionAction::Catchup {
+            all_projects,
+            full,
+            json,
+            sessions_offset,
+        } => {
+            // #8017: `--json` pages exactly as the MCP tool does.
+            if json {
+                catchup::handle_catchup_json(all_projects, full, sessions_offset).await?;
+            } else {
+                catchup::handle_catchup(all_projects, full).await?;
+            }
         }
         SessionAction::Pause { id_or_name, note } => {
             let resp = daemon

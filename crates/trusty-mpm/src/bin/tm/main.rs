@@ -99,6 +99,12 @@ mod tests_behavior_d_ls_connector;
 #[path = "tests_behavior_d_stop_delete_tests.rs"]
 mod tests_behavior_d_stop_delete;
 
+// #9097: the `tm f` CLI parse tests, split out when `tests_behavior_d_tests.rs`
+// crossed the 3000-SLOC test cap again.
+#[cfg(test)]
+#[path = "tests_behavior_d_f_cli_tests.rs"]
+mod tests_behavior_d_f_cli;
+
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;

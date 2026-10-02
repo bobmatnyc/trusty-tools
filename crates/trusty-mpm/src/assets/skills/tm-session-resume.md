@@ -172,33 +172,32 @@ stale.
 ## CLI Fallback: `tm sessions catchup`
 
 For scripted / non-MCP callers the CLI still works, and the MCP tool is
-additive rather than a replacement. Its full surface is two flags:
+additive rather than a replacement:
 
 ```bash
-tm sessions catchup                  # this project, watermarked digest
+tm sessions catchup                  # this project, watermarked markdown digest
 tm sessions catchup --full           # ignore the watermark, full history
 tm sessions catchup --all-projects   # also scan machine-wide registered projects
+tm sessions catchup --json           # the MCP tool's JSON, first page
+tm sessions catchup --json --sessions-offset <n>   # the next page
 ```
 
-**Prefer the MCP tool whenever it is reachable.** The CLI prints rendered
-markdown to stdout and has **no JSON mode and no paging**, so a project with
-many paused sessions emits one unbounded blob — 163 KB for 23 sessions in the
-run that filed #8017. The paged, machine-readable equivalents live only on
-`session_context_catchup`:
+**Prefer the MCP tool whenever it is reachable.** Without `--json` the CLI
+prints rendered markdown with no paging, so a project with many paused
+sessions emits one unbounded blob — 163 KB for 23 sessions in the run that
+filed #8017. When the MCP tool is unreachable, use `--json`: it prints the
+same paged payload `session_context_catchup` returns.
 
 | Want | MCP tool | CLI |
 |---|---|---|
-| Typed JSON | the tool's return value (schema above) | not available — rendered markdown only |
-| One page at a time | `sessions_offset: <n>`, then `sessions_next_offset` | not available |
-| Bounded output | default watermark + `truncated` / `truncation_notice` | not available |
+| Typed JSON | the tool's return value (schema above) | `--json` |
+| One page at a time | `sessions_offset: <n>`, then `sessions_next_offset` | `--json --sessions-offset <n>`, then `sessions_next_offset` |
+| Bounded output | default watermark + `truncated` / `truncation_notice` | `--json` (same fields) |
 | Full history | `full: true` | `--full` |
 | Machine-wide scan | `all_projects: true` | `--all-projects` |
 
-So when the MCP tool is unreachable and the CLI digest is too large to read,
-narrow it at the source — resume from the newest snapshot in
-`.trusty-mpm/sessions/` named by the digest rather than re-running the CLI —
-and report that the paged read was unavailable, instead of loading the whole
-blob into context.
+Never load the markdown digest whole into context; page the `--json` form
+instead.
 
 ## Re-aligning the Tmux Window
 
