@@ -159,8 +159,11 @@ pub(crate) fn is_provisioning_entry(ws: &Path, task: Option<&str>, line: &str) -
     match (status, path.trim()) {
         // #7660: `.gitignore` is checked line by line, never by path alone.
         (" M ", ".gitignore") => gitignore_diff_is_provisioning(ws),
-        ("?? ", ".gitignore") => std::fs::read_to_string(ws.join(".gitignore"))
-            .is_ok_and(|body| body.lines().all(is_provisioning_gitignore_line)),
+        // #8540: never a blocking read; a FIFO `.gitignore` is not excused.
+        ("?? ", ".gitignore") => provisioning_ledger::read_regular_file(&ws.join(".gitignore"))
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .is_some_and(|body| body.lines().all(is_provisioning_gitignore_line)),
         // #8688: agents may write to `TASK.md`, so it is checked by content.
         ("?? ", TASK_MD) => task_md_is_unedited(ws, task),
         // #8540: by content, never by path — `--force` deleted notes a user
