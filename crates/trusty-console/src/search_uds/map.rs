@@ -15,15 +15,18 @@
 //! own copy of that flow is gone — #6923 made the Search tab display-only and
 //! #6928 did the same for the Memory tab.
 //!
-//! ## Two endpoints the SPA calls have no method to map to
+//! ## Chat is one unary row; `admin/stop` is still unmapped
 //!
-//! `POST /chat` and `POST /admin/stop` are HTTP-only on trusty-search: slice 5.5
-//! left them out on the grounds that "chat serves the embedded `/ui` alone", and
-//! #6384 moved that `/ui` here — so the console-served SPA IS the consumer that
-//! reasoning said did not exist. Both answer `501` naming the gap. The same
-//! finding the #6285 consumer-map correction recorded for trusty-mpm's TUI stop
-//! key: the retire slice needs an owner decision on `admin.stop`, and the chat
-//! lane needs one too.
+//! `POST /chat` maps to `search.chat` (#6285 owner ruling: chat is served by
+//! the console over the socket, no TCP listener). The HTTP shape is the daemon
+//! route's own: a JSON `ChatRequest` body in, ONE JSON envelope out. The daemon
+//! streams from the provider internally and collects the deltas before it
+//! answers, so this row is `Unary` rather than an SSE stream. The body is the
+//! `params` object verbatim — no `index_id` path segment, as with `POST
+//! /search`. A chat call gets `CHAT_TIMEOUT` rather than the 30 s budget.
+//!
+//! `POST /admin/stop` answers `501` naming the gap: the retire slice needs an
+//! owner decision on `search.admin.stop` before the dashboard may reach it.
 //!
 //! ## Query values are coerced, and that is visible when it is wrong
 //!
@@ -47,7 +50,7 @@ use axum::http::Method;
 use serde_json::{Map, Value, json};
 
 use super::{
-    METHOD_CONFIG_GET, METHOD_CONFIG_SET, METHOD_HEALTH, METHOD_INDEX_CONFIG_GET,
+    METHOD_CHAT, METHOD_CONFIG_GET, METHOD_CONFIG_SET, METHOD_HEALTH, METHOD_INDEX_CONFIG_GET,
     METHOD_INDEX_CONFIG_SET, METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_EVENTS,
     METHOD_INDEX_PAUSE_EMBEDDING, METHOD_INDEX_REINDEX, METHOD_INDEX_REINDEX_STREAM,
     METHOD_INDEX_RESUME_EMBEDDING, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
@@ -87,8 +90,8 @@ pub(crate) enum Call {
 /// Turn one `/api/search/…` request into the call it stands for.
 ///
 /// Why the `Err` is a sentence rather than a code: it is rendered into the `501`
-/// body an operator reads, and "no socket method serves POST /chat" is what
-/// makes the gap actionable.
+/// body an operator reads, and "no socket method serves POST /admin/stop" is
+/// what makes the gap actionable.
 ///
 /// What: `path` is the sub-path with no leading slash — what axum's `{*path}`
 /// captures. `body` is the raw request body, parsed as JSON only for the methods
@@ -185,12 +188,15 @@ pub(crate) fn map_request(
         (&Method::GET, ["logs", "tail"]) => unary(METHOD_LOGS_TAIL, q),
         (&Method::GET, ["registry", "orphans"]) => unary(METHOD_REGISTRY_ORPHANS, json!({})),
         (&Method::GET, ["status", "stream"]) => stream(METHOD_STATUS_STREAM, json!({})),
+        // #6285: the body is `ChatRequest` verbatim. An empty body maps to
+        // `null`, which the daemon refuses as `invalid_params` — `400` here.
+        (&Method::POST, ["chat"]) => unary(METHOD_CHAT, body_json(body)?),
 
         _ => Err(format!(
             "no trusty-search socket method serves {method} /{}. The console reaches \
              trusty-search over its Unix socket (ADR-0032, #6285); only the endpoints the \
-             dashboard uses are mapped. `POST /chat` and `POST /admin/stop` have no socket \
-             method at all and are pending an owner decision on #6285.",
+             dashboard uses are mapped. `POST /admin/stop` is pending an owner decision \
+             on #6285.",
             path.trim_matches('/')
         )),
     }
@@ -392,6 +398,19 @@ mod tests {
                 params: json!({ "query": "q", "top_k": 5 })
             }
         );
+        // #6285: the SPA's `api.chat` body, verbatim, as a unary call.
+        assert_eq!(
+            unary(
+                &Method::POST,
+                "chat",
+                None,
+                r#"{"index_id":"a","message":"why?","history":[]}"#
+            ),
+            Call::Unary {
+                method: METHOD_CHAT,
+                params: json!({ "index_id": "a", "message": "why?", "history": [] })
+            }
+        );
         assert_eq!(
             unary(&Method::GET, "config", None, ""),
             Call::Unary {
@@ -512,13 +531,13 @@ mod tests {
     }
 
     /// Why: an unmapped request must be refused with a sentence an operator can
-    /// act on, never forwarded on a guess. `POST /chat` is the live instance —
-    /// the SPA calls it and no socket method serves it.
+    /// act on, never forwarded on a guess. `POST /admin/stop` is the live
+    /// instance — the SPA calls it and this table does not map it.
     /// Test: this is the test.
     #[test]
     fn refuses_an_unmapped_path() {
         for (method, path) in [
-            (Method::POST, "chat"),
+            (Method::GET, "chat"),
             (Method::POST, "admin/stop"),
             (Method::POST, "upgrade"),
             (Method::GET, "metrics"),

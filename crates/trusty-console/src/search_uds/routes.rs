@@ -44,8 +44,8 @@ use trusty_common::uds::UdsRpcError;
 
 use super::map::{Call, map_request};
 use super::{
-    CALL_TIMEOUT, MAX_FRAME_BYTES, STREAM_OPEN_TIMEOUT, SearchRpcError, call, json_response,
-    open_stream,
+    MAX_FRAME_BYTES, STREAM_OPEN_TIMEOUT, SearchRpcError, call, json_response, open_stream,
+    unary_timeout,
 };
 use crate::server::AppState;
 use trusty_common::uds::sse::sse_response;
@@ -112,7 +112,8 @@ pub async fn search_api_handler(
     match mapped {
         Call::Unary { method, params } => {
             debug!("search_uds: {} /{path} → {method}", parts.method);
-            match call(&socket, method, params, CALL_TIMEOUT).await {
+            // #6285: chat collects a whole completion; see `CHAT_TIMEOUT`.
+            match call(&socket, method, params, unary_timeout(method)).await {
                 Ok(result) => json_response(&result),
                 Err(e) => e.into_response(),
             }

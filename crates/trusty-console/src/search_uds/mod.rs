@@ -76,6 +76,10 @@ pub(crate) const METHOD_QUERY_ALL: &str = "search.query.all";
 // #9028: the dashboard's query box asks this per keystroke.
 /// Per-keystroke suggestions from one index — `GET /indexes/{id}/typeahead`.
 pub(crate) const METHOD_TYPEAHEAD: &str = "search.typeahead";
+// #6285: owner ruling — chat is served by the console over this socket, with
+// no TCP listener on the daemon.
+/// One grounded chat answer — `POST /chat`, unary.
+pub(crate) const METHOD_CHAT: &str = "search.chat";
 /// Trigger a reindex — `POST /indexes/{id}/reindex`.
 pub(crate) const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// Daemon memory-limit config — `GET /config`.
@@ -106,6 +110,27 @@ pub(crate) const METHOD_INDEX_FILE_EVENTS: &str = "search.index.file_events";
 /// quiesce and a fan-out query walks every registered corpus, so this is bounded
 /// by disk work rather than by a round trip.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long one `search.chat` exchange may take, end to end.
+///
+/// Why longer than [`CALL_TIMEOUT`] (#6285): the daemon collects a whole model
+/// completion before it answers, and a local model server generating on CPU
+/// routinely takes longer than 30 s. The daemon's own route carries no
+/// deadline, so the console's figure is the only bound. A cut-off answer would
+/// read as `502` "did not answer" against a daemon that was still working.
+/// What: five minutes — bounded, so a wedged provider still frees the request.
+pub(crate) const CHAT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The end-to-end budget for one unary call to `method`.
+///
+/// Test: `only_chat_gets_the_long_budget`.
+pub(crate) fn unary_timeout(method: &str) -> Duration {
+    if method == METHOD_CHAT {
+        CHAT_TIMEOUT
+    } else {
+        CALL_TIMEOUT
+    }
+}
 
 /// How long the health probe may take.
 ///
@@ -656,6 +681,19 @@ mod tests {
             "this client's frame budget ({MAX_FRAME_BYTES}) is under the listener's ({listener}); \
              a response trusty-search already produced would come back as FrameTooLarge"
         );
+    }
+
+    /// Why (#6285): a chat answer is a whole model completion and outlasts the
+    /// 30 s figure every other call keeps; the long budget must not leak to
+    /// the methods a wedged daemon should fail fast on.
+    /// Test: this is the test.
+    #[test]
+    fn only_chat_gets_the_long_budget() {
+        assert_eq!(unary_timeout(METHOD_CHAT), CHAT_TIMEOUT);
+        assert!(CHAT_TIMEOUT > CALL_TIMEOUT);
+        for method in [METHOD_QUERY, METHOD_QUERY_ALL, METHOD_TYPEAHEAD] {
+            assert_eq!(unary_timeout(method), CALL_TIMEOUT, "{method}");
+        }
     }
 
     /// Why: the console and the daemon must compute the SAME path, or the
