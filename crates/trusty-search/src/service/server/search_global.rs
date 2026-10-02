@@ -87,6 +87,15 @@ pub struct GlobalSearchRequest {
     pub path_prefix: Option<String>,
     #[serde(default)]
     pub repos: Vec<String>,
+
+    /// Fan-out deadline in milliseconds for this call (#9027): one instant,
+    /// taken when the per-index searches start, that every one of them must
+    /// answer by. Not a per-index budget, despite the name (kept for
+    /// compatibility). Overrides `TRUSTY_SEARCH_FANOUT_INDEX_DEADLINE_MS`
+    /// (default 3000). An index that misses it is skipped and counted in
+    /// `deadline_indexes_skipped`. Clamped to `>= 1`.
+    #[serde(default)]
+    pub per_index_deadline_ms: Option<u64>,
 }
 
 fn default_global_top_k() -> usize {
@@ -150,9 +159,16 @@ pub(super) async fn global_search_handler(
 /// `corpus_failed_indexes_skipped`, `corpus_read_failed_indexes_skipped` — are
 /// the fields a caller reads to know the sweep was partial, so a second
 /// implementation that omitted one would report a complete answer over a
-/// missing corpus.
-/// What: [`global_search_handler`]'s whole former body.
-/// Test: `global_search_over_the_socket_matches_the_http_body`.
+/// missing corpus. `partial` (#9027) folds them, plus a degraded query embed,
+/// into one flag.
+/// What: [`global_search_handler`]'s whole former body. Order (#9027): embed
+/// under its own timeout, route, kick rehydrates for the routed indexes, then
+/// take the one fan-out deadline and search.
+/// Test: `global_search_over_the_socket_matches_the_http_body`,
+/// `a_slow_embed_degrades_to_lexical_and_still_searches_every_index`,
+/// `the_fan_out_deadline_starts_after_the_query_embed`,
+/// `global_search_skips_an_index_that_misses_the_deadline`,
+/// `an_index_whose_search_errors_marks_the_fan_out_partial`.
 pub(crate) async fn global_search_report(
     state: &Arc<SearchAppState>,
     req: GlobalSearchRequest,
@@ -195,6 +211,9 @@ pub(crate) async fn global_search_report(
         all_ids
     };
     let total_indexes = index_ids.len();
+    let per_index_deadline =
+        super::fanout_deadline::resolve_index_deadline(req.per_index_deadline_ms);
+    let per_index_deadline_ms = per_index_deadline.as_millis() as u64;
     if index_ids.is_empty() {
         return Ok(serde_json::json!({
             "results": Vec::<crate::core::indexer::CodeChunk>::new(),
@@ -208,6 +227,14 @@ pub(crate) async fn global_search_report(
             "corpus_read_failed_indexes_skipped": 0_usize,
             // #6581: same contract — present on every response, never absent.
             "migration_in_progress_indexes_skipped": 0_usize,
+            // #9027: same contract — present on every response.
+            "rehydrating_indexes_skipped": 0_usize,
+            "deadline_indexes_skipped": 0_usize,
+            "deadline_skipped_index_ids": Vec::<String>::new(),
+            "per_index_deadline_ms": per_index_deadline_ms,
+            "query_embed": "not_run",
+            "embed_degraded": false,
+            "partial": cold_indexes_skipped > 0,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         }));
@@ -219,7 +246,21 @@ pub(crate) async fn global_search_report(
     // Issue #112: compute per-index context weights, then apply the routing
     // strategy to decide which indexes participate in the fan-out.
     let routing_mode = RoutingMode::from_request(&req);
-    let weights = compute_context_weights(&state.registry, &index_ids, &req.query).await;
+    // #9027: embed once, under its own timeout; the routing weights and every
+    // per-index search reuse it. A timeout degrades every index to lexical.
+    let embed = super::fanout_deadline::embed_query_once(
+        &state.registry,
+        &index_ids,
+        &req.query,
+        super::fanout_deadline::resolve_embed_timeout(),
+    )
+    .await;
+    let query_vector = embed.vector;
+    let routing_vector = query_vector
+        .as_deref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|v| v.as_slice());
+    let weights = compute_context_weights(&state.registry, &index_ids, routing_vector).await;
     let (mut active_ids, mut weight_map) = routing_mode.apply(&index_ids, &weights);
 
     // Issue #404 — nested-index fan-out (MVP):
@@ -324,98 +365,28 @@ pub(crate) async fn global_search_report(
         serial = req.serial,
         "global search: bounded fan-out"
     );
-    let registry = state.registry.clone();
-    // #4087: exclude indexes whose durable corpus failed to open, and COUNT
-    // them. Their lane can only ever be empty, so leaving them in fused a
-    // silent zero-result contribution into the response and told the caller
-    // its fan-out was complete when one of its corpora was entirely absent.
-    // Reported alongside `cold_indexes_skipped` so an incomplete fan-out is
-    // always visible in the payload rather than only in the daemon log.
-    let corpus_failed_indexes_skipped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // #5917: the sibling counter for a corpus that OPENED and then failed a
-    // READ. That fault reached the generic error arm below, which warn-logged
-    // and dropped the index — so an index contributing nothing because its
-    // corpus is unreadable was indistinguishable, in the payload, from one that
-    // simply had no matches.
-    let corpus_read_failed_indexes_skipped =
-        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // #6581: an index mid-schema-migration has an empty or partial corpus for
-    // the length of the rebuild. Counted separately so a caller can tell that
-    // from an index that genuinely matched nothing.
-    let migration_in_progress_indexes_skipped =
-        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let futures = active_ids.into_iter().map(|id| {
-        let registry = registry.clone();
-        let query = per_index_query.clone();
-        let failed_counter = std::sync::Arc::clone(&corpus_failed_indexes_skipped);
-        let read_failed_counter = std::sync::Arc::clone(&corpus_read_failed_indexes_skipped);
-        let migrating_counter = std::sync::Arc::clone(&migration_in_progress_indexes_skipped);
-        async move {
-            let handle = registry.get(&id)?;
-            if super::degraded::is_corpus_failed(&handle).await {
-                failed_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    index_id = %id,
-                    "global search: skipping index '{id}' — its durable corpus failed to \
-                     open, so it can only contribute an empty lane; reported as \
-                     corpus_failed_indexes_skipped (issue #4087)"
-                );
-                return None;
-            }
-            let indexer = handle.indexer.read().await;
-            match indexer.search(&query).await {
-                Ok(results) => Some((id, results)),
-                Err(e) => {
-                    // #5917: count the unreadable-corpus case separately so an
-                    // incomplete fan-out is visible in the payload, matching how
-                    // #4087's open-failure skip is reported one arm up.
-                    if e.downcast_ref::<crate::core::indexer::CorpusReadUnavailable>()
-                        .is_some()
-                    {
-                        read_failed_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            index_id = %id,
-                            "global search: index '{id}' contributed nothing — its durable \
-                             corpus could not be read ({e:#}); reported as \
-                             corpus_read_failed_indexes_skipped (issue #5917)"
-                        );
-                        return None;
-                    }
-                    // #6581: a schema migration is rebuilding this index's
-                    // corpus. Without its own counter it fell through to the
-                    // generic arm below and vanished from the payload entirely
-                    // — the "outage rendered as nothing matched" failure this
-                    // 503 exists to prevent, one call site over.
-                    if e.downcast_ref::<crate::core::indexer::IndexMigrationInProgress>()
-                        .is_some()
-                    {
-                        migrating_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!(
-                            index_id = %id,
-                            "global search: index '{id}' contributed nothing — a schema \
-                             migration is rebuilding its corpus ({e:#}); reported as \
-                             migration_in_progress_indexes_skipped (issue #6581)"
-                        );
-                        return None;
-                    }
-                    tracing::warn!("global search: index {} errored: {e}", id);
-                    None
-                }
-            }
-        }
-    });
-    let mut per_index_results: Vec<(IndexId, Vec<crate::core::indexer::CodeChunk>)> =
-        futures::stream::iter(futures)
-            .buffer_unordered(fanout_concurrency)
-            .filter_map(|opt| async move { opt })
-            .collect()
-            .await;
-    let corpus_failed_indexes_skipped =
-        corpus_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
-    let corpus_read_failed_indexes_skipped =
-        corpus_read_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
-    let migration_in_progress_indexes_skipped =
-        migration_in_progress_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
+    // #9027: rehydrate only what routing kept, all at once, then start the
+    // deadline. Taking it any earlier let a slow embed spend it before a single
+    // index was searched.
+    super::fanout_deadline::kick_evicted_rehydrates(&state.registry, &active_ids);
+    let deadline_at = tokio::time::Instant::now() + per_index_deadline;
+    // #4087 / #5917 / #6581 / #9027: every way an index can contribute no lane
+    // is classified by `search_one_index` and counted below, so a partial
+    // fan-out is visible in the payload rather than only in the daemon log.
+    let outcomes: Vec<super::fanout_deadline::LaneOutcome> =
+        futures::stream::iter(active_ids.into_iter().map(|id| {
+            super::fanout_deadline::search_one_index(
+                state.registry.clone(),
+                id,
+                per_index_query.clone(),
+                query_vector.clone(),
+                deadline_at,
+            )
+        }))
+        .buffer_unordered(fanout_concurrency)
+        .collect()
+        .await;
+    let (mut per_index_results, skips) = super::fanout_deadline::split_outcomes(outcomes);
     // `buffer_unordered` yields in completion order; sort by index id so the
     // fused output is deterministic regardless of which lanes finished first
     // (RRF is a per-lane rank sum, but stable lane ordering keeps score ties
@@ -492,6 +463,16 @@ pub(crate) async fn global_search_report(
         .collect();
 
     let latency_ms = started.elapsed().as_millis() as u64;
+    let deadline_skipped = skips.deadline_ids.len();
+    // #9027: one flag for "this is not the full answer over every index".
+    let partial = cold_indexes_skipped
+        + skips.corpus_failed
+        + skips.corpus_read_failed
+        + skips.migration_in_progress
+        + skips.errored
+        + deadline_skipped
+        > 0
+        || embed.status.degraded();
     Ok(serde_json::json!({
         "results": results,
         "indexes_searched": indexes_searched,
@@ -505,15 +486,34 @@ pub(crate) async fn global_search_report(
         // #4087: indexes excluded from the fan-out because their durable corpus
         // failed to open — they can only contribute an empty lane, so folding
         // them in silently reported a complete fan-out over a missing corpus.
-        "corpus_failed_indexes_skipped": corpus_failed_indexes_skipped,
+        "corpus_failed_indexes_skipped": skips.corpus_failed,
         // #5917: the sibling count for a corpus that opened and then failed a
         // read. Non-zero means those indexes contributed no lane at all, so
         // this result set is not the complete answer over the fan-out.
-        "corpus_read_failed_indexes_skipped": corpus_read_failed_indexes_skipped,
+        "corpus_read_failed_indexes_skipped": skips.corpus_read_failed,
         // #6581: indexes whose corpus is mid-rebuild by a schema migration.
         // Non-zero means this result set is not the complete answer over the
         // fan-out and the missing lanes are transient — retry once they settle.
-        "migration_in_progress_indexes_skipped": migration_in_progress_indexes_skipped,
+        "migration_in_progress_indexes_skipped": skips.migration_in_progress,
+        // #9027: indexes whose search failed for any other reason (logged).
+        "errored_indexes_skipped": skips.errored,
+        // #9027: indexes that missed the fan-out deadline (often rehydrating
+        // after idle eviction; a held lock or a slow search counts too). Any
+        // rehydrate keeps running in the background. `rehydrating_…` is the
+        // original name of the same count, kept for compatibility.
+        "rehydrating_indexes_skipped": deadline_skipped,
+        "deadline_indexes_skipped": deadline_skipped,
+        "deadline_skipped_index_ids": skips.deadline_ids,
+        // One deadline for the whole fan-out, not a per-index budget.
+        "per_index_deadline_ms": per_index_deadline_ms,
+        // #9027: how the one query embed ended — `embedded`, `failed`,
+        // `timed_out` or `per_index` (`not_run` when there was nothing to
+        // search). `embed_degraded` is true when every
+        // index answered from the lexical lane because the embed failed.
+        "query_embed": embed.status.label(),
+        "embed_degraded": embed.status.degraded(),
+        // #9027: true when any index was skipped or the embed degraded.
+        "partial": partial,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,
