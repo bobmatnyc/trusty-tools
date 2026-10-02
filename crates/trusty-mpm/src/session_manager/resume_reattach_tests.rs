@@ -35,7 +35,8 @@ use super::tests::make_manager;
 async fn manager_resume_reuses_live_pane_without_recreate() {
     let dir = TempDir::new().unwrap();
     let workspace_dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
+    // #9101: a reuse needs a pane the record owns on the live server.
+    let (mgr, fake) = super::tests::make_manager_with_pane(&dir).await;
 
     let workspace_path = workspace_dir.path().to_owned();
 

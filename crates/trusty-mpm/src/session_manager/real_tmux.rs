@@ -403,7 +403,10 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
 /// What: `create_session` and `kill_session` return `Ok(())` silently; `send_line`
 /// returns `Ok(())` silently; `capture` returns an empty string; `list_sessions`
 /// returns an empty list so `reconcile_on_boot` sees no live sessions and marks
-/// stored records `Stopped` (never adopts real host sessions).
+/// stored records `Stopped` (never adopts real host sessions). #9101:
+/// `get_pane_id` mints `%<name>` and `pane_identity` places that pane in
+/// session `<name>` on one fake server, so pane operations on its records
+/// pass the ownership gate.
 /// Test: used by [`DaemonState::with_root_isolated_managed`] — the sole test
 /// constructor that pre-seeds the `managed_sessions` OnceCell so the lazy
 /// initialiser never touches the real tmux binary.
@@ -440,6 +443,37 @@ impl ManagedTmuxDriver for FakeNoopTmuxDriver {
 
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
+    }
+
+    /// #9101: a pane id naming its session, so a record this driver created
+    /// can prove ownership of its pane; this driver keeps no state.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(format!("%{name}"))
+    }
+
+    /// #9101: the pane [`Self::get_pane_id`] minted, on one fake server.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        Ok(super::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: "1:1".into(),
+            session_name: pane_id.trim_start_matches('%').to_owned(),
+        })
+    }
+
+    fn send_keys_literal_to_pane(&self, _n: &str, _p: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn send_interrupt_to_pane(&self, _name: &str, _pane_id: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn capture_pane(&self, _n: &str, _p: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
     }
 }
 

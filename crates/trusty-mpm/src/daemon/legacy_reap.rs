@@ -1,38 +1,32 @@
-//! The kill loop of the shutdown legacy-registry reap (#8942).
+//! The shutdown legacy-registry pass, which kills nothing (#8942, #9101).
 //!
 //! Why: boot discovery fills the legacy registry from ANY claude pane, the
-//! Architect's included, so the graceful-shutdown reap reached the Architect
-//! by name with no record at all. Split out of `daemon/mod.rs` so a test can
-//! drive the loop with a scripted tmux and a scratch kill floor.
-//! What: [`reap_legacy_names`] kills each name through
-//! [`TmuxDriver::kill_session`], whose #8942 floor refuses the Architect's
-//! names; a refusal or failure is logged and the loop moves on.
-//! Test: `reap_all_live_sessions_never_kills_a_sidecar_named_session`.
+//! Architect's included, and an entry records only a tmux name. The shutdown
+//! reap used to kill every such name, so it reached whichever session carried
+//! the name at shutdown: the Architect (#8942), an operator's own claude, or
+//! after a tmux server restart an unrelated session (#9101). A name proves no
+//! ownership, and the daemon kills only sessions it proves it owns.
+//! What: [`skip_legacy_names`] logs each name as skipped and kills none.
+//! Test: `the_shutdown_legacy_pass_kills_no_legacy_session`.
 
 use tracing::warn;
 
-use super::tmux::TmuxDriver;
-
-/// Kill every tmux session in `names`; returns how many kills ran.
+/// Log every tmux session in `names` as left running; returns how many.
 ///
-/// Why: see the module doc. One failure must not stop the rest.
-/// What: best-effort `kill_session` per name; a floor refusal is an `Err`
-/// like any other and is logged, never retried.
-/// Test: `reap_all_live_sessions_never_kills_a_sidecar_named_session`.
-pub(crate) fn reap_legacy_names(
-    driver: &TmuxDriver,
-    names: impl IntoIterator<Item = String>,
-) -> usize {
-    let mut reaped = 0usize;
+/// Why: see the module doc. The managed sessions the daemon can prove it
+/// owns are stopped by `SessionManager::shutdown` before this runs.
+/// What: one `warn` per name; no tmux call.
+/// Test: `the_shutdown_legacy_pass_kills_no_legacy_session`.
+pub(crate) fn skip_legacy_names(names: impl IntoIterator<Item = String>) -> usize {
+    let mut skipped = 0usize;
     for name in names {
-        match driver.kill_session(&name) {
-            Ok(()) => reaped += 1,
-            // Fail-open: a kill failing (already gone, never had a host, or
-            // refused by the #8942 floor) must not stop us reaping the rest.
-            Err(e) => warn!("graceful shutdown: kill_session({name}) failed or was refused: {e}"),
-        }
+        warn!(
+            "graceful shutdown: legacy session '{name}' left running — a legacy registry \
+             entry carries no pane or server identity to prove it is the daemon's (#9101)"
+        );
+        skipped += 1;
     }
-    reaped
+    skipped
 }
 
 #[cfg(test)]

@@ -1,40 +1,28 @@
-//! Tests for the shutdown legacy-registry reap (#8942). Hermetic: the floor is
-//! rooted in a scratch directory and tmux is a scripted fake that logs argv.
+//! Tests for the shutdown legacy-registry pass (#8942, #9101). Hermetic: tmux
+//! resolves to a scripted fake that logs its argv.
 
-use super::reap_legacy_names;
-use crate::daemon::tmux::TmuxDriver;
-use crate::session_manager::SupervisorFloor;
+use super::skip_legacy_names;
 
-/// #8942: the legacy registry holds the Architect's pane (boot discovery adds
-/// any claude pane), and the reap still never kills it or its poller, while
-/// an ordinary name in the same sweep is killed. Serial: the tmux spawn guard
-/// reads `$HOME`, which other serial tests reassign.
+/// #9101: a legacy registry entry is a bare tmux name, so the shutdown pass
+/// kills none of them — not the Architect's names (#8942), and not an
+/// ordinary one, which a restarted tmux server may have handed to an
+/// unrelated session. No tmux call runs at all.
 #[serial_test::serial]
-#[test]
-fn reap_all_live_sessions_never_kills_a_sidecar_named_session() {
+#[tokio::test]
+async fn the_shutdown_legacy_pass_kills_no_legacy_session() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = crate::test_support::hermetic_temp_dir();
-    let root = dir.path().join(".trusty-mpm");
-    let sidecars = root.join("architect-launch");
-    std::fs::create_dir_all(&sidecars).expect("sidecar dir");
-    let sidecar = serde_json::json!({"pid": 111, "start_time": 1, "session": "tm-arch"});
-    std::fs::write(sidecars.join("111.architect-session"), sidecar.to_string()).expect("sidecar");
     let log = dir.path().join("calls.log");
     let bin = dir.path().join("fake-tmux");
     let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", log.display());
     std::fs::write(&bin, script).expect("write fake tmux");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy())
-        .with_floor(SupervisorFloor::at_root(&root));
 
     let names = ["tm-arch", "tm-arch-poll", "tm-work"].map(String::from);
-    let reaped = reap_legacy_names(&driver, names);
+    let skipped =
+        crate::core::tmux::with_tmux_binary(bin, async { skip_legacy_names(names) }).await;
 
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert_eq!(reaped, 1, "only the ordinary session is reaped: {calls}");
-    assert!(calls.contains("kill-session -t =tm-work"), "{calls}");
-    assert!(
-        !calls.contains("=tm-arch"),
-        "the Architect's names were killed: {calls}"
-    );
+    assert_eq!(skipped, 3, "every legacy name is reported as left running");
+    assert!(calls.is_empty(), "the legacy pass ran tmux: {calls}");
 }

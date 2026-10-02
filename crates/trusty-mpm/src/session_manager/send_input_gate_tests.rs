@@ -11,12 +11,14 @@
 //! blocking onboarding/trust dialog, and proves a `Tcode`-runtime session is
 //! exempt from that modal probe (the healthy-path regression guard on the
 //! other runtime).
+//! #9101: every test past the state guard binds the record to pane `%1`,
+//! which the ownership gate requires, so the fake keys its capture by pane.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use std::path::PathBuf;
 
 use super::record::ManagedSessionState;
-use super::tests::make_manager;
+use super::tests::{make_manager, make_manager_with_pane};
 
 /// send_input must be rejected for Provisioning and Errored sessions (#3591).
 ///
@@ -94,7 +96,7 @@ async fn manager_send_input_rejected_for_provisioning_and_errored() {
 #[tokio::test]
 async fn manager_send_input_rejected_when_pane_shows_blocking_modal() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -114,7 +116,7 @@ async fn manager_send_input_rejected_when_pane_shows_blocking_modal() {
         store.upsert(r).await.unwrap();
     }
     fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
+        "%1".to_string(),
         "Do you trust the files in this folder?".into(),
     );
 
@@ -124,7 +126,7 @@ async fn manager_send_input_rejected_when_pane_shows_blocking_modal() {
         "send_input must fail when the pane shows a blocking modal (pre-fix: this proceeds)"
     );
     assert!(
-        fake.send_calls.lock().unwrap().is_empty(),
+        fake.pane_send_calls.lock().unwrap().is_empty(),
         "no send-line may fire while a blocking modal is showing"
     );
 }
@@ -147,7 +149,7 @@ async fn manager_send_input_rejected_when_pane_shows_blocking_modal() {
 #[tokio::test]
 async fn manager_send_input_skips_modal_probe_for_tcode() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -170,15 +172,15 @@ async fn manager_send_input_skips_modal_probe_for_tcode() {
     // Same marker that DOES block a ClaudeCode session in
     // `manager_send_input_rejected_when_pane_shows_blocking_modal`.
     fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
+        "%1".to_string(),
         "Do you trust the files in this folder?".into(),
     );
 
     mgr.send_input(&record.id, "hello tcode")
         .await
         .expect("send_input must succeed for an Active tcode session even with a ClaudeCode-shaped marker in its pane");
-    let calls = fake.send_calls.lock().unwrap();
-    assert!(calls.iter().any(|(_, text)| text == "hello tcode"));
+    let calls = fake.pane_send_calls.lock().unwrap();
+    assert!(calls.iter().any(|(_, _, text)| text == "hello tcode"));
 }
 
 /// `send_input_observed` must report the UNSUBMITTED state when the pane still
@@ -196,7 +198,7 @@ async fn manager_send_input_skips_modal_probe_for_tcode() {
 #[tokio::test]
 async fn send_input_observed_reports_unsubmitted_paste() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -217,7 +219,7 @@ async fn send_input_observed_reports_unsubmitted_paste() {
     }
     // The exact prompt line issue #5699 recorded on the live session.
     fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
+        "%1".to_string(),
         "❯ [Pasted text #1][Pasted text #2]".into(),
     );
 
@@ -235,11 +237,11 @@ async fn send_input_observed_reports_unsubmitted_paste() {
         "`sent` must be false for an observed unsubmitted paste (pre-fix: hardcoded true)"
     );
     assert!(
-        fake.send_calls
+        fake.pane_send_calls
             .lock()
             .unwrap()
             .iter()
-            .any(|(_, text)| text == "a very long coordination message"),
+            .any(|(_, _, text)| text == "a very long coordination message"),
         "the text was typed — the verdict is about submission, not dispatch"
     );
 }
@@ -254,7 +256,7 @@ async fn send_input_observed_reports_unsubmitted_paste() {
 #[tokio::test]
 async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -276,7 +278,7 @@ async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
     fake.capture_responses
         .lock()
         .unwrap()
-        .insert(record.tmux_name.clone(), "● Working…\n❯ ".into());
+        .insert("%1".to_string(), "● Working…\n❯ ".into());
 
     let state = mgr
         .send_input_observed(&record.id, "short message")

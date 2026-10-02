@@ -417,7 +417,8 @@ impl SessionManager {
     /// second copy inline in `send_input` — see [`PaneReadiness`]'s doc for
     /// why this reuses only the modal half, not the `runtime_ready` half.
     /// What: refuses `Provisioning`/`Errored` outright (the shell-execution
-    /// risk this issue is about); for `RuntimeKind::ClaudeCode` also refuses
+    /// risk this issue is about); for `RuntimeKind::ClaudeCode` proves the
+    /// pane with [`Self::owned_pane`] (#9101) and refuses
     /// a pane showing a [`BLOCKING_MODAL_MARKERS`] hit. Fail-fast: a single
     /// probe, no retry loop — see `send_input`'s doc for the block-vs-fail-fast
     /// rationale.
@@ -439,9 +440,14 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
+        // #9101: the modal probe reads the pane, so it runs only on a pane
+        // proven to be this record's.
         if record.runtime == RuntimeKind::ClaudeCode
             && pane_shows_blocking_modal(
-                &self.capture_readiness_pane(&record.tmux_name, record.pane_id.as_deref()),
+                &self.capture_readiness_pane(
+                    &record.tmux_name,
+                    Some(&self.owned_pane(id, &record)?),
+                ),
             )
         {
             return Err(ManagedError::TmuxUnavailable(format!(
@@ -457,7 +463,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::super::record::ManagedSessionState;
-    use super::super::tests::make_manager;
+    use super::super::tests::{make_manager, make_manager_with_pane};
     use super::*;
     use tempfile::TempDir;
 
@@ -527,7 +533,8 @@ mod tests {
         // defaults to `session_exists` → true after create), injection delivers
         // the task through the SAME `send_line` seam `tm session send` uses.
         let dir = TempDir::new().unwrap();
-        let (mgr, fake) = make_manager(&dir).await;
+        // #9101: the send needs a pane the record owns.
+        let (mgr, fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up the widget".into(), None, None, None, None, None)
             .await
@@ -553,14 +560,14 @@ mod tests {
             injected,
             "task should have been injected into the ready pane"
         );
-        let sends = fake.send_calls.lock().unwrap();
+        let sends = fake.pane_send_calls.lock().unwrap();
         assert_eq!(
             sends.len(),
             1,
             "exactly one send-line should fire: {sends:?}"
         );
         assert_eq!(sends[0].0, record.tmux_name);
-        assert_eq!(sends[0].1, "wire up the widget");
+        assert_eq!(sends[0].2, "wire up the widget");
     }
 
     #[tokio::test]
@@ -679,7 +686,7 @@ mod tests {
         // #2364a: a successful delivery must leave the record's
         // injection_status as Success, not just return Ok(true).
         let dir = TempDir::new().unwrap();
-        let (mgr, _fake) = make_manager(&dir).await;
+        let (mgr, _fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("ship the feature".into(), None, None, None, None, None)
             .await

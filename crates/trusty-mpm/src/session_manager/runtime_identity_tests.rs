@@ -1078,3 +1078,7 @@ async fn live_a_record_on_its_own_server_is_killed_by_session_id() {
     );
     assert_eq!(live_pane(&server, &sibling_name), Some(sibling));
 }
+
+// #9101: the pane operations reuse this fixture, so they live in a child module.
+#[path = "pane_ops_identity_tests.rs"]
+mod pane_ops;

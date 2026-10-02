@@ -104,6 +104,43 @@ impl ManagedTmuxDriver for RecordingDriver {
         }
         Ok(self.live.lock().unwrap().iter().any(|n| n == name))
     }
+    /// #9101: one pane, `%1`, in the first created session on one server, so
+    /// the record proves it owns the pane. The pane-scoped primitives below
+    /// log into the same per-primitive lists as their session-scoped twins.
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        Some("%1".to_owned())
+    }
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<trusty_mpm::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        let name = self.live.lock().unwrap().first().cloned();
+        Ok(trusty_mpm::session_manager::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: "1:1".into(),
+            session_name: name.unwrap_or_default(),
+        })
+    }
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        _pane_id: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        self.send_keys_literal(name, text)
+    }
+    fn send_interrupt_to_pane(&self, name: &str, _pane_id: &str) -> Result<(), ManagedError> {
+        self.send_interrupt(name)
+    }
+    fn capture_pane(
+        &self,
+        name: &str,
+        _pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.capture(name, lines)
+    }
 }
 
 /// Create a manager + a fresh active session, returning the id and the driver.

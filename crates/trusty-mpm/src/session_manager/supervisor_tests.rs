@@ -120,14 +120,11 @@ async fn shutdown_skips_a_supervisor_session() {
         SessionKind::Ordinary,
     )
     .await;
+    // #9101: shutdown stops only a session that owns its pane.
+    crate::session_manager::tests::bind_pane(&mgr, &arch).await;
+    crate::session_manager::tests::bind_pane(&mgr, &work).await;
     mgr.shutdown().await;
-    let stopped: Vec<String> = fake
-        .graceful_stop_calls
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
+    let stopped: Vec<String> = fake.kill_calls.lock().unwrap().clone();
     let name = |id: ManagedSessionId| format!("tmpm-seed-{id}");
     assert_eq!(stopped, vec![name(work)], "shutdown reached {stopped:?}");
     assert!(!stopped.contains(&name(arch)));

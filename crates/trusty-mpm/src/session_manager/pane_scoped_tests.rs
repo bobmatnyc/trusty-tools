@@ -14,9 +14,9 @@
 //! `observe`, and `answer_decision`, proves (a) a known-and-alive `pane_id`
 //! routes through the pane-scoped driver call, never the session-scoped one;
 //! (b) a confirmed-gone `pane_id` refuses loudly with `ManagedError::PaneGone`
-//! WITHOUT ever calling a session-scoped primitive; (c) a legacy record with
-//! no captured `pane_id` falls back to the session-scoped call exactly as
-//! #2467 established for `resume`.
+//! WITHOUT ever calling a session-scoped primitive; (c) #9101: a legacy
+//! record with no captured `pane_id` refuses, where #2467 fell back to the
+//! session-scoped call.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use tempfile::TempDir;
@@ -156,21 +156,20 @@ async fn inject_refuses_when_stored_pane_gone() {
     );
 }
 
+/// #9101: a record with no pane id cannot prove the session is its own, so
+/// the old session-scoped fallback refuses and nothing is typed.
 #[tokio::test]
-async fn inject_legacy_record_without_pane_id_falls_back_to_session_target() {
+async fn inject_refuses_a_legacy_record_without_pane_id() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
 
-    mgr.inject(&record.id, "hello", Submit::Enter)
+    let err = mgr
+        .inject(&record.id, "hello", Submit::Enter)
         .await
-        .expect("inject enter on legacy record");
+        .expect_err("a legacy record must refuse");
 
-    assert_eq!(
-        fake.send_calls.lock().unwrap().as_slice(),
-        [(record.tmux_name.clone(), "hello".to_string())],
-        "a legacy record (no captured pane_id) must use the session-scoped \
-         target exactly like pre-#2468 behavior"
-    );
+    assert!(matches!(err, ManagedError::InvalidState(..)), "{err:?}");
+    assert!(fake.send_calls.lock().unwrap().is_empty());
     assert!(fake.pane_send_calls.lock().unwrap().is_empty());
 }
 
@@ -224,21 +223,19 @@ async fn answer_decision_refuses_when_stored_pane_gone() {
     );
 }
 
+/// #9101: as `inject_refuses_a_legacy_record_without_pane_id`, for answers.
 #[tokio::test]
-async fn answer_decision_legacy_record_without_pane_id_falls_back_to_session_target() {
+async fn answer_decision_refuses_a_legacy_record_without_pane_id() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
 
-    mgr.answer_decision(&record.id, "rebase")
+    let err = mgr
+        .answer_decision(&record.id, "rebase")
         .await
-        .expect("answer_decision on legacy record");
+        .expect_err("a legacy record must refuse");
 
-    assert_eq!(
-        fake.send_calls.lock().unwrap().as_slice(),
-        [(record.tmux_name.clone(), "rebase".to_string())],
-        "a legacy record (no captured pane_id) must use the session-scoped \
-         target exactly like pre-#2468 behavior"
-    );
+    assert!(matches!(err, ManagedError::InvalidState(..)), "{err:?}");
+    assert!(fake.send_calls.lock().unwrap().is_empty());
     assert!(fake.pane_send_calls.lock().unwrap().is_empty());
 }
 
@@ -282,19 +279,18 @@ async fn observe_refuses_when_stored_pane_gone() {
     assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
 }
 
+/// #9101: a legacy record's observe reads no pane at all.
 #[tokio::test]
-async fn observe_legacy_record_without_pane_id_falls_back_to_session_capture() {
+async fn observe_refuses_a_legacy_record_without_pane_id() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
-    // Keyed by SESSION name — the legacy/session-scoped lookup path.
-    fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
-        "session-scoped output".to_string(),
-    );
 
-    let obs = mgr.observe(&record.id, 50).await.expect("observe");
+    let err = mgr
+        .observe(&record.id, 50)
+        .await
+        .expect_err("a legacy record must refuse");
 
-    assert_eq!(obs.raw_pane, "session-scoped output");
+    assert!(matches!(err, ManagedError::InvalidState(..)), "{err:?}");
     assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
 }
 
@@ -346,22 +342,18 @@ async fn capture_pane_refuses_when_stored_pane_gone() {
     );
 }
 
+/// #9101: a legacy record's capture reads no pane at all.
 #[tokio::test]
-async fn capture_pane_legacy_record_falls_back_to_session_capture() {
+async fn capture_pane_refuses_a_legacy_record_without_pane_id() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
-    // Keyed by SESSION name — the legacy/session-scoped lookup path.
-    fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
-        "session-scoped output".to_string(),
-    );
 
-    let text = mgr
+    let err = mgr
         .capture_pane(&record.id, 60)
         .await
-        .expect("capture_pane");
+        .expect_err("a legacy record must refuse");
 
-    assert_eq!(text, "session-scoped output");
+    assert!(matches!(err, ManagedError::InvalidState(..)), "{err:?}");
     assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
 }
 
@@ -408,21 +400,22 @@ async fn capture_pane_by_tmux_name_refuses_when_pane_gone() {
     );
 }
 
+/// #9101: a legacy record yields no verdict; a name with no record at all
+/// still falls back to the session-scoped capture.
 #[tokio::test]
-async fn capture_pane_by_tmux_name_legacy_falls_back_to_session() {
+async fn capture_pane_by_tmux_name_without_a_record_falls_back_to_session() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
     fake.capture_responses.lock().unwrap().insert(
-        record.tmux_name.clone(),
+        "tm-unmanaged".to_string(),
         "session-scoped output".to_string(),
     );
 
-    let text = mgr
-        .capture_pane_by_tmux_name(&record.tmux_name, 300)
-        .await
-        .expect("legacy record falls back to session-scoped capture");
+    let legacy = mgr.capture_pane_by_tmux_name(&record.tmux_name, 300).await;
+    let unmanaged = mgr.capture_pane_by_tmux_name("tm-unmanaged", 300).await;
 
-    assert_eq!(text, "session-scoped output");
+    assert_eq!(legacy, None, "a legacy record must yield no verdict");
+    assert_eq!(unmanaged.as_deref(), Some("session-scoped output"));
     assert!(fake.pane_capture_calls.lock().unwrap().is_empty());
 }
 
