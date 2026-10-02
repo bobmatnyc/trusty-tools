@@ -74,7 +74,7 @@ Work so trusty-mpm can drive coding harnesses other than Claude Code — Codex a
 
 ## Also on the roadmap
 
-These two initiatives are not part of a trusty-mpm release. They are tracked
+These initiatives are not part of a trusty-mpm release. They are tracked
 here because they change what trusty-mpm and the console do. States use the
 issue-lifecycle vocabulary: not started, in-progress, merged.
 
@@ -120,3 +120,18 @@ workspace-root `content/` tree
 | 4 | PHASE_1: per-crate move-and-drop, five PRs | [#8387](https://github.com/bobmatnyc/trusty-tools/issues/8387) | not started |
 | 5 | Republish wave | tracked under #8387 | not started |
 | 6 | PHASE_4: trusty-code's own asset tree | [#8390](https://github.com/bobmatnyc/trusty-tools/issues/8390) | not started |
+
+### Claude Code mods (after 2.0.0)
+
+Investigation and design, after the architect release (2.0.0). Claude Code
+2.1.287 adds mods: plugin code that runs inside the session, sees each tool
+call and turn as it happens, and can draw a band or pane. trusty-mpm would use
+a mod to watch sessions without reading the tmux screen, to show build slots
+and architect messages inside the session, and to add a second, fail-closed
+layer to pm-guard. Proposal: [DOC-78](../specs/DOC-78-claude-code-mods-integration.md)
+(draft).
+
+| Phase | Scope | State |
+|---|---|---|
+| 0–1 | Version gate at 2.1.287; observe-only event mod, replacing capture-pane scraping | not started |
+| 2–3 | In-session band, toasts and `/tm` commands; additive pm-guard layer | not started |
