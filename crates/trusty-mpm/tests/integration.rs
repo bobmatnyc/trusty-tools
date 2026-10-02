@@ -50,6 +50,7 @@ mod spawned_tm_home_isolation;
 mod tm_build_lease;
 mod tm_cli_socket;
 mod tm_compress_pipe;
+mod tm_doctor_network;
 mod tm_doctor_standalone;
 // #8436: `tm fleet init|status` through the binary.
 mod tm_fleet;
