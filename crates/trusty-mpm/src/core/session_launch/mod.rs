@@ -667,26 +667,34 @@ pub(super) fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
+    // #9011 critic r1: no content means zero agents. The framework source may
+    // still hold a previous binary's roster; the quarantine below reports why.
+    let stale_source =
+        plan.agent_source == fw.agents && crate::core::content_source::agent_roster().is_err();
     // #7727: `fw.skill_deploy_dir()` is the skills tier the agent bodies name.
-    let deploy = match deploy_agents_filtered(
-        &plan.agent_source,
-        &fw.agent_deploy_dir(),
-        &fw.skill_deploy_dir(),
-        |name| plan.agent_selected(name),
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            // LOUD: an empty agent roster means the launched session has
-            // nothing to delegate to. This must never be a quiet `warn` — it
-            // is the exact failure mode that shipped issue #2149 (a session
-            // with no roster AND no trusty-mpm identity).
-            tracing::error!(
-                project_dir = %project_dir.display(),
-                "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
-                 roster: {err}. Identity/output-style provisioning continues regardless."
-            );
-            roster_errors.push(format!("agent deploy failed: {err}"));
-            DeployResult::default()
+    let deploy = if stale_source {
+        DeployResult::default()
+    } else {
+        match deploy_agents_filtered(
+            &plan.agent_source,
+            &fw.agent_deploy_dir(),
+            &fw.skill_deploy_dir(),
+            |name| plan.agent_selected(name),
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                // LOUD: an empty agent roster means the launched session has
+                // nothing to delegate to. This must never be a quiet `warn` — it
+                // is the exact failure mode that shipped issue #2149 (a session
+                // with no roster AND no trusty-mpm identity).
+                tracing::error!(
+                    project_dir = %project_dir.display(),
+                    "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
+                     roster: {err}. Identity/output-style provisioning continues regardless."
+                );
+                roster_errors.push(format!("agent deploy failed: {err}"));
+                DeployResult::default()
+            }
         }
     };
 
@@ -754,6 +762,12 @@ pub(super) fn prepare_session_inner(
                 ));
             }
             quarantine_report = Some(report);
+        }
+        // #9011 D4: no content is ONE gap, printed by every caller of this
+        // report; no WARN of its own, and no second line from a later consumer.
+        Err(quarantine_shadows::ShadowQuarantineError::Roster(err)) if err.is_not_installed() => {
+            trusty_agents_common::agent_content::mark_not_installed_reported();
+            roster_errors.push(err.to_string());
         }
         Err(err) => {
             tracing::warn!(
@@ -1119,18 +1133,20 @@ pub(super) fn prepare_session_inner(
         tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
     }
 
-    // Issue #3427: ensure the harness-scaffolding paths this deploy just wrote
-    // (or may write in a future session) are gitignored in `project_dir`, so
-    // they never enter this project's git history — the precondition for the
-    // "would be overwritten by merge" collision this issue reports. A no-op
-    // when `project_dir` is not a git working tree, and idempotent otherwise
-    // (see `scaffold_gitignore` module docs). Non-fatal: a write failure only
-    // means the operator keeps doing this manually, it never blocks launch.
-    // This only prevents FUTURE commits — a project that already committed
-    // these paths needs the `scaffold_tracking` doctor check's remediation,
-    // not this step.
-    if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
-        tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
+    // Issue #3427: keep the harness-scaffolding paths this deploy just wrote
+    // out of `project_dir`'s git history. #8758: through the shared
+    // `.git/info/exclude`, never the tracked `.gitignore`, whose append left
+    // `git status` dirty on every launch. A no-op when `project_dir` is not a
+    // git working tree. Non-fatal: a failure never blocks launch. A project
+    // that already committed these paths needs the `scaffold_tracking` doctor
+    // check's remediation, not this step.
+    match crate::core::harness_exclude::ensure_scaffold_excluded(project_dir) {
+        Ok(added) if !added.is_empty() => tracing::info!(
+            "added {} to the shared info/exclude (#8758)",
+            added.join(", ")
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!("harness scaffolding NOT excluded (non-fatal, #8758): {err}"),
     }
     // #8663: after the last write to a ledgered path. A failure only means a
     // later decommission keeps this workspace.

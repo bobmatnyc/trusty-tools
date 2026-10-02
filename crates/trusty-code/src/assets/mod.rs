@@ -18,7 +18,7 @@
 //! `agents::md_loader::project_embedded_md`) plus the 26 tm agents (`extends:`-chained
 //! through the 5 `BASE-*` templates — projected via
 //! `agents::md_loader::project_embedded_md_with_extends`, which resolves
-//! against [`EMBEDDED_TM_AGENT_SOURCES`]). Authored as Markdown+frontmatter
+//! against [`tm_agent_sources`]). Authored as Markdown+frontmatter
 //! (`.md`) as of #2897 Slice C (previously native TOML; Slice D subsequently
 //! retired the TOML loader for USER `.claude/agents/*.toml` configs entirely
 //! — see `agents::mod`'s docs). Both projection paths share one
@@ -34,10 +34,11 @@
 //! Four of the 26 roster agents — `qa`, `code-critic`, `code-analyzer`,
 //! `web-qa` — carry an explicit restrictive `tools:` override in their tcode
 //! FORK (`assets/agents/{qa,code-critic,code-analyzer,web-qa}.md`) that is NOT
-//! present in the shared asset they were derived from
-//! (`trusty_agents_common::agent_assets`). These four are the only agent `.md`
-//! files trusty-code still keeps a second copy of: every other roster agent is
-//! embedded straight from the shared crate, so it cannot drift. (#8129's four
+//! present in the shared agent they were derived from (`content/agents`,
+//! read at runtime since #9011). These four are the only agent `.md` files
+//! trusty-code still embeds a second copy of: every other roster agent is read
+//! from instructional content through [`tm_agent_sources`], so it cannot
+//! drift. (#8129's four
 //! delivery-workflow agents also live in `assets/agents/`, but they are
 //! tcode-AUTHORED, not copies — see the "Delivery-workflow agents" section
 //! below.) This is a
@@ -128,14 +129,14 @@
 //! deviations — there is no upstream content to reconcile against, only an
 //! upstream ROLE. `scripts/check_agent_assets.sh` therefore lists them in
 //! `$TCODE_ONLY`, never in `$DEVIATED_FILES`. The three shared sources they
-//! replace were removed from [`EMBEDDED_TM_AGENT_SOURCES`] in the same change
-//! so no caller can compose the trusty-mpm body under the same dispatch name.
+//! replace are absent from [`SHARED_TM_AGENT_FILES`], so no caller can compose
+//! the trusty-mpm body under the same dispatch name.
 //!
 //! ## E4 guard (issue #2958, `scripts/check_agent_assets.sh`)
 //!
 //! The byte-parity half of this gate is gone because what it compared is gone:
-//! 30 duplicated `.md` files became one shared copy each, and a file cannot
-//! drift from itself. What the gate still checks is what the compiler cannot
+//! 30 duplicated `.md` files became one shared copy each (`content/agents`
+//! since #9011), and a file cannot drift from itself. What the gate still checks is what the compiler cannot
 //! see — it pins the 4 deviated files' SHARED source hash
 //! (`scripts/agent-asset-pins.tsv`) so an edit behind one of them fails for
 //! deliberate reconciliation, and it rejects any `.md` appearing in this
@@ -154,13 +155,14 @@
 //! [`EmbeddedAgent`]: crate::assets::EmbeddedAgent
 //! [`EmbeddedAgent::Direct`]: crate::assets::EmbeddedAgent::Direct
 //! [`DEFAULT_AGENTS`]: crate::assets::DEFAULT_AGENTS
-//! [`EMBEDDED_TM_AGENT_SOURCES`]: crate::assets::EMBEDDED_TM_AGENT_SOURCES
+//! [`tm_agent_sources`]: crate::assets::tm_agent_sources
+//! [`SHARED_TM_AGENT_FILES`]: crate::assets::SHARED_TM_AGENT_FILES
 //! [`EmbeddedSkill`]: crate::assets::EmbeddedSkill
 //! [`DEFAULT_SKILLS`]: crate::assets::DEFAULT_SKILLS
 
 /// One embedded default agent: either self-contained (tcode's own 3
 /// defaults, no `extends:` chain) or a roster agent whose `extends:` chain is
-/// resolved at load time against [`EMBEDDED_TM_AGENT_SOURCES`] (Slice E3,
+/// resolved at load time against [`tm_agent_sources`] (Slice E3,
 /// #2958).
 ///
 /// Why: `agents::mod`'s embedded-fallback needs a single ordered table
@@ -175,7 +177,7 @@
 /// What: [`EmbeddedAgent::Direct`] carries the dispatch name and the raw
 /// `.md` source (frontmatter fence + prose body) verbatim. [`EmbeddedAgent::Composed`]
 /// carries only the dispatch name — its content is resolved from
-/// [`EMBEDDED_TM_AGENT_SOURCES`] at load time, since the whole point of the
+/// [`tm_agent_sources`] at load time, since the whole point of the
 /// in-memory composer is that no second copy of the raw bytes is needed here.
 /// [`EmbeddedAgent::name`] reads the name back out of either variant.
 /// Test: `assets::tests::default_agents_parse_and_names_match`.
@@ -190,9 +192,9 @@ pub enum EmbeddedAgent {
         md: &'static str,
     },
     /// A roster agent resolved via `agents::md_loader::project_embedded_md_with_extends`
-    /// against [`EMBEDDED_TM_AGENT_SOURCES`] at load time.
+    /// against [`tm_agent_sources`] at load time.
     Composed {
-        /// Dispatch key, and the lookup key into `EMBEDDED_TM_AGENT_SOURCES`
+        /// Dispatch key, and the lookup key into `tm_agent_sources`
         /// (after that table's own case-folding).
         name: &'static str,
     },
@@ -307,7 +309,7 @@ const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 /// (Slice E3, #2958, plus `pm` added for #3437, `ticketing` for #4027, and
 /// the four #8129 delivery-workflow agents):
 /// tcode's 8 own `Direct` defaults plus the 26 tm roster agents. The 5
-/// `BASE-*` extends templates in [`EMBEDDED_TM_AGENT_SOURCES`] are
+/// `BASE-*` extends templates in [`tm_agent_sources`] are
 /// deliberately NOT entries here — they are extends-sources only, never
 /// dispatchable — and trusty-mpm's own `engineer` agent is excluded from the
 /// roster upstream (#2958's roster decision) precisely because it would
@@ -334,7 +336,7 @@ const DOCUMENTATION_MD: &str = include_str!("agents/documentation.md");
 /// bump, changelog) and `documentation` (prose) — all eight
 /// [`EmbeddedAgent::Direct`], interleaved alphabetically from
 /// `documentation` onward. Then the 26 [`EmbeddedAgent::Composed`] roster
-/// agents, alphabetical, matching [`EMBEDDED_TM_AGENT_SOURCES`]'s roster
+/// agents, alphabetical, matching [`tm_agent_sources`]'s roster
 /// ordering. Four of them (`qa`, `code-critic`, `code-analyzer`, `web-qa`)
 /// carry a tcode-only restrictive `tcode_tools:` override in their `.md`
 /// source — see this module's "Tools-restriction deviation" doc section above.
@@ -472,12 +474,6 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
 // their content source, resolved at load time via
 // `agents::md_loader::project_embedded_md_with_extends`. --
 
-const BASE_AGENT_MD: &str = trusty_agents_common::agent_assets::BASE_AGENT;
-const BASE_ENGINEER_MD: &str = trusty_agents_common::agent_assets::BASE_ENGINEER;
-const BASE_OPS_MD: &str = trusty_agents_common::agent_assets::BASE_OPS;
-const BASE_QA_MD: &str = trusty_agents_common::agent_assets::BASE_QA;
-const BASE_RESEARCH_MD: &str = trusty_agents_common::agent_assets::BASE_RESEARCH;
-
 /// The 5 `BASE-*` extends-template names — composition bases only, never
 /// meant to be dispatched directly (issue #3465 follow-up: the Agents
 /// catalog listing was surfacing these to end users).
@@ -504,95 +500,93 @@ pub const BASE_AGENT_NAMES: &[&str] = &[
     "base-research",
 ];
 
-const API_QA_MD: &str = trusty_agents_common::agent_assets::API_QA;
 const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
 const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");
-const DART_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DART_ENGINEER;
-const DATA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::DATA_ENGINEER;
-const GOLANG_ENGINEER_MD: &str = trusty_agents_common::agent_assets::GOLANG_ENGINEER;
-const JAVA_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVA_ENGINEER;
-const JAVASCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::JAVASCRIPT_ENGINEER;
-const NEXTJS_ENGINEER_MD: &str = trusty_agents_common::agent_assets::NEXTJS_ENGINEER;
-const ELIXIR_ENGINEER_MD: &str = trusty_agents_common::agent_assets::ELIXIR_ENGINEER;
-const PHOENIX_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PHOENIX_ENGINEER;
-const PHP_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PHP_ENGINEER;
-const PROMPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PROMPT_ENGINEER;
-const PYTHON_ENGINEER_MD: &str = trusty_agents_common::agent_assets::PYTHON_ENGINEER;
 const QA_MD: &str = include_str!("agents/qa.md");
-const REACT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::REACT_ENGINEER;
-const REFACTORING_ENGINEER_MD: &str = trusty_agents_common::agent_assets::REFACTORING_ENGINEER;
-const RESEARCH_MD: &str = trusty_agents_common::agent_assets::RESEARCH;
-const RUBY_ENGINEER_MD: &str = trusty_agents_common::agent_assets::RUBY_ENGINEER;
-const RUST_ENGINEER_MD: &str = trusty_agents_common::agent_assets::RUST_ENGINEER;
-const SECURITY_MD: &str = trusty_agents_common::agent_assets::SECURITY;
-const SVELTE_ENGINEER_MD: &str = trusty_agents_common::agent_assets::SVELTE_ENGINEER;
-const TAURI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TAURI_ENGINEER;
-const TYPESCRIPT_ENGINEER_MD: &str = trusty_agents_common::agent_assets::TYPESCRIPT_ENGINEER;
 const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
-const WEB_UI_ENGINEER_MD: &str = trusty_agents_common::agent_assets::WEB_UI_ENGINEER;
 
-/// The embedded tm agent catalog's raw sources (Slice E2, #2958): the 5
-/// `BASE-*` extends templates plus the 26 `Composed` roster agents
-/// (mpm/memory/cloud-vendor agents excluded -- see the issue's roster
-/// decision; `ticketing`, `local-ops` and `documentation` left this table in
-/// #8129, when tcode-native `Direct` agents took over those three dispatch
-/// names -- see this module's "Delivery-workflow agents" doc section).
-/// Keyed by each asset's ORIGINAL embedded
-/// filename (`"BASE-QA.md"`, `"rust-engineer.md"`, ...) rather than a
-/// pre-lowercased bare name, because
-/// `trusty_agents_common::agents::builder_in_memory::InMemorySources::insert`
-/// already lowercases and strips a trailing `.md` on both insert and lookup
-/// (Slice E1, PR #3013) -- so `("BASE-QA.md", ...)` resolves an
-/// `extends: base-qa` reference with no extra normalisation needed here.
+/// The 27 shared agent files tcode composes from: the 5 `BASE-*` extends
+/// templates plus 22 roster agents (#9011).
 ///
-/// Why: `agents::md_loader::project_embedded_md_with_extends` needs a single
-/// batch source for `build_in_memory_source_map` instead of 31 individual
-/// `insert` calls; this table is that source. Kept separate from
-/// [`DEFAULT_AGENTS`] (rather than folded into it) because this table's key
-/// space includes the 5 `BASE-*` templates, which must remain resolvable as
-/// `extends:` targets while staying permanently non-dispatchable -- merging
-/// the two tables would require a third state ("resolvable but not listed")
-/// that the current `Direct`/`Composed` enum has no need to express.
-/// What: 31 `(original_filename, raw_md_content)` pairs: 5 `BASE-*` templates
-/// (never dispatchable) plus the 26 roster agents (dispatchable as of Slice
-/// E3 via [`DEFAULT_AGENTS`]'s `EmbeddedAgent::Composed` entries, which
-/// resolve against this table at load time).
-/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`,
-/// `assets::tests::base_templates_are_never_dispatchable`,
-/// `md_loader::tests::project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`.
-pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
-    ("BASE-AGENT.md", BASE_AGENT_MD),
-    ("BASE-ENGINEER.md", BASE_ENGINEER_MD),
-    ("BASE-OPS.md", BASE_OPS_MD),
-    ("BASE-QA.md", BASE_QA_MD),
-    ("BASE-RESEARCH.md", BASE_RESEARCH_MD),
-    ("api-qa.md", API_QA_MD),
+/// Why: these texts are instructional content (ADR-0064), read at runtime
+/// from the same source trusty-mpm reads — a trusty-tools checkout, else the
+/// bundle `tm content install` pinned — instead of being compiled in.
+/// Keyed by each file's name in `agents/` (`"BASE-QA.md"`,
+/// `"rust-engineer.md"`), which
+/// `trusty_agents_common::agents::builder_in_memory::InMemorySources::insert`
+/// lowercases and strips, so `extends: base-qa` resolves with no extra work.
+/// What: file names only; [`tm_agent_sources`] reads them from a roster.
+/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`.
+pub const SHARED_TM_AGENT_FILES: &[&str] = &[
+    "BASE-AGENT.md",
+    "BASE-ENGINEER.md",
+    "BASE-OPS.md",
+    "BASE-QA.md",
+    "BASE-RESEARCH.md",
+    "api-qa.md",
+    "dart-engineer.md",
+    "data-engineer.md",
+    "golang-engineer.md",
+    "java-engineer.md",
+    "javascript-engineer.md",
+    "nextjs-engineer.md",
+    "elixir-engineer.md",
+    "phoenix-engineer.md",
+    "php-engineer.md",
+    "prompt-engineer.md",
+    "python-engineer.md",
+    "react-engineer.md",
+    "refactoring-engineer.md",
+    "research.md",
+    "ruby-engineer.md",
+    "rust-engineer.md",
+    "security.md",
+    "svelte-engineer.md",
+    "tauri-engineer.md",
+    "typescript-engineer.md",
+    "web-ui-engineer.md",
+];
+
+/// tcode's 4 read-only forks of shared roster agents, still embedded until
+/// PHASE_4 (#8390) — see this module's "Tools-restriction deviation" section.
+pub const LOCAL_TM_AGENT_FORKS: &[(&str, &str)] = &[
     ("code-analyzer.md", CODE_ANALYZER_MD),
     ("code-critic.md", CODE_CRITIC_MD),
-    ("dart-engineer.md", DART_ENGINEER_MD),
-    ("data-engineer.md", DATA_ENGINEER_MD),
-    ("golang-engineer.md", GOLANG_ENGINEER_MD),
-    ("java-engineer.md", JAVA_ENGINEER_MD),
-    ("javascript-engineer.md", JAVASCRIPT_ENGINEER_MD),
-    ("nextjs-engineer.md", NEXTJS_ENGINEER_MD),
-    ("elixir-engineer.md", ELIXIR_ENGINEER_MD),
-    ("phoenix-engineer.md", PHOENIX_ENGINEER_MD),
-    ("php-engineer.md", PHP_ENGINEER_MD),
-    ("prompt-engineer.md", PROMPT_ENGINEER_MD),
-    ("python-engineer.md", PYTHON_ENGINEER_MD),
     ("qa.md", QA_MD),
-    ("react-engineer.md", REACT_ENGINEER_MD),
-    ("refactoring-engineer.md", REFACTORING_ENGINEER_MD),
-    ("research.md", RESEARCH_MD),
-    ("ruby-engineer.md", RUBY_ENGINEER_MD),
-    ("rust-engineer.md", RUST_ENGINEER_MD),
-    ("security.md", SECURITY_MD),
-    ("svelte-engineer.md", SVELTE_ENGINEER_MD),
-    ("tauri-engineer.md", TAURI_ENGINEER_MD),
-    ("typescript-engineer.md", TYPESCRIPT_ENGINEER_MD),
     ("web-qa.md", WEB_QA_MD),
-    ("web-ui-engineer.md", WEB_UI_ENGINEER_MD),
 ];
+
+/// The 31-entry tm agent catalog the extends-composer resolves against: every
+/// [`SHARED_TM_AGENT_FILES`] entry read from `roster`, then
+/// [`LOCAL_TM_AGENT_FORKS`].
+///
+/// Why: `agents::md_loader` and the roster deploy need one batch source of
+/// `(file name, markdown)` pairs, as the compiled-in table used to be.
+/// What: `Err(AgentContentError::Missing)` when `roster` lacks a shared file,
+/// so a partial catalog never composes.
+/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`.
+pub fn tm_agent_sources(
+    roster: &trusty_agents_common::agent_content::AgentRoster,
+) -> Result<Vec<(String, String)>, trusty_agents_common::agent_content::AgentContentError> {
+    let mut out = Vec::with_capacity(SHARED_TM_AGENT_FILES.len() + LOCAL_TM_AGENT_FORKS.len());
+    for file in SHARED_TM_AGENT_FILES {
+        out.push(((*file).to_string(), roster.require(file)?.to_string()));
+    }
+    for (file, md) in LOCAL_TM_AGENT_FORKS {
+        out.push(((*file).to_string(), (*md).to_string()));
+    }
+    Ok(out)
+}
+
+/// [`tm_agent_sources`] over the roster resolved for this process: the
+/// trusty-tools checkout above the cwd, else the installed content bundle.
+/// Every failure names `tm content install` or `tm content update`.
+pub fn load_tm_agent_sources()
+-> Result<Vec<(String, String)>, trusty_agents_common::agent_content::AgentContentError> {
+    use trusty_agents_common::agent_content::{AgentRoster, DevOverride, resolve_content};
+    let dev = std::env::current_dir().map_or(DevOverride::Off, DevOverride::DetectFrom);
+    tm_agent_sources(&AgentRoster::load(&resolve_content(dev)?)?)
+}
 
 const API_DESIGN_PATTERNS_SKILL: &str = include_str!("skills/api-design-patterns/SKILL.md");
 const API_DOCUMENTATION_SKILL: &str = include_str!("skills/api-documentation/SKILL.md");

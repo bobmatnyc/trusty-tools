@@ -9,9 +9,9 @@ use super::ContentError;
 /// `scripts/package_content.sh` packages them.
 ///
 /// Why: ADR-0064 decision 5 (iii) — run from inside the checkout, `tm` reads
-/// the working tree, not the installed cache. Until PHASE_1 (#8387) moves the
-/// assets to `content/`, they live in today's in-crate directories; this table
-/// mirrors the packager's `LEGACY_SOURCES`, so a bundle path
+/// the working tree, not the installed cache. The agents and harness docs
+/// live under `content/` (#9011); the rest stay in-crate until PHASE_1 (#8387)
+/// moves them. This table mirrors the packager's `LEGACY_SOURCES`, so a bundle path
 /// (`skills/tm/SKILL.md`) names the same file in both modes.
 /// What: every destination is one of the three content classes (`agents`,
 /// `skills`, `instructions`) or a subfolder of one; a nested row such as
@@ -21,7 +21,7 @@ use super::ContentError;
 /// Test: `dev_class_table_matches_the_packager`,
 /// `packaged_destinations_lie_under_the_three_content_classes`.
 pub const DEV_CLASS_SOURCES: &[(&str, &str)] = &[
-    ("agents", "crates/trusty-agents-common/src/assets/agents"),
+    ("agents", "content/agents"),
     ("skills", "crates/trusty-mpm/src/assets/skills"),
     ("instructions", "crates/trusty-mpm/src/assets/instructions"),
     (
@@ -34,7 +34,7 @@ pub const DEV_CLASS_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "instructions/harness_understanding",
-        "crates/trusty-agents-common/src/assets/harness_understanding",
+        "content/instructions/harness_understanding",
     ),
 ];
 

@@ -35,7 +35,7 @@ use trusty_mpm::core::bundle::{
     SYSTEMATIC_DEBUGGING_WORKFLOW,
 };
 
-use crate::commands::install::install_to;
+use crate::commands::install::{install_to_with, test_roster};
 
 #[test]
 fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
@@ -44,7 +44,7 @@ fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including the 93 skill-port batch-1 entries) under the framework root.
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.

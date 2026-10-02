@@ -4,7 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use super::skill_root::*;
-use crate::agent_assets::AGENT_ASSETS;
+use crate::agent_content::AgentRoster;
+
+/// The repository roster (`content/agents`, #9011) — what `AGENT_ASSETS` embedded.
+fn repo_roster() -> AgentRoster {
+    AgentRoster::load(&crate::agent_content::tests::repo_content()).expect("repo roster")
+}
 use crate::agents::builder::AgentBuildError;
 
 #[test]
@@ -28,7 +33,7 @@ fn relative_skills_root_is_refused() {
 #[test]
 fn compose_for_deploy_resolves_the_real_base_agent() {
     let src = tempfile::tempdir().unwrap();
-    for (file_name, contents) in AGENT_ASSETS {
+    for (file_name, contents) in repo_roster().iter() {
         fs::write(src.path().join(file_name), contents).unwrap();
     }
     let root = std::env::temp_dir().join("tm-skills");

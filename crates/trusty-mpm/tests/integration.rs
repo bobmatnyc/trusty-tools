@@ -32,6 +32,7 @@ mod manager_routes;
 mod manager_routing;
 mod memory_verbs_socket;
 mod meta_demo_e2e;
+mod no_content_single_error;
 mod orphan_gc_sweep;
 mod pid_registry_sweep;
 mod project_registry_routes;

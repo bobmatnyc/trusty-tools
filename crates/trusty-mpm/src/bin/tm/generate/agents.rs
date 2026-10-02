@@ -1,7 +1,7 @@
 //! Renders `references/agents.md` from the bundled agent roster (source #3
 //! of the issue #2913 design-research brief).
 //!
-//! Why: `bundle::ALL` (filtered to `agents/*.md`) plus
+//! Why: the content agent roster (#9011, `content/agents`) plus
 //! `agent_metadata::agent_metadata_from_str` reuse the exact frontmatter
 //! grammar `agent_builder` uses at compose time, so this table can never
 //! drift from what actually deploys — no independent parsing to keep in
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use trusty_mpm::core::agent_metadata::agent_metadata_from_str;
-use trusty_mpm::core::bundle::ALL;
+use trusty_mpm::core::content_source::AgentRoster;
 use trusty_mpm::core::manifest::framework_agent_categories;
 
 /// Map every declared agent stem to its deployment category and gate condition.
@@ -71,25 +71,20 @@ fn gate_by_stem() -> BTreeMap<String, (&'static str, String)> {
 ///
 /// Why: an operator/agent choosing a delegate needs the exact declared
 /// `skills:` set and `extends` chain without opening each `.md` source file.
-/// What: filters `ALL` to `agents/*.md` minus the five `BASE-*` foundation
+/// What: takes every `roster` file minus the five `BASE-*` foundation
 /// files (those are the shared foundation every row below extends, not
 /// independently delegatable agents), sorts by stem for a stable table, and
 /// renders one row per agent with the deployment category
 /// `framework-manifest.toml` declares for it.
 /// Test: `agents_render_contains_known_agent`,
 /// `agents_render_excludes_base_files`, `agents_render_carries_categories`.
-pub(crate) fn render() -> String {
-    let mut agents: Vec<(String, trusty_mpm::core::agent_metadata::AgentMetadata)> = ALL
+pub(crate) fn render(roster: &AgentRoster) -> String {
+    let mut agents: Vec<(String, trusty_mpm::core::agent_metadata::AgentMetadata)> = roster
         .iter()
-        .filter(|a| a.rel_path.starts_with("agents/") && !a.rel_path.starts_with("agents/BASE-"))
-        .map(|a| {
-            let stem = a
-                .rel_path
-                .strip_prefix("agents/")
-                .and_then(|s| s.strip_suffix(".md"))
-                .unwrap_or(a.rel_path)
-                .to_string();
-            (stem, agent_metadata_from_str(a.contents))
+        .filter(|(name, _)| !name.starts_with("BASE-"))
+        .map(|(name, contents)| {
+            let stem = name.strip_suffix(".md").unwrap_or(name).to_string();
+            (stem, agent_metadata_from_str(contents))
         })
         .collect();
     agents.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -97,7 +92,7 @@ pub(crate) fn render() -> String {
     let mut out = String::new();
     out.push_str("# Agent Roster Reference\n\n");
     out.push_str(
-        "Generated from `bundle::ALL` (filtered to `agents/*.md`) + \
+        "Generated from content/agents (the agent roster) + \
          `agent_metadata::agent_metadata_from_str` — the same frontmatter \
          parser `agent_builder` uses at compose time — with the **Category** \
          and **Deploys When** columns read from the bundled \
@@ -150,14 +145,14 @@ mod tests {
 
     #[test]
     fn agents_render_contains_known_agent() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         assert!(rendered.contains("`rust-engineer`"), "{rendered}");
         assert!(rendered.contains("`code-critic`"), "{rendered}");
     }
 
     #[test]
     fn agents_render_excludes_base_files() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         assert!(!rendered.contains("`BASE-AGENT`"), "{rendered}");
         assert!(!rendered.contains("`BASE-ENGINEER`"), "{rendered}");
     }
@@ -166,7 +161,7 @@ mod tests {
     fn agents_render_carries_categories() {
         // The category column must come from the manifest — pin one row of each
         // of the four gated categories plus the deprecated one.
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         for (stem, category) in [
             ("engineer", "universal"),
             ("rust-engineer", "language"),
@@ -186,7 +181,7 @@ mod tests {
         // #4765: the gate CONDITION is rendered from the manifest too, so the
         // reference states why an agent deploys without a second copy of the
         // markers living in a Rust table.
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         for (stem, gate) in [
             ("rust-engineer", "| language | `Cargo.toml` |"),
             ("engineer", "| universal | always |"),
@@ -201,6 +196,9 @@ mod tests {
 
     #[test]
     fn agents_render_is_deterministic() {
-        assert_eq!(render(), render());
+        assert_eq!(
+            render(crate::commands::install::test_roster_ref()),
+            render(crate::commands::install::test_roster_ref())
+        );
     }
 }

@@ -10,7 +10,7 @@
 #   back.
 #
 # What: scans every tracked Rust, shell, Swift, TS/JS and Svelte file, plus the
-#   bundled Markdown assets under `crates/*/src/assets/` (skills and agents that
+#   bundled Markdown assets under `crates/*/src/assets/` and `content/` (#9011) (skills and agents that
 #   tell an agent which tmux command to run). Comment lines are ignored, and a
 #   line ending in `\` is joined to the next before matching.
 #     A. an argv token `"-t"` (or `'-t'`) in a non-shell file that mentions
@@ -57,7 +57,7 @@
 #   - A `let` bound more than 30 lines above its `-t`, and a `{…}` placeholder
 #     whose value is computed outside its own statement, read as findings —
 #     the safe direction; restructure or add an allowlist row.
-#   - Markdown outside `crates/*/src/assets/` (ADRs, research notes) is not
+#   - Markdown outside `crates/*/src/assets/` and `content/` (ADRs, research notes) is not
 #     scanned: it records history, and nothing executes it.
 #
 # Usage: bash scripts/check_tmux_exact_targets.sh
@@ -79,7 +79,7 @@ cd "$REPO_ROOT"
 
 if ! files="$(git ls-files -- \
   '*.rs' '*.sh' '*.swift' '*.ts' '*.tsx' '*.js' '*.mjs' '*.svelte' \
-  'crates/*/src/assets/**/*.md' \
+  'crates/*/src/assets/**/*.md' 'content/**/*.md' \
   ':!**/node_modules/**' ':!scripts/check_tmux_exact_targets.sh' \
   ':!scripts/check_tmux_exact_targets_selftest.sh')"; then
   echo "check_tmux_exact_targets: TOOL ERROR: git ls-files failed" >&2

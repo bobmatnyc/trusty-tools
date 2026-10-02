@@ -1,6 +1,6 @@
 # Agent Roster Reference
 
-Generated from `bundle::ALL` (filtered to `agents/*.md`) + `agent_metadata::agent_metadata_from_str` — the same frontmatter parser `agent_builder` uses at compose time — with the **Category** and **Deploys When** columns read from the bundled `framework-manifest.toml`, the same file the deployer consults — this table is that manifest's rendered view, never a second copy of it. Regenerate with `tm generate capabilities`.
+Generated from content/agents (the agent roster) + `agent_metadata::agent_metadata_from_str` — the same frontmatter parser `agent_builder` uses at compose time — with the **Category** and **Deploys When** columns read from the bundled `framework-manifest.toml`, the same file the deployer consults — this table is that manifest's rendered view, never a second copy of it. Regenerate with `tm generate capabilities`.
 
 **Category** is the DEPLOYMENT gate (#4760) and **Deploys When** is the condition it resolves to (#4765): `universal` deploys to every project with no detection; `language`, `framework`, and `platform` deploy only when one of the listed markers is present at the project root or at a declared workspace member; `deprecated` never deploys. A marker written `path::needle` is a bounded content probe of that file. This axis is distinct from ADR-0025's four-category agent model, which classifies by who authored an agent and where it lives — every row below is an ADR-0025 category-1 or category-2 bundled agent.
 

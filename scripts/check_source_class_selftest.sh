@@ -104,7 +104,9 @@ asset() {
   assert "is_inert_instruction_asset $status $path" "$want" "$rc"
 }
 asset M "crates/trusty-mpm/src/assets/skills/tm/SKILL.md" yes
-asset A "crates/trusty-agents-common/src/assets/agents/qa.md" yes
+asset A "content/agents/qa.md" yes
+# #9011: the agents moved out, so a .md there would be include_str!-ed code.
+asset A "crates/trusty-agents-common/src/assets/agents/qa.md" no
 asset M "content/agents/qa.json" yes
 asset D "crates/trusty-mpm/src/assets/skills/tm/SKILL.md" no
 asset T "crates/trusty-mpm/src/assets/a.md" no

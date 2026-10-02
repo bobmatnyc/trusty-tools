@@ -63,7 +63,7 @@
 
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
-# crates/trusty-mpm/src/assets/agents/ (and crates/trusty-code/src/assets/agents/).
+# content/agents/ (and crates/trusty-code/src/assets/agents/).
 # A tracked copy under any crate's .claude/agents/ SHADOWS the bundled agent of
 # the same name, because Claude Code resolves project tier before user tier —
 # the shadowing hazard tracked in #4448/#4526. The `**/` prefix is required:
