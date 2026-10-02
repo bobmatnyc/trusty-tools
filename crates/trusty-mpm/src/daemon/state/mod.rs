@@ -17,6 +17,8 @@ mod overseer;
 pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
+// #8983: rebinding an id to the `claude` the daemon resumed.
+pub(crate) mod session_claude_resume;
 // #8531: the kernel-bound `claude` of each session id.
 pub(crate) mod session_claudes;
 mod sm;

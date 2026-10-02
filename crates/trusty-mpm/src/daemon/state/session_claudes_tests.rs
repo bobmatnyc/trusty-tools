@@ -585,3 +585,229 @@ fn claude_liveness_needs_proof_to_call_a_claude_gone_9010() {
         "{unreadable:?}"
     );
 }
+
+/// Unix seconds now.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs()
+}
+
+/// The `claude` the daemon's resume put in the pane: started after the grant.
+fn resumed_claude() -> ClaudeProcess {
+    ClaudeProcess {
+        pid: 400,
+        start_time: now_secs() + 5,
+    }
+}
+
+/// A session first bound to [`CLAUDE`], owning one live delegation, that the
+/// daemon is resuming into pane `%7` of `tm-resumed`.
+fn resumed_session(state: &DaemonState) -> SessionId {
+    let session = SessionId::new();
+    state.bind_session_claude(session, CLAUDE).expect("vacant");
+    state.upsert_delegation(Delegation::observed(session, "engineer", "task", None));
+    state.grant_resumed_session(Some(&session.0.to_string()), "tm-resumed", Some("%7"));
+    session
+}
+
+/// A kernel peer seen well after every test claude started.
+fn kernel_peer() -> crate::daemon::services::delegation_repair_caller::RepairPeer {
+    crate::daemon::services::delegation_repair_caller::RepairPeer::Kernel {
+        pid: 401,
+        seen_at: now_secs() + 60,
+    }
+}
+
+/// The caller [`establish_caller_with`] finds for `caller` over `session`'s
+/// records, with `live` as the only running process.
+fn caller_of(
+    state: &DaemonState,
+    session: SessionId,
+    caller: ClaudeProcess,
+    live: ClaudeProcess,
+) -> crate::daemon::services::delegation_repair::RepairCaller {
+    use crate::daemon::services::delegation_repair_caller::{
+        establish_caller_with, owner_claude_with,
+    };
+    establish_caller_with(
+        kernel_peer(),
+        &[session],
+        |_, _| Ok(caller),
+        |s| {
+            owner_claude_with(state, s, |pid| {
+                if pid == live.pid {
+                    Ok(ProcessFacts {
+                        parent: None,
+                        start_time: live.start_time,
+                    })
+                } else {
+                    Err(format!("no entry for {pid}"))
+                }
+            })
+        },
+    )
+}
+
+/// #8983: the `claude` the daemon resumed into its own pane rebinds the
+/// settled id when it announces it, and is then granted its own records.
+#[tokio::test]
+async fn a_daemon_resumed_claude_rebinds_its_session_8983() {
+    use crate::daemon::services::delegation_repair::RepairCaller;
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude_with;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = resumed_session(&state);
+    let resumed = resumed_claude();
+
+    let got = bind_announcing_claude_with(
+        &state,
+        session,
+        kernel_peer(),
+        move |_, _, _| Ok(resumed),
+        move |grant| {
+            assert_eq!(
+                (grant.tmux_name.as_str(), grant.pane_id.as_deref()),
+                ("tm-resumed", Some("%7"))
+            );
+            Ok(resumed)
+        },
+    )
+    .await;
+
+    assert_eq!(got, Ok(()));
+    assert_eq!(state.session_claudes().get(session), Some(resumed));
+    assert_eq!(state.session_claudes().resume_grant(session), None, "used");
+    assert_eq!(
+        caller_of(&state, session, resumed, resumed),
+        RepairCaller::Session(session)
+    );
+    let restarted = daemon_at(root.path());
+    assert_eq!(restarted.session_claudes().get(session), Some(resumed));
+}
+
+/// #8983: a sibling's `claude` announcing a resumed id — it is not the
+/// `claude` in the daemon's pane — rebinds nothing and is not the owner; an
+/// id the daemon is not resuming takes no announcement at all.
+#[tokio::test]
+async fn a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983() {
+    use crate::daemon::services::delegation_repair::RepairCaller;
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude_with;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = resumed_session(&state);
+    let resumed = resumed_claude();
+    let sibling = ClaudeProcess {
+        pid: 500,
+        start_time: resumed.start_time + 1,
+    };
+
+    let got = bind_announcing_claude_with(
+        &state,
+        session,
+        kernel_peer(),
+        move |_, _, _| Ok(sibling),
+        move |_| Ok(resumed),
+    )
+    .await;
+
+    assert!(
+        got.as_ref()
+            .is_err_and(|e| e.contains("is not the claude the daemon resumed")),
+        "{got:?}"
+    );
+    assert_eq!(state.session_claudes().get(session), Some(CLAUDE));
+    assert!(
+        state.session_claudes().resume_grant(session).is_some(),
+        "kept"
+    );
+    assert!(matches!(
+        caller_of(&state, session, sibling, sibling),
+        RepairCaller::Unestablished(_)
+    ));
+
+    let not_resumed = SessionId::new();
+    state
+        .bind_session_claude(not_resumed, CLAUDE)
+        .expect("vacant");
+    let got = bind_announcing_claude_with(
+        &state,
+        not_resumed,
+        kernel_peer(),
+        |_, _, _| panic!("no walk for a settled id"),
+        |_| panic!("no pane lookup without a grant"),
+    )
+    .await;
+    assert_eq!(got, Ok(()));
+    assert_eq!(state.session_claudes().get(not_resumed), Some(CLAUDE));
+}
+
+/// #8983 Fail-Open Check: no grant, a `claude` older than the grant, a pane
+/// lookup that fails, and a sealed registry each rebind nothing.
+#[test]
+fn a_resume_rebind_fails_closed_8983() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = daemon_at(root.path());
+    let resumed = resumed_claude();
+    let refused = |session, claude, pane: Result<ClaudeProcess, String>, why: &str| {
+        let got = state.rebind_resumed_claude_with(session, claude, |_| pane.clone());
+        assert!(
+            got.as_ref().is_err_and(|e| e.contains(why)),
+            "{why}: {got:?}"
+        );
+        assert_eq!(state.session_claudes().get(session), Some(CLAUDE), "{why}");
+    };
+    let ungranted = SessionId::new();
+    state
+        .bind_session_claude(ungranted, CLAUDE)
+        .expect("vacant");
+    refused(ungranted, resumed, Ok(resumed), "has not resumed");
+    let session = resumed_session(&state);
+    refused(session, CLAUDE, Ok(CLAUDE), "started before");
+    refused(
+        session,
+        resumed,
+        Err("tmux is gone".into()),
+        "could not be found",
+    );
+
+    let sealed_root = tempfile::tempdir().expect("tempdir");
+    let file = registry_file(&daemon_at(sealed_root.path()));
+    std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&file, b"{").expect("corrupt it");
+    let sealed = daemon_at(sealed_root.path());
+    let id = SessionId::new();
+    sealed.grant_resumed_session(Some(&id.0.to_string()), "tm-resumed", None);
+    let got = sealed.rebind_resumed_claude_with(id, resumed, |_| Ok(resumed));
+    assert!(got.is_err_and(|e| e.contains("sealed")));
+    assert_eq!(sealed.session_claudes().get(id), None);
+}
+
+/// #8983 Fail-Open Check: a rebinding that cannot be saved leaves the
+/// earlier binding, so no unsaved binding grants.
+#[test]
+fn an_unsaved_rebind_keeps_the_earlier_binding_8983() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sub = dir.path().join("sub");
+    let claudes = SessionClaudes::load_as(sub.join(SESSION_CLAUDES_FILE), current_uid());
+    let session = SessionId::new();
+    claudes
+        .record(session, Announcement::Claude(CLAUDE), || Ok(()))
+        .expect("saved");
+    std::fs::remove_dir_all(&sub).expect("rmdir");
+    std::fs::write(&sub, b"").expect("a file where the directory goes");
+    let got = claudes.rebind(session, resumed_claude());
+    assert!(got.is_err_and(|e| e.contains("could not be saved")));
+    assert_eq!(claudes.get(session), Some(CLAUDE));
+}
+
+/// #8983: a resume with no stored id, or a malformed one, launches a fresh
+/// session, so it grants nothing.
+#[test]
+fn a_malformed_resume_id_grants_nothing_8983() {
+    let state = DaemonState::new();
+    state.grant_resumed_session(None, "tm-resumed", None);
+    state.grant_resumed_session(Some("not-a-uuid"), "tm-resumed", None);
+    assert!(state.session_claudes().resumes.lock().is_empty());
+}

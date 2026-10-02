@@ -73,6 +73,8 @@ impl RuntimeRelauncher for DaemonRelauncher {
             None,
             state.framework_root(),
         );
+        // #8983: the resumed claude may rebind its session id.
+        state.grant_resume_of(record);
         adapter
             .spawn_resume(
                 &record.tmux_name,

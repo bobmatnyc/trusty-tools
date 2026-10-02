@@ -1207,11 +1207,10 @@ pub async fn resume_managed(
         return Err(ResumeManagedError::Other(msg));
     }
 
-    let tmux_arc = mgr.tmux_driver();
     // #6766: the post-send launch check below needs the driver after the
     // adapter has taken ownership of its Arc.
-    let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
+    let tmux_driver = mgr.tmux_driver();
+    let adapter = build_adapter(record.runtime, tmux_driver.clone(), None, fw_root);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
@@ -1222,6 +1221,7 @@ pub async fn resume_managed(
     // freshly recreated one — still exists) instead of a session-scoped
     // target that tmux could resolve to an unrelated active sibling pane.
     let gh_env = resolve_gh_env(state, &workspace).await;
+    state.grant_resume_of(&record); // #8983: before the launch line is sent
     if let Err(e) = adapter.spawn_resume(
         &record.tmux_name,
         record.pane_id.as_deref(),

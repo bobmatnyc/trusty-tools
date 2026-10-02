@@ -28,6 +28,8 @@ use crate::core::agent::Delegation;
 use crate::core::session::SessionId;
 use crate::core::twin_identity::ClaudeProcess;
 use crate::daemon::state::DaemonState;
+use crate::daemon::state::session_claude_resume::pane_claude;
+use crate::daemon::state::session_claudes::ResumeGrant;
 
 /// What the transport can prove about the process that sent a repair (#8531).
 ///
@@ -184,27 +186,50 @@ pub(crate) fn establish_caller_with(
 /// announcement is already recorded. `Err` naming the failed step when there
 /// is no peer pid, the walk fails, or the bind is refused; `ingest_hook` then
 /// records the id as unproven, and an unproven owner is refused.
+/// #8983: an id the daemon itself is resuming is instead rebound when the
+/// announcing `claude` is the one running in the daemon's own pane
+/// (`DaemonState::rebind_resumed_claude_with`).
 /// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
 /// `a_session_start_without_a_peer_pid_binds_nothing_8531`,
 /// `a_session_start_whose_walk_fails_binds_nothing_8531`,
-/// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`.
+/// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`,
+/// `a_daemon_resumed_claude_rebinds_its_session_8983`.
 pub async fn bind_announcing_claude(
     state: &Arc<DaemonState>,
     session: SessionId,
     peer: RepairPeer,
 ) -> Result<(), String> {
+    let walk = |pid, seen_at, held: &DaemonState| held.session_claudes().peer_claude(pid, seen_at);
+    bind_announcing_claude_with(state, session, peer, walk, pane_claude).await
+}
+
+/// [`bind_announcing_claude`] over an injected peer walk and pane lookup
+/// (#8983).
+pub(crate) async fn bind_announcing_claude_with(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    peer: RepairPeer,
+    walk: impl FnOnce(u32, u64, &DaemonState) -> Result<ClaudeProcess, String> + Send + 'static,
+    pane: impl Fn(&ResumeGrant) -> Result<ClaudeProcess, String> + Send + 'static,
+) -> Result<(), String> {
     let (pid, seen_at) = match peer {
         RepairPeer::Kernel { pid, seen_at } => (pid, seen_at),
         RepairPeer::Unproven(why) => return Err(why),
     };
+    // #8983: a session the daemon resumed may rebind to its new claude.
+    let resumed = state.session_claudes().resume_grant(session).is_some();
     // #8531: a recorded first announcement is final, so skip the walk.
-    if state.session_claudes().is_settled(session) {
+    if state.session_claudes().is_settled(session) && !resumed {
         return Ok(());
     }
     let held = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
-        let claude = held.session_claudes().peer_claude(pid, seen_at)?;
-        held.bind_session_claude(session, claude)
+        let claude = walk(pid, seen_at, &held)?;
+        if resumed {
+            held.rebind_resumed_claude_with(session, claude, pane)
+        } else {
+            held.bind_session_claude(session, claude)
+        }
     })
     .await
     .map_err(|e| format!("the process walk did not finish: {e}"))?

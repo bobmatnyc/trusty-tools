@@ -10,7 +10,9 @@
 //! the daemon saw for it: the `claude` process (pid + start time) above the
 //! kernel-reported socket peer, or [`Announcement::Unproven`] when that first
 //! announcement proved no process (HTTP, no peer pid, a failed walk). A
-//! recorded id is never rewritten or cleared, and the reaper never touches it.
+//! recorded id is never cleared, and the reaper never touches it. The one
+//! rewrite is #8983's: the `claude` the daemon itself resumed into its own
+//! pane rebinds the id (`session_claude_resume`).
 //! The registry lives in `<framework root>/session-claudes.json` (mode
 //! `0600`, replaced atomically on every new id), so a daemon restart does not
 //! reopen an id to a second announcer.
@@ -34,12 +36,10 @@
 //!   session that started before it is bound.
 //! - A first `SessionStart` that fell back to HTTP settles its id as
 //!   unproven for good, so that owner can never repair its records.
-//! - A resumed session (`claude --resume <id>` keeps the id; tm relaunches
-//!   this way, see `runtime/claude_code.rs` and
-//!   `daemon/managed_routes/lifecycle.rs`) cannot clear its own records: the
-//!   id is settled and the old binding fails the pid + start-time check. No
-//!   rebind is safe, since the new `claude` is indistinguishable from a
-//!   sibling announcing the same id.
+//! - A session resumed outside the daemon (`claude --resume <id>` by hand,
+//!   or tm's in-place relaunch) keeps the id in a new process the daemon did
+//!   not launch, so it is never rebound (#8983 covers only the daemon's own
+//!   resume paths).
 //!
 //! #8984: an id whose `SessionStart` never reached the daemon (daemon down
 //! at start, no tm `SessionStart` hook — doctor check
@@ -94,6 +94,24 @@ pub struct SessionClaudes {
     registry: Mutex<Result<HashMap<SessionId, Announcement>, String>>,
     /// #8984: ids with a socket `SessionStart` bind in flight, and how many.
     binding: Mutex<HashMap<SessionId, usize>>,
+    /// #8983: ids the daemon itself relaunched with `--resume`, and where.
+    resumes: Mutex<HashMap<SessionId, ResumeGrant>>,
+}
+
+/// Where and when the daemon relaunched a session's `claude` (#8983).
+///
+/// Why: a resumed `claude` keeps the session id but is a new process, and
+/// only the daemon knows it launched one, into a pane it owns.
+/// What: the pane the launch line went to and the Unix second before it was
+/// sent; a `claude` that started earlier is not the one launched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeGrant {
+    /// The managed session's tmux session.
+    pub tmux_name: String,
+    /// The record's own `%N` pane, when known.
+    pub pane_id: Option<String>,
+    /// Unix seconds, taken before the launch line was sent.
+    pub issued_at: u64,
 }
 
 impl SessionClaudes {
@@ -120,6 +138,7 @@ impl SessionClaudes {
             path,
             registry: Mutex::new(registry),
             binding: Mutex::new(HashMap::new()),
+            resumes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -223,6 +242,51 @@ impl SessionClaudes {
         Ok(self
             .record(session, Announcement::Unproven, || Ok(()))?
             .is_none())
+    }
+
+    /// Record that the daemon is relaunching `session` per `grant` (#8983);
+    /// replaces an earlier grant.
+    pub(crate) fn grant_resume(&self, session: SessionId, grant: ResumeGrant) {
+        self.resumes.lock().insert(session, grant);
+    }
+
+    /// The pending resume grant of `session`, if any (#8983).
+    pub(crate) fn resume_grant(&self, session: SessionId) -> Option<ResumeGrant> {
+        self.resumes.lock().get(&session).cloned()
+    }
+
+    /// Drop `session`'s grant when it is still `used`; a newer one stays.
+    pub(super) fn revoke_resume(&self, session: SessionId, used: &ResumeGrant) {
+        let mut resumes = self.resumes.lock();
+        if resumes.get(&session) == Some(used) {
+            resumes.remove(&session);
+        }
+    }
+
+    /// Bind `session` to `claude` over whatever it recorded (#8983).
+    ///
+    /// Why: the only rewrite of a recorded id, for the `claude` the daemon
+    /// itself resumed; see [`DaemonState::rebind_resumed_claude_with`].
+    /// What: `Err` when sealed or the save fails; a failed save restores the
+    /// earlier entry, so no unsaved binding ever grants.
+    /// Test: `an_unsaved_rebind_keeps_the_earlier_binding_8983`.
+    pub(super) fn rebind(&self, session: SessionId, claude: ClaudeProcess) -> Result<(), String> {
+        let mut guard = self.registry.lock();
+        let map = guard
+            .as_mut()
+            .map_err(|why| format!("the session-claude registry is sealed: {why}"))?;
+        let earlier = map.insert(session, Announcement::Claude(claude));
+        if let Err(e) = write_registry(&self.path, map) {
+            match earlier {
+                Some(announcement) => map.insert(session, announcement),
+                None => map.remove(&session),
+            };
+            return Err(format!(
+                "the rebinding could not be saved to {}: {e}",
+                self.path.display()
+            ));
+        }
+        Ok(())
     }
 
     /// The nearest `claude` above the kernel-reported peer `pid` (#8531).
