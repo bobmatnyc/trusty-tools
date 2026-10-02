@@ -28,6 +28,8 @@ use crate::core::agent::Delegation;
 use crate::core::session::SessionId;
 use crate::core::twin_identity::ClaudeProcess;
 use crate::daemon::state::DaemonState;
+use crate::daemon::state::session_claude_resume::pane_claude;
+use crate::daemon::state::session_claudes::ResumeGrant;
 
 /// What the transport can prove about the process that sent a repair (#8531).
 ///
@@ -180,34 +182,75 @@ pub(crate) fn establish_caller_with(
 /// ([`SessionClaudes::peer_claude`](crate::daemon::state::session_claudes::SessionClaudes::peer_claude)),
 /// then [`DaemonState::bind_session_claude`] (first announcement wins), both
 /// on the blocking pool — the walk reads the process table and the bind
-/// writes the registry file. `Ok` without a walk when the id's first
-/// announcement is already recorded. `Err` naming the failed step when there
+/// writes the registry file. `Ok` when the id's first announcement is
+/// already recorded; #9010: a walked `claude` is then only noted as a later
+/// announcer (`SessionClaudes::note_announcer`), never bound, and a failed
+/// walk is logged at WARN. `Err` naming the failed step when there
 /// is no peer pid, the walk fails, or the bind is refused; `ingest_hook` then
 /// records the id as unproven, and an unproven owner is refused.
+/// #8983: an id the daemon itself is resuming is instead rebound when the
+/// announcing `claude` is the one running in the daemon's own pane
+/// (`DaemonState::rebind_resumed_claude_with`).
 /// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
 /// `a_session_start_without_a_peer_pid_binds_nothing_8531`,
 /// `a_session_start_whose_walk_fails_binds_nothing_8531`,
-/// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`.
+/// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`,
+/// `a_daemon_resumed_claude_rebinds_its_session_8983`,
+/// `a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983`,
+/// `a_failed_walk_on_a_settled_id_notes_no_announcer_9010`.
 pub async fn bind_announcing_claude(
     state: &Arc<DaemonState>,
     session: SessionId,
     peer: RepairPeer,
 ) -> Result<(), String> {
+    let walk = |pid, seen_at, held: &DaemonState| held.session_claudes().peer_claude(pid, seen_at);
+    bind_announcing_claude_with(state, session, peer, walk, pane_claude).await
+}
+
+/// [`bind_announcing_claude`] over an injected peer walk and pane lookup
+/// (#8983).
+pub(crate) async fn bind_announcing_claude_with(
+    state: &Arc<DaemonState>,
+    session: SessionId,
+    peer: RepairPeer,
+    walk: impl FnOnce(u32, u64, &DaemonState) -> Result<ClaudeProcess, String> + Send + 'static,
+    pane: impl Fn(&ResumeGrant) -> Result<ClaudeProcess, String> + Send + 'static,
+) -> Result<(), String> {
     let (pid, seen_at) = match peer {
         RepairPeer::Kernel { pid, seen_at } => (pid, seen_at),
         RepairPeer::Unproven(why) => return Err(why),
     };
-    // #8531: a recorded first announcement is final, so skip the walk.
-    if state.session_claudes().is_settled(session) {
+    // #8983: a session the daemon resumed may rebind to its new claude.
+    let resumed = state.session_claudes().resume_grant(session).is_some();
+    let settled = state.session_claudes().is_settled(session);
+    let held = Arc::clone(state);
+    let unfinished = |e| format!("the process walk did not finish: {e}");
+    // #8531: a recorded first announcement is final. #9010: a later
+    // announcer only holds the session off the reaper while it runs. Logged
+    // off the blocking pool, on the task the caller's subscriber follows.
+    if settled && !resumed {
+        let walked = tokio::task::spawn_blocking(move || walk(pid, seen_at, &held))
+            .await
+            .map_err(unfinished)?;
+        match walked {
+            Ok(claude) => state.session_claudes().note_announcer(session, claude),
+            Err(e) => tracing::warn!(
+                session = ?session,
+                "noted no later announcer of a settled session, its process walk failed: {e} (#9010)"
+            ),
+        }
         return Ok(());
     }
-    let held = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
-        let claude = held.session_claudes().peer_claude(pid, seen_at)?;
-        held.bind_session_claude(session, claude)
+        let claude = walk(pid, seen_at, &held)?;
+        if resumed {
+            held.rebind_resumed_claude_with(session, claude, pane)
+        } else {
+            held.bind_session_claude(session, claude)
+        }
     })
     .await
-    .map_err(|e| format!("the process walk did not finish: {e}"))?
+    .map_err(unfinished)?
 }
 
 /// Stale `session`'s live delegations on a `SessionEnd` its own `claude`

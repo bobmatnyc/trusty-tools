@@ -10,7 +10,9 @@
 //! the daemon saw for it: the `claude` process (pid + start time) above the
 //! kernel-reported socket peer, or [`Announcement::Unproven`] when that first
 //! announcement proved no process (HTTP, no peer pid, a failed walk). A
-//! recorded id is never rewritten or cleared, and the reaper never touches it.
+//! recorded id is never cleared, and the reaper never touches it. The one
+//! rewrite is #8983's: the `claude` the daemon itself resumed into its own
+//! pane rebinds the id (`session_claude_resume`).
 //! The registry lives in `<framework root>/session-claudes.json` (mode
 //! `0600`, replaced atomically on every new id), so a daemon restart does not
 //! reopen an id to a second announcer.
@@ -28,35 +30,38 @@
 //! entry whose process has exited grants nothing (see
 //! `delegation_repair_caller::owner_claude`).
 //!
-//! Residuals (#8531, accepted). The first three leave an owner unable to
-//! repair its own records until the stale (6 h) or owner-gone path ends
-//! them; the fourth leaves an id open to a deliberate impersonator.
+//! Residuals (#8531, accepted). Each leaves an owner unable to repair its
+//! own records until the stale (6 h) or owner-gone path ends them.
 //! - Upgrade window: the first daemon start on this code has no file, so no
 //!   session that started before it is bound.
 //! - A first `SessionStart` that fell back to HTTP settles its id as
 //!   unproven for good, so that owner can never repair its records.
-//! - A resumed session (`claude --resume <id>` keeps the id; tm relaunches
-//!   this way, see `runtime/claude_code.rs` and
-//!   `daemon/managed_routes/lifecycle.rs`) cannot clear its own records: the
-//!   id is settled and the old binding fails the pid + start-time check. No
-//!   rebind is safe, since the new `claude` is indistinguishable from a
-//!   sibling announcing the same id.
-//! - An id whose `SessionStart` never reached the daemon (daemon down at
-//!   start, no tm `SessionStart` hook — doctor check
-//!   `hooks_missing_tm_group` — or a pre-upgrade session) stays announceable
-//!   for the session's life. Claiming it takes a sibling that knows the id
-//!   and announces it first, on purpose.
+//! - A session resumed outside the daemon (`claude --resume <id>` by hand,
+//!   or tm's in-place relaunch) keeps the id in a new process the daemon did
+//!   not launch, so it is never rebound (#8983 covers only the daemon's own
+//!   resume paths). #9010: it holds its session off the reaper while it runs
+//!   (a later announcer) or sends hook events ([`SessionClaudes::reap_hold`]).
+//!
+//! #8984: an id whose `SessionStart` never reached the daemon (daemon down
+//! at start, no tm `SessionStart` hook — doctor check
+//! `hooks_missing_tm_group` — or a pre-upgrade session) is settled as
+//! unproven by its first event that only follows a `SessionStart`
+//! ([`SessionClaudes::settle_after_event`]), unless a socket bind of it is
+//! in flight. A sibling can still claim such an id only by announcing it
+//! before the session's first turn.
 //!
 //! Test: `session_claudes_tests.rs`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::DaemonState;
+use super::session_claude_liveness::ClaudeLiveness;
 use crate::core::session::SessionId;
 use crate::core::twin_arming::{
     ProcessFacts, STATUS_MAX_ANCESTOR_HOPS, nearest_claude_for_status_in, process_facts,
@@ -90,6 +95,43 @@ pub enum Announcement {
 pub struct SessionClaudes {
     path: PathBuf,
     registry: Mutex<Result<HashMap<SessionId, Announcement>, String>>,
+    /// #8984: ids with a socket `SessionStart` bind in flight, and how many.
+    binding: Mutex<HashMap<SessionId, usize>>,
+    /// #8983: ids the daemon itself relaunched with `--resume`, and where.
+    resumes: Mutex<HashMap<SessionId, ResumeGrant>>,
+    /// #9010: when each id's last hook event arrived, for the reaper.
+    events: Mutex<HashMap<SessionId, Instant>>,
+    /// #9010: the latest `claude` that announced an id already settled.
+    announcers: Mutex<HashMap<SessionId, ClaudeProcess>>,
+}
+
+/// Where and when the daemon relaunched a session's `claude` (#8983).
+///
+/// Why: a resumed `claude` keeps the session id but is a new process, and
+/// only the daemon knows it launched one, into a pane it owns.
+/// What: the pane the launch line went to and the Unix second before it was
+/// sent; a `claude` that started earlier is not the one launched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeGrant {
+    /// The managed session's tmux session.
+    pub tmux_name: String,
+    /// The record's own `%N` pane, when known.
+    pub pane_id: Option<String>,
+    /// Unix seconds, taken before the launch line was sent.
+    pub issued_at: u64,
+}
+
+/// How long a resume grant holds its session off the reaper (#9010): five
+/// reap intervals. A grant that a failed launch, rebind or HTTP announce
+/// never consumed must not keep a dead session for the daemon's life.
+pub(crate) const RESUME_HOLD_SECS: u64 = 5 * crate::daemon::REAP_INTERVAL_SECS;
+
+impl ResumeGrant {
+    /// Whether this grant still holds its session off the reaper at `now`
+    /// (Unix seconds); a clock stepped behind `issued_at` still holds (#9010).
+    pub(crate) fn holds_reap(&self, now: u64) -> bool {
+        now.saturating_sub(self.issued_at) < RESUME_HOLD_SECS
+    }
 }
 
 impl SessionClaudes {
@@ -115,6 +157,10 @@ impl SessionClaudes {
         Self {
             path,
             registry: Mutex::new(registry),
+            binding: Mutex::new(HashMap::new()),
+            resumes: Mutex::new(HashMap::new()),
+            events: Mutex::new(HashMap::new()),
+            announcers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -183,6 +229,88 @@ impl SessionClaudes {
         Ok(None)
     }
 
+    /// Mark a socket `SessionStart` bind of `session` in flight (#8984).
+    ///
+    /// Why: a later event settles an unrecorded id as unproven, and must not
+    /// race the legitimate bind already under way for it.
+    /// What: counts the bind until the returned guard drops.
+    /// Test: `an_in_flight_session_start_still_binds_8984`.
+    pub(crate) fn begin_bind(&self, session: SessionId) -> BindInFlight<'_> {
+        *self.binding.lock().entry(session).or_insert(0) += 1;
+        BindInFlight {
+            claudes: self,
+            session,
+        }
+    }
+
+    /// Settle `session` as unproven because it produced an event that only
+    /// follows its `SessionStart` (#8984).
+    ///
+    /// Why: an id whose `SessionStart` never reached the daemon stayed open
+    /// to whichever sibling announced it first, for the session's life.
+    /// What: `Ok(true)` when [`Announcement::Unproven`] was recorded;
+    /// `Ok(false)` when the id was already recorded or a socket bind of it is
+    /// in flight — that bind decides it. `Err` as [`Self::record`]; an
+    /// unsaved record still settles the id.
+    /// Test: `a_forged_session_start_after_another_event_binds_nothing_8984`,
+    /// `an_in_flight_session_start_still_binds_8984`,
+    /// `an_unsaved_settle_after_an_event_still_refuses_a_bind_8984`.
+    pub(crate) fn settle_after_event(&self, session: SessionId) -> Result<bool, String> {
+        // #8984: held across the record, so a bind cannot start between them.
+        let binding = self.binding.lock();
+        if binding.contains_key(&session) {
+            return Ok(false);
+        }
+        Ok(self
+            .record(session, Announcement::Unproven, || Ok(()))?
+            .is_none())
+    }
+
+    /// Record that the daemon is relaunching `session` per `grant` (#8983);
+    /// replaces an earlier grant.
+    pub(crate) fn grant_resume(&self, session: SessionId, grant: ResumeGrant) {
+        self.resumes.lock().insert(session, grant);
+    }
+
+    /// The pending resume grant of `session`, if any (#8983).
+    pub(crate) fn resume_grant(&self, session: SessionId) -> Option<ResumeGrant> {
+        self.resumes.lock().get(&session).cloned()
+    }
+
+    /// Drop `session`'s grant when it is still `used`; a newer one stays.
+    pub(super) fn revoke_resume(&self, session: SessionId, used: &ResumeGrant) {
+        let mut resumes = self.resumes.lock();
+        if resumes.get(&session) == Some(used) {
+            resumes.remove(&session);
+        }
+    }
+
+    /// Bind `session` to `claude` over whatever it recorded (#8983).
+    ///
+    /// Why: the only rewrite of a recorded id, for the `claude` the daemon
+    /// itself resumed; see [`DaemonState::rebind_resumed_claude_with`].
+    /// What: `Err` when sealed or the save fails; a failed save restores the
+    /// earlier entry, so no unsaved binding ever grants.
+    /// Test: `an_unsaved_rebind_keeps_the_earlier_binding_8983`.
+    pub(super) fn rebind(&self, session: SessionId, claude: ClaudeProcess) -> Result<(), String> {
+        let mut guard = self.registry.lock();
+        let map = guard
+            .as_mut()
+            .map_err(|why| format!("the session-claude registry is sealed: {why}"))?;
+        let earlier = map.insert(session, Announcement::Claude(claude));
+        if let Err(e) = write_registry(&self.path, map) {
+            match earlier {
+                Some(announcement) => map.insert(session, announcement),
+                None => map.remove(&session),
+            };
+            return Err(format!(
+                "the rebinding could not be saved to {}: {e}",
+                self.path.display()
+            ));
+        }
+        Ok(())
+    }
+
     /// The nearest `claude` above the kernel-reported peer `pid` (#8531).
     ///
     /// Why: both the binding and the repair check start from a pid the kernel
@@ -198,6 +326,25 @@ impl SessionClaudes {
             process_facts,
             crate::core::twin_arming::is_claude,
         )
+    }
+}
+
+/// A socket `SessionStart` bind in flight; see [`SessionClaudes::begin_bind`].
+#[derive(Debug)]
+pub(crate) struct BindInFlight<'a> {
+    claudes: &'a SessionClaudes,
+    session: SessionId,
+}
+
+impl Drop for BindInFlight<'_> {
+    fn drop(&mut self) {
+        let mut binding = self.claudes.binding.lock();
+        if let Some(count) = binding.get_mut(&self.session) {
+            *count -= 1;
+            if *count == 0 {
+                binding.remove(&self.session);
+            }
+        }
     }
 }
 
@@ -235,6 +382,112 @@ pub(crate) fn peer_claude_with(
         Err(e) => Err(format!(
             "the calling process's ancestry (pid {pid}) could not be read: {e}"
         )),
+    }
+}
+
+impl SessionClaudes {
+    /// Note that a hook event for `session` arrived now (#9010).
+    pub(crate) fn note_event(&self, session: SessionId) {
+        self.events.lock().insert(session, Instant::now());
+    }
+
+    /// Note `claude`, kernel-verified, as a later announcer of the settled
+    /// `session` (#9010); it never binds, it only holds off the reaper.
+    pub(crate) fn note_announcer(&self, session: SessionId, claude: ClaudeProcess) {
+        self.announcers.lock().insert(session, claude);
+    }
+
+    /// Why `session`, whose bound `claude` was probed and proven gone, must
+    /// still be kept (#9010).
+    ///
+    /// Why: the reaper's walk and probe run on a snapshot, and a session can
+    /// outlive its first `claude` — a resume rebinds it, a daemon resume is
+    /// still announcing, or `claude --resume <id>` was run by hand.
+    /// What: `Some(reason)` when a resume grant younger than
+    /// [`RESUME_HOLD_SECS`] is pending, the binding is no longer `probed`, a
+    /// hook event for `session` arrived within `quiet`, or its latest
+    /// announcer is not proven gone by `probe`. `None` lets the reaper
+    /// remove it.
+    /// Test: `a_settled_session_with_a_recent_event_is_kept_9010`,
+    /// `a_session_rebound_during_the_reap_is_kept_9010`,
+    /// `a_resume_grant_holds_a_reap_only_for_a_bounded_time_9010`.
+    pub(crate) fn reap_hold(
+        &self,
+        session: SessionId,
+        probed: ClaudeProcess,
+        quiet: Duration,
+        probe: impl Fn(ClaudeProcess) -> ClaudeLiveness,
+    ) -> Option<String> {
+        // #9010: the grant BEFORE the binding. `rebind_resumed_claude_with`
+        // writes the binding, then revokes the grant, so a grant read as
+        // revoked here means the binding read below is already the rebound
+        // one. An expired grant holds nothing.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if self
+            .resume_grant(session)
+            .is_some_and(|g| g.holds_reap(now))
+        {
+            return Some("the daemon is resuming it".to_string());
+        }
+        if self.get(session) != Some(probed) {
+            return Some("it was rebound after the probe".to_string());
+        }
+        if self
+            .events
+            .lock()
+            .get(&session)
+            .is_some_and(|at| at.elapsed() < quiet)
+        {
+            return Some("a hook event for it arrived within the last reap interval".to_string());
+        }
+        let announcer = self.announcers.lock().get(&session).copied();
+        match announcer.map(&probe) {
+            Some(ClaudeLiveness::Alive) => Some("a later announcer still runs".to_string()),
+            Some(ClaudeLiveness::Unknown(why)) => Some(format!("a later announcer: {why}")),
+            Some(ClaudeLiveness::Gone(_)) | None => None,
+        }
+    }
+
+    /// Drop every event older than `quiet`, which can hold no reap (#9010).
+    pub(crate) fn forget_events_before(&self, quiet: Duration) {
+        self.events.lock().retain(|_, at| at.elapsed() < quiet);
+    }
+}
+
+impl DaemonState {
+    /// Remove each settled session in `bound` whose `claude` is proven gone
+    /// and that nothing else holds (#9010).
+    ///
+    /// What: probes each `claude`; on proof it is gone, re-checks
+    /// [`SessionClaudes::reap_hold`] just before removing the session and
+    /// staling its live delegations. Returns how many it removed.
+    /// Test: `a_settled_session_whose_claude_exited_is_reaped_9010`,
+    /// `a_settled_session_with_a_recent_event_is_kept_9010`.
+    pub(super) fn reap_settled_sessions(
+        &self,
+        bound: Vec<(SessionId, ClaudeProcess)>,
+        probe: impl Fn(ClaudeProcess) -> ClaudeLiveness,
+    ) -> usize {
+        let quiet = Duration::from_secs(crate::daemon::REAP_INTERVAL_SECS);
+        self.session_claudes.forget_events_before(quiet);
+        let mut reaped = 0;
+        for (id, claude) in bound {
+            if !probe(claude).proves_gone(id) {
+                continue;
+            }
+            if let Some(why) = self.session_claudes.reap_hold(id, claude, quiet, &probe) {
+                tracing::info!(session = ?id, "kept a settled session: {why} (#9010)");
+                continue;
+            }
+            self.remove_session(id);
+            self.session_claudes.announcers.lock().remove(&id);
+            // #6497: the session's agents cannot outlive it.
+            self.stale_delegations_of_dead_session(id);
+            reaped += 1;
+        }
+        reaped
     }
 }
 

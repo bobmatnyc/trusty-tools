@@ -1207,11 +1207,8 @@ pub async fn resume_managed(
         return Err(ResumeManagedError::Other(msg));
     }
 
-    let tmux_arc = mgr.tmux_driver();
-    // #6766: the post-send launch check below needs the driver after the
-    // adapter has taken ownership of its Arc.
-    let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
+    // #6766: the post-send launch check below takes its own driver handle.
+    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), None, fw_root);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
@@ -1222,6 +1219,7 @@ pub async fn resume_managed(
     // freshly recreated one — still exists) instead of a session-scoped
     // target that tmux could resolve to an unrelated active sibling pane.
     let gh_env = resolve_gh_env(state, &workspace).await;
+    let granted = state.grant_resume_of(&record); // #8983: before the launch line
     if let Err(e) = adapter.spawn_resume(
         &record.tmux_name,
         record.pane_id.as_deref(),
@@ -1237,6 +1235,7 @@ pub async fn resume_managed(
             runtime = %record.runtime.as_str(),
             "resume_managed: runtime adapter spawn_resume failed: {e}"
         );
+        state.revoke_resume_grant(granted); // #8983: no claude was launched
         // #8233 review round 2 (finding 7): this arm marked the record errored
         // and then fell through to `Ok(record)`, so the caller saw a successful
         // resume and had to notice the state itself. `guided_resume` did not,
@@ -1249,7 +1248,7 @@ pub async fn resume_managed(
         // not that `claude` started. A launch-time refusal leaves the pane at a
         // bare shell, and this arm used to log a resume that never happened.
         &mgr,
-        tmux_driver.as_ref(),
+        &*mgr.tmux_driver(),
         &record,
         &workspace,
     )

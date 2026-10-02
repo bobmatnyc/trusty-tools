@@ -571,13 +571,42 @@ pub async fn ingest_hook_from_socket(
     post: HookPost,
     peer: Option<trusty_common::uds::server::RequestPeer>,
 ) -> Result<HookAcceptedResponse, DaemonError> {
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude;
+    let bind = |held: Arc<DaemonState>, session, peer| async move {
+        bind_announcing_claude(&held, session, peer).await
+    };
+    ingest_hook_from_socket_with(state, post, peer, bind).await
+}
+
+/// [`ingest_hook_from_socket`] over an injected `SessionStart` bind (#8984).
+///
+/// Test: `the_socket_bind_runs_inside_its_in_flight_guard_8984`.
+pub(crate) async fn ingest_hook_from_socket_with<B, F>(
+    state: &Arc<DaemonState>,
+    post: HookPost,
+    peer: Option<trusty_common::uds::server::RequestPeer>,
+    bind: B,
+) -> Result<HookAcceptedResponse, DaemonError>
+where
+    B: FnOnce(
+        Arc<DaemonState>,
+        SessionId,
+        crate::daemon::services::delegation_repair_caller::RepairPeer,
+    ) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
     use crate::daemon::services::delegation_repair_caller::{
-        RepairPeer, bind_announcing_claude, stale_on_owner_session_end,
+        RepairPeer, stale_on_owner_session_end,
     };
     // #8531: bind before ingest, from the kernel's peer; HTTP never binds.
-    if post.event == HookEvent::SessionStart
-        && let Ok(session) = parse_id(&post.session_id)
-        && let Err(e) = bind_announcing_claude(state, session, RepairPeer::from_socket(peer)).await
+    // #8984: the bind is in flight until the ingest below settles the id, so
+    // a concurrent later event does not settle it first.
+    let start = (post.event == HookEvent::SessionStart)
+        .then(|| parse_id(&post.session_id).ok())
+        .flatten();
+    let _in_flight = start.map(|session| state.session_claudes().begin_bind(session));
+    if let Some(session) = start
+        && let Err(e) = bind(Arc::clone(state), session, RepairPeer::from_socket(peer)).await
     {
         tracing::warn!(session_id = %session.0, "SessionStart left the session unbound: {e}");
     }
@@ -608,13 +637,21 @@ pub async fn ingest_hook_from_socket(
 /// [`DaemonError::OverseerBlocked`] when the overseer vetoes the event (HTTP 403
 /// / `CODE_FORBIDDEN`) — a refusal, never a warning-and-continue.
 ///
+/// #8984: an in-session event for an id with no recorded announcement
+/// settles it as unproven, unless a socket `SessionStart` bind of it is in
+/// flight; a failed settle is logged at WARN and never fails the hook.
+///
 /// Test: `parity_hooks_ingest_leaves_the_same_event_log_on_both_transports`,
-/// `parity_hooks_ingest_malformed_id_agrees_across_transports`.
+/// `parity_hooks_ingest_malformed_id_agrees_across_transports`,
+/// `a_forged_session_start_after_another_event_binds_nothing_8984`,
+/// `an_in_flight_session_start_still_binds_8984`.
 pub async fn ingest_hook(
     state: &Arc<DaemonState>,
     post: HookPost,
 ) -> Result<HookAcceptedResponse, DaemonError> {
     let session = parse_id(&post.session_id)?;
+    // #9010: a recent event holds a settled session off the reaper.
+    state.session_claudes().note_event(session);
 
     // #8531: the first SessionStart decides an id's binding on either
     // transport. One that bound no claude (HTTP, or a socket bind that
@@ -629,6 +666,28 @@ pub async fn ingest_hook(
             .and_then(|r| r);
         if let Err(e) = settled {
             tracing::warn!(session_id = %session.0, "SessionStart not recorded as unproven: {e}");
+        }
+    }
+    // #8984: an id whose SessionStart never reached the daemon is settled by
+    // its first in-session event, so a later forged SessionStart binds nothing.
+    if post.event.follows_session_start() && !state.session_claudes().is_settled(session) {
+        let held = Arc::clone(state);
+        let settled =
+            tokio::task::spawn_blocking(move || held.session_claudes().settle_after_event(session))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+        match settled {
+            Ok(true) => tracing::warn!(
+                session_id = %session.0,
+                event = ?post.event,
+                "no SessionStart was seen for this session; it is settled as unproven (#8984)"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                session_id = %session.0,
+                "the session could not be recorded as unproven (#8984): {e}"
+            ),
         }
     }
 
