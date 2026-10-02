@@ -11,8 +11,8 @@
 //! failure this file exists to catch.
 //!
 //! What: stages a temp project whose `.claude/agents/` holds the REAL shared
-//! assets — `trusty_agents_common::agent_assets::{TICKETING, VERSION_CONTROL}`
-//! plus the two `BASE-*` templates their `extends:` chains resolve against,
+//! agents — `ticketing.md` and `version-control.md` from the checkout's
+//! `content/agents` (#9011) — plus the two `BASE-*` templates their `extends:` chains resolve against,
 //! exactly as a trusty-mpm deployment lays them out — then runs
 //! `plan_import`/`apply_import` in-process and loads each imported file back
 //! through `agents::load_md_agent`. Asserts the frontmatter's identity, model
@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_agents_common::agent_assets;
+use trusty_agents_common::agent_content::{AgentRoster, checkout_content};
 use trusty_code::agents::load_md_agent;
 use trusty_code::paths::import::{ImportAction, apply_import, plan_import};
 
@@ -32,19 +32,32 @@ use trusty_code::paths::import::{ImportAction, apply_import, plan_import};
 ///
 /// `ticketing` extends `base-agent`; `version-control` extends `base-ops`,
 /// which itself extends `base-agent`.
-const CATALOG: &[(&str, &str)] = &[
-    ("BASE-AGENT.md", agent_assets::BASE_AGENT),
-    ("BASE-OPS.md", agent_assets::BASE_OPS),
-    ("ticketing.md", agent_assets::TICKETING),
-    ("version-control.md", agent_assets::VERSION_CONTROL),
-];
+fn catalog() -> Vec<(&'static str, String)> {
+    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let roster =
+        AgentRoster::load(&checkout_content(root).expect("repo content")).expect("repo roster");
+    [
+        "BASE-AGENT.md",
+        "BASE-OPS.md",
+        "ticketing.md",
+        "version-control.md",
+    ]
+    .into_iter()
+    .map(|file| {
+        (
+            file,
+            roster.require(file).expect("catalog file").to_string(),
+        )
+    })
+    .collect()
+}
 
 /// Stage a project root whose `.claude/agents/` holds the real shared catalog.
 fn staged_project() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
     let agents = tmp.path().join(".claude").join("agents");
     std::fs::create_dir_all(&agents).expect("create .claude/agents");
-    for (name, content) in CATALOG {
+    for (name, content) in catalog() {
         std::fs::write(agents.join(name), content).expect("stage catalog file");
     }
     tmp
@@ -72,7 +85,7 @@ fn dry_run_plan_and_apply_carry_the_whole_mpm_catalog() {
     let root = tmp.path();
 
     let plan = plan_import(root);
-    for (name, _) in CATALOG {
+    for (name, _) in catalog() {
         let entry = plan
             .entries
             .iter()
@@ -91,7 +104,7 @@ fn dry_run_plan_and_apply_carry_the_whole_mpm_catalog() {
         "no catalog file may be refused: {:?}",
         report.refused
     );
-    for (name, _) in CATALOG {
+    for (name, _) in catalog() {
         let target = imported_path(root, name);
         assert!(
             report.created.contains(&target),

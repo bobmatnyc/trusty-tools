@@ -63,7 +63,7 @@ use trusty_agents_common::agents::deployer::{DeployResult, deploy_agents_filtere
 use trusty_agents_common::agents::manifest::{AgentManifest, MANIFEST_FILE, ManifestLoad};
 
 use crate::agents::skill_refs::SKILL_REFS_DIRNAME;
-use crate::assets::{DEFAULT_AGENTS, EMBEDDED_TM_AGENT_SOURCES, EmbeddedAgent};
+use crate::assets::{DEFAULT_AGENTS, EmbeddedAgent};
 use crate::paths::write_dir::NativeWriteDir;
 use crate::paths::{self, WriteTargetError};
 
@@ -120,6 +120,10 @@ pub enum RosterDeployError {
     /// The shared deployer itself failed.
     #[error("deploying the embedded agent roster failed: {0}")]
     Deploy(#[source] AgentBuildError),
+    /// The shared agent texts could not be loaded from instructional content
+    /// (#9011); the message names `tm content install`.
+    #[error("the agent roster could not be deployed: {0}")]
+    Content(#[from] trusty_agents_common::agent_content::AgentContentError),
 }
 
 /// Why a deploy was skipped rather than attempted.
@@ -313,6 +317,7 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         }
     };
 
+    // #9011: the shared texts come from content; none means nothing is staged.
     let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
@@ -477,15 +482,18 @@ fn is_user_edited(manifest: &AgentManifest, target: &Path, stem: &str) -> bool {
 /// is a set of `&'static str`s. Staging them is what lets the deployer be reused
 /// verbatim instead of growing a second, pre-composed entry point — a shared
 /// library change this slice deliberately avoided.
-/// What: one `.md` per [`EMBEDDED_TM_AGENT_SOURCES`] entry (keyed by its
-/// original filename, so `extends: base-qa` resolves against `BASE-QA.md`) plus
+/// What: loads the catalog once ([`crate::assets::load_tm_agent_sources`],
+/// #9011; a content error is [`RosterDeployError::Content`] and nothing is
+/// staged), then one `.md` per entry (keyed by its filename, so
+/// `extends: base-qa` resolves against `BASE-QA.md`) plus
 /// one per [`EmbeddedAgent::Direct`] in [`DEFAULT_AGENTS`]. The `TempDir` is
 /// returned so the caller keeps it alive across the deploy; dropping it removes
 /// the scratch tree.
 /// Test: `staged_sources_cover_every_roster_name_and_base_template`.
 fn stage_embedded_sources() -> Result<tempfile::TempDir, RosterDeployError> {
+    let catalog = crate::assets::load_tm_agent_sources()?;
     let dir = tempfile::tempdir().map_err(RosterDeployError::Stage)?;
-    for (filename, content) in EMBEDDED_TM_AGENT_SOURCES {
+    for (filename, content) in &catalog {
         std::fs::write(dir.path().join(filename), content).map_err(RosterDeployError::Stage)?;
     }
     for embedded in DEFAULT_AGENTS {

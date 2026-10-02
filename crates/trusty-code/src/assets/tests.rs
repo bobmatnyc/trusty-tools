@@ -434,7 +434,7 @@ fn workflow_agents_declare_the_prefixes_the_pm_parses() {
 /// Test: this test.
 #[test]
 fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
-    let source_keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
+    let source_keys: Vec<String> = test_catalog()
         .iter()
         .map(|(name, _)| name.trim_end_matches(".md").to_ascii_lowercase())
         .collect();
@@ -443,7 +443,7 @@ fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
         if let EmbeddedAgent::Composed { name } = agent {
             assert!(
                 source_keys.iter().any(|k| k == name),
-                "roster name '{name}' has no matching EMBEDDED_TM_AGENT_SOURCES key"
+                "roster name '{name}' has no matching tm agent catalog key"
             );
         }
     }
@@ -592,8 +592,11 @@ fn default_skills_names_are_unique() {
 /// Test: this test.
 #[test]
 fn embedded_tm_agent_sources_has_31_entries_and_unique_keys() {
-    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 31);
-    let mut keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
+    let catalog = test_catalog();
+    assert_eq!(catalog.len(), 31);
+    assert_eq!(SHARED_TM_AGENT_FILES.len(), 27);
+    assert_eq!(LOCAL_TM_AGENT_FORKS.len(), 4);
+    let mut keys: Vec<String> = catalog
         .iter()
         .map(|(name, _)| name.to_lowercase())
         .collect();
@@ -601,12 +604,23 @@ fn embedded_tm_agent_sources_has_31_entries_and_unique_keys() {
     keys.sort_unstable();
     keys.dedup();
     assert_eq!(keys.len(), before, "no duplicate embedded tm agent keys");
-    for (name, content) in EMBEDDED_TM_AGENT_SOURCES {
+    for (name, content) in &catalog {
         assert!(
             content.trim_start().starts_with("---"),
             "embedded tm agent source '{name}' must open with a frontmatter fence"
         );
     }
+}
+
+/// The tm agent catalog over the checkout's `content/agents` (#9011), so no
+/// test depends on the cwd, HOME or an installed bundle.
+fn test_catalog() -> Vec<(String, String)> {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let content =
+        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+    let roster =
+        trusty_agents_common::agent_content::AgentRoster::load(&content).expect("repo roster");
+    tm_agent_sources(&roster).expect("the checkout carries every shared file")
 }
 
 /// #4027 (epic #4021): the ported `ticketing` agent is a real, dispatchable
@@ -638,7 +652,7 @@ fn ticketing_is_dispatchable_for_cross_product_delegation() {
 }
 
 /// #8129: no delivery-workflow dispatch name is ALSO resolvable from
-/// [`EMBEDDED_TM_AGENT_SOURCES`], so there is exactly one body behind each.
+/// the tm agent catalog ([`tm_agent_sources`]), so there is exactly one body behind each.
 ///
 /// Why: #8129 replaced three shared bodies with tcode-native ones under the
 /// same dispatch names. Leaving the shared entry in the source table would
@@ -657,7 +671,7 @@ fn delivery_workflow_names_resolve_to_exactly_one_body() {
     for name in ["ticketing", "version-control", "local-ops", "documentation"] {
         let key = format!("{name}.md");
         assert!(
-            !EMBEDDED_TM_AGENT_SOURCES
+            !test_catalog()
                 .iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case(&key)),
             "'{key}' must not stay in the shared source table — a tcode-native \
@@ -727,21 +741,21 @@ fn backticked_agent_tokens(text: &str) -> Vec<&str> {
 /// own card declares, so it needs the card bytes — which live in two different
 /// tables depending on whether the agent is `Direct` or `Composed`.
 /// What: the `Direct` entry's `md` when one exists, else the
-/// [`EMBEDDED_TM_AGENT_SOURCES`] entry keyed `<name>.md`.
+/// tm agent catalog entry keyed `<name>.md` (#9011: read from content).
 /// Test: `supporting_agents_resolve_with_their_declared_tool_grant`.
-fn card_source(name: &str) -> &'static str {
+fn card_source(name: &str) -> String {
     DEFAULT_AGENTS
         .iter()
         .find_map(|a| match a {
-            EmbeddedAgent::Direct { name: n, md } if *n == name => Some(*md),
+            EmbeddedAgent::Direct { name: n, md } if *n == name => Some((*md).to_string()),
             _ => None,
         })
         .or_else(|| {
             let key = format!("{name}.md");
-            EMBEDDED_TM_AGENT_SOURCES
-                .iter()
+            test_catalog()
+                .into_iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(&key))
-                .map(|(_, md)| *md)
+                .map(|(_, md)| md)
         })
         .unwrap_or_else(|| panic!("no embedded card source for '{name}'"))
 }
@@ -962,7 +976,7 @@ fn pm_card_names_no_tool_the_delegate_mode_pm_lacks() {
 #[test]
 fn supporting_agents_resolve_with_their_declared_tool_grant() {
     for name in ["research", "documentation", "ticketing", "version-control"] {
-        let card = card_source(name);
+        let card = &card_source(name);
         let cfg = resolve_embedded(name);
 
         assert!(

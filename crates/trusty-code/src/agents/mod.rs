@@ -179,19 +179,28 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// What: For each `EmbeddedAgent::Direct { name, md }`, calls
 /// [`md_loader::project_embedded_md`] directly, which fails only on a
 /// malformed `permissions:` block (#7948). For each
-/// `EmbeddedAgent::Composed { name }`, calls
-/// [`md_loader::project_embedded_md_with_extends`], which also fails on an
-/// unresolvable `extends:` chain. Either failure is logged at
-/// ERROR level and the agent is skipped rather than panicking — this should
-/// be unreachable in practice (every roster name is pinned against
-/// `EMBEDDED_TM_AGENT_SOURCES` by `assets::tests::default_agents_parse_and_names_match`),
-/// but a compiled-in asset table defect must degrade gracefully, not crash
-/// the harness, exactly like the disk-parsing path in [`load_all_agents`]
-/// does for a malformed on-disk config.
+/// `EmbeddedAgent::Composed { name }`, composes against the catalog
+/// [`crate::assets::load_tm_agent_sources`] reads from content ONCE (#9011),
+/// which also fails on an unresolvable `extends:` chain. With no content the
+/// composed agents are skipped under one ERROR naming `tm content install`
+/// and the `Direct` agents still load. Any per-agent failure is logged at
+/// ERROR level and the agent is skipped rather than panicking, exactly like
+/// the disk-parsing path in [`load_all_agents`] does for a malformed on-disk
+/// config.
 /// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 /// `assets::tests::default_agents_field_identical_to_retired_toml`,
 /// `assets::tests::default_agents_parse_and_names_match`.
 pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
+    // #9011: the composed agents' shared texts are instructional content,
+    // loaded ONCE; without it only the `Direct` agents load, under one error.
+    let catalog = crate::assets::load_tm_agent_sources()
+        .inspect_err(|e| {
+            tracing::error!(
+                "tcode's shared agents are unavailable, so only its built-in agents load: {e}"
+            );
+        })
+        .ok();
+    let skill_refs_root = skill_refs::user_skill_refs_dir();
     crate::assets::DEFAULT_AGENTS
         .iter()
         .filter_map(|embedded| {
@@ -202,7 +211,11 @@ pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
                     md_loader::project_embedded_md(name, md)
                 }
                 crate::assets::EmbeddedAgent::Composed { name } => {
-                    md_loader::project_embedded_md_with_extends(name)
+                    md_loader::project_embedded_md_with_extends_from(
+                        name,
+                        catalog.as_deref()?,
+                        &skill_refs_root,
+                    )
                 }
             };
             loaded
@@ -349,17 +362,14 @@ pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgent
                 });
             }
             crate::assets::EmbeddedAgent::Composed { name: n } => {
-                match md_loader::project_embedded_md_with_extends(n) {
-                    Ok(cfg) => return Ok(cfg),
-                    Err(e) => {
-                        tracing::error!(
-                            "embedded roster agent '{n}' failed to compose \
-                             (build-time asset defect, not a runtime condition): {e}"
-                        );
-                        // Fall through to the not-found error below, mirroring
-                        // `load_embedded_default_agents`'s own handling.
+                // #9011: a content error (none installed) is a load failure
+                // that names `tm content install`, never a "not found".
+                return md_loader::project_embedded_md_with_extends(n).map_err(|source| {
+                    ResolveAgentError::Load {
+                        name: name.to_string(),
+                        source,
                     }
-                }
+                });
             }
         }
     }

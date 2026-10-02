@@ -173,10 +173,10 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
     Ok(config)
 }
 
-/// Project an embedded tm-catalog agent onto tcode's [`AgentConfig`],
-/// resolving its `extends:` chain entirely against
-/// `crate::assets::EMBEDDED_TM_AGENT_SOURCES` -- no filesystem access
-/// (Slice E2, #2958).
+/// Project a tm-catalog agent onto tcode's [`AgentConfig`], resolving its
+/// `extends:` chain entirely in memory against the catalog
+/// `crate::assets::load_tm_agent_sources` reads from instructional content
+/// (Slice E2, #2958; content since #9011).
 ///
 /// Why: [`project_embedded_md`] handles tcode's own 3 defaults, none of
 /// which declare `extends:`. The bundled tm agent catalog (5 `BASE-*`
@@ -187,8 +187,8 @@ pub(crate) fn project_embedded_md(default_name: &str, raw: &str) -> anyhow::Resu
 /// constants don't have. `trusty_agents_common::agents::builder_in_memory`
 /// (Slice E1, PR #3013) supplies the disk-free counterpart: an
 /// `InMemorySources` map plus `compose_agent_in_memory`, built here from
-/// `crate::assets::EMBEDDED_TM_AGENT_SOURCES` and passed the requested
-/// `name`.
+/// the loaded catalog and passed the requested `name`. A content error (none
+/// installed, unverifiable) is an `Err` naming `tm content install`.
 /// What: builds an `InMemorySources` map from the embedded catalog table,
 /// resolves `name`'s `extends:` chain via `compose_agent_in_memory`, then
 /// projects the composed document through the same
@@ -223,11 +223,22 @@ pub fn project_embedded_md_with_extends_at(
     name: &str,
     skill_refs_root: &Path,
 ) -> anyhow::Result<AgentConfig> {
-    project_in_memory_catalog(
-        name,
-        crate::assets::EMBEDDED_TM_AGENT_SOURCES,
-        skill_refs_root,
-    )
+    let catalog = crate::assets::load_tm_agent_sources()?;
+    project_embedded_md_with_extends_from(name, &catalog, skill_refs_root)
+}
+
+/// [`project_embedded_md_with_extends_at`] over a catalog already loaded, so
+/// a batch resolves content once (#9011).
+pub(crate) fn project_embedded_md_with_extends_from(
+    name: &str,
+    catalog: &[(String, String)],
+    skill_refs_root: &Path,
+) -> anyhow::Result<AgentConfig> {
+    let entries: Vec<(&str, &str)> = catalog
+        .iter()
+        .map(|(file, md)| (file.as_str(), md.as_str()))
+        .collect();
+    project_in_memory_catalog(name, &entries, skill_refs_root)
 }
 
 /// [`project_embedded_md_with_extends_at`] over a supplied
