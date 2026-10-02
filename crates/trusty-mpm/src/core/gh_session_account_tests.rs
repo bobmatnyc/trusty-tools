@@ -472,6 +472,7 @@ fn tm_dir_pin(state_root: &Path) -> PinnedGhIdentity {
     PinnedGhIdentity {
         account: Some("octo-pinned".into()),
         config_dir: Some(account_dir(state_root, "octo-pinned")),
+        ..Default::default()
     }
 }
 
@@ -551,6 +552,7 @@ fn operator_dir_pin() -> PinnedGhIdentity {
     PinnedGhIdentity {
         account: Some("octo-pinned".into()),
         config_dir: Some(PathBuf::from("/home/me/.config/gh-duetto")),
+        ..Default::default()
     }
 }
 
@@ -589,6 +591,7 @@ fn a_config_dir_pin_naming_no_login_fails_closed() {
     let pinned = PinnedGhIdentity {
         account: None,
         config_dir: Some(tmp.path().to_path_buf()),
+        ..Default::default()
     };
     let env = spawn(&pinned, ORIGIN, |_| panic!("no login is ever proven"));
     let warning = assert_fails_closed(&env);
@@ -608,6 +611,7 @@ fn a_config_dir_pin_proves_the_login_its_hosts_yml_names() {
     let pinned = PinnedGhIdentity {
         account: None,
         config_dir: Some(tmp.path().to_path_buf()),
+        ..Default::default()
     };
     let env = spawn(&pinned, ORIGIN, |login| {
         assert_eq!(login, "octo-pinned");

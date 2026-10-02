@@ -35,9 +35,10 @@ use std::path::{Path, PathBuf};
 
 use super::{
     GH_TOKEN_ENV_VAR, GH_USER_ENV_VAR, find_pinned_gh_identity,
-    resolve_gh_account_env_for_registry, resolve_gh_account_env_with,
+    resolve_gh_account_env_for_registry_with, resolve_gh_account_env_with,
 };
 use crate::core::gh_account_dir::gh_account_dir_tests::{TableCheck, TableProbe, migrated_dir};
+use crate::core::gh_org_accounts::{OrgAccounts, OrgAccountsError};
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::project::Project;
 use crate::project::ProjectRegistry;
@@ -51,6 +52,12 @@ fn value_of(vars: &[(String, String)], name: &str) -> String {
     let matches: Vec<&(String, String)> = vars.iter().filter(|(k, _)| k == name).collect();
     assert_eq!(matches.len(), 1, "expected exactly one {name} in {vars:?}");
     matches[0].1.clone()
+}
+
+/// The registry spawn env with an empty `[accounts]` table, so no test reads
+/// the host's `~/.trusty-mpm/config.toml` (#9091).
+async fn for_registry(registry: &ProjectRegistry, cwd: &Path) -> Vec<(String, String)> {
+    resolve_gh_account_env_for_registry_with(registry, cwd, || Ok(OrgAccounts::default())).await
 }
 
 /// [`find_pinned_gh_identity`] for a registry whose pins agree.
@@ -531,7 +538,7 @@ async fn resolve_gh_account_env_for_registry_no_origin_is_empty() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = ProjectRegistry::load(dir.path()).await.expect("load");
     let workspace = tempfile::tempdir().expect("workspace tempdir");
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert!(vars.is_empty(), "vars: {vars:?}");
 }
 
@@ -554,7 +561,7 @@ async fn a_local_only_repo_spawns_with_gh_disabled() {
         .expect("git init");
     assert!(init.status.success(), "git init failed");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert_eq!(value_of(&vars, GH_CONFIG_DIR), LOCAL_ONLY_GH_CONFIG_DIR);
     assert_eq!(value_of(&vars, "GH_TOKEN"), LOCAL_ONLY_GH_TOKEN);
     assert_eq!(value_of(&vars, "GH_ENTERPRISE_TOKEN"), LOCAL_ONLY_GH_TOKEN);
@@ -577,7 +584,7 @@ async fn an_unreadable_origin_spawns_with_the_nobody_token() {
     workspace_with_origin(workspace.path(), "https://github.com/acme-8934/widget.git");
     let git_dir = workspace.path().join(".git");
     std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o755)).expect("restore");
     for var in [GH_TOKEN_ENV_VAR, "GH_ENTERPRISE_TOKEN"] {
         assert_eq!(value_of(&vars, var), super::REFUSED_GH_TOKEN, "{var}");
@@ -633,7 +640,7 @@ async fn pinned_config_dir_reaches_the_spawn_env() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert_eq!(
         value_of(&vars, GH_CONFIG_DIR),
         gh_home.path().to_string_lossy(),
@@ -662,7 +669,7 @@ async fn disagreeing_pins_spawn_with_the_nobody_token() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme-8914/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     for var in [GH_TOKEN_ENV_VAR, "GH_ENTERPRISE_TOKEN"] {
         assert_eq!(value_of(&vars, var), super::REFUSED_GH_TOKEN, "{var}");
     }
@@ -684,7 +691,7 @@ async fn an_unreadable_registry_spawns_with_the_nobody_token() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme-8914/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert_eq!(value_of(&vars, GH_TOKEN_ENV_VAR), super::REFUSED_GH_TOKEN);
 }
 
@@ -710,7 +717,7 @@ async fn an_operator_config_dir_pin_never_leaves_the_session_on_the_active_accou
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme-8914/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert_eq!(
         value_of(&vars, GH_TOKEN_ENV_VAR),
         super::REFUSED_GH_TOKEN,
@@ -752,7 +759,7 @@ async fn a_tm_account_dir_pin_never_leaves_the_session_on_the_active_account() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme-8914/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert_eq!(
         value_of(&vars, GH_TOKEN_ENV_VAR),
         super::REFUSED_GH_TOKEN,
@@ -781,8 +788,48 @@ async fn registered_project_pinning_nothing_injects_nothing() {
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     workspace_with_origin(workspace.path(), "https://github.com/acme/widget.git");
 
-    let vars = resolve_gh_account_env_for_registry(&registry, workspace.path()).await;
+    let vars = for_registry(&registry, workspace.path()).await;
     assert!(vars.is_empty(), "vars: {vars:?}");
+}
+
+/// 🔴 #9091: an origin no record pins spawns as its org's `[accounts]` login,
+/// through the whole production path. A test build proves no token, so the
+/// mapped login reaches `GH_USER` beside the nobody-token.
+/// Test: itself.
+#[tokio::test]
+async fn an_org_mapped_origin_spawns_as_the_mapped_account() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    workspace_with_origin(workspace.path(), "https://github.com/Acme-9091/widget.git");
+    let raw = "[accounts]\nacme-9091 = \"octo-9091-mapped\"\n";
+    let load = || OrgAccounts::from_toml(raw, Path::new("/home/u/.trusty-mpm/config.toml"));
+
+    let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), load).await;
+    assert_eq!(value_of(&vars, GH_USER_ENV_VAR), "octo-9091-mapped");
+    assert_eq!(value_of(&vars, GH_TOKEN_ENV_VAR), super::REFUSED_GH_TOKEN);
+}
+
+/// 🔴 #9091 Fail-Open Check: a broken `[accounts]` table gives the spawn the
+/// nobody-token through the whole production path, never an empty env.
+/// Test: itself.
+#[tokio::test]
+async fn a_broken_accounts_table_spawns_with_the_nobody_token() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    workspace_with_origin(workspace.path(), "https://github.com/acme-9091/widget.git");
+    let load = || -> Result<OrgAccounts, OrgAccountsError> {
+        OrgAccounts::from_toml(
+            "[accounts]\nacme-9091 = octo\n",
+            Path::new("/home/u/.trusty-mpm/config.toml"),
+        )
+    };
+
+    let vars = resolve_gh_account_env_for_registry_with(&registry, workspace.path(), load).await;
+    for var in [GH_TOKEN_ENV_VAR, "GH_ENTERPRISE_TOKEN"] {
+        assert_eq!(value_of(&vars, var), super::REFUSED_GH_TOKEN, "{var}");
+    }
 }
 
 // ── #8510: an account-only spawn pin never falls back to "no identity" ─────
@@ -797,7 +844,7 @@ const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
 fn account_only_pin() -> super::PinnedGhIdentity {
     super::PinnedGhIdentity {
         account: Some("octo-pinned".into()),
-        config_dir: None,
+        ..Default::default()
     }
 }
 
@@ -893,6 +940,7 @@ fn a_config_dir_spawn_pin_is_proven_not_used_bare() {
     let pinned = super::PinnedGhIdentity {
         account: Some("octo-pinned".into()),
         config_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
     };
     let env = super::pinned_spawn_env(&pinned, SPAWN_ORIGIN, |login| {
         assert_eq!(login, "octo-pinned");

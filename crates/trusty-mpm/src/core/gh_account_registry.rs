@@ -181,7 +181,7 @@ impl RegistryPin {
 
     /// The login this pin selects: `gh_account`, else `github.account`.
     /// Test: `same_login_in_a_different_case_agrees`.
-    fn login(&self) -> Option<&str> {
+    pub(crate) fn login(&self) -> Option<&str> {
         self.account.as_deref().or_else(|| {
             self.github
                 .as_ref()?
@@ -210,13 +210,14 @@ impl RegistryPin {
 /// What: `Ok(None)` for an absent file, no matching record, or matching records
 /// that pin nothing; `Err` for an I/O failure, a document that does not parse,
 /// ANY matching record that does not parse as a [`Project`], or matching records
-/// that pin different identities — see [`select_pin`].
+/// that pin different identities — see [`select_pin`]. #9091: the clone path
+/// reads the pin here too (`gh_org_accounts::resolve_gh_account`).
 /// Test: `an_absent_registry_file_is_not_a_pin`,
 /// `an_unreadable_registry_fails_closed`,
 /// `a_malformed_matching_record_fails_closed`,
 /// `a_malformed_second_matching_record_fails_closed`,
 /// `a_malformed_unrelated_record_does_not_block_a_match`.
-fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
+pub(crate) fn read_pin(registry_dir: &Path, origin: &str) -> Result<Option<RegistryPin>, String> {
     let path = registry_dir.join(REGISTRY_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,

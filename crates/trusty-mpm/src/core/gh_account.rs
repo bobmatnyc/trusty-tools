@@ -714,7 +714,8 @@ pub fn resolve_gh_account_env(
 /// [`crate::core::remote_mode::local_only_spawn_vars`] — gh cannot run at all
 /// unless the root is the allow-listed supervisor — and an origin git cannot
 /// read, which gets the nobody token. #9091: an origin no record pins takes the
-/// `[accounts]` org map's login ([`crate::core::gh_org_accounts::org_map_pin`]).
+/// `[accounts]` org map's login ([`crate::core::gh_org_accounts::org_map_pin`]),
+/// read through `load` in [`resolve_gh_account_env_for_registry_with`].
 /// Test: `resolve_gh_account_env_for_registry_no_origin_is_empty`,
 /// `a_local_only_repo_spawns_with_gh_disabled`,
 /// `an_unreadable_origin_spawns_with_the_nobody_token`,
@@ -725,6 +726,22 @@ pub fn resolve_gh_account_env(
 pub async fn resolve_gh_account_env_for_registry(
     registry: &crate::project::ProjectRegistry,
     cwd: &std::path::Path,
+) -> Vec<(String, String)> {
+    let load = crate::core::gh_org_accounts::OrgAccounts::load_default;
+    resolve_gh_account_env_for_registry_with(registry, cwd, load).await
+}
+
+/// [`resolve_gh_account_env_for_registry`] with the `[accounts]` loader given
+/// (#9091), so a test never reads the host's `~/.trusty-mpm/config.toml`.
+/// Test: `an_org_mapped_origin_spawns_as_the_mapped_account`,
+/// `a_broken_accounts_table_spawns_with_the_nobody_token`.
+pub(crate) async fn resolve_gh_account_env_for_registry_with(
+    registry: &crate::project::ProjectRegistry,
+    cwd: &std::path::Path,
+    load: impl FnOnce() -> Result<
+        crate::core::gh_org_accounts::OrgAccounts,
+        crate::core::gh_org_accounts::OrgAccountsError,
+    >,
 ) -> Vec<(String, String)> {
     use crate::core::remote_mode::{RemoteMode, remote_mode};
     let cwd_for_origin = cwd.to_path_buf();
@@ -756,14 +773,15 @@ pub async fn resolve_gh_account_env_for_registry(
         // #9091: no pin → the `[accounts]` org map; a broken table fails closed.
         Ok(None) => match crate::core::gh_org_accounts::org_map_pin(
             &origin,
-            crate::core::gh_org_accounts::OrgAccounts::load_default,
+            &crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user(),
+            load,
         ) {
             Ok(Some(pinned)) => pinned,
             Ok(None) => return Vec::new(),
             Err(env) => return log_spawn_env(Some(Ok(env)), cwd),
         },
         Err(reason) => {
-            let env = refused_spawn_env(None, &origin, &reason);
+            let env = refused_spawn_env(None, &origin, &reason, Default::default());
             return log_spawn_env(Some(Ok(env)), cwd);
         }
     };
@@ -850,7 +868,8 @@ pub(crate) fn joined_spawn_vars(
                 .map(str::trim)
                 .filter(|a| !a.is_empty());
             let reason = format!("the gh identity task did not finish: {e}");
-            log_spawn_env(Some(Ok(refused_spawn_env(login, origin, &reason))), cwd)
+            let env = refused_spawn_env(login, origin, &reason, pinned.source);
+            log_spawn_env(Some(Ok(env)), cwd)
         }
     }
 }
@@ -935,7 +954,7 @@ pub(crate) fn pinned_spawn_env(
                 warning: None,
             }
         }
-        Err(reason) => refused_spawn_env(Some(login), origin, &reason),
+        Err(reason) => refused_spawn_env(Some(login), origin, &reason, pinned.source),
     }))
 }
 
@@ -943,21 +962,34 @@ pub(crate) fn pinned_spawn_env(
 ///
 /// What: `GH_TOKEN` and `GH_ENTERPRISE_TOKEN` both [`REFUSED_GH_TOKEN`], plus
 /// `GH_USER=<login>` when known, and a warning naming each candidate's failure
-/// and the fix command.
+/// and the fix command — #9091: for an `[accounts]` login, the table's fix.
 /// Test: `an_account_only_spawn_pin_with_no_proven_token_fails_closed`,
-/// `a_panicked_spawn_env_task_fails_closed`.
-fn refused_spawn_env(login: Option<&str>, origin: &str, reason: &str) -> GhSpawnEnv {
+/// `a_panicked_spawn_env_task_fails_closed`,
+/// `an_org_map_refusal_names_the_table_not_the_registry`.
+fn refused_spawn_env(
+    login: Option<&str>,
+    origin: &str,
+    reason: &str,
+    source: crate::core::gh_org_accounts::AccountSource,
+) -> GhSpawnEnv {
     let mut vars = crate::core::gh_account_proof::identity_token_vars(None);
     vars.extend(login.map(|l| (GH_USER_ENV_VAR.to_string(), l.to_string())));
     let who = login.unwrap_or("<login>");
-    GhSpawnEnv {
-        vars,
-        warning: Some(format!(
+    let warning = match source {
+        // #9091: the account came from the config table, so that is the fix.
+        crate::core::gh_org_accounts::AccountSource::OrgMap => {
+            crate::core::gh_org_accounts::org_map_refusal(who, reason)
+        }
+        _ => format!(
             "this project is pinned to gh account '{who}', and no gh token is proven by `GET /user` to be its own ({reason}). The session's gh is \
              given a token that authenticates as nobody, so it fails instead of acting as the \
              machine's global account (#8510). Fix: `tm projects register <name> --repo-url \
              {origin} --gh-account {who} --gh-config-dir <dir>`."
-        )),
+        ),
+    };
+    GhSpawnEnv {
+        vars,
+        warning: Some(warning),
     }
 }
 
@@ -979,6 +1011,8 @@ pub struct PinnedGhIdentity {
     pub account: Option<String>,
     /// `Project::github.config_dir` — the scoped `gh` config home to pin to.
     pub config_dir: Option<PathBuf>,
+    /// #9091: a registry record, or the `[accounts]` org map — names the fix.
+    pub source: crate::core::gh_org_accounts::AccountSource,
 }
 
 /// Look up the pinned `gh` identity among the registered projects whose
@@ -1029,6 +1063,7 @@ async fn find_pinned_gh_identity(
     let pinned = PinnedGhIdentity {
         account: pin.account,
         config_dir: pin.github.and_then(|cfg| cfg.config_dir),
+        ..Default::default()
     };
     Ok((pinned != PinnedGhIdentity::default()).then_some(pinned))
 }

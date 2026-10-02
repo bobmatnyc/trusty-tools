@@ -584,3 +584,30 @@ fn every_account_spelling_selects_the_account_in_every_form_and_position() {
         }
     }
 }
+
+/// 🔴 #9091: a launch whose `[accounts]` table cannot be read is refused with
+/// the file and the parse error, before anything is cloned or spawned; a
+/// chosen or ambient account passes.
+#[test]
+fn preflight_refuses_a_broken_accounts_table_naming_the_file() {
+    use trusty_mpm::core::gh_org_accounts::{AccountSource, OrgAccounts, ResolvedAccount};
+    let path = std::path::Path::new("/home/u/.trusty-mpm/config.toml");
+    let broken = OrgAccounts::from_toml("[accounts]\nduettoresearch = bob-duetto\n", path)
+        .expect_err("an unquoted login is a syntax error");
+    let origin = "https://github.com/duettoresearch/jev.git";
+
+    let err = preflight_verdict(origin, Err(broken.to_string()))
+        .expect_err("a broken table refuses the launch")
+        .to_string();
+    for needle in [origin, "/home/u/.trusty-mpm/config.toml", "not valid TOML"] {
+        assert!(err.contains(needle), "{needle}: {err}");
+    }
+    assert!(err.contains("No session was started"), "{err}");
+
+    let chosen = ResolvedAccount {
+        login: "bob-duetto".into(),
+        source: AccountSource::OrgMap,
+    };
+    preflight_verdict(origin, Ok(Some(chosen))).expect("a mapped account launches");
+    preflight_verdict(origin, Ok(None)).expect("the ambient identity launches");
+}
