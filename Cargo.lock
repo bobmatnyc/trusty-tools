@@ -11236,7 +11236,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.53.0"
+version = "0.53.1"
 dependencies = [
  "anyhow",
  "async-trait",
