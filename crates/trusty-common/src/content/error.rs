@@ -106,6 +106,22 @@ pub enum ContentError {
         /// The tag in the bundle's `bundle-manifest.toml`.
         bundle_tag: String,
     },
+    /// The bundle's manifest declares a layout newer than this reader
+    /// (ADR-0064 PHASE_3 (iv)).
+    #[error(
+        "refusing to load the content bundle {}: it declares schema_major {bundle}, \
+         and this binary reads schema_major {supported} or older; upgrade tm, or pin \
+         an older content release",
+        path.display()
+    )]
+    UnsupportedSchema {
+        /// The bundle file.
+        path: PathBuf,
+        /// The `schema_major` the bundle declares.
+        bundle: u32,
+        /// The newest `schema_major` this binary reads.
+        supported: u32,
+    },
     /// The dev checkout named explicitly lacks a content class directory.
     #[error("{} is not a content checkout: {} is missing", root.display(), missing.display())]
     NotACheckout {
@@ -128,6 +144,13 @@ pub enum ContentError {
     InvalidPath {
         /// The rejected path.
         path: String,
+    },
+    /// A listing named a class other than `agents`, `skills` or `instructions`
+    /// (#8378): a former class name fails loud instead of listing nothing.
+    #[error("{class:?} is not a content class (expected agents, skills or instructions)")]
+    UnknownClass {
+        /// The rejected class or destination.
+        class: String,
     },
     /// The content path does not exist in the resolved source.
     #[error("content path {path:?} does not exist")]

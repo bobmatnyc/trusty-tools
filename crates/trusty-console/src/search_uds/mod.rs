@@ -103,6 +103,11 @@ pub(crate) const METHOD_INDEX_RESUME_EMBEDDING: &str = "search.index.resume_embe
 /// One index's recent and live file changes — `GET /indexes/{id}/file-events/stream`,
 /// as a stream.
 pub(crate) const METHOD_INDEX_FILE_EVENTS: &str = "search.index.file_events";
+// #9027: warm every registered index ahead of an all-index search.
+/// Start warming every index, or join the running warm — `POST /warm`.
+pub(crate) const METHOD_WARM_START: &str = "search.warm.start";
+/// Per-index warm progress, totals, window and memory — `GET /warm/status`.
+pub(crate) const METHOD_WARM_STATUS: &str = "search.warm.status";
 
 /// How long one unary exchange may take, end to end.
 ///

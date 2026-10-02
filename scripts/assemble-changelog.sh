@@ -20,6 +20,8 @@
 # directly below CHANGELOG.md's `---` header separator (forward-only — existing
 # history is never rewritten), then DELETES the consumed fragments in the same
 # operation. Fails loudly rather than writing an empty or partial section.
+# The target `content` reads content/changelog.d/ and writes
+# content/CONTENT-CHANGELOG.md the same way (ADR-0064, #8388).
 #
 # Fragment format (deliberately minimal):
 #   line 1        a category token — Breaking | Added | Fixed | Performance |
@@ -130,7 +132,8 @@ usage() {
   echo "       scripts/assemble-changelog.sh <crate-dir> --stdout" >&2
   echo "       scripts/assemble-changelog.sh --fragment <path>" >&2
   echo "" >&2
-  echo "  <crate-dir>   directory under crates/ (e.g. trusty-mpm)" >&2
+  echo "  <crate-dir>   directory under crates/ (e.g. trusty-mpm), or \`content\` for" >&2
+  echo "                content/changelog.d/ -> content/CONTENT-CHANGELOG.md (#8388)" >&2
   echo "  <version>     released version for the new heading (e.g. 1.3.2)" >&2
   echo "  --check       validate fragments only; write nothing, delete nothing" >&2
   echo "  --merge       fold the fragments into an EXISTING [<version>] section" >&2
@@ -614,7 +617,7 @@ delete_consumed_fragments() {
   done
   [[ "${#survivors[@]}" -eq 0 ]] && return 0
 
-  echo "ERROR: crates/${crate_dir}/CHANGELOG.md WAS ALREADY UPDATED (${what}), but" >&2
+  echo "ERROR: ${REL_CHANGELOG} WAS ALREADY UPDATED (${what}), but" >&2
   echo "       ${#survivors[@]} of ${#fragments[@]} fragment(s) could not be deleted:" >&2
   printf '%s\n' "${survivors[@]}" | sed 's#^.*/changelog\.d/#         changelog.d/#' >&2
   echo "       Do NOT re-run: those bullets are in CHANGELOG.md already, and a" >&2
@@ -649,7 +652,7 @@ merge_fragments() {
     echo "ERROR: merge into '## [${version}]' did not place every pending category." >&2
     echo "       Expected: $(printf '%s' "${want_cats}" | tr '\n' ' ')" >&2
     echo "       Placed:   $(printf '%s' "${got_cats}" | tr '\n' ' ')" >&2
-    echo "       crates/${crate_dir}/CHANGELOG.md and changelog.d/ are UNCHANGED." >&2
+    echo "       ${REL_CHANGELOG} and changelog.d/ are UNCHANGED." >&2
     exit 1
   fi
 
@@ -660,7 +663,7 @@ merge_fragments() {
   delete_consumed_fragments "${crate_dir}" "merged into [${version}]" "${fragments[@]}" || exit 1
 
   echo "Merged ${#fragments[@]} fragment(s) into the existing [${version}] section of" >&2
-  echo "crates/${crate_dir}/CHANGELOG.md and removed them from changelog.d/." >&2
+  echo "${REL_CHANGELOG} and removed them from changelog.d/." >&2
 }
 
 main() {
@@ -702,15 +705,26 @@ main() {
     fi
   fi
 
-  local crate_path="${WORKSPACE_ROOT}/crates/${crate_dir}"
+  # #8388: the target `content` is the instructional-content tree (ADR-0064),
+  # not a crate. Its fragments sit in content/changelog.d/ and roll up into
+  # content/CONTENT-CHANGELOG.md; every rule below applies unchanged. No crate
+  # directory is named `content`, so the name cannot shadow one.
+  local crate_path="${WORKSPACE_ROOT}/crates/${crate_dir}" changelog_name="CHANGELOG.md"
+  REL_DIR="crates/${crate_dir}"
+  if [[ "${crate_dir}" == "content" ]]; then
+    crate_path="${WORKSPACE_ROOT}/content"
+    changelog_name="CONTENT-CHANGELOG.md"
+    REL_DIR="content"
+  fi
+  REL_CHANGELOG="${REL_DIR}/${changelog_name}"
   if [[ ! -d "${crate_path}" ]]; then
-    echo "ERROR: crate directory not found: crates/${crate_dir}" >&2
+    echo "ERROR: crate directory not found: ${REL_DIR}" >&2
     exit 1
   fi
 
-  local changelog="${crate_path}/CHANGELOG.md"
+  local changelog="${crate_path}/${changelog_name}"
   if [[ ! -f "${changelog}" ]]; then
-    echo "ERROR: crates/${crate_dir}/CHANGELOG.md not found" >&2
+    echo "ERROR: ${REL_CHANGELOG} not found" >&2
     exit 1
   fi
 
@@ -725,7 +739,7 @@ main() {
     local nested
     nested="$(find "${frag_dir}" -mindepth 2 -type f -name '*.md' | LC_ALL=C sort)"
     if [[ -n "${nested}" ]]; then
-      echo "ERROR: changelog fragments must sit directly in crates/${crate_dir}/changelog.d/;" >&2
+      echo "ERROR: changelog fragments must sit directly in ${REL_DIR}/changelog.d/;" >&2
       echo "       these are nested and would never be assembled:" >&2
       printf '%s\n' "${nested}" | sed 's/^/         /' >&2
       echo "       Move them up one level. Nothing has been modified." >&2
@@ -758,7 +772,7 @@ main() {
     echo "ERROR: ${changelog} still has a '## [Unreleased]' heading." >&2
     echo "       Fragments are the source of truth for the unreleased set now" >&2
     echo "       (issue #4476), so CHANGELOG.md must carry released sections only." >&2
-    echo "       Fold those bullets into crates/${crate_dir}/changelog.d/ fragments" >&2
+    echo "       Fold those bullets into ${REL_DIR}/changelog.d/ fragments" >&2
     echo "       (or into the section you are about to cut), remove the heading," >&2
     echo "       then re-run. Nothing has been modified." >&2
     exit 1
@@ -774,8 +788,8 @@ main() {
   # crates/<crate>/src/** without a fragment — enforcement belongs at the commit
   # that makes the change, not at the release that ships it.
   if [[ "${#fragments[@]}" -eq 0 ]]; then
-    echo "NOTE: no changelog fragments pending in crates/${crate_dir}/changelog.d/;" >&2
-    echo "      no release section inserted into crates/${crate_dir}/CHANGELOG.md." >&2
+    echo "NOTE: no changelog fragments pending in ${REL_DIR}/changelog.d/;" >&2
+    echo "      no release section inserted into ${REL_CHANGELOG}." >&2
     return 0
   fi
 
@@ -841,8 +855,8 @@ main() {
   section="$(render_section "## [${version}] — $(date -u +%Y-%m-%d)" "${parsed}")" || exit 1
 
   if [[ "${mode}" == "--check" ]]; then
-    echo "OK: ${#fragments[@]} fragment(s) in crates/${crate_dir}/changelog.d/ are valid;" >&2
-    echo "    crates/${crate_dir}/CHANGELOG.md is ready for a [${version}] section." >&2
+    echo "OK: ${#fragments[@]} fragment(s) in ${REL_DIR}/changelog.d/ are valid;" >&2
+    echo "    ${REL_CHANGELOG} is ready for a [${version}] section." >&2
     return 0
   fi
 
@@ -872,8 +886,8 @@ main() {
   # release later, a hard stop in the leftover-[Unreleased] check above.
   delete_consumed_fragments "${crate_dir}" "assembled as [${version}]" "${fragments[@]}" || exit 1
 
-  echo "Assembled ${#fragments[@]} fragment(s) into crates/${crate_dir}/CHANGELOG.md as [${version}]" >&2
-  echo "and removed them from crates/${crate_dir}/changelog.d/." >&2
+  echo "Assembled ${#fragments[@]} fragment(s) into ${REL_CHANGELOG} as [${version}]" >&2
+  echo "and removed them from ${REL_DIR}/changelog.d/." >&2
 }
 
 main "$@"

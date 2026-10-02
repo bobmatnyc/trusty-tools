@@ -25,6 +25,7 @@
 //! `cargo test -p trusty-common --features memory-core`).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -123,6 +124,34 @@ const _: () = assert!(
 const _: () = assert!(
     DEFAULT_WRITE_PIPELINE_SECS > DEFAULT_WRITE_OP_BUDGET_SECS,
     "the write-pipeline ceiling must exceed the acquisition budget it follows (#6366)"
+);
+
+/// Default ceiling on how long one palace redb write transaction may hold the
+/// write lock before it is rolled back (#8749).
+///
+/// Why: redb admits one writer per file, so a transaction that stalls holds off
+/// every other writer — including after #6366's pipeline ceiling has already
+/// given up on it. A KG batch is at most 64 ops and normally commits in
+/// milliseconds, so 30 s is orders of magnitude above a healthy transaction.
+/// The clock starts when redb grants the lock, so waiting for it never counts.
+const DEFAULT_WRITE_TXN_SECS: u64 = 30;
+
+/// A deadline at or above the pipeline floor would let a commit that a
+/// timed-out pipeline abandoned keep the lock longer than any ceiling the
+/// pipeline can be configured to; [`cap_write_txn_deadline`] enforces the same
+/// relation at runtime for an overridden value.
+const _: () = assert!(
+    DEFAULT_WRITE_TXN_SECS < WRITE_PIPELINE_FLOOR_SECS,
+    "the write-transaction deadline must sit inside the pipeline ceiling (#8749)"
+);
+
+/// A writer queued on the palace write mutex behind a stalled transaction must
+/// outlast that transaction's deadline, or it times out before the lock frees.
+/// This covers the defaults; [`cap_write_txn_deadline`] enforces it at runtime
+/// for an overridden deadline or lock wait.
+const _: () = assert!(
+    DEFAULT_WRITE_TXN_SECS < DEFAULT_WRITE_LOCK_SECS,
+    "the write-transaction deadline must be shorter than the write-lock wait (#8749)"
 );
 
 /// Elapsed pipeline duration above which a COMPLETED write is logged as slow.
@@ -230,6 +259,8 @@ pub fn write_op_budget() -> Duration {
 /// may one write hold this palace's write mutex" — as distinct from
 /// [`write_op_budget`], which bounds only the waits BEFORE the mutex is held.
 /// What: Reads the env var; falls back to `DEFAULT_WRITE_PIPELINE_SECS` (240).
+/// A clamped value warns once per process (#8749: this now runs on every
+/// write transaction, via [`write_txn_deadline`]).
 /// Test: `write_pipeline_timeout_default`; its relationship to the embedder
 /// legs it contains is a `const` assertion beside `DEFAULT_WRITE_PIPELINE_SECS`.
 pub fn write_pipeline_timeout() -> Duration {
@@ -238,7 +269,8 @@ pub fn write_pipeline_timeout() -> Duration {
         DEFAULT_WRITE_PIPELINE_SECS,
     );
     let floored = floor_write_pipeline(configured);
-    if floored != configured {
+    // #8749: once per process, not once per write transaction.
+    if floored != configured && first_warning(&PIPELINE_FLOOR_WARNED) {
         tracing::warn!(
             configured_secs = configured.as_secs(),
             floor_secs = WRITE_PIPELINE_FLOOR_SECS,
@@ -285,6 +317,78 @@ pub fn floor_write_pipeline(configured: Duration) -> Duration {
     } else {
         Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS)
     }
+}
+
+/// Return the deadline for one palace redb write transaction (#8749).
+///
+/// Why: Overridable via `TRUSTY_WRITE_TXN_DEADLINE_SECS` for a host whose
+/// commits are legitimately slow. The override is checked against the live
+/// pipeline ceiling and write-lock wait (#8749 review): a deadline that
+/// outlives either lets a stalled commit hold the lock past every waiter.
+/// What: Reads the env var, then [`cap_write_txn_deadline`] against
+/// [`write_pipeline_timeout`] and [`write_lock_timeout`]. Runs on every write
+/// transaction, so a corrected value is logged at warn once per process.
+/// Test: `write_txn_deadline_default`,
+/// `a_txn_deadline_outside_the_pipeline_ceiling_falls_back_to_the_default`,
+/// `a_txn_deadline_at_or_above_the_write_lock_wait_falls_back_to_the_default`.
+pub fn write_txn_deadline() -> Duration {
+    let configured = parse_secs_env("TRUSTY_WRITE_TXN_DEADLINE_SECS", DEFAULT_WRITE_TXN_SECS);
+    let pipeline = write_pipeline_timeout();
+    let lock_wait = write_lock_timeout();
+    let applied = cap_write_txn_deadline(configured, pipeline, lock_wait);
+    if applied != configured && first_warning(&TXN_DEADLINE_WARNED) {
+        tracing::warn!(
+            configured_secs = configured.as_secs(),
+            pipeline_secs = pipeline.as_secs(),
+            lock_wait_secs = lock_wait.as_secs(),
+            applied_secs = applied.as_secs(),
+            "#8749: TRUSTY_WRITE_TXN_DEADLINE_SECS must be above zero and below \
+             both the write-pipeline ceiling and the write-lock wait; using the \
+             compiled-in default"
+        );
+    }
+    applied
+}
+
+/// Keep a configured write-transaction deadline inside
+/// `(0, min(pipeline, lock_wait))` (#8749).
+///
+/// Why: `0` would roll back every write on every palace (the #6366
+/// zero-override hazard). A value at or above the pipeline ceiling lets a
+/// commit the pipeline abandoned keep the lock longer than the ceiling, and
+/// one at or above the write-lock wait times out every writer queued behind a
+/// stalled transaction before the deadline frees the lock.
+/// What: returns `configured` when it is non-zero and below both bounds,
+/// otherwise [`DEFAULT_WRITE_TXN_SECS`]. The `const` assertions prove the
+/// default sits below every pipeline ceiling and the default lock wait; an
+/// operator who lowers the lock wait below the default still gets the
+/// default, with the warning naming both values.
+/// Test: `a_txn_deadline_outside_the_pipeline_ceiling_falls_back_to_the_default`,
+/// `a_txn_deadline_at_or_above_the_write_lock_wait_falls_back_to_the_default`.
+pub fn cap_write_txn_deadline(
+    configured: Duration,
+    pipeline: Duration,
+    lock_wait: Duration,
+) -> Duration {
+    if configured.is_zero() || configured >= pipeline.min(lock_wait) {
+        Duration::from_secs(DEFAULT_WRITE_TXN_SECS)
+    } else {
+        configured
+    }
+}
+
+/// Set once [`write_pipeline_timeout`] has warned about a clamped value.
+static PIPELINE_FLOOR_WARNED: AtomicBool = AtomicBool::new(false);
+/// Set once [`write_txn_deadline`] has warned about a corrected value.
+static TXN_DEADLINE_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// `true` the first time it is called for `flag`, `false` after (#8749).
+///
+/// Why: both readers run on every write transaction, and the environment they
+/// read does not change within a process, so one warning carries the whole
+/// signal and a per-write repeat only floods `stderr.log`.
+fn first_warning(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::Relaxed)
 }
 
 /// Return the elapsed time above which a completed write is logged as slow.
@@ -369,8 +473,9 @@ impl OpBudget {
 /// eliminates the duplication and guarantees a consistent error message shape
 /// (issue #906).
 /// What: Calls `tokio::time::timeout(duration, mutex.lock())`. On success
-/// returns the `MutexGuard`. On expiry returns `anyhow::Error` with a message
-/// that includes the palace label and the configured duration.
+/// returns the `MutexGuard`. On expiry returns [`WriteTimeout::LockWait`]
+/// (#8749: typed, so a caller can tell a timed-out wait from a data error),
+/// whose message names the palace label and the configured duration.
 /// Test: `write_lock_timeout_returns_error_when_held` in
 /// `memory_core::retrieval::timeout_tests` exercises this path end-to-end.
 pub async fn lock_with_timeout<'a>(
@@ -381,14 +486,52 @@ pub async fn lock_with_timeout<'a>(
     tokio::time::timeout(duration, mutex.lock())
         .await
         .map_err(|_| {
-            anyhow::anyhow!(
-                "palace '{}' write-lock acquisition timed out after {:?} \
-                 (issue #906); a previous writer may be stuck — retry or \
-                 increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
-                label,
-                duration
-            )
+            anyhow::Error::new(WriteTimeout::LockWait {
+                palace: label.to_string(),
+                waited: duration,
+            })
         })
+}
+
+/// A palace write that gave up rather than wait without bound (#8749).
+///
+/// Why: a writer queued behind a stalled one must fail with an error a caller
+/// can recognise — "timed out, retry" — not an opaque string. Wrapped in
+/// `anyhow`, so callers that only read the message see the same text as
+/// before, and `downcast_ref::<WriteTimeout>()` names the case.
+/// What: `LockWait` — the per-palace write mutex was not granted in time, so
+/// nothing ran. `PipelineBudget` — the write's critical section ran out of
+/// budget; work not yet dispatched never runs, and a commit already
+/// dispatched lands whole or rolls back at its transaction deadline.
+/// Test: `write_lock_timeout_returns_error_when_held`,
+/// `a_writer_behind_a_stalled_commit_times_out_with_a_typed_error`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WriteTimeout {
+    /// Waiting for the palace write mutex ran out of time.
+    #[error(
+        "palace '{palace}' write-lock acquisition timed out after {waited:?} \
+         (issue #906); a previous writer may be stuck — retry or increase \
+         TRUSTY_WRITE_LOCK_TIMEOUT_SECS"
+    )]
+    LockWait { palace: String, waited: Duration },
+    /// The write pipeline ran past its ceiling.
+    #[error(
+        "palace '{}' write pipeline exceeded its {:?} budget after {:?} \
+         (issue #6366); the palace write mutex has been released so other \
+         writers proceed. kg.redb is {} bytes — a large store makes commits \
+         slower; raise TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS if writes on this \
+         palace are legitimately this slow",
+        .palace,
+        .budget,
+        .elapsed,
+        .kg_redb_bytes.map_or_else(|| "unknown".to_string(), |b| b.to_string())
+    )]
+    PipelineBudget {
+        palace: String,
+        budget: Duration,
+        elapsed: Duration,
+        kg_redb_bytes: Option<u64>,
+    },
 }
 
 /// Pure parser: return a `Duration` from a lookup-provided optional string.
@@ -592,6 +735,79 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS") };
         let t = write_pipeline_timeout();
         assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS));
+    }
+
+    /// Why (#8749): the transaction deadline must default to the documented
+    /// value, and a `0` override must not roll back every write.
+    /// What: Hold the env mutex, check unset and `0`.
+    /// Test: itself.
+    #[test]
+    fn write_txn_deadline_default() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_WRITE_TXN_DEADLINE_SECS") };
+        assert_eq!(
+            write_txn_deadline(),
+            Duration::from_secs(DEFAULT_WRITE_TXN_SECS)
+        );
+        unsafe { std::env::set_var("TRUSTY_WRITE_TXN_DEADLINE_SECS", "0") };
+        let zero = write_txn_deadline();
+        unsafe { std::env::remove_var("TRUSTY_WRITE_TXN_DEADLINE_SECS") };
+        assert_eq!(zero, Duration::from_secs(DEFAULT_WRITE_TXN_SECS));
+    }
+
+    /// Why (#8749 review): a deadline at or above the pipeline ceiling lets a
+    /// commit the pipeline abandoned hold the lock past every caller; the
+    /// `const` assertion covers only the compiled-in default.
+    /// What: pure check of [`cap_write_txn_deadline`] — zero and at/above the
+    /// ceiling fall back to the default; a value inside is honoured.
+    /// Test: itself.
+    #[test]
+    fn a_txn_deadline_outside_the_pipeline_ceiling_falls_back_to_the_default() {
+        let default = Duration::from_secs(DEFAULT_WRITE_TXN_SECS);
+        let pipeline = Duration::from_secs(DEFAULT_WRITE_PIPELINE_SECS);
+        // A lock wait above the pipeline, so only the pipeline bound is tested.
+        let lock_wait = pipeline * 4;
+        for configured in [Duration::ZERO, pipeline, pipeline * 2] {
+            assert_eq!(
+                cap_write_txn_deadline(configured, pipeline, lock_wait),
+                default
+            );
+        }
+        let inside = Duration::from_secs(90);
+        assert_eq!(cap_write_txn_deadline(inside, pipeline, lock_wait), inside);
+    }
+
+    /// Why (#8749 review): a deadline at or above the write-lock wait times
+    /// out every writer queued behind a stalled transaction before the
+    /// deadline frees the lock — the relation the `const` assertion states for
+    /// the defaults, which an override bypassed.
+    /// What: through the env, end to end: a 90 s deadline (inside the 240 s
+    /// pipeline, above the 60 s lock wait) falls back to the default, and so
+    /// does a 25 s deadline under a 20 s lock wait; 45 s under 60 s is kept.
+    /// Test: itself.
+    #[test]
+    fn a_txn_deadline_at_or_above_the_write_lock_wait_falls_back_to_the_default() {
+        const TXN: &str = "TRUSTY_WRITE_TXN_DEADLINE_SECS";
+        const LOCK: &str = "TRUSTY_WRITE_LOCK_TIMEOUT_SECS";
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS") };
+        let default = Duration::from_secs(DEFAULT_WRITE_TXN_SECS);
+        let mut seen = Vec::new();
+        for (txn, lock) in [("90", None), ("25", Some("20")), ("45", None)] {
+            unsafe { std::env::set_var(TXN, txn) };
+            match lock {
+                Some(l) => unsafe { std::env::set_var(LOCK, l) },
+                None => unsafe { std::env::remove_var(LOCK) },
+            }
+            seen.push(write_txn_deadline());
+        }
+        unsafe { std::env::remove_var(TXN) };
+        unsafe { std::env::remove_var(LOCK) };
+        assert_eq!(
+            seen,
+            [default, default, Duration::from_secs(45)],
+            "#8749: the deadline must stay below the write-lock wait"
+        );
     }
 
     /// Why (issue #6366): `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS=0` parsed to

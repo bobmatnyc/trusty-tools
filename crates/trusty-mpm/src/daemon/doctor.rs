@@ -436,7 +436,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_five_checks`,
+/// Test: `run_doctor_produces_sixty_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -683,6 +683,11 @@ pub(crate) async fn run_doctor_with_claims(
     // never Ok, whenever the source tree could not be read. Read-only: it
     // never fetches, installs, or deploys.
     checks.push(check_bundled_asset_lag(project_dir));
+    // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
+    checks.push(super::doctor_content::check_content(
+        project_dir,
+        trusty_common::content::default_cache_dir().as_deref(),
+    ));
     // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
     // every write while `tm ls` keeps serving the daemon's in-memory copy, so
     // without this probe the condition is invisible until someone attempts a
@@ -826,7 +831,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_five_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_six_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

@@ -11,7 +11,9 @@
 //!    `.git`, a `[workspace]` `Cargo.toml` and the current user's ownership
 //!    ([`DevOverride`](crate::content::DevOverride));
 //! 2. the installed bundle — `content-lock.toml` in the cache directory pins a
-//!    tag and a sha256; the bundle is hashed and refused on any mismatch.
+//!    tag and a sha256; the bundle is hashed and refused on any mismatch, and
+//!    refused when its manifest declares a `schema_major` newer than
+//!    [`SUPPORTED_SCHEMA_MAJOR`](crate::content::SUPPORTED_SCHEMA_MAJOR).
 //!
 //! There is no third source. With no checkout and no lock, `resolve` returns
 //! [`ContentError::NotInstalled`](crate::content::ContentError::NotInstalled); a failed check never falls back to
@@ -20,7 +22,7 @@
 //! Test: `content::tests` (`src/content/tests.rs`).
 //!
 //! # Spec References
-//! - ADR-0064 decision 5, PHASE_3 acceptance criteria (i) and (iii):
+//! - ADR-0064 decision 5, PHASE_3 acceptance criteria (i), (iii) and (iv):
 //!   `docs/adr/0064-instructional-content-tracked-separately-from-code.md`
 
 mod bundle;
@@ -31,10 +33,12 @@ mod lock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_ENTRIES, MAX_UNPACKED_BYTES};
+pub use bundle::{
+    MAX_BUNDLE_BYTES, MAX_BUNDLE_ENTRIES, MAX_UNPACKED_BYTES, SUPPORTED_SCHEMA_MAJOR,
+};
 pub use dev::{DEV_CLASS_SOURCES, find_dev_checkout};
 pub use error::ContentError;
-pub use lock::{ContentLock, TAG_PREFIX};
+pub use lock::{ContentLock, TAG_PREFIX, validate_tag};
 
 use crate::integrity::Sha256Digest;
 
@@ -174,6 +178,9 @@ pub fn resolve(options: &ResolveOptions) -> Result<ResolvedContent, ContentError
     })
 }
 
+/// The three top-level content classes of a bundle (#8378).
+const CONTENT_CLASSES: [&str; 3] = ["agents", "skills", "instructions"];
+
 impl ResolvedContent {
     /// Where this content came from.
     pub fn source(&self) -> &ContentSource {
@@ -207,11 +214,26 @@ impl ResolvedContent {
         })
     }
 
-    /// Lists every file of one content class as sorted bundle paths.
+    /// Lists every file of one content class (`instructions`), or of a
+    /// subfolder destination under one (`instructions/output-styles`), as
+    /// sorted bundle paths.
     ///
-    /// An unknown class lists nothing.
-    /// Test: `installed_bundle_serves_its_files`, `dev_checkout_serves_working_tree_files`.
+    /// Since #8378 the bundle has three classes; a first path segment other
+    /// than `agents`, `skills` or `instructions` (a former class name such as
+    /// `output-styles`) is [`ContentError::UnknownClass`], in both backings. A
+    /// known class with no files is `Ok(vec![])`. `read` stays `NotFound` for
+    /// an absent path: it names the path asked for, so it cannot pass for an
+    /// empty listing.
+    /// Test: `installed_bundle_serves_its_files`, `dev_checkout_serves_working_tree_files`,
+    /// `dev_checkout_serves_a_nested_destination_from_its_own_source`,
+    /// `list_of_an_unknown_class_is_an_error_in_both_backings`.
     pub fn list(&self, class: &str) -> Result<Vec<String>, ContentError> {
+        let top = class.split('/').next().unwrap_or_default();
+        if !CONTENT_CLASSES.contains(&top) {
+            return Err(ContentError::UnknownClass {
+                class: class.to_owned(),
+            });
+        }
         let prefix = format!("{class}/");
         match &self.backing {
             Backing::Memory(files) => Ok(files
@@ -219,10 +241,7 @@ impl ResolvedContent {
                 .filter(|k| k.starts_with(&prefix))
                 .cloned()
                 .collect()),
-            Backing::Checkout(root) => match dev::class_dir(root, class) {
-                Some(dir) => dev::list_class(&dir, class),
-                None => Ok(Vec::new()),
-            },
+            Backing::Checkout(root) => dev::list(root, class),
         }
     }
 }

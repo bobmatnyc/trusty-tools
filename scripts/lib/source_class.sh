@@ -14,7 +14,7 @@
 # What was wrong is that the two definitions lived in two places and could drift
 # without anyone deciding they should.
 #
-# What: four predicates, and the ruling on which gate applies which.
+# What: five predicates, and the ruling on which gate applies which.
 #
 #   is_test_path <path>       test / benchmark / testdata file
 #   is_crate_src_path <path>  crates/<crate>/src/**, exactly one level under
@@ -24,6 +24,12 @@
 #                             Cargo-inert instruction content (ADR-0064): the
 #                             ONE list scripts/detect-docs-only.sh and
 #                             check_changelog_fragment.sh both read
+#   is_content_member_path <path>
+#                             a file under content/{instructions,agents,
+#                             skills}/ (#8388), whose change
+#                             check_changelog_fragment.sh records in
+#                             content/changelog.d/; scripts/check_content.py
+#                             applies the same three classes
 #
 # THE RULING (#5765). The two gates ask different questions, so they apply
 # different predicates — deliberately, and stated here rather than implied by
@@ -131,6 +137,17 @@ is_inert_instruction_asset() {
     content/?*) return 0 ;;
     crates/trusty-mpm/src/assets/?*.md) return 0 ;;
     crates/trusty-agents-common/src/assets/?*.md) return 0 ;;
+  esac
+  return 1
+}
+
+# is_content_member_path <path> — 0 when <path> is a file under one of the
+# three content classes (ADR-0064; owner ruling 2026-10-01: instructions/,
+# agents/, skills/). Any status counts: adding, editing or deleting a member
+# changes the bundle, so content/changelog.d/ records it (#8388).
+is_content_member_path() {
+  case "$1" in
+    content/instructions/?* | content/agents/?* | content/skills/?*) return 0 ;;
   esac
   return 1
 }

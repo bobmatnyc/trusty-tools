@@ -134,6 +134,10 @@ pub(crate) async fn delete_index_report(
     if let Some(refusal) = outcome.refusal {
         return Err(refusal);
     }
+    // #9027: a warm-all pin never outlives its index.
+    if outcome.removed {
+        state.warm.unpin(id);
+    }
     // #6363: absent from the hot registry, the cold store AND `indexes.toml` —
     // there is nothing here to delete, and saying so is the only answer that
     // distinguishes a typo from a delete that failed.

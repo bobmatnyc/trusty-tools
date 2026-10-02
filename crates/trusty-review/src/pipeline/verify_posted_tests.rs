@@ -264,11 +264,20 @@ async fn verify_refuted_nit_beside_confirmed_blocker_keeps_block() {
     assert_eq!(report.verdict, Verdict::Block);
 }
 
-/// #5309 kept: a verifier-judged UNVERIFIABLE finding is a judgment, not a
-/// failure — it is posted as a demoted advisory carrying its caveat.
+/// #4044 (owner ruling on #8905, 2026-09-30): only CONFIRMED findings are
+/// posted. A verifier-judged UNVERIFIABLE finding and one a hygiene pass
+/// pre-stamped UNVERIFIABLE (#4081) are both withheld with the reason
+/// "unverifiable"; with no survivor the BLOCK review is withheld as UNKNOWN.
 #[tokio::test]
-async fn verify_verifier_judged_unverifiable_is_posted_as_advisory() {
-    let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::High, 0.95)];
+async fn verify_unverifiable_finding_is_withheld_not_posted() {
+    let mut prestamped = finding("src/b.rs", 4, "registry claim", Effort::Medium, 0.5);
+    prestamped.verified = Some(VerifyOutcome::Unverifiable {
+        reason: "no registry lookup".into(),
+    });
+    let mut findings = vec![
+        finding("src/a.rs", 3, OUTSIDE, Effort::High, 0.95),
+        prestamped,
+    ];
     let report = run(
         Arc::new(MarkerVerifier::default()),
         Verdict::Block,
@@ -276,11 +285,34 @@ async fn verify_verifier_judged_unverifiable_is_posted_as_advisory() {
         policy(8, 4),
     )
     .await;
-    assert_eq!(report.dropped(), 0);
-    assert_eq!(findings.len(), 1);
-    let outcome = findings[0].verified.as_ref().expect("an outcome");
-    assert!(outcome.reader_caveat().is_some(), "posted with its caveat");
-    assert!(!findings[0].code_provable, "demoted: cannot drive BLOCK");
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(report.unverifiable, 2);
+    let reasons: Vec<&str> = report
+        .withheld_findings
+        .iter()
+        .map(|w| w.reason.as_str())
+        .collect();
+    assert_eq!(reasons, vec!["unverifiable", "unverifiable"]);
+    assert_eq!(report.verdict, Verdict::Unknown);
+    let note = report.note().expect("a withheld finding produces a note");
+    assert!(note.contains("2 unverifiable"), "{note}");
+}
+
+/// #4044 keeps the #8949 rule: an APPROVE* review that loses only an advisory
+/// UNVERIFIABLE finding keeps its verdict instead of turning UNKNOWN.
+#[tokio::test]
+async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
+    let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
+    let report = run(
+        Arc::new(MarkerVerifier::default()),
+        Verdict::ApproveWithReservations,
+        &mut findings,
+        policy(8, 4),
+    )
+    .await;
+    assert!(findings.is_empty());
+    assert_eq!(report.unverifiable, 1);
+    assert_eq!(report.verdict, Verdict::ApproveWithReservations);
 }
 
 /// `enforce_outcomes` with nothing dropped re-derives instead of withholding.

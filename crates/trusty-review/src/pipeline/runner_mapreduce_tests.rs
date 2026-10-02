@@ -177,6 +177,15 @@ fn deps(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
     }
 }
 
+/// [`deps`] with a verifier that confirms every finding: since #4044 only a
+/// verifier-confirmed finding is posted.
+fn confirmed_deps(llm: Arc<dyn LlmProvider>) -> ReviewDeps {
+    ReviewDeps {
+        verifier: Some(Arc::new(DiffRecordingVerifier::default())),
+        ..deps(llm)
+    }
+}
+
 /// A search client that is always down — used with `require_search = Some(false)`
 /// (#590 opt-out) to drive `preflight_context` into `GateOutcome::Degraded`
 /// alongside a separately-triggered partial-coverage map-reduce run (#1661).
@@ -575,7 +584,7 @@ async fn run_review_mapreduce_chunk_request_changes_propagates() {
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);
 
-    let result = run_review(&config, input(source), deps(llm)).await;
+    let result = run_review(&config, input(source), confirmed_deps(llm)).await;
 
     assert_ne!(
         result.verdict,
@@ -812,7 +821,7 @@ async fn run_review_mapreduce_medium_rc_propagates_through_synthesis() {
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);
 
-    let result = run_review(&config, input(source), deps(llm)).await;
+    let result = run_review(&config, input(source), confirmed_deps(llm)).await;
 
     assert_ne!(
         result.verdict,
@@ -1267,5 +1276,97 @@ async fn run_review_mapreduce_verifies_findings_from_every_chunk() {
     assert!(
         diffs.iter().all(|carried| carried.len() == 1),
         "each request carries only its own file's diff: {diffs:?}"
+    );
+}
+
+// ── #4044: per-chunk hygiene withholds reach the final result ───────────────
+
+/// Body of the finding [`SelfNegatingChunkReviewer`] emits for chunk `n`:
+/// chunk 0 withdraws itself, chunk 1 says "this is fine", the rest are real.
+fn chunk_finding_body(n: usize) -> String {
+    let quote = format!("`let v_{n}_5 = compute_{n}(5)`");
+    match n {
+        0 => format!("{quote} discards an error. Withdrawing this finding."),
+        1 => format!("{quote} discards an error, but this is fine."),
+        _ => format!("{quote} discards an error."),
+    }
+}
+
+/// Like [`PerFileFindingReviewer`], but the findings for chunks 0 and 1
+/// negate themselves in their own text.
+struct SelfNegatingChunkReviewer;
+
+#[async_trait]
+impl LlmProvider for SelfNegatingChunkReviewer {
+    fn name(&self) -> &str {
+        "self-negating-chunk-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body: String = req.messages.iter().map(|m| m.content.as_str()).collect();
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"per-file issues."}"#.to_string()
+        } else {
+            let findings: Vec<serde_json::Value> = (0..CHUNK_FILES)
+                .filter(|n| body.contains(&format!("b/src/mr{n}.rs")))
+                .map(|n| {
+                    serde_json::json!({
+                        "title": format!("issue in mr{n}"),
+                        "body": chunk_finding_body(n),
+                        "severity": "medium",
+                        "confidence": 0.85,
+                        "file": format!("src/mr{n}.rs"),
+                        "line": 5,
+                    })
+                })
+                .collect();
+            serde_json::json!({"verdict": "REQUEST_CHANGES", "summary": "issue", "findings": findings})
+                .to_string()
+        };
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 400,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// #4044 (owner ruling on #8905, 2026-09-30): on the map-reduce aggregate
+/// path, a finding a per-chunk hygiene pass drops reaches the final
+/// `ReviewResult::withheld_findings` with a `#4044 self-negated` reason, and is
+/// not posted. Red on `origin/main`: the per-chunk drop was only logged, so
+/// `withheld_findings` held no hygiene entry.
+#[tokio::test]
+async fn run_review_mapreduce_records_hygiene_withholds() {
+    let (source, _tmp) = local_source(&chunked_diff());
+    let mut review_deps = deps(Arc::new(SelfNegatingChunkReviewer));
+    review_deps.verifier = Some(Arc::new(DiffRecordingVerifier::default()));
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), review_deps).await;
+
+    let mut withheld: Vec<(String, String)> = result
+        .withheld_findings
+        .iter()
+        .filter(|w| w.reason.starts_with("#4044 self-negated"))
+        .map(|w| (w.finding.file.clone(), w.reason.clone()))
+        .collect();
+    withheld.sort();
+    assert_eq!(
+        withheld.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(),
+        vec!["src/mr0.rs", "src/mr1.rs"],
+        "both self-negated chunk findings are recorded: {:?}",
+        result.withheld_findings
+    );
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| f.file != "src/mr0.rs" && f.file != "src/mr1.rs"),
+        "a self-negated finding is never posted: {:?}",
+        result.findings
     );
 }

@@ -64,8 +64,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 use tracing::warn;
 
-use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER};
+use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER, WithheldFinding};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
+
+/// `WithheldFinding::reason` prefix for a citation-integrity drop.
+pub const CITATION_REASON: &str = "#4042 citation";
 
 /// The four inline bracket-citation forms the system prompt mandates
 /// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[confluence: … ]`).
@@ -307,11 +310,18 @@ impl DiffContentIndex {
 /// FAIL-OPEN: a finding with no quoted content and a resolvable `file` is left
 /// completely untouched.
 ///
+/// Every dropped finding is pushed onto `withheld` with the reason
+/// `#4042 citation: <why>` (owner ruling on #8905, 2026-09-30).
+///
 /// Test: `drops_cross_file_misattribution`, `keeps_grounded_code_provable`,
 /// `drops_citation_to_path_outside_diff` (#4042),
 /// `drops_findings_with_line_contradiction` (#4042),
-/// `fail_open_when_no_quote`.
-pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffContentIndex) -> usize {
+/// `fail_open_when_no_quote`, `a_dropped_citation_is_recorded_as_withheld`.
+pub fn enforce_citation_integrity(
+    findings: &mut Vec<Finding>,
+    index: &DiffContentIndex,
+    withheld: &mut Vec<WithheldFinding>,
+) -> usize {
     let contradictory = detect_line_contradictions(findings);
 
     let mut reasons: Vec<Option<&'static str>> = Vec::with_capacity(findings.len());
@@ -339,6 +349,11 @@ pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffConte
                     "citation-check: dropping unverifiable finding (#4042)"
                 );
                 dropped += 1;
+                withheld.push(WithheldFinding {
+                    finding: f,
+                    reason: format!("{CITATION_REASON}: {reason}"),
+                    missing_fragment: None,
+                });
             }
             None => kept.push(f),
         }

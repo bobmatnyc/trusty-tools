@@ -315,6 +315,7 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
             serial: false,
             path_prefix: None,
             repos: Vec::new(),
+            per_index_deadline_ms: None,
         }),
     )
     .await
@@ -371,6 +372,7 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
             serial: false,
             path_prefix: None,
             repos: Vec::new(),
+            per_index_deadline_ms: None,
         }),
     )
     .await

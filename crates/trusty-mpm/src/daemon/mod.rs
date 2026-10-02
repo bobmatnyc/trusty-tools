@@ -56,6 +56,8 @@ pub mod doctor_launchd_process_type;
 mod doctor_tmux_priority;
 // #8926: trusty-* processes listening on TCP, against the ADR-0032 allowlist.
 mod doctor_tcp_listeners;
+// #8378 PR-C: the instructional-content source and the installed pin (ADR-0064).
+mod doctor_content;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;

@@ -157,7 +157,7 @@ async fn quoted_cross_file_misattribution_is_dropped() {
         "precondition: the critical misattribution drives a floor before enforcement"
     );
 
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(dropped, 1, "the misattributed finding must be dropped");
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].description, legitimate_finding().description);
@@ -176,7 +176,7 @@ async fn citation_beyond_the_last_diffed_line_is_dropped() {
         legitimate_finding(),
     ];
 
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(
         dropped, 2,
         "both impossible-line findings must be dropped: {findings:#?}"
@@ -193,7 +193,7 @@ async fn lines_inside_the_diffed_span_are_never_dropped() {
     let index = DiffContentIndex::from_filtered(&filtered);
 
     let mut findings = vec![legitimate_finding()];
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(dropped, 0, "a grounded in-span finding must survive");
     assert_eq!(findings.len(), 1);
 }

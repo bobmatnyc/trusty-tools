@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-65 top-level commands.
+66 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -28,6 +28,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `test` — Cheap live auth check: probe the provider with the resolved key
     - `unset` — Remove a provider's key from the secure store (never touches env/.env.local)
 - `connect` — Start or attach to a session without running the deployment sequence
+- `content` — Install, update and inspect the runtime instructional content
+  - `install` — Install a content bundle from a local file, with no network
+  - `status` — Show the content source `tm` reads and the installed pin's health
+  - `update` — Fetch and pin a content release from GitHub
 - `coordinator` — Send a message to the cross-session coordinator / session manager
   - `serve` — Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface)
 - `daemon` — Run the trusty-mpm daemon

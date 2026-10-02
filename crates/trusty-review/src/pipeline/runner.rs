@@ -680,8 +680,10 @@ pub async fn run_review(
     // ── Step 7-hyg/cite/absent/relax: output hygiene + grounding ──────────
     // Self-negated findings, ungrounded citations, refuted diff-absence claims,
     // and a self-reported verdict left resting on findings this run removed —
-    // all four run before grading. See `ground_parsed_findings`.
-    ground_parsed_findings(&mut parsed, &filtered);
+    // all four run before grading. See `ground_parsed_findings`. #4044: each
+    // drop is recorded in the review record, never posted.
+    let withheld = ground_parsed_findings(&mut parsed, &filtered);
+    result.withheld_findings.extend(withheld);
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
     // `original_llm_grade` is the pre-floor LLM grade; it is held separately so

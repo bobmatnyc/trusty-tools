@@ -1965,6 +1965,61 @@ fn resolve_managed_target_empty_list_is_none() {
     );
 }
 
+/// #8378 PR-C: the three `tm content` verbs and their flags.
+#[test]
+fn cli_parses_content_install_update_and_status() {
+    use crate::cli::ContentAction;
+    let parse = |args: &[&str]| {
+        let mut argv = vec!["trusty-mpm", "content"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Content { action } => action,
+            other => panic!("expected content, got {other:?}"),
+        }
+    };
+    match parse(&["install", "--from", "/b/content-v0.1.0.tar.gz"]) {
+        ContentAction::Install { from } => {
+            assert_eq!(from, std::path::Path::new("/b/content-v0.1.0.tar.gz"));
+        }
+        other => panic!("expected install, got {other:?}"),
+    }
+    assert!(matches!(
+        parse(&["update"]),
+        ContentAction::Update { content_ref: None }
+    ));
+    match parse(&["update", "--content-ref", "content-v0.2.0"]) {
+        ContentAction::Update { content_ref } => {
+            assert_eq!(content_ref.as_deref(), Some("content-v0.2.0"));
+        }
+        other => panic!("expected update, got {other:?}"),
+    }
+    assert!(matches!(parse(&["status"]), ContentAction::Status));
+    assert!(Cli::try_parse_from(["trusty-mpm", "content", "install"]).is_err());
+}
+
+/// #8389 owner ruling: `install --help` and `update --help` state that the
+/// sidecar is required and checks the transfer only, with a first-use pin.
+#[test]
+fn cli_content_help_states_the_sidecar_limit() {
+    use clap::CommandFactory as _;
+    for verb in ["install", "update"] {
+        let mut root = Cli::command();
+        let help = root
+            .find_subcommand_mut("content")
+            .expect("content group")
+            .find_subcommand_mut(verb)
+            .expect("content verb")
+            .render_long_help()
+            .to_string();
+        for needle in ["is required", "proves the transfer only", "first use"] {
+            assert!(
+                help.contains(needle),
+                "`content {verb} --help` omits {needle}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
