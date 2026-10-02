@@ -164,7 +164,7 @@ point tcode does not control. A gate's verdict is produced by a system outside
 the delegated task: GitHub Actions, GitHub branch protection, a required
 reviewer, or a human-operated review step. Gates in this repository include —
 non-exhaustively — the workflows in `.github/workflows/` (`ci.yml`,
-`line-cap.yml` (the 500-SLOC cap), `changelog-fragment.yml` (the per-PR
+`line-cap.yml` (the 500-SLOC cap), the `changelog-fragment` job of `ci.yml` (the per-PR
 changelog requirement), `sld-lint.yml`, `doc-numbers.yml`, `test-pointers.yml`,
 `token-drift.yml`, `capabilities-drift.yml`, `version-parity.yml`,
 `cargo-audit.yml`, `generation-artifact-lint.yml`, `agent-assets.yml`), GitHub branch protection
@@ -260,8 +260,8 @@ independent structural reasons why:
    delegation payload has no representation in that computation. The only way
    to change such a gate's verdict is to change the tree it runs against —
    which is the honest path. The gate design is explicitly anti-bypass:
-   `.github/workflows/changelog-fragment.yml` deliberately carries **no**
-   `paths:` filter ("a required check that is skipped by a path filter never
+   the `changelog-fragment` job in `.github/workflows/ci.yml` deliberately carries **no**
+   `paths:` filter or job-level `if:` ("a required check that is skipped by a path filter never
    reports on the PRs it skips"), and `scripts/check_changelog_fragment.sh`
    states there is "deliberately NO 'trivial change' escape hatch".
 2. **The ratchets can only shrink.** The allowlist-backed gates

@@ -241,7 +241,7 @@ jobs:
       # it examines from `scripts/lib/source_class.sh`, shared with
       # `scripts/check_changelog_fragment.sh` — the two used to carry
       # independent path matches that disagreed about a test file under src/.
-      # Run here as well as in changelog-fragment.yml because both consumers
+      # Run here as well as in ci.yml's changelog-fragment job because both consumers
       # should refuse to run against a broken definition, and this is the
       # required context of the two. Pure shell, no network, well under a
       # second.

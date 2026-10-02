@@ -37,22 +37,22 @@ gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
   ([#5929](https://github.com/bobmatnyc/trusty-tools/pull/5929),
   [#5935](https://github.com/bobmatnyc/trusty-tools/issues/5935)).
 
-## `CI gate` stands in for fourteen required contexts (#8378)
+## `CI gate` stands in for its covered contexts (#8378)
 
 🔴 **`CI gate` (`ci.yml`, job `ci-gate`) fails whenever any context it covers
 fails.** The covered list is the `CONTEXTS` table in
 `scripts/ci-gate-verdict.sh` — Format check, Clippy, MSRV check, Rust tests
 (affected crates), the four Tauri UI clippies, the daemon smoke test, the
 teardown guard, the tmux exact-target gate, the three release-decision
-selftests, and Website content corpus. `scripts/ci-gate-selftest.sh` holds that
-table equal to the job's `needs:`. The job runs under `if: always()` and goes
+selftests, Website content corpus, and Per-PR changelog fragment (the
+fragment gate and the #8388 content gates; owner ruling 407). That job has no
+`changes` dependency and no skip, so a docs or content PR runs it; its steps run
+on a `pull_request` and on a `workflow_dispatch` off main (diffing against
+main). `scripts/ci-gate-selftest.sh` holds that table equal to the job's
+`needs:`. The job runs under `if: always()` and goes
 red on a failed or cancelled need, a failed `changes` classifier, a job
 missing from `needs:`, or a skip the classifier did not order.
 
-- **Not required yet.** The owner-approved list is CI gate, line-cap,
-  generation-artifact-lint, test-pointers, PR version bump and
-  capabilities-drift. Branch protection changes by hand, after the probes pass
-  on GitHub.
 - **Why the covered jobs live in `ci.yml`.** `needs:` cannot name a job in
   another workflow file, so #8378 moved the teardown guard, the tmux gate, the
   three `Tag/publish parity` selftests and `Website content corpus` into
@@ -105,8 +105,9 @@ it derives by search. Add a row naming the test, or its module; `check
 run-time lookup is invisible to the guard; its row carries a `runtime:` reason.
 
 🔴 **Cargo-inert is not gate-free (#8388).** A change under
-`content/{instructions,agents,skills}/` still owes three content gates in the
-`Per-PR changelog fragment` job: a `content/changelog.d/` fragment,
+`content/{instructions,agents,skills}/` still owes three content gates, run by
+the `Per-PR changelog fragment` job of `ci.yml` (required through `CI gate`,
+owner ruling 407): a `content/changelog.d/` fragment,
 `python3 scripts/check_content.py tree` (manifest and member versions), and
 `python3 scripts/check_content.py bump` (a bundle version no `content-v*` tag
 has used). Rules and failure cases:

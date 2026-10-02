@@ -78,8 +78,9 @@ fragments into `content/CONTENT-CHANGELOG.md` and deletes them, as it does for a
 crate.
 
 **The gates.** The `Per-PR changelog fragment` job in
-`.github/workflows/changelog-fragment.yml` runs these on every PR, after
-`scripts/check_content_selftest.sh`:
+`.github/workflows/ci.yml` runs these on every PR, after
+`scripts/check_content_selftest.sh`. The job is part of `CI gate`, so a failure
+blocks merge:
 
 | Check | Fails when |
 |---|---|

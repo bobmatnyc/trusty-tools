@@ -205,7 +205,7 @@ jobs:
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
-  # .github/workflows/changelog-fragment.yml already documents. So every job
+  # ci.yml's `changelog-fragment` job already documents. So every job
   # still RUNS and still REPORTS; the exemption lives inside the jobs, on the
   # steps that cost money. A docs-only PR therefore gets a green required check
   # in ~30 s of runner startup instead of 45 minutes of cargo.
@@ -2604,10 +2604,162 @@ jobs:
         run: pnpm run test:corpus
 
   # --------------------------------------------------------------------------
+  # changelog-fragment: the per-PR changelog gates, folded in from the retired
+  # changelog-fragment.yml (owner ruling 407, Refs #8388): the fragment gate
+  # (#4476), the merge-time half of the assembler gate (#6406) and the content
+  # gates (ADR-0064, #8388). It sits under `CI gate`, so it is required through
+  # that one context rather than through its own.
+  #
+  # NO job-level `if:` and NO dependency on `changes`: a Cargo-inert (docs or
+  # content) PR is exactly the PR these gates exist for, and `CI gate` accepts
+  # no skip for this row (scripts/ci-gate-verdict.sh). The gate compares a
+  # branch with its base, so every step runs on a `pull_request` and on a
+  # `workflow_dispatch` from a ref other than main (diffing against main), and
+  # nothing else: a push to main, or a dispatch on main, reports success without
+  # work. A dispatch on a PR branch must not report a green row for no work.
+  #
+  # Every step after the checkout carries `!cancelled()`, so a failed step does
+  # not hide the steps behind it. The job still fails if any one step failed.
+  # --------------------------------------------------------------------------
+  changelog-fragment:
+    name: Per-PR changelog fragment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 — the gate needs `git merge-base` against the base
+      # branch, which a shallow checkout cannot resolve. It also brings the
+      # TAGS, which the #6695 release-window evidence path and the #8388 bump
+      # gate read; with no tags in the checkout both refuse (fail closed).
+      - uses: actions/checkout@v5
+        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main') }}
+        with:
+          fetch-depth: 0
+
+      # Scan-floor mutation self-test (#4618): re-proves in CI that this gate
+      # REFUSES a vacuous scan. Runs before the real gate — a gate that cannot
+      # fail makes the real run's green meaningless.
+      - name: Scan-floor selftest (must refuse an empty scan)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_scan_floor_selftest.sh changelog_fragment changelog_fragment_tool_error
+
+      # Fragment-validation selftest. The gate asks the release assembler
+      # (`assemble-changelog.sh <crate> --stdout`), so gate and assembler cannot
+      # disagree; this proves the assembler still REJECTS a malformed fragment,
+      # including the four-categories-in-one-file case from the 1.3.3 release.
+      - name: Fragment-validation selftest (must reject a malformed fragment)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/assemble_changelog_selftest.sh
+
+      # Stale-base selftest (#5018): a branch touching crate A only, with crate
+      # B released on main since the fork point. The gate must refuse the stale
+      # base, pass against the live branch, and still fail a missing fragment.
+      - name: Stale-base selftest (must refuse a pinned base.sha)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_base_selftest.sh
+
+      # Release-window selftest (#6695): the fragment gate and
+      # check-changelog-assembled.sh demanded opposite states of the same PR
+      # (branch fix/prepublish-doc-links-20260902, ffe03c23c). Both must now
+      # pass that shape, and the evidence path must still reject a bullet
+      # written into an already-tagged section, one outside the cut section,
+      # and a stranded fragment.
+      - name: Release-window selftest (both changelog gates must agree)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_release_window_selftest.sh
+
+      # Crate-attribution selftest (#4576): nested crate source was selected by
+      # a `case` glob and then silently DROPPED by a one-level sed (PR #5796).
+      # Nested source must be attributed, an unattributable path must fail, and
+      # build.rs / tests/ / benches/ / testdata/ / dist bundles / Cargo.toml
+      # still need no fragment.
+      - name: Crate-attribution selftest (must not drop nested crate source)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_attribution_selftest.sh
+
+      # Shared-classification selftest (#5765): this gate and
+      # `check-pr-version-bump.sh` both read scripts/lib/source_class.sh; the
+      # selftest re-proves the classification and that neither has grown a
+      # private copy.
+      - name: Source-classification selftest (both gates share one definition)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_source_class_selftest.sh
+
+      # Author-mode selftest (#6947): `--staged` and `--file` must not weaken
+      # the DEFAULT verdict this job runs below.
+      - name: Author-mode selftest (--staged and --file must not weaken the gate)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_changelog_staged_selftest.sh
+
+      # Bump-mode selftest (#5674): `bump-version.sh --no-changelog` leaves the
+      # fragments this gate demands in place, and a release cut still assembles
+      # them (PR #5673).
+      - name: Bump-mode selftest (a mid-PR bump must not eat fragments)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/bump_version_selftest.sh
+
+      # Assembler-gate selftest (#7439): the failing and passing branches of
+      # the assembled-sections gate below, including a PR that deletes a
+      # CHANGELOG.md (the #7359 pipefail bug).
+      - name: Assembler-gate selftest (deletion passes, hand-written section fails)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check-pr-changelog-assembled-selftest.sh
+
+      # #8388: the content/ gates (ADR-0064) — manifest, member versions, the
+      # bundle-version bump and the content changelog arm of the fragment gate
+      # — each refuse their failure cases before the real runs below.
+      - name: Content gates selftest (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_content_selftest.sh
+
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot, so the merge base cannot lag behind the merge
+      # ref's own first parent. See the ATTRIBUTION note in
+      # scripts/check_changelog_fragment.sh (PR #5018 / run 31431273762).
+      - name: Refresh the base branch ref
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+
+      - name: Enforce per-PR changelog fragment
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check_changelog_fragment.sh
+
+      # #8388: content/manifest.toml lists every versioned content member and
+      # its bundle version is never below one of them.
+      - name: Enforce content manifest and member versions (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: python3 scripts/check_content.py tree
+
+      # #8388: a content member change must land under a bundle version no
+      # content-v* tag has used, and the version never goes down.
+      - name: Enforce content bundle version bump (#8388)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          CONTENT_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: python3 scripts/check_content.py bump
+
+      # Merge-time half of the changelog-assembler gate (#6406); the
+      # publish-time half is preflight-publish.sh CHECK 9. It asks "did a new
+      # release section consume the fragments it claims to have folded in", and
+      # fires ONLY on a NEW version heading. Base is origin/<base ref>, never
+      # `github.event.pull_request.base.sha` (#5018).
+      - name: Enforce assembled CHANGELOG sections (no stranded fragments)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        env:
+          PR_CHANGELOG_ASSEMBLED_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check-pr-changelog-assembled.sh
+
+  # --------------------------------------------------------------------------
   # ci-gate: ONE context that fails whenever any context it stands in for
   # fails (#8378). The owner-approved required list is CI gate, line-cap,
   # generation-artifact-lint, test-pointers, PR version bump and
-  # capabilities-drift; this job is what lets the other fourteen leave it.
+  # capabilities-drift; this job is what lets the covered contexts leave it.
   # NOT a required context yet — branch protection is changed by hand, after
   # the probes pass on GitHub.
   #
@@ -2639,6 +2791,7 @@ jobs:
         check5-decision,
         check8-decision,
         website-corpus,
+        changelog-fragment,
       ]
     if: ${{ always() }}
     runs-on: ubuntu-latest
