@@ -1,0 +1,15 @@
+# Instructional-content manifest (ADR-0064, #8388).
+#
+# [bundle].version is the content release this tree builds toward; a release
+# is tagged content-v<version>. [bundle].schema_major must equal SCHEMA_MAJOR
+# in scripts/package_content.sh. Every agent, skill entry point, or other
+# content/ file that carries `metadata: {version: "x.y.z"}` frontmatter has
+# one [[member]] table, and the bundle version is never below a member's.
+#
+# Check:      python3 scripts/check_content.py tree
+# Regenerate: python3 scripts/check_content.py sync
+# How it is gated: docs/reference/content-release.md
+
+[bundle]
+version = "0.1.0"
+schema_major = 1

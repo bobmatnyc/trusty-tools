@@ -10,7 +10,8 @@
 #
 # WHAT:
 #   1. `package` (contents: read) — validates the version, refuses a tag that
-#      already exists, runs scripts/package_content_selftest.sh, then runs
+#      already exists or a version content/manifest.toml does not declare
+#      (#8388), runs scripts/package_content_selftest.sh, then runs
 #      scripts/package_content.sh and uploads the tarball, its .sha256 sidecar
 #      and the release notes as a workflow artifact.
 #   2. `release` (contents: write) — skipped on a dry run. Re-verifies the
@@ -110,6 +111,11 @@ jobs:
             echo "::error::git ls-remote failed (exit ${rc}); cannot prove ${TAG} is unused"
             exit 1
           fi
+
+      # #8388: the tag names the bundle version content/manifest.toml declares,
+      # so the PR bump gate's "is this version released" check stays true.
+      - name: Content manifest names this version (#8388)
+        run: python3 scripts/check_content.py tree --expect-version "$VERSION"
 
       - name: Packager selftest (determinism, manifest, fail-open)
         run: bash scripts/package_content_selftest.sh

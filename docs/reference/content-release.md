@@ -13,6 +13,10 @@ crate.
 Releases are cut by `local-ops` with supervisor sign-off, by dispatching
 `.github/workflows/content-release.yml` against `main`:
 
+First merge a PR that sets `[bundle].version` in `content/manifest.toml` to
+the version you are about to cut and rolls the pending fragments into
+`content/CONTENT-CHANGELOG.md` (see "Versioning and changelog" below).
+
 ```bash
 # 1. Dry run: package, run the selftest, upload a workflow artifact. No release.
 gh workflow run content-release.yml --ref main -f version=0.1.0
@@ -25,6 +29,8 @@ The workflow refuses to run when:
 - the version is not SemVer `X.Y.Z[-pre]` (no leading `v`), checked against
   the whole string, so a value holding a newline or carriage return fails;
 - the tag already exists, because a published content release is immutable;
+- `content/manifest.toml` declares another version, or fails
+  `python3 scripts/check_content.py tree` (#8388);
 - a real cut (`dry_run=false`) was dispatched against any ref but `main`;
 - the packager selftest fails.
 
@@ -41,6 +47,50 @@ version (`X.Y.Z-pre`) is published with `--prerelease`.
 `*-v*` tag triggers (Refs #8389), so a hand-pushed tag starts nothing. It
 still uses up the version: this workflow refuses a tag that already exists,
 so no release can be cut for it. Pick the next version.
+
+## Versioning and changelog (#8388)
+
+The content tree is `content/instructions/`, `content/agents/` and
+`content/skills/` (owner ruling 2026-10-01). Output styles are files inside
+`instructions/`, and product prompts sit in a subfolder of `instructions/`.
+Beside the three classes, `content/` holds only `manifest.toml`,
+`CONTENT-CHANGELOG.md` and `changelog.d/`.
+
+**Member versions.** Every agent (`content/agents/**/*.md`, including the
+compose-only `BASE-*.md` sources) and every skill entry point
+(`content/skills/<name>.md` or `content/skills/<name>/SKILL.md`) declares its
+version as `metadata: {version: "x.y.z"}` in frontmatter. The block form,
+`metadata:` with an indented `version:` line, is accepted too. Any other `.md`
+under the three classes may opt in the same way. A top-level `version:` is
+refused, because it collides with the claude-mpm marker in
+`crates/trusty-agents-common/src/agents/agent_schema.rs`.
+
+**The manifest.** `content/manifest.toml` declares the bundle version, the
+bundle `schema_major` (equal to `SCHEMA_MAJOR` in `scripts/package_content.sh`)
+and one `[[member]]` table, `path` and `version`, per versioned file.
+`python3 scripts/check_content.py sync` rewrites the member tables from the
+tree.
+
+**The changelog.** A PR that changes a file under the three classes adds
+`content/changelog.d/<issue-or-pr-number>-<slug>.md`, in the crate fragment
+format. `bash scripts/assemble-changelog.sh content <version>` rolls the
+fragments into `content/CONTENT-CHANGELOG.md` and deletes them, as it does for a
+crate.
+
+**The gates.** The `Per-PR changelog fragment` job in
+`.github/workflows/changelog-fragment.yml` runs these on every PR, after
+`scripts/check_content_selftest.sh`:
+
+| Check | Fails when |
+|---|---|
+| `python3 scripts/check_content.py tree` | the manifest is missing, is not valid TOML, has an unknown key, or a non-SemVer version; `schema_major` differs from the packager's; a path sits outside the three classes, is a symlink, or has a name outside `[A-Za-z0-9._/-]` (git would quote it past the other two gates); a frontmatter block is unterminated; a required member has no `metadata.version` or has a top-level `version:`; the member tables differ from the tree; the bundle version is below any member's |
+| `python3 scripts/check_content.py bump` | the bundle version went down; or a member file changed while the bundle version is already a `content-v<version>` tag; or the checkout has no `content-v*` tag to decide that; or the manifest is gone at HEAD |
+| `bash scripts/check_changelog_fragment.sh` | a member file changed with no content fragment, or a content fragment fails the assembler |
+
+The bump gate mirrors `check-pr-version-bump.sh`: a version no release has used
+yet may collect the changes of several PRs, so concurrent PRs do not each bump
+and conflict on one line. The release workflow then refuses any version the
+manifest does not declare.
 
 ## Installing a release (`tm content`)
 

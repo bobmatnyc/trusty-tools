@@ -104,6 +104,14 @@ it derives by search. Add a row naming the test, or its module; `check
 --verbose` prints what it found. A test that reaches the `.md` only through a
 run-time lookup is invisible to the guard; its row carries a `runtime:` reason.
 
+🔴 **Cargo-inert is not gate-free (#8388).** A change under
+`content/{instructions,agents,skills}/` still owes three content gates in the
+`Per-PR changelog fragment` job: a `content/changelog.d/` fragment,
+`python3 scripts/check_content.py tree` (manifest and member versions), and
+`python3 scripts/check_content.py bump` (a bundle version no `content-v*` tag
+has used). Rules and failure cases:
+[content-release.md](content-release.md#versioning-and-changelog-8388).
+
 ## The agent resident-budget tests gate merge through the drift check
 
 🔴 **The required `tm-capabilities generated-skill drift check` job also runs

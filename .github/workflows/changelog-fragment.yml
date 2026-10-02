@@ -141,6 +141,12 @@ jobs:
       - name: Assembler-gate selftest (deletion passes, hand-written section fails)
         run: bash scripts/check-pr-changelog-assembled-selftest.sh
 
+      # #8388: the content/ gates (ADR-0064) — manifest, member versions, the
+      # bundle-version bump and the content changelog arm of the fragment gate
+      # — each refuse their failure cases before the real runs below.
+      - name: Content gates selftest (#8388)
+        run: bash scripts/check_content_selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
       # whatever it fetched; re-fetching pins it to the live tip so the merge
@@ -160,6 +166,19 @@ jobs:
         env:
           CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check_changelog_fragment.sh
+
+      # #8388: content/manifest.toml lists every versioned content member and
+      # its bundle version is never below one of them.
+      - name: Enforce content manifest and member versions (#8388)
+        run: python3 scripts/check_content.py tree
+
+      # #8388: a content member change must land under a bundle version no
+      # content-v* tag has used, and the version never goes down. The release
+      # check reads tags, which fetch-depth: 0 above brought in.
+      - name: Enforce content bundle version bump (#8388)
+        env:
+          CONTENT_GATE_BASE: origin/${{ github.event.pull_request.base.ref }}
+        run: python3 scripts/check_content.py bump
 
       # Merge-time half of the changelog-assembler gate (#6406). The publish-time
       # half is preflight-publish.sh CHECK 9, which stops a bypass in the last

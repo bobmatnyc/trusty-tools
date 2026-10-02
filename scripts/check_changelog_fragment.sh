@@ -141,6 +141,11 @@
 #   There is deliberately NO "trivial change" escape hatch: adding a fragment is
 #   one new file, and the rule it enforces has never had one.
 #
+# CONTENT (#8388). A change under content/{instructions,agents,skills}/
+#   (ADR-0064) needs a content/changelog.d/<n>-<slug>.md fragment, and any
+#   content fragment the diff adds or edits must pass
+#   `assemble-changelog.sh content --stdout`. Both arms run in every mode.
+#
 # AUTHOR MODES (#6947). The default diff is `<base>..HEAD`, so before the commit
 #   exists the gate reports SCAN FLOOR and an author cannot check a fragment at
 #   all; after it, a shape error the gate could have caught earlier costs a
@@ -300,7 +305,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h | --help)
       # Through the author-mode notes — keep this range in step with the header.
-      sed -n '2,167p' "$0" >&2
+      sed -n '2,172p' "$0" >&2
       exit 0
       ;;
     *)
@@ -386,6 +391,13 @@ if [[ "$MODE" == "file" ]]; then
     echo "       time and would never reach the CHANGELOG." >&2
     exit 1
   fi
+  # #8388: the content tree's one fragment directory, at the same depth rule.
+  if [[ "$frag_rel" == content/* && ! "$frag_rel" =~ ^content/changelog\.d/[^/]+\.md$ ]]; then
+    echo "FAIL ${frag_rel}: not a fragment path. A content fragment is exactly" >&2
+    echo "       content/changelog.d/<issue-or-pr-number>-<slug>.md, sitting" >&2
+    echo "       DIRECTLY in changelog.d/." >&2
+    exit 1
+  fi
 
   if frag_err="$(bash "${REPO_ROOT}/scripts/assemble-changelog.sh" \
     --fragment "$frag_path" 2>&1 >/dev/null)"; then
@@ -469,22 +481,25 @@ fi
 # every untracked-but-not-ignored path to both. An untracked path exists and was
 # not deleted, so it belongs in each view; and a fragment the author wrote but
 # has not `git add`-ed yet is exactly the evidence this mode exists to see.
+#
+# #8388: core.quotePath=false, so a non-ASCII path arrives as itself and not as
+# `"content/agents/caf\303\251.md"`, which no prefix match below would see.
 if [[ "$MODE" == "staged" ]]; then
-  UNTRACKED="$(git ls-files --others --exclude-standard)"
+  UNTRACKED="$(git -c core.quotePath=false ls-files --others --exclude-standard)"
   CHANGED="$(printf '%s\n%s\n' \
-    "$(git diff --cached --name-only --no-renames "$MERGE_BASE")" "$UNTRACKED" |
+    "$(git -c core.quotePath=false diff --cached --name-only --no-renames "$MERGE_BASE")" "$UNTRACKED" |
     grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
   PRESENT="$(printf '%s\n%s\n' \
-    "$(git diff --cached --name-only --no-renames --diff-filter=d "$MERGE_BASE")" "$UNTRACKED" |
+    "$(git -c core.quotePath=false diff --cached --name-only --no-renames --diff-filter=d "$MERGE_BASE")" "$UNTRACKED" |
     grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
   # An untracked path is an add.
   ADDED_OR_MODIFIED="$(printf '%s\n%s\n' \
-    "$(git diff --cached --name-only --no-renames --diff-filter=AM "$MERGE_BASE")" "$UNTRACKED" |
+    "$(git -c core.quotePath=false diff --cached --name-only --no-renames --diff-filter=AM "$MERGE_BASE")" "$UNTRACKED" |
     grep -v '^[[:space:]]*$' | LC_ALL=C sort -u || true)"
 else
-  CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
-  PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
-  ADDED_OR_MODIFIED="$(git diff --name-only --no-renames --diff-filter=AM "$MERGE_BASE" HEAD)"
+  CHANGED="$(git -c core.quotePath=false diff --name-only --no-renames "$MERGE_BASE" HEAD)"
+  PRESENT="$(git -c core.quotePath=false diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
+  ADDED_OR_MODIFIED="$(git -c core.quotePath=false diff --name-only --no-renames --diff-filter=AM "$MERGE_BASE" HEAD)"
 fi
 
 # Instruction assets whose add or modify is Cargo-inert need no fragment. The
@@ -908,6 +923,55 @@ while IFS= read -r path; do
   esac
 done <<<"$PRESENT"
 
+# #8388: the CONTENT arm (ADR-0064). A change under
+# content/{instructions,agents,skills}/ is recorded in content/changelog.d/,
+# never in a crate fragment, and every content fragment this PR adds or edits
+# must be one the assembler accepts (`assemble-changelog.sh content --stdout`),
+# the validation a crate fragment gets. Same two views as the crate arm:
+# changes from CHANGED, evidence from PRESENT, so a deleted fragment is never a
+# record. Only a .md directly in content/changelog.d/ is evidence; a nested
+# path still triggers validation, which the assembler rejects by name.
+content_changed=0
+content_sample=""
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  # A path git still quotes (a `"`, `\` or control byte) counts as content,
+  # since it cannot be classified; check_content.py tree refuses the name.
+  if is_content_member_path "$path" || [[ "$path" == \"content/* ]]; then
+    content_changed=$((content_changed + 1))
+    [[ -z "$content_sample" ]] && content_sample="$path"
+  fi
+done <<<"$CHANGED"
+content_validate=0
+content_evidence=0
+while IFS= read -r path; do
+  case "$path" in
+    content/changelog.d/README.md) ;;
+    content/changelog.d/*/*) content_validate=1 ;;
+    content/changelog.d/*.md)
+      content_validate=1
+      content_evidence=1
+      ;;
+  esac
+done <<<"$PRESENT"
+content_fail=0
+if [[ "$content_validate" -eq 1 ]]; then
+  if assemble_err="$(bash "${REPO_ROOT}/scripts/assemble-changelog.sh" content --stdout 2>&1 >/dev/null)"; then
+    echo "OK   content: content/changelog.d fragment present and valid"
+  else
+    echo "FAIL content: content/changelog.d fragment present but the release assembler rejects it" >&2
+    printf '%s\n' "$assemble_err" | sed 's/^/       /' >&2
+    content_fail=1
+  fi
+fi
+if [[ "$content_changed" -gt 0 && "$content_evidence" -eq 0 ]]; then
+  echo "FAIL content: ${content_changed} path(s) under content/{instructions,agents,skills}/ changed" >&2
+  echo "       with no content/changelog.d/<issue-or-pr-number>-<slug>.md fragment," >&2
+  echo "       e.g. ${content_sample}. Content changes are recorded there, not in a" >&2
+  echo "       crate fragment (ADR-0064, #8388); same format as a crate fragment." >&2
+  content_fail=1
+fi
+
 needs="$(printf '%s' "$needs" | grep -v '^$' | LC_ALL=C sort -u || true)"
 
 # #6947: name the mode on a --staged run so its verdict is never pasted as the
@@ -917,6 +981,7 @@ MODE_LABEL=""
 [[ "$MODE" == "staged" ]] && MODE_LABEL=" --staged (index + untracked):"
 
 if [[ -z "$needs" ]]; then
+  [[ "$content_fail" -ne 0 ]] && exit 1
   echo "changelog-fragment gate:${MODE_LABEL} scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
   exit 0
 fi
@@ -994,6 +1059,8 @@ PR deleted outright (record the removal in a surviving crate's fragment).
 EOF
   exit 1
 fi
+
+[[ "$content_fail" -ne 0 ]] && exit 1
 
 crate_count="$(printf '%s\n' "$needs" | grep -c '[^[:space:]]' || true)"
 echo "changelog-fragment gate:${MODE_LABEL} scanned ${CHANGED_COUNT} changed path(s); attributed ${attributed_count} crate-source path(s); all ${crate_count} crate(s) with source changes are recorded."

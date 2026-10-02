@@ -27,6 +27,10 @@
   no `content/output-styles/` class. The runtime-only fallback is confirmed
   and supersedes the 2026-09-22 compile-time embed fallback. See
   "Amendment 2026-09-30" below.
+- **Amended:** 2026-10-01 (owner ruling, [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378)) —
+  the version is `metadata: {version}`, product prompts move under
+  `content/instructions/`, and `BASE-*.md` files are compose-only. See
+  "Amendment 2026-10-01" below.
 - **Date:** 2026-09-22
 - **Scope:** Workspace-wide — bundled agents
   (`crates/trusty-agents-common/src/assets/agents/`), skills
@@ -285,6 +289,29 @@ under epic [#8378](https://github.com/bobmatnyc/trusty-tools/issues/8378):
    `content/product-prompts/` from the 2026-09-27 ruling. This supersedes
    the `output-styles` entry in Decision item 1. The earlier text stays
    above, struck through, as history.
+
+## Amendment 2026-10-01 (owner ruling, #8378)
+
+Bob ruled on [epic #8378](https://github.com/bobmatnyc/trusty-tools/issues/8378#issuecomment-5942529659):
+
+1. **Version field.** A content asset declares its version as
+   `metadata: {version: "x.y.z"}` in frontmatter, and the deployed file keeps
+   it. A top-level `version:` is not used: it collides with the claude-mpm
+   marker in `agent_schema.rs`. This supersedes the `version:` field named in
+   Decision item 2.
+2. **Order.** PHASE_2 ([#8388](https://github.com/bobmatnyc/trusty-tools/issues/8388):
+   manifest, versioning, changelog, bump gate) lands before the PHASE_1
+   per-crate moves (#9011–#9015).
+3. **Product prompts.** trusty-agents' and trusty-review's prompts go in a
+   subfolder of `content/instructions/`. The tree keeps three directories,
+   `instructions/`, `agents/` and `skills/`; there is no
+   `content/product-prompts/`. This supersedes that class in Decision item 1
+   and in the 2026-09-30 amendment.
+4. **Compose-only sources.** The five `BASE-*.md` files stay in
+   `content/agents/` as composer sources and are not deployed standalone.
+
+The checks that enforce items 1 and 3 are in
+[content-release.md](../reference/content-release.md#versioning-and-changelog-8388).
 
 ## Related Decisions
 
