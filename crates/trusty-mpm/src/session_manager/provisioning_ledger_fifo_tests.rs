@@ -1,10 +1,13 @@
-//! A FIFO where a launch or a decommission reads a provisioning file (#8540).
+//! A FIFO or symlink where a launch or a decommission reads a provisioning
+//! file (#8540).
 //!
 //! Why: `std::fs::read` on a FIFO blocks until a writer appears, so a FIFO
 //! named `CLAUDE.md` or `.gitignore` hung a launch's `snapshot` and the
-//! decommission `?? .gitignore` checks forever.
-//! What: each test runs the read on a thread and requires an answer inside a
-//! bound; a miss wakes the blocked reader so the thread ends, then fails.
+//! decommission `?? .gitignore` checks forever; and a followed symlink let
+//! bytes outside the tree vouch for it.
+//! What: each FIFO test runs the read on a thread and requires an answer
+//! inside a bound; a miss wakes the blocked reader so the thread ends, then
+//! fails. The symlink test requires the excuse to be refused.
 //! Test: this file IS the test module.
 
 use std::ffi::CString;
@@ -91,4 +94,39 @@ fn a_fifo_untracked_gitignore_is_not_excused_and_does_not_block() {
         is_provisioning_entry(&ws, None, "?? .gitignore")
     });
     assert_eq!(by_force, Some(false), "--force check: hung or excused");
+}
+
+/// 🔴 #8540 critic r1: an untracked `.gitignore` symlinked to a file holding
+/// only provisioning lines was excused by both checks, as the target's bytes
+/// were read through the link. A symlink is never tm's. The regular-file
+/// control shows the same bytes are excused. Fails at 8c608b31a6.
+#[test]
+fn a_symlinked_untracked_gitignore_is_not_excused() {
+    let line = ".trusty-mpm/sessions/";
+    let ledger = ProvisioningLedger {
+        version: 1,
+        gitignore_appended: vec![line.to_string()],
+        ..ProvisioningLedger::default()
+    };
+    let excused = |ws: &Path| {
+        (
+            ledger.excuses(ws, "?? .gitignore"),
+            is_provisioning_entry(ws, None, "?? .gitignore"),
+        )
+    };
+    let elsewhere = tempfile::tempdir().expect("tempdir");
+    let target = elsewhere.path().join("gitignore");
+    std::fs::write(&target, format!("{line}\n")).expect("write target");
+
+    let control = tempfile::tempdir().expect("tempdir");
+    std::fs::copy(&target, control.path().join(".gitignore")).expect("copy");
+    assert_eq!(
+        excused(control.path()),
+        (true, true),
+        "regular-file control"
+    );
+
+    let ws = tempfile::tempdir().expect("tempdir");
+    std::os::unix::fs::symlink(&target, ws.path().join(".gitignore")).expect("symlink");
+    assert_eq!(excused(ws.path()), (false, false), "a symlink was excused");
 }

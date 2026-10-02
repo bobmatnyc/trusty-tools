@@ -13,3 +13,6 @@ Fixed
   or `.gitignore` no longer hangs the provisioning-ledger snapshot a launch
   takes, or the decommission `?? .gitignore` checks. tm checks the file type
   without blocking and treats such a file as user content.
+- A symlinked untracked `.gitignore` is no longer excused as provisioning
+  output on the strength of its target's lines; the provisioning checks never
+  follow a symlink.
