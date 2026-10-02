@@ -412,6 +412,98 @@ fn every_opaque_or_dynamic_tmux_route_denies() {
     }
 }
 
+/// #9001 critic r3: the bypasses its review found ALLOWED at 9d47158a85.
+const R3_BYPASSES: [(&str, &str); 6] = [
+    ("echo tmux | xargs -I{} env {} kill-server", "`xargs`"),
+    ("echo tmux | xargs -J % % kill-server", "`xargs`"),
+    ("echo tmux | xargs --replace={} {} kill-server", "`xargs`"),
+    (
+        "read -d '' C <<EOF\ntmux kill-server\nEOF\neval \"$C\"",
+        "cannot read",
+    ),
+    (
+        "while read a b; do $a $b; done <<EOF\ntmux kill-server\nEOF",
+        "cannot read",
+    ),
+    ("bash <<< 'TMUX killp'", "stdin"),
+];
+
+/// #9001 critic r3, findings 1, 3 and 4: an `xargs` replacement string can
+/// make a stdin word the program, a shell fed `TMUX` text runs tmux, and a
+/// shell given a script operand reads its stdin as data.
+#[test]
+fn an_xargs_replacement_string_or_a_fed_shell_naming_tmux_denies() {
+    assert_rows_deny(&fake(), &R3_BYPASSES[..3]);
+    assert_rows_deny(&fake(), &R3_BYPASSES[5..]);
+    assert_rows_deny(
+        &fake(),
+        &[
+            ("echo tmux | xargs -I {} {} kill-server", "`xargs`"),
+            ("echo tmux | xargs -0i{} {} kill-server", "`xargs`"),
+            ("echo tmux | xargs -n 1 -I{} {} kill-server", "`xargs`"),
+            ("echo 'Tmux kill-server' | sh", "stdin"),
+            ("cat x | bash -s tmux", "stdin"),
+            ("echo 'tmux kill-server' | bash -o pipefail", "stdin"),
+            ("tmux ls; python3 - < /tmp/x9001.py", "stdin"),
+        ],
+    );
+    for command in [
+        "cat log | bash scripts/report.sh tmux",
+        "cat log | bash -o pipefail scripts/report.sh tmux",
+        "tmux ls | python3 -m json.tool",
+        "tmux ls | python3 scripts/summarize.py",
+        "tmux ls | xargs -n1 echo",
+        "echo a | xargs -I{} echo {}",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// #9001 critic r3, finding 2: a here-document body read into a variable an
+/// evaluator runs, or fed to a loop that runs its words, is read as shell.
+/// A data body in a command with neither still passes.
+#[test]
+fn a_data_body_an_evaluator_or_dynamic_program_runs_is_read() {
+    assert_rows_deny(&fake(), &R3_BYPASSES[3..5]);
+    assert_rows_deny(
+        &fake(),
+        &[
+            (
+                "read -d '' C <<EOF; eval \"$C\"\ntmux kill-server\nEOF",
+                "cannot read",
+            ),
+            (
+                "read -r -d '' C <<'EOF'\ntmux send-keys -t nos hi\nEOF\n$C",
+                "cannot read",
+            ),
+        ],
+    );
+    for command in [
+        "cat <<'EOF' > notes.md\nThe PM's tmux pane is fine\nEOF\ngit add notes.md",
+        "while read a; do echo \"$a\"; done <<EOF\ntmux kill-server\nEOF",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// Owner ruling 2026-10-01 (ruling 353): `send-keys` to a target that does
+/// not exist is refused, naming it — on a server that lists other sessions
+/// and on one with no server running.
+#[test]
+fn send_keys_to_a_missing_target_is_refused() {
+    let empty = Fake {
+        objects: Ok(Vec::new()),
+    };
+    let listed = fake();
+    for probe in [&listed as &dyn PaneProbe, &empty] {
+        for target in ["nosuch:0", "nosuch", "=nosuch:0", "nosuch:0.0", "%99"] {
+            let command = format!("tmux send-keys -t {target} 'hi' Enter");
+            let reason = denied(probe, &command).unwrap_or_else(|| panic!("{command} passed"));
+            assert!(reason.contains(&format!("`{target}`")), "{reason}");
+        }
+    }
+}
+
 /// #9001 critic r2, rules (c) and (d): every grammar row is judged and every
 /// over-denial passes — a literal program path, prose in a here-document
 /// data body, and the read verbs the P10 exception relies on.

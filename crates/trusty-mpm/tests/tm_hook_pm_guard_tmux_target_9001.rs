@@ -134,6 +134,29 @@ fn every_r2_bypass_is_refused_and_prose_passes_under_each_bypass() {
     }
 }
 
+/// #9001 critic r3: each bypass its review found ALLOWED is refused under
+/// each bypass variable, and a shell running a script operand passes.
+#[test]
+fn every_r3_bypass_is_refused_and_a_script_operand_passes_under_each_bypass() {
+    let refused = [
+        "echo tmux | xargs -I{} env {} kill-server",
+        "read -d '' C <<EOF\ntmux kill-server\nEOF\neval \"$C\"",
+        "while read a b; do $a $b; done <<EOF\ntmux kill-server\nEOF",
+        "bash <<< 'TMUX killp'",
+    ];
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        for command in refused {
+            let out = guard(command, &env);
+            assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
+            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+        }
+        let script = "cat log | bash scripts/report.sh tmux";
+        let out = guard(script, &env);
+        assert!(!out.contains("#9001"), "{script} {bypass:?}: {out}");
+    }
+}
+
 /// Supervisor ruling 2026-10-02, narrow reading of rule (a): a program word
 /// the shell expands is refused when its arguments put a tmux deny verb in a
 /// verb position, and passes when no tmux text appears (`$P "$A"` is the

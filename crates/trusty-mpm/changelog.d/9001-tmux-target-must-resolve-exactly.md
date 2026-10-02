@@ -16,16 +16,23 @@ Fixed
   before `--` ends the options (`$F -t x`, `"$@"`), and a program name the
   shell expands (`$T`, `${T}ux`, `$a$b`) when the command names tmux or a
   deny verb, or when an argument in a verb position is a deny verb, its alias
-  or a unique prefix of it. tmux behind `xargs` or `find -exec … +`,
-  and a shell that reads program text on stdin (`bash <<<`, `| sh`) in a
-  command naming tmux, are refused too.
+  or a unique prefix of it. Also refused: an `xargs` whose argv holds `tmux`
+  (`xargs tmux send-keys`); an `xargs` with a replacement string (`-I`, `-J`,
+  `-i`, `--replace`) in a command naming tmux, since a stdin word can become
+  the program (`echo tmux | xargs -I{} env {} kill-server`); `find -exec tmux
+  … +`; and a shell that reads program text on stdin (`bash <<<`, `| sh`) in a
+  command naming tmux in any letter case. A shell given a script file
+  (`cat log | bash scripts/report.sh tmux`) reads stdin as data and passes.
 - A tmux command after shell grammar is now found: `{ …; }`, `( … )`, `!`,
   `if`/`then`/`else`, `for`/`while`/`until … do`, `case` arms including
   `(pat)`, function bodies (`f() {`, `f(){`, `f (){`), `time { …; }`, and
   `coproc`. `kill-session -a -t X` now checks `X`. A pane-position word
   (`top`, `bottom-left`, …) is no exact target for a pane verb.
 - Prose in a here-document data body (`cat <<'EOF' > notes.md`) and a program
-  path such as `~/.cargo/bin/tm` are no longer refused by this floor.
+  path such as `~/.cargo/bin/tm` are no longer refused by this floor. A body
+  is still read when the command names an evaluator or runs a program word
+  the shell expands (`read -d '' C <<EOF … eval "$C"`, `while read a b; do
+  $a $b; done <<EOF`).
 - Not covered: a fully dynamic program word with only dynamic arguments and
   no tmux text (`$P "$A"`), tmux reached through a runner the guard does not
   unwrap (`watch`, `script`, `parallel`), a script file, or an interpreter
