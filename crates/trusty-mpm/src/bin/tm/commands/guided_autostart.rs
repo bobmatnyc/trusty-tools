@@ -3,11 +3,11 @@
 //! Why: bare `tm` should bring the trusty-mpm daemon up automatically when
 //! it is unreachable, so the operator gets the full picker UX without having
 //! to run `tm start` first.
-//! What: [`ensure_daemon_started`] checks whether the MAIN session-manager
-//! daemon is managed by launchd on macOS (via its `com.trusty.mpm` plist) and,
-//! if so, nudges it with `launchctl bootstrap` (reboot-durable); otherwise it
-//! falls back to a detached direct spawn, recording the child PID in a
-//! discoverable pidfile. Both paths poll `/health` via lock-file URL resolution
+//! What: [`ensure_daemon_started`] runs the plan in
+//! [`super::guided_autostart_plan`] (#9034): await a running daemon, start
+//! the MAIN daemon's launchd job (`com.trusty.mpm` plist, macOS) with
+//! `bootstrap`/`kickstart`, or fall back to a detached direct spawn,
+//! recording the child PID in a discoverable pidfile. Both paths poll `/health` via lock-file URL resolution
 //! for up to 5 s and return the resolved daemon URL on success.
 //! Test: `main_daemon_plist_path_uses_main_label`,
 //! `main_daemon_managed_by_launchd`,
@@ -108,92 +108,48 @@ pub(crate) fn remove_autostart_pidfile(root: &std::path::Path) {
     let _ = std::fs::remove_file(autostart_pidfile_path(root));
 }
 
-/// Outcome of a `launchctl bootstrap` attempt (macOS only).
-///
-/// Why: distinguishes "already running" (EALREADY) from "truly unavailable" so
-/// `ensure_daemon_started` can skip the lock-delete+spawn step when launchd
-/// already owns the service, preventing a double-start race.
-/// What: three variants — `Launched` (exit 0), `AlreadyLoaded` (exit 37 /
-/// EALREADY or matching stderr), `Unavailable` (plist absent, `id -u` failed,
-/// or unknown non-zero exit).
-/// Test: covered indirectly by the launchd e2e smoke test.
-#[cfg(target_os = "macos")]
-enum LaunchctlOutcome {
-    /// launchd accepted the bootstrap command — daemon is now (re)starting.
-    Launched,
-    /// launchd reports the service is already bootstrapped (exit 37 / EALREADY).
-    /// No second spawn is needed — proceed straight to the health-poll loop.
-    AlreadyLoaded,
-    /// launchctl is not available, the plist is absent, or bootstrap failed for
-    /// an unknown reason. Fall back to a detached direct spawn.
-    Unavailable,
-}
-
 /// Ensure the trusty-mpm daemon is running, starting it if unreachable.
 ///
 /// Why: bare `tm` in the guided-default flow should not require the operator
 /// to run `tm start` manually first. This helper transparently starts the
 /// daemon so the picker UX appears on every invocation.
-/// What: (1) on macOS, if the MAIN daemon plist (`com.trusty.mpm`) is installed,
-/// issues `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup and
-/// skips the spawn step when the service is already loaded (EALREADY) — the
-/// check targets the main daemon, NOT the optional supervisor (#1900);
-/// (2) when launchd is unavailable, the main-daemon plist is absent, or on
-/// non-macOS, asks [`plan_autostart_at`] (#9034): a live lock pid keeps the
-/// lock and skips the spawn; otherwise it spawns the current executable with
-/// the `daemon` subcommand in a detached process (recording the child PID in a
-/// discoverable pidfile); (3) polls `/health` every 500 ms for up to 5 s via
-/// lock-file URL resolution; (4) returns the resolved daemon URL on success or,
-/// on timeout, removes any pidfile written by this call's fallback spawn (so a
-/// failed autostart leaves no stale PID) and returns `Err` — a
-/// [`super::guided_liveness::DaemonAliveUnresponsive`] when liveness evidence
-/// skipped the spawn. The `_url` parameter is intentionally unused: after
-/// auto-start the lock file records the actual bound address.
-/// Test: launchd path requires a macOS launchd environment; the pure gates
-/// (`main_daemon_managed_by_launchd_in`, `plan_autostart_at`,
-/// `classify_bootstrap_failure`) and pidfile helpers are unit-tested;
-/// detached-spawn and polling paths are covered by the guided-default e2e suite.
+/// What: (1) [`super::guided_autostart_plan::prepare_autostart`] (#9034)
+/// decides: a launchd job reporting `state = running`, or a lock naming a live
+/// daemon pid, is awaited; a loaded-but-stopped job is kickstarted and an
+/// unloaded one bootstrapped (macOS, MAIN daemon plist `com.trusty.mpm` only —
+/// never the supervisor, #1900); otherwise (2) it spawns the current
+/// executable with the `daemon` subcommand in a detached process, recording
+/// the child PID in a discoverable pidfile and keeping the `Child`; (3) polls
+/// `/health` every 500 ms for up to 5 s via lock-file URL resolution;
+/// (4) returns the resolved daemon URL on success or, on timeout, removes any
+/// pidfile this call wrote and returns
+/// [`super::guided_autostart_plan::autostart_timeout_error`] over
+/// [`super::guided_autostart_plan::timeout_evidence`] — a slow daemon (still
+/// running) is a [`super::guided_liveness::DaemonAliveUnresponsive`]. The
+/// `_url` parameter is intentionally unused: after auto-start the lock file
+/// records the actual bound address.
+/// Test: the decisions are `prepare_*`, `timeout_evidence_*` and
+/// `timeout_error_*` in `guided_autostart_plan_tests.rs`; the pidfile helpers
+/// are unit-tested here; detached-spawn and polling paths are covered by the
+/// guided-default e2e suite.
 pub(crate) async fn ensure_daemon_started(
     client: &reqwest::Client,
     _url: &str,
 ) -> anyhow::Result<String> {
-    // Determine whether we need to spawn a new daemon process.
-    // On macOS: if the MAIN daemon plist is installed, let launchd own it and
-    // nudge it via bootstrap; spawn only when launchctl truly cannot help.
-    // On all other platforms: always spawn directly.
-    #[cfg(target_os = "macos")]
-    let needs_spawn = {
-        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        if main_daemon_managed_by_launchd_in(&home) {
-            let plist_path = plist_path_in(&home, MAIN_DAEMON_PLIST_LABEL);
-            matches!(
-                try_launchctl_start(&plist_path),
-                LaunchctlOutcome::Unavailable
-            )
-        } else {
-            // No main-daemon plist installed → launchd cannot help; spawn.
-            true
-        }
+    use super::guided_autostart_plan::{
+        AutostartPlan, autostart_timeout_error, prepare_autostart, timeout_evidence,
     };
-    #[cfg(not(target_os = "macos"))]
-    let needs_spawn = true;
+    let launchd = launchd_target();
+    let run = run_launchctl;
+    let is_daemon_pid = |pid: u32| super::daemon::find_daemon_pids().contains(&pid);
+    let lock_path = trusty_mpm::core::lock_file_path();
+    let plan = prepare_autostart(&run, launchd.as_ref(), &lock_path, &is_daemon_pid);
 
-    // When we take the fallback-spawn path we record the framework root so the
-    // health-poll timeout branch below can clean up the pidfile we wrote. On the
-    // launchd path (or when no spawn happened) this stays `None` and no pidfile
-    // is touched — we only ever remove a pidfile this call actually created.
-    let mut spawned_root: Option<std::path::PathBuf> = None;
-    // #9034: a loaded service or a live lock pid keeps the lock and skips the
-    // spawn; the poll below then waits for that daemon instead.
-    let plan = plan_autostart_at(&trusty_mpm::core::lock_file_path(), !needs_spawn);
-    let evidence = match plan {
-        AutostartPlan::AwaitExisting(evidence) => Some(evidence),
-        AutostartPlan::Spawn => None,
-    };
-    if evidence.is_none() {
-        // launchd not available or plist absent — fall back to detached spawn,
-        // the same approach used by `commands::daemon::start`. A dead-pid lock
-        // was already removed by `plan_autostart_at`.
+    // When we take the fallback-spawn path we keep the child and the framework
+    // root: the timeout branch below asks the child whether it still runs
+    // (#9034) and removes only a pidfile this call actually created.
+    let mut spawned: Option<(std::process::Child, std::path::PathBuf)> = None;
+    if plan == AutostartPlan::Spawn {
         let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
         std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
         let log_path = root.join("daemon.log");
@@ -219,11 +175,8 @@ pub(crate) async fn ensure_daemon_started(
         if let Err(e) = write_autostart_pidfile(&root, child.id()) {
             eprintln!("tm: warning: could not write autostart pidfile: {e}");
         }
-        spawned_root = Some(root);
-        // `child` is intentionally dropped here: the daemon is meant to outlive
-        // this process (on Unix it re-parents to init on our exit), so we do not
-        // wait on or kill it — dropping the handle just detaches from it.
-        drop(child);
+        // Dropping a `Child` never kills it: the daemon outlives this process.
+        spawned = Some((child, root));
     }
 
     // Poll until healthy or timeout (5 s). Re-resolve from the lock file each
@@ -236,145 +189,60 @@ pub(crate) async fn ensure_daemon_started(
             return Ok(resolved);
         }
     }
-    // Health poll timed out. If we spawned a fallback daemon, the pidfile we
-    // wrote now points at a PID that never became reachable — the spawned child
-    // may have died immediately or bound an unreachable address. The single-file
-    // pidfile is overwritten per spawn, so this does not *accumulate* entries,
-    // but leaving it behind hands `tm`'s tooling a stale PID that no longer
-    // corresponds to a healthy daemon. Remove it here (mirrors the stop-path
-    // cleanup in `daemon::cleanup_lock_file`) so a failed autostart leaves no
-    // misleading pidfile. Best-effort; ignore removal errors.
-    if let Some(root) = spawned_root.as_deref() {
-        remove_autostart_pidfile(root);
-    }
-    // #9034: the daemon exists but is slow — the caller must not go offline.
-    if let Some(evidence) = evidence {
-        return Err(super::guided_liveness::DaemonAliveUnresponsive { evidence }.into());
-    }
-    anyhow::bail!("daemon did not become healthy within 5 s after auto-start")
-}
-
-/// What autostart does about `daemon.lock` and the spawn.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AutostartPlan {
-    /// No live daemon evidence: spawn one. Any dead-pid lock is already gone.
-    Spawn,
-    /// A daemon exists; keep the lock and wait. The string names the evidence.
-    AwaitExisting(String),
-}
-
-/// Decide whether autostart may spawn, removing `daemon.lock` only when stale.
-///
-/// Why: #9034 — autostart deleted the lock unconditionally before spawning,
-/// even while launchd held the service and the lock's pid was serving. Seven
-/// spawns were refused and the live daemon lost its discovery record.
-/// What: `service_loaded` → `AwaitExisting`, lock untouched. Otherwise
-/// [`trusty_mpm::core::daemon_identity::read_lock_at`] decides: a live pid →
-/// `AwaitExisting`, lock kept; a dead pid of ours is removed by that call →
-/// `Spawn`; a missing or foreign file → `Spawn`, foreign file left in place.
-/// Test: `autostart_keeps_lock_with_live_pid`,
-/// `autostart_keeps_lock_when_service_loaded`,
-/// `autostart_clears_dead_pid_lock_and_spawns`.
-pub(crate) fn plan_autostart_at(
-    lock_path: &std::path::Path,
-    service_loaded: bool,
-) -> AutostartPlan {
-    if service_loaded {
-        return AutostartPlan::AwaitExisting("the launchd service is loaded".to_string());
-    }
-    match trusty_mpm::core::daemon_identity::read_lock_at(lock_path) {
-        Some(lock) => {
-            AutostartPlan::AwaitExisting(format!("daemon.lock names live pid {}", lock.pid))
+    // #9034: a spawned child that has not exited is still starting — slow,
+    // not down. Only a child that died leaves a stale pidfile to remove.
+    let mut still_running = None;
+    if let Some((child, root)) = spawned.as_mut() {
+        still_running = super::guided_autostart_plan::spawned_still_running(child);
+        if still_running.is_none() {
+            remove_autostart_pidfile(root);
         }
-        None => AutostartPlan::Spawn,
     }
+    Err(autostart_timeout_error(timeout_evidence(
+        &plan,
+        &run,
+        launchd.as_ref(),
+        still_running,
+    )))
 }
 
-/// Attempt to start the daemon via launchd `bootstrap` (macOS only).
+/// The MAIN daemon's launchd job, when its plist is installed (macOS).
 ///
-/// Why: `launchctl bootstrap` is preferred over a bare process spawn because
-/// launchd registers the unit for reboot-durability and respawn-on-crash. The
-/// detached-spawn fallback is session-only (no reboot durability).
-/// What: if `plist_path` exists, resolves the current user UID via `id -u`,
-/// then runs `launchctl bootstrap gui/<uid> <plist>`. Returns `Launched` on
-/// exit 0, `AlreadyLoaded` on exit 37 (EALREADY) or when stderr contains
-/// "already bootstrapped"/"service already loaded", and `Unavailable` in all
-/// other cases (plist absent, `id -u` failure, unknown launchctl error).
-/// Test: requires a real macOS launchd environment; covered by e2e smoke test.
+/// Test: the plist gate is `main_daemon_managed_by_launchd`.
 #[cfg(target_os = "macos")]
-fn try_launchctl_start(plist_path: &std::path::Path) -> LaunchctlOutcome {
-    if !plist_path.exists() {
-        return LaunchctlOutcome::Unavailable;
+fn launchd_target() -> Option<super::guided_autostart_plan::LaunchdTarget> {
+    let home = dirs::home_dir()?;
+    if !main_daemon_managed_by_launchd_in(&home) {
+        return None;
     }
-    let uid = std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    if uid.is_empty() {
-        return LaunchctlOutcome::Unavailable;
-    }
-    let domain = format!("gui/{uid}");
-    let plist_str = match plist_path.to_str() {
-        Some(s) => s,
-        None => return LaunchctlOutcome::Unavailable,
-    };
-    let output = match std::process::Command::new("launchctl")
-        .args(["bootstrap", &domain, plist_str])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return LaunchctlOutcome::Unavailable,
-    };
-    if output.status.success() {
-        return LaunchctlOutcome::Launched;
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    classify_bootstrap_failure(output.status.code(), &stderr, || {
-        launchd_service_loaded(&domain, MAIN_DAEMON_PLIST_LABEL)
+    // SAFETY: getuid() takes no arguments and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    Some(super::guided_autostart_plan::LaunchdTarget {
+        domain: format!("gui/{uid}"),
+        label: MAIN_DAEMON_PLIST_LABEL.to_string(),
+        plist: plist_path_in(&home, MAIN_DAEMON_PLIST_LABEL),
     })
 }
 
-/// Classify a failed `launchctl bootstrap` as already-loaded or unavailable.
-///
-/// Why: #9034 — current macOS answers a bootstrap of a loaded service with
-/// `Bootstrap failed: 5: Input/output error`, not exit 37, so a loaded
-/// service read as Unavailable and autostart deleted the lock and spawned.
-/// What: exit 37 (EALREADY) or a matching stderr is `AlreadyLoaded` as before;
-/// any other failure asks `service_loaded` and is `AlreadyLoaded` when it says
-/// yes, `Unavailable` otherwise.
-/// Test: `bootstrap_exit_5_on_loaded_service_is_already_loaded`,
-/// `bootstrap_failure_on_unloaded_service_is_unavailable`.
-#[cfg(target_os = "macos")]
-fn classify_bootstrap_failure(
-    code: Option<i32>,
-    stderr: &str,
-    service_loaded: impl FnOnce() -> bool,
-) -> LaunchctlOutcome {
-    // exit 37 = EALREADY; some launchctl versions surface this in stderr instead.
-    if code == Some(37)
-        || stderr.contains("already bootstrapped")
-        || stderr.contains("service already loaded")
-        || service_loaded()
-    {
-        return LaunchctlOutcome::AlreadyLoaded;
-    }
-    LaunchctlOutcome::Unavailable
+/// No launchd off macOS.
+#[cfg(not(target_os = "macos"))]
+fn launchd_target() -> Option<super::guided_autostart_plan::LaunchdTarget> {
+    None
 }
 
-/// Whether launchd has `label` loaded in `domain` (`launchctl print` exits 0).
+/// The real `launchctl` runner injected into the autostart plan.
 ///
-/// Test: I/O probe; the decision it feeds is `classify_bootstrap_failure`.
-#[cfg(target_os = "macos")]
-fn launchd_service_loaded(domain: &str, label: &str) -> bool {
-    std::process::Command::new("launchctl")
-        .args(["print", &format!("{domain}/{label}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+/// Test: I/O; the plan is tested against a fake runner.
+fn run_launchctl(args: &[String]) -> Option<super::guided_autostart_plan::LaunchctlReply> {
+    let out = std::process::Command::new("launchctl")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some(super::guided_autostart_plan::LaunchctlReply {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+    })
 }
 
 /// Extract the host token from a git remote URL (lowercased input expected).
@@ -523,33 +391,6 @@ mod tests {
             !path.exists(),
             "remove_autostart_pidfile must delete the pidfile"
         );
-    }
-
-    /// #9034: `Bootstrap failed: 5` on a loaded service must not read as
-    /// Unavailable — that verdict deletes `daemon.lock` and spawns.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn bootstrap_exit_5_on_loaded_service_is_already_loaded() {
-        let outcome =
-            classify_bootstrap_failure(Some(5), "Bootstrap failed: 5: Input/output error", || true);
-        assert!(
-            matches!(outcome, LaunchctlOutcome::AlreadyLoaded),
-            "a loaded service must be AlreadyLoaded whatever bootstrap's exit code"
-        );
-    }
-
-    /// #9034: the probe only rescues a loaded service; an unloaded one with an
-    /// unknown failure is still Unavailable, so a real down daemon is started.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn bootstrap_failure_on_unloaded_service_is_unavailable() {
-        let outcome =
-            classify_bootstrap_failure(Some(5), "Bootstrap failed: 5: Input/output error", || {
-                false
-            });
-        assert!(matches!(outcome, LaunchctlOutcome::Unavailable));
-        let ealready = classify_bootstrap_failure(Some(37), "", || false);
-        assert!(matches!(ealready, LaunchctlOutcome::AlreadyLoaded));
     }
 
     /// Verify github_host strips a port suffix from scheme-style URLs.

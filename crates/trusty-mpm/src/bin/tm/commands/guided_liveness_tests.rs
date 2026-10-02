@@ -6,7 +6,6 @@
 //! touches the daemon on 7880, `~/.trusty-mpm/daemon.lock`, or launchd.
 
 use super::*;
-use crate::commands::guided_autostart::{AutostartPlan, plan_autostart_at};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -61,11 +60,26 @@ fn write_lock(path: &std::path::Path, addr: &str, pid: u32) {
     .expect("write lock");
 }
 
-/// Run [`picker_or_autostart_with`] with a recording autostart stub.
+/// The restart command the stop message must name.
+const RESTART_CMD: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
+
+/// [`run_flow_with`] where this test process counts as the daemon.
 async fn run_flow(
     client: &reqwest::Client,
     url: &str,
     lock: &std::path::Path,
+    autostart_result: anyhow::Result<String>,
+) -> (PickerFlow, bool) {
+    run_flow_with(client, url, lock, &[std::process::id()], autostart_result).await
+}
+
+/// Run [`picker_or_autostart_with`] with a recording autostart stub; only
+/// `daemon_pids` count as daemon processes.
+async fn run_flow_with(
+    client: &reqwest::Client,
+    url: &str,
+    lock: &std::path::Path,
+    daemon_pids: &[u32],
     autostart_result: anyhow::Result<String>,
 ) -> (PickerFlow, bool) {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -77,7 +91,13 @@ async fn run_flow(
     };
     let called = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&called);
-    let flow = picker_or_autostart_with(client, url, &project, lock, move || async move {
+    let is_daemon_pid = |pid: u32| daemon_pids.contains(&pid);
+    let host = HostProbe {
+        lock_path: lock,
+        is_daemon_pid: &is_daemon_pid,
+        restart_cmd: RESTART_CMD,
+    };
+    let flow = picker_or_autostart_with(client, url, &project, &host, move || async move {
         flag.store(true, Ordering::SeqCst);
         autostart_result
     })
@@ -129,23 +149,27 @@ fn live_pid_requires_matching_addr() {
     let me = std::process::id();
     write_lock(&lock, "http://127.0.0.1:47001", me);
     assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &lock),
+        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|p| p == me),
         Some(me)
     );
     assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001/", &lock),
+        live_daemon_pid_for("http://127.0.0.1:47001/", &lock, &|p| p == me),
         Some(me)
     );
     assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47002", &lock),
+        live_daemon_pid_for("http://127.0.0.1:47002", &lock, &|p| p == me),
         None,
         "a lock for another address is no evidence about this one"
     );
     write_lock(&lock, "http://127.0.0.1:47001", DEAD_PID);
-    assert_eq!(live_daemon_pid_for("http://127.0.0.1:47001", &lock), None);
+    assert_eq!(
+        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|p| p == me),
+        None
+    );
     assert!(lock.exists(), "classification must not delete the lock");
     assert_eq!(
-        live_daemon_pid_for("http://127.0.0.1:47001", &tmp.path().join("absent")),
+        live_daemon_pid_for("http://127.0.0.1:47001", &tmp.path().join("absent"), &|p| p
+            == me),
         None
     );
 }
@@ -170,6 +194,10 @@ async fn slow_listing_stops_without_autostart() {
     assert!(
         msg.contains("not responding"),
         "message must name a slow daemon: {msg}"
+    );
+    assert!(
+        msg.contains(RESTART_CMD),
+        "message must name the restart command: {msg}"
     );
 }
 
@@ -242,40 +270,57 @@ async fn alive_unresponsive_autostart_stops_not_offline() {
 }
 
 #[test]
-fn autostart_keeps_lock_with_live_pid() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, "http://127.0.0.1:7880", std::process::id());
-    let plan = plan_autostart_at(&lock, false);
+fn flags_connect_phase_timeout_is_unknown() {
+    // A connect-phase timeout sets both flags; it is a busy listener.
+    let reach = reach_from_flags(true, true, None, "connect timed out");
     assert!(
-        matches!(plan, AutostartPlan::AwaitExisting(_)),
-        "got {plan:?}"
-    );
-    assert!(lock.exists(), "a live daemon's lock must never be deleted");
-}
-
-#[test]
-fn autostart_keeps_lock_when_service_loaded() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lock = tmp.path().join("daemon.lock");
-    // Even a record read_lock_at would call stale stays while launchd holds it.
-    write_lock(&lock, "http://127.0.0.1:7880", DEAD_PID);
-    let plan = plan_autostart_at(&lock, true);
-    assert!(
-        matches!(plan, AutostartPlan::AwaitExisting(_)),
-        "got {plan:?}"
-    );
-    assert!(
-        lock.exists(),
-        "a loaded service's lock must never be deleted"
+        matches!(reach, DaemonReach::Unknown(ref why) if why.contains("timed out")),
+        "a connect-phase timeout must be Unknown, got {reach:?}"
     );
 }
 
 #[test]
-fn autostart_clears_dead_pid_lock_and_spawns() {
+fn live_pid_requires_a_daemon_process() {
+    // #9034: a live pid that is not a daemon process (a reused pid) is no
+    // evidence of a daemon.
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, "http://127.0.0.1:7880", DEAD_PID);
-    assert_eq!(plan_autostart_at(&lock, false), AutostartPlan::Spawn);
-    assert!(!lock.exists(), "a dead-pid lock is stale and is removed");
+    let me = std::process::id();
+    write_lock(&lock, "http://127.0.0.1:47001", me);
+    assert_eq!(
+        live_daemon_pid_for("http://127.0.0.1:47001", &lock, &|_| false),
+        None
+    );
+}
+
+#[tokio::test]
+async fn refused_with_reused_lock_pid_autostarts() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lock = tmp.path().join("daemon.lock");
+    write_lock(&lock, REFUSED_URL, std::process::id());
+    let client = short_timeout_client();
+    let (flow, autostarted) = run_flow_with(
+        &client,
+        REFUSED_URL,
+        &lock,
+        &[],
+        Err(anyhow::anyhow!("stub: spawn failed")),
+    )
+    .await;
+    assert!(autostarted, "a reused lock pid must not block autostart");
+    assert!(matches!(flow, PickerFlow::Offline));
+}
+
+#[tokio::test]
+async fn refused_with_live_lock_pid_message_names_recovery() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lock = tmp.path().join("daemon.lock");
+    write_lock(&lock, REFUSED_URL, std::process::id());
+    let client = short_timeout_client();
+    let (flow, _) = run_flow(&client, REFUSED_URL, &lock, Ok(String::new())).await;
+    let msg = assert_stopped(flow);
+    assert!(
+        msg.contains("tm start") && msg.contains("daemon.lock"),
+        "a lock-pid stop must name its recovery: {msg}"
+    );
 }

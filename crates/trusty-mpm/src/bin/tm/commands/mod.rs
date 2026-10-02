@@ -63,6 +63,8 @@ pub(crate) mod fleet;
 pub(crate) mod generate;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+// #9034: the autostart decision, with launchctl and the process table injected.
+pub(crate) mod guided_autostart_plan;
 pub(crate) mod guided_inplace;
 pub(crate) mod guided_launch;
 // #9034: down versus slow, and the picker/autostart sequence.
