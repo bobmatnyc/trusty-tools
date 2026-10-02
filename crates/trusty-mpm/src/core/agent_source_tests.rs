@@ -79,7 +79,7 @@ fn no_deployed_agent_asset_enables_auto_memory() {
     assert!(!written.is_empty(), "the roster must not be empty");
 
     for name in &written {
-        let text = std::fs::read_to_string(agents.join(&name)).unwrap();
+        let text = std::fs::read_to_string(agents.join(name)).unwrap();
         // The field only means anything inside the leading `---` frontmatter
         // block; prose in the body that happens to start a line with `memory:`
         // is not a setting.
