@@ -106,6 +106,10 @@ pub struct RescanStats {
     /// every one of the 22 observed passes actually found. Reported beside
     /// `files_reindexed` so the log line says which of the two happened.
     pub files_unchanged: usize,
+    /// Files still on disk whose chunks were dropped because the index now
+    /// excludes them: the walker's policy no longer admits a tracked file, or
+    /// a walked file's content is sops-encrypted (#8922).
+    pub files_excluded: usize,
 }
 
 impl RescanStats {
@@ -246,6 +250,11 @@ pub(crate) async fn reconcile_registered(
 }
 
 /// Reconcile with the current registered admission policy (#7379).
+///
+/// #8922: a walked file whose content is sops-encrypted has its chunks dropped
+/// instead of indexed, and a tracked file the policy now excludes is dropped by
+/// the sweep; both are counted in [`RescanStats::files_excluded`].
+/// Test: `rescan_drops_sops_files_and_files_the_policy_now_excludes`.
 pub(crate) async fn reconcile_with_policy(
     index_id: &IndexId,
     canonical_root: &Path,
@@ -292,6 +301,16 @@ pub(crate) async fn reconcile_with_policy(
             // never disagree about what a file is called in the corpus.
             let rel = watcher_relative_path(canonical_root, raw_root, abs);
             let key = PathBuf::from(&rel);
+            // #8922: checked before the hash skip — a hash recorded before
+            // the content check existed may sit over plaintext chunks. The
+            // file stays `live`, so the sweep below never counts it as gone.
+            if crate::core::sops::is_sops_encrypted(&content) {
+                drop_file(index_id, indexer, &rel).await?;
+                indexed_files.take(&key).await;
+                live.insert(key);
+                stats.files_excluded += 1;
+                continue;
+            }
             // #6570: the file was still read and hashed, so this is a decision
             // about its CONTENT, not about its mtime. `live` is populated either
             // way — a skipped file is present on disk and must never look like a
@@ -337,10 +356,19 @@ pub(crate) async fn reconcile_with_policy(
         }
     }
 
-    stats.files_removed =
-        sweep_deleted(index_id, canonical_root, indexer, indexed_files, &live).await?;
+    let swept = sweep_deleted(
+        index_id,
+        canonical_root,
+        indexer,
+        indexed_files,
+        &live,
+        policy,
+    )
+    .await?;
+    stats.files_removed = swept.deleted;
+    stats.files_excluded += swept.excluded;
 
-    if stats.files_reindexed > 0 || stats.files_removed > 0 {
+    if stats.files_reindexed > 0 || stats.files_removed > 0 || stats.files_excluded > 0 {
         // One rebuild for the whole pass — `index_files_batch_no_rebuild` and
         // `remove_file_no_kg_rebuild`'s public sibling both defer it, and the
         // graph is O(N + E) over the entire corpus.
@@ -391,16 +419,49 @@ async fn warm_hashes_from_corpus(
     }
 }
 
-/// Drop chunks for tracked files that the walk did not find and that are gone
-/// from disk.
+/// Drop one file's chunks, mapping a failure to [`RescanError::Remove`].
+///
+/// Caller obligation (#3049): the same as [`sweep_deleted`]'s — the caller
+/// holds the teardown guard.
+async fn drop_file(
+    index_id: &IndexId,
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    path: &str,
+) -> Result<usize, RescanError> {
+    indexer
+        .read()
+        .await
+        .remove_file(path)
+        .await
+        .map_err(|source| RescanError::Remove {
+            index_id: index_id.to_string(),
+            path: path.to_string(),
+            source,
+        })
+}
+
+/// What [`sweep_deleted`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Swept {
+    /// Tracked files gone from disk.
+    deleted: usize,
+    /// Tracked files still on disk that the policy now excludes (#8922).
+    excluded: usize,
+}
+
+/// Drop chunks for tracked files that the walk did not find: files gone from
+/// disk, and files the index's policy now excludes.
 ///
 /// Why: an overflow drops deletions as readily as writes, and a deletion that
-/// is never applied leaves a phantom file answering searches forever.
+/// is never applied leaves a phantom file answering searches forever. #8922:
+/// a file that became excluded — a new `exclude_globs` entry, a narrowed
+/// extension list — answers searches forever the same way.
 ///
 /// What: for each tracked path absent from `live`, re-checks the filesystem
-/// before removing anything. That guard matters because the walk and the
-/// watcher do not use identical filters — a file the walk excluded but which
-/// still exists must not be mistaken for a deletion.
+/// before removing anything. A file still on disk is removed only when
+/// `policy` holds and [`crate::service::index_admission::admits`] answers
+/// `Excluded` for it; an `Included` or undetermined answer keeps it (#7396),
+/// and with no policy there is nothing to judge it against.
 ///
 /// Caller obligation (#3049): `remove_file` is a durable write and this
 /// function does NOT take the teardown guard — [`reconcile_after_rescan`] holds
@@ -416,27 +477,30 @@ async fn sweep_deleted(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
     live: &HashSet<PathBuf>,
-) -> Result<usize, RescanError> {
-    let mut removed = 0usize;
+    policy: Option<&crate::core::registry::IndexHandle>,
+) -> Result<Swept, RescanError> {
+    use crate::service::index_admission::{admits, Admission};
+    let mut swept = Swept::default();
     for tracked in indexed_files.paths().await {
-        if live.contains(&tracked) || canonical_root.join(&tracked).exists() {
+        if live.contains(&tracked) {
             continue;
         }
-        let path = tracked.display().to_string();
-        indexer
-            .read()
-            .await
-            .remove_file(&path)
-            .await
-            .map_err(|source| RescanError::Remove {
-                index_id: index_id.to_string(),
-                path: path.clone(),
-                source,
-            })?;
+        let abs = canonical_root.join(&tracked);
+        let on_disk = abs.exists();
+        // #8922: on disk but excluded by the current policy is a removal too.
+        let excluded = on_disk && policy.is_some_and(|h| admits(h, &abs) == Admission::Excluded);
+        if on_disk && !excluded {
+            continue;
+        }
+        drop_file(index_id, indexer, &tracked.display().to_string()).await?;
         indexed_files.take(&tracked).await;
-        removed += 1;
+        if excluded {
+            swept.excluded += 1;
+        } else {
+            swept.deleted += 1;
+        }
     }
-    Ok(removed)
+    Ok(swept)
 }
 
 /// What the watch loop owes after a reconcile pass finishes.

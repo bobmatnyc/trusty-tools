@@ -767,7 +767,7 @@ async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
         routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
     let entries: Vec<String> = (0..600).map(|i| format!("  \"key_{i}\": {i},")).collect();
     let big = format!("{{\n{}\n  \"last\": 0\n}}\n", entries.join("\n"));
-    let body = serde_json::json!({ "path": "data/big.json", "content": big });
+    let body = serde_json::json!({ "path": "config/big.json", "content": big });
 
     let landed = http_ok(&http, "POST", "/indexes/wf/index-file", body).await;
     assert_eq!(landed["indexed"], serde_json::json!(true), "{landed}");
@@ -781,7 +781,7 @@ async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
         .indexer
         .read()
         .await
-        .chunk_ids_for_file("data/big.json")
+        .chunk_ids_for_file("config/big.json")
         .await;
     assert_eq!(
         ids.len() as u64,
@@ -789,7 +789,7 @@ async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
         "the reported count is the landed count"
     );
 
-    let blank = serde_json::json!({ "path": "data/empty.json", "content": "  \n" });
+    let blank = serde_json::json!({ "path": "config/empty.json", "content": "  \n" });
     let refused = http_ok(&http, "POST", "/indexes/wf/index-file", blank).await;
     assert_eq!(refused["indexed"], serde_json::json!(false), "{refused}");
     assert_eq!(
@@ -926,6 +926,55 @@ async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
         state.registry.get(&IndexId::new("absent-6285")).is_none(),
         "a refused write must not conjure the index it was aimed at"
     );
+}
+
+/// Why (#8922): `index-file` indexed any path and any content, so a caller
+/// could put a file the walker excludes, or a sops-encrypted secrets file, into
+/// the index and be told `indexed: true`.
+/// What: a path under the default-skipped `data/` dir and sops content on an
+/// admitted path each answer 403 `index_file_excluded` with `indexed: false`
+/// on both transports, and neither leaves a chunk. Fails with the #8922 fixes disabled:
+/// the route then answers 200 `indexed: true` for both.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
+    let sops = crate::core::sops::sample_sops_yaml();
+    for (path, content, reason) in [
+        ("data/export.json", "{\"a\": 1}\n", "excluded_path"),
+        ("config/secrets.yaml", sops.as_str(), "sops_encrypted"),
+    ] {
+        let body = serde_json::json!({ "path": path, "content": content });
+        let over_http = http_err(&http, "POST", "/indexes/wf/index-file", body.clone()).await;
+        assert_eq!(
+            over_http.0,
+            StatusCode::FORBIDDEN,
+            "{path}: {}",
+            over_http.1
+        );
+        assert_eq!(over_http.1["error"], "index_file_excluded", "{path}");
+        assert_eq!(over_http.1["reason"], reason, "{path}");
+        assert_eq!(over_http.1["indexed"], false, "{path}");
+        let over_socket = rpc_err(
+            &rpc,
+            writes::METHOD_INDEX_FILE_PUT,
+            serde_json::json!({ "index_id": "wf", "body": body }),
+        )
+        .await;
+        assert_same_refusal(&over_http, &over_socket, CODE_FORBIDDEN, path);
+        let handle = state.registry.get(&IndexId::new("wf")).expect("resident");
+        assert!(
+            handle
+                .indexer
+                .read()
+                .await
+                .chunk_ids_for_file(path)
+                .await
+                .is_empty(),
+            "{path}: a refused write must leave no chunk"
+        );
+    }
 }
 
 // ----------------------------------------------------------------- reindex ---

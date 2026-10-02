@@ -343,8 +343,10 @@ impl CodeIndexer {
     /// What: the same write; zero chunks for non-blank content logs at WARN
     /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
     /// `Empty`, JSON above the window ceiling `TooLarge`, a tombstone
-    /// `Removed`. Every `Err` arm is unchanged.
+    /// `Removed`, sops-encrypted content `SopsEncrypted` after its old chunks
+    /// are removed (#8922). Every `Err` arm is unchanged.
     /// Test: `index_file_on_large_json_lands_chunks`,
+    /// `index_file_refuses_sops_content_and_drops_its_old_chunks`,
     /// `index_file_on_blank_content_reports_empty`, and
     /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
     /// `indexer::tests::zero_chunk_8976`.
@@ -366,6 +368,18 @@ impl CodeIndexer {
         if trusty_common::knowledge_document::is_tombstone(content) {
             self.remove_file(file_path).await?;
             return Ok(IndexFileOutcome::Removed);
+        }
+        // #8922: a sops-encrypted file is never indexed, and a file that became
+        // one loses the chunks its plaintext left behind.
+        if crate::core::sops::is_sops_encrypted(content) {
+            let removed = self.remove_file(file_path).await?;
+            tracing::warn!(
+                index_id = %self.index_id,
+                file = %file_path,
+                removed,
+                "index_file: refused a sops-encrypted file (#8922)"
+            );
+            return Ok(IndexFileOutcome::SopsEncrypted);
         }
         let (mut chunks, entities) = chunk_ast(file_path, content);
         // #8976: classify before `chunks` moves into the commit below.
@@ -660,8 +674,11 @@ impl CodeIndexer {
             files
                 .par_iter()
                 .map(|(path, content)| {
+                    // #8922: sops content parses to nothing, like a tombstone.
                     let (mut chunks, entities) =
-                        if trusty_common::knowledge_document::is_tombstone(content) {
+                        if trusty_common::knowledge_document::is_tombstone(content)
+                            || crate::core::sops::is_sops_encrypted(content)
+                        {
                             (vec![], vec![])
                         } else {
                             chunk_ast(path, content)

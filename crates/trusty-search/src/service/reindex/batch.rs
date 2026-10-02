@@ -578,7 +578,16 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // Issue #1073: use the corpus-RELATIVE PathBuf as the DashMap key so
         // the in-process cache and the redb-persisted cache use the SAME key space.
         let rel_path = PathBuf::from(&rel);
-        if ctx
+        // #8922: sops content is never hash-skipped. A hash recorded before the
+        // content check existed may still sit over the file's chunks, and the
+        // commit's delete-then-insert below is what removes them; the indexer
+        // then parses the content to zero chunks. It is counted as skipped, so
+        // the zero-vector gate (#868) does not read a batch of only sops files
+        // as an embedder failure.
+        let sops = crate::core::sops::is_sops_encrypted(&content);
+        if sops {
+            ctx.progress.skipped.fetch_add(1, Ordering::Release);
+        } else if ctx
             .hashes
             .get(&rel_path)
             .map(|prev| *prev == h)

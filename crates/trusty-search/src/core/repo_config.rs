@@ -290,9 +290,10 @@ pub fn language_to_exts(lang: &str) -> &'static [&'static str] {
 /// Why: `IndexConfig::exclude` patterns target both file basenames
 /// (`"**/__tests__/**"`) and partial paths (`"selenium/"`). The `glob` crate's
 /// `Pattern` handles both via the standard glob syntax.
-/// What: parses each pattern once and tests with `Pattern::matches`. Patterns
-/// that fail to parse are skipped with a warning.
-/// Test: `test_glob_match_basic`, `test_glob_match_recursive`.
+/// What: parses each pattern once and tests with `Pattern::matches`. A pattern
+/// that fails to parse matches every path (#8922): the exclude config could not
+/// be read, so nothing it might cover is admitted.
+/// Test: `test_glob_match_basic`, `an_unparsable_exclude_glob_excludes_every_path`.
 pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
     if excludes.is_empty() {
         return false;
@@ -329,7 +330,12 @@ pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
                 }
             }
             Err(e) => {
-                tracing::warn!("ignoring invalid exclude glob {pat:?}: {e}");
+                // #8922: fail closed — skipping the pattern indexed what it
+                // was written to exclude.
+                tracing::error!(
+                    "invalid exclude glob {pat:?}: {e} — excluding every path until it is fixed"
+                );
+                return true;
             }
         }
     }
@@ -453,6 +459,22 @@ indexes:
         ));
         assert!(!path_matches_any_glob(
             Path::new("/repo/src/api/foo.py"),
+            &excludes
+        ));
+    }
+
+    /// #8922 fail-open check: an exclude glob that does not parse used to be
+    /// skipped, so the files it was written to exclude were indexed. Fails
+    /// with the `Err` arm restored to a skip.
+    #[test]
+    fn an_unparsable_exclude_glob_excludes_every_path() {
+        let excludes = vec!["secrets/[unclosed".to_string()];
+        assert!(path_matches_any_glob(
+            Path::new("/repo/secrets/prod.yaml"),
+            &excludes
+        ));
+        assert!(path_matches_any_glob(
+            Path::new("/repo/src/lib.rs"),
             &excludes
         ));
     }

@@ -890,3 +890,78 @@ async fn force_reconcile_leaves_warm_chunks_alone_without_a_corpus() {
         "#7004: an absent corpus must not read as an empty promoted id set"
     );
 }
+
+/// #8922: a non-force reindex drops a file that is still on disk but that the
+/// index now excludes, and a file whose content became sops-encrypted even when
+/// its persisted hash already matches that content.
+///
+/// Why: the #848 prune pass kept every corpus file still on disk, so a new
+/// `exclude_globs` entry never purged what it covered; and the batch loop
+/// hash-skipped a file before looking at its content, so a hash recorded before
+/// the sops check existed kept the file's plaintext chunks forever.
+/// What: indexes three files, then re-registers the same indexer with an
+/// exclude glob, re-encrypts one file and plants its new hash, and reindexes.
+/// Fails with the #8922 fixes disabled: both the excluded and the sops file keep chunks.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn reindex_prunes_a_file_that_became_excluded_and_sops_content() {
+    let (root, handle, _vectors) = colocated_fixture("x8922-prune");
+    std::fs::create_dir(root.path().join("secrets")).unwrap();
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
+    std::fs::write(root.path().join("secrets/prod.yaml"), "password: hunter2\n").unwrap();
+    std::fs::write(root.path().join("app.yaml"), "token: plaintext\n").unwrap();
+
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+    for file in ["a.rs", "secrets/prod.yaml", "app.yaml"] {
+        assert!(
+            !corpus_ids_for(&handle, file).await.is_empty(),
+            "test setup: {file} must produce chunks"
+        );
+    }
+
+    let sops = crate::core::sops::sample_sops_yaml();
+    std::fs::write(root.path().join("app.yaml"), &sops).unwrap();
+    let fingerprint = crate::service::reindex::hash::hash_content(&sops);
+    let corpus = handle.indexer.read().await.corpus_store().unwrap();
+    corpus
+        .upsert_file_hashes(&[("app.yaml", fingerprint.as_str())])
+        .unwrap();
+    drop(corpus);
+
+    let mut narrowed = IndexHandle::bare(
+        handle.id.clone(),
+        Arc::clone(&handle.indexer),
+        root.path().to_path_buf(),
+    );
+    narrowed.defer_embed = false;
+    narrowed.extra_skip_dirs.push(".trusty-search".into());
+    narrowed.exclude_globs = vec!["**/secrets/**".into()];
+    let narrowed = Arc::new(narrowed);
+
+    let second = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(narrowed.clone(), second.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.status.load(),
+        ReindexStatus::Complete,
+        "{:?}",
+        second.events.lock().await
+    );
+
+    assert!(
+        corpus_ids_for(&narrowed, "secrets/prod.yaml")
+            .await
+            .is_empty(),
+        "#8922: a file the index now excludes must be pruned though it is on disk"
+    );
+    assert!(
+        corpus_ids_for(&narrowed, "app.yaml").await.is_empty(),
+        "#8922: a sops-encrypted file must lose its plaintext chunks"
+    );
+    assert!(!corpus_ids_for(&narrowed, "a.rs").await.is_empty());
+}
