@@ -31,19 +31,48 @@ pub(crate) enum PidIdentity {
 ///
 /// Why: one rule for `tm stop` and for the autostart lock check.
 /// What: empty `cmd` → `Unknown` (argv unreadable; never a verdict); a name in
-/// `OWN_BINARY_NAMES` with a `daemon` argument → `Daemon`; else `NotDaemon`.
+/// `OWN_BINARY_NAMES` whose SUBCOMMAND ([`subcommand_of`]) is `daemon` →
+/// `Daemon`; else `NotDaemon`.
 /// Test: `classify_process_daemon`, `classify_process_cli_is_not_daemon`,
+/// `classify_process_daemon_word_after_the_subcommand_is_not_daemon`,
 /// `classify_process_empty_argv_is_unknown`.
 pub(crate) fn classify_process(name: &str, cmd: &[String]) -> PidIdentity {
     if cmd.is_empty() {
         return PidIdentity::Unknown;
     }
     let is_tm_binary = trusty_mpm::core::own_binary_names::OWN_BINARY_NAMES.contains(&name);
-    if is_tm_binary && cmd.iter().any(|a| a == "daemon") {
+    if is_tm_binary && subcommand_of(cmd) == Some("daemon") {
         PidIdentity::Daemon
     } else {
         PidIdentity::NotDaemon
     }
+}
+
+/// The `tm` global flags that take a separate value (`--url X`), so the value
+/// is not mistaken for the subcommand.
+const GLOBAL_VALUE_FLAGS: &[&str] = &["--url", "--account", "--user"];
+
+/// The subcommand in a `tm` argv: the first non-flag argument after argv[0].
+///
+/// Why: #9034 — `daemon` anywhere in argv made `tm build-lease -- cargo test
+/// daemon` or `tm doctor daemon` a "daemon" that `tm stop` would kill.
+/// What: skips global flags (and the value of a [`GLOBAL_VALUE_FLAGS`] flag
+/// given without `=`); stops at `--`; returns the first positional argument.
+/// Test: `classify_process_daemon_word_after_the_subcommand_is_not_daemon`.
+fn subcommand_of(cmd: &[String]) -> Option<&str> {
+    let mut args = cmd.iter().skip(1).map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return None;
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+        if GLOBAL_VALUE_FLAGS.contains(&arg) {
+            args.next();
+        }
+    }
+    None
 }
 
 /// Refresh `which` processes WITH argv loaded.

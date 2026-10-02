@@ -23,3 +23,8 @@ Fixed
   deleted: bare `tm` stops and tells you to remove the lock if no tm daemon
   is running, then run `tm start`. A spawned daemon that is still starting
   when the 5 s health poll ends is reported as slow, not as down (#9034).
+- `tm stop` and the autostart lock check count a process as the daemon only
+  when `daemon` is its subcommand, so `tm build-lease -- cargo test daemon`
+  or `tm doctor daemon` is never stopped as a daemon. A lock pid owned by
+  another user (`kill` answers EPERM) now counts as alive, so its lock is
+  kept instead of deleted (#9034).
