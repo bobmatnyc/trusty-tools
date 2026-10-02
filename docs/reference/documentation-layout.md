@@ -34,6 +34,9 @@ README must not present draft behavior as implemented.
   more than a crate README.
 - `docs/getting-started/`, `docs/reference/`, `docs/architecture/`, and
   `docs/distribution/`: cross-package current guidance.
+  - `docs/reference/install-checkpoint.md`: operational runbook for installing
+    and safely restarting trusty-mpm binaries with checkpoint validation and
+    rollback procedures.
 
 Use [crate-map.md](crate-map.md) for the package-to-code-to-doc mapping.
 
