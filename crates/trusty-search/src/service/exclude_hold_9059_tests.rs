@@ -321,3 +321,35 @@ async fn a_valid_patch_catches_up_what_the_hold_refused() {
         "existing chunks lost"
     );
 }
+
+/// #9059: the catch-up reindex refuses, not fails, when another reindex holds
+/// the claim. The releasing PATCH still succeeds, `catch_up_reindex` reports
+/// `started: false`, and its `reason` names the running claim's origin.
+#[tokio::test]
+async fn a_release_with_a_running_reindex_reports_the_catch_up_refusal() {
+    let (_temp, root) = tree();
+    let id = "x9059-catch-up-refused";
+    let (state, _handle, _files) = restored(id, &root).await;
+    let claim = crate::service::reindex::try_claim_reindex(&IndexId::new(id), "test-holder", false)
+        .expect("setup: the index has no running reindex");
+
+    let patch = PatchIndexConfigRequest {
+        exclude_globs: Some(vec![FIXED.to_string()]),
+        ..Default::default()
+    };
+    let body = crate::service::server::patch_index_config_report(&state, id, patch)
+        .await
+        .expect("the PATCH succeeds although the catch-up is refused");
+
+    assert_eq!(body["catch_up_reindex"]["started"], false, "{body}");
+    let reason = body["catch_up_reindex"]["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("already running") && reason.contains("test-holder"),
+        "the reason must name the running claim: {body}"
+    );
+    drop(claim);
+    assert!(
+        crate::service::reindex::try_claim_reindex(&IndexId::new(id), "after", false).is_ok(),
+        "dropping the held claim frees the index"
+    );
+}
