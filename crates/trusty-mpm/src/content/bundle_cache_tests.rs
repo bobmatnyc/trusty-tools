@@ -57,7 +57,8 @@ struct Gate {
 }
 
 /// An in-memory release host. Every tag with an asset is a release; `drafts`
-/// and `prereleases` flag some of them the way the releases API does.
+/// and `prereleases` mark some of them the way GitHub does: `releases/tags`
+/// answers 404 for a draft and flags a pre-release.
 #[derive(Default)]
 struct FakeSource {
     assets: HashMap<String, Vec<u8>>,
@@ -105,10 +106,10 @@ impl ReleaseSource for FakeSource {
         Ok(self.assets.get(&format!("{tag}/{file}")).cloned())
     }
 
-    fn content_releases(&self) -> Result<Vec<Release>, FetchError> {
+    fn content_tags(&self) -> Result<Vec<String>, FetchError> {
         if self.offline {
             return Err(FetchError {
-                url: "fake://releases".into(),
+                url: "fake://tags".into(),
                 reason: "network is unreachable".into(),
             });
         }
@@ -119,14 +120,21 @@ impl ReleaseSource for FakeSource {
             .collect();
         tags.sort();
         tags.dedup();
-        Ok(tags
-            .into_iter()
-            .map(|tag| Release {
-                draft: self.drafts.contains(&tag),
-                prerelease: self.prereleases.contains(&tag),
-                tag,
-            })
-            .collect())
+        Ok(tags)
+    }
+
+    fn release(&self, tag: &str) -> Result<Release, FetchError> {
+        if self.drafts.contains(tag) {
+            return Err(FetchError {
+                url: format!("fake://releases/tags/{tag}"),
+                reason: "HTTP 404 Not Found".into(),
+            });
+        }
+        Ok(Release {
+            tag: tag.to_owned(),
+            draft: false,
+            prerelease: self.prereleases.contains(tag),
+        })
     }
 }
 
@@ -253,20 +261,24 @@ fn update_without_a_ref_moves_the_pin_to_the_newest_release() {
     );
 }
 
-/// "Latest" is a published release: a draft or a release flagged as a
-/// pre-release is never installed, even when it carries the highest version.
+/// "Latest" is a published release. A pre-release with the highest version
+/// is passed over for the next one down. A draft has no release GitHub will
+/// show (a 404), so a draft tag at the top fails the update and the pin stays.
 #[test]
 fn update_never_installs_a_draft_or_a_pre_release() {
     let cache = tempfile::tempdir().unwrap();
     let mut src = FakeSource::default();
     src.publish(A);
-    for tag in ["content-v0.8.0", "content-v0.9.0"] {
-        src.publish(tag);
-    }
-    src.drafts.insert("content-v0.9.0".to_owned());
+    src.publish("content-v0.8.0");
     src.prereleases.insert("content-v0.8.0".to_owned());
     let out = update(cache.path(), &src, None).expect("update");
     assert_eq!(out.tag, A);
+    assert_eq!(pinned(cache.path()).tag(), A);
+
+    src.publish("content-v0.9.0");
+    src.drafts.insert("content-v0.9.0".to_owned());
+    let err = update(cache.path(), &src, None).expect_err("a draft is a 404");
+    assert!(matches!(err, CacheError::Network { .. }), "{err:?}");
     assert_eq!(pinned(cache.path()).tag(), A);
 }
 
@@ -383,7 +395,7 @@ fn update_offline_with_no_cache_names_the_install_command() {
     assert!(!cache.path().join(LOCK_FILE_NAME).exists());
 }
 
-/// A releases-API failure is an error, never "already current": the update
+/// A tag-listing failure is an error, never "already current": the update
 /// could not learn the newest release. The verified pin stays in use.
 #[test]
 fn update_offline_with_a_verified_cache_fails_and_keeps_the_pin() {
@@ -395,7 +407,7 @@ fn update_offline_with_a_verified_cache_fails_and_keeps_the_pin() {
     let err = update(cache.path(), &src, None).expect_err("listing failed");
     match &err {
         CacheError::Network { url, fallback, .. } => {
-            assert_eq!(url, "fake://releases");
+            assert_eq!(url, "fake://tags");
             assert_eq!(fallback, &Fallback::Cached(A.to_owned()));
         }
         other => panic!("expected Network, got {other:?}"),
@@ -549,32 +561,63 @@ fn status_reports_a_tampered_bundle_as_unhealthy() {
 }
 
 /// Serves `routes` (path -> status, body) over HTTP/1.1 on a loopback port,
-/// one request per connection, and returns the base URL. The thread lives
-/// until the test process exits.
+/// one request per connection, and returns the base URL. A route with no
+/// query string answers that path with any query. The thread lives until the
+/// test process exits.
 fn serve(routes: Vec<(&'static str, u16, &'static str)>) -> String {
+    let owned = routes
+        .into_iter()
+        .map(|(path, status, body)| route(path, status, body))
+        .collect();
+    serve_recording(owned).0
+}
+
+/// One served route: path, status, body.
+type Route = (String, u16, Vec<u8>);
+
+/// Every request a [`serve_recording`] server saw: (path, raw headers).
+type Seen = std::sync::Arc<Mutex<Vec<(String, String)>>>;
+
+/// [`serve`] with owned routes and byte bodies, and a log of each request's
+/// path and headers.
+fn serve_recording(routes: Vec<Route>) -> (String, Seen) {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let seen = Seen::default();
+    let log = seen.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.expect("accept");
+            let mut reader = BufReader::new(&stream);
             let mut line = String::new();
-            BufReader::new(&stream)
-                .read_line(&mut line)
-                .expect("request");
-            let path = line.split_whitespace().nth(1).unwrap_or("");
+            reader.read_line(&mut line).expect("request");
+            let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
+            let mut headers = String::new();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).expect("header");
+                if header.trim().is_empty() {
+                    break;
+                }
+                headers.push_str(&header);
+            }
+            let empty = Vec::new();
+            let bare = path.split('?').next().unwrap_or("");
             let (status, body) = routes
                 .iter()
-                .find(|(p, _, _)| *p == path)
-                .map_or((404, ""), |(_, s, b)| (*s, *b));
+                .find(|(p, _, _)| *p == path || *p == bare)
+                .map_or((404, &empty), |(_, s, b)| (*s, b));
+            log.lock().expect("log").push((path, headers));
             let _ = write!(
                 stream,
-                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
+            let _ = stream.write_all(body);
         }
     });
-    base
+    (base, seen)
 }
 
 #[test]
@@ -591,80 +634,159 @@ fn github_source_reads_a_404_as_absent() {
     );
 }
 
-/// One release-API entry, as JSON.
-fn api_release(tag: &str, draft: bool, prerelease: bool) -> String {
-    format!(r#"{{"tag_name":"{tag}","draft":{draft},"prerelease":{prerelease},"name":"x"}}"#)
+/// One `git/matching-refs` entry, as JSON.
+fn ref_entry(tag: &str) -> String {
+    format!(
+        r#"{{"ref":"refs/tags/{tag}","node_id":"n","url":"u","object":{{"sha":"s","type":"commit","url":"u"}}}}"#
+    )
 }
 
-/// A full page of 100 releases: 99 crate releases and `content`.
-fn full_page(content: &str) -> &'static str {
-    let mut entries: Vec<String> = (0..99)
-        .map(|i| api_release(&format!("trusty-mpm-v1.0.{i}"), false, false))
+/// A JSON array of ref entries for `tags`.
+fn refs(tags: &[&str]) -> String {
+    let entries: Vec<String> = tags.iter().map(|t| ref_entry(t)).collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// One `releases/tags/{tag}` response, as JSON.
+fn release_json(tag: &str, draft: bool, prerelease: bool) -> String {
+    format!(
+        r#"{{"tag_name":"{tag}","draft":{draft},"prerelease":{prerelease},"name":"x","assets":[]}}"#
+    )
+}
+
+/// The one tag-listing request; the server answers it whatever the query.
+const REFS: &str = "/git/matching-refs/tags/content-v";
+
+fn route(path: &str, status: u16, body: impl Into<Vec<u8>>) -> Route {
+    (path.to_owned(), status, body.into())
+}
+
+/// A source over `base`: assets under `/dl`, the API at the root.
+fn github(base: &str) -> GithubReleases {
+    GithubReleases::with_bases(&format!("{base}/dl"), base).expect("client")
+}
+
+/// #9036: matching-refs ignores `per_page` and `page` and answers every
+/// query with the whole list, so one unpaged request reads it all. The
+/// server here does the same with 120 refs; a client that pages re-reads
+/// them until its page cap and fails.
+#[test]
+fn github_source_lists_every_content_tag_in_one_request() {
+    let owned: Vec<String> = (0..120).map(|i| format!("content-v0.0.{i}")).collect();
+    let tags: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let (base, seen) = serve_recording(vec![route(REFS, 200, refs(&tags))]);
+    let listed = github(&base).content_tags().expect("tags");
+    let paths: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.clone())
         .collect();
-    entries.push(content.to_owned());
-    Box::leak(format!("[{}]", entries.join(",")).into_boxed_str())
+    assert_eq!(paths, vec![REFS.to_owned()], "exactly one unpaged request");
+    assert_eq!(listed, owned);
 }
 
-const PAGE_1: &str = "/releases?per_page=100&page=1";
-const PAGE_2: &str = "/releases?per_page=100&page=2";
-
-/// The releases API is paged; content releases on any page are found, with
-/// their draft and pre-release flags, and other releases are dropped.
+/// The listing is read whole or not at all: one over the size cap is
+/// refused, never truncated to the tags that fit, and an update pins nothing.
 #[test]
-fn github_source_lists_content_releases_across_pages() {
-    let page2 = Box::leak(
-        format!(
-            "[{},{}]",
-            api_release(B, false, true),
-            api_release("content-v0.3.0", true, false)
-        )
-        .into_boxed_str(),
-    );
-    let base = serve(vec![
-        (PAGE_1, 200, full_page(&api_release(A, false, false))),
-        (PAGE_2, 200, page2),
-    ]);
-    let src = GithubReleases::with_bases(&base, &base).expect("client");
-    let release = |tag: &str, draft, prerelease| Release {
-        tag: tag.to_owned(),
-        draft,
-        prerelease,
-    };
-    assert_eq!(
-        src.content_releases().expect("releases"),
-        vec![
-            release(A, false, false),
-            release(B, false, true),
-            release("content-v0.3.0", true, false),
-        ]
-    );
+fn github_source_refuses_a_tag_listing_over_its_size_cap() {
+    let cap = usize::try_from(crate::content::release_source::MAX_LISTING_BYTES).unwrap();
+    let mut body = refs(&[A]).into_bytes();
+    body.resize(cap + 1, b' ');
+    let (base, _) = serve_recording(vec![route(REFS, 200, body)]);
+    let err = github(&base).content_tags().expect_err("over the cap");
+    assert!(err.reason.contains("over"), "{err:?}");
+    let cache = tempfile::tempdir().unwrap();
+    let err = update(cache.path(), &github(&base), None).expect_err("over the cap");
+    assert!(matches!(err, CacheError::Network { .. }), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
 }
 
-/// A listing that is still full at the page cap was not read to the end, so
-/// the newest release may be missing from it: refused, not truncated.
+/// A release body that is not JSON, a release for another tag, and a ref
+/// outside `refs/tags/` are each a failure naming what was wrong, and an
+/// update reading any of them pins nothing.
 #[test]
-fn github_source_refuses_a_listing_longer_than_its_page_cap() {
-    let base = serve(vec![(
-        PAGE_1,
-        200,
-        full_page(&api_release(A, false, false)),
-    )]);
-    let src = GithubReleases::with_bases(&base, &base)
-        .expect("client")
-        .with_max_pages(1);
-    let err = src.content_releases().expect_err("over the cap");
-    assert!(err.reason.contains("not read to the end"), "{err:?}");
+fn github_source_refuses_a_malformed_or_mismatched_answer() {
+    let release_route = format!("/releases/tags/{A}");
+    let bad_ref = format!(r#"[{{"ref":"refs/heads/{A}","object":{{"sha":"s"}}}}]"#);
+    let cases: [(&str, Vec<Route>, &str); 3] = [
+        (
+            "release body not JSON",
+            vec![
+                route(REFS, 200, refs(&[A])),
+                route(&release_route, 200, "<html>busy</html>"),
+            ],
+            "unexpected response",
+        ),
+        (
+            "tag_name mismatch",
+            vec![
+                route(REFS, 200, refs(&[A])),
+                route(&release_route, 200, release_json(B, false, false)),
+            ],
+            "asked for release",
+        ),
+        (
+            "ref outside refs/tags/",
+            vec![route(REFS, 200, bad_ref)],
+            "unexpected ref",
+        ),
+    ];
+    for (case, routes, reason) in cases {
+        let (base, _) = serve_recording(routes);
+        let src = github(&base);
+        let err = src
+            .content_tags()
+            .and_then(|_| src.release(A))
+            .expect_err(case);
+        assert!(err.reason.contains(reason), "{case}: {err:?}");
+        let cache = tempfile::tempdir().unwrap();
+        let err = update(cache.path(), &src, None).expect_err(case);
+        assert!(matches!(err, CacheError::Network { .. }), "{case}: {err:?}");
+        assert!(!cache.path().join(LOCK_FILE_NAME).exists(), "{case}");
+    }
 }
 
-/// Critic M3: a rate-limited (403) or unavailable (503) listing is a failure
-/// that names the status, and an update reads it as `Network`, never as
-/// `NoReleases`.
+/// #9036: an empty or whitespace-only `GITHUB_TOKEN` falls through to
+/// `GH_TOKEN`, and a blank `GH_TOKEN` is unset. Reads a table, not the process environment.
 #[test]
-fn github_source_reads_a_rate_limited_or_5xx_listing_as_a_failure() {
+fn an_empty_github_token_falls_through_to_gh_token() {
+    let cases = [
+        (Some(""), Some("gh"), Some("gh")),
+        (None, Some("gh"), Some("gh")),
+        (Some("g"), Some("gh"), Some("g")),
+        (Some("g"), None, Some("g")),
+        (Some("  "), Some("gh"), Some("gh")),
+        (Some("\n"), Some("gh"), Some("gh")),
+        (Some(" g \n"), Some("gh"), Some("g")),
+        (Some(""), Some(""), None),
+        (Some("  "), Some("\n"), None),
+        (Some(""), None, None),
+        (None, None, None),
+    ];
+    for (github_token, gh_token, want) in cases {
+        let got = crate::content::release_source::github_token_from(|name| match name {
+            "GITHUB_TOKEN" => github_token.map(str::to_owned),
+            "GH_TOKEN" => gh_token.map(str::to_owned),
+            other => panic!("unexpected variable {other}"),
+        });
+        assert_eq!(
+            got.as_deref(),
+            want,
+            "GITHUB_TOKEN={github_token:?} GH_TOKEN={gh_token:?}"
+        );
+    }
+}
+
+/// Critic M3: a rate-limited (403) or unavailable (503) listing, or release
+/// lookup, is a failure that names the status; an update reads it as
+/// `Network`, never as `NoReleases`, and pins nothing.
+#[test]
+fn github_source_reads_a_rate_limited_or_5xx_response_as_a_failure() {
     for (status, label) in [(403, "403"), (503, "503")] {
-        let base = serve(vec![(PAGE_1, status, "{\"message\":\"no\"}")]);
-        let src = GithubReleases::with_bases(&base, &base).expect("client");
-        let err = src.content_releases().expect_err("error status");
+        let (base, _) = serve_recording(vec![route(REFS, status, r#"{"message":"no"}"#)]);
+        let src = github(&base);
+        let err = src.content_tags().expect_err("error status");
         assert!(err.reason.contains(label), "{status}: {err:?}");
         let cache = tempfile::tempdir().unwrap();
         let err = update(cache.path(), &src, None).expect_err("no listing");
@@ -673,16 +795,38 @@ fn github_source_reads_a_rate_limited_or_5xx_listing_as_a_failure() {
             "{status}: {err:?}"
         );
         assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+
+        let (base, _) = serve_recording(vec![
+            route(REFS, 200, refs(&[A])),
+            route(
+                &format!("/releases/tags/{A}"),
+                status,
+                r#"{"message":"no"}"#,
+            ),
+        ]);
+        let src = github(&base);
+        let err = src.release(A).expect_err("error status");
+        assert!(err.reason.contains(label), "{status}: {err:?}");
+        let err = update(cache.path(), &src, None).expect_err("no release");
+        assert!(
+            matches!(err, CacheError::Network { .. }),
+            "{status}: {err:?}"
+        );
+        assert!(!cache.path().join(LOCK_FILE_NAME).exists());
     }
 }
 
-/// The repository always exists, so a 404 listing is a failure, not "none".
+/// The repository always exists, so a 404 listing, or a tag with no release,
+/// is a failure, not "none".
 #[test]
-fn github_source_reads_a_404_release_listing_as_a_failure() {
-    let base = serve(vec![]);
-    let src = GithubReleases::with_bases(&base, &base).expect("client");
-    let err = src.content_releases().expect_err("404");
+fn github_source_reads_a_404_tag_listing_as_a_failure() {
+    let (base, _) = serve_recording(vec![]);
+    let err = github(&base).content_tags().expect_err("404");
     assert!(err.reason.contains("404"), "{err:?}");
+    let (base, _) = serve_recording(vec![route(REFS, 200, refs(&[A]))]);
+    let cache = tempfile::tempdir().unwrap();
+    let err = update(cache.path(), &github(&base), None).expect_err("no release for the tag");
+    assert!(matches!(err, CacheError::Network { .. }), "{err:?}");
 }
 
 #[test]
@@ -697,11 +841,174 @@ fn github_source_reads_a_non_404_error_status_as_a_failure() {
 }
 
 #[test]
-fn github_source_refuses_a_release_listing_that_is_not_json() {
-    let base = serve(vec![(PAGE_1, 200, "<html>rate limited</html>")]);
-    let src = GithubReleases::with_bases(&base, &base).expect("client");
-    let err = src.content_releases().expect_err("not JSON");
+fn github_source_refuses_a_tag_listing_that_is_not_json() {
+    let (base, _) = serve_recording(vec![route(REFS, 200, "<html>rate limited</html>")]);
+    let err = github(&base).content_tags().expect_err("not JSON");
     assert!(err.reason.starts_with("unexpected response"), "{err:?}");
+}
+
+/// An empty matching-refs list is an error (`NoReleases`), never "current".
+#[test]
+fn update_with_no_content_tags_is_an_error() {
+    let (base, _) = serve_recording(vec![route(REFS, 200, "[]")]);
+    let cache = tempfile::tempdir().unwrap();
+    let err = update(cache.path(), &github(&base), None).expect_err("empty list");
+    assert!(matches!(err, CacheError::NoReleases), "{err:?}");
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+/// A tag that is not a content version is refused, not skipped.
+#[test]
+fn update_refuses_a_listing_with_an_unparsable_tag() {
+    let (base, _) = serve_recording(vec![route(REFS, 200, refs(&[A, "content-vfoo"]))]);
+    let cache = tempfile::tempdir().unwrap();
+    let err = update(cache.path(), &github(&base), None).expect_err("unparsable");
+    match &err {
+        CacheError::UnparsableTag { tag, .. } => assert_eq!(tag, "content-vfoo"),
+        other => panic!("expected UnparsableTag, got {other:?}"),
+    }
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+/// A release with no bundle, or a bundle with no `.sha256` sidecar, is an
+/// error that pins nothing.
+#[test]
+fn update_through_github_refuses_a_release_without_a_bundle_or_a_sidecar() {
+    let listing = [
+        route(REFS, 200, refs(&[A])),
+        route(
+            &format!("/releases/tags/{A}"),
+            200,
+            release_json(A, false, false),
+        ),
+    ];
+    let (base, _) = serve_recording(listing.to_vec());
+    let cache = tempfile::tempdir().unwrap();
+    let err = update(cache.path(), &github(&base), None).expect_err("no bundle");
+    assert!(matches!(err, CacheError::TagNotFound { .. }), "{err:?}");
+
+    let bytes = bundle(A, 1, b"x");
+    let mut routes = listing.to_vec();
+    routes.push(route(&format!("/dl/{A}/{A}.tar.gz"), 200, bytes));
+    let (base, _) = serve_recording(routes);
+    let err = update(cache.path(), &github(&base), None).expect_err("no sidecar");
+    assert!(
+        matches!(err, CacheError::SidecarNotPublished { .. }),
+        "{err:?}"
+    );
+    assert!(!cache.path().join(LOCK_FILE_NAME).exists());
+}
+
+/// #9036: finding the newest release costs two API requests however many
+/// content tags exist. Before: every page of `/releases` (about 6.4 MB in 4
+/// requests); the listing was a function of the total release count.
+#[test]
+fn update_finds_the_newest_release_in_two_api_requests() {
+    let newest = "content-v0.10.0";
+    let owned: Vec<String> = (0..60).map(|i| format!("content-v0.1.{i}")).collect();
+    let mut tags: Vec<&str> = owned.iter().map(String::as_str).collect();
+    tags.extend(["content-v0.9.0", newest]);
+    let bytes = bundle(newest, 1, b"x");
+    let (base, seen) = serve_recording(vec![
+        route(REFS, 200, refs(&tags)),
+        route(
+            &format!("/releases/tags/{newest}"),
+            200,
+            release_json(newest, false, false),
+        ),
+        route(&format!("/dl/{newest}/{newest}.tar.gz"), 200, bytes.clone()),
+        route(
+            &format!("/dl/{newest}/{newest}.tar.gz.sha256"),
+            200,
+            sidecar(newest, &bytes),
+        ),
+    ]);
+    let cache = tempfile::tempdir().unwrap();
+    let out = update(cache.path(), &github(&base), None).expect("update");
+    assert_eq!(out.tag, newest);
+    let api: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, _)| path.clone())
+        .filter(|path| !path.starts_with("/dl/"))
+        .collect();
+    assert_eq!(
+        api,
+        vec![REFS.to_owned(), format!("/releases/tags/{newest}")]
+    );
+}
+
+/// The token header goes on API calls when a token is set and nowhere when
+/// it is not; asset downloads never carry it.
+#[test]
+fn github_source_sends_the_token_only_when_one_is_set() {
+    let routes = || {
+        vec![
+            route(REFS, 200, refs(&[A])),
+            route(
+                &format!("/releases/tags/{A}"),
+                200,
+                release_json(A, false, false),
+            ),
+            route(&format!("/dl/{A}/file"), 200, "bytes"),
+        ]
+    };
+    let drive = |token: Option<&str>| {
+        let (base, seen) = serve_recording(routes());
+        let src = github(&base).with_token(token.map(str::to_owned));
+        src.content_tags().expect("tags");
+        src.release(A).expect("release");
+        src.asset(A, "file", 64).expect("asset");
+        seen.lock().unwrap().clone()
+    };
+    let auth = |headers: &str| {
+        headers
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .map(str::to_owned)
+    };
+    for (path, headers) in drive(Some("ghp_TOKEN123")) {
+        let found = auth(&headers).map(|l| l.split_once(':').unwrap().1.trim().to_owned());
+        if path.starts_with("/dl/") {
+            assert_eq!(found, None, "{path}");
+        } else {
+            assert_eq!(found.as_deref(), Some("Bearer ghp_TOKEN123"), "{path}");
+        }
+    }
+    let unauthenticated = drive(None);
+    assert_eq!(unauthenticated.len(), 3);
+    for (path, headers) in unauthenticated {
+        assert_eq!(auth(&headers), None, "{path}");
+    }
+    // An empty or whitespace-only token is unset.
+    for blank in ["", "  ", "\n"] {
+        for (path, headers) in drive(Some(blank)) {
+            assert_eq!(auth(&headers), None, "{blank:?} {path}");
+        }
+    }
+}
+
+/// The token is never in `Debug` of the source, in a `FetchError`, or in a
+/// `CacheError` (`Debug` or `Display`), on an HTTP failure or a token that
+/// cannot be sent.
+#[test]
+fn a_token_never_appears_in_debug_or_error_output() {
+    let token = "ghp_SECRETVALUE";
+    let (base, _) = serve_recording(vec![route(REFS, 403, r#"{"message":"rate limit"}"#)]);
+    let src = github(&base).with_token(Some(token.to_owned()));
+    assert!(!format!("{src:?}").contains(token), "{src:?}");
+    let fetch_err = src.content_tags().expect_err("403");
+    let cache = tempfile::tempdir().unwrap();
+    let cache_err = update(cache.path(), &src, None).expect_err("403");
+    let unsendable = github(&base).with_token(Some(format!("{token}\nx")));
+    let header_err = unsendable.content_tags().expect_err("bad header value");
+    assert!(
+        header_err.reason.contains("not a valid header"),
+        "{header_err:?}"
+    );
+    let text = format!("{fetch_err:?} {cache_err:?} {cache_err} {header_err:?} {unsendable:?}");
+    assert!(!text.contains("SECRETVALUE"), "{text}");
 }
 
 /// The newest release is chosen by semver: `0.10.0` beats `0.9.0`, which a
