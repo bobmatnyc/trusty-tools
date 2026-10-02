@@ -1119,18 +1119,20 @@ pub(super) fn prepare_session_inner(
         tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
     }
 
-    // Issue #3427: ensure the harness-scaffolding paths this deploy just wrote
-    // (or may write in a future session) are gitignored in `project_dir`, so
-    // they never enter this project's git history — the precondition for the
-    // "would be overwritten by merge" collision this issue reports. A no-op
-    // when `project_dir` is not a git working tree, and idempotent otherwise
-    // (see `scaffold_gitignore` module docs). Non-fatal: a write failure only
-    // means the operator keeps doing this manually, it never blocks launch.
-    // This only prevents FUTURE commits — a project that already committed
-    // these paths needs the `scaffold_tracking` doctor check's remediation,
-    // not this step.
-    if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
-        tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
+    // Issue #3427: keep the harness-scaffolding paths this deploy just wrote
+    // out of `project_dir`'s git history. #8758: through the shared
+    // `.git/info/exclude`, never the tracked `.gitignore`, whose append left
+    // `git status` dirty on every launch. A no-op when `project_dir` is not a
+    // git working tree. Non-fatal: a failure never blocks launch. A project
+    // that already committed these paths needs the `scaffold_tracking` doctor
+    // check's remediation, not this step.
+    match crate::core::harness_exclude::ensure_scaffold_excluded(project_dir) {
+        Ok(added) if !added.is_empty() => tracing::info!(
+            "added {} to the shared info/exclude (#8758)",
+            added.join(", ")
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!("harness scaffolding NOT excluded (non-fatal, #8758): {err}"),
     }
     // #8663: after the last write to a ledgered path. A failure only means a
     // later decommission keeps this workspace.

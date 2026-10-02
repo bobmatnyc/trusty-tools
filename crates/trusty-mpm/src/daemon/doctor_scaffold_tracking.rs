@@ -141,9 +141,9 @@ fn tracked_scaffold_paths(project_dir: &Path) -> Option<BTreeSet<String>> {
 /// message inviting over-broad cleanup; the fix is a command scoped to
 /// exactly the true intersection, nothing more.
 /// What: one `git rm -r --cached <paths…>` line (sorted, space-joined) plus a
-/// reminder that `tm` now auto-manages the matching `.gitignore` block
-/// (issue #3427 Part 1) so this collision does not recur once the cleanup
-/// commit lands.
+/// reminder that `tm` keeps these paths in `.git/info/exclude` on every
+/// launch (issue #3427 Part 1, #8758) so this collision does not recur once
+/// the cleanup commit lands.
 /// Test: `remediation_message_lists_exact_paths`.
 fn remediation_message(collisions: &BTreeSet<String>) -> String {
     let joined = collisions
@@ -154,10 +154,10 @@ fn remediation_message(collisions: &BTreeSet<String>) -> String {
     format!(
         "{count} harness-scaffolding path{plural} {verb} BOTH tracked in git AND regenerated \
          locally by tm — the next `git merge --ff-only` may abort with \"would be overwritten\" \
-         (issue #3427). Fix: `git rm -r --cached {joined}`, commit that removal, then commit \
-         the .gitignore entries tm keeps up to date automatically \
-         (`.claude/agents/`, `.claude/skills/`, `.claude/output-styles/`). This lists ONLY the \
-         true collision — not every untracked file git's own merge error would list.",
+         (issue #3427). Fix: `git rm -r --cached {joined}` and commit that removal; tm keeps \
+         these paths in `.git/info/exclude` on every launch (#8758), so they stay untracked. \
+         This lists ONLY the true collision — not every untracked file git's own merge error \
+         would list.",
         count = collisions.len(),
         plural = if collisions.len() == 1 { "" } else { "s" },
         verb = if collisions.len() == 1 { "is" } else { "are" },

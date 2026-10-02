@@ -16,11 +16,15 @@
 //! clean-tree reclaim gate. `/.trusty-mpm/` is skipped when the project tracks
 //! files under the top-level `.trusty-mpm/` — the same scope the pattern
 //! covers. [`ensure_and_log`] is the best-effort wrapper registration calls.
+//! [`ensure_scaffold_excluded`] adds the launch's scaffolding paths the same
+//! way (#8758).
 //! Test: `exclude_entries_are_added_once`,
 //! `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`,
 //! `nested_trusty_mpm_files_stay_visible`.
 
 use std::path::{Path, PathBuf};
+
+use crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS;
 
 /// The in-tree marker's name as an exclude pattern, anchored to the tree root.
 const MARKER_ENTRY: &str = "/.trusty-mpm-worktree";
@@ -108,19 +112,57 @@ pub(crate) fn pending_excludes(repo: &Path) -> Result<(PathBuf, Vec<&'static str
 /// `trusty_mpm_dir_is_skipped_when_it_holds_tracked_files`.
 pub(crate) fn ensure_harness_files_excluded(repo: &Path) -> Result<Vec<&'static str>, String> {
     let (path, pending) = pending_excludes(repo)?;
-    if pending.is_empty() {
-        return Ok(pending);
+    append_lines(&path, &pending)?;
+    Ok(pending)
+}
+
+/// Append every [`SCAFFOLD_IGNORED_PATHS`] line `project_dir`'s shared
+/// `info/exclude` lacks; a no-op unless `project_dir` holds a `.git` entry.
+///
+/// Why: #8758 — the launch used to append these to the project's TRACKED
+/// `.gitignore`, which left `git status` dirty after every launch.
+/// What: never reads or writes `.gitignore`, so a managed block a tracked
+/// `.gitignore` already carries stays as it is. The `.git` gate keeps a
+/// non-git directory inside another repository from editing that
+/// repository's exclude file. Returns the entries it added.
+/// Test: `launch_leaves_a_tracked_gitignore_untouched`,
+/// `a_fifo_gitignore_does_not_hang_launch`.
+pub(crate) fn ensure_scaffold_excluded(project_dir: &Path) -> Result<Vec<&'static str>, String> {
+    if !project_dir.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let path = exclude_file(project_dir)?;
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    let pending: Vec<&'static str> = SCAFFOLD_IGNORED_PATHS
+        .iter()
+        .copied()
+        .filter(|entry| !existing.lines().any(|l| l.trim() == *entry))
+        .collect();
+    append_lines(&path, &pending)?;
+    Ok(pending)
+}
+
+/// Append `entries` to the exclude file at `path`, one per line, creating
+/// `info/` when absent and adding a leading newline when the file does not
+/// end in one. Writes nothing when `entries` is empty.
+fn append_lines(path: &Path, entries: &[&str]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     }
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut text = String::new();
     if !existing.is_empty() && !existing.ends_with('\n') {
         text.push('\n');
     }
-    for entry in &pending {
+    for entry in entries {
         text.push_str(entry);
         text.push('\n');
     }
@@ -128,10 +170,9 @@ pub(crate) fn ensure_harness_files_excluded(repo: &Path) -> Result<Vec<&'static 
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .and_then(|mut f| f.write_all(text.as_bytes()))
-        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
-    Ok(pending)
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 /// Best-effort [`ensure_harness_files_excluded`] for registration and
@@ -236,6 +277,37 @@ mod tests {
             "both entries must be ignored in a linked worktree: {}",
             String::from_utf8_lossy(&status.stdout)
         );
+    }
+
+    /// #8758: a FIFO at `.gitignore` never blocks the launch's scaffolding
+    /// step, which does not open that file.
+    #[test]
+    fn a_fifo_gitignore_does_not_hang_launch() {
+        let (_tmp, repo, _wt) = repo_with_worktree();
+        let fifo = repo.join(".gitignore");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(made.success(), "mkfifo failed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = repo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ensure_scaffold_excluded(&dir));
+        });
+        let Ok(result) = rx.recv_timeout(std::time::Duration::from_secs(20)) else {
+            // Release a reader blocked on the FIFO (non-blocking, so no reader
+            // means no wait); the thread is left to finish or leak.
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+            panic!("the scaffolding step blocked on the .gitignore FIFO");
+        };
+        let added = result.expect("exclude written");
+        assert_eq!(added, SCAFFOLD_IGNORED_PATHS.to_vec());
     }
 
     /// A project that tracks files under `.trusty-mpm/` keeps seeing new ones.

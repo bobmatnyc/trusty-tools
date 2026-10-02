@@ -119,9 +119,9 @@ pub(crate) enum ChangelogVerdict {
 /// Production [`Preflight`].
 ///
 /// Why/What/Test: resolves the session name from `$TM_SESSION_NAME` first and
-/// tmux second — the same resolution `tm-workflow.md`'s shipped-defaults
-/// section describes (`tmux display-message -p '#{session_name}'`) — reusing
-/// the crate's existing bounded tmux probe rather than adding a second one.
+/// the session of the caller's own pane (`$TMUX_PANE`) second, reusing
+/// [`current_tmux_session_name`](crate::commands::tmux_attach::current_tmux_session_name);
+/// neither gives `None`, which `plan` refuses with a `--session` hint (#8694).
 /// The changelog gate shells to the repo's own script so this command and CI
 /// can never disagree about the verdict. Exercised live; the decision logic
 /// it feeds is covered against `FakePreflight`.
@@ -133,7 +133,8 @@ impl Preflight for RealPreflight {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .or_else(crate::commands::statusline::branch::tmux_session_name)
+            // #8694: the caller's own pane, never the last-attached client's session.
+            .or_else(crate::commands::tmux_attach::current_tmux_session_name)
     }
 
     fn cleanup_registry(&self) -> trusty_mpm::core::pr_cleanup::CleanupRegistry {

@@ -60,7 +60,7 @@ fn provision(ws: &Path) {
     std::fs::write(ws.join("CLAUDE.md"), "# Project Instructions\n").expect("CLAUDE.md");
     std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
     std::fs::write(ws.join(".claude/settings.json"), "{}\n").expect("settings.json");
-    crate::core::scaffold_gitignore::ensure_scaffold_gitignored(ws).expect("scaffold block");
+    crate::core::scaffold_gitignore::append_legacy_block(ws);
     assert!(record(ws, &before).expect("record the ledger"));
 }
 

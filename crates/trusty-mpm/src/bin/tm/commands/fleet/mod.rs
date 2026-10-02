@@ -99,13 +99,40 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
     }
 }
 
-/// The Architect directory: `--dir` made absolute, else [`DEFAULT_DIR`] under `home`.
+/// The Architect directory: `--dir` made absolute, else the one Architect
+/// `home`'s config records, else [`DEFAULT_DIR`] under `home`.
 ///
-/// Test: `dir_overrides_the_default`.
+/// Why: #8995 — a bare `tm fleet status` checked the default while the
+/// operator's Architect was recorded elsewhere.
+/// What: without `--dir`, the recorded Architects are [`config::architects`]
+/// of `home`'s `~/.trusty-mpm/config.toml`. One is returned as recorded; none
+/// gives the default. A config that is absent, unreadable or malformed counts
+/// as none: `status` reports such a file in its `allowlist` row and `init`
+/// refuses it. More than one is an error asking for `--dir`.
+/// Test: `dir_overrides_the_default`,
+/// `status_without_dir_checks_the_recorded_architect`,
+/// `two_recorded_architects_ask_for_dir`.
 pub(crate) fn resolve_dir(dir: Option<&str>, home: &Path) -> anyhow::Result<PathBuf> {
-    match dir {
-        Some(dir) => std::path::absolute(dir).with_context(|| format!("invalid --dir {dir:?}")),
-        None => Ok(home.join(DEFAULT_DIR)),
+    if let Some(dir) = dir {
+        return std::path::absolute(dir).with_context(|| format!("invalid --dir {dir:?}"));
+    }
+    // #8995: the recorded Architect wins over the default.
+    let path = user_config_path(home);
+    let recorded = read_or_empty(&path)
+        .and_then(|raw| config::parse_user_config(&raw, &path))
+        .map(|(_, typed)| config::architects(&typed))
+        .unwrap_or_default();
+    match recorded.as_slice() {
+        [] => Ok(home.join(DEFAULT_DIR)),
+        [one] => Ok(one.clone()),
+        many => bail!(
+            "{} records more than one Architect in `[supervisor] projects` ({}); pass --dir",
+            path.display(),
+            many.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

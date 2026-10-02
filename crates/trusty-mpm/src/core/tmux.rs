@@ -311,8 +311,8 @@ pub fn run_tmux(cmd: &TmuxCommand) -> std::io::Result<std::process::Output> {
 /// the typed commands.
 /// What: `target: None` renders untargeted (`display-message -p <format>`,
 /// which tmux resolves against the invoking CLIENT, not any particular
-/// session — the "current client" fallback [`current_tmux_session_name`](
-/// crate) and [`tmux_session_name`](crate) both rely on); `Some(target)`
+/// session — the "current client" fallback [`tmux_session_name`](crate)
+/// relies on; #8694 moved `current_tmux_session_name` to a pane target); `Some(target)`
 /// renders `-t <target.as_target()> -p <format>`, addressing exactly the
 /// session or bare pane id [`TmuxTarget::as_target`] renders (never a
 /// `"session:%pane"` compound, which tmux parses as a window spec, not a

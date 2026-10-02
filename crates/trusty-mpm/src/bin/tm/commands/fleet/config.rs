@@ -140,11 +140,22 @@ pub(crate) fn request_supervisor_profile(raw: &str, path: &Path) -> anyhow::Resu
 /// supervisor profile.
 /// Test: `a_second_architect_elsewhere_is_refused`.
 pub(crate) fn other_architects(config: &MpmConfig, dir: &Path) -> Vec<PathBuf> {
+    architects(config)
+        .into_iter()
+        .filter(|entry| !session_profile::path_is_listed(dir, std::slice::from_ref(entry)))
+        .collect()
+}
+
+/// Every absolute `[supervisor] projects` entry whose `.trusty-mpm.toml`
+/// requests the supervisor profile: the Architects `init` recorded.
+///
+/// Test: `status_without_dir_checks_the_recorded_architect`,
+/// `a_second_architect_elsewhere_is_refused`.
+pub(crate) fn architects(config: &MpmConfig) -> Vec<PathBuf> {
     config
         .supervisor
         .projects
         .iter()
-        .filter(|entry| !session_profile::path_is_listed(dir, std::slice::from_ref(entry)))
         .filter(|entry| entry.is_absolute() && session_profile::requested(entry).is_supervisor())
         .cloned()
         .collect()
