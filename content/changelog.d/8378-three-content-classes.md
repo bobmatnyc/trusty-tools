@@ -1,0 +1,2 @@
+Changed
+- The bundle's top level is the three content classes, `agents/`, `skills/` and `instructions/` (owner ruling 2026-10-01). Output styles, the session-manager instructions and the harness-understanding docs move from top-level `output-styles/`, `sm_instructions/` and `harness_understanding/` to `instructions/output-styles/`, `instructions/sm_instructions/` and `instructions/harness_understanding/`, with the same files. `bundle-manifest.toml` lists one `[[class]]` table per class and one `[[source]]` table per packaged source directory.

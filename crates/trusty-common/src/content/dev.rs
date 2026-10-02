@@ -4,30 +4,36 @@ use std::path::{Path, PathBuf};
 
 use super::ContentError;
 
-/// Where each content class lives in a trusty-tools checkout, relative to its
-/// root, in the order `scripts/package_content.sh` packages them.
+/// Where each bundle destination lives in a trusty-tools checkout, as
+/// `(destination, source relative to the root)`, in the order
+/// `scripts/package_content.sh` packages them.
 ///
 /// Why: ADR-0064 decision 5 (iii) — run from inside the checkout, `tm` reads
 /// the working tree, not the installed cache. Until PHASE_1 (#8387) moves the
-/// assets to `content/<class>/`, the classes live in today's in-crate
-/// directories; this table mirrors the packager's `LEGACY_SOURCES`, so a
-/// bundle path (`skills/tm/SKILL.md`) names the same file in both modes.
-/// PHASE_1 changes the right-hand column to `content/<class>` and nothing else.
-/// Test: `dev_class_table_matches_the_packager` pins it to the packager.
+/// assets to `content/`, they live in today's in-crate directories; this table
+/// mirrors the packager's `LEGACY_SOURCES`, so a bundle path
+/// (`skills/tm/SKILL.md`) names the same file in both modes.
+/// What: every destination is one of the three content classes (`agents`,
+/// `skills`, `instructions`) or a subfolder of one; a nested row such as
+/// `instructions/output-styles` serves that subfolder from its own source, and
+/// wins over its parent class for paths under it (owner ruling 2026-10-01,
+/// #8378). PHASE_1 changes the right-hand column to `content/<destination>`.
+/// Test: `dev_class_table_matches_the_packager`,
+/// `packaged_destinations_lie_under_the_three_content_classes`.
 pub const DEV_CLASS_SOURCES: &[(&str, &str)] = &[
     ("agents", "crates/trusty-agents-common/src/assets/agents"),
     ("skills", "crates/trusty-mpm/src/assets/skills"),
     ("instructions", "crates/trusty-mpm/src/assets/instructions"),
     (
-        "output-styles",
+        "instructions/output-styles",
         "crates/trusty-mpm/src/assets/output-styles",
     ),
     (
-        "sm_instructions",
+        "instructions/sm_instructions",
         "crates/trusty-mpm/src/assets/sm_instructions",
     ),
     (
-        "harness_understanding",
+        "instructions/harness_understanding",
         "crates/trusty-agents-common/src/assets/harness_understanding",
     ),
 ];
@@ -226,15 +232,17 @@ fn first_missing_class(root: &Path) -> Option<PathBuf> {
 /// directory must be a real directory and the last a regular file. `Ok(None)`
 /// when the path is absent, is a symlink, a directory or anything else, or
 /// when any component starts with `.` — the packager skips those, as
-/// [`list_class`] does.
+/// [`list`] does.
 /// Test: `dev_read_serves_only_regular_files`.
 pub(super) fn read_regular(root: &Path, key: &str) -> Result<Option<Vec<u8>>, ContentError> {
-    let Some((class, rest)) = key.split_once('/') else {
+    let Some((dest, source)) = owner(key) else {
         return Ok(None);
     };
-    let Some(mut path) = class_dir(root, class) else {
+    // `key == dest` names a directory, never a file.
+    let Some(rest) = key.strip_prefix(dest).and_then(|r| r.strip_prefix('/')) else {
         return Ok(None);
     };
+    let mut path = root.join(source);
     let mut parts = rest.split('/').peekable();
     while let Some(part) = parts.next() {
         // #8378 review: a bundle never holds a dot-file, so dev mode must not.
@@ -263,19 +271,43 @@ pub(super) fn read_regular(root: &Path, key: &str) -> Result<Option<Vec<u8>>, Co
     }
 }
 
-/// The checkout directory holding `class`, if the class is known.
-pub(super) fn class_dir(root: &Path, class: &str) -> Option<PathBuf> {
+/// The [`DEV_CLASS_SOURCES`] row serving bundle path `key`: the longest
+/// destination that is `key` or one of its parent directories.
+fn owner(key: &str) -> Option<(&'static str, &'static str)> {
     DEV_CLASS_SOURCES
         .iter()
-        .find(|(name, _)| *name == class)
-        .map(|(_, rel)| root.join(rel))
+        .copied()
+        .filter(|(dest, _)| is_under(key, dest))
+        .max_by_key(|(dest, _)| dest.len())
 }
 
-/// Lists every regular file under `dir` as `<class>/<relative path>`, skipping
-/// dot-files and symlinks exactly as the packager does.
-pub(super) fn list_class(dir: &Path, class: &str) -> Result<Vec<String>, ContentError> {
+/// Whether bundle path `key` is `dir` or lies below it.
+fn is_under(key: &str, dir: &str) -> bool {
+    key.strip_prefix(dir)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Lists every regular file of a class or destination (`instructions`,
+/// `instructions/output-styles`) as sorted bundle paths, skipping dot-files and
+/// symlinks exactly as the packager does; any other `prefix` lists nothing.
+///
+/// What: walks every row whose destination lies under `prefix`, keeping only
+/// the paths that row serves, so a nested destination's files appear once
+/// even when its source sits inside its parent's (`content/` after PR-D).
+/// Test: `dev_checkout_serves_a_nested_destination_from_its_own_source`.
+pub(super) fn list(root: &Path, prefix: &str) -> Result<Vec<String>, ContentError> {
     let mut out = Vec::new();
-    walk(dir, class, &mut out)?;
+    for (dest, source) in DEV_CLASS_SOURCES
+        .iter()
+        .filter(|(d, _)| is_under(d, prefix))
+    {
+        let mut keys = Vec::new();
+        walk(&root.join(source), dest, &mut keys)?;
+        out.extend(
+            keys.into_iter()
+                .filter(|k| owner(k).is_some_and(|(d, _)| d == *dest)),
+        );
+    }
     out.sort();
     Ok(out)
 }

@@ -10,33 +10,41 @@
 #   anything that varies between runs: file mtimes, walk order, the packer's
 #   uid/gid, or the gzip header timestamp.
 #
-# What: collects every regular file under each content class's source
-#   directory, then writes, into --out-dir:
+# What: collects every regular file under each source directory in the
+#   table below, then writes, into --out-dir:
 #     content-v<version>.tar.gz          the bundle
 #     content-v<version>.tar.gz.sha256   `<hex>  <name>`, `sha256sum -c` form
 #   The tarball's first entry is `bundle-manifest.toml` (bundle version, tag,
-#   content schema major, per-class source and file count); the class trees
-#   follow as `<class>/<relative path>`, sorted by path. Every entry has
+#   content schema major, per-class file count, per-source path and count);
+#   the trees follow as `<destination>/<relative path>`, sorted by path. Every
+#   destination lies under one of the three content classes, `agents`,
+#   `skills` and `instructions` (owner ruling 2026-10-01, ADR-0064), so the
+#   bundle's top level is those three directories. Every entry has
 #   mtime 0, uid/gid 0 with empty owner names, and mode 0644 (files) or 0755
 #   (directories); the gzip header carries mtime 0 and no file name.
 #   Dot-files and dot-directories are skipped. A class whose directory is
 #   missing, holds no files, or holds a symlink or other non-regular file
 #   fails the run, and no bundle is written: an empty or partial bundle
-#   would pin cleanly and deploy nothing (Fail-Open Check).
+#   would pin cleanly and deploy nothing (Fail-Open Check). Two sources that
+#   put the same path in the bundle also fail the run.
 #
 # Source layout: until PHASE_1/PR-D (#8387) moves the tree, content lives in
-#   the in-crate asset directories listed in LEGACY_SOURCES below. PR-D flips
-#   DEFAULT_SOURCE_ROOT to "content", after which every class is read from
-#   content/<class>/ and LEGACY_SOURCES can be deleted.
+#   the in-crate asset directories listed in LEGACY_SOURCES below. A nested
+#   destination (`instructions/output-styles`) packages a separate crate
+#   directory into a subfolder of its class. Under --source-root, each
+#   destination is read from <root>/<destination>/; a parent class's walk
+#   skips a subfolder that is another row's source, so its files are packaged
+#   once. PR-D flips DEFAULT_SOURCE_ROOT to "content", after which the tree is
+#   read from content/ and LEGACY_SOURCES can be deleted.
 #
 # Usage:
 #   bash scripts/package_content.sh --version 0.1.0
 #   bash scripts/package_content.sh --version 0.1.0 --out-dir dist \
-#     [--source-root <dir>]     # read <dir>/<class>/ instead of the table
+#     [--source-root <dir>]     # read <dir>/<destination>/ instead of the table
 #   A relative --out-dir or --source-root resolves against the caller's cwd.
 #
 # Exit: 0 bundle written; 1 a source directory is missing, empty, or holds a
-#   non-regular file; 2 bad arguments.
+#   non-regular file, or two sources collide; 2 bad arguments.
 #
 # Test: scripts/package_content_selftest.sh
 #
@@ -57,14 +65,17 @@ SCHEMA_MAJOR=1
 # PR-D (#8387): set to "content" once the tree lives at content/<class>/.
 DEFAULT_SOURCE_ROOT=""
 
-# <class>=<source directory, relative to the repo root>, in manifest order.
+# <destination in the bundle>=<source directory, relative to the repo root>,
+# in manifest order. A destination's first segment is one of the three
+# content classes (#8378); crates/trusty-common/src/content/dev.rs mirrors
+# this table and `dev_class_table_matches_the_packager` pins the two.
 LEGACY_SOURCES="
 agents=crates/trusty-agents-common/src/assets/agents
 skills=crates/trusty-mpm/src/assets/skills
 instructions=crates/trusty-mpm/src/assets/instructions
-output-styles=crates/trusty-mpm/src/assets/output-styles
-sm_instructions=crates/trusty-mpm/src/assets/sm_instructions
-harness_understanding=crates/trusty-agents-common/src/assets/harness_understanding
+instructions/output-styles=crates/trusty-mpm/src/assets/output-styles
+instructions/sm_instructions=crates/trusty-mpm/src/assets/sm_instructions
+instructions/harness_understanding=crates/trusty-agents-common/src/assets/harness_understanding
 "
 
 usage() {
@@ -112,24 +123,25 @@ abs_path() {
 OUT_DIR="$(abs_path "$OUT_DIR")"
 [ -z "$SOURCE_ROOT_ARG" ] || SOURCE_ROOT="$(abs_path "$SOURCE_ROOT_ARG")"
 
-# Build the class list as <class>=<path> lines. A relative table path (and
-# DEFAULT_SOURCE_ROOT) resolves against the repo root, not the caller's cwd.
-CLASSES=""
+# Build the source list as <destination>=<path> lines. A relative table path
+# (and DEFAULT_SOURCE_ROOT) resolves against the repo root, not the caller's
+# cwd.
+SOURCES=""
 for pair in $LEGACY_SOURCES; do
-  class="${pair%%=*}"
+  dest="${pair%%=*}"
   if [ -n "$SOURCE_ROOT" ]; then
-    src="${SOURCE_ROOT%/}/${class}"
+    src="${SOURCE_ROOT%/}/${dest}"
   else
     src="${pair#*=}"
   fi
-  CLASSES="${CLASSES}${class}=${src}
+  SOURCES="${SOURCES}${dest}=${src}
 "
 done
 
 mkdir -p "$OUT_DIR"
 cd "$REPO_ROOT"
 
-CLASSES="$CLASSES" python3 - "$VERSION" "$SCHEMA_MAJOR" "$OUT_DIR" <<'PY'
+SOURCES="$SOURCES" python3 - "$VERSION" "$SCHEMA_MAJOR" "$OUT_DIR" <<'PY'
 import gzip
 import hashlib
 import io
@@ -156,29 +168,32 @@ def die(msg):
     sys.exit(1)
 
 
-def collect(cls, src):
-    """Return one class tree's (archive_path, abs_path, is_dir) entries and file count."""
+def collect(dest, src, owned):
+    """Return one source tree's (archive_path, abs_path, is_dir) entries and
+    file count. A subdirectory in `owned` (another row's source) is skipped:
+    that row packages it."""
     if not os.path.isdir(src) or os.path.islink(src):
-        die(f"source directory for class '{cls}' is missing: {src}")
-    entries = [(cls, src, True)]
+        die(f"source directory for '{dest}' is missing: {src}")
+    entries = [(dest, src, True)]
     files = 0
     for root, dirs, names in os.walk(src):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and os.path.realpath(os.path.join(root, d)) not in owned]
         for d in dirs:
             path = os.path.join(root, d)
             if os.path.islink(path):
-                die(f"symlink in class '{cls}': {path}")
-            entries.append((f"{cls}/{os.path.relpath(path, src)}", path, True))
+                die(f"symlink in '{dest}': {path}")
+            entries.append((f"{dest}/{os.path.relpath(path, src)}", path, True))
         for n in names:
             if n.startswith("."):
                 continue
             path = os.path.join(root, n)
             if not stat.S_ISREG(os.lstat(path).st_mode):
-                die(f"non-regular file in class '{cls}': {path}")
-            entries.append((f"{cls}/{os.path.relpath(path, src)}", path, False))
+                die(f"non-regular file in '{dest}': {path}")
+            entries.append((f"{dest}/{os.path.relpath(path, src)}", path, False))
             files += 1
     if files == 0:
-        die(f"source directory for class '{cls}' holds no files: {src}")
+        die(f"source directory for '{dest}' holds no files: {src}")
     return entries, files
 
 
@@ -187,25 +202,36 @@ for stale in (name, f"{name}.sha256"):
     if os.path.exists(os.path.join(out_dir, stale)):
         os.remove(os.path.join(out_dir, stale))
 
-classes, entries = [], []
-for line in os.environ["CLASSES"].splitlines():
-    if not line:
-        continue
-    cls, src = line.split("=", 1)
-    got, files = collect(cls, src)
-    classes.append((cls, src, files))
+rows = [line.split("=", 1) for line in os.environ["SOURCES"].splitlines() if line]
+sources, entries = [], []
+for dest, src in rows:
+    owned = {os.path.realpath(s) for d, s in rows if d != dest}
+    got, files = collect(dest, src, owned)
+    sources.append((dest, src, files))
     entries.extend(got)
 entries.sort(key=lambda e: e[0].encode("utf-8"))
+# #8378: two sources writing one bundle path would let tar keep either copy.
+seen = set()
+for arcname, _, _ in entries:
+    if arcname in seen:
+        die(f"two sources put '{arcname}' in the bundle")
+    seen.add(arcname)
+classes = {}
+for dest, _, files in sources:
+    cls = dest.split("/", 1)[0]
+    classes[cls] = classes.get(cls, 0) + files
 
 manifest = [
     "# Generated by scripts/package_content.sh (ADR-0064). Do not edit.",
     f'bundle_version = "{version}"',
     f'tag = "{tag}"',
     f"schema_major = {schema_major}",
-    f"file_count = {sum(c[2] for c in classes)}",
+    f"file_count = {sum(classes.values())}",
 ]
-for cls, src, files in classes:
-    manifest += ["", "[[class]]", f'name = "{cls}"', f"source = {json.dumps(src)}", f"files = {files}"]
+for cls, files in classes.items():
+    manifest += ["", "[[class]]", f'name = "{cls}"', f"files = {files}"]
+for dest, src, files in sources:
+    manifest += ["", "[[source]]", f'path = "{dest}"', f"source = {json.dumps(src)}", f"files = {files}"]
 manifest_bytes = ("\n".join(manifest) + "\n").encode("utf-8")
 
 
@@ -243,5 +269,5 @@ finally:
 with open(os.path.join(out_dir, f"{name}.sha256"), "w", encoding="utf-8") as fh:
     fh.write(f"{digest}  {name}\n")
 print(f"package_content: wrote {os.path.join(out_dir, name)} "
-      f"({sum(c[2] for c in classes)} files, schema {schema_major}, sha256 {digest})")
+      f"({sum(classes.values())} files, schema {schema_major}, sha256 {digest})")
 PY
