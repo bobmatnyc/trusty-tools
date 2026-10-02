@@ -654,3 +654,99 @@ async fn a_stream_against_a_dead_socket_is_a_bad_gateway() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(!content_type.contains("event-stream"), "{content_type}");
 }
+
+// ─── typeahead (#9028) ───────────────────────────────────────────────────────
+
+/// A stub `search.typeahead` that decodes `params` the way the daemon's
+/// `IndexScoped<TypeaheadParams>` does: `index_id` and `q` strings, `limit` an
+/// unsigned integer when present, `mode` one of the two named modes. Anything
+/// else is the daemon's own `invalid_params` refusal.
+fn typeahead_daemon(request: &Value) -> Vec<String> {
+    let p = &request["params"];
+    let limit_ok = p.get("limit").is_none_or(Value::is_u64);
+    let mode_ok = p
+        .get("mode")
+        .is_none_or(|m| m == "lexical" || m == "blended");
+    if request["method"] != "search.typeahead"
+        || !p["index_id"].is_string()
+        || !p["q"].is_string()
+        || !limit_ok
+        || !mode_ok
+    {
+        return vec![error_frame(-32602, &format!("invalid params: {p}"))];
+    }
+    vec![result_frame(json!({
+        "hits": [{ "label": p["q"].clone(), "path": "src/lib.rs", "start_line": 1,
+                   "score": 1.0, "source": "lexical", "snippet": "" }],
+        "mode": p["mode"].clone(),
+        "latency_ms": 1,
+    }))]
+}
+
+/// Why (#9028): the query box asks every index per keystroke, and before this
+/// row the console answered `501`, so the box stopped asking. The SPA's exact
+/// URL — `URLSearchParams` over `q`, a stringified `limit` and `mode` — must
+/// reach `search.typeahead` with each field in its own type, and a digit-only
+/// prefix must stay text.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_keystroke_reaches_the_daemon_and_returns_its_hits() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), typeahead_daemon);
+
+    let (status, content_type, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=404&limit=6&mode=lexical",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(content_type.contains("application/json"), "{content_type}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["hits"][0]["label"], json!("404"), "{body}");
+    assert_eq!(parsed["mode"], json!("lexical"));
+}
+
+/// Why (#9028, the fail-open check): a typeahead against a daemon that is not
+/// running must read as the daemon being down — `502` naming it — and never as
+/// an empty suggestion list, which the box would render as "no matches".
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_against_a_dead_socket_is_a_bad_gateway() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (status, _, body) = through_router(
+        tmp.path().join("absent.sock"),
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=fn&limit=6&mode=lexical",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("trusty-search"), "{body}");
+}
+
+/// Why (#9028): a `limit` that is not a number must reach the daemon as text
+/// and come back as the daemon's `invalid_params`, rendered `400` with its
+/// words — not be coerced into some other valid value, and not read as `501`.
+/// Test: this is the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typeahead_with_a_bad_limit_is_a_bad_request() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let socket = stub_daemon(tmp.path(), typeahead_daemon);
+
+    let (status, _, body) = through_router(
+        socket,
+        "GET",
+        "/api/search/indexes/scratch/typeahead?q=fn&limit=many",
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let words = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        words.contains(r#""limit":"many""#),
+        "the daemon's words must reach the caller, limit still text: {body}"
+    );
+}

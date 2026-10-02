@@ -35,8 +35,13 @@
 //! be REFUSED by the daemon's own deserialiser rather than silently mis-read,
 //! which is why the coercion is safe to make blind.
 //!
+//! The one row where a string field routinely carries such a value is
+//! typeahead: `q` is whatever the operator typed, `404` included. That row
+//! names `q` as text and coerces only the rest (#9028).
+//!
 //! Test: `maps_every_endpoint_the_spa_calls`, `refuses_an_unmapped_path`,
-//! `query_json_coerces_bools_and_integers`, `body_json_reads_an_empty_body_as_absent`.
+//! `query_json_coerces_bools_and_integers`, `a_typeahead_prefix_is_never_coerced`,
+//! `body_json_reads_an_empty_body_as_absent`.
 
 use axum::http::Method;
 use serde_json::{Map, Value, json};
@@ -47,6 +52,7 @@ use super::{
     METHOD_INDEX_PAUSE_EMBEDDING, METHOD_INDEX_REINDEX, METHOD_INDEX_REINDEX_STREAM,
     METHOD_INDEX_RESUME_EMBEDDING, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, METHOD_LOGS_TAIL,
     METHOD_QUERY, METHOD_QUERY_ALL, METHOD_REGISTRY_ORPHANS, METHOD_STATUS_STREAM,
+    METHOD_TYPEAHEAD,
 };
 
 /// What one mapped request asks the daemon for.
@@ -133,6 +139,14 @@ pub(crate) fn map_request(
         (&Method::POST, ["indexes", id, "search"]) => unary(
             METHOD_QUERY,
             json!({ "index_id": id, "body": body_json(body)? }),
+        ),
+        // #9028: `q` is what the operator typed, and the daemon's
+        // `TypeaheadParams::q` is a `String` — a prefix of `404` or `true`
+        // coerced blind would be refused, so `q` stays text. `limit` still
+        // becomes the integer `Option<usize>` expects; `mode` is text anyway.
+        (&Method::GET, ["indexes", id, "typeahead"]) => unary(
+            METHOD_TYPEAHEAD,
+            with_index(id, query_json_keeping_text(query, &["q"])),
         ),
         // `ReindexParams::body` is `Option`, so an absent body maps to `null`
         // rather than to `{}` — the same "no overrides" the HTTP route reads
@@ -227,6 +241,16 @@ fn body_json(body: &[u8]) -> Result<Value, String> {
 /// Test: `query_json_coerces_bools_and_integers`,
 /// `query_json_is_an_empty_object_for_no_query`.
 fn query_json(query: Option<&str>) -> Value {
+    query_json_keeping_text(query, &[])
+}
+
+/// [`query_json`], except the keys in `text` are never coerced.
+///
+/// Why: blind coercion is safe only while no string-typed field can carry a
+/// literal `true` or a bare integer. A typed prefix can (#9028), and the
+/// daemon would refuse it as `invalid_params` on every digit the operator types.
+/// Test: `a_typeahead_prefix_is_never_coerced`.
+fn query_json_keeping_text(query: Option<&str>, text: &[&str]) -> Value {
     let mut out = Map::new();
     let Some(raw) = query.filter(|q| !q.is_empty()) else {
         return Value::Object(out);
@@ -237,6 +261,10 @@ fn query_json(query: Option<&str>) -> Value {
         return Value::Object(out);
     };
     for (key, value) in url.query_pairs() {
+        if text.contains(&key.as_ref()) {
+            out.insert(key.into_owned(), Value::String(value.into_owned()));
+            continue;
+        }
         let coerced = match value.as_ref() {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
@@ -336,6 +364,18 @@ mod tests {
             Call::Unary {
                 method: METHOD_QUERY,
                 params: json!({ "index_id": "a", "body": { "text": "q", "top_k": 10 } })
+            }
+        );
+        assert_eq!(
+            unary(
+                &Method::GET,
+                "indexes/a/typeahead",
+                Some("q=auth&limit=6&mode=lexical"),
+                ""
+            ),
+            Call::Unary {
+                method: METHOD_TYPEAHEAD,
+                params: json!({ "index_id": "a", "q": "auth", "limit": 6, "mode": "lexical" })
             }
         );
         assert_eq!(
@@ -539,6 +579,32 @@ mod tests {
         assert_eq!(v["n"], json!(200));
         assert_eq!(v["format"], json!("json"));
         assert_eq!(v["repo"], json!("own/repo"));
+    }
+
+    /// Why (#9028): the daemon's `TypeaheadParams::q` is a `String`, so a
+    /// prefix of `404` coerced to a number is refused and the operator's
+    /// digits get no suggestions. `limit` must still arrive as an integer.
+    /// What: digit, boolean and empty prefixes all stay strings; the
+    /// neighbouring `limit` is still coerced.
+    /// Test: this is the test.
+    #[test]
+    fn a_typeahead_prefix_is_never_coerced() {
+        for (raw, prefix) in [("404", "404"), ("true", "true"), ("", ""), ("a+b", "a b")] {
+            let call = unary(
+                &Method::GET,
+                "indexes/a/typeahead",
+                Some(&format!("q={raw}&limit=6")),
+                "",
+            );
+            assert_eq!(
+                call,
+                Call::Unary {
+                    method: METHOD_TYPEAHEAD,
+                    params: json!({ "index_id": "a", "q": prefix, "limit": 6 })
+                },
+                "prefix {raw:?}"
+            );
+        }
     }
 
     /// Why: a method whose params struct has all-default fields still refuses

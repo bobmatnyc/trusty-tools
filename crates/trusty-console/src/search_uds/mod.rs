@@ -73,6 +73,9 @@ pub(crate) const METHOD_INDEX_CONFIG_SET: &str = "search.index.config.set";
 pub(crate) const METHOD_QUERY: &str = "search.query";
 /// Cross-index fan-out search — `POST /search`.
 pub(crate) const METHOD_QUERY_ALL: &str = "search.query.all";
+// #9028: the dashboard's query box asks this per keystroke.
+/// Per-keystroke suggestions from one index — `GET /indexes/{id}/typeahead`.
+pub(crate) const METHOD_TYPEAHEAD: &str = "search.typeahead";
 /// Trigger a reindex — `POST /indexes/{id}/reindex`.
 pub(crate) const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// Daemon memory-limit config — `GET /config`.
