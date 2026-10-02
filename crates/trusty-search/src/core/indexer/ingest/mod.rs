@@ -376,7 +376,7 @@ impl CodeIndexer {
             // when it is decrypted again; the graph is rebuilt only when chunks
             // actually left.
             let id = crate::core::registry::IndexId::new(self.index_id.as_str());
-            let removed = crate::service::reindex::hash::purge_file(&id, self, file_path).await?;
+            let removed = self.purge_file(&id, file_path).await?;
             if removed > 0 && !self.skip_kg {
                 self.rebuild_symbol_graph().await;
             }

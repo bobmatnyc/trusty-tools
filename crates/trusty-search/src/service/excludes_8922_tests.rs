@@ -254,12 +254,14 @@ async fn open_rescan(
 /// #8922: every purge arm drops the file's content hash with its chunks, so a
 /// file that is excluded and then admitted again — unchanged — is re-read and
 /// re-indexed instead of hash-skipped forever. One index per arm: the rescan
-/// sweep, boot reconcile's delta, the `index_file` gate, and the rescan's sops
-/// arm. Fails with `forget_file_hash` removed from `purge_file`: the second
-/// open rescan reports the file unchanged and it stays empty.
+/// sweep, boot reconcile's delta, the `index_file` gate, the rescan's sops
+/// arm, and `CodeIndexer::index_file`'s own sops arm (the watcher's path).
+/// Fails with `forget_file_hash` removed from `purge_file`, or with any one
+/// arm's purge reverted to `remove_file_no_kg_rebuild`: the second open rescan
+/// reports the file unchanged and it stays empty.
 #[tokio::test]
 async fn a_purged_file_is_reindexed_once_readmitted() {
-    for arm in ["sweep", "boot", "gate", "sops"] {
+    for arm in ["sweep", "boot", "gate", "sops", "indexer"] {
         let (_temp, root) = tree();
         std::fs::write(root.join(SOPS), PLAIN_YAML).unwrap();
         let id = format!("x8922-readmit-{arm}");
@@ -268,7 +270,11 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
         narrowed.exclude_globs = vec!["**/secrets/**".into()];
         let files = IndexedFiles::new();
         open_rescan(&open, &root, &files).await;
-        let rel = if arm == "sops" { SOPS } else { EXCLUDED };
+        let rel = if matches!(arm, "sops" | "indexer") {
+            SOPS
+        } else {
+            EXCLUDED
+        };
         assert!(!ids(&open.indexer, rel).await.is_empty(), "{arm}: setup");
 
         match arm {
@@ -299,6 +305,12 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
                     "{arm}: the gate refuses the excluded path"
                 );
             }
+            "indexer" => {
+                // #8922: the watcher reaches `index_file` with the rescan's
+                // relative key; the plaintext stays on disk.
+                let idx = open.indexer.read().await;
+                idx.index_file(SOPS, &sample_sops_yaml()).await.unwrap();
+            }
             _ => {
                 std::fs::write(root.join(SOPS), sample_sops_yaml()).unwrap();
                 open_rescan(&open, &root, &files).await;
@@ -313,4 +325,57 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
             "{arm}: a re-admitted, unchanged file must be indexed again: {stats:?}"
         );
     }
+}
+
+/// #8922 fail-open check on persisted state: an index restored with an exclude
+/// glob that does not parse (`**.min.js`, persisted before entry validation)
+/// keeps its chunks through the next rescan, and `GET /indexes/{id}/config`
+/// reports the glob as invalid. Fails against cfa841fc78, where that glob
+/// matched every path and the rescan purged the whole index.
+#[tokio::test]
+async fn a_restored_invalid_glob_neither_purges_nor_hides() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+    use crate::service::persistence::PersistedIndex;
+    use crate::service::server::SearchAppState;
+
+    const ID: &str = "x8922-restore";
+    const BAD: &str = "**.min.js";
+    let (_temp, root) = tree();
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+    state.install_embedder(embedder.clone()).await;
+    let entry = PersistedIndex {
+        id: ID.to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        exclude_globs: vec![BAD.to_string()],
+        ..Default::default()
+    };
+    crate::service::lazy_restore::restore_index_on_demand(&state, &embedder, entry).await;
+    let restored = state.registry.get(&IndexId::new(ID)).expect("restored");
+
+    let idx = restored.indexer.read().await;
+    idx.index_file(KEPT, "pub fn kept() {}\n").await.unwrap();
+    drop(idx);
+    let files = IndexedFiles::new();
+    files
+        .record(PathBuf::from(KEPT), ids(&restored.indexer, KEPT).await)
+        .await;
+    assert!(!ids(&restored.indexer, KEPT).await.is_empty(), "setup");
+
+    let stats = open_rescan(&restored, &root, &files).await;
+    assert_eq!(stats.files_excluded, 0, "{stats:?}");
+    assert!(
+        !ids(&restored.indexer, KEPT).await.is_empty(),
+        "an invalid restored glob must not purge the index: {stats:?}"
+    );
+
+    let view = crate::service::server::index_config_report(&state, ID).expect("config");
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["exclude_globs"], serde_json::json!([BAD]), "{view}");
+    assert_eq!(
+        view["invalid_exclude_globs"],
+        serde_json::json!([BAD]),
+        "{view}"
+    );
 }

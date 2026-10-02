@@ -291,10 +291,10 @@ pub fn language_to_exts(lang: &str) -> &'static [&'static str] {
 
 /// Reject exclude globs that do not parse (#8922).
 ///
-/// Why: at runtime an unparsable glob excludes every path (see
-/// [`path_matches_any_glob`]), so one typo would purge a whole index. Callers
-/// that accept globs — repo-config load, `POST /indexes`, the config PATCH —
-/// refuse it up front instead.
+/// Why: at runtime an unparsable glob is skipped (see
+/// [`path_matches_any_glob`]), so it would index what it was written to
+/// exclude. Callers that accept globs — repo-config load, `POST /indexes`, the
+/// config PATCH — refuse it up front instead.
 /// What: `Err` naming the first pattern that fails `glob::Pattern::new`.
 /// Test: `an_invalid_exclude_glob_is_rejected_at_load`,
 /// `create_and_patch_reject_an_invalid_exclude_glob`.
@@ -305,6 +305,39 @@ pub fn validate_exclude_globs(globs: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The patterns in `globs` that do not parse, in order (#8922).
+///
+/// Why: a glob persisted before entry validation existed reaches the daemon
+/// only through restore, which reports it rather than refusing the index.
+/// What: every pattern `glob::Pattern::new` rejects.
+/// Test: `a_restored_invalid_glob_neither_purges_nor_hides`.
+pub fn invalid_exclude_globs(globs: &[String]) -> Vec<String> {
+    globs
+        .iter()
+        .filter(|pat| glob::Pattern::new(pat).is_err())
+        .cloned()
+        .collect()
+}
+
+/// Log each restored exclude glob that does not parse, naming the index.
+///
+/// Why (#8922): an index persisted with such a glob keeps loading. The glob is
+/// skipped at match time, so the operator must learn that it widens the index.
+/// What: one ERROR per invalid pattern; `GET /indexes/{id}/config` reports the
+/// same patterns as `invalid_exclude_globs`.
+/// Test: `a_restored_invalid_glob_neither_purges_nor_hides`.
+pub fn report_invalid_restored_globs(index_id: &str, globs: &[String]) {
+    for pat in invalid_exclude_globs(globs) {
+        tracing::error!(
+            index_id,
+            pattern = %pat,
+            "restored exclude glob does not parse; it is skipped, so the paths it \
+             was meant to exclude are indexed. Fix it with PATCH \
+             /indexes/{index_id}/config (#8922)"
+        );
+    }
 }
 
 /// Record that `pat` failed to parse; `true` only the first time per process.
@@ -324,10 +357,10 @@ fn first_report_of_invalid_glob(pat: &str) -> bool {
 /// (`"**/__tests__/**"`) and partial paths (`"selenium/"`). The `glob` crate's
 /// `Pattern` handles both via the standard glob syntax.
 /// What: parses each pattern once and tests with `Pattern::matches`. A pattern
-/// that fails to parse matches every path (#8922): the exclude config could not
-/// be read, so nothing it might cover is admitted. That error is logged once
-/// per pattern.
-/// Test: `test_glob_match_basic`, `an_unparsable_exclude_glob_excludes_every_path`,
+/// that fails to parse is skipped and logged once per pattern (#8922):
+/// matching every path instead purged a whole index on its next rescan.
+/// Entry points reject such globs; restore reports a persisted one.
+/// Test: `test_glob_match_basic`, `an_unparsable_exclude_glob_is_skipped`,
 /// `the_invalid_glob_backstop_logs_once`.
 pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
     if excludes.is_empty() {
@@ -365,16 +398,13 @@ pub fn path_matches_any_glob(path: &Path, excludes: &[String]) -> bool {
                 }
             }
             Err(e) => {
-                // #8922: fail closed — skipping the pattern indexed what it
-                // was written to exclude. Entry points reject such globs, so
-                // this is a backstop for a persisted config; logged once per
-                // pattern, not once per path.
+                // #8922: skip, never match everything — that purged the whole
+                // index. Only a persisted glob gets here; restore reports it.
                 if first_report_of_invalid_glob(pat) {
                     tracing::error!(
-                        "invalid exclude glob {pat:?}: {e} — excluding every path until it is fixed"
+                        "invalid exclude glob {pat:?}: {e} — skipped until it is fixed"
                     );
                 }
-                return true;
             }
         }
     }
@@ -502,20 +532,21 @@ indexes:
         ));
     }
 
-    /// #8922 fail-open check: an exclude glob that does not parse used to be
-    /// skipped, so the files it was written to exclude were indexed. Fails
-    /// with the `Err` arm restored to a skip.
+    /// #8922: an exclude glob that does not parse is skipped rather than
+    /// matching every path, and the valid globs beside it still apply. Fails
+    /// with the `Err` arm answering `true`, which purged the whole index.
     #[test]
-    fn an_unparsable_exclude_glob_excludes_every_path() {
-        let excludes = vec!["secrets/[unclosed".to_string()];
+    fn an_unparsable_exclude_glob_is_skipped() {
+        let excludes = vec!["**.min.js".to_string(), "**/secrets/**".to_string()];
+        assert!(!path_matches_any_glob(
+            Path::new("/repo/src/lib.rs"),
+            &excludes
+        ));
         assert!(path_matches_any_glob(
             Path::new("/repo/secrets/prod.yaml"),
             &excludes
         ));
-        assert!(path_matches_any_glob(
-            Path::new("/repo/src/lib.rs"),
-            &excludes
-        ));
+        assert_eq!(invalid_exclude_globs(&excludes), vec!["**.min.js"]);
     }
 
     /// #8922: a repo config whose exclude glob does not parse is a load error,
@@ -564,9 +595,9 @@ indexes:
         }
     }
 
-    /// #8922: the runtime backstop still excludes every path, but logs the bad
-    /// pattern once, not once per path checked. Fails with the
-    /// `first_report_of_invalid_glob` check removed (three errors are logged).
+    /// #8922: the runtime backstop skips the bad pattern and logs it once, not
+    /// once per path checked. Fails with the `first_report_of_invalid_glob`
+    /// check removed (three errors are logged).
     #[test]
     fn the_invalid_glob_backstop_logs_once() {
         use tracing_subscriber::layer::SubscriberExt;
@@ -582,7 +613,7 @@ indexes:
             // the no-op global dispatcher; re-evaluate it under this one.
             tracing::callsite::rebuild_interest_cache();
             for path in ["/repo/a.rs", "/repo/b.rs", "/repo/c/d.py"] {
-                assert!(path_matches_any_glob(Path::new(path), &excludes));
+                assert!(!path_matches_any_glob(Path::new(path), &excludes));
             }
         });
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);

@@ -770,7 +770,7 @@ pub(super) async fn apply_delta(
                 let idx = handle.indexer.read().await;
                 // #8922: the content hash goes with the chunks, and the graph
                 // is rebuilt once after the loop rather than per file.
-                crate::service::reindex::hash::purge_file(&handle.id, &idx, rel_path_str).await
+                idx.purge_file(&handle.id, rel_path_str).await
             };
             match result {
                 Ok(n) if n > 0 => removed += n,

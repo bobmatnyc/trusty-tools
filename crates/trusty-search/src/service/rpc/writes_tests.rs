@@ -977,9 +977,8 @@ async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transpor
     }
 }
 
-/// Why (#8922): an exclude glob that does not parse excludes every path at
-/// runtime, so accepting one at the API would purge the index on its next
-/// reconcile.
+/// Why (#8922): an exclude glob that does not parse is skipped at runtime, so
+/// accepting one at the API would index what it was written to exclude.
 /// What: `POST /indexes` and `PATCH /indexes/{id}/config` each answer
 /// `400 invalid_exclude_glob`, and neither registers nor changes anything.
 /// Fails with `reject_invalid_globs` removed from either handler.

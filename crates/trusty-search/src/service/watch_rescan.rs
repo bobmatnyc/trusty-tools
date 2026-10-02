@@ -427,14 +427,14 @@ async fn warm_hashes_from_corpus(
 /// Why (#8922): the hash goes with the chunks, or a re-admitted unchanged file
 /// is hash-skipped forever. No per-file graph rebuild: the pass rebuilds once.
 /// Caller obligation (#3049): the same as [`sweep_deleted`]'s — the caller
-/// holds the teardown guard.
+/// holds the teardown guard; declared in `scripts/teardown-guard-manifest.tsv`.
 async fn drop_file(
     index_id: &IndexId,
     indexer: &Arc<RwLock<CodeIndexer>>,
     path: &str,
 ) -> Result<usize, RescanError> {
     let idx = indexer.read().await;
-    crate::service::reindex::hash::purge_file(index_id, &idx, path)
+    idx.purge_file(index_id, path)
         .await
         .map_err(|source| RescanError::Remove {
             index_id: index_id.to_string(),

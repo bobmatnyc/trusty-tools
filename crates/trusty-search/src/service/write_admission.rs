@@ -134,8 +134,8 @@ async fn purge_pushed(
     indexer: &CodeIndexer,
     path: &str,
 ) -> anyhow::Result<usize> {
-    use crate::service::reindex::hash::{forget_file_hash, purge_file};
-    let removed = purge_file(&handle.id, indexer, path).await?;
+    use crate::service::reindex::hash::forget_file_hash;
+    let removed = indexer.purge_file(&handle.id, path).await?;
     if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
         forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
     }

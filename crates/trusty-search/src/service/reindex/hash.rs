@@ -127,17 +127,19 @@ pub(crate) async fn forget_file_hash(
         .map_err(|e| anyhow::anyhow!("file-hash delete task did not complete: {e}"))?
 }
 
-/// Purge one file for #8922: its chunks without a symbol-graph rebuild, then
-/// its content hash. Returns the chunks removed; the caller rebuilds the graph
-/// once, and only when something was removed.
-pub(crate) async fn purge_file(
-    index_id: &IndexId,
-    indexer: &crate::core::CodeIndexer,
-    rel: &str,
-) -> anyhow::Result<usize> {
-    let removed = indexer.remove_file_no_kg_rebuild(rel).await?;
-    forget_file_hash(index_id, indexer, rel).await?;
-    Ok(removed)
+impl crate::core::CodeIndexer {
+    /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
+    /// then its content hash. Returns the chunks removed; the caller rebuilds
+    /// the graph once, and only when something was removed.
+    ///
+    /// A method, not a free function, so `scripts/check_teardown_guard.sh`
+    /// sees every `.purge_file(` call site: both writes are durable and each
+    /// caller must hold the teardown guard (#3049).
+    pub(crate) async fn purge_file(&self, index_id: &IndexId, rel: &str) -> anyhow::Result<usize> {
+        let removed = self.remove_file_no_kg_rebuild(rel).await?;
+        forget_file_hash(index_id, self, rel).await?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]

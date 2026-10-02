@@ -62,6 +62,10 @@ pub struct IndexConfigView {
     pub extensions: Vec<String>,
     /// Glob patterns excluded on top of the built-in ignores.
     pub exclude_globs: Vec<String>,
+    /// #8922: the `exclude_globs` entries that do not parse and are skipped.
+    /// Only a glob persisted before entry validation can land here.
+    #[serde(default)]
+    pub invalid_exclude_globs: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
     pub include_docs: bool,
     /// Whether the walk honours `.gitignore` / `.ignore` / `.rgignore`.
@@ -87,6 +91,9 @@ impl IndexConfigView {
             data_file_max_bytes: handle.data_file_max_bytes,
             extensions: handle.extensions.clone(),
             exclude_globs: handle.exclude_globs.clone(),
+            invalid_exclude_globs: crate::core::repo_config::invalid_exclude_globs(
+                &handle.exclude_globs,
+            ),
             include_docs: handle.include_docs,
             respect_gitignore: handle.respect_gitignore,
             kg: !handle.skip_kg,
@@ -217,8 +224,8 @@ pub(super) async fn patch_index_config_handler(
 
 /// Refuse an `exclude_globs` list holding a pattern that does not parse (#8922).
 ///
-/// Why: at runtime such a glob excludes every path, so accepting it would purge
-/// the whole index on its next reconcile. `POST /indexes` and this PATCH share it.
+/// Why: at runtime such a glob is skipped, so accepting it would index what it
+/// was written to exclude. `POST /indexes` and this PATCH share it.
 /// What: `400 invalid_exclude_glob` naming the pattern; `None` passes.
 /// Test: `create_and_patch_reject_an_invalid_exclude_glob`.
 pub(crate) fn reject_invalid_globs(
