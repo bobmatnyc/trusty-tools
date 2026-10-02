@@ -75,7 +75,10 @@
 
 use tracing::warn;
 
-use crate::models::{Effort, Finding, Verdict};
+use crate::models::{Effort, Finding, Verdict, WithheldFinding};
+
+/// `WithheldFinding::reason` prefix for a self-negated or CoT-leaking drop.
+pub const SELF_NEGATED_REASON: &str = "#4044 self-negated";
 
 /// Case-insensitive substrings that mean the finding's OWN text has already
 /// negated it, or leaked raw mid-reasoning deliberation (#4044).
@@ -93,12 +96,16 @@ use crate::models::{Effort, Finding, Verdict};
 /// finding's text (cheap, dependency-free, no regex needed for fixed
 /// substrings).
 /// Test: `drops_finding_containing_each_self_negation_marker`,
-/// `does_not_drop_legitimate_finding_using_the_word_correct`.
+/// `does_not_drop_legitimate_finding_using_the_word_correct`,
+/// `self_negated_escapes_from_the_0_37_re_measure_are_withheld`.
 const SELF_NEGATION_MARKERS: &[&str] = &[
     "withdrawing",
     "withdraw this finding",
     "not a finding",
+    "non-finding",
     "no finding here",
+    "no issue here",
+    "this is fine",
     "no actual bug",
     "this is a non-issue",
     "is correctly implemented",
@@ -175,15 +182,19 @@ pub struct HygieneCounts {
 /// `runner.rs` and `mapreduce/mod.rs` from having to know the pass ordering.
 /// What: drops self-negated/leaked findings FIRST (so they never participate
 /// in downstream checks — e.g. `citation_check`'s mutual-contradiction pass),
-/// then demotes any surviving diff-absent-speculation High finding, then any
-/// surviving self-admitted-unverifiable claim (`evidence_admission`, #5309),
-/// then any surviving unverified package-registry claim (`claim_grounding`,
-/// #4081 — last, because the advisory note it appends contains registry
-/// vocabulary the earlier marker passes have no business re-reading).
+/// recording each in `withheld`, then demotes any surviving
+/// diff-absent-speculation High finding, then any surviving
+/// self-admitted-unverifiable claim (`evidence_admission`, #5309), then any
+/// surviving unverified package-registry claim (`claim_grounding`, #4081 —
+/// last, because the advisory note it appends contains registry vocabulary the
+/// earlier marker passes have no business re-reading).
 /// Test: `sanitize_findings_runs_every_pass`.
-pub fn sanitize_findings(findings: &mut Vec<Finding>) -> HygieneCounts {
+pub fn sanitize_findings(
+    findings: &mut Vec<Finding>,
+    withheld: &mut Vec<WithheldFinding>,
+) -> HygieneCounts {
     HygieneCounts {
-        dropped_self_negated: drop_self_negated_or_leaked_findings(findings),
+        dropped_self_negated: drop_self_negated_or_leaked_findings(findings, withheld),
         demoted_diff_absent: demote_diff_absent_speculation(findings),
         demoted_self_admitted_unverifiable:
             crate::pipeline::evidence_admission::demote_self_admitted_unverifiable(findings),
@@ -203,11 +214,16 @@ pub fn sanitize_findings(findings: &mut Vec<Finding>) -> HygieneCounts {
 /// not reliable signal worth salvaging.
 /// What: case-insensitive substring match against [`SELF_NEGATION_MARKERS`]
 /// over `kind`, `description`, and `consequence`; a hit removes the finding
-/// from the `Vec` and logs the reason at `warn` (never surfaced to the
-/// rendered review — this IS the mechanism that keeps it from being surfaced).
+/// from the `Vec`, logs the reason at `warn`, and pushes it onto `withheld`
+/// with the reason `#4044 self-negated (marker "…")` — never posted, but
+/// kept for the review record (owner ruling on #8905, 2026-09-30).
 /// Test: `drops_finding_containing_each_self_negation_marker`,
-/// `does_not_drop_legitimate_finding_using_the_word_correct`.
-pub fn drop_self_negated_or_leaked_findings(findings: &mut Vec<Finding>) -> usize {
+/// `does_not_drop_legitimate_finding_using_the_word_correct`,
+/// `self_negated_escapes_from_the_0_37_re_measure_are_withheld`.
+pub fn drop_self_negated_or_leaked_findings(
+    findings: &mut Vec<Finding>,
+    withheld: &mut Vec<WithheldFinding>,
+) -> usize {
     let mut dropped = 0usize;
     let mut kept = Vec::with_capacity(findings.len());
     for f in std::mem::take(findings) {
@@ -221,6 +237,11 @@ pub fn drop_self_negated_or_leaked_findings(findings: &mut Vec<Finding>) -> usiz
                     "finding-hygiene: dropping self-negated/CoT-leaking finding (#4044)"
                 );
                 dropped += 1;
+                withheld.push(WithheldFinding {
+                    finding: f,
+                    reason: format!("{SELF_NEGATED_REASON} (marker \"{marker}\")"),
+                    missing_fragment: None,
+                });
             }
             None => kept.push(f),
         }

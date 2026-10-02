@@ -156,7 +156,7 @@ async fn fabricated_centerpiece_findings_are_dropped_legit_finding_survives() {
         "precondition: the fabricated Highs force BLOCK before enforcement"
     );
 
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(
         dropped, 3,
         "all three fabricated findings must be dropped: {findings:#?}"
@@ -203,7 +203,7 @@ async fn fully_fabricated_review_relaxes_the_top_level_verdict_too() {
     let mut model_verdict = Verdict::Block;
     let mut model_grade = Some("F".to_string());
 
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(dropped, 3, "every fabricated finding must be dropped");
     assert!(findings.is_empty());
 
@@ -246,7 +246,7 @@ async fn citation_to_a_path_outside_the_diff_is_dropped() {
     f.code_provable = true;
     let mut findings = vec![f];
 
-    let dropped = enforce_citation_integrity(&mut findings, &index);
+    let dropped = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
     assert_eq!(dropped, 1, "an out-of-diff citation must be dropped");
     assert!(findings.is_empty());
 }
