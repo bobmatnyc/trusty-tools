@@ -504,7 +504,8 @@ pub(crate) async fn launch(
 /// connect), registers the session via `POST /api/v1/sessions/connect`,
 /// builds the PM system prompt via
 /// [`trusty_mpm::core::session_launch::cli_launch`]
-/// and writes it to a temp file, creates the tmux host idempotently
+/// and writes it to a temp file (#8286: refusing the connect if it cannot),
+/// creates the tmux host idempotently
 /// (`tmux new-session -A`), and — only when the session is freshly created —
 /// starts `claude` from the launch spec [`connect_claude_spec`] builds (`--append-system-prompt-file`
 /// plus the shared `--setting-sources project,local` /
@@ -578,14 +579,11 @@ pub(crate) async fn connect(
 
     // 1d. Build the PM system-prompt text for the live checkout (where 1c just
     //     deployed the framework) and write it to a temp file for
-    //     `--append-system-prompt-file` (issue #2230). Non-fatal: a write
-    //     failure omits the flag rather than blocking the connect.
+    //     `--append-system-prompt-file` (issue #2230). #8286: a write failure
+    //     refuses the connect before the daemon registers anything.
     // #8453: the prompt and the launch stamp come from one profile resolution.
     let cli = trusty_mpm::core::session_launch::cli_launch(&path, None);
-    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt);
-    if prompt_path.is_none() {
-        eprintln!("warning: failed to write system prompt file; connecting without prompt");
-    }
+    let prompt_path = connect_prompt_file(&std::env::temp_dir(), &cli.prompt, &path)?;
 
     // 2. Register the session with the daemon via the connect endpoint. When
     //    the daemon is unreachable we still bring the session up under the
@@ -623,7 +621,7 @@ pub(crate) async fn connect(
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
-    print_launch_banner(&workdir, &tmux_name, prompt_path.as_deref(), None);
+    print_launch_banner(&workdir, &tmux_name, Some(prompt_path.as_path()), None);
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -668,7 +666,7 @@ pub(crate) async fn connect(
         // #8308: same spec carrier as `tm launch`.
         let claude_spec = connect_claude_spec(
             &path,
-            prompt_path.as_deref(),
+            Some(prompt_path.as_path()),
             config_dir.as_deref(),
             // #4181: the per-project MCP pins; #8453: plus the profile stamp.
             &cli.env,
@@ -693,6 +691,28 @@ pub(crate) async fn connect(
         g.disarm();
     }
     Ok(())
+}
+
+/// Write the PM prompt file `tm connect` hands `claude` (#8286).
+///
+/// Why: a write failure used to connect without `--append-system-prompt-file`,
+/// so the session ran as plain Claude Code. `tm connect` launches a PM (or a
+/// supervisor), whose role is this prompt, so there is no optional case.
+/// What: [`trusty_mpm::core::model_inject::write_prompt_file_in`] under `dir`
+/// (production: the process temp dir); `Err` names the file, the I/O cause
+/// and `project`.
+/// Test: `connect_prompt_file_refuses_when_the_prompt_file_cannot_be_written`.
+fn connect_prompt_file(
+    dir: &std::path::Path,
+    prompt: &str,
+    project: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    trusty_mpm::core::model_inject::write_prompt_file_in(dir, prompt).map_err(|err| {
+        anyhow::anyhow!(
+            "{err}; refusing to connect {} without its PM instructions (#8286)",
+            project.display()
+        )
+    })
 }
 
 /// Compose the launch spec `connect` starts a freshly-created tmux pane with.
@@ -878,6 +898,22 @@ fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8286: `tm connect` refuses, naming the file and the cause, instead of
+    /// connecting without its PM prompt.
+    #[test]
+    fn connect_prompt_file_refuses_when_the_prompt_file_cannot_be_written() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
+        let err = connect_prompt_file(&not_a_dir, "prompt", tmp.path())
+            .expect_err("a connect without its PM prompt must be refused")
+            .to_string();
+        assert!(
+            err.contains(&*not_a_dir.to_string_lossy()) && err.contains("os error"),
+            "the refusal must name the prompt file and the I/O cause: {err}"
+        );
+    }
 
     /// Exact-match: a session whose workdir equals the live checkout directory must match.
     ///

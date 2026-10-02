@@ -306,9 +306,14 @@ fn build_prompt_file_records_under_the_named_framework_root() {
     let root = tempfile::tempdir().expect("named framework root");
     let project = tempfile::tempdir().expect("project");
 
-    let path = build_prompt_file_in(root.path(), project.path(), Some("sess-1"))
-        .0
-        .expect("prompt file written");
+    let path = build_prompt_file_in(
+        root.path(),
+        &std::env::temp_dir(),
+        project.path(),
+        Some("sess-1"),
+    )
+    .0
+    .expect("prompt file written");
     std::fs::remove_file(&path).ok();
 
     assert!(
@@ -2028,4 +2033,90 @@ fn spawn_resume_uses_resume_flag_for_a_worktree_cwd() {
         "a dotted worktree cwd must still resolve its own transcript: {:?}",
         spec.args
     );
+}
+
+// ── #8286: a PM launch whose prompt file cannot be written is refused ──────
+
+/// An adapter rooted under `home` with `claude` planted on `PATH`, whose
+/// prompt directory is a regular file, so the prompt-file write really fails.
+///
+/// What: returns the adapter, the planted file and the `PATH` guard, which
+/// must outlive the call under test.
+fn adapter_with_unwritable_prompt_dir(
+    fake: &std::sync::Arc<FakeTmux>,
+    home: &HomeGuard,
+) -> (ClaudeCodeAdapter, std::path::PathBuf, PathGuard) {
+    let bin_dir = home.home().join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    plant_fake_claude(&bin_dir);
+    let path = PathGuard::prepend(&bin_dir);
+    let not_a_dir = home.home().join("not-a-dir");
+    std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
+    let mut adapter =
+        ClaudeCodeAdapter::new(fake.clone(), Some(true), &home.home().join(".trusty-mpm"));
+    adapter.prompt_dir = not_a_dir.clone();
+    (adapter, not_a_dir, path)
+}
+
+/// Asserts `err` names a file under `prompt_dir`, and that nothing reached
+/// the pane.
+fn assert_refused(err: RuntimeError, prompt_dir: &Path, fake: &FakeTmux) {
+    let text = err.to_string();
+    assert!(
+        text.contains(&*prompt_dir.to_string_lossy()) && text.contains("os error"),
+        "the refusal must name the prompt file and the I/O cause: {text}"
+    );
+    assert!(
+        fake.sends.lock().expect("send log").is_empty()
+            && fake.pane_sends.lock().expect("pane send log").is_empty(),
+        "a refused launch must type nothing into the pane"
+    );
+}
+
+/// #8286: `spawn` used to launch without `--append-system-prompt-file` here.
+#[test]
+#[serial_test::serial]
+fn spawn_refuses_when_the_prompt_file_cannot_be_written() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let (adapter, not_a_dir, _path) = adapter_with_unwritable_prompt_dir(&fake, &home);
+    let err = adapter
+        .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
+        .expect_err("a PM spawn without its prompt must be refused");
+    assert_refused(err, &not_a_dir, &fake);
+}
+
+/// #8286: the resume path refuses the same way `spawn` does.
+#[test]
+#[serial_test::serial]
+fn spawn_resume_refuses_when_the_prompt_file_cannot_be_written() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let (adapter, not_a_dir, _path) = adapter_with_unwritable_prompt_dir(&fake, &home);
+    let err = adapter
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect_err("a PM resume without its prompt must be refused");
+    assert_refused(err, &not_a_dir, &fake);
+}
+
+/// #8286: the bare-`tm` in-place relaunch builds no command without its prompt.
+#[test]
+#[serial_test::serial]
+fn inplace_resume_command_refuses_when_the_prompt_file_cannot_be_written() {
+    let home = HomeGuard::set();
+    let fake = FakeTmux::new();
+    let (_adapter, not_a_dir, _path) = adapter_with_unwritable_prompt_dir(&fake, &home);
+    let fw = FrameworkPaths::from_root(home.home().join(".trusty-mpm"));
+    let err = build_inplace_resume_command_with(&fw, &not_a_dir, home.home(), None)
+        .map(|_| ())
+        .expect_err("an in-place PM relaunch without its prompt must be refused");
+    assert_refused(err, &not_a_dir, &fake);
 }

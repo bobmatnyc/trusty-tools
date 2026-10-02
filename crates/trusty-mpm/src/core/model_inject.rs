@@ -41,16 +41,41 @@ use crate::core::delegation_authority::AgentSummary;
 /// returns the path. Returns `None` and logs a warning on any I/O error.
 /// Test: `write_prompt_file_returns_path`.
 pub fn write_prompt_file(prompt: &str) -> Option<PathBuf> {
-    let file = std::env::temp_dir().join(format!(
+    write_prompt_file_in(&std::env::temp_dir(), prompt)
+        .inspect_err(|err| tracing::warn!("{err}"))
+        .ok()
+}
+
+/// A system-prompt file that could not be written (#8286).
+///
+/// Why: a launch that refuses over a missing prompt must tell the operator
+/// which file it tried and why the write failed.
+/// What: the target path and the I/O error, both in the `Display` text.
+/// Test: `write_prompt_file_in_names_the_path_and_the_cause`.
+#[derive(Debug, thiserror::Error)]
+#[error("could not write the PM system-prompt file {}: {cause}", path.display())]
+pub struct PromptFileError {
+    /// The file the write targeted.
+    pub path: PathBuf,
+    /// The error the write returned.
+    pub cause: std::io::Error,
+}
+
+/// [`write_prompt_file`] under a caller-named directory, keeping the error.
+///
+/// Why (#8286): the PM launch paths refuse on a write failure, and their tests
+/// need a real failing write without touching the process-global `TMPDIR`.
+/// What: writes `prompt` to `<dir>/trusty-mpm-system-prompt-<uuid>.txt`;
+/// `Err` carries that path and the I/O error.
+/// Test: `write_prompt_file_in_names_the_path_and_the_cause`.
+pub fn write_prompt_file_in(dir: &Path, prompt: &str) -> Result<PathBuf, PromptFileError> {
+    let path = dir.join(format!(
         "trusty-mpm-system-prompt-{}.txt",
         uuid::Uuid::new_v4()
     ));
-    match std::fs::write(&file, prompt) {
-        Ok(()) => Some(file),
-        Err(err) => {
-            tracing::warn!("failed to write system prompt file: {err}");
-            None
-        }
+    match std::fs::write(&path, prompt) {
+        Ok(()) => Ok(path),
+        Err(cause) => Err(PromptFileError { path, cause }),
     }
 }
 
@@ -1290,6 +1315,19 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "hello trusty-mpm");
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// #8286: the refusal text names the file and the I/O cause.
+    #[test]
+    fn write_prompt_file_in_names_the_path_and_the_cause() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let err = write_prompt_file_in(&not_a_dir, "prompt").unwrap_err();
+        assert!(err.path.starts_with(&not_a_dir), "{}", err.path.display());
+        let text = err.to_string();
+        assert!(text.contains(&*err.path.to_string_lossy()), "{text}");
+        assert!(text.contains(&err.cause.to_string()), "{text}");
     }
 
     #[test]
