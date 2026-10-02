@@ -70,11 +70,15 @@ impl StatusReport {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
         }
-        out.push_str(if self.complete {
-            "complete\n"
+        if self.complete {
+            out.push_str("complete\n");
         } else {
-            "incomplete: run `tm fleet init` to finish the setup\n"
-        });
+            // #8995: a bare `tm fleet init` could set up a second Architect.
+            out.push_str(&format!(
+                "incomplete: run `tm fleet init --dir {}` to finish the setup\n",
+                self.dir.display()
+            ));
+        }
         out
     }
 }

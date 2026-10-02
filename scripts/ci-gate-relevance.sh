@@ -18,7 +18,7 @@
 #                     script and selftest, and scripts/lib/sloc_awk.sh, which
 #                     the gate sources
 #     tmux-targets    every *.rs *.sh *.swift *.ts *.tsx *.js *.mjs *.svelte
-#                     outside node_modules, every crates/*/src/assets/**/*.md,
+#                     outside node_modules, every crates/*/src/assets/**/*.md and content/**/*.md,
 #                     the allowlist TSV, and the gate's script and selftest
 #   Both modes: this script and .github/workflows/ci.yml, the workflow that
 #   hosts the gates — a change to either must exercise the jobs it governs.
@@ -79,7 +79,7 @@ is_relevant() {
         node_modules/* | */node_modules/*) return 1 ;;
         *.rs | *.sh | *.swift | *.ts | *.tsx | *.js | *.mjs | *.svelte) return 0 ;;
         # In a bash `case`, `*` matches `/`: any depth below assets/.
-        crates/*/src/assets/*.md) return 0 ;;
+        crates/*/src/assets/*.md | content/*.md) return 0 ;;
       esac
       ;;
   esac

@@ -65,14 +65,28 @@ pub fn workspace_tier(project_dir: &Path) -> PathBuf {
 pub fn quarantine_workspace_shadows(
     fw: &FrameworkPaths,
     project_dir: &Path,
-) -> Result<QuarantineReport, QuarantineError> {
+) -> Result<QuarantineReport, ShadowQuarantineError> {
+    // #9011: without a content roster the sweep is skipped, never run on a
+    // partial roster that would classify bundled shadows as custom agents.
+    let roster = bundled_roster(fw)?;
     let run_id = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    quarantine_shadowing_agents(
+    Ok(quarantine_shadowing_agents(
         &workspace_tier(project_dir),
         &backup_root(project_dir),
-        &bundled_roster(fw),
+        &roster,
         &run_id,
-    )
+    )?)
+}
+
+/// Why [`quarantine_workspace_shadows`] moved nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum ShadowQuarantineError {
+    /// The sweep itself refused or failed.
+    #[error(transparent)]
+    Quarantine(#[from] QuarantineError),
+    /// The bundled roster could not be resolved from content (#9011).
+    #[error("the bundled agent roster is unavailable, so nothing was quarantined: {0}")]
+    Roster(#[from] crate::core::content_source::AgentContentError),
 }
 
 /// Render one sweep's outcome as the line an operator needs, or `None` when

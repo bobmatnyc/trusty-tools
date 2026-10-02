@@ -303,11 +303,11 @@ assert_eq "UI source"             "false" "$(docs_only_of 'crates/trusty-agents/
 # The trap this denylist exists to avoid: markdown UNDER a crate's src/ is a
 # bundled agent/skill/instruction asset compiled in via include_dir!.
 assert_eq "embedded .md asset"    "false" "$(docs_only_of 'crates/trusty-code/src/assets/agents/ops.md')"
-# #8378 / ADR-0064: instruction content under the two shared roots and
-# content/** is inert when ADDED or MODIFIED, and code when deleted, renamed
+# #8378 / ADR-0064: instruction content under crates/trusty-mpm/src/assets
+# and content/** (the agents' home since #9011) is inert when ADDED or MODIFIED, and code when deleted, renamed
 # (a D half under --no-renames), type-changed, or given without a status.
 tab="$(printf '\t')"
-assert_eq "instruction asset modified"   "true"  "$(docs_only_of "M${tab}crates/trusty-agents-common/src/assets/agents/BASE-AGENT.md")"
+assert_eq "instruction asset modified"   "true"  "$(docs_only_of "M${tab}content/agents/BASE-AGENT.md")"
 assert_eq "instruction asset added"      "true"  "$(docs_only_of "A${tab}crates/trusty-mpm/src/assets/skills/tm/SKILL.md")"
 assert_eq "content/ added"               "true"  "$(docs_only_of "A${tab}content/agents/qa.md")"
 assert_eq "instruction asset deleted"    "false" "$(docs_only_of "D${tab}crates/trusty-mpm/src/assets/skills/tm/SKILL.md")"
@@ -331,9 +331,9 @@ assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
 # #8378: the asset-content definition check_asset_test_filter.py and the
 # capabilities-drift relevance step both read.
 assert_eq "--instruction-assets keeps only inert instruction content" \
-  "crates/trusty-mpm/src/assets/skills/a.md crates/trusty-agents-common/src/assets/agents/qa.md content/agents/qa.json " \
+  "crates/trusty-mpm/src/assets/skills/a.md content/agents/qa.md content/agents/qa.json " \
   "$(printf '%s\n' crates/trusty-mpm/src/assets/skills/a.md crates/trusty-mpm/src/assets/hooks/pre-push \
-    crates/trusty-agents-common/src/assets/agents/qa.md crates/trusty-code/src/assets/agents/qa.md \
+    content/agents/qa.md crates/trusty-code/src/assets/agents/qa.md \
     content/agents/qa.json docs/a.md crates/trusty-mpm/src/lib.rs |
     bash scripts/detect-docs-only.sh --instruction-assets | tr '\n' ' ')"
 

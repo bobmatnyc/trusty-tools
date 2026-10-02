@@ -11,7 +11,7 @@
 //! same ordering/content drift the PM pipeline was built to prevent.
 //! What: [`assemble_sm_prompt`] embeds the four bundled assets via `include_str!`
 //! at compile time and joins them with the shared harness-understanding content
-//! from `trusty_agents_common::harness_doc` in the fixed order
+//! (a [`HarnessDoc`] loaded from instructional content since #9011) in the fixed order
 //! SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM,
 //! BASE_SM **always last** as the non-overridable floor. [`resolve_sm_prompt`]
 //! layers optional per-file overrides from an override directory
@@ -30,7 +30,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
-use trusty_agents_common::harness_doc;
+use trusty_agents_common::harness_doc::HarnessDoc;
+
+use crate::core::content_source::{self, AgentContentError};
 
 // `pub(crate)` is deliberate: these bundled defaults are consumed only through
 // `assemble_sm_prompt` / `resolve_sm_prompt`, which own the ordering and the
@@ -80,8 +82,8 @@ pub const FILE_SM_HARNESS: &str = "SM_HARNESS.md";
 /// auditable place (mirrors [`assemble_system_prompt`]).
 /// What: joins the five sections in the fixed order SM_INSTRUCTIONS ->
 /// SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM, separated by the `---`
-/// rule. The SM_HARNESS section is the full harness-understanding doc from
-/// `trusty_agents_common::harness_doc::harness_understanding()`. Each section
+/// rule. The SM_HARNESS section is `harness`'s full harness-understanding doc
+/// ([`HarnessDoc::harness_understanding`]). Each section
 /// is trimmed before joining -- byte-for-byte the same treatment
 /// [`resolve_sm_prompt`] applies -- so the two produce identical output when no
 /// override is present. BASE_SM is **always last** as the non-overridable
@@ -92,8 +94,8 @@ pub const FILE_SM_HARNESS: &str = "SM_HARNESS.md";
 /// `resolve_with_no_overrides_matches_assembled_sections` (exact equality).
 ///
 /// [`assemble_system_prompt`]: crate::core::instruction_pipeline::assemble_system_prompt
-pub fn assemble_sm_prompt() -> String {
-    let harness = harness_doc::harness_understanding();
+pub fn assemble_sm_prompt(harness: &HarnessDoc) -> String {
+    let harness = harness.harness_understanding();
     let harness_trimmed = harness.trim();
     vec![
         SM_INSTRUCTIONS.trim(),
@@ -171,8 +173,8 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 ///
 /// What: for each of `SM_INSTRUCTIONS`, `SM_HARNESS`, `SM_WORKFLOW`, and
 /// `SM_TOOLS`, uses the override file from `dir` when present and non-empty,
-/// else the bundled default (SM_HARNESS falls back to
-/// `harness_doc::harness_understanding()`). The bundled `BASE_SM` floor is
+/// else the bundled default (SM_HARNESS falls back to the harness docs from
+/// instructional content, #9011). The bundled `BASE_SM` floor is
 /// **always** appended last and is **never** overridable -- even a `BASE_SM.md`
 /// placed in `dir` is ignored; the bundled floor is used. Sections are joined
 /// with [`SECTION_SEPARATOR`], the same rule [`assemble_sm_prompt`] uses, so
@@ -181,20 +183,33 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 ///
 /// Robustness: a missing override directory, missing files, empty files, and
 /// unreadable files all fall back to the bundled defaults without failing.
+/// The one failure is content (#9011): with no non-empty `SM_HARNESS.md`
+/// override, the harness docs must resolve, and an `Err` names
+/// `tm content install` rather than shipping an SM prompt with no harness model.
 ///
 /// Test: `no_overrides_uses_bundled`, `sm_instructions_override_replaces`,
 /// `harness_override_replaces`, `workflow_override_replaces`,
-/// `tools_override_replaces`, `base_sm_floor_is_never_overridable`, and the
-/// robustness tests.
-pub fn resolve_sm_prompt(dir: &Path) -> String {
+/// `tools_override_replaces`, `base_sm_floor_is_never_overridable`,
+/// `missing_content_fails_the_prompt`, and the robustness tests.
+pub fn resolve_sm_prompt(dir: &Path) -> Result<String, AgentContentError> {
+    resolve_sm_prompt_with(dir, content_source::harness_doc)
+}
+
+/// [`resolve_sm_prompt`] with the harness-doc loader given; it runs only when
+/// no non-empty `SM_HARNESS.md` override is present.
+pub fn resolve_sm_prompt_with(
+    dir: &Path,
+    harness: impl FnOnce() -> Result<HarnessDoc, AgentContentError>,
+) -> Result<String, AgentContentError> {
     let instructions = read_override(dir, FILE_SM_INSTRUCTIONS)
         .unwrap_or_else(|| SM_INSTRUCTIONS.trim().to_string());
 
     // The harness section uses the shared trusty-agents-common content, with
     // an optional override via SM_HARNESS.md in the override directory.
-    let harness_default = harness_doc::harness_understanding();
-    let harness =
-        read_override(dir, FILE_SM_HARNESS).unwrap_or_else(|| harness_default.trim().to_string());
+    let harness = match read_override(dir, FILE_SM_HARNESS) {
+        Some(text) => text,
+        None => harness()?.harness_understanding().trim().to_string(),
+    };
 
     let workflow =
         read_override(dir, FILE_SM_WORKFLOW).unwrap_or_else(|| SM_WORKFLOW.trim().to_string());
@@ -202,7 +217,7 @@ pub fn resolve_sm_prompt(dir: &Path) -> String {
 
     // BASE_SM is the non-overridable floor: always the bundled one, always last.
     // Order: SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM
-    vec![
+    Ok(vec![
         instructions,
         harness,
         workflow,
@@ -213,7 +228,7 @@ pub fn resolve_sm_prompt(dir: &Path) -> String {
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
-    .join(SECTION_SEPARATOR)
+    .join(SECTION_SEPARATOR))
 }
 
 /// Resolve the effective SM prompt for the production `~/.trusty-mpm/sm/`
@@ -223,13 +238,14 @@ pub fn resolve_sm_prompt(dir: &Path) -> String {
 /// override location; [`resolve_sm_prompt`] stays path-parameterised for tests.
 /// What: when [`sm_override_dir`] resolves a home, delegates to
 /// [`resolve_sm_prompt`] with that directory (which tolerates a missing dir);
-/// when no home is resolvable, returns the bundled [`assemble_sm_prompt`].
+/// when no home is resolvable, returns [`assemble_sm_prompt`] over the harness
+/// docs from content. A content error is `Err` (#9011).
 /// Test: side-effect-only over the real home; the layering logic is covered by
 /// the `resolve_sm_prompt` tests against temp dirs.
-pub fn resolve_sm_prompt_default() -> String {
+pub fn resolve_sm_prompt_default() -> Result<String, AgentContentError> {
     match sm_override_dir() {
         Some(dir) => resolve_sm_prompt(&dir),
-        None => assemble_sm_prompt(),
+        None => Ok(assemble_sm_prompt(&content_source::harness_doc()?)),
     }
 }
 
@@ -238,6 +254,16 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The checkout's harness docs (#9011).
+    fn harness() -> HarnessDoc {
+        crate::core::content_source::test_support::repo_harness_doc()
+    }
+
+    /// [`resolve_sm_prompt`] against the checkout's harness docs.
+    fn resolve(dir: &Path) -> String {
+        resolve_sm_prompt_with(dir, || Ok(harness())).expect("prompt")
+    }
 
     /// Write `<dir>/<name>` with `content`, creating `dir` if needed.
     fn write_override(dir: &Path, name: &str, content: &str) {
@@ -251,7 +277,7 @@ mod tests {
         // section -- prohibitions, allowlist, harness model, 6-phase loop,
         // verification gate, and the BASE_SM floor -- must be present and joined
         // with the `---` rule.
-        let prompt = assemble_sm_prompt();
+        let prompt = assemble_sm_prompt(&harness());
         // Identity + prohibitions table (SP1-SP7) + allowlist.
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("| SP1 |"));
@@ -284,7 +310,7 @@ mod tests {
     fn assemble_sm_prompt_base_floor_is_last() {
         // Why: BASE_SM is the non-overridable floor; it must be the final
         // section so nothing can displace it.
-        let prompt = assemble_sm_prompt();
+        let prompt = assemble_sm_prompt(&harness());
         let base = prompt.find("# BASE_SM Framework Floor").expect("base_sm");
         let tools = prompt
             .find("# SM Tools -- the verbs you may call")
@@ -308,7 +334,7 @@ mod tests {
         // the BASE_SM floor, so it must survive into the assembled prompt
         // verbatim, along with the forbidden shell-probe list a reviewer can
         // grep for regressions.
-        let prompt = assemble_sm_prompt();
+        let prompt = assemble_sm_prompt(&harness());
         assert!(prompt.contains("## Identity & Self-Awareness Protocol (Non-Overridable)"));
         assert!(prompt.contains("pip3 show"));
         assert!(prompt.contains("which claude-mpm"));
@@ -328,7 +354,7 @@ mod tests {
         );
         write_override(tmp.path(), FILE_SM_WORKFLOW, "# Custom Loop\n\nBODY\n");
         write_override(tmp.path(), FILE_SM_TOOLS, "# Custom Verbs\n\nBODY\n");
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
         assert!(
             prompt.contains("## Identity & Self-Awareness Protocol (Non-Overridable)"),
             "identity protocol must survive every override branch"
@@ -355,7 +381,7 @@ mod tests {
 
     #[test]
     fn assemble_sm_prompt_contains_harness_section() {
-        let prompt = assemble_sm_prompt();
+        let prompt = assemble_sm_prompt(&harness());
         // The harness understanding section contains the Claude Code working glyph
         // and the tcode event prefix as canonical markers (DOC-21).
         assert!(
@@ -380,7 +406,7 @@ mod tests {
             FILE_SM_HARNESS,
             "# Custom Harness Doc\n\nHARNESS_OVERRIDE_SENTINEL\n",
         );
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
         assert!(prompt.contains("HARNESS_OVERRIDE_SENTINEL"));
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
@@ -393,7 +419,7 @@ mod tests {
         // No override dir at all → all four bundled sections present, BASE_SM
         // last.
         let tmp = TempDir::new().unwrap();
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
 
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
@@ -417,7 +443,7 @@ mod tests {
             FILE_SM_INSTRUCTIONS,
             "# Custom Identity\n\nDELEGATE_EVERYTHING_TO_ALICE\n",
         );
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
 
         assert!(prompt.contains("DELEGATE_EVERYTHING_TO_ALICE"));
         assert!(
@@ -443,7 +469,7 @@ mod tests {
             FILE_SM_WORKFLOW,
             "# Custom Loop\n\nTWO_PHASE_ONLY\n",
         );
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
 
         assert!(prompt.contains("TWO_PHASE_ONLY"));
         assert!(
@@ -464,7 +490,7 @@ mod tests {
             FILE_SM_TOOLS,
             "# Custom Verbs\n\nONLY_LAUNCH_AND_STOP\n",
         );
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
 
         assert!(prompt.contains("ONLY_LAUNCH_AND_STOP"));
         assert!(
@@ -492,7 +518,7 @@ mod tests {
             FILE_SM_INSTRUCTIONS,
             "# Custom Identity\n\nCUSTOM_IDENTITY_BODY\n",
         );
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
 
         // The overridable section IS replaced.
         assert!(prompt.contains("CUSTOM_IDENTITY_BODY"));
@@ -521,7 +547,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("does-not-exist");
         assert!(!missing.exists());
-        let prompt = resolve_sm_prompt(&missing);
+        let prompt = resolve(&missing);
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("# BASE_SM Framework Floor"));
     }
@@ -532,7 +558,7 @@ mod tests {
         // bundled default for that section survives (no silent blanking).
         let tmp = TempDir::new().unwrap();
         write_override(tmp.path(), FILE_SM_WORKFLOW, "   \n\t\n");
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
         assert!(prompt.contains("# BASE_SM Framework Floor"));
     }
@@ -543,7 +569,7 @@ mod tests {
         // falls back to the bundled default rather than failing assembly.
         let tmp = TempDir::new().unwrap();
         fs::create_dir(tmp.path().join(FILE_SM_WORKFLOW)).unwrap();
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
         // Did not panic; bundled workflow is used.
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
         assert!(prompt.contains("# BASE_SM Framework Floor"));
@@ -554,7 +580,7 @@ mod tests {
         // The resolved prompt uses the same `---` rule the bundled assembler
         // uses, so the two never visually diverge.
         let tmp = TempDir::new().unwrap();
-        let prompt = resolve_sm_prompt(tmp.path());
+        let prompt = resolve(tmp.path());
         assert!(prompt.contains(SECTION_SEPARATOR));
     }
 
@@ -564,8 +590,8 @@ mod tests {
         // the bundled assemble_sm_prompt: both trim each section the same way
         // before joining with the `---` rule (Finding 3). Assert exact equality.
         let tmp = TempDir::new().unwrap();
-        let resolved = resolve_sm_prompt(tmp.path());
-        let assembled = assemble_sm_prompt();
+        let resolved = resolve(tmp.path());
+        let assembled = assemble_sm_prompt(&harness());
         assert_eq!(
             resolved, assembled,
             "no-override resolve must be byte-identical to assemble"
@@ -611,5 +637,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #9011: with no `SM_HARNESS.md` override and no content, the SM prompt
+    /// fails and names the fix — it never ships without the harness model.
+    #[test]
+    fn missing_content_fails_the_prompt() {
+        use crate::core::content_source::DevOverride;
+        use trusty_agents_common::agent_content::resolve_content_in;
+
+        let cache = TempDir::new().unwrap();
+        let overrides = TempDir::new().unwrap();
+        let err = resolve_sm_prompt_with(overrides.path(), || {
+            HarnessDoc::load(&resolve_content_in(cache.path(), DevOverride::Off)?)
+        })
+        .expect_err("no content, no override");
+        assert!(err.to_string().contains("tm content install"), "{err}");
+
+        // A non-empty override needs no content read at all.
+        write_override(overrides.path(), FILE_SM_HARNESS, "# operator harness");
+        let prompt = resolve_sm_prompt_with(overrides.path(), || {
+            panic!("an SM_HARNESS.md override must not read content")
+        })
+        .expect("override supplies the harness");
+        assert!(prompt.contains("# operator harness"));
     }
 }

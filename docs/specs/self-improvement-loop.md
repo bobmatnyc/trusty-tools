@@ -23,7 +23,7 @@ in-flight work. No source file was edited to produce this document.
 
 ### 1.1 The two closing blocks (BASE-AGENT)
 
-`crates/trusty-agents-common/src/assets/agents/BASE-AGENT.md:516-614` defines
+`content/agents/BASE-AGENT.md:516-614` defines
 two mechanisms every composed agent carries today:
 
 - **"Self-Analysis and Improvement Reporting"** (`:516-554`) — every task ends

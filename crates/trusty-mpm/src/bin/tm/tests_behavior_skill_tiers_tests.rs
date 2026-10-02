@@ -24,13 +24,13 @@
 //! byte-identical.
 //! Test: this IS the test module.
 
-use crate::commands::install::install_to;
+use crate::commands::install::{install_to_with, test_roster};
 
 #[test]
 fn install_skill_step_preserves_user_tier_override() {
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
 
     // The user authors their own override in the user-custom tier BEFORE any
     // deploy runs, so both calls below see the collision.

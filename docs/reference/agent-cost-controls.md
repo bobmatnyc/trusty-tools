@@ -13,14 +13,17 @@
 > in `BASE-AGENT.md`, the Rust build levers in the `rust-build-performance`
 > skill. This page states only what is specific to this repo.
 
-## 1. Markdown under `crates/*/src/assets/**` is not a rung-1 change
+## 1. Markdown under `crates/*/src/assets/**` and `content/**` is not a rung-1 change
 
-These files look like docs and are not. They are compiled into the binary with
-`include_str!`, and bundle tests assert on their text. Verified embed sites:
+These files look like docs and are not. The `crates/*/src/assets/**` ones are
+compiled into the binary with `include_str!`; the `content/**` ones are read at
+run time (#9011) and asserted on by tests that load the checkout's roster.
+Either way, tests assert on their text. Verified read sites:
 
-| Asset tree | Embedded at |
+| Asset tree | Read at |
 |---|---|
-| `crates/trusty-agents-common/src/assets/agents/*.md` | `crates/trusty-agents-common/src/agent_assets.rs` |
+| `content/agents/*.md` | `crates/trusty-agents-common/src/agent_content.rs` (`AgentRoster::load`; tests: `agent_content_tests.rs`, trusty-mpm `bundle_tests.rs`) |
+| `content/instructions/harness_understanding/*.md` | `crates/trusty-agents-common/src/harness_doc.rs` (`HarnessDoc::load`) |
 | `crates/trusty-mpm/src/assets/skills/*.md` | `crates/trusty-mpm/src/core/bundle_tm_skills.rs`, `bundle_skills_*.rs` |
 
 Two consequences the rung-1 row does not cover. Editing one recompiles the
