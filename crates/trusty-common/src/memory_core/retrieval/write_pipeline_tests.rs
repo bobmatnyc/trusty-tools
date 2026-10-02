@@ -739,4 +739,262 @@ mod tests {
             "#8314: the abort must be logged naming palace and operation: {lines:#?}"
         );
     }
+
+    /// Why (#8749): #6366 hands a timed-out write's commit to a task the
+    /// timeout does not own. The caller is released, but that task kept the
+    /// commit-order guard and redb's write lock for as long as it ran, then
+    /// landed a write its caller had been told failed. The commit must roll
+    /// back at its transaction deadline instead.
+    /// What: stalls writer A's drawer op until A's 1 s pipeline has timed out,
+    /// under a 100 ms transaction budget. Then asserts writer B lands, the
+    /// commit guard is free, and A's drawer is in neither redb nor the
+    /// in-memory table.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_commit_abandoned_by_a_timed_out_pipeline_rolls_back_at_its_deadline() {
+        use std::sync::atomic::Ordering;
+        const STALLED: &str = "the write whose commit stalls";
+        const SURVIVOR: &str = "the write queued behind the stalled commit";
+
+        let (_dir, handle) = palace().await;
+        let store = handle.kg.redb_store();
+        // Hold until A's pipeline has given up: the #6366 detached-commit window.
+        let (entered, a_returned) = stall_commit_of(&handle, STALLED, Duration::from_secs(10));
+
+        let a = handle
+            .remember_with_options_within(
+                STALLED.to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                Duration::from_secs(1),
+            )
+            .await;
+        a_returned.store(true, Ordering::SeqCst);
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "writer A never reached its commit, so this test proved nothing: {a:?}"
+        );
+        assert!(a.is_err(), "writer A's pipeline must have timed out");
+
+        let started = Instant::now();
+        handle
+            .remember_with_options_within(
+                SURVIVOR.to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                AMPLE,
+            )
+            .await
+            .expect("#8749: the writer behind a stalled commit must land");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "writer B waited {:?}",
+            started.elapsed()
+        );
+        assert!(
+            handle.commit_mutex.try_lock().is_ok(),
+            "#8749: the commit-order guard must be free"
+        );
+        let in_redb = store.load_drawers().expect("load drawers");
+        assert!(
+            !in_redb.iter().any(|d| d.content() == STALLED),
+            "#8749: the abandoned commit must roll back, not land late"
+        );
+        assert!(!handle.drawers.read().iter().any(|d| d.content() == STALLED));
+        assert!(in_redb.iter().any(|d| d.content() == SURVIVOR));
+    }
+
+    /// The #8749 stalled-commit seam: the kg.redb transaction that carries the
+    /// drawer whose content is `content` stalls after its op.
+    ///
+    /// Why: a test palace commits in microseconds, so a stall has to be made.
+    /// What: sets a 100 ms transaction budget on the palace's kg.redb, and a
+    /// hook that, for that one drawer, flags `entered` and then blocks until
+    /// `release` is set or `max_stall` passes — a bounded condition poll, so
+    /// no test can hang. Returns `(entered, release)`.
+    /// Test: used by the #8749 tests below.
+    fn stall_commit_of(
+        handle: &PalaceHandle,
+        content: &'static str,
+        max_stall: Duration,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use crate::memory_core::store::kg_redb::BatchWriteOp;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let store = handle.kg.redb_store();
+        *store.test_hooks().txn_budget.lock().expect("hook lock") = Some(TXN_BUDGET);
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (e, r) = (entered.clone(), release.clone());
+        *store.test_hooks().after_batch_op.lock().expect("hook lock") =
+            Some(Arc::new(move |op: &BatchWriteOp| {
+                if let BatchWriteOp::UpsertDrawer(d) = op
+                    && d.content() == content
+                {
+                    e.store(true, Ordering::SeqCst);
+                    let until = Instant::now() + max_stall;
+                    while !r.load(Ordering::SeqCst) && Instant::now() < until {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            }));
+        (entered, release)
+    }
+
+    /// The transaction deadline the #8749 tests run under.
+    const TXN_BUDGET: Duration = Duration::from_millis(100);
+
+    /// Poll `flag` until it is set or five seconds pass.
+    async fn wait_for(flag: &std::sync::atomic::AtomicBool) -> bool {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !flag.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Why (#8749, Fail-Open Check): a write whose transaction stalls past its
+    /// deadline must not commit late and must not report success — and the
+    /// writer queued behind it must proceed rather than wait for the stall.
+    /// What: writer A (ample pipeline budget) stalls 400 ms inside its commit
+    /// under the 100 ms transaction budget; writer B queues behind it. A must
+    /// fail with `WriteTxnError::DeadlineExceeded` naming the palace, B must
+    /// land, and A's drawer must be in neither redb nor the in-memory table.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_stalled_commit_rolls_back_and_its_writer_gets_the_typed_deadline_error() {
+        use crate::memory_core::store::write_deadline::WriteTxnError;
+        const STALLED: &str = "a write whose own commit stalls";
+        const NEXT: &str = "a write queued behind the stalled one";
+
+        let (_dir, handle) = palace().await;
+        let (entered, _release) = stall_commit_of(&handle, STALLED, Duration::from_millis(400));
+        let a = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .remember_with_options_within(
+                        STALLED.to_string(),
+                        RoomType::General,
+                        vec![],
+                        0.5,
+                        opts(),
+                        AMPLE,
+                    )
+                    .await
+            })
+        };
+        assert!(
+            wait_for(&entered).await,
+            "writer A never reached its commit"
+        );
+
+        let started = Instant::now();
+        let b = handle
+            .remember_with_options_within(
+                NEXT.to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                AMPLE,
+            )
+            .await;
+        let waited = started.elapsed();
+        let err = a
+            .await
+            .expect("writer A task")
+            .expect_err("#8749: a write rolled back at its deadline must not report success");
+        assert!(
+            matches!(
+                err.downcast_ref::<WriteTxnError>(),
+                Some(WriteTxnError::DeadlineExceeded { palace, .. })
+                    if &**palace == "write-budget-test"
+            ),
+            "#8749: writer A must get the typed deadline error: {err:#}"
+        );
+        b.expect("#8749: the writer queued behind the stalled commit must land");
+        assert!(
+            waited < Duration::from_secs(5),
+            "writer B waited {waited:?}"
+        );
+
+        let in_redb = handle.kg.redb_store().load_drawers().expect("load drawers");
+        assert!(
+            !in_redb.iter().any(|d| d.content() == STALLED),
+            "#8749: the stalled transaction must roll back, not commit"
+        );
+        assert!(!handle.drawers.read().iter().any(|d| d.content() == STALLED));
+        assert!(in_redb.iter().any(|d| d.content() == NEXT));
+    }
+
+    /// Why (#8749): a writer that cannot wait out a stalled commit must fail
+    /// with an error a caller can recognise as a timeout, not an opaque string,
+    /// and its own write must not land.
+    /// What: writer A's pipeline (1 s) gives up while its commit is held in
+    /// the stall; writer B (300 ms) then waits behind that commit and times
+    /// out. B must get `WriteTimeout::PipelineBudget` naming the palace. Once
+    /// the stall is released, A's commit rolls back at its deadline and the
+    /// commit-order guard frees; neither drawer is in redb or memory.
+    /// Test: itself.
+    #[tokio::test]
+    async fn a_writer_behind_a_stalled_commit_times_out_with_a_typed_error() {
+        use crate::memory_core::timeouts::WriteTimeout;
+        use std::sync::atomic::Ordering;
+        const STALLED: &str = "a write whose detached commit stalls";
+        const WAITER: &str = "a write that gives up waiting behind it";
+
+        let (_dir, handle) = palace().await;
+        let (entered, release) = stall_commit_of(&handle, STALLED, Duration::from_secs(10));
+        let a = handle
+            .remember_with_options_within(
+                STALLED.to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(entered.load(Ordering::SeqCst), "A never reached its commit");
+        assert!(a.is_err(), "writer A's pipeline must have timed out");
+
+        let err = handle
+            .remember_with_options_within(
+                WAITER.to_string(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+                Duration::from_millis(300),
+            )
+            .await
+            .expect_err("#8749: B cannot finish while the stalled commit holds the guard");
+        release.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(
+                err.downcast_ref::<WriteTimeout>(),
+                Some(WriteTimeout::PipelineBudget { palace, .. }) if palace == "write-budget-test"
+            ),
+            "#8749: the waiter must get the typed timeout: {err:#}"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            handle.commit_mutex.clone().lock_owned(),
+        )
+        .await
+        .expect("#8749: the stalled commit must release the guard once past its deadline");
+        let in_redb = handle.kg.redb_store().load_drawers().expect("load drawers");
+        for content in [STALLED, WAITER] {
+            assert!(!in_redb.iter().any(|d| d.content() == content), "{content}");
+            assert!(!handle.drawers.read().iter().any(|d| d.content() == content));
+        }
+    }
 }
