@@ -130,6 +130,8 @@ pub mod config;
 /// Unrecognised-key reporting for the host-level config files (#5207).
 pub mod config_keys;
 pub mod connect;
+// #9011: the agent roster and harness docs resolve from content here.
+pub mod content_source;
 pub mod daemon_identity;
 pub mod delegation_authority;
 pub mod deploy_validate;

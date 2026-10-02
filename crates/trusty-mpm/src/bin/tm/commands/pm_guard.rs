@@ -228,6 +228,7 @@ use crate::commands::pm_guard_build_lease;
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 // #8722: moved out with the denial record; re-exported for existing importers.
+use crate::commands::pm_guard_content;
 use crate::commands::pm_guard_deny_log::DenyContext;
 pub(crate) use crate::commands::pm_guard_deny_log::audit_denied_tool;
 use crate::commands::pm_guard_dispatch;
@@ -767,9 +768,20 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // granting — the cost inversion ADR-0048 states for a main checkout, where a
     // false deny costs a round trip and a false allow corrupts another session's
     // branch.
-    if !caller_is_subagent
-        && let Some(grant) =
-            pm_guard_worktree_grant::evaluate_worktree_grant(tool_name, tool_input, &hook_cwd)
+    // #9011, owner ruling 09(a): both dispatch checks classify against the
+    // content roster; a PM dispatch with none is refused, never guessed at.
+    let roster = match pm_guard_content::dispatch_roster(caller_is_subagent, tool_name) {
+        Ok(roster) => roster,
+        Err(reason) => {
+            audit_denied_tool(&refused, "dispatch-content", &reason).await;
+            println!("{}", build_pm_guard_deny_response(&reason));
+            return Ok(());
+        }
+    };
+    if let Some(roster) = roster.as_ref()
+        && let Some(grant) = pm_guard_worktree_grant::evaluate_worktree_grant(
+            roster, tool_name, tool_input, &hook_cwd,
+        )
     {
         match grant {
             pm_guard_worktree_grant::WorktreeGrant::Rewrite(updated_input) => {
@@ -807,8 +819,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             // safe, and a printed rewrite ends this call, so the check below
             // would never run.
             pm_guard_worktree_grant::WorktreeGrant::InPlace(updated_input) => {
-                match pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id)
-                    .await
+                match pm_guard_dispatch::evaluate(
+                    roster, url, &payload, tool_name, tool_input, session_id,
+                )
+                .await
                 {
                     Some(reason) => {
                         audit_denied_tool(&refused, "dispatch", &reason).await;
@@ -837,9 +851,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // on stderr. #5923: a daemon that IS listening and does not answer usably
     // now DENIES — see `pm_guard_dispatch`'s module doc for which failure sits
     // on which side of that line.
-    if !caller_is_subagent
+    if let Some(roster) = roster.as_ref()
         && let Some(reason) =
-            pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
+            pm_guard_dispatch::evaluate(roster, url, &payload, tool_name, tool_input, session_id)
+                .await
     {
         audit_denied_tool(&refused, "dispatch", &reason).await;
         println!("{}", build_pm_guard_deny_response(&reason));

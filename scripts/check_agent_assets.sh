@@ -7,10 +7,10 @@
 #   their trusty-mpm sources, because both crates shipped their own copy of the
 #   same file and nothing stopped one from drifting. That comparison is gone
 #   along with the duplication: all 42 agent assets now live once, in
-#   crates/trusty-agents-common/src/assets/agents/, and both crates embed THAT
-#   file via `trusty_agents_common::agent_assets`. One physical file consumed by
-#   two crates is a COMPILE-TIME property — strictly stronger than a CI diff,
-#   which could only report drift after it had already landed on main.
+#   content/agents/ (moved from trusty-agents-common by #9011), and both crates
+#   read THAT file at run time through `trusty_agents_common::agent_content`.
+#   One physical file consumed by two crates cannot drift — strictly stronger
+#   than a CI diff, which could only report drift after it had landed on main.
 #
 #   Two things a compiler still cannot see, and this script is what checks them:
 #
@@ -43,9 +43,9 @@
 #
 #   NOTE ON SCOPE: this only walks tcode-side files tracked in git
 #   (`git ls-files`). A wholesale deletion of a shared asset needs no check here
-#   — `include_str!` fails the build at compile time, and
-#   `trusty_agents_common::agent_assets`'s own `table_matches_the_directory`
-#   test fails if a roster file is added or removed without wiring it up.
+#   — `AgentRoster::load` and the consumers' `require` fail loudly at run time,
+#   and `agent_content::tests::the_repository_roster_carries_every_agent`
+#   fails if the roster and `content/agents` disagree.
 #
 #   --update       recompute the pinned sha256 for every file already listed in
 #                  scripts/agent-asset-pins.tsv, after you have deliberately
@@ -82,7 +82,7 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TCODE_DIR="crates/trusty-code/src/assets/agents"
-SHARED_DIR="crates/trusty-agents-common/src/assets/agents"
+SHARED_DIR="content/agents"
 PINS="scripts/agent-asset-pins.tsv"
 
 # tcode's own defaults — no shared counterpart, never tracked against one.
@@ -185,8 +185,8 @@ if [ "$MODE" = "update" ]; then
     echo "# shared asset it was derived from."
     echo "#"
     echo "# Every OTHER agent asset is not copied at all — trusty-mpm and trusty-code"
-    echo "# both embed the one file under crates/trusty-agents-common/src/assets/"
-    echo "# agents/ via trusty_agents_common::agent_assets, so there is nothing to"
+    echo "# both read the one file under content/agents/ (repo root, ADR-0064)"
+    echo "# via trusty_agents_common::agent_content, so there is nothing to"
     echo "# pin. check_agent_assets.sh hashes the CURRENT shared source for these 4"
     echo "# and compares against the pin here; if it no longer matches, the shared"
     echo "# source changed behind a deliberately deviated fork and the guard fails so"
@@ -311,9 +311,9 @@ while IFS= read -r f; do
 
   echo "FAIL: RE-COPIED SHARED ASSET — $f is neither a declared tcode-only" >&2
   echo "      default (TCODE_ONLY) nor a pinned deviation (DEVIATED_FILES)." >&2
-  echo "      Agent assets live ONCE, in $SHARED_DIR, and are embedded through" >&2
-  echo "      trusty_agents_common::agent_assets by every consumer. Delete this" >&2
-  echo "      file and reference the shared const instead. If it genuinely is" >&2
+  echo "      Agent assets live ONCE, in $SHARED_DIR, and are read through" >&2
+  echo "      trusty_agents_common::agent_content by every consumer. Delete this" >&2
+  echo "      file and list it in SHARED_TM_AGENT_FILES instead. If it genuinely is" >&2
   echo "      tcode's own new agent with no shared counterpart, add it to" >&2
   echo "      TCODE_ONLY and raise EXPECTED_TCODE_FILES." >&2
   FAIL=1

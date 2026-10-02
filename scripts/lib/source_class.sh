@@ -136,7 +136,6 @@ is_inert_instruction_asset() {
   case "$2" in
     content/?*) return 0 ;;
     crates/trusty-mpm/src/assets/?*.md) return 0 ;;
-    crates/trusty-agents-common/src/assets/?*.md) return 0 ;;
   esac
   return 1
 }

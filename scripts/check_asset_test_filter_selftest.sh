@@ -192,6 +192,59 @@ mod m {
 }'
 check "planted: a manifest naming a .md asset" 1 "$M" "$M/scripts/list.tsv" "fix lib m::idx"
 
+# #9011: the agent roster moved to the repo-root content/ tree; a literal
+# naming it from a crate (`<manifest dir>/../../content/agents`) is a read.
+C="$WORK/content-literal"
+new_fixture "$C"
+mkdir -p "$C/content/agents"
+echo "# agent" > "$C/content/agents/qa.md"
+plant "$C" "src/lib.rs" '
+#[cfg(test)]
+mod c {
+    #[test]
+    fn lit() { let _ = concat!(env!("CARGO_MANIFEST_DIR"), "/../../content/agents"); }
+}'
+check "planted: a repo-root content/ literal" 1 "$C" "$C/scripts/list.tsv" "fix lib c::lit"
+
+# #9011 R4: a test-code helper over a run-time content loader is a loader;
+# the TEST calling it is the reader, and the helper's module needs no row.
+L="$WORK/content-loader"
+new_fixture "$L"
+plant "$L" "src/lib.rs" '
+#[cfg(test)]
+mod support {
+    pub fn roster() { let _ = AgentRoster::load(); }
+}
+#[cfg(test)]
+mod uses {
+    #[test]
+    fn calls() { super::support::roster(); }
+}'
+check "planted: a test helper over AgentRoster::load" 1 "$L" "$L/scripts/list.tsv" "fix lib uses::calls"
+{ cat "$L/scripts/list.tsv"; printf 'fix\tlib\tuses\treads support::roster\n'; } > "$L/scripts/covered.tsv"
+check "  ...and its caller's row alone covers it" 0 "$L" "$L/scripts/covered.tsv"
+
+# #9011 R4: a same-named helper in another `tests` module is not that loader.
+D="$WORK/content-loader-names"
+new_fixture "$D"
+plant "$D" "src/lib.rs" '
+mod a {
+    #[cfg(test)]
+    mod tests {
+        fn d() { let _ = checkout_content(); }
+        use super::super::agent_content::checkout_content;
+    }
+}
+mod b {
+    #[cfg(test)]
+    mod tests {
+        fn d() {}
+        #[test]
+        fn calls_its_own_d() { d(); }
+    }
+}'
+check "a same-named helper elsewhere is not a content read" 0 "$D" "$D/scripts/list.tsv"
+
 echo "not asset-content readers (#8378 round 2b):"
 N="$WORK/non-md"
 new_fixture "$N"
@@ -247,12 +300,15 @@ R="$WORK/real"
 mkdir -p "$R/crates" "$R/scripts"
 cp -R "$REPO_ROOT/crates/trusty-agents-common" "$R/crates/"
 rm -rf "$R/crates/trusty-agents-common/target"
+# #9011: the crate embeds its agents and harness docs from the repo-root content/.
+cp -R "$REPO_ROOT/content" "$R/"
 awk -F'\t' '$1 == "trusty-agents-common"' "$REPO_ROOT/scripts/asset-content-tests.tsv" > "$R/scripts/list.tsv"
 check "copy of trusty-agents-common, unmodified" 0 "$R" "$R/scripts/list.tsv"
-printf '\n#[cfg(test)]\nmod planted_8378 {\n    #[test]\n    fn reads_base_ops() {\n        assert!(!crate::agent_assets::BASE_OPS.is_empty());\n    }\n}\n' \
+# #9011: the roster is read at run time; the planted test calls the loader.
+printf '\n#[cfg(test)]\nmod planted_8378 {\n    #[test]\n    fn reads_the_roster() {\n        let _ = crate::agent_content::checkout_content(std::path::Path::new("."));\n    }\n}\n' \
   >> "$R/crates/trusty-agents-common/src/lib.rs"
 check "planted reader in the real trusty-agents-common" 1 "$R" "$R/scripts/list.tsv" \
-  "trusty-agents-common lib planted_8378::reads_base_ops"
+  "trusty-agents-common lib planted_8378::reads_the_roster"
 check "the real tree and scripts/asset-content-tests.tsv" 0 "$REPO_ROOT" "$REPO_ROOT/scripts/asset-content-tests.tsv"
 
 echo

@@ -122,6 +122,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use trusty_mpm::core::agent::is_subagent_dispatch_tool;
+use trusty_mpm::core::content_source::AgentRoster;
 use trusty_mpm::core::dispatch_isolation::{
     blocked_by_shared_tree, dispatch_agent, dispatch_isolation,
 };
@@ -146,12 +147,13 @@ use crate::commands::pm_guard_dispatch_deny::{
 /// `allows_the_first_dispatch`, `allows_an_isolated_dispatch`,
 /// `allows_a_read_only_agent`, `allows_every_non_dispatch_tool`.
 pub(crate) fn evaluate_shared_tree_dispatch(
+    roster: &AgentRoster,
     tool_name: &str,
     tool_input: Option<&Value>,
     cwd: &Path,
     live: &[String],
 ) -> Option<String> {
-    if live.is_empty() || !dispatch_shares_the_tree(tool_name, tool_input) {
+    if live.is_empty() || !dispatch_shares_the_tree(roster, tool_name, tool_input) {
         return None;
     }
     let agent = dispatch_agent(tool_input).unwrap_or("this");
@@ -169,10 +171,15 @@ pub(crate) fn evaluate_shared_tree_dispatch(
 /// Test: `allows_a_read_only_agent`, `allows_an_isolated_dispatch`,
 /// `allows_when_the_agent_is_unknown`,
 /// `allows_version_control_alongside_a_live_writer`.
-pub(crate) fn dispatch_shares_the_tree(tool_name: &str, tool_input: Option<&Value>) -> bool {
+pub(crate) fn dispatch_shares_the_tree(
+    roster: &AgentRoster,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+) -> bool {
     is_subagent_dispatch_tool(tool_name)
-        && dispatch_agent(tool_input)
-            .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(tool_input)))
+        && dispatch_agent(tool_input).is_some_and(|agent| {
+            blocked_by_shared_tree(Some(roster), agent, dispatch_isolation(tool_input))
+        })
 }
 
 /// The directory a dispatch from this hook would land in.
@@ -985,6 +992,7 @@ fn eligibility_diverged(body: &Value, live: &[String]) -> bool {
 /// siblings, and the end-to-end path runs through the real binary in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn evaluate(
+    roster: &AgentRoster,
     url: &str,
     payload: &Value,
     tool_name: &str,
@@ -992,6 +1000,7 @@ pub(crate) async fn evaluate(
     session_id: &str,
 ) -> Option<String> {
     evaluate_with_cwd(
+        roster,
         url,
         dispatch_cwd(payload),
         payload,
@@ -1011,6 +1020,7 @@ pub(crate) async fn evaluate(
 /// `None` (ALLOW) before any daemon call.
 /// Test: `evaluate_allows_when_the_cwd_cannot_be_resolved`.
 pub(crate) async fn evaluate_with_cwd(
+    roster: &AgentRoster,
     url: &str,
     cwd: Option<PathBuf>,
     payload: &Value,
@@ -1018,14 +1028,14 @@ pub(crate) async fn evaluate_with_cwd(
     tool_input: Option<&Value>,
     session_id: &str,
 ) -> Option<String> {
-    if !dispatch_shares_the_tree(tool_name, tool_input) {
+    if !dispatch_shares_the_tree(roster, tool_name, tool_input) {
         return None;
     }
     let cwd = cwd?;
     match claim_shared_tree(url, session_id, &cwd, payload).await {
         // #8257: the deny names each blocking record and how to clear it.
         SharedTreeClaim::Writers(live, records) => {
-            evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
+            evaluate_shared_tree_dispatch(roster, tool_name, tool_input, &cwd, &live)
                 .map(|reason| reason + &blocking_records(&cwd, &records))
         }
         // #5923: a running daemon that did not answer leaves the question open,
@@ -1041,6 +1051,11 @@ pub(crate) async fn evaluate_with_cwd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout roster (#9011) every classifier in this suite reads.
+    fn r() -> &'static trusty_mpm::core::content_source::AgentRoster {
+        crate::commands::install::test_roster_ref()
+    }
     use trusty_mpm::core::agent::SUBAGENT_DISPATCH_TOOLS;
 
     fn input(agent: &str, isolation: Option<&str>) -> Value {
@@ -1056,6 +1071,7 @@ mod tests {
         // tree, a second dispatched into it with no isolation.
         for tool in SUBAGENT_DISPATCH_TOOLS {
             let reason = evaluate_shared_tree_dispatch(
+                r(),
                 tool,
                 Some(&input("rust-engineer", None)),
                 Path::new("/repo"),
@@ -1075,6 +1091,7 @@ mod tests {
         // and it must never be denied.
         assert_eq!(
             evaluate_shared_tree_dispatch(
+                r(),
                 "Agent",
                 Some(&input("rust-engineer", None)),
                 Path::new("/repo"),
@@ -1090,6 +1107,7 @@ mod tests {
         for mode in ["worktree", "remote"] {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
+                    r(),
                     "Agent",
                     Some(&input("rust-engineer", Some(mode))),
                     Path::new("/repo"),
@@ -1109,6 +1127,7 @@ mod tests {
         for agent in ["research", "code-critic", "code-analyzer"] {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
+                    r(),
                     "Agent",
                     Some(&input(agent, None)),
                     Path::new("/repo"),
@@ -1130,6 +1149,7 @@ mod tests {
         for tool in SUBAGENT_DISPATCH_TOOLS {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
+                    r(),
                     tool,
                     Some(&input("version-control", None)),
                     Path::new("/repo"),
@@ -1147,6 +1167,7 @@ mod tests {
         // ADR-0056 exempted `version-control`; the rest are unchanged.
         for agent in ["documentation", "qa", "web-qa", "api-qa"] {
             let reason = evaluate_shared_tree_dispatch(
+                r(),
                 "Agent",
                 Some(&input(agent, None)),
                 Path::new("/repo"),
@@ -1164,6 +1185,7 @@ mod tests {
         for agent in ["some-project-agent", ""] {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
+                    r(),
                     "Agent",
                     Some(&input(agent, None)),
                     Path::new("/repo"),
@@ -1175,6 +1197,7 @@ mod tests {
         // An Agent call carrying no input at all is equally indeterminate.
         assert_eq!(
             evaluate_shared_tree_dispatch(
+                r(),
                 "Agent",
                 None,
                 Path::new("/repo"),
@@ -1199,6 +1222,7 @@ mod tests {
         ] {
             assert_eq!(
                 evaluate_shared_tree_dispatch(
+                    r(),
                     tool,
                     Some(&input("rust-engineer", None)),
                     Path::new("/repo"),
@@ -1275,6 +1299,7 @@ mod tests {
         // verdict can only come from the cwd short-circuit firing first.
         let url = spawn_denying_mock();
         let verdict = evaluate_with_cwd(
+            r(),
             &url,
             None,
             &serde_json::json!({}),
@@ -1563,6 +1588,7 @@ mod tests {
         // and the message must name #5923 and the remedy that needs no daemon.
         let url = spawn_silent_mock();
         let reason = evaluate_with_cwd(
+            r(),
             &url,
             Some(PathBuf::from("/repo")),
             &serde_json::json!({"tool_use_id": "toolu_X"}),
@@ -1583,6 +1609,7 @@ mod tests {
         // broken, turning a machine with no daemon into one that cannot
         // dispatch at all.
         let verdict = evaluate_with_cwd(
+            r(),
             "http://127.0.0.1:1",
             Some(PathBuf::from("/repo")),
             &serde_json::json!({"tool_use_id": "toolu_X"}),
@@ -1780,6 +1807,7 @@ mod tests {
         let (listener, url) = unaccepted_listener();
         let payload = serde_json::json!({"cwd": "/repo"});
         let verdict = evaluate(
+            r(),
             &url,
             &payload,
             "Read",

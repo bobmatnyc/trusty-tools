@@ -38,7 +38,9 @@ fn seeded(base: &std::path::Path) -> FrameworkPaths {
         paths
             .agents
             .join(crate::core::agent_source::STAMP_FILE_NAME),
-        crate::core::agent_source::agent_bundle_stamp(),
+        crate::core::agent_source::agent_bundle_stamp(
+            &crate::core::content_source::test_support::repo_roster(),
+        ),
     )
     .unwrap();
 
