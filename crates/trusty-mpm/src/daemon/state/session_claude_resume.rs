@@ -25,14 +25,28 @@ impl DaemonState {
     /// Grant `record`'s resumed `claude` its session id (#8983).
     ///
     /// What: [`Self::grant_resumed_session`] over the record's stored
-    /// `claude_session_id`, tmux session and pane.
-    /// Test: `a_daemon_resumed_claude_rebinds_its_session_8983`.
-    pub fn grant_resume_of(&self, record: &crate::session_manager::SessionRecord) {
+    /// `claude_session_id`, tmux session and pane; returns the grant, for
+    /// [`Self::revoke_resume_grant`] when the launch fails.
+    /// Test: `a_daemon_resumed_claude_rebinds_its_session_8983`,
+    /// `an_operator_resume_holds_its_grant_through_the_launch_line_8983`,
+    /// `an_auto_relaunch_holds_its_grant_through_the_launch_line_8983`.
+    pub fn grant_resume_of(
+        &self,
+        record: &crate::session_manager::SessionRecord,
+    ) -> Option<(SessionId, ResumeGrant)> {
         self.grant_resumed_session(
             record.claude_session_id.as_deref(),
             &record.tmux_name,
             record.pane_id.as_deref(),
-        );
+        )
+    }
+
+    /// Drop `granted` when it is still `session`'s grant (#8983): a launch
+    /// that failed puts no `claude` in the pane, so nothing may claim it.
+    pub fn revoke_resume_grant(&self, granted: Option<(SessionId, ResumeGrant)>) {
+        if let Some((session, grant)) = granted {
+            self.session_claudes.revoke_resume(session, &grant);
+        }
     }
 
     /// Record that the daemon is about to relaunch `claude_session_id` in
@@ -47,24 +61,20 @@ impl DaemonState {
         claude_session_id: Option<&str>,
         tmux_name: &str,
         pane_id: Option<&str>,
-    ) {
-        let Some(session) = claude_session_id
+    ) -> Option<(SessionId, ResumeGrant)> {
+        let session = claude_session_id
             .and_then(|id| uuid::Uuid::parse_str(id).ok())
-            .map(SessionId)
-        else {
-            return;
-        };
+            .map(SessionId)?;
         let issued_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        self.session_claudes.grant_resume(
-            session,
-            ResumeGrant {
-                tmux_name: tmux_name.to_string(),
-                pane_id: pane_id.map(str::to_string),
-                issued_at,
-            },
-        );
+        let grant = ResumeGrant {
+            tmux_name: tmux_name.to_string(),
+            pane_id: pane_id.map(str::to_string),
+            issued_at,
+        };
+        self.session_claudes.grant_resume(session, grant.clone());
+        Some((session, grant))
     }
 
     /// Rebind `session` to `claude`, the kernel-verified sender of its
@@ -113,17 +123,17 @@ impl DaemonState {
     }
 }
 
-/// The `claude` running in `grant`'s pane, with its start time (#8983).
+/// The `claude` running in `grant`'s own pane, with its start time (#8983).
+///
+/// What: `Err` for a grant with no pane id. It never falls back to the tmux
+/// session's active pane, which can be a sibling's (#8935).
+/// Test: `a_resume_rebind_fails_closed_8983`.
 pub(crate) fn pane_claude(grant: &ResumeGrant) -> Result<ClaudeProcess, String> {
-    let pid = match grant.pane_id.as_deref() {
-        Some(pane) => crate::core::process::find_claude_pid_in_pane(&grant.tmux_name, pane),
-        None => crate::core::process::find_claude_pid_in_tmux(
-            &grant.tmux_name,
-            1,
-            std::time::Duration::ZERO,
-        ),
-    }
-    .ok_or("no claude runs in the pane")?;
+    let pane = grant.pane_id.as_deref().ok_or(
+        "the managed record has no pane id, so its claude cannot be told from a sibling's",
+    )?;
+    let pid = crate::core::process::find_claude_pid_in_pane(&grant.tmux_name, pane)
+        .ok_or("no claude runs in the pane")?;
     let facts = crate::core::twin_arming::process_facts(pid)?;
     Ok(ClaudeProcess {
         pid,

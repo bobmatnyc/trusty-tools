@@ -421,24 +421,28 @@ impl DaemonState {
     ///   `claude` process has exited, the session is marked
     ///   [`SessionStatus::Stopped`] in place (kept so the operator can see it).
     ///
-    /// Returns the [`ReapResult`] with both counts. Native sessions are left
-    /// untouched, and so is any session whose id a `SessionStart` settled in
-    /// the session-claude registry, or every session while it is sealed
-    /// (#8980). #9010: a settled id bound to a `claude` is removed once that
-    /// `claude` — pid AND start time — is proven gone; one whose probe
-    /// cannot answer is kept.
+    /// Returns the [`ReapResult`] with both counts. A Native session whose id
+    /// is not settled in the session-claude registry is left untouched. A
+    /// settled session, Native or Tmux, is never reaped by the tmux rule, and
+    /// every session is skipped while the registry is sealed (#8980). #9010:
+    /// a settled id bound to a `claude` is removed only when that `claude` —
+    /// pid AND start time — is proven gone and
+    /// `SessionClaudes::reap_hold` finds nothing that still holds it; one
+    /// whose probe cannot answer is kept.
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
     /// `reap_marks_stopped_when_pid_dead`,
     /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`,
     /// `a_sealed_registry_reaps_nothing_8980`,
-    /// `a_settled_session_whose_claude_exited_is_reaped_9010`.
+    /// `a_settled_session_whose_claude_exited_is_reaped_9010`,
+    /// `a_settled_session_with_a_recent_event_is_kept_9010`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
         self.reap_against_with(live, super::session_claudes::claude_liveness)
     }
 
     /// [`Self::reap_against`] over an injected bound-`claude` probe (#9010).
     ///
-    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`.
+    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`,
+    /// `a_session_rebound_during_the_reap_is_kept_9010`.
     pub(super) fn reap_against_with(
         &self,
         live: &std::collections::HashSet<String>,
@@ -474,11 +478,6 @@ impl DaemonState {
                 stopped_ids.push(*entry.key());
             }
         }
-        for (id, claude) in bound {
-            if probe(claude).proves_gone(id) {
-                dead.push(id);
-            }
-        }
         for id in &dead {
             self.remove_session(*id);
             // #6497: the session's agents cannot outlive it, and their records
@@ -490,7 +489,7 @@ impl DaemonState {
             self.stale_delegations_of_dead_session(*id);
         }
         ReapResult {
-            reaped: dead.len(),
+            reaped: dead.len() + self.reap_settled_sessions(bound, probe),
             stopped: stopped_ids.len(),
         }
     }

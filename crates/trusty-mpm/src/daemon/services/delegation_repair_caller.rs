@@ -182,8 +182,9 @@ pub(crate) fn establish_caller_with(
 /// ([`SessionClaudes::peer_claude`](crate::daemon::state::session_claudes::SessionClaudes::peer_claude)),
 /// then [`DaemonState::bind_session_claude`] (first announcement wins), both
 /// on the blocking pool — the walk reads the process table and the bind
-/// writes the registry file. `Ok` without a walk when the id's first
-/// announcement is already recorded. `Err` naming the failed step when there
+/// writes the registry file. `Ok` when the id's first announcement is
+/// already recorded; #9010: a walked `claude` is then only noted as a later
+/// announcer (`SessionClaudes::note_announcer`), never bound. `Err` naming the failed step when there
 /// is no peer pid, the walk fails, or the bind is refused; `ingest_hook` then
 /// records the id as unproven, and an unproven owner is refused.
 /// #8983: an id the daemon itself is resuming is instead rebound when the
@@ -193,7 +194,8 @@ pub(crate) fn establish_caller_with(
 /// `a_session_start_without_a_peer_pid_binds_nothing_8531`,
 /// `a_session_start_whose_walk_fails_binds_nothing_8531`,
 /// `a_restart_does_not_hand_the_owner_id_to_a_sibling_8531`,
-/// `a_daemon_resumed_claude_rebinds_its_session_8983`.
+/// `a_daemon_resumed_claude_rebinds_its_session_8983`,
+/// `a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983`.
 pub async fn bind_announcing_claude(
     state: &Arc<DaemonState>,
     session: SessionId,
@@ -218,13 +220,19 @@ pub(crate) async fn bind_announcing_claude_with(
     };
     // #8983: a session the daemon resumed may rebind to its new claude.
     let resumed = state.session_claudes().resume_grant(session).is_some();
-    // #8531: a recorded first announcement is final, so skip the walk.
-    if state.session_claudes().is_settled(session) && !resumed {
-        return Ok(());
-    }
+    let settled = state.session_claudes().is_settled(session);
     let held = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
-        let claude = walk(pid, seen_at, &held)?;
+        let walked = walk(pid, seen_at, &held);
+        // #8531: a recorded first announcement is final. #9010: a later
+        // announcer only holds the session off the reaper while it runs.
+        if settled && !resumed {
+            if let Ok(claude) = walked {
+                held.session_claudes().note_announcer(session, claude);
+            }
+            return Ok(());
+        }
+        let claude = walked?;
         if resumed {
             held.rebind_resumed_claude_with(session, claude, pane)
         } else {

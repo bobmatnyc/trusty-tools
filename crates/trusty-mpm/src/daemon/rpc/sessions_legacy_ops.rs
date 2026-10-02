@@ -571,8 +571,32 @@ pub async fn ingest_hook_from_socket(
     post: HookPost,
     peer: Option<trusty_common::uds::server::RequestPeer>,
 ) -> Result<HookAcceptedResponse, DaemonError> {
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude;
+    let bind = |held: Arc<DaemonState>, session, peer| async move {
+        bind_announcing_claude(&held, session, peer).await
+    };
+    ingest_hook_from_socket_with(state, post, peer, bind).await
+}
+
+/// [`ingest_hook_from_socket`] over an injected `SessionStart` bind (#8984).
+///
+/// Test: `the_socket_bind_runs_inside_its_in_flight_guard_8984`.
+pub(crate) async fn ingest_hook_from_socket_with<B, F>(
+    state: &Arc<DaemonState>,
+    post: HookPost,
+    peer: Option<trusty_common::uds::server::RequestPeer>,
+    bind: B,
+) -> Result<HookAcceptedResponse, DaemonError>
+where
+    B: FnOnce(
+        Arc<DaemonState>,
+        SessionId,
+        crate::daemon::services::delegation_repair_caller::RepairPeer,
+    ) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
     use crate::daemon::services::delegation_repair_caller::{
-        RepairPeer, bind_announcing_claude, stale_on_owner_session_end,
+        RepairPeer, stale_on_owner_session_end,
     };
     // #8531: bind before ingest, from the kernel's peer; HTTP never binds.
     // #8984: the bind is in flight until the ingest below settles the id, so
@@ -582,7 +606,7 @@ pub async fn ingest_hook_from_socket(
         .flatten();
     let _in_flight = start.map(|session| state.session_claudes().begin_bind(session));
     if let Some(session) = start
-        && let Err(e) = bind_announcing_claude(state, session, RepairPeer::from_socket(peer)).await
+        && let Err(e) = bind(Arc::clone(state), session, RepairPeer::from_socket(peer)).await
     {
         tracing::warn!(session_id = %session.0, "SessionStart left the session unbound: {e}");
     }
@@ -626,6 +650,8 @@ pub async fn ingest_hook(
     post: HookPost,
 ) -> Result<HookAcceptedResponse, DaemonError> {
     let session = parse_id(&post.session_id)?;
+    // #9010: a recent event holds a settled session off the reaper.
+    state.session_claudes().note_event(session);
 
     // #8531: the first SessionStart decides an id's binding on either
     // transport. One that bound no claude (HTTP, or a socket bind that

@@ -557,7 +557,9 @@ fn an_unanswered_probe_keeps_a_settled_session_9010() {
 }
 
 /// #9010: only proof calls a bound claude gone; every unanswered arm is
-/// `Unknown`.
+/// `Unknown`. A start-time mismatch is a reused pid only when the process
+/// now holding the pid is no claude; a claude there, or a name lookup that
+/// fails, may be the bound claude after a wall-clock step.
 #[test]
 fn claude_liveness_needs_proof_to_call_a_claude_gone_9010() {
     let facts = |start_time| {
@@ -568,21 +570,179 @@ fn claude_liveness_needs_proof_to_call_a_claude_gone_9010() {
             })
         }
     };
-    let alive = claude_liveness_with(CLAUDE, |_| Ok(true), facts(CLAUDE.start_time));
+    let no_name = |_| -> Result<bool, String> { panic!("no name lookup") };
+    let alive = claude_liveness_with(CLAUDE, |_| Ok(true), facts(CLAUDE.start_time), no_name);
     assert_eq!(alive, ClaudeLiveness::Alive);
-    let gone = claude_liveness_with(CLAUDE, |_| Ok(false), |_| panic!("no read of a gone pid"));
+    let gone = claude_liveness_with(
+        CLAUDE,
+        |_| Ok(false),
+        |_| panic!("no read of a gone pid"),
+        no_name,
+    );
     assert!(matches!(gone, ClaudeLiveness::Gone(_)), "{gone:?}");
-    let reused = claude_liveness_with(CLAUDE, |_| Ok(true), facts(CLAUDE.start_time + 1));
-    assert!(matches!(reused, ClaudeLiveness::Gone(ref why) if why.contains("started at")));
-    let unanswered = claude_liveness_with(CLAUDE, |_| Err("EIO".to_string()), facts(0));
+    let shifted = facts(CLAUDE.start_time + 1);
+    let reused = claude_liveness_with(CLAUDE, |_| Ok(true), shifted, |_| Ok(false));
+    assert!(matches!(reused, ClaudeLiveness::Gone(ref why) if why.contains("not a claude")));
+    let stepped = claude_liveness_with(CLAUDE, |_| Ok(true), shifted, |_| Ok(true));
+    assert!(
+        matches!(stepped, ClaudeLiveness::Unknown(ref why) if why.contains("it is a claude")),
+        "{stepped:?}"
+    );
+    let unnamed = claude_liveness_with(CLAUDE, |_| Ok(true), shifted, |_| Err("EIO".into()));
+    assert!(
+        matches!(unnamed, ClaudeLiveness::Unknown(ref why) if why.contains("could not be named")),
+        "{unnamed:?}"
+    );
+    let unanswered = claude_liveness_with(CLAUDE, |_| Err("EIO".to_string()), facts(0), no_name);
     assert!(
         matches!(unanswered, ClaudeLiveness::Unknown(_)),
         "{unanswered:?}"
     );
-    let unreadable = claude_liveness_with(CLAUDE, |_| Ok(true), |_| Err("gone".to_string()));
+    let unreadable =
+        claude_liveness_with(CLAUDE, |_| Ok(true), |_| Err("gone".to_string()), no_name);
     assert!(
         matches!(unreadable, ClaudeLiveness::Unknown(_)),
         "{unreadable:?}"
+    );
+}
+
+/// An exited `claude`: this test's own child, spawned and reaped.
+fn exited_claude() -> ClaudeProcess {
+    ClaudeProcess {
+        pid: reaped_child_pid(),
+        start_time: 1,
+    }
+}
+
+/// #9010 HIGH regression: a session whose bound claude exited is kept while
+/// it still produces hook events — `claude --resume <id>` run outside the
+/// daemon keeps the id bound to the old pid. An event older than one reap
+/// interval holds nothing.
+#[tokio::test]
+async fn a_settled_session_with_a_recent_event_is_kept_9010() {
+    use crate::core::agent::DelegationStatus;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = bound_session(&state, exited_claude());
+    ingest(&state, session, HookEvent::PreToolUse).await;
+
+    let result = state.reap_against(&std::collections::HashSet::new());
+
+    assert_eq!(result.reaped, 0, "{result:?}");
+    assert!(state.session(session).is_some(), "a recent event keeps it");
+    assert_eq!(
+        delegation_status(&state, session),
+        DelegationStatus::Running
+    );
+
+    let window = std::time::Duration::from_secs(crate::daemon::REAP_INTERVAL_SECS + 1);
+    let long_ago = std::time::Instant::now()
+        .checked_sub(window)
+        .expect("the host has been up longer than one reap interval");
+    state
+        .session_claudes()
+        .events
+        .lock()
+        .insert(session, long_ago);
+    let result = state.reap_against(&std::collections::HashSet::new());
+    assert_eq!(result.reaped, 1, "an old event holds nothing: {result:?}");
+    assert_eq!(delegation_status(&state, session), DelegationStatus::Stale);
+}
+
+/// #9010 HIGH regression: the reaper re-checks a gone claude's session just
+/// before removing it. A rebind or a resume grant that lands after the walk,
+/// or a later announcer that still runs, keeps the session.
+#[test]
+fn a_session_rebound_during_the_reap_is_kept_9010() {
+    use crate::core::agent::DelegationStatus;
+    let none = std::collections::HashSet::new();
+    let gone = || ClaudeLiveness::Gone("exited".to_string());
+    // Each case runs on its own daemon, so no case's session is in another's
+    // sweep.
+    let case = || {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = daemon_at(root.path());
+        (root, state)
+    };
+
+    let (_root, state) = case();
+    let rebound = bound_session(&state, CLAUDE);
+    let result = state.reap_against_with(&none, |_| {
+        state
+            .session_claudes()
+            .rebind(rebound, resumed_claude())
+            .expect("rebound during the probe");
+        gone()
+    });
+    assert_eq!(result.reaped, 0, "a rebind after the walk keeps it");
+    assert!(state.session(rebound).is_some());
+    assert_eq!(
+        delegation_status(&state, rebound),
+        DelegationStatus::Running
+    );
+
+    let (_root, state) = case();
+    let resuming = bound_session(&state, CLAUDE);
+    let id = resuming.0.to_string();
+    let result = state.reap_against_with(&none, |_| {
+        state.grant_resumed_session(Some(&id), "tm-resumed", Some("%7"));
+        gone()
+    });
+    assert_eq!(result.reaped, 0, "a grant after the walk keeps it");
+    assert!(state.session(resuming).is_some());
+
+    let (_root, state) = case();
+    let announced = bound_session(&state, exited_claude());
+    state
+        .session_claudes()
+        .note_announcer(announced, this_process());
+    let result = state.reap_against(&none);
+    assert_eq!(result.reaped, 0, "a running later announcer keeps it");
+    assert_eq!(
+        delegation_status(&state, announced),
+        DelegationStatus::Running
+    );
+    let result = state.reap_against_with(&none, |_| gone());
+    assert_eq!(
+        result.reaped, 1,
+        "a gone announcer holds nothing: {result:?}"
+    );
+    assert!(state.session(announced).is_none());
+}
+
+/// #8984 LOW: the socket ingest holds the bind's in-flight guard through the
+/// bind, so a later event racing it leaves the id to the bind. Dropping the
+/// guard before the bind — `let _ = begin_bind(..)` — fails this test.
+#[tokio::test]
+async fn the_socket_bind_runs_inside_its_in_flight_guard_8984() {
+    use crate::daemon::rpc::sessions_legacy_ops::ingest_hook_from_socket_with;
+    let root = tempfile::tempdir().expect("tempdir");
+    let state = std::sync::Arc::new(daemon_at(root.path()));
+    let session = SessionId::new();
+    let post = crate::daemon::api::HookPost {
+        session_id: session.0.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({}),
+    };
+
+    let bind =
+        |held: std::sync::Arc<DaemonState>,
+         id: SessionId,
+         _peer: crate::daemon::services::delegation_repair_caller::RepairPeer| async move {
+            let in_flight = held.session_claudes().binding.lock().get(&id).copied();
+            assert_eq!(in_flight, Some(1), "the guard is held during the bind");
+            let raced = held.session_claudes().settle_after_event(id);
+            assert_eq!(raced, Ok(false), "a racing event leaves the id to the bind");
+            held.bind_session_claude(id, CLAUDE)
+        };
+    ingest_hook_from_socket_with(&state, post, None, bind)
+        .await
+        .expect("ingested");
+
+    assert_eq!(state.session_claudes().get(session), Some(CLAUDE));
+    assert!(
+        state.session_claudes().binding.lock().is_empty(),
+        "released after the ingest"
     );
 }
 
@@ -731,16 +891,24 @@ async fn a_sibling_claude_announcing_a_resumed_id_is_not_bound_8983() {
     state
         .bind_session_claude(not_resumed, CLAUDE)
         .expect("vacant");
+    // #9010: the walked claude is only noted as a later announcer.
     let got = bind_announcing_claude_with(
         &state,
         not_resumed,
         kernel_peer(),
-        |_, _, _| panic!("no walk for a settled id"),
+        move |_, _, _| Ok(sibling),
         |_| panic!("no pane lookup without a grant"),
     )
     .await;
     assert_eq!(got, Ok(()));
     assert_eq!(state.session_claudes().get(not_resumed), Some(CLAUDE));
+    let noted = state
+        .session_claudes()
+        .announcers
+        .lock()
+        .get(&not_resumed)
+        .copied();
+    assert_eq!(noted, Some(sibling));
 }
 
 /// #8983 Fail-Open Check: no grant, a `claude` older than the grant, a pane
@@ -771,6 +939,21 @@ fn a_resume_rebind_fails_closed_8983() {
         Err("tmux is gone".into()),
         "could not be found",
     );
+    // #8983: a record with no pane id never falls back to the active pane.
+    let paneless = SessionId::new();
+    state.bind_session_claude(paneless, CLAUDE).expect("vacant");
+    state.grant_resumed_session(Some(&paneless.0.to_string()), "tm-resumed", None);
+    let got = state.rebind_resumed_claude_with(
+        paneless,
+        resumed,
+        crate::daemon::state::session_claude_resume::pane_claude,
+    );
+    assert!(
+        got.as_ref().is_err_and(|e| e.contains("has no pane id")),
+        "{got:?}"
+    );
+    assert_eq!(state.session_claudes().get(paneless), Some(CLAUDE));
+    assert!(state.session_claudes().resume_grant(paneless).is_some());
 
     let sealed_root = tempfile::tempdir().expect("tempdir");
     let file = registry_file(&daemon_at(sealed_root.path()));
