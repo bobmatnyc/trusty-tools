@@ -117,7 +117,7 @@ resolve_crate_dir() {
 ROWS="$(grep -v '^[[:space:]]*#' "$MANIFEST" | grep -v '^[[:space:]]*$' || true)"
 STAMPED=0
 
-while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
+while IFS="$(printf '\t')" read -r crate src_dir bundle_dir shared_dirs _rest; do
   [ -z "${crate:-}" ] && continue
   [ "$ALL" -eq 0 ] && [ "$crate" != "$TARGET" ] && continue
 
@@ -129,7 +129,8 @@ while IFS="$(printf '\t')" read -r crate src_dir bundle_dir _rest; do
   # #6155: src_dir is a comma-separated list, current path first — see
   # ui_source_digest_any. On a working tree the current path always wins, so
   # this only matters for a checkout mid-move.
-  pair="$(ui_source_digest_any "$REPO_ROOT" --worktree "$src_dir" "$bundle_dir")" || {
+  # Optional column 4 (shared_dirs) is hashed together with it (ui_pathspecs).
+  pair="$(ui_source_digest_any "$REPO_ROOT" --worktree "$src_dir" "$bundle_dir" "${shared_dirs:-}")" || {
     echo "stamp-ui-bundle: ERROR: ${crate}: no bundle-affecting source files under ${src_dir}" >&2
     exit 1
   }
