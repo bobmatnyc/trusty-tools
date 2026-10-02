@@ -40,6 +40,11 @@ pub enum Error {
     /// / `AgentManifest::save` into a `core::error::Result` keep compiling.
     #[error("agent manifest error: {0}")]
     Manifest(#[from] trusty_agents_common::agents::manifest::ManifestError),
+
+    /// The agent roster or a harness doc could not be loaded from content
+    /// (#9011); the message names `tm content install`.
+    #[error("{0}")]
+    Content(#[from] trusty_agents_common::agent_content::AgentContentError),
 }
 
 #[cfg(test)]

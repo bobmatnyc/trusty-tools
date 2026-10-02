@@ -57,7 +57,7 @@ pub const TM_CAPABILITIES_MCP_TOOLS: &str =
 
 /// Generated agent roster reference (source #3, issue #2913).
 ///
-/// Why: `bundle::ALL` filtered to `agents/*.md` plus
+/// Why: the content agent roster (`content/agents`, #9011) plus
 /// `agent_metadata::agent_metadata_from_str` reuse the exact frontmatter
 /// grammar `agent_builder` uses at compose time, so this can never drift
 /// from what actually deploys.
@@ -70,7 +70,7 @@ pub const TM_CAPABILITIES_AGENTS: &str =
 
 /// Generated skill catalog reference (source #4, issue #2913).
 ///
-/// Why: same `bundle::ALL` table [`TM_CAPABILITIES_AGENTS`] reads, filtered
+/// Why: the `bundle::ALL` table (skills; the agents come from content), filtered
 /// to top-level `skills/*.md` entries (nested `references/*.md` siblings
 /// excluded) and parsed with the shared frontmatter line parser.
 /// What: embedded markdown deployed to

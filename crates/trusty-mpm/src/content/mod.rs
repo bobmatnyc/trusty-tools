@@ -12,12 +12,10 @@
 //! `bundle_cache_tests.rs` covers the content cache.
 
 /// Whether this binary still compiles in the content ADR-0064 PHASE_1 moves
-/// out. While it does, nothing installed loses nothing: `tm doctor` reports
-/// INFO and `tm content status` exits 0.
-// See ADR-0064: the PHASE_1 PR that drops the embedded content sets this to
-// `false`, which turns "nothing installed" into a doctor WARN and a non-zero
-// `tm content status`.
-pub const BUILTIN_CONTENT_EMBEDDED: bool = true;
+/// out. `false` since #9011 dropped the embedded agent roster and harness docs:
+/// nothing installed now loses them, so `tm doctor` WARNs and `tm content
+/// status` exits non-zero. #9012 deletes the constant and its parameters.
+pub const BUILTIN_CONTENT_EMBEDDED: bool = false;
 
 pub mod bundle_cache;
 pub mod catalog_sync;

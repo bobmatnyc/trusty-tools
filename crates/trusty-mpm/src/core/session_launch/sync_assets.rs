@@ -189,6 +189,16 @@ pub fn sync_session_assets(
     let quarantine_summary =
         match super::quarantine_shadows::quarantine_workspace_shadows(fw, project_dir) {
             Ok(report) => super::quarantine_shadows::summarize(&report),
+            // #9011 D4: no content is one line here and at most one ERROR in
+            // this process's log, never a WARN per consumer.
+            Err(super::quarantine_shadows::ShadowQuarantineError::Roster(err))
+                if trusty_agents_common::agent_content::report_not_installed(
+                    &err,
+                    "agent quarantine skipped during sync-assets",
+                ) =>
+            {
+                Some(err.to_string())
+            }
             Err(err) => {
                 tracing::warn!(
                     project_dir = %project_dir.display(),

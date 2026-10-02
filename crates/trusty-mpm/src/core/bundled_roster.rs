@@ -7,10 +7,10 @@
 //! sweep refuses is noise operators learn to ignore, and the sweep moving a file
 //! doctor never flagged is a project's agent silently disappearing.
 //!
-//! What: [`bundled_roster`] — the on-disk agent source UNION the agents
-//! compiled into this binary. Lives here, in `core`, rather than inside the
-//! doctor probe, because the quarantine call sites in `session_launch` cannot
-//! reach into `daemon`.
+//! What: [`bundled_roster`] — the on-disk agent source UNION the content
+//! roster (#9011; compiled into the binary before that). Lives here, in
+//! `core`, rather than inside the doctor probe, because the quarantine call
+//! sites in `session_launch` cannot reach into `daemon`.
 //!
 //! Test: `crates/trusty-mpm/src/daemon/doctor_asset_tier_tests.rs`
 //! (`roster_falls_back_to_the_embedded_bundle`,
@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 
 use trusty_agents_common::agents::tier_audit::{agent_identity, bundled_agent_names};
 
+use crate::core::content_source::{self, AgentContentError, AgentRoster};
 use crate::core::paths::FrameworkPaths;
 
 /// The canonical bundled-agent roster, as resolved NAMES.
@@ -28,24 +29,32 @@ use crate::core::paths::FrameworkPaths;
 /// custom agent — a silent false green in doctor, and a silent no-op in the
 /// quarantine. The on-disk source directory is the accurate authority (it is
 /// literally what the deployer reads), but it is absent on a binary-only
-/// install, so the agents compiled into this binary backstop it.
+/// install, so the content roster (#9011) backstops it. When the content
+/// roster cannot be resolved this is `Err`, and callers skip classification
+/// rather than run on half a roster.
+/// What: resolves [`content_source::agent_roster`] and delegates to
+/// [`bundled_roster_with`].
+/// Test: `agent_roster_in_an_empty_cache_is_not_installed` (the resolver arm
+/// this propagates).
+pub fn bundled_roster(paths: &FrameworkPaths) -> Result<BTreeSet<String>, AgentContentError> {
+    Ok(bundled_roster_with(paths, &content_source::agent_roster()?))
+}
+
+/// [`bundled_roster`] against a roster already resolved.
+///
 /// What: [`bundled_agent_names`] over [`FrameworkPaths::agent_source_dir`],
-/// unioned with every `agents/*.md` entry of [`crate::core::bundle::ALL`]. The
-/// embedded half runs the SAME [`agent_identity`] rule over the artifact's
-/// contents rather than its `rel_path`, so both halves are keyed by declared
-/// `name:` — the bundle ships files whose stem and name differ (`BASE-AGENT.md`
-/// declares `name: base-agent`), and a stem-keyed half would silently exempt
-/// them.
+/// unioned with every file of `roster`. The roster half runs the SAME
+/// [`agent_identity`] rule over each file's contents rather than its name, so
+/// both halves are keyed by declared `name:` — `BASE-AGENT.md` declares
+/// `name: base-agent`, and a stem-keyed half would silently exempt it.
 /// Test: `roster_falls_back_to_the_embedded_bundle`,
 /// `roster_keys_the_embedded_half_by_declared_name`.
-pub fn bundled_roster(paths: &FrameworkPaths) -> BTreeSet<String> {
+pub fn bundled_roster_with(paths: &FrameworkPaths, roster: &AgentRoster) -> BTreeSet<String> {
     let mut names = bundled_agent_names(&paths.agent_source_dir());
-    names.extend(crate::core::bundle::ALL.iter().filter_map(|artifact| {
-        let file_name = artifact.rel_path.strip_prefix("agents/")?;
-        if !file_name.ends_with(".md") {
-            return None;
-        }
-        Some(agent_identity(artifact.contents, file_name))
-    }));
+    names.extend(
+        roster
+            .iter()
+            .map(|(file_name, contents)| agent_identity(contents, file_name)),
+    );
     names
 }

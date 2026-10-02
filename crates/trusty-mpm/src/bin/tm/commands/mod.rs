@@ -137,6 +137,8 @@ pub(crate) mod pm_guard_budget;
 // #4480 sibling — see its module doc.
 pub(crate) mod pm_guard_build_lease;
 pub(crate) mod pm_guard_cost;
+// #9011: the content roster pm-guard classifies dispatches against.
+pub(crate) mod pm_guard_content;
 pub(crate) mod pm_guard_deny_by_default;
 // #8722: the denial record and audit POST every pm-guard deny makes.
 pub(crate) mod pm_guard_deny_log;

@@ -257,8 +257,8 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
         tracing::warn!("managed config dir: skill source refresh failed (non-fatal): {err}");
     }
 
-    // #4840: refresh the bundled agent SOURCE from the compiled-in bundle
-    // before deploying it. Until this call existed, `~/.trusty-mpm/framework/
+    // #4840: refresh the bundled agent SOURCE from the content roster (#9011;
+    // compiled in before that) before deploying it. Until this call existed, `~/.trusty-mpm/framework/
     // agents/` was written only by the manual `tm install`, so a compiled-in
     // `BASE-AGENT.md` change reached no running agent until someone remembered
     // to re-run it. `autodeploy_agents_for` never returns an error — a broken
@@ -273,7 +273,7 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     );
     if agents.refreshed {
         tracing::info!(
-            "managed config dir: bundled agent source refreshed from the running binary"
+            "managed config dir: bundled agent source refreshed from instructional content"
         );
     }
     // #4840: a file the deployer declines to overwrite (untracked-and-differing,

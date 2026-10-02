@@ -47,7 +47,7 @@ fn blank_config() -> AgentConfig {
 /// and `gh`. A translation that lost `bash` would leave the imported agent
 /// unable to do the only job its body describes.
 /// What: feeds the literal `tools:` list from
-/// `crates/trusty-agents-common/src/assets/agents/version-control.md` through
+/// `content/agents/version-control.md` through
 /// the translation and asserts the full expected allowlist, in canonical
 /// order.
 /// Test: this test.

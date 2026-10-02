@@ -315,7 +315,9 @@ impl SessionManagerAgent {
             })?;
 
         let recall = self.delegate_recall(runtime, message).await;
-        let system = decision_system_prompt();
+        // #9011: no harness docs fails the decision, naming `tm content install`.
+        let system =
+            decision_system_prompt().map_err(|e| DelegationError::Degraded(e.to_string()))?;
         let user = decision_user_prompt(message, goal_id, recall.as_deref());
 
         let req = LlmRequest {
@@ -576,9 +578,9 @@ impl SessionManagerAgent {
 /// ([`resolve_sm_prompt_default`](crate::core::sm::prompt::resolve_sm_prompt_default))
 /// followed by the decision-schema instructions.
 /// Test: `delegate_tests.rs` asserts the mock saw the schema instructions.
-fn decision_system_prompt() -> String {
-    let base = crate::core::sm::prompt::resolve_sm_prompt_default();
-    format!("{base}\n\n---\n\n{DECISION_INSTRUCTIONS}")
+fn decision_system_prompt() -> Result<String, crate::core::content_source::AgentContentError> {
+    let base = crate::core::sm::prompt::resolve_sm_prompt_default()?;
+    Ok(format!("{base}\n\n---\n\n{DECISION_INSTRUCTIONS}"))
 }
 
 /// The decision-schema instructions appended to the SM system prompt.

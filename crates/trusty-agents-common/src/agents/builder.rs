@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use super::builder_metadata::{self, MetadataMap};
 use super::builder_yaml::{escape_yaml_double_quoted, render_scalar, unescape_yaml_double_quoted};
 use super::frontmatter::{parse_kv_line, parse_list_value};
 // #4698: the `provenance:` field's typed value and parse error.
@@ -321,7 +322,7 @@ pub(crate) struct Frontmatter {
     /// Allowed tool names in `trusty-code`'s OWN tool vocabulary (#7683).
     ///
     /// Why: one roster, two runtimes, two disjoint tool vocabularies. The
-    /// shared roster under `assets/agents/` deploys to Claude Code, whose
+    /// shared roster under `content/agents/` deploys to Claude Code, whose
     /// tool names are `Read`/`Bash`/`mcp__<server>`; `trusty-code` gates its
     /// own registry on `read_file`/`bash`/`search_code`. A single `tools:`
     /// key cannot mean both: a Claude-vocabulary list read as a tcode
@@ -334,6 +335,9 @@ pub(crate) struct Frontmatter {
     /// Test: `tcode_tools_parses_and_overrides_independently_of_tools` in
     /// builder_tests.rs.
     pub(crate) tcode_tools: Option<Vec<String>>,
+    /// The `metadata:` map, e.g. `version` (#9011, ADR-0064). Merged per key
+    /// child-wins and re-emitted last; see [`super::builder_metadata`].
+    pub(crate) metadata: MetadataMap,
 }
 
 /// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
@@ -480,12 +484,22 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     // parser actively consumed line-by-line — is the more specific match).
     let mut in_skills_block = false;
     let mut skills_block: Option<Vec<String>> = None;
+    // #9011: indented `key: value` lines under a bare `metadata:` key.
+    let mut in_metadata_block = false;
+    let mut metadata = MetadataMap::new();
 
     for line in lines {
         consumed += line.len() + 1; // +1 for the newline `lines()` strips.
         if line.trim() == "---" {
             closed = true;
             break;
+        }
+
+        if in_metadata_block {
+            if builder_metadata::consume_block_line(line, &mut metadata)? {
+                continue;
+            }
+            in_metadata_block = false;
         }
 
         if in_skills_block {
@@ -525,6 +539,9 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
                 // so the empty-inline-value path below is never consulted.
                 in_skills_block = true;
                 skills_block.get_or_insert_with(Vec::new);
+            }
+            Some((key, value)) if key == "metadata" => {
+                in_metadata_block = builder_metadata::open(&value, &mut metadata)?;
             }
             Some((key, value)) => {
                 fields.insert(key, value);
@@ -655,6 +672,7 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         tools,
         tcode_tools,
         provenance,
+        metadata,
     };
     Ok((fm, body))
 }
@@ -761,6 +779,11 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         if let Some(t) = &fm.tcode_tools {
             merged.tcode_tools = Some(t.clone());
         }
+        // #9011: per-key child-wins, so a leaf's `metadata.version` replaces
+        // its base's.
+        for (key, value) in &fm.metadata {
+            builder_metadata::set(&mut merged.metadata, key.clone(), value.clone());
+        }
     }
 
     // HR-1 Part C: derive `model` from `resource_tier` only when no explicit
@@ -840,6 +863,8 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
             escape_yaml_double_quoted(v)
         ));
     }
+    // #9011: last, so every earlier key keeps its byte position.
+    out.push_str(&builder_metadata::render(&merged.metadata));
     out.push_str("---\n");
     out
 }

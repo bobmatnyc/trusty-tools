@@ -1538,3 +1538,93 @@ fn compose_with_provenance_overrides_a_source_declaration() {
     assert!(composed.contains("provenance: framework-owned"));
     assert!(!composed.contains("user-authored"));
 }
+
+/// #9011: a block-form `metadata:` map is parsed, carried through the merge,
+/// and emitted last as a block with a double-quoted value. The indented
+/// `version:` never becomes a top-level key.
+#[test]
+fn metadata_block_parsed_merged_and_emitted() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "solo",
+        "---\nname: solo\nrole: qa\nmetadata:\n  version: \"1.0.0\"\n\n  # note\nmodel: sonnet\n---\n\nBODY\n",
+    );
+    let (fm, _) =
+        split_frontmatter(&fs::read_to_string(tmp.path().join("solo.md")).unwrap()).unwrap();
+    assert_eq!(
+        fm.metadata,
+        vec![("version".to_string(), "1.0.0".to_string())]
+    );
+    assert_eq!(
+        fm.model.as_deref(),
+        Some("sonnet"),
+        "the block ends at the next top-level key"
+    );
+
+    let composed = compose_agent("solo", tmp.path()).unwrap();
+    assert!(
+        composed.starts_with("---\nname: solo\nrole: qa\nmodel: sonnet\n"),
+        "{composed}"
+    );
+    assert!(
+        composed.contains("\nmetadata:\n  version: \"1.0.0\"\n---\n"),
+        "{composed}"
+    );
+    assert!(crate::agents::frontmatter::validate_frontmatter(&composed).is_ok());
+}
+
+/// #9011: the one-line flow form reads the same as the block form.
+#[test]
+fn metadata_flow_form_is_parsed() {
+    let (fm, _) =
+        split_frontmatter("---\nname: a\nmetadata: {version: \"0.3.0\", owner: x}\n---\n\nB\n")
+            .unwrap();
+    assert_eq!(
+        fm.metadata,
+        vec![
+            ("version".to_string(), "0.3.0".to_string()),
+            ("owner".to_string(), "x".to_string()),
+        ]
+    );
+}
+
+/// #9011: per-key child-wins — the leaf's `version` replaces the base's, and a
+/// key only the base declares is inherited.
+#[test]
+fn metadata_child_wins_across_chain() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nmetadata:\n  version: \"1.0.0\"\n  owner: core\n---\n\nBASE\n",
+    );
+    write_agent(
+        tmp.path(),
+        "child",
+        "---\nname: child\nextends: base-agent\nmetadata:\n  version: \"2.0.0\"\n---\n\nCHILD\n",
+    );
+    let composed = compose_agent("child", tmp.path()).unwrap();
+    assert!(
+        composed.contains("metadata:\n  version: \"2.0.0\"\n  owner: \"core\"\n---\n"),
+        "{composed}"
+    );
+}
+
+/// #9011: `metadata:` is a map; a scalar or a non-`key: value` child is a
+/// parse error, not a silently dropped version.
+#[test]
+fn metadata_non_map_value_is_rejected() {
+    for doc in [
+        "---\nname: a\nmetadata: 1.0.0\n---\n\nB\n",
+        "---\nname: a\nmetadata:\n  - 1.0.0\n---\n\nB\n",
+    ] {
+        assert!(
+            matches!(
+                split_frontmatter(doc),
+                Err(AgentBuildError::FrontmatterParse(_))
+            ),
+            "{doc:?}"
+        );
+    }
+}

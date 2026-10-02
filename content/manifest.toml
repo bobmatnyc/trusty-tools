@@ -11,5 +11,177 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "0.1.0"
+version = "0.2.0"
 schema_major = 1
+
+[[member]]
+path = "agents/BASE-AGENT.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/BASE-ENGINEER.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/BASE-OPS.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/BASE-QA.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/BASE-RESEARCH.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/api-qa.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/code-analyzer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/code-critic.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/dart-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/data-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/documentation.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/dotnet-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/elixir-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/gcp-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/golang-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/java-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/javascript-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/local-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/memory-manager.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/mpm-agent-manager.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/mpm-skills-manager.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/nextjs-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/phoenix-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/php-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/prompt-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/python-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/qa.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/react-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/refactoring-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/research.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/ruby-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/rust-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/secrets-manager.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/security.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/svelte-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/tauri-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/ticketing.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/typescript-engineer.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/vercel-ops.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/version-control.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/web-qa.md"
+version = "0.1.0"
+
+[[member]]
+path = "agents/web-ui-engineer.md"
+version = "0.1.0"

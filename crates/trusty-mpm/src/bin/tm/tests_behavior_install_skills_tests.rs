@@ -14,7 +14,7 @@
 //! writes fails here rather than in production.
 //! Test: this file IS the test.
 
-use crate::commands::install::{install_to, skill_report_lines};
+use crate::commands::install::{install_to_with, skill_report_lines, test_roster};
 
 #[test]
 fn install_then_deploy_deploys_skills() {
@@ -25,7 +25,7 @@ fn install_then_deploy_deploys_skills() {
     // `skill_install_tiers::deploy_install_skill_tiers`).
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
     let result = trusty_mpm::core::skill_install_tiers::deploy_install_skill_tiers(&paths)
         .unwrap()
         .stats;

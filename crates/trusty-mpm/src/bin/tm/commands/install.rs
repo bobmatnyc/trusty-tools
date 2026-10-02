@@ -663,20 +663,71 @@ pub(crate) fn install_one(
 ///
 /// Why: separating the filesystem work from argument parsing and stdout makes
 /// the installer unit-testable against a `tempfile::TempDir`.
-/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact, resolves its
-/// destination under `paths.framework` and delegates the policy-driven write
-/// to [`install_one`].
-/// Test: `install_writes_all_artifacts`.
+/// What: resolves the agent roster from content (#9011) and hands it to
+/// [`install_to_with`]. With no content resolvable this fails before writing
+/// anything, and the error names `tm content install`.
+/// Test: `install_writes_all_artifacts`,
+/// `install_without_content_fails_naming_tm_content_install`.
 pub(crate) fn install_to(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
+) -> anyhow::Result<Vec<String>> {
+    install_to_resolving(paths, force, trusty_mpm::core::content_source::agent_roster)
+}
+
+/// [`install_to`] with the roster resolver given, so a test can point it at
+/// an empty cache.
+pub(crate) fn install_to_resolving(
+    paths: &trusty_mpm::core::paths::FrameworkPaths,
+    force: bool,
+    roster: impl FnOnce() -> Result<
+        trusty_mpm::core::content_source::AgentRoster,
+        trusty_mpm::core::content_source::AgentContentError,
+    >,
+) -> anyhow::Result<Vec<String>> {
+    // #9011: resolve before writing anything, so a missing roster leaves the
+    // framework tree untouched.
+    install_to_with(paths, force, &roster()?)
+}
+
+/// [`install_to`] with the roster given.
+///
+/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact, resolves its
+/// destination under `paths.framework` and delegates the policy-driven write
+/// to [`install_one`]; then writes every roster file into
+/// `<framework>/agents/` (agents are framework-owned, so always overwritten).
+/// Test: `install_writes_all_artifacts`.
+pub(crate) fn install_to_with(
+    paths: &trusty_mpm::core::paths::FrameworkPaths,
+    force: bool,
+    roster: &trusty_mpm::core::content_source::AgentRoster,
 ) -> anyhow::Result<Vec<String>> {
     let mut report = Vec::new();
     for artifact in trusty_mpm::core::bundle::ALL {
         let dest = paths.framework.join(artifact.rel_path);
         report.push(install_one(&dest, artifact, force)?);
     }
+    for name in roster.materialize(&paths.framework.join("agents"))? {
+        report.push(format!("\u{2713} agents/{name}"));
+    }
     Ok(report)
+}
+
+/// The checkout's agent roster, for bin-target tests that install.
+#[cfg(test)]
+pub(crate) fn test_roster() -> trusty_mpm::core::content_source::AgentRoster {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let content =
+        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+    trusty_mpm::core::content_source::AgentRoster::load(&content).expect("repo roster")
+}
+
+/// [`test_roster`], loaded once per test binary, for classifier tests.
+#[cfg(test)]
+pub(crate) fn test_roster_ref() -> &'static trusty_mpm::core::content_source::AgentRoster {
+    static ROSTER: std::sync::OnceLock<trusty_mpm::core::content_source::AgentRoster> =
+        std::sync::OnceLock::new();
+    ROSTER.get_or_init(test_roster)
 }
 
 // Unit tests live in install_tests.rs (test-file budget: 1500 SLOC).

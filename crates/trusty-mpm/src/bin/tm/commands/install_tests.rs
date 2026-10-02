@@ -235,3 +235,23 @@ fn install_with_the_guard_off_strips_an_existing_guard_entry() {
         "{commands:?}"
     );
 }
+
+/// #9011: with no content resolvable, `tm install` fails before writing
+/// anything, and the error names `tm content install`.
+#[test]
+fn install_without_content_fails_naming_tm_content_install() {
+    use trusty_mpm::core::content_source::{DevOverride, agent_roster_in};
+
+    let cache = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let paths = trusty_mpm::core::paths::FrameworkPaths::under(home.path());
+    let err = install_to_resolving(&paths, false, || {
+        agent_roster_in(cache.path(), DevOverride::Off)
+    })
+    .expect_err("no content installed");
+    assert!(err.to_string().contains("tm content install"), "{err}");
+    assert!(
+        !paths.framework.exists(),
+        "a failed install must leave the framework tree unwritten"
+    );
+}

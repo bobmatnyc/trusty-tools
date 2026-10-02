@@ -70,12 +70,12 @@ DEFAULT_SOURCE_ROOT=""
 # content classes (#8378); crates/trusty-common/src/content/dev.rs mirrors
 # this table and `dev_class_table_matches_the_packager` pins the two.
 LEGACY_SOURCES="
-agents=crates/trusty-agents-common/src/assets/agents
+agents=content/agents
 skills=crates/trusty-mpm/src/assets/skills
 instructions=crates/trusty-mpm/src/assets/instructions
 instructions/output-styles=crates/trusty-mpm/src/assets/output-styles
 instructions/sm_instructions=crates/trusty-mpm/src/assets/sm_instructions
-instructions/harness_understanding=crates/trusty-agents-common/src/assets/harness_understanding
+instructions/harness_understanding=content/instructions/harness_understanding
 "
 
 usage() {

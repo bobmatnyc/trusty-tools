@@ -9,7 +9,7 @@
 //! without `--force`.
 //! Test: this file.
 
-use crate::commands::install::{install_one, install_to};
+use crate::commands::install::{install_one, install_to_with, test_roster};
 
 #[test]
 fn overwrite_artifact_refreshes_modified_file_without_force() {
@@ -23,7 +23,7 @@ fn overwrite_artifact_refreshes_modified_file_without_force() {
     std::fs::create_dir_all(&paths.hooks).unwrap();
     std::fs::write(&optimizer, "custom").unwrap();
 
-    let report = install_to(&paths, false).unwrap();
+    let report = install_to_with(&paths, false, &test_roster()).unwrap();
     assert!(
         report
             .iter()
@@ -105,7 +105,7 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
     const SENTINEL: &str = "SENTINEL-NOT-WRITTEN-BY-THE-BUNDLE-PASS";
     std::fs::write(&compiled, SENTINEL).unwrap();
 
-    install_to(&paths, true).unwrap();
+    install_to_with(&paths, true, &test_roster()).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&compiled).unwrap(),

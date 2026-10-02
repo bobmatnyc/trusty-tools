@@ -163,7 +163,7 @@ mod tests {
     use trusty_agents_common::agents::metadata::agent_metadata_from_str;
 
     fn agents_dir() -> PathBuf {
-        std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR).to_path_buf()
+        crate::core::content_source::test_support::repo_agents_dir()
     }
 
     fn skills_dir() -> PathBuf {

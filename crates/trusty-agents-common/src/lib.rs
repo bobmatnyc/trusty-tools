@@ -41,7 +41,7 @@ pub mod events;
 
 pub mod harness_doc;
 
-pub mod agent_assets;
+pub mod agent_content;
 
 pub mod compress;
 

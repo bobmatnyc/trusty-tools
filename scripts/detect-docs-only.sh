@@ -48,7 +48,6 @@
 #   The list is is_inert_instruction_asset in scripts/lib/source_class.sh,
 #   which check_changelog_fragment.sh applies too:
 #     crates/trusty-mpm/src/assets/**/*.md
-#     crates/trusty-agents-common/src/assets/**/*.md
 #                                 instruction content compiled in via
 #                                 include_str!. An edit cannot change whether
 #                                 the workspace compiles, lints or formats.

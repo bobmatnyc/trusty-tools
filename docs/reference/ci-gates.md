@@ -70,8 +70,8 @@ missing from `needs:`, or a skip the classifier did not order.
 ## Instruction content is Cargo-inert when added or modified (#8378)
 
 🔴 **Owner ruling 2026-09-27 (ADR-0064).** An ADDED or MODIFIED `.md` under
-`crates/trusty-mpm/src/assets/**` or `crates/trusty-agents-common/src/assets/**`,
-or any added or modified file under `content/**`, is Cargo-inert:
+`crates/trusty-mpm/src/assets/**`, or any added or modified file under
+`content/**` (the agents and harness docs since #9011), is Cargo-inert:
 `scripts/detect-docs-only.sh` reports `docs_only=true`, and clippy, fmt, MSRV,
 the Rust tests, the GUI clippies and the daemon smoke test report success
 without building. A DELETE, a rename (a delete plus an add under

@@ -167,7 +167,7 @@ async fn list_marks_unparseable_disk_override_as_broken() {
 /// `agents.list` excludes every `BASE-*` composition-template name —
 /// even when a real file exists on disk, as trusty-mpm's own bundle
 /// installs (frontmatter `name: base-agent`, `role: base` — see
-/// `crates/trusty-mpm/src/assets/agents/BASE-AGENT.md`) — while
+/// `content/agents/BASE-AGENT.md`) — while
 /// `resolve_agent` (the dispatch/composition path) still finds it by
 /// name, since composing a leaf agent's `extends: base-agent` chain
 /// depends on it (issue #3465 follow-up).

@@ -15,7 +15,9 @@ use clap::Parser;
 use crate::cli::{
     Cli, CliCompressionLevel, Command, OptimizerAction, OverseerAction, SessionAction,
 };
-use crate::commands::install::{deploy_report_lines, install_to, write_project_hooks_for_dir};
+use crate::commands::install::{
+    deploy_report_lines, install_to_with, test_roster, write_project_hooks_for_dir,
+};
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
 use crate::formatters::session::{event_summary, print_compression_stats};
@@ -271,8 +273,17 @@ fn install_writes_all_artifacts() {
     // framework root, with matching content.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    let report = install_to(&paths, false).unwrap();
-    assert_eq!(report.len(), trusty_mpm::core::bundle::ALL.len());
+    let roster = test_roster();
+    let report = install_to_with(&paths, false, &roster).unwrap();
+    assert_eq!(
+        report.len(),
+        trusty_mpm::core::bundle::ALL.len() + roster.len()
+    );
+    // #9011: the agents come from content, written beside the bundle.
+    for (name, body) in roster.iter() {
+        let written = std::fs::read_to_string(paths.framework.join("agents").join(name)).unwrap();
+        assert_eq!(written, body, "agents/{name}");
+    }
     for artifact in trusty_mpm::core::bundle::ALL {
         let dest = paths.framework.join(artifact.rel_path);
         assert!(dest.exists(), "missing {}", artifact.rel_path);
@@ -293,7 +304,7 @@ fn install_then_deploy_composes_agents() {
     // produce composed, inheritance-flattened files in `.claude/agents/`.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
 
     let result = trusty_mpm::core::agent_deployer::deploy_agents(
         &paths.agent_source_dir(),
@@ -312,11 +323,9 @@ fn install_then_deploy_composes_agents() {
     // an equal count with different membership would mean the deployer silently
     // dropped one bundled agent and picked up something else, and a length-only
     // assertion cannot see that.
-    let mut expected_agents: Vec<String> = trusty_mpm::core::bundle::ALL
+    let mut expected_agents: Vec<String> = test_roster()
         .iter()
-        .filter_map(|a| a.rel_path.strip_prefix("agents/"))
-        .filter(|name| name.ends_with(".md"))
-        .map(str::to_string)
+        .map(|(name, _)| name.to_string())
         .collect();
     expected_agents.sort();
     assert!(

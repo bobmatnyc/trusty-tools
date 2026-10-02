@@ -181,8 +181,10 @@ fn ensure_managed_config_dir_refreshes_stale_bundled_agents() {
 
     assert_eq!(
         std::fs::read_to_string(fw.agents.join("BASE-AGENT.md")).unwrap(),
-        crate::core::bundle::BASE_AGENT,
-        "the bundled agent SOURCE must be re-materialized from the running binary"
+        crate::core::content_source::test_support::repo_roster()
+            .require("BASE-AGENT.md")
+            .unwrap(),
+        "the bundled agent SOURCE must be re-materialized from content (#9011)"
     );
     let deployed = std::fs::read_to_string(config_dir.join("agents/BASE-AGENT.md")).unwrap();
     assert!(
@@ -252,7 +254,7 @@ fn manual_static_verify_full_roster() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (src, dst) in [
         (
-            std::path::PathBuf::from(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR),
+            crate::core::content_source::test_support::repo_agents_dir(),
             &fw.agents,
         ),
         (manifest.join("src/assets/skills"), &fw.skills),

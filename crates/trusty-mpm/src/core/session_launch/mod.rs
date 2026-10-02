@@ -667,26 +667,34 @@ pub(super) fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
+    // #9011 critic r1: no content means zero agents. The framework source may
+    // still hold a previous binary's roster; the quarantine below reports why.
+    let stale_source =
+        plan.agent_source == fw.agents && crate::core::content_source::agent_roster().is_err();
     // #7727: `fw.skill_deploy_dir()` is the skills tier the agent bodies name.
-    let deploy = match deploy_agents_filtered(
-        &plan.agent_source,
-        &fw.agent_deploy_dir(),
-        &fw.skill_deploy_dir(),
-        |name| plan.agent_selected(name),
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            // LOUD: an empty agent roster means the launched session has
-            // nothing to delegate to. This must never be a quiet `warn` — it
-            // is the exact failure mode that shipped issue #2149 (a session
-            // with no roster AND no trusty-mpm identity).
-            tracing::error!(
-                project_dir = %project_dir.display(),
-                "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
-                 roster: {err}. Identity/output-style provisioning continues regardless."
-            );
-            roster_errors.push(format!("agent deploy failed: {err}"));
-            DeployResult::default()
+    let deploy = if stale_source {
+        DeployResult::default()
+    } else {
+        match deploy_agents_filtered(
+            &plan.agent_source,
+            &fw.agent_deploy_dir(),
+            &fw.skill_deploy_dir(),
+            |name| plan.agent_selected(name),
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                // LOUD: an empty agent roster means the launched session has
+                // nothing to delegate to. This must never be a quiet `warn` — it
+                // is the exact failure mode that shipped issue #2149 (a session
+                // with no roster AND no trusty-mpm identity).
+                tracing::error!(
+                    project_dir = %project_dir.display(),
+                    "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
+                     roster: {err}. Identity/output-style provisioning continues regardless."
+                );
+                roster_errors.push(format!("agent deploy failed: {err}"));
+                DeployResult::default()
+            }
         }
     };
 
@@ -754,6 +762,12 @@ pub(super) fn prepare_session_inner(
                 ));
             }
             quarantine_report = Some(report);
+        }
+        // #9011 D4: no content is ONE gap, printed by every caller of this
+        // report; no WARN of its own, and no second line from a later consumer.
+        Err(quarantine_shadows::ShadowQuarantineError::Roster(err)) if err.is_not_installed() => {
+            trusty_agents_common::agent_content::mark_not_installed_reported();
+            roster_errors.push(err.to_string());
         }
         Err(err) => {
             tracing::warn!(

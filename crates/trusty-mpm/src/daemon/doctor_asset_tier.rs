@@ -108,7 +108,18 @@ pub(super) fn check_asset_tier(
     project_dir: Option<&Path>,
     home: &Path,
 ) -> DoctorCheck {
-    let roster = bundled_roster(paths);
+    // #9011: no content roster means the shadowing question cannot be
+    // answered; a warning, never a clean pass on an empty roster.
+    let roster = match bundled_roster(paths) {
+        Ok(roster) => roster,
+        Err(err) => {
+            return DoctorCheck::new(
+                CHECK_NAME,
+                CheckStatus::Warn,
+                format!("cannot classify agent tiers: {err}"),
+            );
+        }
+    };
     let canonical = paths.agent_deploy_dir();
 
     let mut scans: Vec<TierScan> = Vec::new();

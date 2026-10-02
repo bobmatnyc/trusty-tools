@@ -169,7 +169,7 @@ jobs:
             asset_content=true
           elif { [ "$verdict" = "docs_only=true" ] &&
                  [ -n "$(bash scripts/detect-docs-only.sh --instruction-assets < "$changed_nl")" ]; } ||
-               grep -qxE 'scripts/(asset-content-tests\.tsv|check_asset_test_filter\.py)' "$changed_nl"; then
+               grep -qxE 'scripts/(asset-content-tests\.tsv|check_asset_test_filter\.py|lib/asset_filter_lex\.py)' "$changed_nl"; then
             echo "asset_content=true" >> "$GITHUB_OUTPUT"
             echo "capabilities-drift: Cargo-inert instruction-content edit, or the test list changed — asset-content tests run here"
             asset_content=true

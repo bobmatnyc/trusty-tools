@@ -864,6 +864,9 @@ impl DaemonState {
         exclude_session: Option<SessionId>,
     ) -> Vec<Delegation> {
         let now = chrono::Utc::now();
+        // #9011: resolved once per query, and only when a record reaches the
+        // classifier; `None` (no content) makes `writes_in` fail closed.
+        let roster = std::cell::OnceCell::new();
         self.delegations
             .iter()
             .filter(|e| {
@@ -878,7 +881,16 @@ impl DaemonState {
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
                     // #8535, #8161: where the agent stands now outranks where
                     // its dispatcher stood; #6556's granted-tree test is folded in.
-                    && super::tree_membership::writes_in(d, cwd)
+                    && super::tree_membership::writes_in(
+                        d,
+                        cwd,
+                        roster
+                            // #9011 critic r1: the query's cwd, error logged.
+                            .get_or_init(|| {
+                                crate::core::content_source::agent_roster_for_query(cwd)
+                            })
+                            .as_ref(),
+                    )
             })
             .map(|e| e.value().clone())
             .collect()

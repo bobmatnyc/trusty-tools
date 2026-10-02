@@ -302,7 +302,7 @@ pub fn reinstall_assets(
 
     let agent_source = paths.agent_source_dir();
     // A populated `agents/agents` git submodule is authoritative on its own;
-    // materializing the compiled-in bundle over it would be destructive. Same
+    // materializing the content roster (#9011) over it would be destructive. Same
     // guard `agent_source::autodeploy_agents_for` applies.
     if agent_source == paths.agents || !crate::core::agent_source::has_agent_markdown(&agent_source)
     {

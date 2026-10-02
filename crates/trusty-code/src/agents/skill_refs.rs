@@ -208,7 +208,13 @@ mod tests {
     #[test]
     fn every_roster_pointer_names_an_embedded_file() {
         let marker = format!("{SKILLS_ROOT_PLACEHOLDER}/");
-        for (file_name, md) in crate::assets::EMBEDDED_TM_AGENT_SOURCES {
+        // #9011: the shared texts are read from the checkout's content.
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let content =
+            trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+        let roster =
+            trusty_agents_common::agent_content::AgentRoster::load(&content).expect("roster");
+        for (file_name, md) in crate::assets::tm_agent_sources(&roster).expect("catalog") {
             for (at, _) in md.match_indices(&marker) {
                 let rest = &md[at + marker.len()..];
                 let relative = rest.split('`').next().unwrap_or(rest);

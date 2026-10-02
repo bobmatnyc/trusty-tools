@@ -191,8 +191,7 @@ is also a CI failure (the `changelog-fragment` job of `.github/workflows/ci.yml`
 
 Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment. So
 may a PR that only adds or modifies Cargo-inert instruction assets — the
-`.md` content under `crates/trusty-mpm/src/assets/` and
-`crates/trusty-agents-common/src/assets/`, and `content/**` (owner ruling
+`.md` content under `crates/trusty-mpm/src/assets/`, and `content/**` (owner ruling
 2026-09-27). The list is `is_inert_instruction_asset` in
 `scripts/lib/source_class.sh`, which `scripts/detect-docs-only.sh` reads too.
 Deleting such an asset still owes a fragment.

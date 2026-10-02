@@ -99,6 +99,9 @@ const TRUSTY_MPM_KEYS: &[&str] = &[
     "tools",
     "tcode_tools",
     "initialprompt",
+    // #9011: `metadata: {version}` (ADR-0064). Its indented children are not
+    // keys of their own; see `split_keys_and_body`.
+    "metadata",
 ];
 
 /// Keys that appear ONLY in claude-mpm's agent schema.
@@ -240,13 +243,22 @@ fn split_keys_and_body(content: &str) -> Option<(Vec<String>, &str)> {
 
     let mut keys = Vec::new();
     let mut cursor = rest;
+    // #9011: inside a block-form `metadata:` map, an indented `version:` is the
+    // map's child, not the top-level claude-mpm `version:` key.
+    let mut in_metadata = false;
     while let Some(newline) = cursor.find('\n') {
         let (line, tail) = cursor.split_at(newline);
         let tail = &tail[1..];
         if line.trim_end() == "---" {
             return Some((keys, tail));
         }
-        if let Some((key, _)) = parse_kv_line(line) {
+        if in_metadata && (line.trim().is_empty() || line.starts_with([' ', '\t'])) {
+            cursor = tail;
+            continue;
+        }
+        in_metadata = false;
+        if let Some((key, value)) = parse_kv_line(line) {
+            in_metadata = key == "metadata" && value.trim().is_empty();
             keys.push(key);
         }
         cursor = tail;

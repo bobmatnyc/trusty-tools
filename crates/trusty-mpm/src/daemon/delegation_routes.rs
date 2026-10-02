@@ -544,9 +544,15 @@ pub fn shared_tree_dispatch_op(
     // ADR-0056: `blocked_by_shared_tree`, not `shares_the_callers_tree` — the
     // guard's admission question, so the two halves stay one policy.
     let is_dispatch = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool);
+    // #9011: no content roster makes the classifier fail closed (`None`).
+    // Critic r1: resolved from the query's cwd, and a content error is logged.
+    let roster = is_dispatch
+        .then(|| crate::core::content_source::agent_roster_for_query(&cwd))
+        .flatten();
     let eligible = is_dispatch
-        && dispatch_agent(input)
-            .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(input)));
+        && dispatch_agent(input).is_some_and(|agent| {
+            blocked_by_shared_tree(roster.as_ref(), agent, dispatch_isolation(input))
+        });
     // #6556: this route serves BOTH questions. `tm hook` posts here for a
     // `Bash` payload too — that is the ADR-0049 documents-only commit and the
     // ADR-0048 HEAD-move query — and those must not hear a record #6556

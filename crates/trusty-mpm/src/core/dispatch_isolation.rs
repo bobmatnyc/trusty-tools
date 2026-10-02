@@ -72,6 +72,16 @@
 //! The grant is keyed by name and reaches exactly one agent; engineer
 //! source-write confinement is untouched.
 //!
+//! **The roster is runtime content (#9011), and without it the classifiers
+//! fail CLOSED (owner ruling 09(a)).** Every classifier takes the agent roster
+//! as `Option<&AgentRoster>`; `None` means the content could not be resolved.
+//! Then no agent can be positively identified as read-only, so
+//! [`agent_mutates_files`] answers `true` for everything but the read-only
+//! harness built-ins. That reverses #4480's fail-open for this one cause on
+//! purpose: a missing roster is not an unknown CUSTOM agent, it is every
+//! bundled engineer becoming invisible to the race check at once.
+//! `tm hook --pm-guard` goes further and refuses the dispatch outright.
+//!
 //! Test: the `#[cfg(test)]` suite below.
 //!
 //! [`isolation_separates_working_tree`]: crate::core::dispatch_isolation::isolation_separates_working_tree
@@ -84,6 +94,8 @@
 
 use serde_json::Value;
 use trusty_agents_common::agents::metadata::agent_metadata_from_str;
+
+use crate::core::content_source::AgentRoster;
 
 /// `isolation` values that give a dispatched subagent a working tree of its own.
 ///
@@ -250,21 +262,25 @@ pub fn isolation_separates_working_tree(isolation: Option<&str>) -> bool {
 /// the time. Resolving the answer from the agent's own declared frontmatter
 /// keeps one authority for it instead of a name list that drifts as agents are
 /// added.
-/// What: scans the compiled-in bundle for the agent whose declared `name:`
+/// What: scans the content roster for the agent whose declared `name:`
 /// equals `agent`, and reports whether its `role:` is in
 /// [`FILE_MUTATING_ROLES`], its `extends:` is [`FILE_MUTATING_BASE`], or its
 /// name is in [`FILE_MUTATING_NAMES`]. A name this binary does not ship — a
 /// project-local or custom agent — answers `false`, the fail-open direction
-/// this module's doc commits to.
+/// this module's doc commits to. With no roster (`None`, #9011) every agent but
+/// a read-only harness built-in answers `true`: the fail-closed direction.
 ///
-/// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
-/// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
-/// calls. A process-lifetime cache would be global state for no measurable win.
+/// No caching: the caller resolves the content roster (#9011) once per
+/// invocation and passes it in; a process-lifetime cache would be global state.
 /// Test: `engineer_tier_agents_mutate_files`,
 /// `file_writing_non_engineer_agents_mutate_files`, `non_engineer_agents_do_not`,
-/// `unknown_agent_fails_open`.
-pub fn agent_mutates_files(agent: &str) -> bool {
-    agent_write_risk(agent) == AgentWriteRisk::Writes
+/// `unknown_agent_fails_open`, `a_missing_roster_fails_closed`.
+pub fn agent_mutates_files(roster: Option<&AgentRoster>, agent: &str) -> bool {
+    match roster {
+        Some(_) => agent_write_risk(roster, agent) == AgentWriteRisk::Writes,
+        // #9011, ruling 09(a): with no roster nothing is positively read-only.
+        None => agent_write_risk(None, agent) != AgentWriteRisk::ReadsOnly,
+    }
 }
 
 /// What this binary can say about whether `agent` writes to its cwd.
@@ -291,24 +307,23 @@ pub enum AgentWriteRisk {
     Unknown,
 }
 
-/// Classify `agent` against the compiled-in bundle.
+/// Classify `agent` against the content roster (#9011).
 ///
 /// Why: one bundle scan feeding both policies, so the shared-tree race and the
 /// main-checkout boundary can never disagree about what an agent is.
-/// What: scans the compiled-in bundle for the agent whose declared `name:`
+/// What: scans the content roster for the agent whose declared `name:`
 /// equals `agent` and reports whether its `role:` is in [`FILE_MUTATING_ROLES`],
 /// its `extends:` is [`FILE_MUTATING_BASE`], or its name is in
 /// [`FILE_MUTATING_NAMES`]. A name not in the bundle is
 /// [`AgentWriteRisk::Unknown`], never `ReadsOnly` — the distinction the whole
 /// enum exists for.
 ///
-/// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
-/// this runs once per `Agent` dispatch, which is rare compared to ordinary tool
-/// calls. A process-lifetime cache would be global state for no measurable win.
+/// No caching: the caller resolves the content roster (#9011) once per
+/// invocation and passes it in; a process-lifetime cache would be global state.
 /// Test: `write_risk_separates_unknown_from_read_only`,
 /// `engineer_tier_agents_mutate_files`, `non_engineer_agents_do_not`,
 /// `read_only_harness_builtins_are_not_isolated`.
-pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
+pub fn agent_write_risk(roster: Option<&AgentRoster>, agent: &str) -> AgentWriteRisk {
     if agent.is_empty() {
         return AgentWriteRisk::Unknown;
     }
@@ -317,7 +332,10 @@ pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
     if READ_ONLY_HARNESS_AGENTS.contains(&agent) {
         return AgentWriteRisk::ReadsOnly;
     }
-    bundled_agent_metadata(agent).map_or(AgentWriteRisk::Unknown, |meta| {
+    let Some(roster) = roster else {
+        return AgentWriteRisk::Unknown;
+    };
+    bundled_agent_metadata(roster, agent).map_or(AgentWriteRisk::Unknown, |meta| {
         let writes = meta
                 .role
                 .as_deref()
@@ -341,29 +359,22 @@ pub fn agent_write_risk(agent: &str) -> AgentWriteRisk {
 /// questions of the SAME table, and a second scan is a second place the two
 /// could disagree about which artifact is which agent. The builder classifier
 /// that also read it retired with the dispatch-time cap (#8261 round 3).
-/// What: scans `crate::core::bundle::ALL` for the `agents/*.md` artifact whose
-/// declared `name:` equals `agent`, and parses it. `None` for a name this binary
+/// What: scans the content roster (#9011) for the file whose declared `name:`
+/// equals `agent`, and parses it. `None` for a name this binary
 /// does not ship — a custom project agent, a renamed agent, or an unparseable
 /// definition.
 ///
-/// No caching and no I/O: the bundle is a compile-time table of ~40 entries and
-/// this runs at most twice per `Agent` dispatch, which is rare compared to
-/// ordinary tool calls. A process-lifetime cache would be global state for no
-/// measurable win.
+/// No caching: the caller resolves the content roster (#9011) once per
+/// invocation and passes it in; a process-lifetime cache would be global state.
 /// Test: `write_risk_separates_unknown_from_read_only`,
 /// `harness_builtins_are_known_names`.
 fn bundled_agent_metadata(
+    roster: &AgentRoster,
     agent: &str,
 ) -> Option<trusty_agents_common::agents::metadata::AgentMetadata> {
-    crate::core::bundle::ALL
+    roster
         .iter()
-        .filter(|artifact| {
-            artifact
-                .rel_path
-                .strip_prefix("agents/")
-                .is_some_and(|f| f.ends_with(".md"))
-        })
-        .map(|artifact| agent_metadata_from_str(artifact.contents))
+        .map(|(_, contents)| agent_metadata_from_str(contents))
         .find(|meta| meta.name.as_deref() == Some(agent))
 }
 
@@ -371,15 +382,16 @@ fn bundled_agent_metadata(
 /// (#8547)?
 ///
 /// Why: the #8547 refusal must not reach a name that something defines. Two of
-/// the three sources that define names need no I/O — the compiled-in bundle and
+/// the three sources that define names need no I/O — the content roster and
 /// the harness built-ins — so they are checked here, and the caller reads the
 /// deployed roster only when both answer no.
 /// What: `true` when `agent` is in [`HARNESS_BUILTIN_AGENTS`] or names a bundled
 /// agent. Exact, case-sensitive match; an empty name is `false`.
 /// Test: `harness_builtins_are_known_names`.
-pub fn agent_known_without_roster(agent: &str) -> bool {
+pub fn agent_known_without_roster(roster: Option<&AgentRoster>, agent: &str) -> bool {
     !agent.is_empty()
-        && (HARNESS_BUILTIN_AGENTS.contains(&agent) || bundled_agent_metadata(agent).is_some())
+        && (HARNESS_BUILTIN_AGENTS.contains(&agent)
+            || roster.is_some_and(|r| bundled_agent_metadata(r, agent).is_some()))
 }
 
 /// Must this dispatch get a working tree of its own before it may run in a
@@ -398,9 +410,13 @@ pub fn agent_known_without_roster(agent: &str) -> bool {
 /// deliberately — see the module doc for why the fail-open direction does not
 /// carry across this boundary.
 /// Test: `main_checkout_isolation_is_required_for_writers_and_unknowns`.
-pub fn requires_own_worktree_in_main_checkout(agent: &str, isolation: Option<&str>) -> bool {
+pub fn requires_own_worktree_in_main_checkout(
+    roster: Option<&AgentRoster>,
+    agent: &str,
+    isolation: Option<&str>,
+) -> bool {
     !isolation_separates_working_tree(isolation)
-        && agent_write_risk(agent) != AgentWriteRisk::ReadsOnly
+        && agent_write_risk(roster, agent) != AgentWriteRisk::ReadsOnly
         // ADR-0056: a role whose write IS the repository operation.
         && !permitted_in_shared_checkout(agent)
 }
@@ -434,8 +450,12 @@ pub fn permitted_in_shared_checkout(agent: &str) -> bool {
 /// Test: `version_control_operates_without_a_worktree_of_its_own`,
 /// `allows_version_control_alongside_a_live_writer`,
 /// `denies_a_file_writing_non_engineer_alongside_an_engineer`.
-pub fn blocked_by_shared_tree(agent: &str, isolation: Option<&str>) -> bool {
-    shares_the_callers_tree(agent, isolation) && !permitted_in_shared_checkout(agent)
+pub fn blocked_by_shared_tree(
+    roster: Option<&AgentRoster>,
+    agent: &str,
+    isolation: Option<&str>,
+) -> bool {
+    shares_the_callers_tree(roster, agent, isolation) && !permitted_in_shared_checkout(agent)
 }
 
 /// The `subagent_type` an Agent-tool `tool_input` names, when it names one.
@@ -477,13 +497,23 @@ fn dispatch_field<'a>(tool_input: Option<&'a Value>, key: &str) -> Option<&'a st
 /// What: `true` when the named agent [`agent_mutates_files`] AND the declared
 /// isolation does not [`isolation_separates_working_tree`].
 /// Test: `shares_the_callers_tree_only_for_unisolated_engineers`.
-pub fn shares_the_callers_tree(agent: &str, isolation: Option<&str>) -> bool {
-    agent_mutates_files(agent) && !isolation_separates_working_tree(isolation)
+pub fn shares_the_callers_tree(
+    roster: Option<&AgentRoster>,
+    agent: &str,
+    isolation: Option<&str>,
+) -> bool {
+    agent_mutates_files(roster, agent) && !isolation_separates_working_tree(isolation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout roster (#9011), loaded once for the suite.
+    fn r() -> Option<&'static AgentRoster> {
+        static ROSTER: std::sync::OnceLock<AgentRoster> = std::sync::OnceLock::new();
+        Some(ROSTER.get_or_init(crate::core::content_source::test_support::repo_roster))
+    }
 
     #[test]
     fn isolation_values_that_separate_the_tree() {
@@ -525,7 +555,7 @@ mod tests {
             "data-engineer",
         ] {
             assert!(
-                agent_mutates_files(agent),
+                agent_mutates_files(r(), agent),
                 "{agent} is engineer-tier and must classify as file-mutating"
             );
         }
@@ -538,7 +568,7 @@ mod tests {
         // agents by name, because `role: qa` also covers `code-critic`.
         for agent in ["documentation", "version-control", "qa", "web-qa", "api-qa"] {
             assert!(
-                agent_mutates_files(agent),
+                agent_mutates_files(r(), agent),
                 "{agent} writes files and must classify as file-mutating"
             );
         }
@@ -551,7 +581,7 @@ mod tests {
         // but it only reads code and returns a verdict. Widening by role would
         // deny a review dispatched alongside the engineer it reviews.
         assert!(
-            !agent_mutates_files("code-critic"),
+            !agent_mutates_files(r(), "code-critic"),
             "code-critic reviews and never writes; a role-based widen would misclassify it"
         );
     }
@@ -569,7 +599,7 @@ mod tests {
             "ticketing",
         ] {
             assert!(
-                !agent_mutates_files(agent),
+                !agent_mutates_files(r(), agent),
                 "{agent} must not classify as file-mutating"
             );
         }
@@ -582,7 +612,7 @@ mod tests {
         // direction. A false deny here lands on the PM and stops all dispatch.
         for agent in ["", "some-project-custom-agent", "Rust-Engineer", "unknown"] {
             assert!(
-                !agent_mutates_files(agent),
+                !agent_mutates_files(r(), agent),
                 "{agent:?} is not a bundled engineer-tier agent and must fail open"
             );
         }
@@ -594,12 +624,18 @@ mod tests {
         // bundled agent this binary positively knows does not write; the other
         // three are names it has never seen. Both answer `false` there, and
         // ADR-0048 needs them apart.
-        assert_eq!(agent_write_risk("rust-engineer"), AgentWriteRisk::Writes);
-        assert_eq!(agent_write_risk("code-critic"), AgentWriteRisk::ReadsOnly);
-        assert_eq!(agent_write_risk("research"), AgentWriteRisk::ReadsOnly);
+        assert_eq!(
+            agent_write_risk(r(), "rust-engineer"),
+            AgentWriteRisk::Writes
+        );
+        assert_eq!(
+            agent_write_risk(r(), "code-critic"),
+            AgentWriteRisk::ReadsOnly
+        );
+        assert_eq!(agent_write_risk(r(), "research"), AgentWriteRisk::ReadsOnly);
         for unknown in ["", "some-project-custom-agent", "Rust-Engineer"] {
             assert_eq!(
-                agent_write_risk(unknown),
+                agent_write_risk(r(), unknown),
                 AgentWriteRisk::Unknown,
                 "{unknown:?} is not a bundled agent"
             );
@@ -613,24 +649,26 @@ mod tests {
         // is exactly the writer that kept landing in the shared checkout.
         for agent in ["rust-engineer", "documentation", "custom-agent", ""] {
             assert!(
-                requires_own_worktree_in_main_checkout(agent, None),
+                requires_own_worktree_in_main_checkout(r(), agent, None),
                 "{agent:?} must not run unisolated in a main checkout"
             );
         }
         // A positively-identified reader costs nothing to run in place.
         for agent in ["research", "code-critic", "ticketing"] {
             assert!(
-                !requires_own_worktree_in_main_checkout(agent, None),
+                !requires_own_worktree_in_main_checkout(r(), agent, None),
                 "{agent} only reads and must not be forced into a worktree"
             );
         }
         // Declared isolation is the whole remedy; it must satisfy the rule.
         for mode in ["worktree", "remote"] {
             assert!(!requires_own_worktree_in_main_checkout(
+                r(),
                 "rust-engineer",
                 Some(mode)
             ));
             assert!(!requires_own_worktree_in_main_checkout(
+                r(),
                 "custom-agent",
                 Some(mode)
             ));
@@ -646,27 +684,31 @@ mod tests {
         // #8547 review: `claude-code-guide` has no Edit/Write/NotebookEdit either.
         for agent in ["Explore", "Plan", "claude-code-guide"] {
             assert_eq!(
-                agent_write_risk(agent),
+                agent_write_risk(r(), agent),
                 AgentWriteRisk::ReadsOnly,
                 "{agent}"
             );
             assert!(
-                !requires_own_worktree_in_main_checkout(agent, None),
+                !requires_own_worktree_in_main_checkout(r(), agent, None),
                 "{agent} only reads and must read the session's own tree"
             );
         }
         // `general-purpose` and `claude` carry the full tool set, and
         // `statusline-setup` carries `Edit`, so all three stay writers.
         for agent in ["general-purpose", "claude", "statusline-setup"] {
-            assert_eq!(agent_write_risk(agent), AgentWriteRisk::Unknown, "{agent}");
+            assert_eq!(
+                agent_write_risk(r(), agent),
+                AgentWriteRisk::Unknown,
+                "{agent}"
+            );
             assert!(
-                requires_own_worktree_in_main_checkout(agent, None),
+                requires_own_worktree_in_main_checkout(r(), agent, None),
                 "{agent}"
             );
         }
         // The read-only classification must not leak into #4480's question:
         // these were already allowed to share a tree, and still are.
-        assert!(!shares_the_callers_tree("Explore", None));
+        assert!(!shares_the_callers_tree(r(), "Explore", None));
     }
 
     #[test]
@@ -677,10 +719,10 @@ mod tests {
             .iter()
             .chain(&["rust-engineer", "research"])
         {
-            assert!(agent_known_without_roster(agent), "{agent}");
+            assert!(agent_known_without_roster(r(), agent), "{agent}");
         }
         for agent in ["", "some-project-custom-agent", "explore", "Rust-Engineer"] {
-            assert!(!agent_known_without_roster(agent), "{agent:?}");
+            assert!(!agent_known_without_roster(r(), agent), "{agent:?}");
         }
         for agent in READ_ONLY_HARNESS_AGENTS {
             assert!(HARNESS_BUILTIN_AGENTS.contains(agent), "{agent}");
@@ -694,35 +736,42 @@ mod tests {
         // worktree. It is still a WRITER — it commits — so it still occupies a
         // tree for everyone else; what the ruling changes is that its OWN
         // dispatch is no longer denied or diverted for declaring no isolation.
-        assert_eq!(agent_write_risk("version-control"), AgentWriteRisk::Writes);
+        assert_eq!(
+            agent_write_risk(r(), "version-control"),
+            AgentWriteRisk::Writes
+        );
         assert!(
-            !requires_own_worktree_in_main_checkout("version-control", None),
+            !requires_own_worktree_in_main_checkout(r(), "version-control", None),
             "version-control merges into main and must not be moved out of it"
         );
         assert!(
-            shares_the_callers_tree("version-control", None),
+            shares_the_callers_tree(r(), "version-control", None),
             "version-control still occupies the tree, so an engineer beside it is still denied"
         );
         assert!(
-            !blocked_by_shared_tree("version-control", None),
+            !blocked_by_shared_tree(r(), "version-control", None),
             "occupancy and admission are separate questions from ADR-0056 on"
         );
         // The exemption is one agent wide. Every other writer is unchanged.
         for agent in ["rust-engineer", "documentation", "qa", "custom-agent", ""] {
             assert!(
-                requires_own_worktree_in_main_checkout(agent, None),
+                requires_own_worktree_in_main_checkout(r(), agent, None),
                 "{agent:?} is not exempt and must still be isolated in a main checkout"
             );
         }
         for agent in ["rust-engineer", "documentation", "qa", "web-qa", "api-qa"] {
             assert!(
-                blocked_by_shared_tree(agent, None),
+                blocked_by_shared_tree(r(), agent, None),
                 "{agent} must still be denied a tree another writer holds"
             );
         }
         // The grant is not a bypass of isolation itself: declaring a worktree
         // still separates the tree, for version-control as for anyone.
-        assert!(!blocked_by_shared_tree("version-control", Some("worktree")));
+        assert!(!blocked_by_shared_tree(
+            r(),
+            "version-control",
+            Some("worktree")
+        ));
         assert!(permitted_in_shared_checkout("version-control"));
         assert!(!permitted_in_shared_checkout("rust-engineer"));
     }
@@ -733,8 +782,12 @@ mod tests {
         // agent is ALLOWED to share a worktree's HEAD (#4480's fail-open) and
         // REQUIRED to be isolated in a main checkout. If a later change makes
         // these agree, one of the two decisions has been silently reversed.
-        assert!(!shares_the_callers_tree("custom-agent", None));
-        assert!(requires_own_worktree_in_main_checkout("custom-agent", None));
+        assert!(!shares_the_callers_tree(r(), "custom-agent", None));
+        assert!(requires_own_worktree_in_main_checkout(
+            r(),
+            "custom-agent",
+            None
+        ));
     }
 
     #[test]
@@ -757,10 +810,48 @@ mod tests {
 
     #[test]
     fn shares_the_callers_tree_only_for_unisolated_engineers() {
-        assert!(shares_the_callers_tree("rust-engineer", None));
-        assert!(!shares_the_callers_tree("rust-engineer", Some("worktree")));
-        assert!(!shares_the_callers_tree("rust-engineer", Some("remote")));
-        assert!(!shares_the_callers_tree("research", None));
-        assert!(!shares_the_callers_tree("unknown-agent", None));
+        assert!(shares_the_callers_tree(r(), "rust-engineer", None));
+        assert!(!shares_the_callers_tree(
+            r(),
+            "rust-engineer",
+            Some("worktree")
+        ));
+        assert!(!shares_the_callers_tree(
+            r(),
+            "rust-engineer",
+            Some("remote")
+        ));
+        assert!(!shares_the_callers_tree(r(), "research", None));
+        assert!(!shares_the_callers_tree(r(), "unknown-agent", None));
+    }
+
+    /// #9011, owner ruling 09(a): with no roster the race check fails CLOSED.
+    /// Every agent but a read-only harness built-in occupies the tree, so a
+    /// second unisolated dispatch beside a live one is denied rather than
+    /// admitted as "unknown". Made to allow, the first assertion fails.
+    #[test]
+    fn a_missing_roster_fails_closed() {
+        for agent in ["rust-engineer", "research", "code-critic", "custom-agent"] {
+            assert!(
+                agent_mutates_files(None, agent),
+                "{agent}: no roster means it cannot be shown read-only"
+            );
+            assert!(shares_the_callers_tree(None, agent, None), "{agent}");
+            assert!(blocked_by_shared_tree(None, agent, None), "{agent}");
+            assert!(
+                requires_own_worktree_in_main_checkout(None, agent, None),
+                "{agent}"
+            );
+            assert_eq!(agent_write_risk(None, agent), AgentWriteRisk::Unknown);
+        }
+        // Isolation is still the remedy, and the harness readers stay readers.
+        assert!(!shares_the_callers_tree(
+            None,
+            "rust-engineer",
+            Some("worktree")
+        ));
+        assert!(!agent_mutates_files(None, "Explore"));
+        assert!(!agent_known_without_roster(None, "rust-engineer"));
+        assert!(agent_known_without_roster(None, "general-purpose"));
     }
 }

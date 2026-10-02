@@ -68,6 +68,8 @@ fn default_hook_home() -> &'static std::path::Path {
             .expect("create hook scratch $HOME")
             .keep();
         common::write_disk_threshold(&dir, 100);
+        // #9011: dispatches are classified against installed content.
+        common::stage_repo_content(&dir);
         dir
     })
     .as_path()
@@ -5362,4 +5364,33 @@ fn pm_guard_allows_resuming_an_agent_whose_worktree_is_live_8004() {
         run_pm_guard_outside_a_checkout(&removed.to_string()).trim(),
         ""
     );
+}
+
+/// #9011, owner ruling 09(a): with no content installed and no checkout above
+/// the cwd, the real binary REFUSES the PM's dispatch — even a read-only one,
+/// since nothing can be classified — and names `tm content install`. Made to
+/// allow, the deny assertion fails; the same payload with content staged is
+/// allowed (`pm_guard_allows_agent_dispatch_from_pm`).
+#[test]
+fn pm_guard_refuses_a_dispatch_when_no_content_is_installed() {
+    let home = tempfile::Builder::new()
+        .prefix("tm-test-no-content-")
+        .tempdir_in("/tmp")
+        .expect("scratch home");
+    common::write_disk_threshold(home.path(), 100);
+    let outside = tempfile::tempdir().expect("tempdir");
+    let home_s = home.path().display().to_string();
+    for agent in ["rust-engineer", "research"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+        );
+        let stdout = run_pm_guard_at_with_env(
+            &payload,
+            UNREACHABLE_DAEMON,
+            outside.path(),
+            &[("HOME", &home_s)],
+        );
+        assert_denied(&stdout);
+        assert!(stdout.contains("tm content install"), "{stdout}");
+    }
 }

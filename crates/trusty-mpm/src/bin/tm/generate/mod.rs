@@ -51,15 +51,18 @@ pub(crate) type GeneratedSet = BTreeMap<&'static str, String>;
 /// `references/workflows.md` is deliberately absent from this set — it is
 /// hand-authored (issue #2913 brief §E) and never regenerated or diffed.
 /// Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`.
-pub(crate) fn generate() -> GeneratedSet {
+pub(crate) fn generate(roster: &trusty_mpm::core::content_source::AgentRoster) -> GeneratedSet {
     let mut set = GeneratedSet::new();
-    set.insert("tm-capabilities.md", entry::render());
+    set.insert("tm-capabilities.md", entry::render(roster));
     set.insert("tm-capabilities/references/cli.md", cli_tree::render());
     set.insert(
         "tm-capabilities/references/mcp-tools.md",
         mcp_tools::render(),
     );
-    set.insert("tm-capabilities/references/agents.md", agents::render());
+    set.insert(
+        "tm-capabilities/references/agents.md",
+        agents::render(roster),
+    );
     set.insert("tm-capabilities/references/skills.md", skills::render());
     set.insert("tm-capabilities/references/doctor.md", doctor::render());
     set.insert(
@@ -168,16 +171,33 @@ pub(crate) fn run_capabilities(check: bool) -> anyhow::Result<()> {
 
 /// [`run_capabilities`] against an explicit starting directory.
 ///
-/// What: without `check`, writes the freshly generated set under the checkout
-/// holding `start` and reports the file count. With `check`, diffs instead of
+/// What: reads the agent roster from that same checkout's `content/` (#9011;
+/// never the installed bundle), then, without `check`, writes the freshly
+/// generated set under the checkout holding `start` and reports the file count. With `check`, diffs instead of
 /// writing and returns an error (non-zero exit) listing every drifted file when
 /// the set is not clean.
 /// Test: `check_reads_the_checkout_holding_the_cwd_7776`.
 pub(crate) fn run_capabilities_in(start: &Path, check: bool) -> anyhow::Result<()> {
-    let set = generate();
     let root = resolve_skills_asset_dir(start)?;
+    // `root` is `<checkout>/crates/trusty-mpm/src/assets/skills`.
+    let checkout = root
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(&root);
+    let content = trusty_agents_common::agent_content::checkout_content(checkout)?;
+    let roster = trusty_mpm::core::content_source::AgentRoster::load(&content)?;
+    run_capabilities_at(&root, check, &roster)
+}
+
+/// [`run_capabilities_in`] with the asset directory and roster resolved.
+pub(crate) fn run_capabilities_at(
+    root: &Path,
+    check: bool,
+    roster: &trusty_mpm::core::content_source::AgentRoster,
+) -> anyhow::Result<()> {
+    let set = generate(roster);
     if check {
-        let drifted = diff(&set, &root);
+        let drifted = diff(&set, root);
         if drifted.is_empty() {
             println!(
                 "tm-capabilities: up to date ({} generated files).",
@@ -198,7 +218,7 @@ pub(crate) fn run_capabilities_in(start: &Path, check: bool) -> anyhow::Result<(
             anyhow::bail!("tm-capabilities drift check failed");
         }
     } else {
-        write(&set, &root)?;
+        write(&set, root)?;
         println!(
             "tm-capabilities: wrote {} generated files under {}/tm-capabilities*",
             set.len(),
@@ -214,7 +234,7 @@ mod tests {
 
     #[test]
     fn generated_set_has_seven_entries() {
-        let set = generate();
+        let set = generate(crate::commands::install::test_roster_ref());
         assert_eq!(set.len(), 7);
         assert!(set.contains_key("tm-capabilities.md"));
         assert!(set.contains_key("tm-capabilities/references/cli.md"));
@@ -227,14 +247,14 @@ mod tests {
 
     #[test]
     fn generated_set_is_deterministic() {
-        let a = generate();
-        let b = generate();
+        let a = generate(crate::commands::install::test_roster_ref());
+        let b = generate(crate::commands::install::test_roster_ref());
         assert_eq!(a, b);
     }
 
     #[test]
     fn generated_set_no_content_is_empty() {
-        for (path, content) in generate() {
+        for (path, content) in generate(crate::commands::install::test_roster_ref()) {
             assert!(!content.trim().is_empty(), "{path} generated empty content");
         }
     }
@@ -292,11 +312,16 @@ mod tests {
         let worktree = tmp.path().join("wt");
         fake_checkout(&worktree, true);
 
-        let err = run_capabilities_in(&worktree, true).expect_err("nothing generated there yet");
+        // #9011: the fake checkout carries no `content/`; the roster is the
+        // real one, and the asset root is still resolved from the cwd.
+        let root = resolve_skills_asset_dir(&worktree).expect("worktree");
+        let roster = crate::commands::install::test_roster_ref();
+        let err =
+            run_capabilities_at(&root, true, roster).expect_err("nothing generated there yet");
         assert!(err.to_string().contains("drift check failed"), "{err:#}");
 
-        run_capabilities_in(&worktree, false).expect("write into the worktree");
-        run_capabilities_in(&worktree, true).expect("a clean worktree passes --check");
+        run_capabilities_at(&root, false, roster).expect("write into the worktree");
+        run_capabilities_at(&root, true, roster).expect("a clean worktree passes --check");
     }
 
     /// Why (#7776): a directory the resolver cannot place is a path error that
@@ -327,12 +352,12 @@ mod tests {
     fn write_then_diff_round_trips_clean() {
         // `write` + `diff` round-trip against an isolated temp dir: after
         // `write`, a fresh `diff` against the just-written files must report
-        // no drift (since `generate()` is deterministic — see
+        // no drift (since `generate(crate::commands::install::test_roster_ref())` is deterministic — see
         // `generated_set_is_deterministic`). Never touches the real
         // committed assets — see `scripts/check_capabilities.sh` for the
         // check that DOES compare against the real committed output.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let set = generate();
+        let set = generate(crate::commands::install::test_roster_ref());
         write(&set, tmp.path()).expect("write succeeds");
         let drifted = diff(&set, tmp.path());
         assert!(

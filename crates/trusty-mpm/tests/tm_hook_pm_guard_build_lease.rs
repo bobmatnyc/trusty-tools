@@ -29,6 +29,8 @@ fn run_hook(home: &Path, args: &[&str], payload: &Value) -> String {
 
 /// [`run_hook`] against the daemon at `url`.
 fn run_hook_against(home: &Path, args: &[&str], payload: &Value, url: &str) -> String {
+    // #9011: the child runs outside any checkout; its agents come from here.
+    common::stage_repo_content(home);
     let mut child = common::tm_command_in(home)
         .args(["--url", url, "hook"])
         .args(args)

@@ -250,7 +250,8 @@ fn pinned_to_the_composer_emission() {
     std::fs::write(
         tmp.path().join("BASE-QA.md"),
         format!(
-            "---\nname: base-qa\nrole: qa\nskills: [systematic-debugging]\n---\n\n\
+            "---\nname: base-qa\nrole: qa\nskills: [systematic-debugging]\n\
+             metadata:\n  version: \"1.0.0\"\n---\n\n\
              {COMPOSED_BASE_MARKER}\n\nBase body.\n"
         ),
     )
@@ -259,8 +260,8 @@ fn pinned_to_the_composer_emission() {
         tmp.path().join("kitchen-sink.md"),
         "---\nname: kitchen-sink\nrole: qa\ndescription: 'Every field the composer models.'\n\
          model: sonnet\nmax_tokens: 4096\nresource_tier: standard\nextends: base-qa\n\
-         skills: [test-driven-development]\ntools: [Read, Write]\n\
-         initialPrompt: \"Go.\"\n---\n\nChild body.\n",
+         skills: [test-driven-development]\ntools: [Read, Write]\ntcode_tools: [read_file]\n\
+         initialPrompt: \"Go.\"\nmetadata:\n  version: \"1.2.3\"\n---\n\nChild body.\n",
     )
     .expect("write child");
 
@@ -286,6 +287,46 @@ fn pinned_to_the_composer_emission() {
         !composed.contains("\nextends:"),
         "composed output must not carry `extends:` — the schema gate relies on it"
     );
+    assert!(
+        keys.contains(&"metadata".to_string()) && !keys.contains(&"version".to_string()),
+        "the composer emits `metadata:` and its child `version:` is no key of its own: {keys:?}"
+    );
+}
+
+/// #9011: an ADR-0064 content agent declares `metadata: {version}`. Composed, it
+/// keeps the leaf's version and still classifies as trusty-mpm's own; only a
+/// TOP-LEVEL `version:` is the claude-mpm marker.
+#[test]
+fn composed_agent_keeps_metadata_version_and_classifies_as_trusty_mpm() {
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("BASE-AGENT.md"),
+        format!(
+            "---\nname: base-agent\nrole: base\nmetadata:\n  version: \"1.0.0\"\n---\n\n\
+             {COMPOSED_BASE_MARKER}\n\nBase.\n"
+        ),
+    )
+    .expect("write base");
+    std::fs::write(
+        tmp.path().join("leaf.md"),
+        "---\nname: leaf\nrole: qa\nextends: base-agent\nmetadata:\n  version: \"2.1.0\"\n---\n\nLeaf.\n",
+    )
+    .expect("write leaf");
+
+    let composed = compose_agent("leaf", tmp.path()).expect("compose");
+    assert!(
+        composed.contains("\nmetadata:\n  version: \"2.1.0\"\n---\n"),
+        "the leaf's metadata.version must survive composition:\n{composed}"
+    );
+    assert!(
+        !composed.contains("1.0.0"),
+        "the base's version must not leak:\n{composed}"
+    );
+    assert_eq!(agent_schema(&composed), AgentSchema::TrustyMpm);
+
+    // The same document with the version at the top level is claude-mpm's.
+    let top_level = composed.replace("metadata:\n  version:", "version:");
+    assert_eq!(agent_schema(&top_level), AgentSchema::ClaudeMpm);
 }
 
 /// THE COMPOSITION PIN. `compose_agent` concatenates the chain base-first, so a

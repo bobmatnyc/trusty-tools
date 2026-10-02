@@ -98,59 +98,16 @@ pub(super) const fn seed_once(rel_path: &'static str, contents: &'static str) ->
 /// install`/`tm launch` always overwrite that same path with the assembled
 /// system prompt in the same call, so the bundled stub's content never
 /// reached a live session.)
-/// What: optimizer/overseer policy, agent catalog, placeholder
-/// skill, and Phase 1 (#770) mpm-* guidance skills.
+/// What: optimizer/overseer policy and the bundled skills. The agent roster
+/// is not here: it is runtime content (#9011), written by `tm install` from
+/// [`crate::core::content_source::agent_roster`].
 /// Test: `bundle_table_is_complete`.
 pub const ALL: &[BundledArtifact] = &[
     overwrite("hooks/optimizer.toml", OPTIMIZER_TOML),
     overwrite("hooks/overseer.toml", OVERSEER_TOML),
-    overwrite("agents/BASE-AGENT.md", BASE_AGENT),
-    overwrite("agents/BASE-ENGINEER.md", BASE_ENGINEER),
-    overwrite("agents/BASE-RESEARCH.md", BASE_RESEARCH),
-    overwrite("agents/BASE-QA.md", BASE_QA),
-    overwrite("agents/BASE-OPS.md", BASE_OPS),
-    overwrite("agents/engineer.md", ENGINEER_AGENT),
-    overwrite("agents/qa.md", QA_AGENT),
-    overwrite("agents/research.md", RESEARCH_AGENT),
-    overwrite("agents/secrets-manager.md", SECRETS_MANAGER_AGENT),
-    overwrite("agents/security.md", SECURITY_AGENT),
-    overwrite("agents/documentation.md", DOCUMENTATION_AGENT),
-    overwrite("agents/data-engineer.md", DATA_ENGINEER_AGENT),
-    overwrite("agents/version-control.md", VERSION_CONTROL_AGENT),
-    overwrite("agents/ticketing.md", TICKETING_AGENT),
-    overwrite("agents/code-analyzer.md", CODE_ANALYZER_AGENT),
-    overwrite("agents/python-engineer.md", PYTHON_ENGINEER_AGENT),
-    overwrite("agents/typescript-engineer.md", TYPESCRIPT_ENGINEER_AGENT),
-    overwrite("agents/golang-engineer.md", GOLANG_ENGINEER_AGENT),
-    overwrite("agents/rust-engineer.md", RUST_ENGINEER_AGENT),
-    overwrite("agents/java-engineer.md", JAVA_ENGINEER_AGENT),
-    overwrite("agents/php-engineer.md", PHP_ENGINEER_AGENT),
-    overwrite("agents/ruby-engineer.md", RUBY_ENGINEER_AGENT),
-    overwrite("agents/react-engineer.md", REACT_ENGINEER_AGENT),
-    overwrite("agents/nextjs-engineer.md", NEXTJS_ENGINEER_AGENT),
-    overwrite("agents/svelte-engineer.md", SVELTE_ENGINEER_AGENT),
-    overwrite("agents/web-qa.md", WEB_QA_AGENT),
-    overwrite("agents/api-qa.md", API_QA_AGENT),
-    // --- Increment 3: remaining 14 agents ---
-    overwrite("agents/javascript-engineer.md", JAVASCRIPT_ENGINEER_AGENT),
-    overwrite("agents/elixir-engineer.md", ELIXIR_ENGINEER_AGENT),
-    overwrite("agents/phoenix-engineer.md", PHOENIX_ENGINEER_AGENT),
-    overwrite("agents/dart-engineer.md", DART_ENGINEER_AGENT),
-    overwrite("agents/dotnet-engineer.md", DOTNET_ENGINEER_AGENT),
-    overwrite("agents/tauri-engineer.md", TAURI_ENGINEER_AGENT),
-    overwrite("agents/web-ui-engineer.md", WEB_UI_ENGINEER_AGENT),
-    overwrite("agents/refactoring-engineer.md", REFACTORING_ENGINEER_AGENT),
-    overwrite("agents/prompt-engineer.md", PROMPT_ENGINEER_AGENT),
-    overwrite("agents/code-critic.md", CODE_CRITIC_AGENT),
     // --- Issue #2890: code-critic's declared `skills:` dependencies ---
     overwrite("skills/code-review-standards.md", CODE_REVIEW_STANDARDS),
     overwrite("skills/contract-driven-testing.md", CONTRACT_DRIVEN_TESTING),
-    overwrite("agents/gcp-ops.md", GCP_OPS_AGENT),
-    overwrite("agents/vercel-ops.md", VERCEL_OPS_AGENT),
-    overwrite("agents/local-ops.md", LOCAL_OPS_AGENT),
-    overwrite("agents/memory-manager.md", MEMORY_MANAGER_AGENT),
-    overwrite("agents/mpm-agent-manager.md", MPM_AGENT_MANAGER_AGENT),
-    overwrite("agents/mpm-skills-manager.md", MPM_SKILLS_MANAGER_AGENT),
     // --- A3 (tm-skills-portfolio epic): previously orphaned tm-doctor.md ---
     overwrite("skills/tm-doctor.md", TM_DOCTOR),
     // --- tm-skills-portfolio epic: the /tm- skill catalog (supersedes mpm-*) ---

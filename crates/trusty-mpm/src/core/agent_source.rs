@@ -2,8 +2,9 @@
 //! bundled agent *source* directory (`~/.trusty-mpm/framework/agents/`) —
 //! issue #4840.
 //!
-//! Why: `crates/trusty-agents-common/src/assets/agents/*.md` is compiled into the binary
-//! (`bundle::ALL`), but the ONLY code path that ever wrote it to disk was the
+//! Why: the agent roster (`content/agents/*.md` since #9011, resolved at
+//! runtime by [`crate::core::content_source`]; compiled in before that), but
+//! the ONLY code path that ever wrote it to disk was the
 //! separate, manual `tm install`. Rebuilding the binary did not trigger it;
 //! starting a session did not trigger it. So a merged, compiled-in instruction
 //! change (e.g. a new `BASE-AGENT.md` rule) silently had no effect until
@@ -13,8 +14,8 @@
 //! (`skill_source::ensure_skill_source_fresh`, issue #1917); agents were the
 //! missing half.
 //!
-//! What: [`agent_bundle_stamp`] fingerprints the compiled-in `agents/*` slice
-//! of [`bundle::ALL`] via sha256 — this is the cheap gate, so the common
+//! What: [`agent_bundle_stamp`] fingerprints the resolved agent roster via
+//! sha256 — this is the cheap gate, so the common
 //! "nothing changed" case costs one file read and one string compare.
 //! [`materialize_agent_artifacts`] writes every bundled agent into the source
 //! directory and prunes any `.md` file the current table no longer lists (a
@@ -43,7 +44,7 @@ use std::path::Path;
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents};
 use crate::core::agent_manifest::{atomic_write, checksum};
-use crate::core::bundle;
+use crate::core::content_source::{self, AgentContentError, AgentRoster};
 use crate::core::error::Result;
 use crate::core::paths::FrameworkPaths;
 
@@ -81,67 +82,51 @@ pub struct AgentAutodeploy {
     pub warnings: Vec<String>,
 }
 
-/// Compute a stable sha256 fingerprint over every `agents/*` entry in the
-/// compiled-in [`bundle::ALL`] table.
+/// Compute a stable sha256 fingerprint over every file of `roster`.
 ///
 /// Why: this is the gate that makes auto-deploy cheap. It detects "this binary
 /// embeds different agent content than what is on disk" without depending on
 /// file mtimes, which a backup/restore (or a `cargo install` that preserves
 /// timestamps) can shuffle.
-/// What: concatenates `<rel_path>\0<contents>\n` for every table entry whose
-/// `rel_path` starts with `"agents/"`, in table order, and returns the sha256
-/// hex digest.
+/// What: concatenates `agents/<name>\0<contents>\n` for every roster file, in
+/// roster order, and returns the sha256 hex digest.
 /// Test: `agent_bundle_stamp_is_stable_across_calls`,
 /// `agent_bundle_stamp_differs_from_skill_stamp`.
-pub fn agent_bundle_stamp() -> String {
+pub fn agent_bundle_stamp(roster: &AgentRoster) -> String {
     let mut buf = String::new();
-    for artifact in bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("agents/"))
-    {
-        buf.push_str(artifact.rel_path);
+    for (name, contents) in roster.iter() {
+        buf.push_str("agents/");
+        buf.push_str(name);
         buf.push('\0');
-        buf.push_str(artifact.contents);
+        buf.push_str(contents);
         buf.push('\n');
     }
     checksum(&buf)
 }
 
-/// Write every bundled `agents/*` artifact into `agents_dir`, pruning any
-/// `.md` file on disk the current table no longer lists.
+/// Write every `roster` file into `agents_dir`, pruning any `.md` file on disk
+/// the roster no longer lists.
 ///
 /// Why: `agents_dir` (`~/.trusty-mpm/framework/agents/`) is a framework-owned
 /// artifact directory — every entry is written exclusively by trusty-mpm's own
 /// installer/self-heal path, never hand-edited (the USER-level agent source is
 /// the separate `~/.trusty-mpm/agents/`). So it is safe, and necessary for the
 /// renamed-agent case, to prune rather than only add.
-/// What: creates `agents_dir` if absent, atomically (over)writes each
-/// `agents/*` artifact to `<agents_dir>/<basename>`, then removes any
-/// remaining top-level `*.md` file that is not one of the artifacts just
-/// written. Hidden files (leading `.`, e.g. the stamp marker and the deploy
+/// What: creates `agents_dir` if absent, atomically (over)writes each roster
+/// file to `<agents_dir>/<name>`, then removes any remaining top-level `*.md`
+/// file that is not one of the files just written. Hidden files (leading `.`, e.g. the stamp marker and the deploy
 /// manifest) are never touched. Returns the basenames written.
 /// Test: `materialize_agent_artifacts_writes_all_agents`,
 /// `materialize_agent_artifacts_prunes_files_not_in_table`.
-pub fn materialize_agent_artifacts(agents_dir: &Path) -> Result<Vec<String>> {
+pub fn materialize_agent_artifacts(agents_dir: &Path, roster: &AgentRoster) -> Result<Vec<String>> {
     std::fs::create_dir_all(agents_dir)?;
 
     let mut written = Vec::new();
     let mut keep: HashSet<String> = HashSet::new();
-    for artifact in bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("agents/"))
-    {
-        let basename = artifact
-            .rel_path
-            .strip_prefix("agents/")
-            .unwrap_or(artifact.rel_path);
-        let dest = agents_dir.join(basename);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        atomic_write(&dest, artifact.contents)?;
-        keep.insert(basename.to_string());
-        written.push(basename.to_string());
+    for (name, contents) in roster.iter() {
+        atomic_write(&agents_dir.join(name), contents)?;
+        keep.insert(name.to_string());
+        written.push(name.to_string());
     }
 
     for entry in std::fs::read_dir(agents_dir)? {
@@ -160,13 +145,15 @@ pub fn materialize_agent_artifacts(agents_dir: &Path) -> Result<Vec<String>> {
     Ok(written)
 }
 
-/// Ensure `agents_dir` reflects the binary's currently-embedded agent bundle,
-/// re-materializing it when missing or stale.
+/// Ensure `agents_dir` reflects the resolved agent roster, re-materializing it
+/// when missing or stale.
 ///
 /// Why: the self-healing entry point behind [`autodeploy_agents`] — it removes
 /// the dependency on a prior, separate `tm install` having refreshed the
 /// source directory (#4840).
-/// What: compares [`agent_bundle_stamp`] against `<agents_dir>/.bundle-stamp`;
+/// What: resolves the roster ([`content_source::agent_roster`]; a content
+/// error is `Err`), then [`ensure_agent_source_fresh_with`]: compares
+/// [`agent_bundle_stamp`] against `<agents_dir>/.bundle-stamp`;
 /// when they differ (including "stamp file absent", which covers a missing or
 /// never-materialized directory), calls [`materialize_agent_artifacts`] and
 /// rewrites the stamp. Returns `true` when a refresh happened, `false` when
@@ -175,13 +162,18 @@ pub fn materialize_agent_artifacts(agents_dir: &Path) -> Result<Vec<String>> {
 /// `ensure_agent_source_fresh_is_noop_when_current`,
 /// `ensure_agent_source_fresh_prunes_renamed_files`.
 pub fn ensure_agent_source_fresh(agents_dir: &Path) -> Result<bool> {
+    ensure_agent_source_fresh_with(agents_dir, &content_source::agent_roster()?)
+}
+
+/// [`ensure_agent_source_fresh`] against a roster already resolved.
+pub fn ensure_agent_source_fresh_with(agents_dir: &Path, roster: &AgentRoster) -> Result<bool> {
     let stamp_path = agents_dir.join(STAMP_FILE_NAME);
-    let current = agent_bundle_stamp();
+    let current = agent_bundle_stamp(roster);
     if std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(current.as_str()) {
         return Ok(false);
     }
 
-    materialize_agent_artifacts(agents_dir)?;
+    materialize_agent_artifacts(agents_dir, roster)?;
     atomic_write(&stamp_path, &current)?;
     Ok(true)
 }
@@ -323,8 +315,14 @@ pub(crate) fn has_agent_markdown(dir: &Path) -> bool {
 /// which composes and writes only the files it safely may (bundled-origin
 /// drift IS overwritten — see the module doc's overwrite policy); (3) collects
 /// [`deploy_summary_lines`] for everything it declined or could not compose.
-/// Every failure is converted into a warning line rather than an `Err`.
+/// Every failure is converted into a warning line rather than an `Err`. When
+/// nothing is installed (#9011) it adds no warning — the one ERROR per process
+/// naming `tm content install` comes from
+/// [`trusty_agents_common::agent_content::report_not_installed`]; any other
+/// content error is a warning line. Either way it deploys nothing: whatever
+/// `source_dir` holds came from an earlier roster and is stale.
 /// Test: `autodeploy_agents_deploys_when_bundle_differs`,
+/// `autodeploy_agents_deploys_nothing_without_content`,
 /// `autodeploy_agents_is_a_noop_when_already_current`,
 /// `autodeploy_agents_fails_open_when_target_is_unwritable`,
 /// `autodeploy_agents_warns_when_it_skips_a_user_modified_file`.
@@ -333,9 +331,44 @@ pub fn autodeploy_agents(
     target_dir: &Path,
     skills_root: &Path,
 ) -> AgentAutodeploy {
+    autodeploy_agents_with(
+        source_dir,
+        target_dir,
+        skills_root,
+        content_source::agent_roster(),
+    )
+}
+
+/// [`autodeploy_agents`] against a roster resolution already made.
+pub fn autodeploy_agents_with(
+    source_dir: &Path,
+    target_dir: &Path,
+    skills_root: &Path,
+    roster: std::result::Result<AgentRoster, AgentContentError>,
+) -> AgentAutodeploy {
     let mut out = AgentAutodeploy::default();
 
-    match ensure_agent_source_fresh(source_dir) {
+    let roster = match roster {
+        Ok(roster) => roster,
+        Err(err) => {
+            // #9011 D4: no content is reported once per process, not here too.
+            if !trusty_agents_common::agent_content::report_not_installed(
+                &err,
+                "the agent roster is unavailable, so no agent is deployed",
+            ) {
+                out.warnings.push(format!(
+                    "warning: the agent roster is unavailable ({err}) — no agent is \
+                     deployed from {}",
+                    source_dir.display()
+                ));
+            }
+            // #9011 critic r1: no content means zero agents. The source dir may
+            // still hold a previous binary's roster; deploying it would be stale.
+            return out;
+        }
+    };
+
+    match ensure_agent_source_fresh_with(source_dir, &roster) {
         Ok(refreshed) => out.refreshed = refreshed,
         Err(err) => out.warnings.push(format!(
             "warning: could not refresh the bundled agent source at {} ({err}) — \

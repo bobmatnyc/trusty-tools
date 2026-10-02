@@ -81,6 +81,11 @@ pub enum SmAgentError {
     /// Recording the round into the rolling-context engine failed.
     #[error("session-manager context update failed: {0}")]
     Context(#[from] SmContextError),
+
+    /// The SM prompt's harness docs could not be loaded from content (#9011);
+    /// the message names `tm content install`.
+    #[error("session-manager prompt unavailable: {0}")]
+    Content(#[from] crate::core::content_source::AgentContentError),
 }
 
 impl SessionManagerAgent {
@@ -133,7 +138,7 @@ impl SessionManagerAgent {
         let mut engine = SmContextEngine::open(&conv_id, &runtime.data_root, inference, rounds)?;
 
         // (3) The SM system prompt (SM-3), with any operator overrides layered in.
-        let system_prompt = resolve_sm_prompt_default();
+        let system_prompt = resolve_sm_prompt_default()?;
 
         // (4) Memory recall (SM-4) — §7.5 step 3. Skipped gracefully when the
         // feature is off, no palace is wired, or recall errors (degrade, never

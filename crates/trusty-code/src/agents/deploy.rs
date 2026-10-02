@@ -63,7 +63,7 @@ use trusty_agents_common::agents::deployer::{DeployResult, deploy_agents_filtere
 use trusty_agents_common::agents::manifest::{AgentManifest, MANIFEST_FILE, ManifestLoad};
 
 use crate::agents::skill_refs::SKILL_REFS_DIRNAME;
-use crate::assets::{DEFAULT_AGENTS, EMBEDDED_TM_AGENT_SOURCES, EmbeddedAgent};
+use crate::assets::{DEFAULT_AGENTS, EmbeddedAgent};
 use crate::paths::write_dir::NativeWriteDir;
 use crate::paths::{self, WriteTargetError};
 
@@ -120,6 +120,10 @@ pub enum RosterDeployError {
     /// The shared deployer itself failed.
     #[error("deploying the embedded agent roster failed: {0}")]
     Deploy(#[source] AgentBuildError),
+    /// The shared agent texts could not be loaded from instructional content
+    /// (#9011); the message names `tm content install`.
+    #[error("the agent roster could not be deployed: {0}")]
+    Content(#[from] trusty_agents_common::agent_content::AgentContentError),
 }
 
 /// Why a deploy was skipped rather than attempted.
@@ -242,22 +246,24 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// What, in order:
 /// 1. Skip when `.claude/agents/` or `.open-mpm/agents/` currently wins
 ///    discovery — see this module's docs.
-/// 2. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
+/// 2. Stage every source into a scratch directory, including the five `BASE-*`
+///    templates so the deployer's own `extends:` composer resolves the chains
+///    from disk exactly as it does for trusty-mpm. The shared texts come from
+///    content (#9011); with none, this fails before anything below creates the
+///    agents directory or its lock (D5).
+/// 3. PIN the agents directory with [`crate::paths::write_dir::NativeWriteDir`],
 ///    which applies the unchanged ADR-0044 membership rule and then holds the
 ///    directory open on a descriptor. Every write below is `openat`-relative to
 ///    it, so a symlink swapped in afterwards cannot redirect one (#7779).
-/// 3. Take the project's ledger lock through the pinned handle, so concurrent
+/// 4. Take the project's ledger lock through the pinned handle, so concurrent
 ///    `tcode` daemons still serialise on the same sidecar the shared deployer
 ///    would have used. It is a blocking `LOCK_EX` held across the whole
-///    mirror/stage/compose/publish sequence — wider than the shared deployer's,
+///    mirror/compose/publish sequence — wider than the shared deployer's,
 ///    which takes it around the compose only, and deliberately so: the mirror
 ///    that decides "hand-edited" and the publish that acts on that decision have
 ///    to see the same directory.
-/// 4. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
-/// 5. Stage every compiled-in source into a scratch directory, including the
-///    five `BASE-*` templates so the deployer's own `extends:` composer resolves
-///    the chains from disk exactly as it does for trusty-mpm.
-/// 6. PIN the skill-refs tree — after step 4, so a refused deploy leaves no
+/// 5. Refuse to proceed on a corrupt ledger, naming the file. Never reset it.
+/// 6. PIN the skill-refs tree — after step 5, so a refused deploy leaves no
 ///    empty directory behind — and materialize the roster's skill pointers.
 /// 7. Deploy into a second scratch directory seeded from the pinned handle,
 ///    selecting the dispatchable roster only and deselecting any tracked file
@@ -272,13 +278,18 @@ pub fn roster_target(project_root: &Path) -> PathBuf {
 /// `symlinked_skill_refs_dir_is_refused_before_any_write`,
 /// `symlinked_skill_folder_is_refused_before_any_write`,
 /// `symlinked_skill_ref_file_is_refused_before_any_write`,
-/// `tests/roster_deploy_e2e.rs`.
+/// `tests/roster_deploy_e2e.rs`,
+/// `no_content_writes_no_agents_dir_and_no_lock` (`tests/no_content_e2e.rs`).
 ///
 /// [`Origin`]: trusty_agents_common::agents::manifest::Origin
 pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, RosterDeployError> {
     if !paths::agents_dir(project_root).source.is_native() {
         return Ok(RosterDeploy::Skipped(SkipReason::CompatRootWins));
     }
+
+    // #9011 D5: load content BEFORE pinning anything. Pinning creates the agents
+    // directory and the lock, so with no content those were left behind empty.
+    let staged = stage_embedded_sources()?;
 
     // #7779: both write targets are PINNED here, not merely checked. Opening
     // them creates every missing component with `mkdirat`/`O_NOFOLLOW`, so the
@@ -313,7 +324,6 @@ pub fn ensure_roster_deployed(project_root: &Path) -> Result<RosterDeploy, Roste
         }
     };
 
-    let staged = stage_embedded_sources()?;
     let roster: HashSet<&str> = DEFAULT_AGENTS.iter().map(EmbeddedAgent::name).collect();
 
     // #7779: pinned only now. Opening a handle CREATES its directory, so pinning
@@ -413,7 +423,8 @@ fn publish_from_scratch(
 /// ledger into an unusable harness.
 /// What: `None` when `project_root` is `None` (a projectless session writes
 /// nothing and keeps the in-memory embed). Otherwise the outcome, with a
-/// `tracing::error!` naming the failure when one occurred. #2074.
+/// `tracing::error!` naming the failure when one occurred. #2074. No content
+/// installed is reported once per process with the loader's line (#9011 D4).
 /// Test: `deploy_and_log_is_a_no_op_without_a_project`,
 /// `deploy_and_log_reports_a_corrupt_ledger_without_panicking`.
 pub fn deploy_and_log(project_root: Option<&Path>) -> Option<RosterDeploy> {
@@ -437,6 +448,15 @@ pub fn deploy_and_log(project_root: Option<&Path>) -> Option<RosterDeploy> {
                 "agent roster materialized (#2074)"
             );
             Some(RosterDeploy::Deployed { target, result })
+        }
+        // #9011 D4: no content at all is reported once per process.
+        Err(RosterDeployError::Content(e))
+            if trusty_agents_common::agent_content::report_not_installed(
+                &e,
+                "tcode could not materialize its agent roster",
+            ) =>
+        {
+            None
         }
         Err(e) => {
             tracing::error!(
@@ -477,15 +497,18 @@ fn is_user_edited(manifest: &AgentManifest, target: &Path, stem: &str) -> bool {
 /// is a set of `&'static str`s. Staging them is what lets the deployer be reused
 /// verbatim instead of growing a second, pre-composed entry point — a shared
 /// library change this slice deliberately avoided.
-/// What: one `.md` per [`EMBEDDED_TM_AGENT_SOURCES`] entry (keyed by its
-/// original filename, so `extends: base-qa` resolves against `BASE-QA.md`) plus
+/// What: loads the catalog once ([`crate::assets::load_tm_agent_sources`],
+/// #9011; a content error is [`RosterDeployError::Content`] and nothing is
+/// staged), then one `.md` per entry (keyed by its filename, so
+/// `extends: base-qa` resolves against `BASE-QA.md`) plus
 /// one per [`EmbeddedAgent::Direct`] in [`DEFAULT_AGENTS`]. The `TempDir` is
 /// returned so the caller keeps it alive across the deploy; dropping it removes
 /// the scratch tree.
 /// Test: `staged_sources_cover_every_roster_name_and_base_template`.
 fn stage_embedded_sources() -> Result<tempfile::TempDir, RosterDeployError> {
+    let catalog = crate::assets::load_tm_agent_sources()?;
     let dir = tempfile::tempdir().map_err(RosterDeployError::Stage)?;
-    for (filename, content) in EMBEDDED_TM_AGENT_SOURCES {
+    for (filename, content) in &catalog {
         std::fs::write(dir.path().join(filename), content).map_err(RosterDeployError::Stage)?;
     }
     for embedded in DEFAULT_AGENTS {

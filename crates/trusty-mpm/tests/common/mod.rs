@@ -282,3 +282,65 @@ pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
         );
     }
 }
+
+/// Install the checkout's agent roster and harness docs into `home` as a
+/// verified content bundle (#9011).
+///
+/// Why: since #9011 a spawned `tm` reads its agents from instructional
+/// content — a checkout above its cwd, else the bundle pinned under
+/// `<home>/.trusty-mpm/content`. A test that pins the child OUTSIDE any
+/// checkout (the ADR-0048 rule would otherwise rewrite its dispatch) has
+/// neither, and pm-guard refuses every dispatch it cannot classify (owner
+/// ruling 09(a)). This stages what `tm content install` would have.
+/// What: a gzip tar of `content/agents/*.md` and the four harness docs under
+/// the bundle paths the packager uses, plus `bundle-manifest.toml`, written as
+/// `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its sha256.
+/// Idempotent per `home`.
+pub fn stage_repo_content(home: &Path) {
+    use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
+    use trusty_common::integrity::Sha256Digest;
+
+    const TAG: &str = "content-v0.0.1";
+    let cache = home.join(".trusty-mpm").join("content");
+    if cache.join(LOCK_FILE_NAME).exists() {
+        return;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut entries: Vec<(String, Vec<u8>)> = vec![(
+        "bundle-manifest.toml".to_string(),
+        format!("tag = \"{TAG}\"\nschema_major = 1\n").into_bytes(),
+    )];
+    for (dest, rel) in [
+        ("agents", "content/agents"),
+        (
+            "instructions/harness_understanding",
+            "content/instructions/harness_understanding",
+        ),
+    ] {
+        for entry in std::fs::read_dir(repo.join(rel))
+            .expect("content dir")
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".md") {
+                let bytes = std::fs::read(entry.path()).expect("content file");
+                entries.push((format!("{dest}/{name}"), bytes));
+            }
+        }
+    }
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut tar = tar::Builder::new(gz);
+    for (path, data) in &entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        tar.append_data(&mut header, path, data.as_slice())
+            .expect("append");
+    }
+    let bytes = tar.into_inner().expect("tar").finish().expect("gzip");
+    std::fs::create_dir_all(&cache).expect("content cache");
+    let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(&bytes)).expect("lock");
+    std::fs::write(cache.join(lock.bundle_file_name()), &bytes).expect("bundle");
+    lock.store(&cache.join(LOCK_FILE_NAME)).expect("store lock");
+}

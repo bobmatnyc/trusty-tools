@@ -33,6 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use trusty_mpm::core::content_source::AgentRoster;
 #[cfg(doc)]
 use trusty_mpm::core::delegation_authority::deployed_agent_dirs;
 use trusty_mpm::core::delegation_authority::scan_agents_reporting;
@@ -58,6 +59,7 @@ pub(crate) type DeployedTiers<'a> = &'a dyn Fn(&Path) -> Vec<PathBuf>;
 /// Test: `a_deployed_agent_is_known`, `a_name_found_nowhere_is_refused`,
 /// `a_project_agent_is_known_from_a_subdirectory_of_the_checkout`.
 pub(crate) fn undetermined_type_refusal(
+    roster: &AgentRoster,
     tool_input: Option<&Value>,
     cwd: &Path,
     accepts_isolation: bool,
@@ -65,7 +67,7 @@ pub(crate) fn undetermined_type_refusal(
 ) -> Option<String> {
     let mut tiers = deployed(cwd);
     tiers.extend(ancestor_project_tiers(cwd));
-    undetermined_type_refusal_in(tool_input, &tiers, accepts_isolation)
+    undetermined_type_refusal_in(roster, tool_input, &tiers, accepts_isolation)
 }
 
 /// `<dir>/.claude/agents` for every strict ancestor of `cwd` up to and
@@ -98,11 +100,12 @@ fn ancestor_project_tiers(cwd: &Path) -> Vec<PathBuf> {
 /// Test: `an_unreadable_tier_does_not_hide_the_other_tiers`,
 /// `an_unreadable_tier_is_named_in_the_refusal`.
 fn undetermined_type_refusal_in(
+    roster: &AgentRoster,
     tool_input: Option<&Value>,
     tiers: &[PathBuf],
     accepts_isolation: bool,
 ) -> Option<String> {
-    let detail = undetermined_type_detail(tool_input, tiers)?;
+    let detail = undetermined_type_detail(roster, tool_input, tiers)?;
     Some(deny_reason(&detail, accepts_isolation))
 }
 
@@ -114,7 +117,11 @@ fn undetermined_type_refusal_in(
 /// the unknown name plus any tier path that could not be read.
 /// Test: `a_name_found_nowhere_is_refused`,
 /// `an_unreadable_tier_is_named_in_the_refusal`.
-fn undetermined_type_detail(tool_input: Option<&Value>, tiers: &[PathBuf]) -> Option<String> {
+fn undetermined_type_detail(
+    roster: &AgentRoster,
+    tool_input: Option<&Value>,
+    tiers: &[PathBuf],
+) -> Option<String> {
     let Some(raw) = tool_input.and_then(|input| input.get("subagent_type")) else {
         return Some("carries no `subagent_type`".to_string());
     };
@@ -123,7 +130,7 @@ fn undetermined_type_detail(tool_input: Option<&Value>, tiers: &[PathBuf]) -> Op
             "carries a `subagent_type` that is not an agent name (`{raw}`)"
         ));
     };
-    if agent_known_without_roster(name) {
+    if agent_known_without_roster(Some(roster), name) {
         return None;
     }
     let mut unreadable = Vec::new();
@@ -177,6 +184,11 @@ fn deny_reason(detail: &str, accepts_isolation: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout roster (#9011) every classifier in this suite reads.
+    fn r() -> &'static trusty_mpm::core::content_source::AgentRoster {
+        crate::commands::install::test_roster_ref()
+    }
     use crate::commands::pm_guard_worktree_grant::{WorktreeGrant, evaluate_worktree_grant_with};
     use crate::test_support::hermetic_temp_dir;
     use tempfile::TempDir;
@@ -258,7 +270,13 @@ mod tests {
 
     /// What `evaluate_worktree_grant` decides for `agent` from `cwd`.
     fn decide(agent: &str, cwd: &Path, machine: &Path) -> Option<WorktreeGrant> {
-        evaluate_worktree_grant_with("Agent", Some(&typed(agent)), cwd, &hermetic_tiers(machine))
+        evaluate_worktree_grant_with(
+            r(),
+            "Agent",
+            Some(&typed(agent)),
+            cwd,
+            &hermetic_tiers(machine),
+        )
     }
 
     #[test]
@@ -269,7 +287,7 @@ mod tests {
         let sent = typed("fixture-ops");
         let tiers = hermetic_tiers(&machine);
         assert_eq!(
-            undetermined_type_refusal(Some(&sent), &root, true, &tiers),
+            undetermined_type_refusal(r(), Some(&sent), &root, true, &tiers),
             None
         );
     }
@@ -344,7 +362,7 @@ mod tests {
         let deployed = tier(&[("fixture-ops", "fixture-ops")]);
         let tiers = [deployed.path().to_path_buf()];
         for agent in ["fixture-ops-missing", "Fixture-Ops"] {
-            let reason = undetermined_type_refusal_in(Some(&typed(agent)), &tiers, true)
+            let reason = undetermined_type_refusal_in(r(), Some(&typed(agent)), &tiers, true)
                 .unwrap_or_else(|| panic!("{agent} is defined nowhere"));
             assert!(reason.contains(&format!("`{agent}`")), "{reason}");
             assert!(reason.contains("deployed in the roster"), "{reason}");
@@ -362,8 +380,9 @@ mod tests {
             return;
         }
         let tiers = [broken.path().to_path_buf(), good.path().to_path_buf()];
-        let found = undetermined_type_refusal_in(Some(&typed("fixture-ops")), &tiers, true);
-        let bundled = undetermined_type_refusal_in(Some(&typed("rust-engineer")), &tiers, true);
+        let found = undetermined_type_refusal_in(r(), Some(&typed("fixture-ops")), &tiers, true);
+        let bundled =
+            undetermined_type_refusal_in(r(), Some(&typed("rust-engineer")), &tiers, true);
         restore(broken.path());
         assert_eq!(found, None, "a readable tier still defines its agents");
         assert_eq!(bundled, None, "the bundle does not depend on any tier");
@@ -382,8 +401,9 @@ mod tests {
             return;
         }
         let tiers = [broken.path().to_path_buf(), file_tier.path().to_path_buf()];
-        let hidden = undetermined_type_refusal_in(Some(&typed("fixture-hidden")), &tiers, true);
-        let bad = undetermined_type_refusal_in(Some(&typed("fixture-bad")), &tiers, true);
+        let hidden =
+            undetermined_type_refusal_in(r(), Some(&typed("fixture-hidden")), &tiers, true);
+        let bad = undetermined_type_refusal_in(r(), Some(&typed("fixture-bad")), &tiers, true);
         restore(broken.path());
         restore(&bad_file);
         for reason in [hidden, bad] {
@@ -406,19 +426,20 @@ mod tests {
         )
         .expect("write agent");
         let tiers = [dir.path().to_path_buf()];
-        let reason = undetermined_type_refusal_in(Some(&typed("fixture-nameless")), &tiers, true);
+        let reason =
+            undetermined_type_refusal_in(r(), Some(&typed("fixture-nameless")), &tiers, true);
         assert!(reason.is_some(), "a file stem is not an agent name");
     }
 
     #[test]
     fn a_task_refusal_points_at_the_agent_tool() {
         // `Task` cannot carry `isolation`, so its fix is the `Agent` tool.
-        let reason = undetermined_type_refusal_in(Some(&typed("fixture-none")), &[], false)
+        let reason = undetermined_type_refusal_in(r(), Some(&typed("fixture-none")), &[], false)
             .expect("refused");
         assert!(reason.contains("through the `Agent` tool"), "{reason}");
         assert!(reason.contains("`Task` carries no isolation"), "{reason}");
-        let agent =
-            undetermined_type_refusal_in(Some(&typed("fixture-none")), &[], true).expect("refused");
+        let agent = undetermined_type_refusal_in(r(), Some(&typed("fixture-none")), &[], true)
+            .expect("refused");
         assert!(!agent.contains("`Task`"), "{agent}");
     }
 }

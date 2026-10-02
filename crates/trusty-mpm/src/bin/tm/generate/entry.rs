@@ -26,12 +26,12 @@ use crate::cli::Cli;
 /// checks) — never re-parses them, just counts from the same source data
 /// each reference renderer reads.
 /// Test: `entry_render_has_frontmatter`, `entry_render_mentions_provenance`.
-pub(crate) fn render() -> String {
+pub(crate) fn render(roster: &trusty_mpm::core::content_source::AgentRoster) -> String {
     let cli_count = Cli::command().get_subcommands().count();
     let mcp_count = trusty_mpm::mcp::tools::tool_catalog().len();
-    let agent_count = trusty_mpm::core::bundle::ALL
+    let agent_count = roster
         .iter()
-        .filter(|a| a.rel_path.starts_with("agents/") && !a.rel_path.starts_with("agents/BASE-"))
+        .filter(|(name, _)| !name.starts_with("BASE-"))
         .count();
     let skill_count = trusty_mpm::core::bundle::ALL
         .iter()
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn entry_render_has_frontmatter() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         assert!(
             rendered.starts_with("---\nname: tm-capabilities\n"),
             "{rendered}"
@@ -123,13 +123,16 @@ mod tests {
 
     #[test]
     fn entry_render_mentions_provenance() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_roster_ref());
         assert!(rendered.contains("AUTO-GENERATED"), "{rendered}");
         assert!(rendered.contains("tm generate capabilities"), "{rendered}");
     }
 
     #[test]
     fn entry_render_is_deterministic() {
-        assert_eq!(render(), render());
+        assert_eq!(
+            render(crate::commands::install::test_roster_ref()),
+            render(crate::commands::install::test_roster_ref())
+        );
     }
 }
