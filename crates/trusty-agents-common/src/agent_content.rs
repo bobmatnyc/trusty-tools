@@ -97,6 +97,50 @@ impl From<ContentError> for AgentContentError {
     }
 }
 
+impl AgentContentError {
+    /// Whether nothing is installed: no checkout, no lock, or no home directory.
+    pub fn is_not_installed(&self) -> bool {
+        matches!(self, Self::NotInstalled { .. } | Self::NoCacheDir)
+    }
+}
+
+// #9011: set once this process has surfaced the no-content root cause.
+static NOT_INSTALLED_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Reports "no content is installed" as one ERROR line per process (#9011).
+///
+/// Why: with no content, every roster consumer in a process fails for the same
+/// reason. One line naming `tm content install` tells the operator what to do;
+/// a line per consumer, or per request, buries it.
+/// What: `false` for any other error, which the caller reports as before. For
+/// a not-installed `err`, the first report in this process (unless
+/// [`mark_not_installed_reported`] ran) logs `"{what}: {err}"` at ERROR and a
+/// later one logs at DEBUG; either way it returns `true`, so the caller adds
+/// no line of its own. Never changes whether the caller refuses.
+/// Test: `only_a_not_installed_error_is_claimed`, and the single-line binary
+/// tests `no_content_logs_one_error_naming_tm_content_install` (trusty-code)
+/// and `sessions_start_without_content_prints_one_line_naming_the_remedy`
+/// (trusty-mpm).
+pub fn report_not_installed(err: &AgentContentError, what: &str) -> bool {
+    if !err.is_not_installed() {
+        return false;
+    }
+    if NOT_INSTALLED_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::debug!("{what}: {err}");
+    } else {
+        tracing::error!("{what}: {err}");
+    }
+    true
+}
+
+/// Records that the caller surfaces a not-installed error through its own
+/// channel (a printed provisioning gap), so a later [`report_not_installed`]
+/// in this process stays at DEBUG (#9011).
+pub fn mark_not_installed_reported() {
+    NOT_INSTALLED_REPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Names a content source for an error message: `dev checkout <root>` or the
 /// installed release tag (`content-v0.2.0`).
 pub fn describe_source(source: &ContentSource) -> String {

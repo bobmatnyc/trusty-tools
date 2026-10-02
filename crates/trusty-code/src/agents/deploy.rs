@@ -418,7 +418,8 @@ fn publish_from_scratch(
 /// ledger into an unusable harness.
 /// What: `None` when `project_root` is `None` (a projectless session writes
 /// nothing and keeps the in-memory embed). Otherwise the outcome, with a
-/// `tracing::error!` naming the failure when one occurred. #2074.
+/// `tracing::error!` naming the failure when one occurred. #2074. No content
+/// installed is reported once per process with the loader's line (#9011 D4).
 /// Test: `deploy_and_log_is_a_no_op_without_a_project`,
 /// `deploy_and_log_reports_a_corrupt_ledger_without_panicking`.
 pub fn deploy_and_log(project_root: Option<&Path>) -> Option<RosterDeploy> {
@@ -442,6 +443,15 @@ pub fn deploy_and_log(project_root: Option<&Path>) -> Option<RosterDeploy> {
                 "agent roster materialized (#2074)"
             );
             Some(RosterDeploy::Deployed { target, result })
+        }
+        // #9011 D4: no content at all is reported once per process.
+        Err(RosterDeployError::Content(e))
+            if trusty_agents_common::agent_content::report_not_installed(
+                &e,
+                "tcode could not materialize its agent roster",
+            ) =>
+        {
+            None
         }
         Err(e) => {
             tracing::error!(

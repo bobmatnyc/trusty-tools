@@ -316,11 +316,13 @@ pub(crate) fn has_agent_markdown(dir: &Path) -> bool {
 /// drift IS overwritten — see the module doc's overwrite policy); (3) collects
 /// [`deploy_summary_lines`] for everything it declined or could not compose.
 /// Every failure is converted into a warning line rather than an `Err`. When
-/// the roster cannot be resolved (#9011) it warns once, naming `tm content
-/// install`, and deploys whatever `source_dir` already holds — nothing when
-/// it is empty.
+/// nothing is installed (#9011) it adds no warning — the one ERROR per process
+/// naming `tm content install` comes from
+/// [`trusty_agents_common::agent_content::report_not_installed`]; any other
+/// content error is a warning line. Either way it deploys whatever
+/// `source_dir` already holds — nothing when it is empty.
 /// Test: `autodeploy_agents_deploys_when_bundle_differs`,
-/// `autodeploy_agents_warns_and_keeps_the_existing_source_without_content`,
+/// `autodeploy_agents_keeps_the_existing_source_without_content`,
 /// `autodeploy_agents_is_a_noop_when_already_current`,
 /// `autodeploy_agents_fails_open_when_target_is_unwritable`,
 /// `autodeploy_agents_warns_when_it_skips_a_user_modified_file`.
@@ -349,11 +351,17 @@ pub fn autodeploy_agents_with(
     let roster = match roster {
         Ok(roster) => roster,
         Err(err) => {
-            out.warnings.push(format!(
-                "warning: the agent roster is unavailable ({err}) — the agents \
-                 already deployed from {} stay in place",
-                source_dir.display()
-            ));
+            // #9011 D4: no content is reported once per process, not here too.
+            if !trusty_agents_common::agent_content::report_not_installed(
+                &err,
+                "the agent roster is unavailable; the agents already deployed stay in place",
+            ) {
+                out.warnings.push(format!(
+                    "warning: the agent roster is unavailable ({err}) — the agents \
+                     already deployed from {} stay in place",
+                    source_dir.display()
+                ));
+            }
             if has_agent_markdown(source_dir) {
                 deploy_into(source_dir, target_dir, skills_root, &mut out);
             }

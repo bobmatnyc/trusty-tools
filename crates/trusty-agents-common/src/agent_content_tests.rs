@@ -75,6 +75,24 @@ fn an_unverifiable_bundle_is_a_content_error() {
     );
 }
 
+/// #9011: only the not-installed case is claimed by the once-per-process
+/// reporter; any other content error stays with its caller, which reports it.
+#[test]
+fn only_a_not_installed_error_is_claimed() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let missing = resolve_content_in(cache.path(), DevOverride::Off).expect_err("nothing");
+    assert!(missing.is_not_installed());
+    assert!(AgentContentError::NoCacheDir.is_not_installed());
+    // A repeat report is still claimed: the caller adds no line either time.
+    assert!(report_not_installed(&missing, "test"));
+    assert!(report_not_installed(&missing, "test"));
+    let empty = AgentContentError::EmptyRoster {
+        origin: "test".to_string(),
+    };
+    assert!(!empty.is_not_installed());
+    assert!(!report_not_installed(&empty, "test"));
+}
+
 /// #9011: a source with no agents is `EmptyRoster`, never `Ok` with zero files.
 #[test]
 fn an_empty_roster_is_an_error() {

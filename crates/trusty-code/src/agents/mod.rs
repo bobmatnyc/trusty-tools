@@ -182,8 +182,8 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// `EmbeddedAgent::Composed { name }`, composes against the catalog
 /// [`crate::assets::load_tm_agent_sources`] reads from content ONCE (#9011),
 /// which also fails on an unresolvable `extends:` chain. With no content the
-/// composed agents are skipped under one ERROR naming `tm content install`
-/// and the `Direct` agents still load. Any per-agent failure is logged at
+/// composed agents are skipped under one ERROR per process naming `tm content
+/// install` (#9011 D4) and the `Direct` agents still load. Any per-agent failure is logged at
 /// ERROR level and the agent is skipped rather than panicking, exactly like
 /// the disk-parsing path in [`load_all_agents`] does for a malformed on-disk
 /// config.
@@ -193,11 +193,14 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
     // #9011: the composed agents' shared texts are instructional content,
     // loaded ONCE; without it only the `Direct` agents load, under one error.
+    // #9011 D4: no content at all is one ERROR per process, not one per call.
+    const UNAVAILABLE: &str =
+        "tcode's shared agents are unavailable, so only its built-in agents load";
     let catalog = crate::assets::load_tm_agent_sources()
         .inspect_err(|e| {
-            tracing::error!(
-                "tcode's shared agents are unavailable, so only its built-in agents load: {e}"
-            );
+            if !trusty_agents_common::agent_content::report_not_installed(e, UNAVAILABLE) {
+                tracing::error!("{UNAVAILABLE}: {e}");
+            }
         })
         .ok();
     let skill_refs_root = skill_refs::user_skill_refs_dir();

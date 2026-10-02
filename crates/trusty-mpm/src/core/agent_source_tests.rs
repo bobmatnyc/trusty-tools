@@ -514,11 +514,12 @@ fn autodeploy_agents_overwrites_a_drifted_bundled_file() {
     );
 }
 
-/// The roster-unavailable arm (#9011): one warning naming `tm content
-/// install`, nothing refreshed, and the agents already in the source stay
-/// deployable; an empty source deploys nothing and the warning stands.
+/// The roster-unavailable arm (#9011): nothing refreshed, and the agents
+/// already in the source stay deployable; an empty source deploys nothing.
+/// #9011 D4: no warning line of its own — not-installed is the one
+/// once-per-process ERROR `report_not_installed` logs.
 #[test]
-fn autodeploy_agents_warns_and_keeps_the_existing_source_without_content() {
+fn autodeploy_agents_keeps_the_existing_source_without_content() {
     use crate::core::content_source::{DevOverride, agent_roster_in};
 
     let cache = tempfile::TempDir::new().unwrap();
@@ -530,12 +531,7 @@ fn autodeploy_agents_warns_and_keeps_the_existing_source_without_content() {
     let out = autodeploy_agents_with(&source, &target, &std::env::temp_dir(), missing());
     assert!(!out.refreshed);
     assert!(out.deployed.is_empty(), "{:?}", out.deployed);
-    assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
-    assert!(
-        out.warnings[0].contains("tm content install"),
-        "{:?}",
-        out.warnings
-    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert!(
         !source.exists(),
         "an unavailable roster must not create the source"
@@ -548,9 +544,5 @@ fn autodeploy_agents_warns_and_keeps_the_existing_source_without_content() {
         target.join("engineer.md").exists(),
         "the existing source still deploys"
     );
-    assert!(
-        out.warnings[0].contains("tm content install"),
-        "{:?}",
-        out.warnings
-    );
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
 }

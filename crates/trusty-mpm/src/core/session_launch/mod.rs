@@ -755,6 +755,12 @@ pub(super) fn prepare_session_inner(
             }
             quarantine_report = Some(report);
         }
+        // #9011 D4: no content is ONE gap, printed by every caller of this
+        // report; no WARN of its own, and no second line from a later consumer.
+        Err(quarantine_shadows::ShadowQuarantineError::Roster(err)) if err.is_not_installed() => {
+            trusty_agents_common::agent_content::mark_not_installed_reported();
+            roster_errors.push(err.to_string());
+        }
         Err(err) => {
             tracing::warn!(
                 project_dir = %project_dir.display(),
