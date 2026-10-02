@@ -111,7 +111,7 @@ this section is generated.
 
 trusty-mpm 1.8.0 is the base before the architect. Agents, skills and PM instructions leave the binaries and ship from content/ with their own versions. Every trusty service talks over a Unix socket; only the console listens on the network. Worktrees are tracked in one machine-wide registry and reclaimed once their work merges. A new session starts with much less context. pm-guard keeps the checks that stop real harm, and the Claude Code sandbox takes over the rest.
 
-34 of 106 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/111)
+35 of 107 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/111)
 
 #### 1.9.0 · Next
 
@@ -145,9 +145,9 @@ Work so trusty-mpm can drive coding harnesses other than Claude Code — Codex a
 
 Other open milestones:
 
-- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · 720 of 772 items done
+- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · 721 of 772 items done
 - [Session, worktree & daemon lifecycle · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/64) · 67 of 82 items done
-- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 59 of 90 items done
+- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 59 of 91 items done
 
 ### trusty-secrets
 
@@ -155,7 +155,7 @@ Other open milestones:
 
 trusty-secrets 0.1.0 is secrets as a standalone, public crate with its own releases, like trusty-memory. You keep project and owner secrets in it, starting with the macOS Keychain, and manage them on the console's secrets page. Values stay out of agent transcripts. trusty-mpm and the console use the crate; they do not contain it.
 
-0 of 21 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/123)
+1 of 21 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/123)
 
 ### tc-services
 
