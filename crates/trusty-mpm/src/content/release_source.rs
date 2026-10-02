@@ -108,15 +108,22 @@ fn github_token_from_env() -> Option<String> {
     github_token_from(|name| std::env::var(name).ok())
 }
 
-/// The first non-empty of `GITHUB_TOKEN` and `GH_TOKEN` as `var` reads them.
-/// #9036: an empty `GITHUB_TOKEN` falls through to `GH_TOKEN`; an empty
-/// `GH_TOKEN` is unset.
+/// A token trimmed of surrounding whitespace; empty or whitespace-only is unset.
+fn normalize_token(token: String) -> Option<String> {
+    let trimmed = token.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// The first set (non-blank, trimmed) of `GITHUB_TOKEN` and `GH_TOKEN` as
+/// `var` reads them.
+/// #9036: an empty or whitespace-only `GITHUB_TOKEN` falls through to
+/// `GH_TOKEN`; a blank `GH_TOKEN` is unset.
 /// Test: `an_empty_github_token_falls_through_to_gh_token`.
 pub(super) fn github_token_from(var: impl Fn(&str) -> Option<String>) -> Option<String> {
     [trusty_common::env_vars::ENV_GITHUB_TOKEN, "GH_TOKEN"]
         .into_iter()
         .filter_map(var)
-        .find(|t| !t.is_empty())
+        .find_map(normalize_token)
 }
 
 impl GithubReleases {
@@ -149,9 +156,10 @@ impl GithubReleases {
         })
     }
 
-    /// The same source sending `token` on API calls; `None` stays unauthenticated.
+    /// The same source sending `token` on API calls; `None`, an empty or a
+    /// whitespace-only token stays unauthenticated (#9036).
     pub fn with_token(mut self, token: Option<String>) -> Self {
-        self.token = token.filter(|t| !t.is_empty());
+        self.token = token.and_then(normalize_token);
         self
     }
 

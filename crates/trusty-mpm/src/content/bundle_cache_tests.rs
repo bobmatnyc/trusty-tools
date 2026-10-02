@@ -747,8 +747,8 @@ fn github_source_refuses_a_malformed_or_mismatched_answer() {
     }
 }
 
-/// #9036: an empty `GITHUB_TOKEN` falls through to `GH_TOKEN`, and an empty
-/// `GH_TOKEN` is unset. Reads a table, not the process environment.
+/// #9036: an empty or whitespace-only `GITHUB_TOKEN` falls through to
+/// `GH_TOKEN`, and a blank `GH_TOKEN` is unset. Reads a table, not the process environment.
 #[test]
 fn an_empty_github_token_falls_through_to_gh_token() {
     let cases = [
@@ -756,7 +756,11 @@ fn an_empty_github_token_falls_through_to_gh_token() {
         (None, Some("gh"), Some("gh")),
         (Some("g"), Some("gh"), Some("g")),
         (Some("g"), None, Some("g")),
+        (Some("  "), Some("gh"), Some("gh")),
+        (Some("\n"), Some("gh"), Some("gh")),
+        (Some(" g \n"), Some("gh"), Some("g")),
         (Some(""), Some(""), None),
+        (Some("  "), Some("\n"), None),
         (Some(""), None, None),
         (None, None, None),
     ];
@@ -977,9 +981,11 @@ fn github_source_sends_the_token_only_when_one_is_set() {
     for (path, headers) in unauthenticated {
         assert_eq!(auth(&headers), None, "{path}");
     }
-    // An empty token is unset.
-    for (path, headers) in drive(Some("")) {
-        assert_eq!(auth(&headers), None, "{path}");
+    // An empty or whitespace-only token is unset.
+    for blank in ["", "  ", "\n"] {
+        for (path, headers) in drive(Some(blank)) {
+            assert_eq!(auth(&headers), None, "{blank:?} {path}");
+        }
     }
 }
 
