@@ -39,9 +39,15 @@ What: three subcommands over scripts/asset-content-tests.tsv.
             file that defines an asset const/static or holds R1 itself;
           - a `pub use` of either, which makes the re-exporting module a home.
         A reference counts when a home module qualifies it
-        (`agent_assets::QA`, `bundle::TM_WORKFLOW`, `super::X`), or when it is
+        (`bundle::OUTPUT_STYLE`, `bundle::TM_WORKFLOW`, `super::X`), or when it is
         bare and in scope (`use …::home::{X}`, `use …::home::*`, a home's own
         module, or `use super::*` beneath one).
+    R4  (#9011) a call to a run-time content loader: `checkout_content`,
+        `AgentRoster::load` or `HarnessDoc::load` read the checkout's
+        `content/` tree, which no literal names. A test-code helper fn that
+        reads by R1-R4 (`repo_roster()`, `stage_repo_content()`) is itself a
+        loader, homed in its module, so the TESTS calling it are the readers
+        and the helper module needs no row of its own.
   `check --verbose` prints every symbol and loader it derived.
 
   Test code is a module under `#[cfg(test)]`, an integration-test target, or
@@ -71,14 +77,16 @@ import sys
 import time
 import tomllib
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from asset_filter_lex import attrs_before, expand_use, lex, match_close  # noqa: E402
+
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
-RAW_START = re.compile(r'(?:b|c)?r(#*)"')
 INCLUDE = re.compile(r"\binclude_(?:str|bytes|dir)\s*!\s*\(")
 MOD_DECL = re.compile(r"\bmod\s+(" + IDENT + r")\s*([;{])")
 FN_DECL = re.compile(r"\bfn\s+(" + IDENT + r")\b")
 ITEM_DECL = re.compile(r"\b(const|static)\s+(?:mut\s+)?(" + IDENT + r")\s*:")
 USE_DECL = re.compile(r"\b(pub(?:\s*\([^)]*\))?\s+)?use\s+([^;]+);")
-# A lookahead, so `crate::agent_assets::X` yields both `crate::agent_assets` and `agent_assets::X`.
+# A lookahead, so `crate::bundle::X` yields both `crate::bundle` and `bundle::X`.
 QUALIFIED = re.compile(r"(?<!\w)(?=(" + IDENT + r")\s*::\s*(" + IDENT + r")\b)")
 BARE = re.compile(r"(?<![\w:.])(" + IDENT + r")\b(?!\s*::)")
 TEST_ATTR = re.compile(r"#\[\s*(?:" + IDENT + r"\s*::\s*)*(?:test|rstest|test_case)\b")
@@ -87,171 +95,8 @@ CFG_TEST = re.compile(r"#\[\s*cfg\s*\((?![^\]]*\bnot\s*\(\s*test)[^\]]*\btest\b"
 # tree, which a crate names as `../../content/…` from its manifest dir.
 ASSET_DIR = re.compile(r"(?:^|/)(?:(?:([\w.-]+)/)?src/assets(?:/|$)|(content)/)")
 DETECT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detect-docs-only.sh")
-
-
-# ------------------------------------------------------------------- lexing
-def is_ident_char(ch):
-    return ch.isalnum() or ch == "_"
-
-
-def lex(src):
-    """Blank comments and literal bodies (newlines kept); return masked text and literals."""
-    out = list(src)
-    lits = []
-    n = len(src)
-    i = 0
-
-    def blank(a, b):
-        for k in range(a, min(b, n)):
-            if out[k] != "\n":
-                out[k] = " "
-
-    while i < n:
-        c = src[i]
-        if src.startswith("//", i):
-            j = src.find("\n", i)
-            j = n if j < 0 else j
-            blank(i, j)
-            i = j
-            continue
-        if src.startswith("/*", i):
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if src.startswith("/*", j):
-                    depth, j = depth + 1, j + 2
-                elif src.startswith("*/", j):
-                    depth, j = depth - 1, j + 2
-                else:
-                    j += 1
-            blank(i, j)
-            i = j
-            continue
-        if c in "bcr" and (i == 0 or not is_ident_char(src[i - 1])):
-            m = RAW_START.match(src, i)
-            if m:
-                close = '"' + m.group(1)
-                j = src.find(close, m.end())
-                j = n if j < 0 else j
-                lits.append((i, src[m.end():j]))
-                blank(m.end(), j)
-                i = j + len(close)
-                continue
-            if c in "bc" and src.startswith('"', i + 1):
-                i += 1
-                c = '"'
-        if c == '"':
-            j = i + 1
-            while j < n and src[j] != '"':
-                j += 2 if src[j] == "\\" else 1
-            lits.append((i, src[i + 1:j]))
-            blank(i + 1, j)
-            i = j + 1
-            continue
-        if c == "'":
-            if src.startswith("\\", i + 1):
-                j = src.find("'", i + 3)
-                j = n if j < 0 else j
-                blank(i + 1, j)
-                i = j + 1
-                continue
-            if i + 2 < n and src[i + 2] == "'":
-                blank(i + 1, i + 2)
-                i += 3
-                continue
-        i += 1
-    return "".join(out), lits
-
-
-def match_close(masked, open_at):
-    """Offset just past the bracket closing the one at `open_at`."""
-    pairs = {"{": "}", "(": ")", "[": "]"}
-    stack = []
-    for k in range(open_at, len(masked)):
-        ch = masked[k]
-        if ch in pairs:
-            stack.append(pairs[ch])
-        elif stack and ch == stack[-1]:
-            stack.pop()
-            if not stack:
-                return k + 1
-    return len(masked)
-
-
-def attrs_before(masked, at, text):
-    """Original text of the `#[...]` groups directly preceding the item at `at`."""
-    k = at
-    keywords = ("pub", "async", "const", "unsafe", "extern", "default")
-    while True:
-        j = k
-        while j > 0 and masked[j - 1].isspace():
-            j -= 1
-        if j > 0 and masked[j - 1] == ")":  # pub(crate)
-            depth, p = 0, j - 1
-            while p >= 0:
-                depth += {")": 1, "(": -1}.get(masked[p], 0)
-                if depth == 0:
-                    break
-                p -= 1
-            k = p
-            continue
-        word = re.search(r"(" + IDENT + r")$", masked[max(0, j - 12):j])
-        if word and word.group(1) in keywords:
-            k = j - len(word.group(1))
-            continue
-        break
-    end = k
-    while True:
-        j = k
-        while j > 0 and masked[j - 1].isspace():
-            j -= 1
-        if j == 0 or masked[j - 1] != "]":
-            break
-        depth, p = 0, j - 1
-        while p >= 0:
-            depth += {"]": 1, "[": -1}.get(masked[p], 0)
-            if depth == 0:
-                break
-            p -= 1
-        if p <= 0 or masked[p - 1] != "#":
-            break
-        k = p - 1
-    return text[k:end]
-
-
-def expand_use(tree):
-    """Expand a use-tree into ([segments], alias) pairs; a glob ends in `*`."""
-    out = []
-
-    def walk(prefix, t):
-        t = t.strip()
-        if not t:
-            return
-        if "{" in t and t.endswith("}"):
-            head, body = t.split("{", 1)
-            base = prefix + [s.strip() for s in head.strip().rstrip(":").split("::") if s.strip()]
-            depth, cur, parts = 0, "", []
-            for ch in body[:-1]:
-                if ch == "," and depth == 0:
-                    parts.append(cur)
-                    cur = ""
-                    continue
-                depth += {"{": 1, "}": -1}.get(ch, 0)
-                cur += ch
-            parts.append(cur)
-            for p in parts:
-                walk(base, p)
-            return
-        alias = None
-        if " as " in t:
-            t, alias = [x.strip() for x in t.split(" as ", 1)]
-        segs = prefix + [s.strip() for s in t.split("::") if s.strip()]
-        if segs and segs[-1] == "self":
-            segs = segs[:-1]
-        if segs:
-            out.append((segs, alias))
-
-    walk([], re.sub(r"\s+", " ", tree))
-    return out
+# R4 (#9011): (home, name) of the run-time readers of the content/ tree.
+CONTENT_LOADERS = (("agent_content", "checkout_content"), ("AgentRoster", "load"), ("HarnessDoc", "load"))
 
 
 # ------------------------------------------------------------- source files
@@ -343,7 +188,7 @@ class Source:
             crate_dir = os.path.join(os.path.dirname(self.crate_dir), m.group(1)) if m.group(1) else self.crate_dir
             # A format string (`src/assets/agents/{name}.md`) names the prefix before its first hole.
             tail = re.split(r"[{}*?]", value[m.end():], maxsplit=1)[0]
-            # #9011: group 2 is the repo-root content tree (AGENT_ASSETS_DIR's `/../../content/agents`).
+            # #9011: group 2 is the repo-root content tree (`<manifest dir>/../../content/agents`).
             prefix = os.path.normpath(os.path.join(crate_dir, *(("..", "..", "content") if m.group(2) else ("src", "assets")), tail))
             if any(a.startswith(prefix) for a in self.assets):
                 return f"literal {value!r}"
@@ -525,6 +370,10 @@ class Symbols:
         self.homes = {}  # name -> set(last module segment)
         self.kinds = {}  # name -> "const" | "loader"
         self._scope = {}
+        self.test_loaders = {}  # R4 test-code helper fn name -> {(module segment, file, module start)}
+        for home, name in CONTENT_LOADERS:
+            self.homes.setdefault(name, set()).add(home)
+            self.kinds.setdefault(name, "loader")
         asset_files = set()
         prod = [m for m in tree.modules if not m.test]
         for m in prod:
@@ -555,6 +404,25 @@ class Symbols:
                         if home in self.homes.get(name, ()) and m.seg not in self.homes[name]:
                             self.homes[name].add(m.seg)
                             changed = True
+        # R4: a non-test helper fn in test code that reads is a loader too. It is
+        # keyed by its module (segment, file, span), never by segment alone:
+        # dozens of test modules are all named `tests`, and a bare `d()` in one
+        # must not match another's.
+        changed = True
+        while changed:
+            changed = False
+            for m in tree.modules:
+                for s, e, name, attrs, _ in m.fns:
+                    if TEST_ATTR.search(attrs) or not (m.test or CFG_TEST.search(attrs)):
+                        continue
+                    key = (m.seg, m.src.path, m.span[0])
+                    if key in self.test_loaders.get(name, ()) or not self.reads(m, s, e):
+                        continue
+                    self.test_loaders.setdefault(name, set()).add(key)
+                    changed = True
+
+    def is_test_loader(self, m, name):
+        return (m.seg, m.src.path, m.span[0]) in self.test_loaders.get(name, ())
 
     @staticmethod
     def resolve(m, seg):
@@ -602,6 +470,20 @@ class Symbols:
             homes = self.homes[name]
             if homes & globs or any((h, name) in names for h in homes):
                 return name
+        # R4: a test-code loader, called bare from its own file or through an
+        # import, or qualified by its own (non-`tests`) module segment.
+        for seg, name in quals:
+            keys = self.test_loaders.get(name, ())
+            home = aliases.get(seg, self.resolve(m, seg))
+            if home != "tests" and any(home == ks for ks, _, _ in keys):
+                return f"{seg}::{name}"
+        for name in bare & self.test_loaders.keys():
+            for ks, path, start in self.test_loaders[name]:
+                own = path == m.src.path and start == m.span[0]
+                # `globs` always holds the module's own segment; only a real glob
+                # import (`use super::*`) reaches a sibling module's helper.
+                if own or (ks, name) in names or (ks in globs and ks != m.seg and path == m.src.path):
+                    return name
         return None
 
 
@@ -614,9 +496,13 @@ def find_readers(tree, symbols):
         for s, e, name, attrs, _ in m.fns + m.items:
             is_test_fn = bool(TEST_ATTR.search(attrs))
             if m.test or is_test_fn or CFG_TEST.search(attrs):
-                spans.append((s, e, name if is_test_fn else None))
+                if not is_test_fn and symbols.is_test_loader(m, name):
+                    # R4: its callers are the readers; the helper needs no row.
+                    spans.append((s, e, None, True))
+                    continue
+                spans.append((s, e, name if is_test_fn else None, False))
         if m.test:
-            edges = sorted((s, e) for s, e, _ in spans)
+            edges = sorted((s, e) for s, e, _, _ in spans)
             lo, hi = m.span
             gaps, cur = [], lo
             for s, e in edges:
@@ -625,8 +511,10 @@ def find_readers(tree, symbols):
                 cur = max(cur, e)
             if cur < hi:
                 gaps.append((cur, hi, None))
-            spans += gaps
-        for s, e, test_fn in spans:
+            spans += [(s, e, t, False) for s, e, t in gaps]
+        for s, e, test_fn, helper in spans:
+            if helper:
+                continue
             reason = symbols.reads(m, s, e)
             if reason:
                 path = "::".join(m.path + ([test_fn] if test_fn else []))

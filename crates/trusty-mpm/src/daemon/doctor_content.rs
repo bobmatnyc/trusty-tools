@@ -26,7 +26,6 @@ pub(crate) const CHECK_NAME: &str = "content";
 /// `project_dir`. `cache_dir` is `None` when no home directory resolves.
 ///
 /// Test: `content_row_is_ok_for_a_verified_bundle`,
-/// `content_row_is_info_when_nothing_is_installed_before_phase_1`,
 /// `content_row_warns_when_nothing_is_installed_after_phase_1`,
 /// `content_row_fails_on_a_tampered_bundle`.
 pub(crate) fn check_content(project_dir: Option<&Path>, cache_dir: Option<&Path>) -> DoctorCheck {

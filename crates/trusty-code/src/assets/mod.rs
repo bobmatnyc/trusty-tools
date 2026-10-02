@@ -564,8 +564,7 @@ pub const LOCAL_TM_AGENT_FORKS: &[(&str, &str)] = &[
 /// `(file name, markdown)` pairs, as the compiled-in table used to be.
 /// What: `Err(AgentContentError::Missing)` when `roster` lacks a shared file,
 /// so a partial catalog never composes.
-/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`,
-/// `agent_content::tests::require_names_the_missing_file` (trusty-agents-common).
+/// Test: `assets::tests::embedded_tm_agent_sources_has_31_entries_and_unique_keys`.
 pub fn tm_agent_sources(
     roster: &trusty_agents_common::agent_content::AgentRoster,
 ) -> Result<Vec<(String, String)>, trusty_agents_common::agent_content::AgentContentError> {

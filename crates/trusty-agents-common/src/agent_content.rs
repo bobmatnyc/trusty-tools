@@ -11,9 +11,10 @@
 //! [`AgentContentError`] is every failure, each naming `tm content install`
 //! or `tm content update`. [`crate::harness_doc::HarnessDoc`] reads the
 //! harness-understanding docs from the same source.
-//! Test: `agent_content_tests` — the four fail-closed arms (not installed,
-//! unverifiable bundle, empty roster, missing foundation file) and the
-//! roster-content assertions that used to live beside the consts.
+//! Test: `not_installed_names_tm_content_install`,
+//! `an_unverifiable_bundle_is_a_content_error`, `an_empty_roster_is_an_error`,
+//! `a_roster_without_the_foundation_file_is_an_error`, and the roster-content
+//! assertions that used to live beside the consts (`agent_content_tests.rs`).
 //!
 //! # Spec References
 //! - ADR-0064 decision 5: `docs/adr/0064-instructional-content-tracked-separately-from-code.md`

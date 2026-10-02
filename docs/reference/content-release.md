@@ -140,12 +140,12 @@ Bundle destinations and where they are read from today:
 
 | Destination | Source directory |
 |---|---|
-| `agents` | `crates/trusty-agents-common/src/assets/agents/` |
+| `agents` | `content/agents/` (#9011) |
 | `skills` | `crates/trusty-mpm/src/assets/skills/` |
 | `instructions` | `crates/trusty-mpm/src/assets/instructions/` |
 | `instructions/output-styles` | `crates/trusty-mpm/src/assets/output-styles/` |
 | `instructions/sm_instructions` | `crates/trusty-mpm/src/assets/sm_instructions/` |
-| `instructions/harness_understanding` | `crates/trusty-agents-common/src/assets/harness_understanding/` |
+| `instructions/harness_understanding` | `content/instructions/harness_understanding/` (#9011) |
 
 `content-v0.1.0` predates this layout: it carries `output-styles/`,
 `sm_instructions/` and `harness_understanding/` as top-level directories.

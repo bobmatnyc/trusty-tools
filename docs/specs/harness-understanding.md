@@ -261,8 +261,10 @@ The shared module lives in:
   - `HARNESS_OVERSEER.md` — §7 content
 
 **Consumers load it via**:
-- `trusty-mpm`: `use trusty_agents_common::harness_doc; harness_doc::harness_understanding()`
-  called from `crates/trusty-mpm/src/core/sm/prompt.rs`.
+- `trusty-mpm`: `HarnessDoc::load(&content)?.harness_understanding()`
+  (`trusty_agents_common::harness_doc`, read from instructional content since
+  #9011), called through `crates/trusty-mpm/src/core/content_source.rs` from
+  `crates/trusty-mpm/src/core/sm/prompt.rs`.
 - Future tcode overseer: same API, filtered to relevant sections.
 
 ---

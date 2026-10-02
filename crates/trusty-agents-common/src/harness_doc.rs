@@ -13,9 +13,9 @@
 //! What: [`HarnessDoc::load`] reads the four files from one
 //!       [`ResolvedContent`]; four accessors plus [`HarnessDoc::harness_understanding`],
 //!       which joins all four for consumers that want the full doc.
-//! Test: `harness_doc_tests` — canonical markers (`✻`, the
-//!       `events::EVENT_LINE_PREFIX` relay marker), the sum of parts, the
-//!       legacy bundle key, and the missing-file error arm.
+//! Test: `harness_doc_names_the_relay_prefix`, `full_doc_sum_of_parts`,
+//!       `the_legacy_bundle_key_still_resolves`,
+//!       `a_missing_harness_doc_is_an_error` (`harness_doc_tests.rs`).
 
 use crate::agent_content::{AgentContentError, ContentError, ResolvedContent, describe_source};
 

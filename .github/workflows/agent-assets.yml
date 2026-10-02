@@ -14,8 +14,8 @@
 #     tcode-only defaults that deliberately track nothing.
 #
 # #5604 collapsed every other agent asset to ONE physical copy under
-# content/agents/ (#9011), which both trusty-mpm and trusty-code embed via
-# trusty_agents_common::agent_assets — so crates/trusty-mpm/src/assets/agents/
+# content/agents/ (#9011), which both trusty-mpm and trusty-code read at run
+# time via trusty_agents_common::agent_content — so crates/trusty-mpm/src/assets/agents/
 # no longer exists and is not a path this gate can watch.
 #
 # Pure file/hash comparison — no Rust toolchain or build needed, so this runs
