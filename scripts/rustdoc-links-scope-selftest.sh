@@ -55,6 +55,15 @@ assert_eq "chore/release- branch, plain title" release \
   "$(scope pull_request true 'assemble notes' chore/release-tga-8.0.0 '')"
 assert_eq "release/ branch, plain title" release \
   "$(scope pull_request true 'assemble notes' release/trusty-mpm-1.7.8 '')"
+# #8716: #9112's exact title and branch. Cargo-inert, so it printed `skip`.
+assert_eq "changelog-assembly PR (#9112 exact title and branch)" release \
+  "$(scope pull_request true 'chore(trusty-common): assemble 0.53.1 changelog' chore/trusty-common-0.53.1-changelog '')"
+assert_eq "assemble-changelog title, plain branch" release \
+  "$(scope pull_request true 'chore(trusty-common): assemble 0.53.1 changelog' feature-x '')"
+assert_eq "chore/<crate>-<ver>-changelog branch, plain title" release \
+  "$(scope pull_request true 'notes' chore/trusty-common-0.53.1-changelog '')"
+assert_eq "plain docs PR naming a changelog still skips" skip \
+  "$(scope pull_request true 'docs: explain the changelog format' docs/changelog-format '')"
 # Ordinary PRs keep their old behaviour.
 assert_eq "docs-only ordinary PR skips" skip \
   "$(scope pull_request true 'docs: fix a typo' docs/typo '')"
@@ -80,6 +89,9 @@ assert_eq "docs-only ordinary push skips" skip \
   "$(scope push true '' '' 'docs: x (#3)')"
 assert_eq "code push runs the ordinary scope" ordinary \
   "$(scope push false '' '' 'fix: y (#4)')"
+
+assert_eq "squash-merged assembly commit (#9112)" release \
+  "$(scope push true '' '' 'chore(trusty-common): assemble 0.53.1 changelog (#9112)')"
 
 echo "rustdoc-links-scope: other events"
 assert_eq "workflow_dispatch" release "$(scope workflow_dispatch false '' '' '')"
