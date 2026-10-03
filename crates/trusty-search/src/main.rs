@@ -448,7 +448,8 @@ enum Commands {
     /// colocated `.trusty-search/` store it has not been given.
     /// `--no-auto-discover` says the same thing explicitly on any data
     /// directory, including the machine default; `--auto-discover` is the
-    /// opt-in that grants the scan on an explicit one.
+    /// opt-in that grants the scan on an explicit one. A value that names the
+    /// default data directory (or a symlink to it) is not explicit.
     #[command(display_order = 20)]
     Start {
         /// Port to listen on (default: 7878, auto-selects next if busy)

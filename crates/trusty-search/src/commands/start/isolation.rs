@@ -18,7 +18,7 @@
 //! `socket_path_follows_trusty_data_dir_not_home`.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 
@@ -164,14 +164,15 @@ impl Discovery {
 /// inherited environment. Resolving them in one place keeps `handle_start`
 /// free of inline policy no test can reach.
 /// What: the data dir from [`resolve_data_dir_override`], and a [`Discovery`]
-/// that refuses the scan whenever that data dir is explicit, unless
-/// `--auto-discover` opts in.
+/// that refuses the scan whenever that data dir is explicit — set, and not a
+/// spelling of the platform default — unless `--auto-discover` opts in.
 ///
 /// # Errors
 ///
 /// When the resolved data dir is not absolute.
 ///
 /// Test: `an_explicit_data_dir_never_auto_discovers_on_any_start`,
+/// `a_data_dir_env_equal_to_the_default_is_not_explicit`,
 /// `start_plan_wires_every_scan_to_one_decision`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartPlan {
@@ -180,16 +181,35 @@ pub(crate) struct StartPlan {
 }
 
 impl StartPlan {
-    /// Resolve the data dir and the scan decision from flags and environment.
+    /// Resolve against the machine's real platform default data dir.
     pub(crate) fn resolve(
         env_value: Option<OsString>,
         flag: Option<&Path>,
         no_auto_discover: bool,
         auto_discover: bool,
     ) -> Result<Self> {
+        let defaults = crate::service::persistence::default_data_dir_candidates();
+        Self::resolve_with_defaults(env_value, flag, &defaults, no_auto_discover, auto_discover)
+    }
+
+    /// Resolve the data dir and the scan decision, given the default dir's
+    /// candidate paths.
+    ///
+    /// Test: `a_data_dir_env_equal_to_the_default_is_not_explicit`.
+    pub(crate) fn resolve_with_defaults(
+        env_value: Option<OsString>,
+        flag: Option<&Path>,
+        defaults: &[PathBuf],
+        no_auto_discover: bool,
+        auto_discover: bool,
+    ) -> Result<Self> {
         let data_dir = resolve_data_dir_override(env_value, flag)?;
-        // #8176: whether the dir is explicit decides, never what it contains.
-        let granted = auto_discover_enabled(no_auto_discover, auto_discover, data_dir.is_some());
+        // #8176: whether the dir is explicit decides, never what it contains;
+        // a value that spells the default (#718's plist hint) is not explicit.
+        let explicit = data_dir
+            .as_deref()
+            .is_some_and(|dir| !names_a_default(dir, defaults));
+        let granted = auto_discover_enabled(no_auto_discover, auto_discover, explicit);
         Ok(Self {
             data_dir,
             discovery: Discovery {
@@ -198,6 +218,38 @@ impl StartPlan {
             },
         })
     }
+}
+
+/// Does `dir` name one of the default data dir's candidate paths?
+///
+/// Why (#8176): `TRUSTY_DATA_DIR` set to the default path is the default, not
+/// an isolated instance, so it keeps the default's auto-discovery.
+/// What: compares normalized forms, so a trailing slash, a `.` or `..`
+/// segment, or a symlink to the default all read as the default.
+/// Test: `a_data_dir_env_equal_to_the_default_is_not_explicit`,
+/// `a_data_dir_flag_equal_to_the_default_is_not_explicit`,
+/// `a_symlink_to_the_default_data_dir_is_not_explicit`.
+fn names_a_default(dir: &Path, defaults: &[PathBuf]) -> bool {
+    let want = normalize_dir(dir);
+    defaults.iter().any(|d| normalize_dir(d) == want)
+}
+
+/// The canonical form of `p` when it exists, else its lexical normal form.
+fn normalize_dir(p: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(p) {
+        return canonical;
+    }
+    let mut out = PathBuf::new();
+    for part in p.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

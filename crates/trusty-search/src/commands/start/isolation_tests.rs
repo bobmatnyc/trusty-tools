@@ -127,6 +127,89 @@ fn an_explicit_data_dir_never_auto_discovers_on_any_start() {
     );
 }
 
+/// Does a start with these inputs and `default` as the platform default
+/// data dir run the auto-discovery scan?
+fn scans_with_default(env: Option<OsString>, flag: Option<&Path>, default: &Path) -> bool {
+    StartPlan::resolve_with_defaults(env, flag, &[default.to_path_buf()], false, false)
+        .expect("must resolve")
+        .discovery
+        .runs_auto_discover()
+}
+
+/// Why (#8176): a launchd plist that follows #718's hint sets `TRUSTY_DATA_DIR`
+/// to the default data dir. That is the default, not an isolated instance, so
+/// it keeps the default's auto-discovery. Under the previous rule — any `Some`
+/// is explicit — the scan was off and this test fails.
+/// Test: this function IS the test.
+#[test]
+fn a_data_dir_env_equal_to_the_default_is_not_explicit() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let default = tmp.path().join("default");
+    std::fs::create_dir_all(&default).expect("the default dir must be creatable");
+
+    let env = Some(default.clone().into_os_string());
+    assert!(scans_with_default(env, None, &default), "env == default");
+    let slashed = OsString::from(format!("{}/", default.display()));
+    assert!(
+        scans_with_default(Some(slashed), None, &default),
+        "env == default/"
+    );
+
+    // A sibling of the default is explicit.
+    let other = Some(tmp.path().join("other").into_os_string());
+    assert!(!scans_with_default(other, None, &default), "env != default");
+}
+
+/// Why (#8176): `--data-dir` naming the default is the default too, including
+/// a default that does not exist yet and so compares lexically. Fails under
+/// the previous any-`Some`-is-explicit rule.
+/// Test: this function IS the test.
+#[test]
+fn a_data_dir_flag_equal_to_the_default_is_not_explicit() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let default = tmp.path().join("default");
+    std::fs::create_dir_all(&default).expect("the default dir must be creatable");
+    assert!(
+        scans_with_default(None, Some(&default), &default),
+        "flag == default"
+    );
+
+    let absent = tmp.path().join("absent-default");
+    let dotted = PathBuf::from(format!("{}/./", absent.display()));
+    assert!(
+        scans_with_default(None, Some(&dotted), &absent),
+        "flag == an absent default, lexically"
+    );
+
+    // --no-auto-discover still refuses on the default.
+    let refused = StartPlan::resolve_with_defaults(
+        None,
+        Some(&default),
+        std::slice::from_ref(&default),
+        true,
+        false,
+    )
+    .expect("must resolve");
+    assert!(!refused.discovery.runs_auto_discover());
+}
+
+/// Why (#8176): a symlink to the default data dir names the same directory, so
+/// it is the default. Fails under the previous any-`Some`-is-explicit rule.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_the_default_data_dir_is_not_explicit() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let default = tmp.path().join("default");
+    std::fs::create_dir_all(&default).expect("the default dir must be creatable");
+    let link = tmp.path().join("link-to-default");
+    std::os::unix::fs::symlink(&default, &link).expect("the symlink must be creatable");
+    assert!(
+        scans_with_default(None, Some(&link), &default),
+        "flag -> default"
+    );
+}
+
 /// Why (#8176): the opt-in must be able to turn the scan back on for the exact
 /// case the safe default turns it off for, or an operator who wants an
 /// isolated daemon to discover has no way to ask.

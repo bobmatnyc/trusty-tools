@@ -556,6 +556,18 @@ fn production_data_dir() -> Result<PathBuf> {
     super::data_dir::data_dir_home_fallback()
 }
 
+/// The platform default data directory, as candidate paths — nothing created.
+///
+/// Why (#8176): `trusty-search start` must tell an explicit data dir from one
+/// that merely spells the default (a launchd plist following the #718 hint),
+/// and it must not create the directory just to ask.
+/// What: the `dirs::data_local_dir()` location and the `$HOME`-relative
+/// fallback, in that order; either may be absent.
+/// Test: `production_location_is_recognised_as_production` pins the formulas.
+pub fn default_data_dir_candidates() -> Vec<PathBuf> {
+    super::data_dir::production_data_dir_candidates()
+}
+
 /// Path to the registry TOML file.
 pub fn indexes_toml_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("indexes.toml"))
