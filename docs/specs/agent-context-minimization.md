@@ -222,7 +222,7 @@ dispatched agent's startup context today, roster-wide.
   - **The PM's dispatch brief** — `BASE-AGENT.md`'s existing Handoff Protocol
     already models this ("State four things: which agent continues, what was
     accomplished, what remains, and any constraints" —
-    `crates/trusty-agents-common/src/assets/agents/BASE-AGENT.md` Handoff
+    `content/agents/BASE-AGENT.md` Handoff
     Protocol section). Extend the same discipline to initial dispatch: the PM,
     which still reads full `CLAUDE.md` natively, copies the one or two rules
     that bind this specific task (e.g. "rung 3 gate: `cargo test -p
@@ -232,7 +232,7 @@ dispatched agent's startup context today, roster-wide.
     role-scoped doctrine (`engineer.md` → `skills: [systematic-debugging,
     test-driven-development]`, `version-control.md` → `skills:
     [git-workflow]` — both confirmed by direct read of
-    `crates/trusty-agents-common/src/assets/agents/*.md` frontmatter). A new
+    `content/agents/*.md` frontmatter). A new
     project-authored skill (e.g. `trusty-tools-rust-gates`, carrying the test
     ladder table, the SLOC cap table, and the changelog-fragment rule from
     this project's own `CLAUDE.md`) added to the `skills:` list of
@@ -258,7 +258,7 @@ prompt's byte length grew to compensate). Neither test exists in
 **Why:** every deployed agent ships with the implicit "all tools" default
 today — confirmed by an empty grep for a `tools:` frontmatter key across the
 entire roster:
-`git grep -n "^tools:" -- crates/trusty-agents-common/src/assets/agents/*.md`
+`git grep -n "^tools:" -- content/agents/*.md`
 returns nothing, and `crates/trusty-agents-common/src/agents/metadata.rs:88-90`
 states it in the type's own doc comment: "`None` when the agent (and its
 whole `extends` chain) never declares a `tools:` key — **trusty-mpm agents
@@ -339,7 +339,7 @@ construction. Every `tm-*` skill under
 (delegation matrices, circuit-breaker enforcement, session pause/resume,
 ticketing *authority*, workflow *ownership*) — none is referenced by any
 agent asset's `skills:` field (`git grep -n "^skills:.*tm-" --
-crates/trusty-agents-common/src/assets/agents/*.md` returns nothing). A
+content/agents/*.md` returns nothing). A
 dispatched agent has no PM loop to orchestrate and no delegation to route.
 The skills an agent family genuinely uses today are already visible in each
 file's own frontmatter (`engineer.md` → `systematic-debugging,
@@ -415,7 +415,7 @@ all-tools) once this ships, mirroring the existing "every agent present in
 **Why:** the owner directive is explicit — "Claude Code auto-memory
 (`MEMORY.md`) is not used; trusty-memory is the memory." Confirmed as
 currently unset: `git grep -n "DISABLE_AUTO_MEMORY\|autoMemoryEnabled\|autoMemoryDirectory" -- crates/trusty-mpm crates/trusty-agents-common`
-returns nothing, and `git grep -n "^memory:" -- crates/trusty-agents-common/src/assets/agents/*.md`
+returns nothing, and `git grep -n "^memory:" -- content/agents/*.md`
 returns nothing — no deployed agent sets the subagent `memory:` frontmatter
 field either.
 
@@ -513,7 +513,7 @@ during this research session.
 
 | # | Slice | What ships | Expected saving per affected turn | Why this size |
 |---|---|---|---|---|
-| **1** | **Per-agent `tools:` allowlist, roster-wide** (§C) | Add `tools:` to all ~38 non-BASE agent assets under `crates/trusty-agents-common/src/assets/agents/`, per the table in §C; extend `agent_builder`/`bundle` tests to assert every composed agent has a non-empty `Some(tools)` | Removes full tool **and MCP JSON schemas** for every server/tool the role doesn't use — this is the single largest lever in the measured 44.7K baseline (150 MCP tools' schemas dwarf their ~151 *names*, which alone are only a few KB). Precedented, mechanically simple (frontmatter-only, no new settings-file plumbing), reversible per-agent. | **Do this first.** No new tm-source code path — `tools:` parsing, merging, and deployment already exist and are exercised by `trusty-code`'s four forks. Zero risk to the PM (agent-scoped, not session-wide). Immediately measurable with the existing roster via `tm session instructions`-style before/after, no probe agents needed. |
+| **1** | **Per-agent `tools:` allowlist, roster-wide** (§C) | Add `tools:` to all ~38 non-BASE agent assets under `content/agents/`, per the table in §C; extend `agent_builder`/`bundle` tests to assert every composed agent has a non-empty `Some(tools)` | Removes full tool **and MCP JSON schemas** for every server/tool the role doesn't use — this is the single largest lever in the measured 44.7K baseline (150 MCP tools' schemas dwarf their ~151 *names*, which alone are only a few KB). Precedented, mechanically simple (frontmatter-only, no new settings-file plumbing), reversible per-agent. | **Do this first.** No new tm-source code path — `tools:` parsing, merging, and deployment already exist and are exercised by `trusty-code`'s four forks. Zero risk to the PM (agent-scoped, not session-wide). Immediately measurable with the existing roster via `tm session instructions`-style before/after, no probe agents needed. |
 | **2** | **`skillOverrides` for this project's irrelevant skill families** (§C) | `tm` computes an `"off"` map for skill namespaces the project's stack profile rules out (`aws-*`, `claude-in-chrome`, `duetto-design-system`, `xlsx`, `breeze-voice`, `cto-kb-ingest`, …) and writes it to `.claude/settings.json` at `prepare_session` | Shrinks the ~131-entry skills listing (session-wide, so this benefits the PM and every agent in one write) — a project like this one with ~50+ irrelevant AWS/Chrome/Duetto entries in the listing is paying their description bytes on every single turn, PM included, today | Second because it is session-wide and easy to get wrong (an "off" skill a human still wants to `/`-invoke by hand disappears from the menu too, per the doc's "Hidden" column) — needs a short allow/deny review, not a rebuild |
 | **3** | **`CLAUDE_CODE_DISABLE_AUTO_MEMORY`** (§D) | `settings.rs` gains `autoMemoryEnabled: false`; `claude_code.rs::env_bin_prefix` gains the env var; two new tests | Removes `MEMORY.md` (measured 5.6KB for this project alone) plus its per-session read/write overhead, for the PM and every subagent | Third: small, isolated, two known write sites, no design ambiguity (§D has no open question, unlike §B) |
 | **4** | **Repo-rule migration off `CLAUDE.md` and onto skills/briefs** (§B, path ii) | Author a `trusty-tools-rust-gates`-style skill carrying the test ladder / SLOC cap / changelog-fragment rules; add it to `skills:` for `rust-engineer`, `engineer`, `qa`, `local-ops`; update `BASE-AGENT.md`'s dispatch-brief guidance to name this as the carrier | Makes goal (2) true in substance (agents stop *needing* `CLAUDE.md`) without touching `claudeMdExcludes` at all, so it carries none of §B's PM-regression risk | Fourth: requires deciding exactly which rules move, a judgment call the earlier three slices don't require |

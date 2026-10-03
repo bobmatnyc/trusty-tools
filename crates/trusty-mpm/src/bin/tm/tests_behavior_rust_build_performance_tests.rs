@@ -21,7 +21,7 @@
 
 use trusty_mpm::core::bundle::{RUST_BUILD_PERFORMANCE, RUST_DELIVERY_WORKFLOW};
 
-use crate::commands::install::install_to;
+use crate::commands::install::{install_to_with, test_roster};
 
 #[test]
 fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
@@ -30,7 +30,7 @@ fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including rust-build-performance) under the framework root.
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -70,7 +70,7 @@ fn rust_delivery_workflow_lands_in_deployed_dot_claude_skills() {
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
 
-    install_to(&paths, false).unwrap();
+    install_to_with(&paths, false, &test_roster()).unwrap();
 
     let result = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
         &paths.skill_source_dir(),

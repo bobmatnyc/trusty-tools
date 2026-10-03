@@ -74,8 +74,15 @@ impl RuntimeRelauncher for DaemonRelauncher {
             None,
             state.framework_root(),
         );
-        spawn_resume_into_owned_pane(&mgr, adapter.as_ref(), record, &workspace, &gh_env)
-            .map_err(|e| format!("runtime adapter spawn_resume failed: {e}"))?;
+        // #8983: the resumed claude may rebind its session id; a failed
+        // launch, or a refused pane (#9101), revokes the grant.
+        let granted = state.grant_resume_of(record);
+        spawn_resume_into_owned_pane(&mgr, adapter.as_ref(), record, &workspace, &gh_env).map_err(
+            |e| {
+                state.revoke_resume_grant(granted);
+                format!("runtime adapter spawn_resume failed: {e}")
+            },
+        )?;
         // The SAME verification the interactive resume runs: a record becomes
         // `Active` only behind a runtime this actually saw.
         match super::launch_verify::record_resume_outcome(&mgr, tmux.as_ref(), record, &workspace)

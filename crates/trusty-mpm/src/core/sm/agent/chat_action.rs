@@ -133,7 +133,7 @@ impl SessionManagerAgent {
         // (verb surface rendered from the catalog single source of truth).
         let system_prompt = format!(
             "{}\n\n---\n\n{}",
-            resolve_sm_prompt_default(),
+            resolve_sm_prompt_default()?,
             action_instructions()
         );
 

@@ -509,7 +509,7 @@ access paths of §5.1 — the `trusty-analyze lsp` subcommand and the
 `search_lsp_*` tools — and names no plugin, because none exists (§1).
 
 **(c) The base coding-agent instructions.**
-`crates/trusty-agents-common/src/assets/agents/BASE-ENGINEER.md` is the layer
+`content/agents/BASE-ENGINEER.md` is the layer
 every engineer agent inherits (`agent_assets.rs:178` registers it; `engineer.md`
 and every language engineer extend it). It gains a short section telling the
 agent to use these tools for:

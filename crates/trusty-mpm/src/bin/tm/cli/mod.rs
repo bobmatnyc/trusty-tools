@@ -1816,6 +1816,21 @@ pub struct DoctorFlags {
     /// repairs act on the cwd and a scoped report beside them would mislead.
     #[arg(long, value_name = "DIR", conflicts_with = "writes")]
     pub dir: Option<std::path::PathBuf>,
+
+    /// Also run the checks that make network calls. Off by default.
+    ///
+    /// Why (#8371, owner ruling 4d): `gcp-ops` could not tell "no gcloud
+    /// credentials" from "every account needs an interactive reauth", and
+    /// telling them apart means asking Google for a token. A bare `tm doctor`
+    /// must stay offline, so that probe is opt-in.
+    /// What: adds the `gcloud_auth` row: the active account (redacted to
+    /// `a***@domain`) and whether `gcloud` can mint an access token for it,
+    /// each call bounded at 10 s. No token value is ever printed. Without
+    /// this flag the row reads `skipped (needs --network)` and `gcloud` is
+    /// never spawned.
+    /// Test: `cli_parses_doctor_network`; the row in `doctor_gcloud_tests.rs`.
+    #[arg(long)]
+    pub network: bool,
 }
 
 /// Flags for [`Command::Reinstall`].

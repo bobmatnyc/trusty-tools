@@ -45,7 +45,7 @@ fn provisioned_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     mark_owned(&wt);
     let before = provisioning_ledger::snapshot(&wt);
     // #7660: the real provisioning write, so the excused diff is the real one.
-    crate::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold .gitignore");
+    crate::core::scaffold_gitignore::append_legacy_block(&wt);
     std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
     std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("write settings");
     std::fs::write(wt.join(".claude/settings.json.bak"), "{}\n").expect("write settings bak");
@@ -779,7 +779,7 @@ fn untracked_gitignore_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {
     let wt = fx.add_worktree(name);
     mark_owned(&wt);
     let before = provisioning_ledger::snapshot(&wt);
-    crate::core::scaffold_gitignore::ensure_scaffold_gitignored(&wt).expect("scaffold .gitignore");
+    crate::core::scaffold_gitignore::append_legacy_block(&wt);
     std::fs::create_dir_all(wt.join(".claude")).expect("mkdir .claude");
     std::fs::write(wt.join(".claude/settings.json"), "{}\n").expect("write settings");
     std::fs::write(wt.join("CLAUDE.md"), "# tm\n").expect("write CLAUDE.md");

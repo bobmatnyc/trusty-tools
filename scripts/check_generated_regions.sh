@@ -62,7 +62,7 @@ MIN_MD_FILES=200
 # Set from the MEASURED tree: 6 marked files across 3 crates plus the first
 # docs/roadmap page (crates/trusty-analyze/{CLAUDE,README}.md,
 # crates/trusty-memory/README.md, crates/trusty-search/{CLAUDE,README}.md,
-# docs/roadmap/trusty-mpm.md). Regions are only ever ADDED, so this
+# docs/roadmap/trusty-tools.md). Regions are only ever ADDED, so this
 # is a ratchet: deliberately retiring one means lowering this constant in the
 # same PR, which puts the removal in front of a reviewer instead of silently
 # shrinking the gate's coverage to nothing.

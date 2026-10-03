@@ -205,8 +205,9 @@ fn require_session(session: Option<String>) -> anyhow::Result<String> {
         .filter(|s| !s.trim().is_empty())
         .or_else(crate::commands::tmux_attach::current_tmux_session_name)
         .ok_or_else(|| anyhow::anyhow!(
-            "no workstream session name — this shell is not inside tmux, so `ws/<session>` cannot \
-             be derived. Pass `--session <NAME>`"
+            // #8694: no `$TMUX_PANE`, or tmux could not name its session.
+            "no workstream session name — this shell's own tmux pane ($TMUX_PANE) is unset or its \
+             session could not be read, so `ws/<session>` cannot be derived. Pass `--session <NAME>`"
         ))
 }
 

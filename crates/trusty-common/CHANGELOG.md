@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.1] — 2026-10-03
+
+### Changed
+
+- `content::DEV_CLASS_SOURCES` reads the `agents` destination from `content/agents` and `instructions/harness_understanding` from `content/instructions/harness_understanding`, where #9011 moved them; the dev override no longer refuses a post-move checkout as `NotACheckout` (#9011).
+
 ## [0.53.0] — 2026-10-02
 
 ### Breaking

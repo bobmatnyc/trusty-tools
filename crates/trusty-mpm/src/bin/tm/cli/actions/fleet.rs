@@ -21,7 +21,8 @@ pub(crate) enum FleetAction {
     /// the `opus` alias. Writes no twin grant. A second run changes nothing
     /// and says so. Refuses when another Architect is already set up.
     Init {
-        /// Project directory (default: `~/trusty-mpm-projects/architect`).
+        /// Project directory (default: the Architect recorded in `[supervisor]
+        /// projects`, else `~/trusty-mpm-projects/architect`).
         #[arg(long)]
         dir: Option<String>,
         /// Set up the project and the grant, but do not start the session.
@@ -40,7 +41,8 @@ pub(crate) enum FleetAction {
     /// session's supervisor launch stamp. Exits 1 when any check fails.
     /// Also reports whether that session's `claude` is bound (#8878).
     Status {
-        /// Project directory (default: `~/trusty-mpm-projects/architect`).
+        /// Project directory (default: the Architect recorded in `[supervisor]
+        /// projects`, else `~/trusty-mpm-projects/architect`).
         #[arg(long)]
         dir: Option<String>,
         /// Print the report as JSON.
