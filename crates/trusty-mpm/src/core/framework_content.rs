@@ -8,15 +8,20 @@
 //! What: [`FrameworkContent::load`] reads every `skills/**` and
 //! `instructions/**` file of one resolved source into memory and fails loud,
 //! naming `tm content update`, when a file every process needs
-//! ([`REQUIRED_INSTRUCTIONS`]) or the whole skills class is absent. Accessors
-//! borrow from the loaded value; nothing here is global or cached.
+//! ([`REQUIRED_INSTRUCTIONS`]) or the whole skills class is absent, or when the
+//! PM instruction package does not parse and validate. Accessors borrow from
+//! the loaded value; nothing here is global or cached.
 //! Test: `the_repository_content_loads`, `a_source_without_skills_is_an_error`,
-//! `a_source_missing_a_required_instruction_is_an_error`.
+//! `a_source_missing_a_required_instruction_is_an_error`,
+//! `a_source_whose_package_does_not_parse_is_an_error`.
 
 use std::collections::BTreeMap;
 
 use trusty_agents_common::agent_content::describe_source;
 pub use trusty_agents_common::agent_content::{AgentContentError, ContentSource, ResolvedContent};
+
+use crate::core::bundled_pm_package::{PM_PACKAGE_PATH, parse_bundled_package};
+use crate::core::instruction_package::InstructionPackage;
 
 /// The bundle class holding skills.
 pub const SKILLS_CLASS: &str = "skills";
@@ -82,14 +87,15 @@ pub const REQUIRED_INSTRUCTIONS: &[&str] = &[
 /// output styles and SM instructions with the same text, read from content.
 /// What: skills keyed by bundle path (`skills/tm.md`), sorted; instructions
 /// keyed by path relative to `instructions/` (`sections/core.md`). A loaded
-/// value always has at least one skill and every [`REQUIRED_INSTRUCTIONS`]
-/// file.
+/// value always has at least one skill, every [`REQUIRED_INSTRUCTIONS`] file
+/// and a parsed, validated PM instruction package.
 /// Test: `the_repository_content_loads`.
 #[derive(Debug, Clone)]
 pub struct FrameworkContent {
     source: ContentSource,
     skills: Vec<(String, String)>,
     instructions: BTreeMap<String, String>,
+    pm_package: InstructionPackage,
 }
 
 impl FrameworkContent {
@@ -97,7 +103,9 @@ impl FrameworkContent {
     ///
     /// # Errors
     /// [`AgentContentError::Missing`] when the source has no skill or lacks a
-    /// [`REQUIRED_INSTRUCTIONS`] file; [`AgentContentError::Content`] when a
+    /// [`REQUIRED_INSTRUCTIONS`] file; [`AgentContentError::Invalid`] when its
+    /// PM instruction package does not parse or validate (#9012: a content
+    /// release newer than this binary); [`AgentContentError::Content`] when a
     /// listed file cannot be read.
     pub fn load(content: &ResolvedContent) -> Result<Self, AgentContentError> {
         let origin = describe_source(content.source());
@@ -129,16 +137,30 @@ impl FrameworkContent {
                 path: format!("{prefix}{missing}"),
             });
         }
+        // #9012: validated here, once, so no launch composes from a package it
+        // cannot parse and no caller needs a degraded fallback for one.
+        let pm_package =
+            parse_bundled_package(&instructions).map_err(|reason| AgentContentError::Invalid {
+                origin,
+                path: format!("{prefix}{PM_PACKAGE_PATH}"),
+                reason,
+            })?;
         Ok(Self {
             source: content.source().clone(),
             skills,
             instructions,
+            pm_package,
         })
     }
 
     /// Where the content came from.
     pub fn source(&self) -> &ContentSource {
         &self.source
+    }
+
+    /// The PM instruction package, parsed and validated at load.
+    pub(crate) fn pm_package(&self) -> &InstructionPackage {
+        &self.pm_package
     }
 
     /// The source named for an error message (`dev checkout <root>`, a tag).

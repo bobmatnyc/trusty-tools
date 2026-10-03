@@ -28,7 +28,7 @@ use crate::core::instruction_package::{
     BlockBody, CustomizationTier, Generator, InstructionBlock, OverrideTier, SCHEMA_VERSION,
     ValidationError,
 };
-use crate::core::instruction_pipeline::{SECTION_FILES, section_source, workflow_section};
+use crate::core::instruction_pipeline::{SECTION_FILES, workflow_section};
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
 use std::path::Path;
@@ -175,7 +175,7 @@ fn bundled_manifest_parses_and_validates() {
     let mut package = InstructionPackage::from_json(rc().required("pm-instruction-package.json"))
         .expect("the shipped manifest is valid schema-v2 JSON");
     // #9012: `file` bodies resolve through the same content source.
-    package.sources = crate::core::instruction_pipeline::package_sources(rc());
+    package.sources = rc().pm_package().sources.clone();
     assert_eq!(package.validate(), Ok(()));
     assert_eq!(package.schema_version, SCHEMA_VERSION);
     assert_eq!(&package, package_ref());
@@ -230,14 +230,17 @@ fn every_section_source_resolves() {
     // section and an empty block, so assert both directions: every canonical
     // section resolves from content (#9012), and a path content lacks does not.
     for path in SECTION_FILES {
-        let body = section_source(rc(), path);
+        let body = rc().pm_package().sources.get(path).map(String::as_str);
         assert!(body.is_some(), "{path} must resolve");
         assert!(
             !body.unwrap_or_default().trim().is_empty(),
             "{path} must not be blank"
         );
     }
-    assert_eq!(section_source(rc(), "sections/does-not-exist.md"), None);
+    assert_eq!(
+        rc().pm_package().sources.get("sections/does-not-exist.md"),
+        None
+    );
 }
 
 #[test]

@@ -276,17 +276,12 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // all. This is it.
         // #7423: and the managed `$CLAUDE_CONFIG_DIR` tier beside it — the copy
         // a tm-launched session actually reads, which this repair never touched.
-        // #9012: the style bodies are runtime content; with none the repair is
-        // skipped with the remedy rather than writing nothing silently.
-        match trusty_mpm::core::content_source::framework_content() {
-            Ok(content) => steps.extend(repair_output_style(
-                &content,
-                &home,
-                trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-                mode,
-            )),
-            Err(err) => eprintln!("  output styles not repaired: {err}"),
-        }
+        steps.extend(output_style_steps(
+            trusty_mpm::core::content_source::framework_content(),
+            &home,
+            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+            mode,
+        ));
         steps.extend(refuse_legacy_sources(&home));
         // A `.mcp.json` above the workspace configures every session started
         // beneath it. This quarantines ONLY the ones the provenance ledger
@@ -530,6 +525,35 @@ pub(crate) fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
     }
 }
 
+/// The output-style repair, or one failed step when there is no content.
+///
+/// Why (#9012): the style bodies are runtime content. Without content the
+/// repair cannot run, and a skip printed only to stderr left the `--fix`
+/// summary reading clean.
+/// What: [`repair_output_style`] over `content`; on `Err`, one
+/// [`StepStatus::Failed`] step against `<home>/.claude/output-styles` whose
+/// reason is the content error, which names its remedy.
+/// Test: `a_missing_content_source_fails_the_output_style_repair`.
+fn output_style_steps(
+    content: Result<
+        trusty_mpm::core::content_source::FrameworkContent,
+        trusty_mpm::core::content_source::AgentContentError,
+    >,
+    home: &std::path::Path,
+    managed_config: Option<&std::path::Path>,
+    mode: RepairMode,
+) -> Vec<RepairStep> {
+    match content {
+        Ok(content) => repair_output_style(&content, home, managed_config, mode),
+        Err(err) => vec![RepairStep {
+            check: "output_style_staleness",
+            path: home.join(".claude").join("output-styles"),
+            what: "redeploy the trusty-mpm output styles".to_string(),
+            status: StepStatus::Failed(err.to_string()),
+        }],
+    }
+}
+
 /// The skill redeploy, expressed as [`RepairStep`]s.
 ///
 /// Why: `--fix` prints one uniform list, so the skill repair's richer outcome
@@ -638,6 +662,26 @@ mod tests {
             "a quarantine preview must never point at --fix, which would not touch the \
              named file: {hint}"
         );
+    }
+
+    /// #9012: no content is a failed output-style step naming the remedy, so
+    /// the `--fix` summary counts it instead of reading clean.
+    #[test]
+    fn a_missing_content_source_fails_the_output_style_repair() {
+        let cache = tempfile::tempdir().expect("empty content cache");
+        let home = tempfile::tempdir().expect("home");
+        let content = trusty_mpm::core::content_source::framework_content_in(
+            cache.path(),
+            trusty_mpm::core::content_source::DevOverride::Off,
+        );
+        let steps = output_style_steps(content, home.path(), None, RepairMode::Apply);
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert_eq!(steps[0].check, "output_style_staleness");
+        match &steps[0].status {
+            StepStatus::Failed(why) => assert!(why.contains("tm content install"), "{why}"),
+            other => panic!("expected a failed step, got {other:?}"),
+        }
+        assert!(!home.path().join(".claude").exists(), "nothing written");
     }
 
     /// Parse `tm doctor <args>` into its flags.

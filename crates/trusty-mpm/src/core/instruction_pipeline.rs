@@ -92,14 +92,7 @@ pub(crate) use section_sources::*;
 pub(crate) fn pm_instructions(content: &FrameworkContent) -> String {
     // #8533: Identity opens the prompt and `core` was split into nine
     // sections, so the PM body is every section before the stack profile.
-    let run = manifest_run(content, &PM_BODY_SECTIONS).unwrap_or_else(|| {
-        PM_BODY_SECTIONS
-            .iter()
-            .filter_map(|id| fallback_source(content, *id))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    });
+    let run = manifest_run(content, &PM_BODY_SECTIONS);
     format!("{run}\n")
 }
 
@@ -109,14 +102,13 @@ pub(crate) fn pm_instructions(content: &FrameworkContent) -> String {
 /// section file, so rebuilding these strings from the raw section files
 /// would deliver that rule to package-composed sessions and silently withhold it
 /// from the legacy assembly and from [`assemble_system_prompt`]. Projecting the
-/// manifest keeps one source of truth for the *content*, while the raw section
-/// files stay as the fallback for the case where the manifest is unreadable.
-/// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
-/// manifest failed to parse or validate.
+/// manifest keeps one source of truth for the *content*. #9012: the manifest
+/// is validated when the content loads, so there is no unreadable-manifest
+/// fallback to the raw section files.
+/// What: [`crate::core::bundled_pm_package::authored_run`].
 /// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
-fn manifest_run(content: &FrameworkContent, sections: &[SectionId]) -> Option<String> {
+fn manifest_run(content: &FrameworkContent, sections: &[SectionId]) -> String {
     crate::core::bundled_pm_package::authored_run(content, sections)
-        .filter(|run| !run.trim().is_empty())
 }
 
 /// The bundled workflow section, as authored in the manifest.
@@ -125,13 +117,11 @@ fn manifest_run(content: &FrameworkContent, sections: &[SectionId]) -> Option<St
 /// manifest appends the opportunistic-fix rule as its own block. Every consumer
 /// must therefore ask the manifest, not the constant, or a project with a
 /// `WORKFLOW.md` override would be the only one to notice the difference.
-/// What: the authored workflow blocks joined as declared, trimmed; the raw
-/// `sections/workflow.md` file when the manifest is unreadable.
+/// What: the authored workflow blocks joined as declared.
 /// Test: `workflow_section_carries_the_opportunistic_fix_rule`,
 /// `assemble_system_prompt_contains_all_sections`.
 pub(crate) fn workflow_section(content: &FrameworkContent) -> String {
     manifest_run(content, &[SectionId::Workflow])
-        .unwrap_or_else(|| content.required("sections/workflow.md").trim().to_string())
 }
 
 /// The bundled delegation doctrine plus the roster-precedence note.
@@ -140,13 +130,11 @@ pub(crate) fn workflow_section(content: &FrameworkContent) -> String {
 /// where its position between the doctrine and the live roster is declared rather
 /// than formatted in by hand at two call sites.
 /// What: the authored `agent-delegation` blocks joined as declared — the section
-/// source followed by the note — trimmed. Falls back to the doctrine alone if the
-/// manifest is unreadable, which is the pre-#4069 shape.
+/// source followed by the note — trimmed.
 /// Test: `bundled_delegation_appends_deployed_roster`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`.
 pub(crate) fn delegation_doctrine(content: &FrameworkContent) -> String {
     manifest_run(content, &[SectionId::AgentDelegation])
-        .unwrap_or_else(|| agent_delegation(content).trim().to_string())
 }
 
 /// The raw `sections/agent-delegation.md` doctrine — the roster-free body the
@@ -187,17 +175,7 @@ pub(crate) fn base_pm(content: &FrameworkContent) -> String {
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
         ],
-    )
-    .unwrap_or_else(|| {
-        format!(
-            "{}\n\n{}\n\n{}",
-            content.required("sections/enforcement.md").trim(),
-            content.required("sections/non-overridable-rules.md").trim(),
-            content
-                .required("sections/framework-guaranteed-conventions.md")
-                .trim()
-        )
-    });
+    );
     format!("{run}\n")
 }
 
@@ -435,16 +413,39 @@ pub fn refresh_compiled_prompt(
 /// operator-facing string from [`instructions_failure_message`] — callers refuse
 /// the launch with it.
 /// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
-/// `refresh_compiled_prompt_reports_an_actionable_failure`.
+/// `refresh_compiled_prompt_reports_an_actionable_failure`,
+/// `a_launch_from_a_checkout_whose_package_does_not_parse_is_refused`.
 pub fn refresh_compiled_prompt_in(
     framework_root: &std::path::Path,
     project_dir: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
+    refresh_compiled_prompt_loading(
+        framework_root,
+        project_dir,
+        session_id,
+        crate::core::content_source::framework_content_for,
+    )
+}
+
+/// [`refresh_compiled_prompt_in`] with the content loader given, so a test can
+/// point it at an empty cache (#9012).
+///
+/// What: `load(project_dir)`; on `Err` returns the error, which names its
+/// remedy, and writes nothing — resume and in-place relaunch refuse on it.
+/// Test: `refresh_compiled_prompt_without_content_names_tm_content_install`.
+pub fn refresh_compiled_prompt_loading(
+    framework_root: &std::path::Path,
+    project_dir: &std::path::Path,
+    session_id: &str,
+    load: impl FnOnce(
+        &std::path::Path,
+    ) -> Result<FrameworkContent, crate::core::content_source::AgentContentError>,
+) -> Result<(), String> {
     // #9012: the sections are runtime content; with none the launch is refused
     // with the remedy, never handed a prompt missing them.
-    let content = crate::core::content_source::framework_content_for(project_dir)
-        .map_err(|err| format!("cannot compose the PM instructions: {err}"))?;
+    let content =
+        load(project_dir).map_err(|err| format!("cannot compose the PM instructions: {err}"))?;
     refresh_compiled_prompt_with(&content, framework_root, project_dir, session_id)
 }
 

@@ -236,11 +236,12 @@ fn install_with_the_guard_off_strips_an_existing_guard_entry() {
     );
 }
 
-/// #9011: with no content resolvable, `tm install` fails before writing
-/// anything, and the error names `tm content install`.
+/// #9012: with a roster but no skills and instructions resolvable, `tm
+/// install` fails before writing anything, and the error names `tm content
+/// install`. The roster resolves, so the content arm is the one refusing.
 #[test]
 fn install_without_content_fails_naming_tm_content_install() {
-    use trusty_mpm::core::content_source::{DevOverride, agent_roster_in};
+    use trusty_mpm::core::content_source::DevOverride;
 
     let cache = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -248,11 +249,51 @@ fn install_without_content_fails_naming_tm_content_install() {
     let err = install_to_resolving(
         &paths,
         false,
-        || agent_roster_in(cache.path(), DevOverride::Off),
+        || Ok(test_roster()),
         || trusty_mpm::core::content_source::framework_content_in(cache.path(), DevOverride::Off),
     )
     .expect_err("no content installed");
     assert!(err.to_string().contains("tm content install"), "{err}");
+    assert!(
+        !paths.framework.exists(),
+        "a failed install must leave the framework tree unwritten"
+    );
+}
+
+/// #9012: a content source without the bundled docs fails `tm install`,
+/// naming the missing doc, before any framework file is written.
+#[test]
+fn install_without_the_bundled_docs_fails_naming_the_doc() {
+    use trusty_mpm::core::framework_content::REQUIRED_INSTRUCTIONS;
+
+    let checkout = tempfile::tempdir().unwrap();
+    let root = checkout.path();
+    for (_, rel) in trusty_common::content::DEV_CLASS_SOURCES {
+        std::fs::create_dir_all(root.join(rel)).unwrap();
+    }
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    // Every required instruction and one skill, but no `docs/`.
+    for rel in REQUIRED_INSTRUCTIONS {
+        let path = root.join("content/instructions").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, test_content_ref().required(rel)).unwrap();
+    }
+    std::fs::write(root.join("content/skills/tm.md"), "skill").unwrap();
+    let content = trusty_mpm::core::content_source::FrameworkContent::load(
+        &trusty_agents_common::agent_content::checkout_content(root).unwrap(),
+    )
+    .expect("a source without docs still loads");
+
+    let home = tempfile::tempdir().unwrap();
+    let paths = trusty_mpm::core::paths::FrameworkPaths::under(home.path());
+    let err =
+        install_to_with(&paths, false, test_roster_ref(), &content).expect_err("no bundled docs");
+    assert!(
+        err.to_string()
+            .contains("instructions/docs/WHAT-IS-TRUSTY-MPM.md"),
+        "{err}"
+    );
     assert!(
         !paths.framework.exists(),
         "a failed install must leave the framework tree unwritten"

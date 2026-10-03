@@ -153,14 +153,9 @@ pub(crate) mod test_support {
         CONTENT.get_or_init(repo_content)
     }
 
-    /// The checkout's bundled PM instruction package, parsed once (#9012).
+    /// The checkout's bundled PM instruction package, parsed at load (#9012).
     pub(crate) fn rc_package() -> &'static crate::core::instruction_package::InstructionPackage {
-        static PACKAGE: std::sync::OnceLock<crate::core::instruction_package::InstructionPackage> =
-            std::sync::OnceLock::new();
-        PACKAGE.get_or_init(|| {
-            crate::core::bundled_pm_package::bundled_fallback_package(rc())
-                .expect("the repository's PM instruction package parses and validates")
-        })
+        rc().pm_package()
     }
 }
 

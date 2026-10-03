@@ -126,7 +126,7 @@ fn inputs() -> CompositionInputs {
 /// `package` with its `file` bodies bound to the checkout's section files
 /// (#9012: the sources are runtime content, never serialized).
 fn with_sources(mut package: InstructionPackage) -> InstructionPackage {
-    package.sources = crate::core::instruction_pipeline::package_sources(rc());
+    package.sources = rc().pm_package().sources.clone();
     package
 }
 
@@ -274,7 +274,7 @@ fn file_body_resolves_through_the_bundled_table() {
     let source = rc().required("sections/pm-allowlist.md");
     let mut package = fixture();
     // #9012: `file` bodies resolve through the package's content sources.
-    package.sources = crate::core::instruction_pipeline::package_sources(rc());
+    package.sources = rc().pm_package().sources.clone();
     package.blocks[8] = InstructionBlock {
         section: SectionId::Identity,
         body: BlockBody::File {

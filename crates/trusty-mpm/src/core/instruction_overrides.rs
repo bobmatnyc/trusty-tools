@@ -466,10 +466,11 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
         }
         match composed {
             Ok(prompt) => return (prompt, PromptSource::Package),
-            // Unreachable for the shipped assets — `shipped_assets_build_and_
-            // validate` proves it — so this is a loud last resort, never a
-            // routine fallback. The string assembly below composes the same
-            // configuration, so degrading still delivers a correct prompt.
+            // #9012: the package was validated when `content` loaded, and
+            // `with_overrides` declines any override that would invalidate it,
+            // so this arm is a composition-INPUT defect (a required generator
+            // left empty), never a manifest one. The string assembly below
+            // projects the same validated package, manifest rules included.
             Err(err) => tracing::error!(
                 %err,
                 "bundled PM instruction package failed to compose; \

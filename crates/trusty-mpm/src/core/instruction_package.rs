@@ -666,15 +666,6 @@ pub enum CompositionError {
     /// The package failed [`InstructionPackage::validate`].
     #[error("invalid instruction package: {0}")]
     Invalid(#[from] ValidationError),
-    /// The bundled manifest could not be parsed or validated (#4318).
-    ///
-    /// Distinct from [`Self::Invalid`]: that one carries a typed defect in a
-    /// package the caller already holds, while this one says the JSON artifact
-    /// never became a package at all. Unreachable for the shipped manifest —
-    /// `bundled_manifest_parses_and_validates` gates it in CI — and the caller
-    /// degrades to the legacy assembly rather than emitting a partial prompt.
-    #[error("bundled instruction manifest is unusable: {0}")]
-    Manifest(String),
     /// A non-optional generated block had no content to emit.
     #[error(
         "block {index} requires generator {generator:?} but it supplied no content; \

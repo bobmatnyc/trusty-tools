@@ -234,14 +234,11 @@ pub fn section_report_for(
 ) -> String {
     let roster = crate::core::delegation_authority::deployed_roster_section(project_dir);
     // #9012: the package comes from the caller's content.
-    match crate::core::bundled_pm_package::bundled_fallback_package(content) {
-        Ok(package) => render_section_report(
-            &section_statuses(&package, project_dir, roster.is_some()),
-            prompt,
-            roster.as_deref(),
-        ),
-        Err(err) => format!("instruction sections: the bundled manifest is unusable: {err}\n"),
-    }
+    render_section_report(
+        &section_statuses(content.pm_package(), project_dir, roster.is_some()),
+        prompt,
+        roster.as_deref(),
+    )
 }
 
 #[cfg(test)]

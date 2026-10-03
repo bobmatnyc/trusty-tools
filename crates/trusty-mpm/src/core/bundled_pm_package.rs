@@ -61,18 +61,21 @@
 //! moves every composer together; it cannot move one.
 //!
 //! FAILURE BEHAVIOUR. `bundled_manifest_parses_and_validates` proves the
-//! repository's manifest parses, validates and composes. A content source whose
-//! manifest does not (#9012: content ships apart from the binary) makes
-//! [`bundled_fallback_package`] return `Err`, and `resolve_pm_prompt_with_roster`
-//! logs it loudly and degrades to the legacy assembly built from the same
-//! source's section files: a prompt missing only the manifest-authored inline
-//! rules, never a truncated one.
+//! repository's manifest parses, validates and composes. Content ships apart
+//! from the binary (#9012), so a content release can carry a manifest this
+//! binary cannot parse — a new section id, a new key. [`parse_bundled_package`]
+//! runs inside [`FrameworkContent::load`], which refuses such a source with
+//! `AgentContentError::Invalid` naming `tm content update` or a tm upgrade. A
+//! loaded [`FrameworkContent`] therefore always holds a valid package, and
+//! nothing here degrades to a prompt missing the manifest-authored rules.
 //!
 //! What guards CONTENT is `pm_prompt_golden_tests.rs`: a committed snapshot of the
 //! fully composed prompt for all three configurations. Every edit to a section
 //! file or to the manifest shows up there as a reviewable prose diff.
 //!
 //! Test: `bundled_pm_package_tests.rs`.
+
+use std::collections::BTreeMap;
 
 use crate::core::claude_md_sections::{Rejection, SectionOverride};
 use crate::core::framework_content::FrameworkContent;
@@ -92,35 +95,50 @@ pub(crate) const PACKAGE_ID: &str = "trusty-mpm.pm.bundled-fallback";
 /// Test: `bundled_manifest_parses_and_validates`.
 pub(crate) const PM_PACKAGE_PATH: &str = "pm-instruction-package.json";
 
-/// The bundled-fallback instruction package.
+/// Parses and validates the manifest among `instructions` (#9012).
 ///
-/// Why: this is the single entry point to "what the DEFAULT PM prompt is made
-/// of". It returns a `Result` (#4318) because the answer now comes from a parsed
-/// artifact rather than from Rust code that could not fail — and a parse failure
-/// must be reportable rather than papered over with a partial package.
-///
-/// What: the manifest of `content`, its `file` bodies bound to the same
-/// source's section files, parsed and structurally validated. `Err` carries
-/// the rendered parse or validation error; see the module docs for the
-/// degradation path. Parsed per call (#9012): no global cache.
-///
-/// Test: `bundled_manifest_parses_and_validates`,
-/// `shipped_sections_build_and_validate`,
-/// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
-pub(crate) fn bundled_fallback_package(
-    content: &FrameworkContent,
+/// Why: content ships apart from the binary, so the manifest is checked where
+/// the content is loaded; a source this binary cannot compose from is refused
+/// there rather than discovered mid-launch.
+/// What: [`PM_PACKAGE_PATH`] parsed, its `package_id` checked against
+/// [`PACKAGE_ID`], its `file` bodies bound to the `sections/**` entries of
+/// `instructions` (keys relative to `instructions/`), then validated. `Err`
+/// carries the rendered parse or validation error.
+/// Test: `a_source_whose_package_does_not_parse_is_an_error`,
+/// `bundled_manifest_parses_and_validates`.
+pub(crate) fn parse_bundled_package(
+    instructions: &BTreeMap<String, String>,
 ) -> Result<InstructionPackage, String> {
-    let mut package = InstructionPackage::from_json(content.required(PM_PACKAGE_PATH))
-        .map_err(|err| err.to_string())?;
+    let json = instructions
+        .get(PM_PACKAGE_PATH)
+        .ok_or_else(|| format!("`{PM_PACKAGE_PATH}` is absent"))?;
+    let mut package = InstructionPackage::from_json(json).map_err(|err| err.to_string())?;
     if package.package_id != PACKAGE_ID {
         return Err(format!(
             "manifest declares package_id `{}`, expected `{PACKAGE_ID}`",
             package.package_id
         ));
     }
-    package.sources = crate::core::instruction_pipeline::package_sources(content);
+    package.sources = instructions
+        .iter()
+        .filter(|(path, _)| path.starts_with("sections/"))
+        .map(|(path, body)| (path.clone(), body.clone()))
+        .collect();
     package.validate().map_err(|err| err.to_string())?;
     Ok(package)
+}
+
+/// The bundled-fallback instruction package of `content`.
+///
+/// Why: the single entry point to "what the DEFAULT PM prompt is made of".
+/// What: a copy of the package [`FrameworkContent::load`] parsed and validated
+/// (see [`parse_bundled_package`]); total, because a source whose manifest
+/// does not parse is never loaded.
+/// Test: `bundled_manifest_parses_and_validates`,
+/// `shipped_sections_build_and_validate`,
+/// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
+pub(crate) fn bundled_fallback_package(content: &FrameworkContent) -> InstructionPackage {
+    content.pm_package().clone()
 }
 
 /// The authored bytes of `sections`, projected out of the bundled manifest.
@@ -129,14 +147,10 @@ pub(crate) fn bundled_fallback_package(
 /// whole multi-section runs as one string and cannot call `compose`. Routing them
 /// through the manifest is what keeps a manifest-authored rule from reaching only
 /// the packaged path — see the module docs' split-brain note.
-/// What: [`InstructionPackage::authored_run`] over the bundled manifest, or `None`
-/// when the manifest is unreadable so the caller can fall back to the raw
-/// section files of the same source.
+/// What: [`InstructionPackage::authored_run`] over the bundled manifest.
 /// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
-pub(crate) fn authored_run(content: &FrameworkContent, sections: &[SectionId]) -> Option<String> {
-    bundled_fallback_package(content)
-        .ok()
-        .map(|package| package.authored_run(sections))
+pub(crate) fn authored_run(content: &FrameworkContent, sections: &[SectionId]) -> String {
+    content.pm_package().authored_run(sections)
 }
 
 /// The pinned blocks of `section`, joined with a paragraph break (#8533).
@@ -145,12 +159,10 @@ pub(crate) fn authored_run(content: &FrameworkContent, sections: &[SectionId]) -
 /// package's block model, and must still keep the feature statement a pinned
 /// block carries.
 /// What: the trimmed authored text of every pinned block owned by `section`, in
-/// block order; empty when there is none or the manifest is unreadable.
+/// block order; empty when there is none.
 /// Test: `a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path`.
 pub(crate) fn pinned_run(content: &FrameworkContent, section: SectionId) -> String {
-    let Ok(package) = bundled_fallback_package(content) else {
-        return String::new();
-    };
+    let package = content.pm_package();
     package
         .blocks
         .iter()
@@ -180,8 +192,7 @@ pub(crate) fn pinned_run(content: &FrameworkContent, section: SectionId) -> Stri
 /// derived stack profile), `roster` (the rendered `## Delegation Authority` block,
 /// required) and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All are
 /// trimmed by the composer. Declined overrides come back alongside the result so
-/// the caller can report them. A manifest that failed to parse surfaces as
-/// [`CompositionError::Manifest`] with no rejections.
+/// the caller can report them.
 ///
 /// Test: `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`,
@@ -193,11 +204,7 @@ pub(crate) fn compose_bundled_fallback_with_overrides(
     addendum: Option<&str>,
     overrides: &[SectionOverride],
 ) -> (Result<String, CompositionError>, Vec<Rejection>) {
-    let bundled = match bundled_fallback_package(content) {
-        Ok(package) => package,
-        Err(err) => return (Err(CompositionError::Manifest(err)), Vec::new()),
-    };
-    let (package, rejected) = bundled.with_overrides(overrides);
+    let (package, rejected) = bundled_fallback_package(content).with_overrides(overrides);
     let composed = package.compose(&CompositionInputs {
         agent_roster: roster.to_string(),
         stack_profile: Some(stack.to_string()),

@@ -54,6 +54,27 @@ fn not_installed_names_tm_content_install() {
     assert!(err.to_string().contains("tm content install"), "{err}");
 }
 
+/// #9012: a present file this binary cannot use names both remedies — a
+/// content refresh and a tm upgrade — and the path.
+#[test]
+fn an_invalid_file_names_both_remedies() {
+    let err = AgentContentError::Invalid {
+        origin: "content-v0.2.0".to_string(),
+        path: "instructions/pm-instruction-package.json".to_string(),
+        reason: "unknown variant `newer-section`".to_string(),
+    };
+    let shown = err.to_string();
+    for needle in [
+        "instructions/pm-instruction-package.json",
+        "unknown variant `newer-section`",
+        "tm content update",
+        "upgrade tm",
+    ] {
+        assert!(shown.contains(needle), "{needle} missing: {shown}");
+    }
+    assert!(!err.is_not_installed());
+}
+
 /// #9011: an installed bundle whose bytes do not match the lock is an error,
 /// not a fallback to some other source.
 #[test]

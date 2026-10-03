@@ -780,6 +780,28 @@ fn strip_delegation_block_noop_when_absent() {
     assert_eq!(strip_delegation_block(clean), clean);
 }
 
+/// The section file a PM-body section is authored in; `None` outside the body.
+fn pm_body_source(id: SectionId) -> Option<&'static str> {
+    let path = match id {
+        SectionId::Identity => "identity",
+        SectionId::Core => "core",
+        SectionId::PmAllowlist => "pm-allowlist",
+        SectionId::DelegationMechanics => "delegation-mechanics",
+        SectionId::AgentRouting => "agent-routing",
+        SectionId::SubagentReEngagement => "subagent-re-engagement",
+        SectionId::Phases => "phases",
+        SectionId::QaGate => "qa-gate",
+        SectionId::GitFileTracking => "git-file-tracking",
+        SectionId::TicketsPrsReleases => "tickets-prs-releases",
+        SectionId::MessagesReportsSessions => "messages-reports-sessions",
+        SectionId::AutonomousExecution => "autonomous-execution",
+        SectionId::Memory => "memory",
+        SectionId::Search => "search",
+        _ => return None,
+    };
+    rc().instruction(&format!("sections/{path}.md"))
+}
+
 #[test]
 fn pm_instructions_is_the_pm_body_sections() {
     // #4183: the legacy PM body is RECONSTITUTED, never kept as a fourth copy
@@ -791,8 +813,7 @@ fn pm_instructions_is_the_pm_body_sections() {
     // #8533: Identity opens the prompt and `core` was split into nine
     // sections, so the body is every section before the stack profile.
     let body = pm_instructions(rc());
-    let projected = crate::core::bundled_pm_package::authored_run(rc(), &PM_BODY_SECTIONS)
-        .expect("the manifest is readable");
+    let projected = crate::core::bundled_pm_package::authored_run(rc(), &PM_BODY_SECTIONS);
     assert_eq!(body, format!("{projected}\n"));
     assert!(
         body.starts_with(rc().required("sections/identity.md").trim()),
@@ -802,7 +823,7 @@ fn pm_instructions_is_the_pm_body_sections() {
     // Every section source is still delivered in full, in order, and the
     // manifest-authored rules ride along.
     for id in PM_BODY_SECTIONS {
-        let expected = fallback_source(rc(), id).expect("every PM-body section has a source");
+        let expected = pm_body_source(id).expect("every PM-body section has a source");
         assert!(body.contains(expected.trim()), "{id:?} went missing");
     }
     // #8361: autonomy is its own section now. On the legacy path it lives
@@ -1569,6 +1590,29 @@ fn refresh_compiled_prompt_reports_an_actionable_failure() {
         "must say the session did not start: {msg}"
     );
     assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
+}
+
+/// #9012: resume and in-place relaunch gate on this refresh; with no content
+/// it refuses, naming `tm content install`, and writes no compiled prompt.
+#[test]
+fn refresh_compiled_prompt_without_content_names_tm_content_install() {
+    let root = TempDir::new().expect("framework root");
+    let project = TempDir::new().expect("project outside any checkout");
+    let cache = TempDir::new().expect("empty content cache");
+    let dest = compiled_prompt_path(project.path(), "sess-1");
+
+    let msg = refresh_compiled_prompt_loading(root.path(), project.path(), "sess-1", |_| {
+        crate::core::content_source::framework_content_in(
+            cache.path(),
+            crate::core::content_source::DevOverride::Off,
+        )
+    })
+    .expect_err("no content installed");
+    assert!(msg.contains("tm content install"), "{msg}");
+    assert!(
+        !dest.exists(),
+        "a refused refresh writes no compiled prompt"
+    );
 }
 
 /// Make `path` unreadable; `false` when the platform or privileges prevent it.

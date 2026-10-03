@@ -52,7 +52,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_manifest::atomic_write;
-use crate::core::bundled_pm_package::bundled_fallback_package;
 use crate::core::claude_md_sections::{
     HOST_FILES, SUPPORTED_VERSION, contains_marker_line, locate_blocks, section_token,
 };
@@ -167,9 +166,6 @@ pub enum WriteRejection {
         /// The host file that failed the structural check.
         host: PathBuf,
     },
-    /// The bundled package could not be loaded, so no tier could be consulted.
-    #[error("bundled instruction package unavailable ({0}); refusing to write")]
-    PackageUnavailable(String),
     /// Reading or writing the host failed.
     #[error("{0}")]
     Io(String),
@@ -200,7 +196,7 @@ fn section_is_writable(
     section: SectionId,
 ) -> Result<(), WriteRejection> {
     // #9012: the package is read from the caller's content, not compiled in.
-    let package = bundled_fallback_package(content).map_err(WriteRejection::PackageUnavailable)?;
+    let package = content.pm_package();
     let declared = package
         .section(section)
         .ok_or(WriteRejection::UnknownSection { section })?;
