@@ -2,7 +2,7 @@
 # Regenerate with: bash scripts/check_context_budget.sh --update
 # Growing TOTAL past 5%, or one file past 10%, fails the gate until
 # the growth is recorded here in the same PR.
-CLAUDE.md	12565
+CLAUDE.md	13051
 content/instructions/sections/README.md	13464
 content/instructions/sections/agent-delegation.md	1804
 content/instructions/sections/agent-routing.md	649
@@ -19,10 +19,10 @@ content/instructions/sections/non-overridable-rules.md	3734
 content/instructions/sections/phases.md	465
 content/instructions/sections/pm-allowlist.md	1113
 content/instructions/sections/prompt-self-improvement.md	264
-content/instructions/sections/qa-gate.md	300
+content/instructions/sections/qa-gate.md	548
 content/instructions/sections/search.md	202
 content/instructions/sections/subagent-re-engagement.md	339
 content/instructions/sections/tickets-prs-releases.md	674
 content/instructions/sections/workflow.md	4704
-content/instructions/output-styles/trusty-mpm.md	7984
-TOTAL	60343
+content/instructions/output-styles/trusty-mpm.md	7987
+TOTAL	61080

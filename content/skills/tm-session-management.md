@@ -95,7 +95,8 @@ Uncommitted changes: {git status summary}
 ```
 
 The `## Tmux Window` section records the originating tmux window so resume can
-re-align to it. Capture it ONLY when inside tmux (`[ -n "$TMUX" ]`) via
+match it by window id, or by tmux session name after a relaunch (#8408).
+Capture it ONLY when inside tmux (`[ -n "$TMUX" ]`) via
 `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`; when
 `$TMUX` is unset, omit the section (resume treats absence as a no-op).
 

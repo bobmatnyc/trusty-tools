@@ -394,6 +394,8 @@ pub(crate) async fn session(
             let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
             print!("{output}");
             print_compression_stats(&body);
+            // #8407: on stderr, so stdout stays the pane text byte for byte.
+            eprintln!("{}", crate::formatters::session::input_box_note(&body));
         }
         // ── Managed session-manager actions ──────────────────────────────────
         // All `ls` variants are routed through the direct HTTP path so the

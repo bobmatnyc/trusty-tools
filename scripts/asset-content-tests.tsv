@@ -130,3 +130,4 @@ trusty-mpm	test:env_serial	standalone_isolation::output_styles_deploy_to_config_
 trusty-mpm	test:integration	tm_hook_pm_guard	reads common::stage_repo_content — the spawned guard classifies against it (#9011)
 trusty-mpm	test:integration	tm_hook_pm_guard_build_lease	reads common::stage_repo_content (#9011)
 trusty-mpm	test:integration	tm_sessions_instructions_diagnostics::instructions_reports_section_status_and_project_style	reads FrameworkContent::load over the checkout (#9012)
+trusty-mpm	lib	daemon::doctor_content::tests::content_row_fails_when_the_pm_package_does_not_parse	reads the checkout's content: fake_checkout_with_package stages a PM package the doctor row parses (#9012)

@@ -288,17 +288,23 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       always safe. `tmux_window` is the caller's own
     ///       `session_name:window_index:window_id`; it resolves a snapshot only
     ///       when `session_id` matched nothing, and `resolved_via` says which
-    ///       of the two answered. #5557: `sessions` is a bounded PAGE starting
-    ///       at `sessions_offset`, and the response carries `sessions_total` /
-    ///       `sessions_next_offset` / `truncated` / `truncation_notice` so a
-    ///       short page can never read as a complete one.
+    ///       of the two answered. #8408: `tmux_session_created` is the
+    ///       caller's tmux `#{session_created}` (Unix seconds); without it the
+    ///       tmux-session route resolves nothing. #5557: `sessions` is a
+    ///       bounded PAGE starting at `sessions_offset`, and the response
+    ///       carries `sessions_total` / `sessions_next_offset` / `truncated` /
+    ///       `truncation_notice` so a short page can never read as a complete
+    ///       one.
     /// Test: `dispatch_session_context_catchup_tool` (mock),
+    ///       `dispatch_session_context_catchup_forwards_tmux_window`,
     ///       `dispatch_session_context_catchup_forwards_sessions_offset`.
+    #[allow(clippy::too_many_arguments)]
     async fn session_context_catchup(
         &self,
         project_dir: &str,
         session_id: Option<&str>,
         tmux_window: Option<&str>,
+        tmux_session_created: Option<i64>,
         all_projects: bool,
         full: bool,
         sessions_offset: usize,
@@ -316,7 +322,7 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       worktrees in-process (the same engine `tm session prune-worktrees`
     ///       uses, called directly rather than looped back over HTTP). Returns
     ///       `{ snapshot_path, timestamp, pruned_worktrees }`. Never touches
-    ///       tmux — window realignment on resume stays a PM-side bash step.
+    ///       tmux (#8408: resume no longer realigns to the recorded window).
     ///
     /// #6888: `session_id` is optional. Omitted, the daemon derives it from the
     ///        caller's own identity — the same derivation

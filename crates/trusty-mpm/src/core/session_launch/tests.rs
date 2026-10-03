@@ -68,7 +68,7 @@ impl EnvVarGuard {
     /// derived slug and make the assertions non-hermetic).
     /// What: snapshots the prior value and removes the var; restored in `Drop`.
     /// Test: used by `inject_trusty_memory_mcp_pins_palace_from_repo_url`.
-    fn clear(key: &'static str) -> Self {
+    pub(super) fn clear(key: &'static str) -> Self {
         let prev = std::env::var(key).ok();
         // SAFETY: serialized by `#[serial]`; restored in `Drop`.
         unsafe {

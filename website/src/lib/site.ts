@@ -40,11 +40,33 @@ export const SITE_URL = 'https://trustytools.dev';
 export const NAV_LINKS: { href: string; label: string }[] = [
 	{ href: '/', label: 'Home' },
 	{ href: '/docs', label: 'Docs' },
+	// The roadmap is a `/docs` page (`docs/public-manifest.tsv`, route
+	// `/roadmap`); `site.corpus.test.ts` fails if that entry goes away.
+	{ href: '/docs/roadmap', label: 'Roadmap' },
 	{ href: '/whats-new', label: "What's new" },
 	// #6268: the migration page is top-level rather than under `/tools/`
 	// because its reader is choosing between two tools, not reading about one.
 	{ href: '/claude-mpm-migration', label: 'From claude-mpm' }
 ];
+
+/**
+ * Why: a plain prefix test marks two links current on `/docs/roadmap` — both
+ * `/docs` and `/docs/roadmap` match — and a page must carry one
+ * `aria-current="page"`.
+ * What: the `NAV_LINKS` href that owns `pathname`: an exact match, else the
+ * longest href that prefixes it at a `/` boundary. `/` matches only itself.
+ * Returns `undefined` when no link owns the path.
+ * Test: `site.test.ts` (`marks exactly one nav link current`).
+ */
+export function currentNavHref(pathname: string): string | undefined {
+	let best: string | undefined;
+	for (const { href } of NAV_LINKS) {
+		const owns =
+			pathname === href || (href !== '/' && pathname.startsWith(href.replace(/\/$/, '') + '/'));
+		if (owns && (best === undefined || href.length > best.length)) best = href;
+	}
+	return best;
+}
 
 /**
  * The flagship crates, each with a hand-authored page under `/tools/` and a

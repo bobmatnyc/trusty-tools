@@ -438,14 +438,16 @@ impl OrchestratorBackend for StateBackend {
         project_dir: &str,
         session_id: Option<&str>,
         tmux_window: Option<&str>,
+        tmux_session_created: Option<i64>,
         all_projects: bool,
         full: bool,
         sessions_offset: usize,
     ) -> Result<Value, String> {
-        super::mcp_context::session_context_catchup(
+        super::mcp_context::session_context_catchup_with_session_created(
             project_dir,
             session_id,
             tmux_window,
+            tmux_session_created,
             all_projects,
             full,
             sessions_offset,

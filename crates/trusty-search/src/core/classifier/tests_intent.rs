@@ -386,3 +386,14 @@ fn test_intent_table_single_and_multi_word() {
         .collect();
     assert!(mismatches.is_empty(), "(query, want, got): {mismatches:?}");
 }
+
+/// #9027: `is_balanced` names exactly the two intents that share balanced
+/// routing.
+#[test]
+fn only_keyword_and_unknown_are_balanced() {
+    use QueryIntent::*;
+    for intent in [Definition, Usage, Conceptual, BugDebt, Keyword, Unknown] {
+        let want = matches!(intent, Keyword | Unknown);
+        assert_eq!(intent.is_balanced(), want, "{intent:?}");
+    }
+}

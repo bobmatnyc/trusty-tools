@@ -257,7 +257,8 @@ fn service_install() -> Result<()> {
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
     match outcome {
         trusty_common::launchd_activate::Activation::AlreadyCurrent { .. } => println!(
-            "{} {} is already loaded in {} with this exact unit — left running.",
+            // #8750: loaded is not running — a cleanly exited unit has no pid.
+            "{} {} is already loaded in {} with this exact unit — left as is.",
             "·".dimmed(),
             LAUNCHD_LABEL,
             domain
@@ -325,10 +326,28 @@ fn ensure_fastembed_cache_dir() {
 /// `trusty-memory service start` keep working. `install` + `bootstrap` is
 /// idempotent under the shared launchd module (bootstrap calls bootout
 /// first), so calling either repeatedly is safe.
-/// Test: integration via `cargo run -p trusty-memory -- service start`.
+/// What (#8750): after the install, a loaded unit with no process — left by
+/// `trusty-memory stop` or any clean exit, which `KeepAlive::OnSuccess` does
+/// not respawn — is kickstarted by label. The install alone finds that unit
+/// current and does nothing.
+/// Test: `service_start_kickstarts_a_loaded_unit_with_no_pid`,
+/// `service_start_leaves_a_running_unit_alone`,
+/// `service_start_fails_when_the_kickstarted_unit_never_runs`.
 #[cfg(target_os = "macos")]
 fn service_start() -> Result<()> {
-    service_install()
+    use super::stop::launchd::{start_loaded_unit, StartOutcome, UserLaunchAgent};
+    service_install()?;
+    // #8750: an idle loaded unit stays down unless something kickstarts it.
+    if let StartOutcome::Kickstarted(pid) =
+        start_loaded_unit(&UserLaunchAgent, std::time::Duration::from_secs(10))?
+    {
+        println!(
+            "{} Kickstarted {} — daemon running as pid {pid}.",
+            "✓".green(),
+            LAUNCHD_LABEL
+        );
+    }
+    Ok(())
 }
 
 /// `service stop` — boot out the agent (stop and unload).

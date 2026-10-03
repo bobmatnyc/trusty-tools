@@ -250,3 +250,41 @@ async fn a_probe_that_panics_is_unknown_not_a_lost_row() {
     assert_eq!(check.name, "credential_reach");
     assert!(check.message.contains("UNKNOWN"), "{}", check.message);
 }
+
+/// Why (#9121): a sandboxed daemon answering `GET /api/v1/doctor` would walk
+/// `.env.local` and the Keychain through this row. In sandbox mode the
+/// resolver must not be called at all.
+/// Test: this test.
+#[test]
+fn a_sandboxed_row_consults_no_credential_tier() {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+
+    let check = check_credential_reach_with(true, |_var| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(FAKE_VALUE.to_string())
+    });
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(check.status, CheckStatus::Ok, "{check:?}");
+    assert!(check.message.contains("sandbox"), "{}", check.message);
+    assert!(!check.message.contains(FAKE_VALUE), "{}", check.message);
+}
+
+/// Why: the sandbox test passes trivially if the injected resolver were never
+/// wired in. With the gate open, every daemon credential is asked once.
+/// Test: this test.
+#[test]
+fn an_unsandboxed_row_consults_every_daemon_credential() {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+
+    let check = check_credential_reach_with(false, |_var| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(FAKE_VALUE.to_string())
+    });
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        DAEMON_PROVIDERS.len()
+    );
+    assert!(!check.message.contains("sandbox"), "{}", check.message);
+}

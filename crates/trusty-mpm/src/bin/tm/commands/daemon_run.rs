@@ -48,7 +48,8 @@ pub(super) const ALREADY_RUNNING_NOTICE: &str = "the trusty-mpm daemon is alread
 /// `AddrInUse`), writes the lock file, registers a Ctrl-C handler that
 /// removes the lock, then serves the API on the primary (loopback) listener.
 /// Test: `cli_parses_daemon_*` cover flag parsing; `run_daemon_rejects_
-/// tailscale_flag` covers the deprecation error; the #4397 guard's decision
+/// tailscale_flag` covers the deprecation error; `sandbox` (#9121) is
+/// covered by `daemon_sandbox_tests.rs`; the #4397 guard's decision
 /// table is covered hermetically by `commands::launchd_probe::tests::
 /// compute_daemon_refuse_*`; the bind/serve path is exercised by the daemon
 /// e2e suite.
@@ -57,6 +58,7 @@ pub(crate) async fn run_daemon(
     tailscale: bool,
     mcp: bool,
     force: bool,
+    sandbox: bool,
 ) -> anyhow::Result<()> {
     use std::io::ErrorKind;
 
@@ -66,6 +68,11 @@ pub(crate) async fn run_daemon(
     // muscle memory) need a clear signal, not a quietly-degraded daemon.
     if tailscale {
         return Err(tailscale_deprecated_error());
+    }
+    // #9121: refuse an unisolated sandbox, and latch, before any credential
+    // read, state construction or bind.
+    if sandbox {
+        crate::commands::daemon_sandbox::enter()?;
     }
 
     // Anchor cwd to a stable directory so that git subprocesses spawned later
@@ -193,7 +200,10 @@ pub(crate) async fn run_daemon(
     // bot. Without a token the daemon runs normally; only a warning is logged.
     // The returned token lets the shutdown handler stop the supervised bot
     // promptly so it never blocks (or outlives) graceful shutdown (#1499).
-    let bot_shutdown = spawn_telegram_bot(&base_url);
+    // #9121: a sandbox starts no channel poller.
+    let bot_shutdown = crate::commands::daemon_sandbox::gate_channel_pollers(sandbox, || {
+        spawn_telegram_bot(&base_url)
+    });
 
     // Clean up the lock file on shutdown for BOTH Ctrl-C (SIGINT) and SIGTERM.
     // `tm restart` stops the old daemon with `pkill`, which sends SIGTERM — if we
@@ -553,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn run_daemon_rejects_tailscale_flag() {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let err = run_daemon(addr, true, false, false)
+        let err = run_daemon(addr, true, false, false, false)
             .await
             .expect_err("--tailscale must be rejected");
         let msg = err.to_string();

@@ -2770,3 +2770,21 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
         );
     }
 }
+
+/// Why (#8408): every relaunch recreates the tmux window, so the skill's old
+/// "select the recorded `@id`" step pointed a resumed PM at a window that no
+/// longer existed.
+/// What: the skill gives no `tmux select-window` step and names the
+/// `tmux_session` resolution route.
+/// Test: this test.
+#[test]
+fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
+    assert!(
+        !TM_SESSION_RESUME.contains("tmux select-window"),
+        "tm-session-resume.md must not tell a resumed PM to select the recorded window"
+    );
+    assert!(
+        TM_SESSION_RESUME.contains("\"tmux_session\""),
+        "tm-session-resume.md must list the `tmux_session` resolved_via value"
+    );
+}

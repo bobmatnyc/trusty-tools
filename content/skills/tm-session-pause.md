@@ -146,7 +146,8 @@ Uncommitted changes: {git status summary}
 ```
 
 The `## Tmux Window` section records the originating tmux window so
-`/tm-session-resume` can re-align you to it with `tmux select-window`. Only
+`/tm-session-resume` can resolve this snapshot by window id or, after a
+relaunch recreates the window, by tmux session name (#8408). Only
 include the section when the capture step below produced a value; snapshots
 created outside tmux simply omit it (resume treats absence as a no-op).
 

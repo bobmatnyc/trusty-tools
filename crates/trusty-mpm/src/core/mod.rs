@@ -162,6 +162,8 @@ pub(crate) mod gh_account_proof;
 // resolves a pin from a bare directory.
 pub(crate) mod gh_account_registry;
 pub mod gh_identity;
+// #9091: asks gh about a login in the daemon's env and in tm's account dirs.
+pub(crate) mod gh_login_probe;
 // #9091: `[accounts]` org → gh account map and the one account resolver.
 pub mod gh_org_accounts;
 // #8914: `--account` sessions run gh and HTTPS git as the account named.
@@ -181,6 +183,8 @@ pub mod hook;
 pub mod host_state_gate;
 pub mod idle_nudge;
 pub mod idle_parking;
+// #8407: classifies a pane's input box as empty, suggestion, or typed.
+pub mod input_box;
 // Issue #7616: the compose-time fold — the one transformation between the
 // authored section corpus and the bytes delivered to the PM.
 pub mod instruction_fold;
