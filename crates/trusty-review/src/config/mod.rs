@@ -17,11 +17,11 @@ pub mod constants;
 pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
-// #8649: per-call owner/repo -> index resolution for `review_pr`; crate-only
-// so the published API does not grow. Gated on `mcp`, its only caller, so a
-// `default-features = false` build carries no dead code.
-#[cfg(feature = "mcp")]
-pub(crate) mod repo_index;
+// #8649: per-call owner/repo -> index resolution for `review_pr`.
+// #8651: public, ungated — the webhook drain, the service `review` operation
+// and the CLI `run` resolve through `pipeline::pr_index`, whose error type
+// lives here. The resolver functions themselves stay crate-only.
+pub mod repo_index;
 pub mod role_models;
 pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the

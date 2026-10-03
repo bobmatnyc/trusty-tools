@@ -11,88 +11,33 @@
 //! Test: `tools_pr_index_tests.rs`.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
-    config::{
-        InvocationSurface, ReviewConfig,
-        repo_index::{RepoIndexError, resolve_repo_index},
-    },
-    integrations::{
-        NullAnalyzeClient, NullSearchClient,
-        github::{AuthStrategy, GithubClient},
-    },
+    config::{InvocationSurface, ReviewConfig, repo_index::RepoIndexError},
+    integrations::github::{AuthStrategy, GithubClient},
     models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, run_review},
     service::AppState,
 };
+
+// #8651: the type moved to `pipeline::pr_index` so every PR surface shares it.
+pub(crate) use crate::pipeline::pr_index::PrIndex;
 
 use super::{
     MCP_REVIEW_ALLOW_POSTING, MCP_REVIEW_TRIGGER, ToolError, deps_from_state, mcp_run_mode,
     require_str, wrap_result, wrap_tool_error,
 };
 
-/// The search index one `review_pr` call reviews against (#8649).
-///
-/// Why: the startup index belongs to whatever repo the server was launched
-/// in; a registry that cannot be read must degrade to NO index, never to that
-/// one.
-/// What: `Resolved` carries the PR repo's index id; `DiffOnly` carries the
-/// operator-facing notice for a degraded, diff-only review.
-/// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
-/// `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PrIndex {
-    /// The PR repo's own index.
-    Resolved(String),
-    /// No index could be resolved; review the diff alone, loudly.
-    DiffOnly(String),
-}
-
-impl PrIndex {
-    /// The per-call config and deps for this index.
-    ///
-    /// Why: `DiffOnly` must disconnect search AND analyze from any index, as
-    /// `ReviewConfig::resolve_source_root`'s diff-only path does, or a healthy
-    /// daemon would still be queried against the startup index.
-    /// What: `Resolved` clones `base` with `search_index` set and explicit.
-    /// `DiffOnly` clears `search_index`, relaxes both `require_*` flags, and
-    /// swaps `deps.search`/`deps.analyze` for null clients carrying the notice,
-    /// so the context gate returns `Degraded` with that notice as its reason.
-    /// Test: `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`.
-    pub(crate) fn apply(
-        self,
-        base: &ReviewConfig,
-        mut deps: ReviewDeps,
-    ) -> (ReviewConfig, ReviewDeps) {
-        let mut config = base.clone();
-        config.search_index_explicit = true;
-        match self {
-            PrIndex::Resolved(index) => config.search_index = index,
-            PrIndex::DiffOnly(notice) => {
-                config.search_index = String::new();
-                config.context.require_search = Some(false);
-                config.context.require_analyze = false;
-                deps.search = Arc::new(NullSearchClient::new(notice.clone()));
-                deps.analyze = Some(Arc::new(NullAnalyzeClient::new(notice)));
-            }
-        }
-        (config, deps)
-    }
-}
-
 /// Resolve the index `review_pr` uses for `owner/repo`, or the degrade.
 ///
 /// Why: an unreadable registry is a search outage; on the interactive surface
 /// that degrades unless the operator required search. An unregistered repo is
 /// a configuration fault and never degrades (#6687).
-/// What: `resolve_repo_index` against `state.search`, the startup index as
-/// the pin. `RepoIndexError::Registry` becomes [`PrIndex::DiffOnly`] (logged at
-/// `warn`) when `effective_require_search(Interactive)` is false; every other
-/// error, and `Registry` when search is required, is returned.
+/// What: [`crate::pipeline::pr_index::resolve_pr_index`] against
+/// `state.search` and `state.config` on [`InvocationSurface::Interactive`].
 /// Test: `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`,
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `missing_index_error_names_the_repo_and_the_index_id`.
@@ -101,25 +46,14 @@ pub(crate) async fn resolve_pr_index(
     owner: &str,
     repo: &str,
 ) -> Result<PrIndex, RepoIndexError> {
-    let pinned = Some(state.config.search_index.as_str());
-    match resolve_repo_index(state.search.as_ref(), owner, repo, pinned).await {
-        Ok(index) => Ok(PrIndex::Resolved(index)),
-        Err(e @ RepoIndexError::Registry { .. })
-            if !state
-                .config
-                .context
-                .effective_require_search(InvocationSurface::Interactive) =>
-        {
-            let notice = format!(
-                "{e} — search is not required for this call, so this review is DEGRADED: \
-                 diff only, no code context and no static analysis, not the server's startup \
-                 index (#8649)"
-            );
-            warn!("{notice}");
-            Ok(PrIndex::DiffOnly(notice))
-        }
-        Err(e) => Err(e),
-    }
+    crate::pipeline::pr_index::resolve_pr_index(
+        state.search.as_ref(),
+        &state.config,
+        InvocationSurface::Interactive,
+        owner,
+        repo,
+    )
+    .await
 }
 
 /// Execute the `review_pr` tool.

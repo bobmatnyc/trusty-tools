@@ -23,12 +23,13 @@ use trusty_review::{
     integrations::{
         NullAnalyzeClient, NullSearchClient,
         github::{AuthStrategy, GithubClient, RunMode},
-        search_client::HttpSearchClient,
+        search_client::{HttpSearchClient, SearchClient},
         subprocess_analyze_client::SubprocessAnalyzeClient,
     },
     llm::build_provider,
     pipeline::{
         CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
+        pr_index::{PrIndex, resolve_pr_index},
         run_review,
     },
     run_output::{run_failure_reason, run_is_failure, run_json_payload},
@@ -144,6 +145,22 @@ pub struct RunArgs {
     /// on `--local-diff` / `--base` sources, which never reach GitHub anyway.
     #[arg(long)]
     pub live: bool,
+
+    /// PR description for the reviewer: literal text, or `@<path>` to read a
+    /// file. On `--local-diff`/`--base` runs this is the only PR description
+    /// the reviewer sees (#8654).
+    #[arg(long, value_name = "TEXT|@FILE")]
+    pub pr_description: Option<String>,
+
+    /// PR discussion (review and issue comments — author rationale), as text
+    /// or `@<path>`. The verifier also receives it (#8654).
+    #[arg(long, value_name = "TEXT|@FILE")]
+    pub pr_discussion: Option<String>,
+
+    /// Referenced or related code the diff depends on, as text or `@<path>`
+    /// (#8654).
+    #[arg(long, value_name = "TEXT|@FILE")]
+    pub referenced_code: Option<String>,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -176,7 +193,9 @@ fn run_config(config_path: Option<&std::path::Path>, args: &RunArgs) -> ReviewCo
 /// first — it wins over CWD auto-derive but loses to an explicit
 /// `TRUSTY_SEARCH_INDEX` — then calls `resolve_index` so the correct
 /// trusty-search index is used even when `TRUSTY_SEARCH_INDEX` is unset
-/// (issue #670 / auto-derive #661).
+/// (issue #670 / auto-derive #661). A GitHub PR with no pinned index reviews
+/// against its own repo's index instead (#8651); the PR-context flags fill
+/// the `CallerContext` (#8654).
 /// Test: CLI integration via `cargo run -p trusty-review -- run --help`;
 /// `resolve_index` wiring covered by
 /// `wiring_cmd_run_resolve_index_updates_before_pipeline` in
@@ -194,6 +213,9 @@ pub async fn cmd_run(
     // default. Stderr, not stdout, so `--json` output stays parseable.
     eprintln!("{}", posting_mode_banner(args.live));
 
+    // #8654: read the PR-context flags before any network call, so an
+    // unreadable `@file` fails the run instead of being silently dropped.
+    let caller_context = caller_context_from_args(&args)?;
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
     let mut config_with_overrides = run_config(config_path, &args);
@@ -221,14 +243,21 @@ pub async fn cmd_run(
     )
     .await;
 
-    config_with_overrides
-        .resolve_index(&search_for_resolve)
-        .await;
+    // #8651: a GitHub PR reviews against its own repo's index; the CWD
+    // auto-derive below is only for a local diff or an operator-pinned index.
+    let pr_index = pr_index_for_run(
+        &config_with_overrides,
+        &search_for_resolve,
+        &diff_source,
+        args.source_root.is_some(),
+    )
+    .await?;
+    if pr_index.is_none() {
+        config_with_overrides
+            .resolve_index(&search_for_resolve)
+            .await;
+    }
 
-    // #5113: `allow_posting` is hardcoded `true` below, so a GitHub-PR run can
-    // post — and must carry the claim gate that keeps a re-run from posting a
-    // second comment.
-    const ALLOW_POSTING: bool = true;
     let mut deps = build_deps_async(
         &config_with_overrides,
         &reviewer_model,
@@ -237,27 +266,12 @@ pub async fn cmd_run(
     )
     .await?;
     apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
-
-    let surface = surface_for_diff_source(&diff_source);
-
-    let input = ReviewInput {
-        diff_source,
-        reviewer_model: reviewer_model.clone(),
-        write_log: args.write_log,
-        // #6290: `--json` owns stdout, so the human report must not also be
-        // written there — a caller piping this into `jq` would get prose ahead
-        // of the object.
-        print_result: !args.json,
-        // #4460: never TriggerDecision::None here — that would defer live-vs-
-        // dry entirely to the ambient PR_INTELLIGENCE_DRY_RUN env var, with no
-        // call-site signal. `--live` is the only per-invocation opt-in.
-        trigger: trigger_for_live_flag(args.live),
-        run_mode: RunMode::Cli,
-        allow_posting: ALLOW_POSTING,
-        caller_context: CallerContext::default(),
-        surface,
+    let (config_with_overrides, deps) = match pr_index {
+        Some(index) => index.apply(&config_with_overrides, deps),
+        None => (config_with_overrides, deps),
     };
 
+    let input = run_input(&args, diff_source, reviewer_model.clone(), caller_context);
     let result = run_review(&config_with_overrides, input, deps).await;
 
     if args.json {
@@ -283,6 +297,109 @@ pub async fn cmd_run(
     }
 
     Ok(())
+}
+
+/// #5113: `run` may post a GitHub-PR review, so it must carry the claim gate
+/// that keeps a re-run from posting a second comment.
+const ALLOW_POSTING: bool = true;
+
+/// The `ReviewInput` one `run` invocation hands the pipeline.
+///
+/// Why: one place builds it, so the test that proves the PR-context flags
+/// reach the reviewer prompt drives the same input `cmd_run` does (#8654).
+/// What: the diff source and model, `run`'s posting posture, and the caller
+/// context read from the flags.
+/// Test: `pr_description_flag_reaches_the_reviewer_prompt`.
+pub(crate) fn run_input(
+    args: &RunArgs,
+    diff_source: DiffSource,
+    reviewer_model: String,
+    caller_context: CallerContext,
+) -> ReviewInput {
+    let surface = surface_for_diff_source(&diff_source);
+    ReviewInput {
+        diff_source,
+        reviewer_model,
+        write_log: args.write_log,
+        // #6290: `--json` owns stdout, so the human report must not also be
+        // written there — a caller piping this into `jq` would get prose ahead
+        // of the object.
+        print_result: !args.json,
+        // #4460: never TriggerDecision::None here — that would defer live-vs-
+        // dry entirely to the ambient PR_INTELLIGENCE_DRY_RUN env var, with no
+        // call-site signal. `--live` is the only per-invocation opt-in.
+        trigger: trigger_for_live_flag(args.live),
+        run_mode: RunMode::Cli,
+        allow_posting: ALLOW_POSTING,
+        caller_context,
+        surface,
+    }
+}
+
+/// The caller context `run`'s PR-context flags describe (#8654).
+///
+/// Why: `run` built `CallerContext::default()`, so a caller had no way to give
+/// the reviewer the PR description, discussion, or referenced code.
+/// What: each of `--pr-description`, `--pr-discussion`, `--referenced-code` is
+/// literal text, or `@<path>` for a file's contents; a blank value is `None`.
+///
+/// # Errors
+///
+/// An `@<path>` that cannot be read, naming the flag and the path.
+///
+/// Test: `pr_context_flags_read_text_and_files`,
+/// `unreadable_pr_context_file_fails_the_run`.
+pub(crate) fn caller_context_from_args(args: &RunArgs) -> Result<CallerContext> {
+    let read = |flag: &str, value: Option<&str>| -> Result<Option<String>> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let text = match value.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("{flag}: cannot read {path:?}"))?,
+            None => value.to_string(),
+        };
+        Ok((!text.trim().is_empty()).then_some(text))
+    };
+    Ok(CallerContext {
+        pr_description: read("--pr-description", args.pr_description.as_deref())?,
+        pr_discussion: read("--pr-discussion", args.pr_discussion.as_deref())?,
+        referenced_code: read("--referenced-code", args.referenced_code.as_deref())?,
+    })
+}
+
+/// The PR repo's own index for a GitHub-PR `run`, or `None` (#8651).
+///
+/// Why: `run` derived its index once from the CWD and fell back to `"main"`,
+/// so a PR in any other repo was reviewed against the wrong index.
+/// What: for a `DiffSource::Github` with no operator-pinned index (neither
+/// `TRUSTY_SEARCH_INDEX` nor `--source-root`), resolves the repo's index on
+/// the run's surface (`Hosted`, so an unreadable registry fails unless search
+/// is opted out). `None` for a local diff or a pinned index, which keep the
+/// CWD/`--source-root` resolution.
+///
+/// # Errors
+///
+/// The repo has no index, its name is invalid, or the registry cannot be read
+/// while search is required.
+///
+/// Test: `github_run_resolves_its_own_repo_index`,
+/// `github_run_with_no_repo_index_fails`, `pinned_or_local_run_keeps_cwd_resolution`.
+pub(crate) async fn pr_index_for_run(
+    config: &ReviewConfig,
+    search: &dyn SearchClient,
+    diff_source: &DiffSource,
+    source_root_given: bool,
+) -> Result<Option<PrIndex>> {
+    let DiffSource::Github { owner, repo, .. } = diff_source else {
+        return Ok(None);
+    };
+    if config.search_index_explicit || source_root_given {
+        return Ok(None);
+    }
+    let surface = surface_for_diff_source(diff_source);
+    let index = resolve_pr_index(search, config, surface, owner, repo).await?;
+    Ok(Some(index))
 }
 
 // ─── posting-mode gate (#4460) ─────────────────────────────────────────────
@@ -1030,3 +1147,8 @@ mod tests {
         );
     }
 }
+
+// #8651 / #8654: per-repo index and PR-context flags for `run`.
+#[cfg(test)]
+#[path = "run_pr_tests.rs"]
+mod pr_tests;

@@ -303,3 +303,117 @@ async fn drain_records_a_merged_delivery_as_ignored_rather_than_dropping_it() {
          ledger marker is indistinguishable from a lost one"
     );
 }
+
+// ── #8651: per-target index resolution ──────────────────────────────────────
+
+use crate::integrations::search_client::IndexIdentity;
+use crate::pipeline::pr_index::tests::{Registry, startup_config, two_repo_registry};
+
+/// LLM stand-in for `ReviewDeps`; the injected runner never calls it.
+struct UnusedLlm8651;
+
+#[async_trait::async_trait]
+impl crate::llm::LlmProvider for UnusedLlm8651 {
+    fn name(&self) -> &str {
+        "unused-8651"
+    }
+
+    async fn complete(
+        &self,
+        _req: crate::llm::LlmRequest,
+    ) -> Result<crate::llm::LlmResponse, crate::llm::LlmError> {
+        Err(crate::llm::LlmError::Transport(
+            "not called in #8651 tests".into(),
+        ))
+    }
+}
+
+/// Deps over a registry fake; `None` models an unreadable registry.
+fn drain_deps(indexes: Option<Vec<IndexIdentity>>) -> ReviewDeps {
+    ReviewDeps {
+        llm: Arc::new(UnusedLlm8651),
+        verifier: None,
+        search: Arc::new(Registry::new(indexes)),
+        analyze: None,
+        dedup: None,
+    }
+}
+
+fn target_for(owner: &str, repo: &str) -> ReviewTarget {
+    ReviewTarget {
+        owner: owner.into(),
+        repo: repo.into(),
+        pr: 42,
+        head_sha: "deadbeef".into(),
+        requested_reviewer: None,
+    }
+}
+
+/// Run `review_target_with` under a capturing runner: the outcome, plus the
+/// index the review received (`None` when the runner never ran).
+async fn drain_index_seen(
+    base: &ReviewConfig,
+    deps: ReviewDeps,
+    target: &ReviewTarget,
+) -> (Result<()>, Option<String>) {
+    let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&seen);
+    let outcome = review_target_with(
+        base,
+        deps,
+        target,
+        move |config, _input, _deps| async move {
+            if let Ok(mut slot) = sink.lock() {
+                *slot = Some(config.search_index.clone());
+            }
+            ReviewResult::new("o", "r", 42, "PR #42", "")
+        },
+    )
+    .await;
+    let captured = seen.lock().ok().and_then(|s| s.clone());
+    (outcome, captured)
+}
+
+/// Two targets in different repos, neither indexed as `"main"`, are reviewed
+/// against their own indexes by ONE drain config — the #8651 bug was every
+/// target reusing the index cached when the pipeline was first built.
+#[tokio::test]
+async fn drain_reviews_each_repo_against_its_own_index() {
+    let base = startup_config(None);
+    for (owner, repo, want) in [
+        (
+            "duettoresearch",
+            "code-intelligence",
+            "code-intelligence-9f1c2e3a",
+        ),
+        ("bobmatnyc", "trusty-tools", "trusty-tools-4e2cf878"),
+    ] {
+        let deps = drain_deps(Some(two_repo_registry()));
+        let (outcome, seen) = drain_index_seen(&base, deps, &target_for(owner, repo)).await;
+        assert!(outcome.is_ok(), "{owner}/{repo}: {outcome:?}");
+        assert_eq!(seen.as_deref(), Some(want), "{owner}/{repo}");
+    }
+    assert_eq!(
+        base.search_index, "main",
+        "the drain config is never rewritten"
+    );
+}
+
+/// Fail-open check: an index that cannot be resolved keeps the delivery
+/// (`Err`, so the drain retries it) and runs no review — an unreadable
+/// registry on the Hosted default, and a repo with no index at all.
+#[tokio::test]
+async fn drain_keeps_a_delivery_whose_index_cannot_be_resolved() {
+    let base = startup_config(None);
+    let (outcome, seen) =
+        drain_index_seen(&base, drain_deps(None), &target_for("acme", "widget")).await;
+    let err = outcome.expect_err("an unreadable registry must not review on Hosted");
+    assert!(err.to_string().contains("acme/widget"), "{err:#}");
+    assert_eq!(seen, None, "no review may run without the repo's index");
+
+    let deps = drain_deps(Some(two_repo_registry()));
+    let (outcome, seen) = drain_index_seen(&base, deps, &target_for("acme", "unindexed")).await;
+    let err = outcome.expect_err("an unindexed repo must not fall back to \"main\"");
+    assert!(err.to_string().contains("acme/unindexed"), "{err:#}");
+    assert_eq!(seen, None);
+}

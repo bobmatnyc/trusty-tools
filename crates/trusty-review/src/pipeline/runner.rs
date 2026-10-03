@@ -34,6 +34,7 @@ use crate::{
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
+        caller_preamble::consume_context_preamble,
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{
             DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers, load_diff,
@@ -185,7 +186,7 @@ pub struct ReviewDeps {
 /// `run_review_empty_head_sha_fails_closed_before_posting`.
 pub async fn run_review(
     config: &ReviewConfig,
-    input: ReviewInput,
+    mut input: ReviewInput,
     deps: ReviewDeps,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
@@ -398,6 +399,8 @@ pub async fn run_review(
             return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
+    // #8654: a `# Context:` preamble is caller context, never an unparsed section.
+    let raw_diff = consume_context_preamble(raw_diff, &mut input.caller_context);
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
     let max = crate::config::constants::MAX_DIFF_CHARS;
     // #1660: render ONCE, bounded to `max`, for the actual prompt/served text

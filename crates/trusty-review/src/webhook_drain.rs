@@ -45,6 +45,7 @@
 //!
 //! Test: `webhook_drain_tests.rs`.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -53,6 +54,8 @@ use trusty_common::webhook_relay::{DeliveryProcessor, Disposition, ProcessFailur
 
 use crate::config::{InvocationSurface, ReviewConfig};
 use crate::integrations::github::RunMode;
+use crate::models::ReviewResult;
+use crate::pipeline::pr_index::resolve_pr_index;
 use crate::pipeline::{
     DiffSource, ReviewDeps, ReviewInput, classify_review_request, enforce_verifier_liveness,
     run_review,
@@ -187,7 +190,8 @@ pub struct ConfiguredReviewPipeline {
     built: tokio::sync::OnceCell<Built>,
 }
 
-/// The config as resolved at build time, plus the deps built against it.
+/// The config the deps were built from, plus those deps. `config.search_index`
+/// is only the pin: each target resolves its own index (#8651).
 struct Built {
     config: ReviewConfig,
     deps: ReviewDeps,
@@ -220,7 +224,7 @@ impl ConfiguredReviewPipeline {
 /// Mirrors `commands::serve::build_app_state` deliberately: the drain runs the
 /// same pipeline the HTTP webhook route ran, so it must not run it with weaker
 /// dependencies. In particular `DedupNeed::Required` — see the module docs.
-async fn build_deps(mut config: ReviewConfig) -> Result<Built> {
+async fn build_deps(config: ReviewConfig) -> Result<Built> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = crate::llm::build_provider(&reviewer_model, &default_provider, &config)
@@ -234,7 +238,8 @@ async fn build_deps(mut config: ReviewConfig) -> Result<Built> {
 
     let search = crate::integrations::search_client::HttpSearchClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("build the search client: {e}"))?;
-    config.resolve_index(&search).await;
+    // #8651: no build-time `resolve_index` — each target resolves its own repo's
+    // index in `review_target_with`, so one cached index never serves every repo.
     let analyze =
         crate::integrations::subprocess_analyze_client::SubprocessAnalyzeClient::from_config(
             &config,
@@ -263,41 +268,87 @@ async fn build_deps(mut config: ReviewConfig) -> Result<Built> {
 impl ReviewPipeline for ConfiguredReviewPipeline {
     async fn review(&self, target: &ReviewTarget) -> Result<()> {
         let built = self.built().await?;
-        let config = &built.config;
-        let trigger = classify_review_request(config, target.requested_reviewer.as_deref());
-        let input = ReviewInput {
-            diff_source: DiffSource::Github {
-                owner: target.owner.clone(),
-                repo: target.repo.clone(),
-                pr: target.pr,
-                // Resolved by `run_review` via `resolve_diff_token` (#1880).
-                token: String::new(),
-            },
-            reviewer_model: config.role_models.reviewer.model.clone(),
-            write_log: true,
-            print_result: false,
-            trigger,
-            run_mode: RunMode::Serve,
-            allow_posting: true,
-            caller_context: crate::pipeline::runner::CallerContext::default(),
-            // The hosted webhook bot CAN post to a real PR, so it keeps the
-            // strict `Hosted` default and never silently degrades (REV-011).
-            surface: InvocationSurface::Hosted,
-        };
-
-        let result = run_review(config, input, built.deps.clone()).await;
-        if let Some(err) = result.error {
-            anyhow::bail!(err);
-        }
-        tracing::info!(
-            pr = target.pr,
-            verdict = %result.verdict,
-            posted = result.posted,
-            findings = result.findings.len(),
-            "webhook drain review complete"
-        );
-        Ok(())
+        review_target_with(
+            &built.config,
+            built.deps.clone(),
+            target,
+            |config, input, deps| async move { run_review(&config, input, deps).await },
+        )
+        .await
     }
+}
+
+/// Review one target under its own repo's index, with the review step injected.
+///
+/// Why: the drain reused the index resolved when the pipeline was first built
+/// for every `ReviewTarget`, so a PR in any other repo was reviewed — and the
+/// review posted — against the wrong index (#8651). Taking the runner as a
+/// parameter lets a test see the config each target's review receives.
+/// What: resolves the index per `target.owner`/`target.repo` on the `Hosted`
+/// surface (`base.search_index` is only the pin), applies it to a clone of
+/// `base` and to `deps`, builds the posting `ReviewInput`, and runs `run`. An
+/// unresolvable index — no index for the repo, or an unreadable registry while
+/// search is required — is an `Err`, so the delivery is kept and retried.
+///
+/// # Errors
+///
+/// The index resolution failure, or the review's own `result.error`.
+///
+/// Test: `drain_reviews_each_repo_against_its_own_index`,
+/// `drain_keeps_a_delivery_whose_index_cannot_be_resolved`.
+pub(crate) async fn review_target_with<R, F>(
+    base: &ReviewConfig,
+    deps: ReviewDeps,
+    target: &ReviewTarget,
+    run: R,
+) -> Result<()>
+where
+    R: FnOnce(ReviewConfig, ReviewInput, ReviewDeps) -> F,
+    F: Future<Output = ReviewResult>,
+{
+    // #8651: the target repo's own index, never the build-time cached one.
+    let index = resolve_pr_index(
+        deps.search.as_ref(),
+        base,
+        InvocationSurface::Hosted,
+        &target.owner,
+        &target.repo,
+    )
+    .await?;
+    let (config, deps) = index.apply(base, deps);
+    let trigger = classify_review_request(&config, target.requested_reviewer.as_deref());
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: target.owner.clone(),
+            repo: target.repo.clone(),
+            pr: target.pr,
+            // Resolved by `run_review` via `resolve_diff_token` (#1880).
+            token: String::new(),
+        },
+        reviewer_model: config.role_models.reviewer.model.clone(),
+        write_log: true,
+        print_result: false,
+        trigger,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: crate::pipeline::runner::CallerContext::default(),
+        // The hosted webhook bot CAN post to a real PR, so it keeps the
+        // strict `Hosted` default and never silently degrades (REV-011).
+        surface: InvocationSurface::Hosted,
+    };
+
+    let result = run(config, input, deps).await;
+    if let Some(err) = result.error {
+        anyhow::bail!(err);
+    }
+    tracing::info!(
+        pr = target.pr,
+        verdict = %result.verdict,
+        posted = result.posted,
+        findings = result.findings.len(),
+        "webhook drain review complete"
+    );
+    Ok(())
 }
 
 /// The drain's view of this crate's pipeline.
