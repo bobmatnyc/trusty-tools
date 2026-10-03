@@ -9,4 +9,5 @@ Fixed
 - A refused `gh_user` now says which of two things happened: "could not run
   gh: <reason>" (HTTP 503) or "gh reports no logged-in account" (HTTP 400). A
   `gh auth status` that fails without naming an account, such as a broken gh
-  config, is no longer read as "no account". Neither case stores the login.
+  config, is no longer read as "no account"; its reason names the exit status
+  only, never gh's own output. Neither case stores the login.

@@ -54,7 +54,9 @@ const FAILED_LOGIN: &str = "Failed to log in to";
 /// What: a spawn failure is `Inconclusive("could not run gh: <reason>")`.
 /// Output naming a logged-in account, gh's "not logged into any GitHub hosts",
 /// or a rejected-token line is `Answered`. Any other output is `Inconclusive`
-/// with the exit status and gh's first line.
+/// with the exit status and a fixed category only — never gh's own text, which
+/// can name a host, a login or a config path, because the reason reaches the
+/// 503 body and the debug log.
 /// Test: `a_spawn_failure_is_could_not_run_gh`,
 /// `gh_reporting_no_hosts_is_a_definite_none`,
 /// `an_unrecognised_failure_is_not_a_none`.
@@ -68,17 +70,13 @@ pub(crate) fn classify_auth_status(run: Result<GhOutput, String>) -> GhAuthProbe
     if !status.logged_in.is_empty() || text.contains(NO_HOSTS) || text.contains(FAILED_LOGIN) {
         return GhAuthProbe::Answered(status);
     }
-    let first = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no output");
     let exit = out
         .code
         .map_or_else(|| "a signal".to_string(), |c| format!("exit {c}"));
+    // #9091: no gh output in the reason — it reaches the 503 body and the log.
     GhAuthProbe::Inconclusive(format!(
-        "could not read gh's answer: `gh auth status` ended with {exit} and named no account \
-         ({first})"
+        "could not read gh's answer: `gh auth status` ended with {exit}, and its output \
+         named no account and matched no known gh message"
     ))
 }
 

@@ -247,7 +247,11 @@ fn an_unrecognised_failure_is_not_a_none() {
     match classify_auth_status(Ok(out)) {
         GhAuthProbe::Inconclusive(why) => {
             assert!(why.contains("exit 1"), "{why}");
-            assert!(why.contains("failed to read configuration"), "{why}");
+            // #9091: the reason reaches the 503 body and the debug log, so it
+            // carries none of gh's own text.
+            for leaked in ["failed to read configuration", "yaml", "bad indent"] {
+                assert!(!why.contains(leaked), "gh output leaked: {why}");
+            }
         }
         other => panic!("expected Inconclusive, got {other:?}"),
     }
