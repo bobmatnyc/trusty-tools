@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::Serialize;
 use tracing::warn;
-use trusty_common::credentials::{SecretResolveError, resolve_env_var_bounded};
+use trusty_common::credentials::SecretResolveError;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
@@ -110,6 +110,19 @@ fn classifier_key_resolves(
     resolve: impl FnOnce(&str) -> Result<String, SecretResolveError>,
 ) -> bool {
     resolve(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).is_ok()
+}
+
+/// Does the daemon's resolver hold the classifier key? Never logs.
+///
+/// Why (#9121): the probe walked `.env.local` and the Keychain directly, past
+/// the sandbox latch.
+/// What: [`classifier_key_resolves`] over
+/// [`crate::secret_source::resolve_bounded_gated`], which answers `Absent` in
+/// sandbox mode without reading a tier.
+/// Test: `tests/sandbox_latch_9121.rs`.
+#[must_use]
+pub fn classifier_key_present() -> bool {
+    classifier_key_resolves(crate::secret_source::resolve_bounded_gated)
 }
 
 /// Response body for GET /api/v1/sessions/managed/{id}/activity.
@@ -260,9 +273,8 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
     // #8236: resolve through the shared resolver, not `std::env::var`, so a key
     // migrated out of the LaunchAgent plist into the store still surfaces here.
     // #8563: cached for `KEY_PRESENCE_TTL`, and never logged per request.
-    let api_key_present = KEY_PRESENCE
-        .present(|| classifier_key_resolves(resolve_env_var_bounded))
-        .await;
+    // #9121: through the sandbox-gated resolver, never the raw bounded one.
+    let api_key_present = KEY_PRESENCE.present(classifier_key_present).await;
     let classification = if api_key_present {
         Some(format!("{:?}", result.verdict.state).to_lowercase())
     } else {

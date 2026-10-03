@@ -15,7 +15,7 @@ use super::*;
 /// override is set, and no secret-shaped variable is present.
 fn isolated(home: &Path, account: &Path) -> SandboxEnv {
     SandboxEnv {
-        secret_names: Vec::new(),
+        disallowed_names: Vec::new(),
         data_dir_override: Some(home.join("data").into_os_string()),
         home: Some(home.to_path_buf()),
         account_home: Some(account.to_path_buf()),
@@ -30,53 +30,104 @@ fn two_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
     )
 }
 
-/// Why: the contract is "ends in `_TOKEN` or `_KEY`", compared without regard
-/// to case, plus the file-pointer and registry forms the daemon reads. A name
-/// that merely contains `TOKEN` or `KEY` elsewhere is not a secret.
+/// Why (#9121, Architect ruling): the allowlist is closed. A credential spelled
+/// without a `_TOKEN`/`_KEY` suffix (`GITHUB_PAT`, `DATABASE_URL`), a
+/// lower-cased allowlisted name, and an `LC_`-prefixed name that is not a
+/// locale category all refuse; every allowlisted name and locale category
+/// passes.
 /// Test: this test.
 #[test]
-fn secret_shaped_names_matches_the_contract_suffixes() {
-    let names = [
-        "TELEGRAM_BOT_TOKEN",
-        "OPENAI_API_KEY",
-        "slack_bot_token",
-        "TRUSTY_BUGREPORT_TOKEN_FILE",
-        "TRUSTY_BUGREPORT_GH_APP_KEY_FILE",
-        "CLIENT_SECRET",
-        "BITBUCKET_APP_PASSWORD",
+fn disallowed_names_admits_only_the_closed_allowlist() {
+    let allowed = [
         "HOME",
         "PATH",
+        "TRUSTY_DATA_DIR_OVERRIDE",
         "TRUSTY_MPM_ADDR",
-        "TOKENIZER_PATH",
-        "KEYBOARD_LAYOUT",
+        "TMPDIR",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_TELEPHONE",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "RUST_LOG",
+    ];
+    let refused = [
         "TELEGRAM_BOT_TOKEN",
-    ]
-    .into_iter()
-    .map(OsString::from);
+        "OPENAI_API_KEY",
+        "GITHUB_PAT",
+        "DATABASE_URL",
+        "LC_API_KEY",
+        "home",
+        "TRUSTY_BUGREPORT_TOKEN_FILE",
+        "SSH_AUTH_SOCK",
+        "TELEGRAM_BOT_TOKEN",
+    ];
+    let names = allowed.iter().chain(refused.iter()).map(OsString::from);
 
     assert_eq!(
-        secret_shaped_names(names),
+        disallowed_names(names),
         vec![
-            "BITBUCKET_APP_PASSWORD",
-            "CLIENT_SECRET",
+            "DATABASE_URL",
+            "GITHUB_PAT",
+            "LC_API_KEY",
             "OPENAI_API_KEY",
+            "SSH_AUTH_SOCK",
             "TELEGRAM_BOT_TOKEN",
-            "TRUSTY_BUGREPORT_GH_APP_KEY_FILE",
             "TRUSTY_BUGREPORT_TOKEN_FILE",
-            "slack_bot_token",
+            "home",
         ]
     );
 }
 
-/// Why (#9121): the incident daemon inherited `TELEGRAM_BOT_TOKEN`. A sandbox
-/// that sees any `*_TOKEN` or `*_KEY` must refuse, and the error must name the
-/// variables so the operator can see what leaked in.
+/// Why: a name that is not UTF-8 cannot equal an allowlist entry, and must be
+/// refused rather than skipped.
 /// Test: this test.
 #[test]
-fn a_token_or_key_env_refuses_and_names_only_the_variables() {
+fn a_non_utf8_name_is_refused() {
+    use std::os::unix::ffi::OsStringExt;
+    let name = OsString::from_vec(vec![b'K', 0xff]);
+
+    assert_eq!(disallowed_names(std::iter::once(name)).len(), 1);
+}
+
+/// Why: macOS sets `__CF_USER_TEXT_ENCODING` inside every process, so it must
+/// pass — but only in CoreFoundation's own form, or it becomes a channel past
+/// the allowlist.
+/// Test: this test.
+#[test]
+fn only_a_well_formed_cf_text_encoding_is_allowed() {
+    let cf = OsString::from("__CF_USER_TEXT_ENCODING");
+    for good in ["0x1F5:0x0:0x0", "0x0:0x0:0x0", "1F5:0:0"] {
+        assert!(is_cf_text_encoding(&cf, &OsString::from(good)), "{good}");
+    }
+    for bad in [
+        "sk-fake-9121",
+        "0x1F5:0x0",
+        "0x1F5:0x0:0x0:0x0",
+        "0xZZ:0x0:0x0",
+        "",
+    ] {
+        assert!(!is_cf_text_encoding(&cf, &OsString::from(bad)), "{bad}");
+    }
+    let other = OsString::from("CF_USER_TEXT_ENCODING");
+    assert!(!is_cf_text_encoding(
+        &other,
+        &OsString::from("0x1F5:0x0:0x0")
+    ));
+}
+
+/// Why (#9121): the incident daemon inherited `TELEGRAM_BOT_TOKEN`. A sandbox
+/// that sees any variable outside the allowlist must refuse, and the error
+/// must name the variables so the operator can see what leaked in.
+/// Test: this test.
+#[test]
+fn a_variable_outside_the_allowlist_refuses_and_names_only_the_variables() {
     let (home, account) = two_dirs();
     let mut env = isolated(home.path(), account.path());
-    env.secret_names = vec!["OPENAI_API_KEY".into(), "TELEGRAM_BOT_TOKEN".into()];
+    env.disallowed_names = vec!["OPENAI_API_KEY".into(), "TELEGRAM_BOT_TOKEN".into()];
 
     let err = enter_with(&env, || panic!("a refused sandbox must not latch"))
         .expect_err("a secret-carrying environment must refuse");
@@ -86,7 +137,13 @@ fn a_token_or_key_env_refuses_and_names_only_the_variables() {
     assert!(msg.contains("OPENAI_API_KEY"), "{msg}");
     assert!(msg.contains("values not shown"), "{msg}");
     assert!(msg.contains("#9121"), "{msg}");
-    assert!(msg.contains("scripts/sandbox_daemon.sh"), "{msg}");
+    assert!(msg.contains("outside the sandbox allowlist"), "{msg}");
+    assert!(
+        msg.contains("sandbox launcher (`env -i` + allowlist)"),
+        "{msg}"
+    );
+    // #7247: the binary ships to projects without this repo's script path.
+    assert!(!msg.contains("scripts/"), "{msg}");
 }
 
 /// Why: without the override the daemon's socket and data land in the real
@@ -181,7 +238,7 @@ fn refuses_when_home_does_not_exist() {
 #[test]
 fn every_refusal_is_reported_together() {
     let env = SandboxEnv {
-        secret_names: vec!["TELEGRAM_BOT_TOKEN".into()],
+        disallowed_names: vec!["TELEGRAM_BOT_TOKEN".into()],
         ..SandboxEnv::default()
     };
 

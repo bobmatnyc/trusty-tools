@@ -17,7 +17,7 @@
 //! Test: `doctor_credential_reach_tests.rs`.
 
 use trusty_common::credential_registry::env_var_for;
-use trusty_common::credentials::{SecretResolveError, resolve_env_var_bounded};
+use trusty_common::credentials::SecretResolveError;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -119,7 +119,12 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
 pub(crate) fn check_credential_reach() -> DoctorCheck {
     // Runs on the blocking pool — see `check_credential_reach_async`, the only
     // caller on an async path. Nothing here may be awaited.
-    check_credential_reach_with(crate::secret_source::sandboxed(), resolve_env_var_bounded)
+    // #9121: the gated resolver, so the latch holds even if this row's own
+    // sandbox check regressed.
+    check_credential_reach_with(
+        crate::secret_source::sandboxed(),
+        crate::secret_source::resolve_bounded_gated,
+    )
 }
 
 /// [`check_credential_reach`] with the sandbox state and the resolver injected.

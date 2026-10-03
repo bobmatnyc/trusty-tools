@@ -294,6 +294,13 @@ path = "tests/integration.rs"
 name = "env_serial"
 path = "tests/env_serial.rs"
 
+# #9121: sets the one-way, process-wide sandbox credential latch, so it is a
+# binary of its own — in a shared target the latch would leak into siblings.
+[[test]]
+name = "sandbox_latch_9121"
+path = "tests/sandbox_latch_9121.rs"
+required-features = ["daemon"]
+
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]

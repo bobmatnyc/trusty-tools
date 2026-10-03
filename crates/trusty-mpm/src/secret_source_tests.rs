@@ -17,6 +17,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use trusty_common::credentials::KeyStoreError;
 
+use super::test_env::EnvVarGuard;
 use super::*;
 
 /// Collected ERROR/WARN/INFO lines from one `with_default` scope.
@@ -89,54 +90,6 @@ fn assert_logged(lines: &[String], var: &str, kind: &str) {
         "expected kind={kind}: {}",
         errors[0]
     );
-}
-
-/// Removes an environment variable for a test's duration, restoring it after.
-///
-/// Why: the resolver's first tier is the process environment, so a host that
-/// happens to export the variable under test would make every arm below answer
-/// `Some` for a reason that has nothing to do with the code. Paired with
-/// `#[serial]`, which is what makes the unsafe set/remove sound.
-struct EnvVarGuard {
-    /// The variable this guard owns.
-    key: &'static str,
-    /// Its value before the guard took it, if it had one.
-    prev: Option<String>,
-}
-
-impl EnvVarGuard {
-    /// Take `key` out of the environment until the guard drops.
-    fn unset(key: &'static str) -> Self {
-        let prev = std::env::var(key).ok();
-        // SAFETY: every user of this guard is `#[serial]`, so no other thread
-        // races the remove/restore. Restored in `Drop`.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, prev }
-    }
-
-    /// Set `key` to `value` until the guard drops.
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        // SAFETY: as `unset`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: as the constructors.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
 }
 
 /// A store that answers instantly and holds nothing, counting its reads.
@@ -408,4 +361,66 @@ fn outside_sandbox_mode_the_store_is_consulted() {
         "the open gate did not return the store's value"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// Why (#9121): the classifier and the manager built their `Configurator`
+/// store with `default_store()`, past the latch. In sandbox mode the real
+/// store must not even be constructed — `default_store()` probes the Keychain.
+/// What: the real constructor panics; the gated store is empty.
+/// Test: this test.
+#[test]
+fn a_sandbox_store_never_builds_the_real_store() {
+    let store = store_gated(true, || panic!("the real store was built in sandbox mode"));
+
+    assert!(store.get("telegram").is_none());
+    assert!(store.get("openrouter").is_none());
+    assert!(store.list().is_empty(), "the sandbox store is not empty");
+}
+
+/// Why: the test above passes trivially if the gate always returned an empty
+/// store. With the gate open, the real store IS what the caller gets.
+/// Test: this test.
+#[test]
+fn outside_sandbox_mode_the_real_store_is_built() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::clone(&calls);
+
+    let store = store_gated(false, move || Box::new(HoldingStore { calls: reads }));
+
+    assert!(
+        store.get("openrouter").as_deref() == Some("from-the-store-9121"),
+        "the open gate did not hand back the real store"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// Why (#9121): the `/activity` key-presence probe read
+/// `resolve_env_var_bounded` directly, which walks `.env.local` and the
+/// Keychain. Gated, it answers `Absent`, reads no tier, and — like the probe it
+/// replaces (#8563) — logs nothing.
+/// Test: this test.
+#[test]
+fn a_sandboxed_bounded_resolve_is_absent_and_reads_nothing() {
+    let (outcome, lines) = capture(|| {
+        bounded_gated(true, "OPENROUTER_API_KEY", |_| {
+            panic!("a tier was read in sandbox mode")
+        })
+    });
+
+    assert!(
+        matches!(&outcome, Err(SecretResolveError::Absent { var }) if var == "OPENROUTER_API_KEY"),
+        "a sandboxed probe must be Absent"
+    );
+    assert!(lines.is_empty(), "the probe must not log: {lines:?}");
+}
+
+/// Test: this test.
+#[test]
+fn outside_sandbox_mode_the_bounded_resolver_runs() {
+    let outcome = bounded_gated(false, "OPENROUTER_API_KEY", |_| Ok("resolved".into()));
+
+    assert!(
+        outcome.as_deref() == Ok("resolved"),
+        "the open gate did not run the resolver"
+    );
 }

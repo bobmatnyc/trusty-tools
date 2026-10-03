@@ -13,22 +13,28 @@ use super::*;
 /// Why (#8236 item 5): the bot token now comes from the shipped resolver, whose
 /// first tier is the process environment. The hand-rolled `.env`/`.env.local`
 /// scanner this replaced is gone.
+/// What (#9121): the same resolution against an empty `MemoryKeyStore`, so a
+/// missing variable answers `None` instead of reaching the operator's real
+/// store, `#[serial]` with a restoring guard, and a redacting assertion.
 /// Test: this test.
 #[test]
+#[serial_test::serial]
 fn resolve_token_reads_the_process_environment() {
-    // SAFETY: this module's token tests are the only readers of this var.
-    unsafe {
-        std::env::set_var("TELEGRAM_BOT_TOKEN", "123:SYNTHETIC-NOT-A-TOKEN");
-    }
-    let value = resolve_token("TELEGRAM_BOT_TOKEN");
-    unsafe {
-        std::env::remove_var("TELEGRAM_BOT_TOKEN");
-    }
-    // #9121: never print the resolved value — when a racing test removes the
-    // variable, the resolver falls through to the operator's real store.
-    assert!(
-        value.as_deref() == Some("123:SYNTHETIC-NOT-A-TOKEN"),
-        "resolve_token did not return the process-environment value"
+    use crate::secret_source::test_env::{EnvVarGuard, assert_secret_eq};
+    use trusty_common::credentials::MemoryKeyStore;
+
+    let _env = EnvVarGuard::set("TELEGRAM_BOT_TOKEN", "123:SYNTHETIC-NOT-A-TOKEN");
+
+    let value = crate::secret_source::resolve_secret_with(
+        "TELEGRAM_BOT_TOKEN",
+        std::sync::Arc::new(MemoryKeyStore::new()),
+        std::time::Duration::from_millis(500),
+    );
+
+    assert_secret_eq(
+        value.as_deref(),
+        Some("123:SYNTHETIC-NOT-A-TOKEN"),
+        "the bot token did not come from the process environment",
     );
 }
 

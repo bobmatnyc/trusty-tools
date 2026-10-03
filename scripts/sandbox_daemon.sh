@@ -12,11 +12,17 @@
 # What: validates, then execs, in the foreground:
 #     env -i HOME=<dir>/home PATH=<caller's PATH> \
 #            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data TRUSTY_MPM_ADDR=127.0.0.1:<port> \
+#            [<FORWARDED names the caller has set>] \
 #            <tm> daemon --sandbox
-#   No other variable reaches the daemon. The daemon refuses on its own too:
-#   any *_TOKEN / *_KEY variable, a missing data-dir override, or HOME equal to
-#   the password-database home. The real home is read from the password
-#   database (dscl on macOS, getent elsewhere), never from $HOME.
+#   The four pinned names are always set; FORWARDED names (locale, terminal,
+#   account name, temp dir, log filter) pass through only when the caller set
+#   them. No other variable reaches the daemon. Both lists are a subset of the
+#   daemon's own closed allowlist (`ENV_ALLOWLIST` and `LOCALE_CATEGORIES` in
+#   crates/trusty-mpm/src/bin/tm/commands/daemon_sandbox.rs); keep them in step.
+#   The daemon refuses on its own too: any variable outside that allowlist, a
+#   missing data-dir override, or HOME equal to the password-database home.
+#   The real home is read from the password database (dscl on macOS, getent
+#   elsewhere), never from $HOME.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
@@ -37,8 +43,12 @@
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
-# The only variables the daemon receives. Keep in step with the exec below.
-ALLOWLIST="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR"
+# Always set by this script. Keep in step with the exec below.
+PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR"
+# Passed through from the caller only when set — never a credential.
+FORWARDED="LANG LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
+LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE \
+LOGNAME RUST_LOG SHELL TERM TMPDIR USER"
 
 die() {
   echo "sandbox_daemon: refused: $*" >&2
@@ -110,10 +120,25 @@ else
 fi
 
 ADDR="127.0.0.1:$PORT"
+
+# The FORWARDED names the caller exported, as NAME=value words for env -i.
+# `compgen -e` lists exported names only: bash itself sets SHELL and TERM as
+# plain shell variables, which the caller never passed. Values are read by
+# indirect expansion and passed straight to exec; only names are printed.
+EXPORTED=" $(compgen -e | tr '\n' ' ') "
+PASSED_NAMES="$PINNED"
+EXTRA=()
+for name in $FORWARDED; do
+  if [ "${EXPORTED#* "$name" }" != "$EXPORTED" ]; then
+    EXTRA+=("$name=${!name}")
+    PASSED_NAMES="$PASSED_NAMES $name"
+  fi
+done
+
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon address: $ADDR"
-echo "sandbox_daemon: variables passed (names only): $ALLOWLIST"
-echo "sandbox_daemon: command: env -i $ALLOWLIST $BIN daemon --sandbox"
+echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
+echo "sandbox_daemon: command: env -i $PASSED_NAMES $BIN daemon --sandbox"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "sandbox_daemon: dry run; nothing started"
@@ -121,9 +146,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
+# `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 exec env -i \
   HOME="$SANDBOX/home" \
   PATH="$PATH" \
   TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
   TRUSTY_MPM_ADDR="$ADDR" \
+  ${EXTRA[@]+"${EXTRA[@]}"} \
   "$BIN" daemon --sandbox

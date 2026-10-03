@@ -69,7 +69,8 @@ pub(crate) async fn run_daemon(
     if tailscale {
         return Err(tailscale_deprecated_error());
     }
-    // #9121: refuse an unisolated sandbox before any side effect.
+    // #9121: refuse an unisolated sandbox, and latch, before any credential
+    // read, state construction or bind.
     if sandbox {
         crate::commands::daemon_sandbox::enter()?;
     }

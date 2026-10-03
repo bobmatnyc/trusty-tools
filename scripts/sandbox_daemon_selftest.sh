@@ -8,12 +8,18 @@
 #   working one, so its allowlist and its refusals are tested before anyone
 #   relies on it.
 # What: runs the launcher against a stub `tm` that records the variable NAMES
-#   and arguments it received, from a caller environment polluted with fake
+#   and arguments it received, from a caller environment (built with `env -i`,
+#   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the four allowlisted names (plus the
-#                   names /bin/sh adds itself), and `daemon --sandbox`
+#     allowlist     the stub sees exactly the four pinned names plus the
+#                   forwarded names the caller set (LANG, RUST_LOG), never the
+#                   fake secrets or `LC_API_KEY` (plus the names /bin/sh adds
+#                   itself), and `daemon --sandbox`
 #     no-leak       no fake secret value appears in the launcher's output
 #     dry-run       prints the names, creates and starts nothing
+#     subset        with every name the daemon allows set, the launcher passes
+#                   only names on the daemon's closed allowlist
+#                   (`ENV_ALLOWLIST` + `LOCALE_CATEGORIES` in daemon_sandbox.rs)
 #     real-home     --dir naming the real home refuses (run as a dry run, so a
 #                   regression prints instead of creating anything there)
 #     symlink-home  --dir resolving to the real home through a symlink refuses
@@ -38,6 +44,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 FAKE_TOKEN="9121-selftest-fake-token-value"
 FAKE_KEY="9121-selftest-fake-key-value"
+FAKE_LC="9121-selftest-fake-lc-value"
+SANDBOX_RS="$SCRIPT_DIR/../crates/trusty-mpm/src/bin/tm/commands/daemon_sandbox.rs"
 
 pass() { echo "ok   $1"; PASSED=$((PASSED + 1)); }
 fail() { echo "FAIL $1: $2"; FAILED=$((FAILED + 1)); }
@@ -51,10 +59,31 @@ printf '%s\n' "$@" > "$HOME/stub-args"
 STUB_EOF
 chmod +x "$STUB"
 
-# The launcher, run from an environment carrying fake secrets.
+# The launcher, run from a cleared environment carrying fake secrets, two
+# forwardable names, and an `LC_`-prefixed name that is no locale category.
 run_launcher() {
-  env TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" OPENAI_API_KEY="$FAKE_KEY" \
+  env -i PATH="$PATH" LANG=C RUST_LOG=warn LC_API_KEY="$FAKE_LC" \
+    TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" OPENAI_API_KEY="$FAKE_KEY" \
     SELFTEST_SECRET_TOKEN="$FAKE_TOKEN" bash "$LAUNCHER" "$@"
+}
+
+# daemon_allowlist: the names `tm daemon --sandbox` accepts, read from the
+# two Rust constants. `DATA_DIR_OVERRIDE_ENV` is the one non-literal entry.
+daemon_allowlist() {
+  awk '/^const (ENV_ALLOWLIST|LOCALE_CATEGORIES)/ { on = 1; next }
+       on && /^\];/ { on = 0 }
+       on' "$SANDBOX_RS" \
+    | sed -e 's/DATA_DIR_OVERRIDE_ENV/"TRUSTY_DATA_DIR_OVERRIDE"/' \
+    | tr -d ' ",' | grep -E '^[A-Z_]+$' | sort -u
+}
+
+# launcher_names: every name the launcher's PINNED and FORWARDED lists carry.
+launcher_names() {
+  {
+    grep '^PINNED="' "$LAUNCHER"
+    sed -n '/^FORWARDED="/,/"$/p' "$LAUNCHER"
+  } | sed -e 's/^[A-Z]*="//' | tr -d '"\\' | tr ' ' '\n' \
+    | grep -E '^[A-Z_]+$' | sort -u
 }
 
 # real_home: the same password-database lookup the launcher uses.
@@ -80,7 +109,7 @@ elif [ ! -f "$DIR1/home/stub-env-names" ]; then
 else
   # /bin/sh exports PWD, SHLVL, OLDPWD and _ on its own; they are not inherited.
   GOT="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR1/home/stub-env-names" | tr '\n' ' ')"
-  WANT="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR "
+  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR "
   if [ "$GOT" != "$WANT" ]; then
     fail allowlist "stub saw [$GOT], want [$WANT]"
   elif [ "$(tr '\n' ' ' < "$DIR1/home/stub-args")" != "daemon --sandbox " ]; then
@@ -90,7 +119,7 @@ else
   fi
 fi
 case "$OUT1" in
-  *"$FAKE_TOKEN"*|*"$FAKE_KEY"*) fail no-leak "a fake secret value reached the output" ;;
+  *"$FAKE_TOKEN"*|*"$FAKE_KEY"*|*"$FAKE_LC"*) fail no-leak "a fake secret value reached the output" ;;
   *) pass no-leak ;;
 esac
 
@@ -105,13 +134,42 @@ if [ "$STATUS2" -ne 0 ]; then
   fail dry-run "exit $STATUS2"
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
-elif ! printf '%s' "$OUT2" | grep -qF "HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR"; then
-  fail dry-run "the allowlisted names were not printed"
+elif ! printf '%s' "$OUT2" \
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR LANG RUST_LOG"; then
+  fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in
-    *"$FAKE_TOKEN"*|*"$FAKE_KEY"*) fail dry-run "a fake secret value reached the output" ;;
+    *"$FAKE_TOKEN"*|*"$FAKE_KEY"*|*"$FAKE_LC"*) fail dry-run "a fake secret value reached the output" ;;
     *) pass dry-run ;;
   esac
+fi
+
+# subset: with every name either side lists set, the launcher passes only
+# names the daemon allows.
+ALLOWED_NAMES="$(daemon_allowlist)"
+CANDIDATES="$(printf '%s\n%s\n' "$ALLOWED_NAMES" "$(launcher_names)" | sort -u)"
+if [ "$(printf '%s\n' "$ALLOWED_NAMES" | grep -c .)" -lt 10 ]; then
+  fail subset "could not read the daemon allowlist from $SANDBOX_RS"
+else
+  ALL_SET=()
+  for name in $CANDIDATES; do ALL_SET+=("$name=selftest"); done
+  set +e
+  OUT3="$(env -i "${ALL_SET[@]}" PATH="$PATH" bash "$LAUNCHER" \
+    --bin "$STUB" --dir "$DIR2" --dry-run 2>&1)"
+  STATUS3=$?
+  set -e
+  SUBSET_PASSED="$(printf '%s\n' "$OUT3" | sed -n 's/^sandbox_daemon: variables passed (names only): //p')"
+  EXTRA_NAMES=""
+  for name in $SUBSET_PASSED; do
+    printf '%s\n' "$ALLOWED_NAMES" | grep -qx "$name" || EXTRA_NAMES="$EXTRA_NAMES $name"
+  done
+  if [ "$STATUS3" -ne 0 ] || [ -z "$SUBSET_PASSED" ]; then
+    fail subset "launcher exit $STATUS3, passed [$SUBSET_PASSED]"
+  elif [ -n "$EXTRA_NAMES" ]; then
+    fail subset "the launcher passes names the daemon refuses:$EXTRA_NAMES"
+  else
+    pass subset
+  fi
 fi
 
 # expect_refusal <name> <want-exit> <needle> <launcher args...>

@@ -92,6 +92,31 @@ fn wait_bounded(mut child: Child) -> (bool, String, String) {
     (status.success(), stdout, stderr)
 }
 
+/// Why (#9121): the allowlist is closed, so a variable the process or the OS
+/// adds on its own would make every sandbox refuse. With only allowlisted
+/// names set and the data-dir override withheld, the binary must refuse for
+/// that reason alone — proving the real process environment passes the
+/// allowlist without starting a daemon.
+/// Test: this test.
+#[test]
+fn an_allowlisted_environment_passes_the_allowlist_check() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let mut cmd = sandbox_command(home.path(), &[("LANG", "C"), ("RUST_LOG", "warn")]);
+    cmd.env_remove("TRUSTY_DATA_DIR_OVERRIDE");
+
+    let (success, _stdout, stderr) = wait_bounded(cmd.spawn().expect("spawn"));
+
+    assert!(!success, "the sandbox started without a data-dir override");
+    assert!(
+        stderr.contains("TRUSTY_DATA_DIR_OVERRIDE is not set"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("outside the sandbox allowlist"),
+        "an allowlisted environment was refused: {stderr}"
+    );
+}
+
 /// Why (#9121): the incident path, end to end. A sandbox with a bot token, an
 /// API key, or both must exit non-zero, name each variable, and print neither
 /// value. On `origin/main` the flag does not exist, so clap's error names no
@@ -102,6 +127,8 @@ fn sandbox_refuses_secret_env_and_never_prints_a_value() {
     let cases: &[&[(&str, &str)]] = &[
         &[("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)],
         &[("OPENAI_API_KEY", FAKE_KEY)],
+        // #9121: closed allowlist — a credential with no secret-shaped suffix.
+        &[("GITHUB_PAT", FAKE_KEY)],
         &[
             ("TELEGRAM_BOT_TOKEN", FAKE_TOKEN),
             ("OPENAI_API_KEY", FAKE_KEY),

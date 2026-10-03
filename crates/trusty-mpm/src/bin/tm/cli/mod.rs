@@ -737,10 +737,11 @@ pub(crate) enum Command {
         #[arg(long)]
         force: bool,
         /// Run as an isolated live-check sandbox (#9121): refuse to start when
-        /// any `*_TOKEN`/`*_KEY` variable is set, when
+        /// any variable outside a closed allowlist is set, when
         /// `TRUSTY_DATA_DIR_OVERRIDE` is unset, or when `$HOME` is the real
         /// home; never start the Telegram bot or read a credential tier.
-        /// Launch it with `scripts/sandbox_daemon.sh`.
+        /// Launch it with the project's sandbox launcher (`env -i` +
+        /// allowlist).
         #[arg(long)]
         sandbox: bool,
     },
