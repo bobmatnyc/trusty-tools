@@ -27,14 +27,18 @@ use tracing::{debug, info};
 use trusty_common::uds::server::RpcError;
 
 use crate::{
-    config::{InvocationSurface, ReviewConfig},
+    config::{InvocationSurface, ReviewConfig, repo_index::RepoIndexError},
     integrations::{
         analyze_client::AnalyzeClient, github::RunMode, health::ServingState,
         search_client::SearchClient,
     },
     llm::LlmProvider,
     models::ReviewResult,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    pipeline::{
+        DiffSource, ReviewDeps, ReviewInput, TriggerDecision,
+        pr_index::{IndexPin, resolve_pr_index},
+        run_review,
+    },
     service::inference_probe::{InferenceProbe, InferenceStatus},
     store::{DedupStore, InFlightCountGuard, InFlightRegistry},
 };
@@ -635,7 +639,8 @@ pub async fn handle_status(state: &AppState) -> StatusResponse {
 /// integrations, and scripts trigger a review on a live PR or a raw diff
 /// without spawning a CLI process.  Runs SYNCHRONOUSLY so the caller blocks
 /// until the verdict is ready (design intent: sub-10s for a normal PR).
-/// What: resolves the `DiffSource` from the request, calls `run_review`, and
+/// What: resolves the `DiffSource` from the request, resolves a GitHub PR's
+/// own trusty-search index (#8651), calls `run_review`, and
 /// returns the `ReviewResult`.  Always dry-run (push firewall remains in
 /// force).  Does NOT post to GitHub.  The `in_flight` counter is held by an
 /// RAII guard so a dropped future still releases it (#5020).
@@ -643,14 +648,18 @@ pub async fn handle_status(state: &AppState) -> StatusResponse {
 /// # Errors
 ///
 /// [`RpcError::invalid_params`] when the request names neither a GitHub PR nor
-/// a local diff, or when the local diff cannot be staged to a tempfile. #6277:
+/// a local diff, when the local diff cannot be staged to a tempfile, or when
+/// no trusty-search index belongs to the PR's repo; [`RpcError::internal`]
+/// when the index registry cannot be read and search is required. #6277:
 /// that is the same code `RpcRouter`'s own decode failure carries, so a caller
 /// sees one error shape for "this request was not usable" regardless of whether
 /// serde or this function refused it — which is what the axum `Json` extractor's
 /// 400 did for the two cases before the transport moved.
 ///
 /// Test: `review_handler_bad_request_missing_fields`,
-/// `review_handler_decrements_in_flight_when_client_disconnects`.
+/// `review_handler_decrements_in_flight_when_client_disconnects`,
+/// `review_handler_resolves_each_repo_to_its_own_index`,
+/// `review_handler_refuses_an_unresolvable_index`.
 pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<ReviewResult, RpcError> {
     debug!("review request received");
 
@@ -667,6 +676,9 @@ pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<Revie
         // `review` is a synchronous inspection operation — no dedup needed.
         dedup: None,
     };
+
+    // #8651: a GitHub PR reviews against its own repo's index.
+    let (config, deps) = review_scope(state, &diff_source, deps).await?;
 
     let input = ReviewInput {
         diff_source,
@@ -698,7 +710,7 @@ pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<Revie
     // consumer timeout) and a panic, so it lives in the guard's `Drop`, not in
     // a statement after the `await` that a cancellation never reaches.
     let _in_flight = InFlightCountGuard::enter(&state.in_flight);
-    let result = run_review(&state.config, input, deps).await;
+    let result = run_review(&config, input, deps).await;
 
     info!(
         verdict = %result.verdict,
@@ -711,6 +723,49 @@ pub async fn handle_review(state: &AppState, req: ReviewRequest) -> Result<Revie
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// The config and deps one `review` request runs under (#8651).
+///
+/// Why: `handle_review` reviewed every PR against `state.search`'s startup
+/// index, so a PR in any other repo got the wrong code context.
+/// What: a `DiffSource::Github` resolves its repo's index through
+/// [`resolve_pr_index`] on the default (`Hosted`) surface and applies it to a
+/// clone of `state.config` and to `deps`; a local diff names no repo and keeps
+/// the startup config.
+///
+/// # Errors
+///
+/// [`RpcError::internal`] for an unreadable registry while search is required;
+/// [`RpcError::invalid_params`] for an invalid repo or one with no index.
+///
+/// Test: `review_handler_resolves_each_repo_to_its_own_index`,
+/// `review_handler_refuses_an_unresolvable_index`.
+async fn review_scope(
+    state: &AppState,
+    diff_source: &DiffSource,
+    deps: ReviewDeps,
+) -> Result<(ReviewConfig, ReviewDeps), RpcError> {
+    let DiffSource::Github { owner, repo, .. } = diff_source else {
+        return Ok((state.config.clone(), deps));
+    };
+    let surface = InvocationSurface::default();
+    // #8651: unattended — the server's index is a hint, never a pin.
+    let pin = IndexPin::Prefer;
+    let index = resolve_pr_index(
+        state.search.as_ref(),
+        &state.config,
+        surface,
+        owner,
+        repo,
+        pin,
+    )
+    .await
+    .map_err(|e| match &e {
+        RepoIndexError::Registry { .. } => RpcError::internal(e.to_string()),
+        _ => RpcError::invalid_params(e.to_string()),
+    })?;
+    Ok(index.apply(&state.config, deps))
+}
 
 /// Resolve a `DiffSource` from a `ReviewRequest`.
 ///

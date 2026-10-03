@@ -145,9 +145,10 @@ required first running `trusty-search index <dir>` out of band.
   investigation (issue #2914) and reliable cleanup isn't trivially safe from
   this crate alone; diff-only-with-notice is the safe default. Ephemeral
   indexing remains a documented follow-up.)
-- An explicit `TRUSTY_SEARCH_INDEX` always wins over `--source-root` — it
-  remains the fully-explicit override; `--source-root` is the ergonomic
-  one-off path. Omitting `--source-root` entirely is a no-op: existing
+- `--source-root` wins over `TRUSTY_SEARCH_INDEX`, which can be inherited
+  from a parent process's environment (#8651). On a GitHub-PR `run`, the
+  index `--source-root` maps to is still checked against the PR's repo.
+  Omitting `--source-root` entirely is a no-op: existing
   `TRUSTY_SEARCH_INDEX`/CWD-derive behaviour is unchanged.
 
 `--context-path <glob>` (scoping which source paths are eligible as retrieved
