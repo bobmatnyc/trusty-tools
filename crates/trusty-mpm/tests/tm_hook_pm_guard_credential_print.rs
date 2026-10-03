@@ -8,9 +8,9 @@
 //! What: spawns the built `tm` against an unreachable daemon URL and asserts
 //! DENY (one JSON line carrying `permissionDecision: "deny"`) or ALLOW (empty
 //! stdout). Every command uses a fake service name and is never executed.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_credential_print`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_credential_print::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::Path;
@@ -89,6 +89,34 @@ fn pm_guard_refuses_an_agent_printing_a_credential() {
             "gcp-ops",
             "for t in $(gcloud auth print-access-token); do echo $t; done",
         ),
+        // #8677: the three reproductions, and a sibling CLI.
+        (
+            "local-ops",
+            "echo 'find-generic-password -s s -w' | security -i",
+        ),
+        (
+            "gcp-ops",
+            "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" -v",
+        ),
+        (
+            "local-ops",
+            "security find-generic-password -s fake-svc -w > /dev/./tty",
+        ),
+        ("local-ops", "gh auth token"),
+        // #8735: a printer behind a wrapper word and its options.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); timeout 5 cat \"$T\"",
+        ),
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); noglob echo \"$T\"",
+        ),
+        // #8735 round 2: a command string behind `env -S` and a wrapper.
+        (
+            "gcp-ops",
+            "T=$(gcloud auth print-access-token); timeout 5 env -S 'cat $T'",
+        ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());
         let lines: Vec<&str> = stdout.lines().collect();
@@ -124,6 +152,13 @@ fn pm_guard_denies_a_deeply_nested_expansion_without_crashing() {
 #[test]
 fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
     let cwd = tempfile::tempdir().expect("cwd");
+    // #8879: a script the command runs must exist to be judged; a missing one
+    // fails closed. This one reads no credential, so the consumer allows.
+    std::fs::write(
+        cwd.path().join("upload.py"),
+        "import sys\nprint(len(sys.argv))\n",
+    )
+    .expect("write upload.py");
     for (agent, command) in [
         (
             "local-ops",
@@ -138,6 +173,13 @@ fn pm_guard_allows_an_agent_consuming_a_credential_without_printing_it() {
         (
             "gcp-ops",
             "T=$(gcloud auth print-access-token); python3 upload.py --token \"$T\"",
+        ),
+        // #8677: the nearest benign forms of the three reproductions.
+        ("gcp-ops", "curl -v https://example.test"),
+        ("local-ops", "security -h"),
+        (
+            "gcp-ops",
+            "gcloud auth print-access-token > /tmp/fake-token",
         ),
     ] {
         let stdout = run_pm_guard(agent, command, cwd.path());

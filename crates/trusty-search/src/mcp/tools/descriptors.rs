@@ -186,7 +186,7 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "index_file",
-            "description": "Add or update one file in an index",
+            "description": "Add or update one file in an index. The reply carries `indexed` and `chunks` (#8976). A write that produced no chunks answers `indexed: false` with `reason`: `empty_file` (blank content), `too_large` (JSON above the window ceiling), or `no_chunks` (content the chunker could not split). A tombstone answers `indexed: true`, `chunks: 0`, `removed: true`.",
             "inputSchema": {
                 "type": "object",
                 "required": ["index_id", "path", "content"],

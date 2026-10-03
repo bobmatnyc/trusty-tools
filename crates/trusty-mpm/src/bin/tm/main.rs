@@ -21,6 +21,7 @@ mod generate;
 mod gh_identity;
 mod tracing_setup;
 mod types;
+mod watch_dispatch;
 
 use std::io::IsTerminal as _;
 
@@ -37,14 +38,14 @@ use commands::{
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
-    misc::{attach_cmd, coordinator, health, hook, optimizer, overseer, status, validate},
+    misc::{attach_cmd, coordinator, hook, optimizer, overseer, validate},
     project::project,
     projects::projects,
     services::services,
-    session::session,
     slack::slack,
     telegram::telegram,
 };
+use trusty_mpm::client::DaemonClient;
 
 #[cfg(test)]
 #[path = "test_support.rs"]
@@ -97,6 +98,12 @@ mod tests_behavior_d_ls_connector;
 #[cfg(test)]
 #[path = "tests_behavior_d_stop_delete_tests.rs"]
 mod tests_behavior_d_stop_delete;
+
+// #9097: the `tm f` CLI parse tests, split out when `tests_behavior_d_tests.rs`
+// crossed the 3000-SLOC test cap again.
+#[cfg(test)]
+#[path = "tests_behavior_d_f_cli_tests.rs"]
+mod tests_behavior_d_f_cli;
 
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
@@ -249,6 +256,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Config(cmd)) = cli.command {
         return cmd.run().await;
     }
+    // #8261: `tm build-lease` wraps every heavy build the hook rewrites, so it
+    // runs before any tracing, migration or gateway probe — its latency is paid
+    // by every build on the machine.
+    if let Some(Command::BuildLease(args)) = cli.command {
+        commands::build_lease::run(args).await
+    }
+    // #8436: `tm fleet` is daemon-less — no gateway probe, no migration.
+    if let Some(Command::Fleet { action }) = cli.command {
+        return commands::fleet::run(action).await;
+    }
+    // #8939: `tm env` is daemon-less too, and prints no value.
+    if let Some(Command::Env { action }) = cli.command {
+        return commands::env_file::run(action);
+    }
+    // #8378 PR-C: `tm content` is daemon-less as well.
+    if let Some(Command::Content { action }) = cli.command {
+        return commands::content::run(action).await;
+    }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
     // tmux pane routes `claude` through so it is spawned with macOS TCC
@@ -368,6 +393,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // #6288 step 1: the sandbox-reached commands run over the daemon's unix
+    // socket only, so they never reach the TCP gateway probe below.
+    if commands::socket_dispatch::takes(&cli.command) {
+        return commands::socket_dispatch::run(cli).await;
+    }
+
     // #2517: the top-level CLI client must carry the same bounded
     // connect/request timeouts `DaemonClient` uses (issue #2471/#2512) — a
     // bare `reqwest::Client::new()` here has NO timeout, so `tm status`
@@ -420,6 +451,15 @@ async fn main() -> anyhow::Result<()> {
     // `--account` is a `global = true` flag (see `cli::Cli::account`'s doc),
     // so it binds regardless of where in the invocation it appeared.
     let account = cli.account.clone();
+    // #8914: a token for `--account` is read from stdin once, before dispatch.
+    let account_token = if cli.account_token_stdin {
+        Some(commands::session_account::read_stdin_token(
+            std::io::stdin().lock(),
+        )?)
+    } else {
+        None
+    };
+    let token = account_token.as_deref();
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
@@ -427,7 +467,14 @@ async fn main() -> anyhow::Result<()> {
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
     let result = match cli.command {
         None => commands::guided::run_guided_default(&client, &url, cli.url.as_deref()).await,
-        Some(Command::Status) => status(&client, &url).await,
+        // #6288 step 1: dispatched over the socket before URL resolution.
+        Some(
+            Command::Status
+            | Command::Health
+            | Command::Doctor { .. }
+            | Command::Ticket { .. }
+            | Command::Pr { .. },
+        ) => unreachable!("socket commands are dispatched before daemon-URL resolution"),
         Some(Command::Start) => start(&client, &url).await,
         Some(Command::Serve { stdio }) => {
             if stdio {
@@ -443,7 +490,13 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Restart) => restart(&client, &url).await,
         Some(Command::Project { action }) => project(&client, &url, action).await,
         // #2116: `sessions` (plural) is the canonical top-level command.
-        Some(Command::Sessions { action }) => session(&client, &url, action).await,
+        // #8914: the global `--account` is applied, never dropped.
+        // #6288: only `tui` and `disk` still arrive here (step 2).
+        Some(Command::Sessions { action }) => {
+            let account = account.as_deref();
+            let daemon = DaemonClient::with_client(client.clone(), url.clone());
+            commands::session_account::session_as_account(&daemon, action, account, token).await
+        }
         Some(Command::Projects { action }) => projects(&client, &url, action).await,
         Some(Command::Manager { action }) => manager(&client, &url, action).await,
         // #2116: `session` (singular) is a hidden deprecated alias of `sessions`.
@@ -451,12 +504,11 @@ async fn main() -> anyhow::Result<()> {
         // which verb was invoked — before dispatching to the identical handler.
         Some(Command::Session { action }) => {
             commands::session::emit_top_level_alias_notice();
-            session(&client, &url, action).await
+            let account = account.as_deref();
+            let daemon = DaemonClient::with_client(client.clone(), url.clone());
+            commands::session_account::session_as_account(&daemon, action, account, token).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        // #6336: standalone — the battery runs in-process, so an unreachable
-        // daemon costs one check row rather than the whole report.
-        Some(Command::Doctor { flags }) => commands::doctor_local::doctor(&url, &flags).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;
@@ -466,7 +518,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
-        Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,
             interval_ms,
@@ -476,7 +527,6 @@ async fn main() -> anyhow::Result<()> {
             // #6483: multipane by default; `--single-pane` opts into the chat.
             trusty_mpm::tui::run_initial_view(resolved, interval_ms, None, single_pane).await
         }
-        Some(Command::Gui) => commands::gui::launch_gui(),
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {
@@ -520,6 +570,9 @@ async fn main() -> anyhow::Result<()> {
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
+        // #8261: normally dispatched before daemon resolution above; kept so
+        // the match stays exhaustive without a panic arm.
+        Some(Command::BuildLease(args)) => commands::build_lease::run(args).await,
         Some(Command::Daemon {
             addr,
             tailscale,
@@ -535,9 +588,17 @@ async fn main() -> anyhow::Result<()> {
             dir,
             style,
             worktree,
+            twin,
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => {
+            // #8914: `tm launch --account X` pins X on the checkout first.
+            if let Some(login) = account.as_deref() {
+                let target = commands::project::resolve_dir(dir.clone())?;
+                let daemon = DaemonClient::with_client(client.clone(), url.clone());
+                commands::session_account::pin_account_for_dir(&daemon, &target, login, token)
+                    .await?;
+            }
             let home = dirs::home_dir();
             launch(
                 &client,
@@ -547,6 +608,7 @@ async fn main() -> anyhow::Result<()> {
                 worktree,
                 LaunchDir::OperatorCwd,
                 home.as_deref(),
+                twin, // #8878: only an operator's `tm launch --twin` arms.
             )
             .await
         }
@@ -560,6 +622,10 @@ async fn main() -> anyhow::Result<()> {
         }) => attach_cmd(&client, &url, &target, json, single_pane).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
+        // #8436: dispatched before daemon resolution above; kept exhaustive.
+        Some(Command::Fleet { action }) => commands::fleet::run(action).await,
+        Some(Command::Env { action }) => commands::env_file::run(action),
+        Some(Command::Content { action }) => commands::content::run(action).await,
         Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
             // over STDIO adapter; a plain `tm sm <message>` chats as before.
@@ -585,16 +651,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
-        Some(Command::Ticket {
-            issue,
-            system,
-            notes,
-            runtime,
-        }) => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
-        // #6653: exits itself, like `tm wait` — the exit code IS the verb surface.
-        Some(Command::Pr { cmd }) => commands::pr::run(cmd, &client, &url).await,
-        Some(Command::Watch { cmd }) => dispatch_watch(&client, &url, cmd).await,
+        Some(Command::Watch { cmd }) => watch_dispatch::dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
         // The handler is async because `meta run` (#1049/#1051) launches a real
         // `claude` tmux session and `--demo` polls for it to exit. A demo
@@ -693,13 +751,15 @@ async fn main() -> anyhow::Result<()> {
         // a registry alias keeps the unchanged DOC-24 standalone behaviour. The
         // routing decision lives in `run_target` so it is unit-testable.
         Some(Command::Run { target, task, root }) => {
-            commands::run_target::run(&client, &url, &target, task, root, account).await
+            commands::run_target::run(&client, &url, &target, task, root, account, token).await
         }
         // #6441: a leading token that matched no subcommand. A repo shape runs
         // the same cold start as `tm run`; anything else is a typo and gets
         // clap's usage error back.
         Some(Command::External(ref tokens)) => {
-            commands::run_target::run_external(&client, &url, tokens, &argv, &HELP, account).await
+            let (external, argv) = (tokens.as_slice(), argv.as_slice());
+            commands::run_target::run_external(&client, &url, external, argv, &HELP, account, token)
+                .await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
@@ -741,19 +801,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Top-level exit-code translation: a `tm session prune-idle` that found the
-    // Session Manager unavailable returns `PruneError::SmUnavailable`. That is a
-    // graceful no-op, not a failure, so exit with the distinct code 75 (the
-    // pause skill branches on it) instead of anyhow's default 1. Any other error
-    // propagates normally (exit 1); `Ok` returns cleanly.
-    if let Err(err) = &result
-        && matches!(
-            err.downcast_ref::<commands::prune::PruneError>(),
-            Some(commands::prune::PruneError::SmUnavailable)
-        )
-    {
-        std::process::exit(commands::prune::EXIT_SM_UNAVAILABLE);
-    }
+    // #6288: `tm session prune-idle`'s exit-75 translation moved with it to
+    // `commands::socket_dispatch::run`.
     // #1737: the bare `tm` guided default returns `DaemonUrlError::Unreachable`
     // when an EXPLICIT `--url`/`TRUSTY_MPM_URL` fails its reachability probe
     // (see `commands::guided::run_guided_default`'s guard, which already
@@ -768,57 +817,4 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(trusty_mpm::core::exit_codes::EXIT_UNAVAILABLE);
     }
     result
-}
-
-/// Dispatch a `tm watch poll|listen` invocation to its handler.
-///
-/// Why: keeps `main`'s match arm thin by folding the flattened `WatchArgs` into
-/// the [`commands::watch`] entry points in one place, mapping the shared CLI flags
-/// onto the module's `RawWatchArgs` and the safety-gate booleans.
-/// What: builds a `RawWatchArgs` from the parsed flags and calls
-/// [`commands::watch::poll`] or [`commands::watch::listen`](mod@crate::commands::watch::listen) accordingly, threading
-/// the `--execute`/`--dry-run` safety flags and the spawn runtime through.
-/// Test: the resolution/safety logic is unit-tested in `commands::watch::tests`;
-/// CLI parsing in `tests.rs` (`cli_parses_watch_*`).
-async fn dispatch_watch(
-    client: &reqwest::Client,
-    url: &str,
-    cmd: cli::WatchCmd,
-) -> anyhow::Result<()> {
-    use cli::{WatchArgs, WatchCmd};
-    use commands::watch::args::RawWatchArgs;
-
-    fn raw(args: &WatchArgs) -> RawWatchArgs {
-        RawWatchArgs {
-            project: args.project.clone(),
-            label: args.label.clone(),
-            interval_secs: args.interval_secs,
-            state: args.state,
-        }
-    }
-
-    match cmd {
-        WatchCmd::Poll { args } => {
-            commands::watch::poll(
-                client,
-                url,
-                raw(&args),
-                args.execute,
-                args.dry_run,
-                args.runtime,
-            )
-            .await
-        }
-        WatchCmd::Listen { args } => {
-            commands::watch::listen(
-                client,
-                url,
-                raw(&args),
-                args.execute,
-                args.dry_run,
-                args.runtime,
-            )
-            .await
-        }
-    }
 }

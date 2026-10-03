@@ -177,3 +177,88 @@ async fn quantize_rejects_an_unknown_precision() {
         err.1
     );
 }
+
+/// Dispatch one `search.index.quantize` frame against the write router.
+async fn quantize_over_socket(
+    state: &Arc<SearchAppState>,
+    params: serde_json::Value,
+) -> trusty_common::uds::server::RpcResponse {
+    let rpc =
+        crate::service::rpc::writes::register(trusty_common::uds::server::RpcRouter::new(), state);
+    let frame = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": crate::service::rpc::writes::METHOD_INDEX_QUANTIZE,
+        "params": params,
+    }))
+    .expect("encode the frame");
+    rpc.dispatch(&frame).await
+}
+
+/// #6285: `search.index.quantize` is the socket twin of the HTTP route — a dry
+/// run over the socket answers the body the handler answers, and writes
+/// nothing.
+#[tokio::test]
+async fn quantize_over_the_socket_matches_the_http_body() {
+    let (state, _root, _snap, store) = seeded("q-socket").await;
+
+    let Json(http) = quantize_handler(
+        State(Arc::clone(&state)),
+        Path("q-socket".to_string()),
+        Some(Json(QuantizeRequest {
+            quant: Some("f32".to_string()),
+            dry_run: Some(true),
+        })),
+    )
+    .await
+    .expect("HTTP dry run succeeds");
+
+    let response = quantize_over_socket(
+        &state,
+        serde_json::json!({
+            "index_id": "q-socket",
+            "body": { "quant": "f32", "dry_run": true },
+        }),
+    )
+    .await;
+    assert!(response.error.is_none(), "{:?}", response.error);
+    assert_eq!(response.result, Some(http), "the two transports must agree");
+    assert_eq!(
+        store.live_quant().await.map(|q| q.label()),
+        Some("f16"),
+        "a socket dry run must not touch the live index"
+    );
+}
+
+/// #6285: the socket carries the route's refusals with their own codes — an
+/// unknown precision is `invalid_params`, an unregistered index is not found —
+/// and neither refusal converts anything.
+#[tokio::test]
+async fn quantize_refusals_over_the_socket_keep_their_codes() {
+    use crate::service::rpc::error::CODE_NOT_FOUND;
+    use trusty_common::uds::server::CODE_INVALID_PARAMS;
+
+    let (state, _root, _snap, store) = seeded("q-socket-bad").await;
+
+    let bad_quant = quantize_over_socket(
+        &state,
+        serde_json::json!({ "index_id": "q-socket-bad", "body": { "quant": "fp8" } }),
+    )
+    .await
+    .error
+    .expect("an unknown precision is refused");
+    assert_eq!(bad_quant.code, CODE_INVALID_PARAMS);
+    assert!(bad_quant.message.contains("fp8"), "{}", bad_quant.message);
+
+    let missing = quantize_over_socket(&state, serde_json::json!({ "index_id": "no-such" }))
+        .await
+        .error
+        .expect("an unregistered index is refused");
+    assert_eq!(missing.code, CODE_NOT_FOUND, "{}", missing.message);
+
+    assert_eq!(
+        store.live_quant().await.map(|q| q.label()),
+        Some("f16"),
+        "a refused call must not convert anything"
+    );
+}

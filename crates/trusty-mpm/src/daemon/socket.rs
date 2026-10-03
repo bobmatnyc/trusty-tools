@@ -74,15 +74,22 @@ fn build_router(state: &Arc<DaemonState>) -> RpcRouter {
     let router = rpc::managed::register(router, state);
     // #6288 slice 5: projects, deliverables/milestones, manager, bus, pairing,
     // delegation.
-    rpc::registry::register(router, state)
+    let router = rpc::registry::register(router, state);
+    // #6288 step 1: the routes the sandboxed `tm` CLI still reached over HTTP.
+    let router = rpc::cli_socket::register(router, state);
+    // #6288 step 2a: MCP dispatch (`POST /rpc`) and the coordinator routes.
+    let router = rpc::mcp::register(router, state);
+    rpc::coordinator::register(router, state)
 }
 
 /// Per-connection budgets for this listener.
 ///
 /// The shared defaults: a 30-second bound on delivering a REQUEST frame, and
-/// the shared control-plane frame budget. Neither bounds a handler, and this
-/// slice has no handler to bound. A later slice that moves a bulk route across
-/// raises `max_frame_bytes` here and on the client together.
+/// the shared control-plane frame budget. Neither bounds a handler.
+/// `mpm.mcp.dispatch` and `mpm.sessions.chat` run unbounded server-side on the
+/// socket, where HTTP caps them at 175 s and 125 s (`request_deadline.rs`);
+/// steps 2b/2c of #6288 close that gap. A later slice that moves a bulk route
+/// across raises `max_frame_bytes` here and on the client together.
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions::default()
 }

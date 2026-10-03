@@ -6,25 +6,28 @@
 //! exactly the moment an operator needs a diagnosis. The unit tests around the
 //! new row cannot catch a regression here, because the defect was never in a
 //! function: it was in which function the CLI called. Only the real binary,
-//! run against an address nothing listens on, proves the command completes.
-//! What: runs the built `tm` as `tm --url <dead> doctor` under a scratch HOME
-//! and cwd, then asserts the local checks printed, that daemon reachability is
-//! ONE row saying "not running", and that no output names a port.
-//! Test: `cargo test -p trusty-mpm --test tm_doctor_standalone`.
+//! run with no daemon to answer, proves the command completes.
+//! What: runs the built `tm doctor` under a scratch HOME and cwd. #6288 step 1:
+//! doctor probes the daemon's unix socket only, and the scratch HOME's data
+//! directory holds none, so the dial is refused at once. It then asserts the
+//! local checks printed, that daemon reachability is ONE row saying "not
+//! running", and that no output names a port.
+//! Test: `cargo test -p trusty-mpm --test integration tm_doctor_standalone::`.
 
-mod common;
+use crate::common;
 
-/// Run `tm doctor` against an address nothing listens on.
+/// Run `tm doctor` with no daemon socket to dial.
 ///
-/// The scratch HOME keeps the run off the operator's real framework root —
-/// `common::tm_command_in` applies it along with the rest of the #7568 scrub —
-/// and port 1 on loopback is the same never-listening address the `tm hook`
-/// fail-open suite uses, so the connect is refused rather than timing out.
+/// The scratch HOME keeps the run off the operator's real framework root and
+/// off their daemon socket — `common::tm_command_in` applies it along with the
+/// rest of the #7568 scrub, which clears `TRUSTY_MPM_SOCKET` and the data-dir
+/// overrides — so the socket path resolves under the scratch HOME, where
+/// nothing is listening.
 fn run_doctor_with_no_daemon() -> (bool, String, String) {
     let home = tempfile::tempdir().expect("scratch home");
     let cwd = tempfile::tempdir().expect("scratch cwd");
     let output = common::tm_command_in(home.path())
-        .args(["--url", "http://127.0.0.1:1", "doctor"])
+        .arg("doctor")
         .current_dir(cwd.path())
         .output()
         .expect("failed to spawn `tm doctor`");
@@ -125,8 +128,69 @@ fn tm_doctor_reports_the_absent_daemon_as_exactly_one_row() {
 fn tm_doctor_output_never_names_a_daemon_port() {
     let (ok, stdout, stderr) = run_doctor_with_no_daemon();
     assert!(ok, "`tm doctor` exited non-zero.\nstderr:\n{stderr}");
+    // #8926: the `tcp_listeners` row reports live TCP listeners by port on
+    // purpose; on a host running the tm daemon it names 7880 until #6288.
     assert!(
-        !stdout.contains("7880"),
+        !stdout
+            .lines()
+            .filter(|line| !line.contains("tcp_listeners"))
+            .any(|line| line.contains("7880")),
         "doctor output names port 7880.\nstdout:\n{stdout}"
+    );
+}
+
+/// #7757: `--dir` points the project-scoped rows at another project.
+///
+/// The cwd is a scratch directory that is NOT the target, so the target's path
+/// in the `session_scope` row can only come from `--dir`. Before the flag the
+/// arg was rejected outright.
+#[test]
+fn tm_doctor_dir_scopes_the_session_scope_row_to_that_project() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let target = tempfile::tempdir().expect("scratch target");
+    let canonical = target.path().canonicalize().expect("canonical target");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--dir"])
+        .arg(target.path())
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --dir`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("session_scope"))
+        .unwrap_or_else(|| panic!("no session_scope row.\nstdout:\n{stdout}"));
+    assert!(
+        row.contains(&canonical.display().to_string()),
+        "row is not scoped to --dir: {row}"
+    );
+}
+
+/// #7757: a nonexistent `--dir` fails closed: non-zero, an error naming the
+/// path, and no report on the cwd in its place.
+#[test]
+fn tm_doctor_dir_that_does_not_exist_fails_closed() {
+    let home = tempfile::tempdir().expect("scratch home");
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let missing = cwd.path().join("absent-project");
+    let output = common::tm_command_in(home.path())
+        .args(["doctor", "--dir"])
+        .arg(&missing)
+        .current_dir(cwd.path())
+        .output()
+        .expect("failed to spawn `tm doctor --dir`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "exited 0.\nstdout:\n{stdout}");
+    assert!(
+        stderr.contains("--dir") && stderr.contains("absent-project"),
+        "error does not name the bad path.\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("session_scope"),
+        "a report was printed anyway.\nstdout:\n{stdout}"
     );
 }

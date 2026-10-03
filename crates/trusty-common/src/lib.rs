@@ -569,7 +569,6 @@ pub mod migrations;
 /// surface (`EntityType`, `RawEntity`, `EdgeKind`, `fact_hash_str`, tables)
 /// — no tree-sitter, no `links` conflict. `symgraph-parser` additionally
 /// pulls in tree-sitter and the full parse → registry → emit stack.
-/// `symgraph-server` enables the HTTP server frontend.
 /// Test: `cargo test -p trusty-common --features symgraph` exercises the
 /// contracts surface; `cargo test -p trusty-symgraph` covers the parser
 /// path through the thin re-export shim.
@@ -719,6 +718,17 @@ pub mod host_metrics;
 #[cfg(feature = "load-average")]
 pub mod load_average;
 
+/// The host's memory pressure as the kernel reports it (#8261).
+///
+/// Why: builder admission read a free-megabytes floor over `sysinfo`'s
+/// estimate; both kernels publish the pressure verdict they act on, and that
+/// is the signal an admission decision should follow.
+/// What: [`memory_pressure::read_memory_pressure`] returns a level
+/// (normal/warn/critical), the available percentage and every raw signal read.
+/// Test: `cargo test -p trusty-common --features memory-pressure -- memory_pressure`.
+#[cfg(feature = "memory-pressure")]
+pub mod memory_pressure;
+
 /// Machine-tier detection + the proportional memory budget (#6820).
 ///
 /// Why: the suite's supported-hardware bar — 24 GB supported, 16 GB minimum,
@@ -737,6 +747,26 @@ pub mod load_average;
 /// Test: `cargo test -p trusty-common --features machine-tier --no-fail-fast`.
 #[cfg(feature = "machine-tier")]
 pub mod machine_tier;
+
+/// SHA-256 parse, hash and verify — the one integrity check (#8378).
+///
+/// Why: ADR-0064 decision 5 (i) rules that pinned-artifact verification has
+/// one implementation; trusty-installer's pinned downloads and the content
+/// resolver both call this module.
+/// What: [`integrity::Sha256Digest`] and [`integrity::IntegrityError`].
+/// Test: `cargo test -p trusty-common --features integrity -- integrity`.
+#[cfg(feature = "integrity")]
+pub mod integrity;
+
+/// Runtime resolver for instructional content (ADR-0064, #8378).
+///
+/// Why: agents, skills and instructions become runtime-only content, so every
+/// harness needs one place that picks the source and verifies the pin.
+/// What: [`content::resolve`] — a trusty-tools checkout override first, then
+/// the installed bundle pinned by `content-lock.toml` (tag + sha256).
+/// Test: `cargo test -p trusty-common --features content-resolver -- content`.
+#[cfg(feature = "content-resolver")]
+pub mod content;
 
 /// Upload trusty-* log files to object storage (#6533).
 ///

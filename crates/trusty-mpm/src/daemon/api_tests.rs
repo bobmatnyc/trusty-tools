@@ -1354,6 +1354,11 @@ async fn doctor_endpoint_returns_report() {
         "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
+        // #8453: the resolved session profile, or why it fell back to PM.
+        "session_profile",
+        // #9018: whether `[pm_guard] enabled = false` turned the guard off.
+        "pm_guard",
+        "org_accounts",
         // #7616: the instruction fold's measured saving, or INACTIVE.
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.
@@ -1400,8 +1405,12 @@ async fn doctor_endpoint_returns_report() {
         // #8482: the binary's own embedded skill assets against `origin/main` —
         // the row above reads a registry ledger, never the source tree.
         "bundled_asset_lag",
+        // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
+        "content",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #8980: an untrusted `session-claudes.json` seals the registry.
+        "session_claudes",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
         // the hook cannot write into.
         "stop_spool",
@@ -1414,6 +1423,8 @@ async fn doctor_endpoint_returns_report() {
         "launchd_process_type",
         // #8415: the observed priority of the running tmux server.
         "tmux_priority",
+        // #8926: trusty-* TCP listeners against the ADR-0032 allowlist.
+        "tcp_listeners",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",
@@ -1885,6 +1896,39 @@ async fn make_state_with_active_managed(
         fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
             Ok(self.sessions.lock().unwrap().clone())
         }
+        /// #8935: a pane id, so a teardown proves the session is the
+        /// record's own (the trait's `pane_exists` default confirms it).
+        fn get_pane_id(&self, _name: &str) -> Option<String> {
+            Some("%1".to_owned())
+        }
+        /// #9004: the pane on one server, in the one session it holds.
+        fn pane_identity(
+            &self,
+            pane_id: &str,
+        ) -> Result<
+            crate::session_manager::pane_identity::PaneIdentity,
+            crate::session_manager::ManagedError,
+        > {
+            Ok(crate::session_manager::pane_identity::PaneIdentity {
+                pane_id: pane_id.to_owned(),
+                session_id: "$0".into(),
+                server: "1:1".into(),
+                session_name: self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+        }
+        fn kill_session_id(
+            &self,
+            name: &str,
+            _: &str,
+        ) -> Result<(), crate::session_manager::ManagedError> {
+            self.kill_session(name)
+        }
     }
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2284,17 +2328,13 @@ async fn session_end_hook_clears_claude_session_id() {
 }
 
 #[tokio::test]
-async fn session_end_stales_the_dead_harness_sessions_delegations() {
-    // #6797: a harness session's subagents cannot outlive it, so its live records
-    // name agents that are gone. While they read as live, ADR-0048 decision 10 and
-    // ADR-0049 decision 3 deny a merge, a rebase, or a documents-only commit in
-    // that checkout for the six hours of RUNNING_STALE_AFTER_SECS. #6497 covers a
-    // session the tmux reaper buries; the reaper walks MANAGED sessions and skips
-    // non-tmux origins, while a delegation's `session` is the HARNESS id — so a
-    // plain `claude` run's agents were never reached, which is what this covers.
-    //
-    // No managed record is created here deliberately: that is exactly the case the
-    // reaper misses, and the disposition must not be gated on one.
+async fn an_http_session_end_leaves_the_sessions_delegations_live_8980() {
+    // #8980: an HTTP SessionEnd proves no sender, and any local process can name
+    // a session id (`GET /sessions` lists them). Before #8980 this staled the
+    // named session's live records (#6797), releasing the ADR-0048 guard on a
+    // checkout another session's agent still writes. The #6797 stale now runs
+    // only for a socket SessionEnd from the session's own claude:
+    // `the_owners_session_end_stales_its_records_8980`.
     let dir = tempfile::tempdir().expect("temp dir");
     let paths = crate::core::paths::FrameworkPaths::under(dir.path());
     let state = Arc::new(DaemonState::with_paths(&paths));
@@ -2327,23 +2367,14 @@ async fn session_end_stales_the_dead_harness_sessions_delegations() {
         .await
         .expect("ingest_hook(SessionEnd) must succeed");
 
-    assert!(
-        state
-            .live_shared_tree_writers(std::path::Path::new("/repo"), None)
-            .is_empty(),
-        "the ended session's agents must stop counting as live writers (#6797)"
-    );
-    // Stale, never Completed: tracking gave up; the agent is not reported as
-    // having finished, and the record stays resolvable by a late SubagentStop.
-    let records = state.delegations_for(session);
-    assert_eq!(records.len(), 1, "the record is staled, never evicted");
     assert_eq!(
-        records[0].status,
-        crate::core::agent::DelegationStatus::Stale
+        state.live_shared_tree_writers(std::path::Path::new("/repo"), None),
+        vec!["rust-engineer".to_string()],
+        "an unproven SessionEnd must leave the session's agents live writers (#8980)"
     );
-    assert!(
-        records[0].ended_at.is_none(),
-        "a staled record must not be stamped with a terminal end time"
+    assert_eq!(
+        state.delegations_for(session)[0].status,
+        crate::core::agent::DelegationStatus::Running
     );
 }
 
@@ -2637,4 +2668,115 @@ fn session_end_pane_still_live_false_when_all_of_multiple_panes_idle() {
         !session_end_pane_still_live("tmpm-split", &panes, &AlwaysIdleProbe),
         "a session whose every pane is idle must not be classified as still-live"
     );
+}
+
+/// #8476: a route whose handler stalls answers `504` at the daemon's own
+/// deadline instead of holding the connection until the caller gives up.
+///
+/// What: registers a control-plane session and holds its metadata write lock,
+/// so `GET /api/v1/control/sessions` blocks on the read inside the handler.
+/// Time is paused, so the deadline elapses at once. Before #8476 the request
+/// never completed and the outer one-hour guard fired instead.
+#[tokio::test(start_paused = true)]
+async fn stalled_route_answers_504_at_the_server_deadline() {
+    use crate::control::actor::SessionActorHandle;
+    use crate::control::event::BackendKind;
+    use crate::control::id::ControlSessionId;
+    use crate::control::state::SessionMetadata;
+    use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let (state, _dir) = hermetic_shared();
+    let id = ControlSessionId::new("deadline-proj", 0);
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let metadata = Arc::new(tokio::sync::RwLock::new(SessionMetadata::new(
+        id.clone(),
+        "deadline-proj".into(),
+        BackendKind::StreamJson,
+    )));
+    let handle = SessionActorHandle {
+        command_tx,
+        event_tx,
+        write_lock_held: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        metadata: Arc::clone(&metadata),
+    };
+    state.session_registry.register(id, handle).await;
+    let _stall = metadata.write().await;
+
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let app = router(Arc::clone(&state)).layer(MockConnectInfo(loopback));
+    let started = tokio::time::Instant::now();
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        app.oneshot(
+            Request::builder()
+                .uri("/api/v1/control/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("the daemon must answer a stalled request itself, not leave it open for an hour")
+    .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the deadline must fire before trusty-console's 30 s proxy bound; took {:?}",
+        started.elapsed()
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["route"], "/api/v1/control/sessions");
+}
+
+/// #8476: the deadline bounds the handler, never a streamed body — an SSE
+/// stream still delivers an event long after the deadline has passed.
+#[tokio::test(start_paused = true)]
+async fn sse_stream_outlives_the_request_deadline() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let (state, id) = state_with_session();
+    let request = Request::builder().uri("/events").body(Body::empty());
+    let response = router(Arc::clone(&state))
+        .oneshot(request.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Well past every standard-class deadline.
+    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+    state
+        .clone()
+        .push_hook_event(crate::core::hook::HookEventRecord::now(
+            id,
+            HookEvent::PostToolUse,
+            serde_json::json!({"tool": "Edit"}),
+        ));
+
+    let mut body = response.into_body();
+    let text = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = body.frame().await.expect("stream still open")?;
+            if let Ok(data) = frame.into_data() {
+                let text = String::from_utf8_lossy(&data).into_owned();
+                // Keep-alive comments arrive too; wait for the event itself.
+                if text.contains("data:") {
+                    return Ok::<_, axum::Error>(text);
+                }
+            }
+        }
+    })
+    .await
+    .expect("the SSE event arrived after the deadline")
+    .expect("frame read ok");
+    assert!(text.contains("PostToolUse"), "unexpected frame: {text:?}");
 }

@@ -289,6 +289,7 @@ universal = [
   "tm",
   "tm-adr",
   "tm-agent-architecture",
+  "tm-architect-setup",
   "tm-bug-reporting",
   "tm-capabilities",
   "tm-circuit-breaker",

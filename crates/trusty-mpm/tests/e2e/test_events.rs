@@ -7,7 +7,7 @@
 //! does not require the session to exist — so the "invalid session" rejection
 //! case below uses a malformed id, which is the contract the daemon enforces.
 
-use crate::harness::TestDaemon;
+use super::harness::TestDaemon;
 use serde_json::{Value, json};
 
 /// A fresh daemon has an empty event feed.

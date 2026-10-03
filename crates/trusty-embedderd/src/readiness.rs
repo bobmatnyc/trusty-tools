@@ -20,26 +20,23 @@
 //! `trusty_common::memory_core::timeouts::embedder_init_timeout` for the
 //! memory-core embedder singleton, so operators only need to learn one knob).
 //! `run_bounded` races an arbitrary init future against that timeout via
-//! `tokio::time::timeout`; on expiry it returns a descriptive `anyhow::Error`
-//! (issue #1633 + remediation steps) instead of hanging forever, so the
-//! caller can `bail!` out of `run_with_args` and the process exits loudly
-//! with a nonzero code and an actionable stderr message. A fast `Err` from
-//! the wrapped future is propagated unchanged (never mistaken for a timeout).
+//! `tokio::time::timeout`; on expiry it prints a descriptive error (issue
+//! #1633 + remediation steps) and exits the process with status 1. A fast
+//! `Err` from the wrapped future is propagated unchanged (never mistaken for
+//! a timeout).
 //!
-//! Note: on timeout the still-blocked OS thread inside `spawn_blocking`
-//! (`FastEmbedder::with_cache_size` runs the ORT init on a blocking-pool
-//! thread) is abandoned, exactly like the existing CoreML-hang bound in
-//! `trusty_common::embedder::fast_embedder::try_new_bounded` (issue #2111).
-//! This is acceptable here because the *process itself* exits immediately
-//! after — there is no long-lived caller left to leak threads under repeated
-//! retries.
+//! #8616: the timeout arm exits instead of returning. On timeout the
+//! still-blocked OS thread inside `spawn_blocking` (`FastEmbedder::with_cache_size`
+//! runs the ORT init on a blocking-pool thread) cannot be cancelled, and a
+//! tokio runtime's drop waits for its blocking threads — so a returned error
+//! left the shim's `#[tokio::main]` process alive forever.
 //!
 //! Test: `model_init_timeout_default`, `model_init_timeout_reads_env`,
 //! `model_init_timeout_ignores_malformed`, `run_bounded_returns_ok_when_fast`,
-//! `run_bounded_propagates_fast_error`, `run_bounded_times_out_when_slow` (all
+//! `run_bounded_propagates_fast_error`, `hung_init_error_names_issue_and_knob`,
+//! and `run_bounded_timeout_ends_process_despite_stuck_blocking_thread` (all
 //! below) — exercise the timeout resolver and the race mechanics against
-//! synthetic futures (`tokio::time::sleep`), with no ONNX/ORT runtime
-//! involved. The real `FastEmbedder::new()` call site is covered indirectly
+//! synthetic futures, with no ONNX/ORT runtime involved. The real `FastEmbedder::new()` call site is covered indirectly
 //! by the `embedder_supervisor_e2e` integration tests in `trusty-search`.
 
 use std::future::Future;
@@ -77,23 +74,22 @@ pub(crate) fn model_init_timeout() -> Duration {
 }
 
 /// Race `fut` against `timeout`, turning an unbounded hang into a loud,
-/// actionable error instead of blocking the caller forever.
+/// actionable failure instead of blocking the caller forever.
 ///
 /// Why: `TextEmbedding::try_new` (inside `FastEmbedder::new()`) offers no
 /// cancellation hook and can deadlock the underlying OS thread indefinitely
-/// on AL2023/glibc-2.34 hosts (issue #1633). Without a bound, `run_with_args`
+/// on AL2023/glibc-2.34 hosts (issue #1633), or inside `ort::api()` after a
+/// failed load-dynamic load (#8616). Without a bound, `run_with_args`
 /// would await it forever, reporting nothing to logs or `/health` — a silent
 /// false-negative that looks identical to "still starting up."
 /// What: on success returns `Ok(value)`. A fast `Err` from `fut` is
 /// propagated unchanged (annotated with `op_name` context) — that is a real
-/// failure, not a hang, and must not be reworded as a timeout. On timeout
-/// returns a descriptive `anyhow::Error` naming issue #1633, the known
-/// AL2023/glibc trigger, and two remediations: raise
-/// `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` if the host is just slow, or rebuild
-/// with `--features embedder-load-dynamic` + `ORT_DYLIB_PATH` if the host is
-/// on AL2023 / glibc < 2.38.
+/// failure, not a hang, and must not be reworded as a timeout. On timeout it
+/// never returns: it prints [`hung_init_error`] to stderr and exits the
+/// process with status 1 (#8616 — see [`exit_hung`]).
 /// Test: `run_bounded_returns_ok_when_fast`,
-/// `run_bounded_propagates_fast_error`, `run_bounded_times_out_when_slow`.
+/// `run_bounded_propagates_fast_error`,
+/// `run_bounded_timeout_ends_process_despite_stuck_blocking_thread`.
 pub(crate) async fn run_bounded<F, T>(op_name: &str, timeout: Duration, fut: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
@@ -101,36 +97,54 @@ where
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(e).with_context(|| format!("{op_name} failed")),
-        Err(_) => Err(anyhow::anyhow!(
-            "{op_name} did not complete within {timeout:?} (issue #1633) — presumed hung. \
-             Known trigger: ONNX Runtime CPU(no-arena) execution-provider init deadlocks on \
-             Amazon Linux 2023 / glibc 2.34 hosts because the default `embedder-bundled-ort` \
-             feature links a statically-bundled ONNX Runtime built assuming glibc >= 2.38. \
-             Remediation: (1) if this host legitimately needs more time, raise \
-             TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS above {timeout:?}; (2) on AL2023 / older-glibc \
-             hosts, reinstall with `--no-default-features --features \
-             daemon,embedder-load-dynamic` and set ORT_DYLIB_PATH to a host-compatible \
-             libonnxruntime.so (e.g. an Ubuntu 20.04 / glibc 2.31 build) instead of the \
-             bundled static ORT — or use the prebuilt `x86_64-linux-al2023` release asset, \
-             which already ships that configuration.",
-        )),
+        Err(_) => exit_hung(&hung_init_error(op_name, timeout)),
     }
+}
+
+/// Print `err` to stderr and end the process with status 1.
+///
+/// Why (#8616): a timed-out init leaves its `spawn_blocking` thread stuck, and
+/// dropping a tokio runtime waits for every blocking thread. Returning the
+/// error to the shim's `#[tokio::main]` therefore never ended the process.
+/// `std::process::exit` does not wait for other threads.
+/// What: writes `Error: {err:#}` (the same shape a `main` returning `Err`
+/// prints) and calls `std::process::exit(1)`.
+/// Test: `run_bounded_timeout_ends_process_despite_stuck_blocking_thread`.
+fn exit_hung(err: &anyhow::Error) -> ! {
+    tracing::error!("{err:#}");
+    eprintln!("Error: {err:#}");
+    std::process::exit(1)
+}
+
+/// The operator-facing error for an init that outlived its bound.
+///
+/// Why: an operator needs the issue, the likely trigger, and the knob.
+/// What: names issue #1633, the AL2023/glibc trigger, the #8616 load-dynamic
+/// trigger, and the remediations: raise `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`
+/// if the host is just slow, or rebuild with load-dynamic + `ORT_DYLIB_PATH`
+/// on AL2023 / glibc < 2.38.
+/// Test: `hung_init_error_names_issue_and_knob`.
+fn hung_init_error(op_name: &str, timeout: Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{op_name} did not complete within {timeout:?} (issue #1633) — presumed hung. \
+         Known triggers: (a) ONNX Runtime CPU(no-arena) execution-provider init deadlocks on \
+         Amazon Linux 2023 / glibc 2.34 hosts because the default `bundled-ort` feature \
+         links a statically-bundled ONNX Runtime built assuming glibc >= 2.38; (b) on a \
+         load-dynamic build, an ONNX Runtime at ORT_DYLIB_PATH that loads but then stalls \
+         (#8616). Remediation: (1) if this host legitimately needs more time, raise \
+         TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS above {timeout:?}; (2) on AL2023 / older-glibc \
+         hosts, reinstall with `--no-default-features --features load-dynamic` and set \
+         ORT_DYLIB_PATH to a host-compatible libonnxruntime.so 1.24.x instead of the \
+         bundled static ORT — or use the prebuilt `x86_64-linux-al2023` release asset, \
+         which already ships that configuration.",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Process-global lock guarding every test that mutates
-    /// `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` — env vars are process-global and
-    /// tests run in parallel by default.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        ENV_MUTEX
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .expect("env_lock mutex poisoned")
-    }
+    use crate::test_env::env_lock;
 
     /// Why: guard that the default is 180 s when the env var is absent.
     /// What: clears the var, asserts the default is returned.
@@ -212,22 +226,20 @@ mod tests {
         assert!(format!("{err:#}").contains("boom"));
     }
 
-    /// Why: the core fix for issue #1633 — a hung future must fail loudly
-    /// within the bound instead of hanging forever, and the error must name
-    /// the issue and remediation so an operator isn't left guessing.
-    /// What: races a future that never resolves within the test's lifetime
-    /// (a long sleep) against a short timeout; asserts the timeout fires and
-    /// the message is actionable.
+    /// Why: the timeout error must name the issue and remediation so an
+    /// operator isn't left guessing (#1633).
+    /// What: builds the error `run_bounded` prints on timeout and checks it.
+    /// The timeout arm itself ends the process (#8616), so it is exercised
+    /// in a child process by
+    /// `run_bounded_timeout_ends_process_despite_stuck_blocking_thread`.
     /// Test: itself.
-    #[tokio::test]
-    async fn run_bounded_times_out_when_slow() {
-        let result = run_bounded("test-op", Duration::from_millis(50), async {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await;
-        let err = result.unwrap_err();
-        let msg = err.to_string();
+    #[test]
+    fn hung_init_error_names_issue_and_knob() {
+        let msg = hung_init_error("test-op", Duration::from_millis(50)).to_string();
+        assert!(
+            msg.contains("test-op did not complete within 50ms"),
+            "error must name the op and the bound: {msg}"
+        );
         assert!(
             msg.contains("1633"),
             "error must reference issue #1633: {msg}"
@@ -235,6 +247,80 @@ mod tests {
         assert!(
             msg.contains("TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS"),
             "error must name the override knob: {msg}"
+        );
+    }
+
+    /// Marks the re-executed child of
+    /// `run_bounded_timeout_ends_process_despite_stuck_blocking_thread`.
+    const STUCK_CHILD_ENV: &str = "TRUSTY_EMBEDDERD_8616_STUCK_CHILD";
+
+    /// Why (#8616): a timed-out init leaves its `spawn_blocking` thread stuck
+    /// (in `ort::api()` on a failed load-dynamic load). Dropping a tokio
+    /// runtime waits for its blocking threads, so returning the timeout error
+    /// to a `#[tokio::main]` caller kept the process alive forever.
+    /// What: re-executes this test binary as a child that mirrors the shim's
+    /// `#[tokio::main]`: it builds a runtime, runs `run_bounded` over a
+    /// blocking task that never returns, then drops the runtime. The parent
+    /// waits at most `BOUND` and asserts the child ended by itself, non-zero,
+    /// with the timeout error on stderr.
+    /// Test: itself.
+    #[test]
+    fn run_bounded_timeout_ends_process_despite_stuck_blocking_thread() {
+        if std::env::var_os(STUCK_CHILD_ENV).is_some() {
+            let rt = tokio::runtime::Runtime::new().expect("child runtime");
+            let result = rt.block_on(run_bounded("stuck-op", Duration::from_millis(200), async {
+                tokio::task::spawn_blocking(|| loop {
+                    std::thread::park();
+                })
+                .await?;
+                Ok::<_, anyhow::Error>(())
+            }));
+            eprintln!("child: run_bounded returned {result:?}; dropping runtime");
+            drop(rt);
+            eprintln!("child: runtime dropped");
+            return;
+        }
+
+        const BOUND: Duration = Duration::from_secs(30);
+        let stderr_file = tempfile::NamedTempFile::new().expect("stderr capture file");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "readiness::tests::run_bounded_timeout_ends_process_despite_stuck_blocking_thread",
+                "--nocapture",
+            ])
+            .env(STUCK_CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(stderr_file.reopen().expect("reopen stderr capture"))
+            .spawn()
+            .expect("spawn child test process");
+
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                break Some(status);
+            }
+            if started.elapsed() > BOUND {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let stderr = std::fs::read_to_string(stderr_file.path()).unwrap_or_default();
+        let status = status.unwrap_or_else(|| {
+            panic!(
+                "child still alive after {BOUND:?}: a stuck blocking thread kept the process \
+                 alive past run_bounded's timeout (#8616). child stderr:\n{stderr}"
+            )
+        });
+        assert!(
+            !status.success(),
+            "a timed-out init must end the process non-zero, got {status}; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("did not complete within"),
+            "the timeout error must reach stderr before exit; stderr:\n{stderr}"
         );
     }
 }

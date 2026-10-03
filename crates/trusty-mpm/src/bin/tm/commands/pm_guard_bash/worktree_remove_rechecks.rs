@@ -118,6 +118,18 @@
 //! request's head and `origin`; otherwise [`residue_deny`]'s `content_on_base`
 //! decides, and only `Landed` admits.
 //!
+//! **A detached HEAD reaches the landed-content admission too (#8721).** The
+//! #7889 admission judges HEAD's content and needs no branch, but only the
+//! branch route led to it, so a detached tree byte-identical to `origin/main`
+//! was refused. [`detached_head_verdict`] now asks it once the commit search
+//! answered with no match. An unresolvable HEAD or an unanswered search still
+//! denies without asking.
+//!
+//! **A HEAD behind the merged pull request's head is inside what merged
+//! (#8849).** Short of an exact head match, `worktree_remove_ancestry` grants
+//! when HEAD is an ancestor of that head and the merge commit is on the
+//! refreshed base; otherwise its reason rides on [`residue_deny`]'s refusal.
+//!
 //! Test: `allows_worktree_remove_from_version_control_on_clean_merged_unowned_tree`,
 //! `denies_worktree_remove_from_version_control_when_tree_dirty`,
 //! `denies_worktree_remove_from_version_control_when_commits_are_unpushed`,
@@ -158,11 +170,15 @@
 //! in `super::worktree_remove`; `worktree_8665_the_merged_head_itself_is_still_reclaimable`,
 //! `worktree_8665_a_commit_after_the_merged_head_denies_and_names_it`,
 //! `worktree_8665_a_post_merge_commit_whose_content_landed_is_reclaimable`,
-//! `worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit` in
+//! `worktree_8665_a_merged_head_git_does_not_have_denies_a_post_merge_commit`,
+//! `worktree_8721_a_detached_head_whose_tree_is_on_origin_main_is_reclaimable`,
+//! `worktree_8721_a_detached_head_holding_residue_still_denies`,
+//! `worktree_8721_an_unanswerable_commit_search_never_reaches_the_admission` in
 //! `worktree_remove_rechecks_tests`.
 
 use std::path::Path;
 
+use super::worktree_remove_ancestry::{MergedHead, head_inside_merged_pr};
 use trusty_mpm::core::worktree_landed_history::ContentOnBase;
 use trusty_mpm::core::worktree_removal_facts::{
     MergedPrLookup, UpstreamComparison, WorktreeRemovalProbe,
@@ -376,7 +392,9 @@ fn landing_rechecks(
         // #7832: a detached checkout has no name to search GitHub by, which is
         // not the same as having no landing evidence. Ask by COMMIT before
         // giving up on it.
-        Err(e) => return detached_head_verdict(target, probe, &e, &local_only_note),
+        Err(e) => {
+            return detached_head_verdict(target, probe, &e, &local_only_note, local_only.is_ok());
+        }
     };
     // #7232: when there is no upstream, a MERGED pull request is the ONLY
     // evidence the tree's commits reached the remote, so the deny says so
@@ -424,6 +442,19 @@ fn landing_rechecks(
     if landed.is_own && head_is_the_merged_pr_head(target, &landed, probe) {
         return None;
     }
+    // #8849: a HEAD BEHIND that head — the earlier round of a branch whose last
+    // commits landed on `-rN` — is inside what merged, once the merge commit is
+    // proven on the refreshed base. Own or round-sibling alike: the proof is
+    // ancestry, and the name only found the pull request.
+    let merged = MergedHead {
+        pr_head: &landed.head_sha,
+        merge_commit: &landed.merge_commit,
+        base_ref: &landed.base_ref,
+    };
+    let ancestry_note = match head_inside_merged_pr(target, &merged, local_only.is_ok(), probe) {
+        Ok(()) => return None,
+        Err(note) => note,
+    };
     let ahead = matches!(upstream, UpstreamComparison::Ahead(n) if n > 0);
     // #8665: "own PR merged, not ahead" is no longer a grant on its own. The
     // merge deleted the remote branch, so a commit made here AFTER it is on no
@@ -438,6 +469,7 @@ fn landing_rechecks(
         after_merge = Some(after);
     }
     residue_deny(target, &branch, &landed, upstream, after_merge, probe)
+        .map(|deny| format!("{deny}{ancestry_note}"))
 }
 
 /// Commits on HEAD that the merged pull request did not carry and no `origin`
@@ -552,17 +584,24 @@ fn head_is_the_merged_pr_head(
 /// answered with no such pull request, and a pull request whose head is some
 /// other commit. `branch_error` is git's own words for why there is no branch,
 /// quoted so a deny on a NON-detached failure (a corrupt HEAD, an unreadable
-/// repository) still says what git said.
+/// repository) still says what git said. #8721: a search that ANSWERED
+/// without a match goes on to [`landed_content_admission`], as the branch
+/// route's `NoMergedPr` does; `refs_fresh` is passed through to it.
 /// Test: `a_detached_head_that_is_a_merged_prs_own_head_is_reclaimable`,
 /// `a_detached_head_no_merged_pr_carries_still_denies`,
 /// `a_detached_head_matched_to_a_pull_request_with_another_head_denies`,
 /// `an_unanswerable_commit_search_denies_a_detached_head`,
-/// `an_unresolvable_head_sha_denies_a_detached_head`.
+/// `an_unresolvable_head_sha_denies_a_detached_head`,
+/// `worktree_8721_a_detached_head_whose_tree_is_on_origin_main_is_reclaimable`,
+/// `worktree_8721_a_detached_head_holding_residue_still_denies`,
+/// `worktree_8721_an_unrefreshable_origin_never_admits_a_detached_head`,
+/// `worktree_8721_an_unanswerable_commit_search_never_reaches_the_admission`.
 fn detached_head_verdict(
     target: &Path,
     probe: &dyn WorktreeRemovalProbe,
     branch_error: &str,
     local_only_note: &str,
+    refs_fresh: bool,
 ) -> Option<String> {
     let head = match probe.head_sha(target) {
         Ok(head) => head,
@@ -611,7 +650,7 @@ fn detached_head_verdict(
              a descendant of it, is not evidence that THIS tree's content landed."
         ),
     };
-    Some(recheck_deny(
+    let deny = recheck_deny(
         CHECK_MERGED_PULL_REQUEST,
         target,
         &format!(
@@ -621,7 +660,12 @@ fn detached_head_verdict(
              back as below.{local_only_note}",
             repo = found.repo
         ),
-    ))
+    );
+    // #8721: GitHub ANSWERED, and no pull request names this commit. The
+    // landed-content admission judges HEAD's content, not a branch, so a
+    // detached tree whose content is on the landing base is admitted here as
+    // a branch-named one is after `LandingFailure::NoMergedPr`.
+    landed_content_admission(target, probe, deny, refs_fresh)
 }
 
 /// Say why the #7914 admission did not apply, for the deny that follows it.
@@ -676,8 +720,9 @@ enum LandingFailure {
 /// under that name can never acquire a pull request of its own, so the
 /// merged-PR refusal is permanent for a tree that holds nothing. Owner ruling
 /// 2026-09-22 admits it on (b) landed content or (c) merged-PR ancestry.
-/// Reached ONLY after `clean-tree`, `sole-owner` and the branch lookup have
-/// passed, and only for a genuine `version-control` dispatch —
+/// Reached ONLY after `clean-tree`, `sole-owner` and a pull-request lookup
+/// that answered — by branch, or by commit for a detached HEAD (#8721) — and
+/// only for a genuine `version-control` dispatch —
 /// [`super::worktree_remove`] settles the identity and scope halves before this
 /// module runs at all.
 /// What: `None` grants when [`WorktreeRemovalProbe::landing_admission`] admits
@@ -790,6 +835,9 @@ struct Landed {
     /// when GitHub named none, which never grants — see
     /// [`head_is_the_merged_pr_head`].
     head_sha: String,
+    /// That pull request's merge commit (#8849). Empty when GitHub named none,
+    /// which never grants on the ancestry route.
+    merge_commit: String,
 }
 
 /// Read the confirmed pull request's base, or deny when it carries none.
@@ -827,6 +875,8 @@ fn base_of(
         // #7958: carried, never required — a row without one simply cannot
         // grant on the head-sha route.
         head_sha: lookup.head_sha.trim().to_string(),
+        // #8849: likewise for the ancestry route.
+        merge_commit: lookup.merge_commit.trim().to_string(),
     })
 }
 

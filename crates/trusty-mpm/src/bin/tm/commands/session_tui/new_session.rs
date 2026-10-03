@@ -859,8 +859,7 @@ pub(crate) async fn perform(
         request,
         |project: NewProject| async move {
             crate::commands::projects::registry::register(
-                client,
-                url,
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                 // #8587: every optional field unset, as before.
                 RegisterInput::new(project.name, project.repo_url),
             )
@@ -868,8 +867,7 @@ pub(crate) async fn perform(
         },
         |repo: String, name_hint: Option<String>| async move {
             crate::commands::guided_launch::launch_new_session_and_attach(
-                client,
-                url,
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
                 &repo,
                 name_hint.as_deref(),
                 LaunchIsolation::default(),

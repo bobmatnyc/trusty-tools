@@ -13,6 +13,7 @@ use super::*;
 use crate::core::agent::{DelegationStatus, ModelTier};
 use crate::core::session::{ControlModel, Session};
 use crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid;
+use crate::daemon::services::delegation_repair_caller::{RepairPeer, establish_caller};
 use crate::daemon::state::DaemonState;
 
 /// A daemon holding one session in `status`, or holding none at all.
@@ -710,11 +711,11 @@ fn an_owner_refusal_never_names_the_owner_uuid_8257() {
     state.upsert_delegation(typed.clone());
     let label = crate::daemon::services::delegation_records::owner_label(&state, owner);
     assert!(label.starts_with("session `tm-"), "{label}");
+    // #8531: every unestablished shape the transports now produce.
     let callers = [
         no_caller(),
-        RepairCaller::from_request(None),
-        RepairCaller::from_request(Some("not-a-uuid")),
-        RepairCaller::from_request(Some(&label)),
+        establish_caller(&state, RepairPeer::http(), |_| true),
+        establish_caller(&state, RepairPeer::from_socket(None), |_| true),
         RepairCaller::Session(SessionId::new()),
     ];
 
@@ -770,12 +771,13 @@ fn an_owner_refusal_logs_the_owner_uuid_8257() {
 #[test]
 fn an_unestablished_caller_is_refused_on_a_live_record_8257() {
     let (state, _owner) = live_owned("a-anon");
-    for (raw, want) in [
-        (None, "CLAUDE_CODE_SESSION_ID"),
-        (Some("not-a-uuid"), "is not a session id"),
+    // #8531: HTTP and a socket peer the kernel did not name both refuse.
+    for (peer, want) in [
+        (RepairPeer::http(), "over HTTP"),
+        (RepairPeer::from_socket(None), "from the kernel"),
     ] {
-        let outcome =
-            repair_delegation_as(&state, "a-anon", true, &RepairCaller::from_request(raw));
+        let caller = establish_caller(&state, peer, |_| true);
+        let outcome = repair_delegation_as(&state, "a-anon", true, &caller);
         match outcome {
             RepairOutcome::Refused { reason } => {
                 assert!(reason.contains("could not be established"), "{reason}");

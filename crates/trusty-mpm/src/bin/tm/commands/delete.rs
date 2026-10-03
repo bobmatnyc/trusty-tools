@@ -47,22 +47,21 @@
 /// `picker_and_verb_route_each_state_identically` in
 /// `tests_behavior_d_stop_delete_tests.rs`.
 pub(crate) async fn session_delete(
-    client: &reqwest::Client,
-    url: &str,
+    daemon: &trusty_mpm::client::DaemonClient,
     id: String,
     force: bool,
 ) -> anyhow::Result<()> {
     use super::picker_delete::DeleteReport;
     // #7388: learn the state before routing — without it every delete took the
     // plain branch and an errored session bounced off the daemon's 409.
-    let state = super::picker_delete::managed_state_for_delete(client, url, &id).await?;
-    match super::picker_delete::route_delete_for_state(client, url, &id, state.as_deref(), force)
-        .await?
+    let state = super::picker_delete::managed_state_for_delete(daemon, &id).await?;
+    match super::picker_delete::route_delete_for_state(daemon, &id, state.as_deref(), force).await?
     {
         DeleteReport::Deleted {
             name,
             prior_state,
             local,
+            note,
         } => {
             if local {
                 // The legacy project-session store has no `--deleted--` state; a
@@ -75,6 +74,10 @@ pub(crate) async fn session_delete(
                     "deleted {id} ({name}) [was {prior_state}] — marked --deleted-- \
                      (still listed; `tm sessions prune --state deleted` to remove)"
                 );
+            }
+            // #8935: delete is record-only; a live session with the name stays.
+            if let Some(note) = note {
+                println!("record only: {note}");
             }
             Ok(())
         }

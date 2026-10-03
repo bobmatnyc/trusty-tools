@@ -591,7 +591,7 @@ this table is generated from it, not maintained by hand.
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
 | `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
-| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
+| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
 | `index_status` | `index_id?` | Get stats for an index (chunk count, root path). |
 | `list_chunks` | `index_id`, `after?`, `full?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?` | Paginated enumeration of every chunk in an index (issue #54). |
 | `list_indexes` | — | List all registered indexes on this daemon |

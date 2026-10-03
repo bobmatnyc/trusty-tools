@@ -285,7 +285,9 @@ impl SessionManager {
         // available immediately, unlike a fresh spawn. Also doubles (#3692) as
         // the signal that tells a same-name collision below apart from a
         // recycled one.
-        let pane_id = self.tmux_driver().get_pane_id(tmux_name);
+        // #9004: with the server it was read on, or the record never owns it.
+        let (pane_id, tmux_server) =
+            super::pane_identity::capture(self.tmux_driver().as_ref(), tmux_name);
 
         // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
         // `list_sessions` is a blocking tmux subprocess and must never run
@@ -323,10 +325,12 @@ impl SessionManager {
             last_cwd: None,
             deliverable_id: None,
             pane_id: pane_id.clone(),
+            tmux_server: tmux_server.clone(),
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: super::SessionKind::Ordinary,
         };
 
         // ── Guard 1: collision check (+ the no-collision persist) — the
@@ -542,10 +546,12 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 
@@ -573,10 +579,12 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         }
     }
 

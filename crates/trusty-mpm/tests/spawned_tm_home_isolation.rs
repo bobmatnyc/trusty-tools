@@ -35,7 +35,7 @@
 //! scope by construction rather than by omission.
 //! Test: this file IS the test module.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,9 +57,9 @@ fn framework_root_of(home: &Path) -> PathBuf {
     home.join(".trusty-mpm")
 }
 
-/// The operator's own framework root, when this process has a `$HOME` at all.
+/// The operator's own framework root, when this process started with a `$HOME`.
 fn operator_framework_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| framework_root_of(Path::new(&home)))
+    common::operator_home().map(framework_root_of)
 }
 
 /// Direct children of `root`, plus the migration marker's size and mtime.
@@ -252,6 +252,15 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // A `sh -c` pipeline with `tm compress` at its tail; the isolation goes on
     // the shell.
     ("tests/tm_compress_pipe.rs", 1),
+    // #8878 ruling A: the guard must be the child of a fake `claude` shell, so
+    // the shell runs `tm` by path; the isolation goes on the shell.
+    ("tests/tm_hook_pm_guard_trust_anchor_8878.rs", 1),
+    // #8531: the daemon binds a SessionStart to the `claude` above `tm hook`,
+    // so a fake `claude` shell runs `tm` by path; the isolation goes on it.
+    ("tests/tm_hook_session_start_8531.rs", 1),
+    // #8980: a SessionEnd stales only for the `claude` above `tm hook`, so a
+    // fake `claude` shell runs `tm` by path; the isolation goes on it.
+    ("tests/tm_hook_session_end_8980.rs", 1),
     // `#[ignore]`d live test (#1053): it drives a real `claude` session against
     // the framework the operator actually installed, so a scratch `$HOME` would
     // make it untestable rather than hermetic. Never run in CI.
@@ -502,17 +511,77 @@ fn the_home_write_fence_is_armed_for_integration_targets() {
     );
 }
 
-/// #8545: every integration crate root declares `mod common;`, whose
-/// constructor arms the home-write fence. A new target without it would run
-/// unfenced and could write the operator's home config unseen.
+/// The `[[test]]` target that runs its tests in parallel (#8345).
+const PARALLEL_TARGET: &str = "tests/integration.rs";
+
+/// The process-global mutators, split so this file's own source never matches
+/// its own scan.
+const ENV_MUTATOR_HALVES: [(&str, &str); 3] =
+    [("set_", "var"), ("remove_", "var"), ("set_current_", "dir")];
+
+/// `set_var` calls `tests/common/mod.rs` may hold: `scratch_home`'s one.
+const COMMON_SET_VAR_ALLOWANCE: usize = 1;
+
+/// Each process-global environment mutator `code` calls, one entry per call.
+///
+/// Why: a qualified-path match (`env::` + the name) misses `use std::env::…;`
+/// followed by a bare call, which is the same process-wide write.
+/// What: finds a mutator name followed by `(` at an identifier boundary, so
+/// every qualification counts — none, `env::`, `std::env::` — and a longer
+/// identifier ending in the name does not. Run it on [`code_only`] output.
+/// Test: `the_env_mutator_scan_fires_on_every_call_form`.
+fn env_mutations(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (head, tail) in ENV_MUTATOR_HALVES {
+        let name = format!("{head}{tail}");
+        let call = format!("{name}(");
+        for (at, _) in code.match_indices(&call) {
+            let preceding = code[..at].chars().last();
+            if preceding.is_none_or(|c| !(c.is_alphanumeric() || c == '_')) {
+                found.push(name.clone());
+            }
+        }
+    }
+    found
+}
+
+/// Module names a crate root mounts with a `mod <name>;` line.
+fn mounted_modules(root_text: &str) -> Vec<String> {
+    code_only(root_text)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("mod ")?.strip_suffix(';'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every integration target arms the fence, and every test source reaches one.
+///
+/// Why: #8545 — a crate root without `mod common;` runs unfenced and can write
+/// the operator's home config unseen. #8345 — `autotests = false` means a file
+/// under `tests/` that no `[[test]]` root mounts never compiles and never
+/// runs, and a module mounted in the parallel target that mutates the process
+/// environment races every other test there.
+/// What: reads the `[[test]]` roots from `Cargo.toml`, then asserts each root
+/// declares `mod common;`, each top-level `tests/` module is mounted by exactly
+/// one root, a directory of Rust without `mod.rs` fails as unmounted, and no
+/// module of [`PARALLEL_TARGET`] calls `set_var`, `remove_var` or
+/// `set_current_dir` in any qualification ([`env_mutations`]). `common` is
+/// scanned too and may hold exactly [`COMMON_SET_VAR_ALLOWANCE`] `set_var`.
+/// Test: this function IS the test; `the_env_mutator_scan_fires_on_every_call_form`
+/// proves the scan fires.
 #[test]
 fn every_integration_target_arms_the_home_write_fence() {
     let root = tests_root();
-    let crate_roots: Vec<PathBuf> = test_sources()
-        .into_iter()
-        .filter(|p| p.parent() == Some(root.as_path()) || p.ends_with("main.rs"))
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("read Cargo.toml");
+    let crate_roots: Vec<PathBuf> = manifest
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("path = \"tests/")?.strip_suffix('"'))
+        .map(|rel| root.join(rel))
         .collect();
-    assert!(crate_roots.len() > 20, "found only {crate_roots:?}");
+    assert!(crate_roots.len() >= 2, "found only {crate_roots:?}");
+
     let missing: Vec<String> = crate_roots
         .iter()
         .filter(|p| {
@@ -525,5 +594,143 @@ fn every_integration_target_arms_the_home_write_fence() {
         missing.is_empty(),
         "these integration targets never declare `mod common;`, so the #8545 \
          home-write fence is not armed in them: {missing:?}"
+    );
+
+    // #8345: every top-level module is mounted by exactly one root.
+    let mounts: Vec<(PathBuf, Vec<String>)> = crate_roots
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(p).expect("read crate root");
+            (p.clone(), mounted_modules(&text))
+        })
+        .collect();
+    let sources = test_sources();
+    let mut unmounted = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .expect("read tests/")
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        let name = if path.is_dir() {
+            let dir = entry.file_name().to_string_lossy().into_owned();
+            if path.join("mod.rs").is_file() {
+                dir
+            } else {
+                // A directory of Rust with no `mod.rs` (say `foo/main.rs`) is
+                // no module any root can mount, so it would never compile.
+                if sources.iter().any(|s| s.starts_with(&path)) {
+                    unmounted.push(format!(
+                        "{dir}/: holds Rust sources but no `mod.rs`, so no root can mount it"
+                    ));
+                }
+                continue;
+            }
+        } else if path.extension().is_some_and(|e| e == "rs") && !crate_roots.contains(&path) {
+            path.file_stem()
+                .expect("stem")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            continue;
+        };
+        let owners = mounts.iter().filter(|(_, m)| m.contains(&name)).count();
+        let expected = if name == "common" {
+            crate_roots.len()
+        } else {
+            1
+        };
+        if owners != expected {
+            unmounted.push(format!(
+                "{name}: mounted by {owners} root(s), expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        unmounted.is_empty(),
+        "a `tests/` module is not mounted by exactly one `[[test]]` root (#8345). \
+         `autotests = false`, so an unmounted file never runs: add `mod <name>;` to \
+         `tests/integration.rs`, or to `tests/env_serial.rs` if it mutates the process \
+         environment.\n  {}",
+        unmounted.join("\n  ")
+    );
+
+    // #8345: the parallel target's modules leave process-global state alone.
+    let parallel = mounts
+        .iter()
+        .find(|(p, _)| p.ends_with(PARALLEL_TARGET))
+        .map(|(_, m)| m.clone())
+        .unwrap_or_else(|| panic!("{PARALLEL_TARGET} is not a `[[test]]` root"));
+    let set_var = format!("{}{}", ENV_MUTATOR_HALVES[0].0, ENV_MUTATOR_HALVES[0].1);
+    let mut mutators = Vec::new();
+    let mut scanned = 0;
+    let mut common_set_vars = 0;
+    for path in &sources {
+        let rel = path.strip_prefix(&root).expect("under tests/");
+        let module = rel.components().next().expect("first component");
+        let module = Path::new(module.as_os_str()).with_extension("");
+        let module = module.to_string_lossy();
+        if !parallel.iter().any(|m| *m == module) {
+            continue;
+        }
+        scanned += 1;
+        let code = code_only(&std::fs::read_to_string(path).expect("read source"));
+        for call in env_mutations(&code) {
+            // `scratch_home`'s one-shot `$HOME` write is the sanctioned case.
+            if module == "common" && call == set_var {
+                common_set_vars += 1;
+            } else {
+                mutators.push(format!("{}: {call}(", rel.display()));
+            }
+        }
+    }
+    assert!(
+        scanned >= parallel.len(),
+        "the mutator scan read {scanned} files for {} `integration` modules — a scan \
+         that reads nothing reports a clean target regardless of its contents",
+        parallel.len()
+    );
+    assert!(
+        mutators.is_empty(),
+        "a module of the parallel `integration` target mutates process-global state \
+         (#8345); every other test in that process can observe it. Move the module to \
+         `tests/env_serial.rs`, which runs one test at a time.\n  {}",
+        mutators.join("\n  ")
+    );
+    assert_eq!(
+        common_set_vars, COMMON_SET_VAR_ALLOWANCE,
+        "`tests/common/mod.rs` may hold only `scratch_home`'s one-shot `{set_var}` (#8345). \
+         More races every parallel `integration` test; fewer means \
+         `COMMON_SET_VAR_ALLOWANCE` is stale and should be lowered."
+    );
+}
+
+/// The environment-mutator scan fires on every call form and ignores prose.
+///
+/// Why: the scan in `every_integration_target_arms_the_home_write_fence` passes
+/// forever if it matches nothing; this shows it catches a bare call reached
+/// through `use`, not only a qualified path.
+/// Test: this function IS the test.
+#[test]
+fn the_env_mutator_scan_fires_on_every_call_form() {
+    let [set, remove, cwd] = ENV_MUTATOR_HALVES.map(|(head, tail)| format!("{head}{tail}"));
+    let sample = format!(
+        "use std::env::{{{set}, {remove}, {cwd}}};\n\
+         fn a() {{ unsafe {{ std::env::{set}(\"K\", \"v\") }}; }}\n\
+         fn b() {{ unsafe {{ {set}(\"K\", \"v\") }}; }}\n\
+         fn c() {{ unsafe {{ env::{remove}(\"K\") }}; }}\n\
+         fn d() {{ unsafe {{ {remove}(\"K\") }}; }}\n\
+         fn e() {{ std::env::{cwd}(\"/\").ok(); }}\n\
+         fn f() {{ {cwd}(\"/\").ok(); }}\n\
+         // {set}(\"K\", \"v\") in a comment\n\
+         fn g() {{ cmd.env_remove(\"K\"); my_{set}(\"K\"); }}\n"
+    );
+    let mut found = env_mutations(&code_only(&sample));
+    found.sort();
+    let mut want = vec![set.clone(), set, remove.clone(), remove, cwd.clone(), cwd];
+    want.sort();
+    assert_eq!(
+        found, want,
+        "each mutator must fire once per qualified and once per bare call, and never \
+         on a comment or a longer identifier; sample:\n{sample}"
     );
 }

@@ -30,7 +30,7 @@ use crate::session_manager::worktree_reclaim::{
     KeepList, LiveClaims, PrIndex, ReclaimMode, ReclaimVerdict,
 };
 use crate::session_manager::worktree_reclaim_sweep::{
-    FreshProbes, SurveyBudget, reclaim_with_probes, survey_with_index,
+    FreshProbes, SurveyBudget, reclaim_scoped, survey_with_index,
 };
 
 /// The owning session's record in the store.
@@ -89,10 +89,12 @@ fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -310,7 +312,7 @@ async fn worktree_7652_an_errored_tmux_probe_is_refused() {
 fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
     let s = scene("owner-store-unreadable-7652");
     let branch = s.branch.clone();
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &s.fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -322,6 +324,7 @@ fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(out.removed.is_empty(), "{out:?}");
     assert!(s.wt.exists(), "the tree must still be on disk");
@@ -345,7 +348,7 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
     let back = claims(&s, name, OwnerRecord::ProjectRoot, Tmux::ListsOwner).await;
     let reads = Cell::new(0usize);
     let branch = s.branch.clone();
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &s.fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -365,6 +368,7 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(out.removed.is_empty(), "{out:?}");
     assert!(s.wt.exists(), "the returning owner's tree must survive");
@@ -393,7 +397,7 @@ async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
     let back = claims(&s, name, OwnerRecord::ProjectRoot, Tmux::ListsOwner).await;
     let reads = Cell::new(0usize);
     let branch = s.branch.clone();
-    let out = reclaim_with_probes(
+    let out = reclaim_scoped(
         &s.fx.repos_root,
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
@@ -413,6 +417,7 @@ async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
         },
         ReclaimMode::Remove,
         &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
     );
     assert!(out.removed.is_empty(), "{out:?}");
     assert!(s.wt.exists(), "the returning owner's tree must survive");

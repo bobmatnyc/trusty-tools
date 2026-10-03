@@ -83,7 +83,7 @@ fn ungrounded_version_claim_is_not_confirmed_and_does_not_block() {
         "precondition: the ungrounded claim forces BLOCK before the guard runs"
     );
 
-    let demoted = sanitize_findings(&mut findings).demoted_ungrounded_registry;
+    let demoted = sanitize_findings(&mut findings, &mut Vec::new()).demoted_ungrounded_registry;
     assert_eq!(demoted, 1, "the registry claim must be demoted");
 
     // The trust signals are withdrawn...
@@ -127,15 +127,15 @@ fn ungrounded_version_claim_is_never_sent_to_the_verifier() {
     let mut findings = vec![ruff_version_finding()];
 
     assert_eq!(
-        select_candidates(Verdict::Block, &findings),
+        select_candidates(&findings),
         vec![0],
         "precondition: on a blocking verdict the wide net picks it up"
     );
 
-    sanitize_findings(&mut findings);
+    sanitize_findings(&mut findings, &mut Vec::new());
 
     assert!(
-        select_candidates(Verdict::Block, &findings).is_empty(),
+        select_candidates(&findings).is_empty(),
         "a claim the pipeline cannot check must not be put to the verifier"
     );
 }
@@ -145,7 +145,7 @@ fn ungrounded_version_claim_is_never_sent_to_the_verifier() {
 #[test]
 fn ungrounded_version_claim_still_surfaces_as_advisory() {
     let mut findings = vec![ruff_version_finding()];
-    sanitize_findings(&mut findings);
+    sanitize_findings(&mut findings, &mut Vec::new());
 
     assert_eq!(findings.len(), 1, "the finding must NOT be dropped");
     let f = &findings[0];
@@ -183,7 +183,7 @@ fn ungrounded_version_claim_still_surfaces_as_advisory() {
 fn verification_backed_finding_still_confirms_and_still_blocks() {
     let mut findings = vec![genuine_finding()];
 
-    sanitize_findings(&mut findings);
+    sanitize_findings(&mut findings, &mut Vec::new());
     assert_eq!(findings.len(), 1, "a genuine finding is untouched");
     assert!(findings[0].code_provable, "keeps its diff-provable flag");
     assert_eq!(findings[0].effort, Effort::High, "keeps its severity");
@@ -194,7 +194,7 @@ fn verification_backed_finding_still_confirms_and_still_blocks() {
 
     // It is still put to the verifier...
     assert_eq!(
-        select_candidates(Verdict::Block, &findings),
+        select_candidates(&findings),
         vec![0],
         "a checkable finding must still be verified"
     );
@@ -215,7 +215,7 @@ fn a_genuine_finding_alongside_a_registry_claim_still_blocks() {
     // bug past review inside a dependency bump.
     let mut findings = vec![ruff_version_finding(), genuine_finding()];
 
-    let counts = sanitize_findings(&mut findings);
+    let counts = sanitize_findings(&mut findings, &mut Vec::new());
     assert_eq!(
         counts.demoted_ungrounded_registry, 1,
         "only the registry claim"

@@ -12,13 +12,17 @@
 //! Test: `cargo test -p trusty-mpm-daemon` exercises registration, the hook
 //! ring-buffer bound, and memory-pressure classification.
 
-// #6892: machine-wide builder-slot leases — claim, release, TTL, PID liveness.
-pub mod builder_slots;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;
 mod resources;
 pub(crate) mod sessions;
+// #9010: whether a session's bound `claude` still runs.
+pub(crate) mod session_claude_liveness;
+// #8983: rebinding an id to the `claude` the daemon resumed.
+pub(crate) mod session_claude_resume;
+// #8531: the kernel-bound `claude` of each session id.
+pub(crate) mod session_claudes;
 mod sm;
 // #8535, #8161: which records write in a given tree.
 mod tree_membership;
@@ -26,10 +30,6 @@ mod tree_membership;
 #[cfg(test)]
 mod tests;
 
-pub use builder_slots::{
-    BUILDER_LEASE_TTL_SECS, BuilderHolder, BuilderLease, BuilderSlotCensus, BuilderSlotGrant,
-    builder_lease,
-};
 pub use core::{
     DaemonState, EVENT_CHANNEL_CAPACITY, HOOK_HISTORY_LIMIT, PAIR_CODE_TTL, ReapResult,
 };

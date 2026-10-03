@@ -26,17 +26,20 @@
 
 mod audit;
 mod checks;
+// #8751: doctor-side threshold for a palace lock held too long.
+mod lock_stall;
 mod mcp_registration;
+// #8751: the lock scan classifies the maintenance lease by its holder pid.
+mod palace_locks;
 mod tier_s;
 
 use audit::audit_palaces;
 pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
-use checks::{
-    check_daemon_health, check_fastembed_cache, check_kg_redb_size, check_stale_palace_locks,
-};
+use checks::{check_daemon_health, check_fastembed_cache, check_kg_redb_size};
 use mcp_registration::check_mcp_registrations;
+use palace_locks::check_stale_palace_locks;
 use tier_s::check_tier_s_reaffirmation;
 
 use anyhow::Result;
@@ -334,6 +337,8 @@ mod tests {
     /// Test: pure, no network.
     #[test]
     fn fastembed_cache_check_reports_missing_dir() {
+        // #5937: mutates FASTEMBED_CACHE_*; serialise on the crate-wide env lock.
+        let _env = crate::commands::env_test_lock().blocking_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let missing = tmp.path().join("does_not_exist");
         // SAFETY: serial test — no other thread is reading the env var.

@@ -45,8 +45,8 @@
 #      load-dynamic` — full link step, not just check.
 #   5. #8612: runs the built `trusty-embedderd` once with ORT_DYLIB_PATH set
 #      and asserts one embedding comes back, then once with a missing
-#      ORT_DYLIB_PATH and asserts startup fails — see
-#      scripts/check_ort_runtime_load.sh.
+#      ORT_DYLIB_PATH and asserts startup fails with an error rather than a
+#      hang (#8616) — see scripts/check_ort_runtime_load.sh.
 #
 # ORT version choice (1.24.2) — #8612:
 #   The workspace Cargo.lock resolves `ort` / `ort-sys` to 2.0.0-rc.12 with the
@@ -316,8 +316,8 @@ jobs:
 
       # #8612: negative control. The same binary with a missing runtime must
       # produce no embedding, so the step above cannot pass without a
-      # loadable ORT. 60 s is ample: a load failure hangs within
-      # milliseconds of startup and never recovers.
+      # loadable ORT. #8616: it must also exit by itself — the pre-init check
+      # fails in milliseconds, so a 60 s timeout means that check regressed.
       - name: Runtime load check — negative control, missing ORT_DYLIB_PATH (#8612)
         env:
           ORT_DYLIB_PATH: /nonexistent/libonnxruntime.so

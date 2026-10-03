@@ -289,7 +289,7 @@ units_case() {
   actual_exit=0
   BASELINE_OVERRIDE="$EMPTY_BASELINE" \
     LANES_OVERRIDE="$FIXTURE_DIR/lanes-mini.tsv" \
-    METADATA_OVERRIDE="$FIXTURE_DIR/metadata-units.json" \
+    METADATA_OVERRIDE="${UNITS_METADATA:-$FIXTURE_DIR/metadata-units.json}" \
     bash "$GATE" "$@" > "$out" 2>&1 || actual_exit=$?
 
   if [ "$actual_exit" != "$expected_exit" ]; then
@@ -326,6 +326,30 @@ units_case units-complete 0 - \
 # bury a real link regression under a census failure it caused itself.
 units_case units-diagnostic-counts-as-examined 1 UNBASELINED \
   --json "$FIXTURE_DIR/units-bin-broken.json" --cargo-rc 101
+
+# ===========================================================================
+# EVERY PUBLISHED CRATE (#8716). The census demands only DECLARED units, and an
+# excluded crate declares none, so a publishable crate in the excluded set
+# passed unseen. metadata-published.json adds two excluded packages to the
+# `demo` world: `trusty-code-gui` is publishable, `trusty-agents-ui` is not.
+# ===========================================================================
+UNITS_METADATA="$FIXTURE_DIR/metadata-published.json" \
+  units_case published-excluded-fails 3 \
+  'PUBLISHED-NOT-DOCUMENTED	trusty-code-gui is publishable' \
+  --require-published --json "$FIXTURE_DIR/units-both.json"
+# The publish = false package must not be named: a check that flags every
+# excluded crate would fail the real workspace, whose entries are all unpublished.
+if grep -q 'PUBLISHED-NOT-DOCUMENTED	trusty-agents-ui' "$WORK/out-published-excluded-fails.txt"; then
+  echo "FAIL  published-excluded-fails: named trusty-agents-ui, which is publish = false"
+  fail=1
+fi
+# Ordinary scope is unchanged: the same fixture without the flag passes.
+UNITS_METADATA="$FIXTURE_DIR/metadata-published.json" \
+  units_case published-ordinary-scope-unchanged 0 - \
+  --json "$FIXTURE_DIR/units-both.json"
+# The counterweight: every publishable crate documented passes under the flag.
+units_case published-all-documented 0 'PUBLISHED	1 of 1 publishable' \
+  --require-published --json "$FIXTURE_DIR/units-both.json"
 
 # ===========================================================================
 # --update-baseline (#7598). The write path scores lanes with its own loop, so

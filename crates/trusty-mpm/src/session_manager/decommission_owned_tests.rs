@@ -17,7 +17,6 @@ use super::decommission_force::ProvisioningDirt;
 use super::decommission_owned::{owned_workspace_keep_reason, remove_owned_workspace};
 use super::manager::SessionManager;
 use super::record::{ManagedSessionId, ManagedSessionState};
-use super::tests::FakeTmuxDriver;
 use super::worktree_git_fixture::{GitWorktreeFixture, deny_all};
 use super::worktree_ignored_output::kept_unversioned_content;
 use super::worktree_ownership::sentinel_payload_bytes;
@@ -54,7 +53,8 @@ fn write(root: &Path, rel: &str) {
 
 /// A manager plus an owned record whose workspace is `ws`.
 async fn owned_session(store: &Path, ws: &Path) -> (SessionManager, ManagedSessionId) {
-    let mgr = SessionManager::new(store, FakeTmuxDriver::new())
+    // #8935: the record's pane proves the live session is its own.
+    let mgr = SessionManager::new(store, crate::session_manager::tests::fake_with_pane())
         .await
         .expect("manager");
     let record = mgr
@@ -176,10 +176,14 @@ fn owned_worktree_force_excuses_only_provisioning_files() {
     write_sentinel_bytes(&wt, &sentinel_payload_bytes(me)).expect("write the owner marker");
     write(&wt, "CLAUDE.md");
     assert!(owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Refuse).is_some());
-    assert_eq!(
-        owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard),
-        None
-    );
+    // #8540: `--force` excuses `CLAUDE.md` only as the ledger recorded it.
+    let forced = || owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard);
+    assert!(forced().is_some(), "no ledger vouches for CLAUDE.md");
+    std::fs::remove_file(wt.join("CLAUDE.md")).expect("start over as a fresh launch");
+    let before = crate::session_manager::provisioning_ledger::snapshot(&wt);
+    write(&wt, "CLAUDE.md");
+    crate::session_manager::provisioning_ledger::record(&wt, &before).expect("record the ledger");
+    assert_eq!(forced(), None);
     write(&wt, "notes.md");
     let reason = owned_workspace_keep_reason(&wt, &me, None, ProvisioningDirt::Discard)
         .expect("--force never excuses user files");

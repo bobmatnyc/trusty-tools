@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::core::agent::{Delegation, DelegationId, DelegationSource, DelegationStatus};
 use crate::core::project::ProjectInfo;
 use crate::core::session::{Session, SessionId};
+use crate::core::twin_identity::ClaudeProcess;
 
 use super::core::PAIR_CODE_TTL;
 use super::core::{DaemonState, ReapResult};
@@ -420,17 +421,51 @@ impl DaemonState {
     ///   `claude` process has exited, the session is marked
     ///   [`SessionStatus::Stopped`] in place (kept so the operator can see it).
     ///
-    /// Returns the [`ReapResult`] with both counts. Native sessions are left
-    /// untouched.
+    /// Returns the [`ReapResult`] with both counts. A Native session whose id
+    /// is not settled in the session-claude registry is left untouched. A
+    /// settled session, Native or Tmux, is never reaped by the tmux rule, and
+    /// every session is skipped while the registry is sealed (#8980). #9010:
+    /// a settled id bound to a `claude` is removed only when that `claude` —
+    /// pid AND start time — is proven gone and
+    /// `SessionClaudes::reap_hold` finds nothing that still holds it; one
+    /// whose probe cannot answer is kept.
     /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
-    /// `reap_marks_stopped_when_pid_dead`.
+    /// `reap_marks_stopped_when_pid_dead`,
+    /// `the_reaper_keeps_an_announced_session_and_its_live_records_8980`,
+    /// `a_sealed_registry_reaps_nothing_8980`,
+    /// `a_settled_session_whose_claude_exited_is_reaped_9010`,
+    /// `a_settled_session_with_a_recent_event_is_kept_9010`.
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
+        self.reap_against_with(live, super::session_claude_liveness::claude_liveness)
+    }
+
+    /// [`Self::reap_against`] over an injected bound-`claude` probe (#9010).
+    ///
+    /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`,
+    /// `a_session_rebound_during_the_reap_is_kept_9010`.
+    pub(super) fn reap_against_with(
+        &self,
+        live: &std::collections::HashSet<String>,
+        probe: impl Fn(ClaudeProcess) -> super::session_claude_liveness::ClaudeLiveness,
+    ) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
 
         let mut dead: Vec<SessionId> = Vec::new();
         let mut stopped_ids: Vec<SessionId> = Vec::new();
+        let mut bound: Vec<(SessionId, ClaudeProcess)> = Vec::new();
         for entry in self.sessions.iter() {
             let session = entry.value();
+            // #8980: a `SessionStart`-announced id is a harness session, whose
+            // uuid-derived tmux name is never live; reaping it would stale its
+            // live agents on any forged or `compact`/`resume` SessionStart. A
+            // sealed registry settles every id, so it skips every session.
+            if self.session_claudes.is_settled(*entry.key()) {
+                // #9010: probed after the walk, so no shard lock spans it.
+                if let Some(claude) = self.session_claudes.get(*entry.key()) {
+                    bound.push((*entry.key(), claude));
+                }
+                continue;
+            }
             if session.origin != SessionHost::Tmux {
                 continue;
             }
@@ -454,7 +489,7 @@ impl DaemonState {
             self.stale_delegations_of_dead_session(*id);
         }
         ReapResult {
-            reaped: dead.len(),
+            reaped: dead.len() + self.reap_settled_sessions(bound, probe),
             stopped: stopped_ids.len(),
         }
     }
@@ -478,14 +513,20 @@ impl DaemonState {
     /// still resolve the record to the truth for the rest of its
     /// [`STALE_RETENTION_SECS`] window.
     ///
-    /// It is driven only by the reaper, which acts on POSITIVE evidence — the
+    /// It is driven by the reaper, which acts on POSITIVE evidence — the
     /// tmux session is gone from `list-sessions`, or the tracked `claude`
-    /// process has exited. Absence from the registry is deliberately NOT a
-    /// trigger: a session the daemon never registered is undeterminable rather
-    /// than dead (ADR-0045), and treating it as dead would quietly disarm the
-    /// ADR-0048 shared-checkout guard for every unregistered session.
+    /// process has exited — and by a `SessionEnd` proven to come from the
+    /// session's own `claude` (#6797, #8980:
+    /// `delegation_repair_caller::stale_on_owner_session_end`). The reaper's
+    /// pid is not caller-writable on a session that owns delegations (#8980:
+    /// `sessions_legacy_ops::set_session_pid`). Absence from the registry is
+    /// deliberately NOT a trigger: a session the daemon never registered is
+    /// undeterminable rather than dead (ADR-0045), and treating it as dead
+    /// would quietly disarm the ADR-0048 shared-checkout guard for every
+    /// unregistered session.
     /// Test: `reap_stales_a_dead_sessions_delegations`,
-    /// `reap_leaves_a_live_sessions_delegations_alone`.
+    /// `reap_leaves_a_live_sessions_delegations_alone`,
+    /// `the_owners_session_end_stales_its_records_8980`.
     pub(crate) fn stale_delegations_of_dead_session(&self, session: SessionId) -> usize {
         let mut staled = 0;
         for mut entry in self.delegations.iter_mut() {
@@ -636,18 +677,6 @@ impl DaemonState {
     /// Test: `a_grant_and_the_tracker_converge_in_either_order`.
     pub(crate) fn dispatch_record_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.dispatch_record.lock()
-    }
-
-    /// Hold the machine-wide builder-slot lock for one scan-and-claim (#6892).
-    ///
-    /// Why: see the `builder_claim` field's own doc. Exposed as a guard rather
-    /// than inlined so [`super::builder_slots`] — a sibling module of this one —
-    /// can take it without the field being `pub`.
-    /// What: blocks until the lock is free. `pub(crate)`: an internal invariant
-    /// between two modules of this crate, never a consumer API.
-    /// Test: `builder_cap_admits_exactly_one_of_two_simultaneous_claims`.
-    pub(crate) fn builder_claim_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
-        self.builder_claim.lock()
     }
 
     /// Stops still waiting for the `agent_id` that names them (#4142).
@@ -861,6 +890,9 @@ impl DaemonState {
         exclude_session: Option<SessionId>,
     ) -> Vec<Delegation> {
         let now = chrono::Utc::now();
+        // #9011: resolved once per query, and only when a record reaches the
+        // classifier; `None` (no content) makes `writes_in` fail closed.
+        let roster = std::cell::OnceCell::new();
         self.delegations
             .iter()
             .filter(|e| {
@@ -875,7 +907,16 @@ impl DaemonState {
                         && d.tool_use_id.as_deref() == exclude_tool_use_id)
                     // #8535, #8161: where the agent stands now outranks where
                     // its dispatcher stood; #6556's granted-tree test is folded in.
-                    && super::tree_membership::writes_in(d, cwd)
+                    && super::tree_membership::writes_in(
+                        d,
+                        cwd,
+                        roster
+                            // #9011 critic r1: the query's cwd, error logged.
+                            .get_or_init(|| {
+                                crate::core::content_source::agent_roster_for_query(cwd)
+                            })
+                            .as_ref(),
+                    )
             })
             .map(|e| e.value().clone())
             .collect()
@@ -1216,7 +1257,11 @@ impl DaemonState {
     /// guard's own comment in the body for why a missing `tmux_name` proves
     /// nothing while a resume is recreating that very session.
     ///
-    /// Test: `reap_dead_managed_sessions_marks_stopped`,
+    /// #8942 — a protected-kind record goes `Stopped` record-only
+    /// ([`crate::session_manager::SessionManager::mark_stopped_record_only`]).
+    ///
+    /// Test: `the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown`,
+    /// `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,
     /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
@@ -1250,7 +1295,14 @@ impl DaemonState {
                     );
                     continue;
                 }
-                match mgr.stop_with_cause(&r.id, cause).await {
+                // #8942: the Architect's pane is gone, so its record says so,
+                // but no teardown runs for it.
+                let stopped = if r.kind.is_protected() {
+                    mgr.mark_stopped_record_only(&r.id, cause).await
+                } else {
+                    mgr.stop_with_cause(&r.id, cause).await
+                };
+                match stopped {
                     Ok(_) => tracing::info!(
                         id = %r.id,
                         name = %r.tmux_name,

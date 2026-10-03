@@ -345,6 +345,8 @@ mod tests {
         (router, rx)
     }
 
+    // #5937: removes TRUSTY_MAX_CONCURRENT_REQUESTS / TRUSTY_QUEUE_DEPTH; join the #[serial] env group.
+    #[serial_test::serial]
     #[tokio::test]
     async fn from_env_uses_defaults_when_unset() {
         // SAFETY: env-mutating; this test must not run concurrently with

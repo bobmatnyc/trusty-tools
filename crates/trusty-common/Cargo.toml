@@ -120,7 +120,22 @@ name = "trusty-common"
 # links, from trusty-mpm's #8767 split) was red, so that version number is
 # burned (tags are immutable, #6178). No source change; republish under the
 # next version.
-version = "0.52.6"
+# 0.52.7 (Refs #8736): patch — release-opening bump, no source change.
+# 0.52.8 (PR #8736, Refs #8261, owner ruling 2026-09-28): patch — 0.52.7 is
+# already live on crates.io and #8736 changes `src/lib.rs` and
+# `src/memory_pressure.rs` (new opt-in `memory-pressure` module/feature, plus
+# a doc-comment fix), so the "PR version bump vs crates.io" gate (#4421)
+# requires a bump. Additive-only: no public item removed or changed shape, so
+# no semver-accepted-breaks record is needed; owner ruling directs PATCH
+# regardless of break status per docs/reference/semver-gate.md.
+# 0.53.0 (Refs #8749): minor — a 0.x break is MINOR. Four breaks since 0.52.7:
+# `RpcError`/`SearchRpcError` gain a public `data` field (#6285), the new
+# `HnswStoreError::WriteDeadline` variant on a non-`#[non_exhaustive]` enum
+# (#8749), `embedder-test-support` no longer enables `embedder` (#8838), and
+# the `symgraph::server` module plus `symgraph-server` feature are removed
+# (#8926). Listed under `### Breaking` in CHANGELOG.md; 0.52.8 was never
+# published, so 0.53.0 follows 0.52.7 on crates.io.
+version = "0.53.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -188,10 +203,22 @@ lanes = [
         # machine-tier — all three read the machine, and the lane that owns two
         # of them is the one whose editor must see the third.
         "load-average",
+        # #8261: memory-pressure joins the machine-reading lane beside
+        # load-average — both are builder-admission inputs.
+        "memory-pressure",
+        # #8378: the content resolver (ADR-0064) and the sha256 check it
+        # shares with trusty-installer's pinned downloads.
+        "integrity",
+        "content-resolver",
         "update-check",
         "bug-capture",
         "session-naming",
         "rpc",
+        # `uds::sse` compiles only with `uds` AND `axum-server`. `uds` lives in
+        # this lane and `axum-server` in `inference`, so until this line no lane
+        # compiled `sse_data_is_one_line_per_event` — a feature-level coverage
+        # check cannot see a gap in a combination.
+        "axum-server",
     ] },
     { name = "inference", features = [
         "bedrock-client",
@@ -207,7 +234,7 @@ lanes = [
         "daemon-token",
     ] },
     { name = "symgraph", features = [
-        "symgraph-server",
+        "symgraph-parser",
     ] },
 ]
 exempt = [
@@ -453,6 +480,9 @@ bytes = { workspace = true, optional = true }
 aws-credential-types = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 globset = { workspace = true, optional = true }
+# Optional: enabled by the `content-resolver` feature (#8378). Unpacks a
+# verified content bundle in memory; already in the lockfile via trusty-installer.
+tar = { workspace = true, optional = true }
 
 # Optional: enabled by the `catchup` feature (DOC-28 cutover bridge, #1762).
 # rusqlite is used only by the `mpm_registry` submodule to read the
@@ -675,8 +705,12 @@ embedder-load-dynamic = ["embedder", "fastembed/ort-load-dynamic", "ort/load-dyn
 # no-op alias for backward compatibility.
 embedder-coreml = ["embedder"]
 # Exposes the `MockEmbedder` test double outside `cfg(test)` so downstream
-# integration tests can reuse it.
-embedder-test-support = ["embedder"]
+# integration tests can reuse it. It does NOT imply `embedder`: every item it
+# gates sits inside the `embedder` module, so on its own it compiles nothing
+# and pulls no ONNX. A crate can then list it in `[dev-dependencies]` and get
+# the mock only when one of its own features turns `embedder` or `memory-core`
+# on — trusty-mpm's `sm-memory` does (owner ruling 2026-09-27).
+embedder-test-support = []
 # Issue #54: opt-in Candle BERT backend (all-MiniLM-L6-v2 on Metal/CPU). Does
 # NOT replace the fastembed/ORT default — operators select it at runtime via
 # `TRUSTY_EMBEDDER=candle` on builds that compiled this feature in. The
@@ -727,9 +761,6 @@ symgraph-parser = [
     "dep:quote",
     "dep:genco",
 ]
-# Enables the symgraph HTTP server module (axum + tokio). Implies the
-# full parser stack.
-symgraph-server = ["symgraph-parser", "axum-server"]
 # Enables the `memory_core` module: Memory Palace storage engine
 # (formerly the `trusty-memory-core` crate). Pulls in usearch (HNSW
 # vector index), redb + postcard (knowledge graph + payload/chat stores),
@@ -933,11 +964,29 @@ host-metrics = ["sysinfo/disk", "sysinfo/network"]
 # in this crate, and the module's error enum uses it per the workspace's
 # libraries-use-thiserror rule.
 load-average = ["dep:thiserror"]
+# #8261: `memory_pressure::read_memory_pressure` — the kernel's own memory
+# pressure verdict (macOS `kern.memorystatus_*`, Linux PSI / cgroup PSI /
+# `/proc/meminfo`) that builder admission reads instead of a free-MB floor.
+# Adds no crate to the lockfile: `libc` is already a `cfg(unix)` dependency and
+# the Linux path is plain file reads; a feature only because `thiserror` is
+# optional here.
+memory-pressure = ["dep:thiserror"]
 # #6820: machine-tier detection + proportional memory budget, hoisted out of
 # trusty-search so trusty-memory reads the same numbers. Zero new dependencies —
 # the RAM read is `sysctl`/`/proc` + the cgroup files, deliberately NOT sysinfo
 # (which applies no cgroup clamp; see the module doc).
 machine-tier = []
+# #8378 (ADR-0064 decision 5 (i)): the `integrity` module — the one SHA-256
+# parse/hash/verify implementation, shared by trusty-installer's pinned
+# downloads and the content resolver. Turns on the optional `sha2` and
+# `thiserror` deps; adds no crate to the lockfile.
+integrity = ["dep:sha2", "dep:thiserror"]
+# #8378 (ADR-0064 PR-B): the `content` module — the runtime resolver for
+# instructional content: `content-lock.toml`, tag + sha256 verification of the
+# installed bundle, and the trusty-tools checkout override. `tar` is new to
+# this crate but already in the lockfile; `toml` and `flate2` are optional deps
+# other features already use.
+content-resolver = ["integrity", "dep:thiserror", "dep:toml", "dep:flate2", "dep:tar"]
 
 # Enables the `log_drain` module (#6533, epic phase 1+2): the `LogDestination`
 # trait, its `s3://` and `file://` adapters, the `DestinationUri` parser, the

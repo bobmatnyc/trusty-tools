@@ -76,6 +76,8 @@ fn grandfather_seeds_registered_roots() {
 ///
 /// Why: grandfathering preserves a working setup; it must not launder a
 /// sensitive root that predates the gate into a standing approval.
+// #5937: builds paths from HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn grandfather_skips_denied_roots() {
     let dir = tempfile::tempdir().expect("tempdir");

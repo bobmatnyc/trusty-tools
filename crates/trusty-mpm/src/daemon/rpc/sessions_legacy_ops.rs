@@ -348,19 +348,49 @@ pub fn reap_sessions(state: &Arc<DaemonState>) -> ReapResponse {
 /// Record the OS-level `claude` process PID (`PATCH /sessions/{id}/pid`,
 /// `mpm.sessions.set_pid`).
 ///
+/// Why (#8980): a dead pid on a session's record reads as "owner gone" to the
+/// delegation repair (`delegation_repair::owner_liveness`) and to the reaper,
+/// which then stales that session's live delegations. Neither transport
+/// proves who sends this, so a caller may set the pid only of a session the
+/// daemon registered for a launcher (`POST /sessions`), never of one a
+/// `SessionStart` announced or one that owns delegation records — no
+/// legitimate caller writes those.
+/// What: the refusal check, then `DaemonState::set_session_pid`.
+///
 /// # Errors
 ///
-/// [`DaemonError::InvalidRequest`] for a malformed id,
+/// [`DaemonError::InvalidRequest`] for a malformed id, for any session while
+/// the session-claude registry is sealed (naming the seal), and for a session
+/// announced by a `SessionStart` or naming delegation records;
 /// [`DaemonError::SessionNotFound`] for an unknown one.
 ///
 /// Test: `parity_sessions_set_pid_agrees_across_transports`,
-/// `parity_sessions_set_pid_unknown_agrees_across_transports`.
+/// `parity_sessions_set_pid_unknown_agrees_across_transports`,
+/// `set_pid_cannot_make_an_announced_owner_read_gone_8980`,
+/// `set_pid_refuses_a_session_that_owns_delegations_8980`,
+/// `a_sealed_registry_refuses_set_pid_8980`.
 pub fn set_session_pid(
     state: &Arc<DaemonState>,
     id: &str,
     pid: u32,
 ) -> Result<SetPidResponse, DaemonError> {
     let session = parse_id(id)?;
+    // #8980: a sealed registry cannot tell an announced id from a launcher's,
+    // so it refuses every pid, and says why.
+    if let Some(why) = state.session_claudes().sealed() {
+        return Err(DaemonError::InvalidRequest(format!(
+            "session {id}: the session-claude registry is sealed, so no claude pid is \
+             caller-settable until it is fixed and the daemon restarts: {why} (#8980)"
+        )));
+    }
+    let announced = state.session_claudes().is_settled(session);
+    if announced || state.all_delegations().iter().any(|d| d.session == session) {
+        return Err(DaemonError::InvalidRequest(format!(
+            "session {id} was announced by a SessionStart hook or owns delegation records; its \
+             claude pid is not caller-settable, since a pid that reads as exited ends the \
+             session's delegations (#8980)"
+        )));
+    }
     if state.set_session_pid(session, pid) {
         Ok(SetPidResponse {
             session_id: id.to_string(),
@@ -518,6 +548,82 @@ pub fn get_output(
     })
 }
 
+/// `mpm.hooks.ingest`: [`ingest_hook`], plus the #8531 binding and the
+/// #8980 owner-proven `SessionEnd`.
+///
+/// Why: only the socket names the sending process, so only a socket
+/// `SessionStart` can record which `claude` owns the session it announces —
+/// the identity a delegation repair later compares its caller against — and
+/// only a socket `SessionEnd` can prove it came from that `claude`.
+/// What: on `SessionStart` with a well-formed id,
+/// `delegation_repair_caller::bind_announcing_claude` over `peer`. On
+/// `SessionEnd`, `stale_on_owner_session_end` over `peer`, which stales the
+/// session's live delegations only for its own bound `claude`. A failure of
+/// either is logged and never fails the hook. Then [`ingest_hook`], which
+/// records an id still unbound as unproven (refused as a repair owner, for
+/// good) and stales no delegation.
+/// Test: `the_bound_owner_ends_its_own_record_over_the_socket_8531`,
+/// `tm_hook_session_start_8531::a_session_start_over_the_socket_binds_its_claude`,
+/// `a_socket_session_end_from_a_sibling_leaves_the_owners_records_live_8980`,
+/// `tm_hook_session_end_8980::the_owners_session_end_over_the_socket_stales_its_records`.
+pub async fn ingest_hook_from_socket(
+    state: &Arc<DaemonState>,
+    post: HookPost,
+    peer: Option<trusty_common::uds::server::RequestPeer>,
+) -> Result<HookAcceptedResponse, DaemonError> {
+    use crate::daemon::services::delegation_repair_caller::bind_announcing_claude;
+    let bind = |held: Arc<DaemonState>, session, peer| async move {
+        bind_announcing_claude(&held, session, peer).await
+    };
+    ingest_hook_from_socket_with(state, post, peer, bind).await
+}
+
+/// [`ingest_hook_from_socket`] over an injected `SessionStart` bind (#8984).
+///
+/// Test: `the_socket_bind_runs_inside_its_in_flight_guard_8984`.
+pub(crate) async fn ingest_hook_from_socket_with<B, F>(
+    state: &Arc<DaemonState>,
+    post: HookPost,
+    peer: Option<trusty_common::uds::server::RequestPeer>,
+    bind: B,
+) -> Result<HookAcceptedResponse, DaemonError>
+where
+    B: FnOnce(
+        Arc<DaemonState>,
+        SessionId,
+        crate::daemon::services::delegation_repair_caller::RepairPeer,
+    ) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    use crate::daemon::services::delegation_repair_caller::{
+        RepairPeer, stale_on_owner_session_end,
+    };
+    // #8531: bind before ingest, from the kernel's peer; HTTP never binds.
+    // #8984: the bind is in flight until the ingest below settles the id, so
+    // a concurrent later event does not settle it first.
+    let start = (post.event == HookEvent::SessionStart)
+        .then(|| parse_id(&post.session_id).ok())
+        .flatten();
+    let _in_flight = start.map(|session| state.session_claudes().begin_bind(session));
+    if let Some(session) = start
+        && let Err(e) = bind(Arc::clone(state), session, RepairPeer::from_socket(peer)).await
+    {
+        tracing::warn!(session_id = %session.0, "SessionStart left the session unbound: {e}");
+    }
+    // #8980: a SessionEnd stales live records only from the owner's claude.
+    if post.event == HookEvent::SessionEnd
+        && let Ok(session) = parse_id(&post.session_id)
+        && let Err(e) =
+            stale_on_owner_session_end(state, session, RepairPeer::from_socket(peer)).await
+    {
+        tracing::warn!(
+            session_id = %session.0,
+            "SessionEnd left the session's live delegations as they were (#8980): {e}"
+        );
+    }
+    ingest_hook(state, post).await
+}
+
 /// Ingest one Claude Code hook event (`POST /hooks`, `mpm.hooks.ingest`).
 ///
 /// Why this is the write that matters most: it is how a claude session announces
@@ -531,13 +637,59 @@ pub fn get_output(
 /// [`DaemonError::OverseerBlocked`] when the overseer vetoes the event (HTTP 403
 /// / `CODE_FORBIDDEN`) — a refusal, never a warning-and-continue.
 ///
+/// #8984: an in-session event for an id with no recorded announcement
+/// settles it as unproven, unless a socket `SessionStart` bind of it is in
+/// flight; a failed settle is logged at WARN and never fails the hook.
+///
 /// Test: `parity_hooks_ingest_leaves_the_same_event_log_on_both_transports`,
-/// `parity_hooks_ingest_malformed_id_agrees_across_transports`.
+/// `parity_hooks_ingest_malformed_id_agrees_across_transports`,
+/// `a_forged_session_start_after_another_event_binds_nothing_8984`,
+/// `an_in_flight_session_start_still_binds_8984`.
 pub async fn ingest_hook(
     state: &Arc<DaemonState>,
     post: HookPost,
 ) -> Result<HookAcceptedResponse, DaemonError> {
     let session = parse_id(&post.session_id)?;
+    // #9010: a recent event holds a settled session off the reaper.
+    state.session_claudes().note_event(session);
+
+    // #8531: the first SessionStart decides an id's binding on either
+    // transport. One that bound no claude (HTTP, or a socket bind that
+    // failed) leaves the id unproven, never open to a later announcer.
+    // #8980: settled BEFORE the record below exists, so `set_session_pid`
+    // never sees an announced session's record unsettled.
+    if post.event == HookEvent::SessionStart {
+        let held = Arc::clone(state);
+        let settled = tokio::task::spawn_blocking(move || held.settle_unproven_session(session))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        if let Err(e) = settled {
+            tracing::warn!(session_id = %session.0, "SessionStart not recorded as unproven: {e}");
+        }
+    }
+    // #8984: an id whose SessionStart never reached the daemon is settled by
+    // its first in-session event, so a later forged SessionStart binds nothing.
+    if post.event.follows_session_start() && !state.session_claudes().is_settled(session) {
+        let held = Arc::clone(state);
+        let settled =
+            tokio::task::spawn_blocking(move || held.session_claudes().settle_after_event(session))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+        match settled {
+            Ok(true) => tracing::warn!(
+                session_id = %session.0,
+                event = ?post.event,
+                "no SessionStart was seen for this session; it is settled as unproven (#8984)"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                session_id = %session.0,
+                "the session could not be recorded as unproven (#8984): {e}"
+            ),
+        }
+    }
 
     // Auto-register on SessionStart if not already known. This is how a claude
     // session connects itself to the daemon: its first hook event registers it

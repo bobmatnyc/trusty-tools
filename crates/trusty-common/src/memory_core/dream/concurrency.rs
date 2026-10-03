@@ -126,10 +126,32 @@ pub fn dream_cycles_in_flight() -> usize {
 /// Why: the transient this module bounds lasts seconds, so a poll of
 /// [`dream_cycles_in_flight`] almost always misses it. The high-water mark is
 /// the only reading that survives long enough to be checked.
-/// What: monotonic; never decreases. `0` before the first cycle.
+/// What: monotonic in production; never decreases. `0` before the first
+/// cycle. The test-only `reset_dream_cycles_peak_in_flight_for_test` is the
+/// one exception, scoped to `#[cfg(test)]` builds.
 /// Test: `the_in_flight_gauge_counts_a_held_cycle`.
 pub fn dream_cycles_peak_in_flight() -> usize {
     PEAK_IN_FLIGHT.load(Ordering::SeqCst)
+}
+
+/// Test-only: rebase the peak high-water mark to the current in-flight count.
+///
+/// Why (#8835): [`PEAK_IN_FLIGHT`] never resets for the life of the test
+/// process, so `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`
+/// reading it can be corrupted by an unrelated, already-finished test's
+/// transient spike rather than anything its own concurrent cycles did — in
+/// particular `the_in_flight_gauge_counts_a_held_cycle`, which enters the
+/// gauge directly without acquiring a permit and so is not bounded by the
+/// semaphore's cap.
+/// What: stores the current [`IN_FLIGHT`] reading into [`PEAK_IN_FLIGHT`] —
+/// a fresh floor, not a claim that nothing is in flight. Call it under the
+/// same `#[serial(dream_permits)]` lock the measurement itself runs under, so
+/// no other gauge-touching test can raise the mark between the rebase and the
+/// read.
+/// Test: `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`.
+#[cfg(test)]
+pub(super) fn reset_dream_cycles_peak_in_flight_for_test() {
+    PEAK_IN_FLIGHT.store(IN_FLIGHT.load(Ordering::SeqCst), Ordering::SeqCst);
 }
 
 /// A held slot in the process-wide dream concurrency bound.

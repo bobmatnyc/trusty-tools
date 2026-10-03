@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use super::manager::SessionManager;
 use super::worktree_reclaim_claim::{ClaimLiveness, LiveClaims, WorkspaceClaim};
-use super::worktree_reclaim_ownership::SessionOwners;
+use super::worktree_reclaim_ownership::{LinkHistory, SessionOwners};
 
 /// Wall-clock ceiling for the tmux liveness probe this module runs (#7965).
 ///
@@ -85,7 +85,18 @@ impl SessionManager {
             let claude = r.claude_session_id.clone()?;
             Some((claude, r.id.to_string()))
         }))
-        .with_caller(caller.clone());
+        .with_caller(caller.clone())
+        // #7771: a Claude id a restart or `/clear` replaced is named only by
+        // the #7617 sidecar, never by a record.
+        .with_history(self.link_history())
+        // #7771: Claude Code's own process registry proves an owner no record
+        // names ended, or that a live record's tmux runs a newer session.
+        .with_tmux(
+            records
+                .iter()
+                .map(|r| (r.id.to_string(), r.tmux_name.clone())),
+        )
+        .with_claude(self.claude_registry());
         let claims = records
             .into_iter()
             .filter_map(|r| {
@@ -101,6 +112,25 @@ impl SessionManager {
             claims,
             caller,
             owners,
+        }
+    }
+
+    /// The #7617 session-link history beside this store (#7771).
+    ///
+    /// Why: the sidecar lives under the framework root, and every production
+    /// construction roots this store at `<framework root>/session-manager`.
+    /// What: [`LinkHistory::read`] on the data dir's parent when the data dir is
+    /// named `session-manager`; [`LinkHistory::Absent`] otherwise, which leaves
+    /// a superseded Claude id undeterminable, as before #7771.
+    /// Test: `worktree_7771_a_superseded_sessions_open_delegation_tree_is_reclaimed`,
+    /// `worktree_7771_an_unreadable_link_history_keeps_the_tree`.
+    fn link_history(&self) -> LinkHistory {
+        let data_dir = self.data_dir();
+        match data_dir.parent() {
+            Some(root) if data_dir.file_name() == Some("session-manager".as_ref()) => {
+                LinkHistory::read(root)
+            }
+            _ => LinkHistory::Absent,
         }
     }
 

@@ -139,6 +139,40 @@ async fn call_blocking_carries_the_daemons_own_error_code() {
     assert_eq!(refusal.message, "root_path is taken");
 }
 
+/// Why: #6285 moves the MCP bridge onto this client, and its INDEX_UNAVAILABLE
+/// contract relays the daemon's structured refusal body. A `data` member the
+/// daemon sent and `call_at` dropped would strand every field but the code.
+/// Test: itself.
+#[tokio::test]
+async fn call_at_carries_the_daemons_error_data() {
+    let body = serde_json::json!({
+        "error": "index_not_resident",
+        "index_id": "wt-1",
+        "retryable": true,
+        "restore_via": "search.query",
+    });
+    let sent = body.clone();
+    let daemon = uds_mock::spawn(move |_method, _params| {
+        let refusal = RpcError::new(-32002, "index_not_resident").with_data(sent.clone());
+        Box::pin(async move { Err(refusal) })
+    })
+    .await;
+
+    let err = call_at(
+        daemon.socket(),
+        METHOD_HEALTH,
+        serde_json::json!({}),
+        PROBE_TIMEOUT,
+    )
+    .await
+    .expect_err("the daemon refused");
+
+    let refusal = err
+        .downcast_ref::<SearchRpcError>()
+        .expect("a daemon refusal must arrive typed");
+    assert_eq!(refusal.data.as_ref(), Some(&body));
+}
+
 /// Why: a handler that dies mid-call is the one failure that reaches
 /// [`call_blocking`] as neither a coded refusal nor a clean dial failure — the
 /// daemon accepted the connection and then never answered. The caller is a

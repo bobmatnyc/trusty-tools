@@ -1,0 +1,198 @@
+# Content release — cuts a `content-vX.Y.Z` GitHub Release holding the
+# instructional-content bundle (ADR-0064, epic #8378, #8389).
+#
+# WHY:
+#   ADR-0064 versions agents, skills, PM instruction sections and output styles
+#   independently of every crate. The runtime resolver pins a bundle by tag and
+#   sha256, so the bundle needs its own release channel. It shares nothing with
+#   release.yml (per-crate binaries, tag-triggered, build matrix) and never
+#   touches crates.io.
+#
+# WHAT:
+#   1. `package` (contents: read) — validates the version, refuses a tag that
+#      already exists or a version content/manifest.toml does not declare
+#      (#8388), runs scripts/package_content_selftest.sh, then runs
+#      scripts/package_content.sh and uploads the tarball, its .sha256 sidecar
+#      and the release notes as a workflow artifact.
+#   2. `release` (contents: write) — skipped on a dry run. Re-verifies the
+#      sha256, re-checks that the tag is still unused, and creates the
+#      release with `gh release create` (--prerelease for an X.Y.Z-pre
+#      version), which also creates the tag at the packaged commit.
+#
+# TRIGGERS:
+#   - workflow_dispatch only, dry_run defaulting to true. A real cut must be
+#     dispatched against `main`. PR-D (#8387) adds the ADR's `content/**`
+#     push-to-main trigger once `content/` exists and carries a version source;
+#     until then there is nothing for a push trigger to package.
+#   - Deliberately NOT a `content-v*` tag push: release.yml, pre-publish.yml
+#     and semver-checks.yml all fire on `*-v*`, which a hand-pushed
+#     `content-v*` tag would otherwise match — they now exclude `content-v*`
+#     explicitly (Refs #8389). The tag is created here with GITHUB_TOKEN,
+#     and events created by GITHUB_TOKEN start no other workflow regardless.
+#
+# How to cut and what the bundle holds: docs/reference/content-release.md.
+
+name: Content Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Content bundle version without the leading 'v' (e.g. 0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run — package and upload a workflow artifact, create no release"
+        required: false
+        type: boolean
+        default: true
+
+# Deny by default; each job grants only what it needs.
+permissions: {}
+
+concurrency:
+  group: content-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package content bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    env:
+      # Inputs reach the shell as env vars, never as interpolated script text.
+      VERSION: ${{ inputs.version }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate version and ref
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # #8389: match the WHOLE string. A line-by-line `grep` passed a
+          # multi-line value when any one line was valid, and its extra lines
+          # then reached $GITHUB_OUTPUT and `::error::`. The charset guard
+          # refuses any newline or carriage return before the regex runs, and
+          # a refused value is echoed only with those bytes replaced by `?`.
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          case "$VERSION" in
+            *[!0-9A-Za-z.-]*) ok=false ;;
+            *) if [[ $VERSION =~ $semver_re ]]; then ok=true; else ok=false; fi ;;
+          esac
+          if [ "$ok" != true ]; then
+            echo "::error::version must be SemVer X.Y.Z[-pre] without a leading 'v', got '${VERSION//[!0-9A-Za-z.-]/?}'"
+            exit 1
+          fi
+          if [ "$DRY_RUN" != "true" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::a real content release must be dispatched against main, not ${GITHUB_REF}"
+            exit 1
+          fi
+          echo "tag=content-v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse an existing tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # --exit-code: 0 = tag found, 2 = no such ref, anything else = error.
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::tag ${TAG} already exists; content releases are immutable, pick the next version"
+            exit 1
+          elif [ "$rc" -ne 2 ]; then
+            echo "::error::git ls-remote failed (exit ${rc}); cannot prove ${TAG} is unused"
+            exit 1
+          fi
+
+      # #8388: the tag names the bundle version content/manifest.toml declares,
+      # so the PR bump gate's "is this version released" check stays true.
+      - name: Content manifest names this version (#8388)
+        run: python3 scripts/check_content.py tree --expect-version "$VERSION"
+
+      - name: Packager selftest (determinism, manifest, fail-open)
+        run: bash scripts/package_content_selftest.sh
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/package_content.sh --version "$VERSION" --out-dir dist
+          (cd dist && sha256sum -c "${TAG}.tar.gz.sha256")
+          {
+            echo "Instructional content bundle ${TAG} (ADR-0064)."
+            echo
+            echo "sha256: \`$(cut -d' ' -f1 "dist/${TAG}.tar.gz.sha256")\`"
+            echo
+            echo '```toml'
+            tar -xzOf "dist/${TAG}.tar.gz" bundle-manifest.toml
+            echo '```'
+          } > dist/release-notes.md
+          cat dist/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: content-bundle
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: package
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: content-bundle
+          path: dist
+
+      - name: Verify sha256
+        shell: bash
+        env:
+          TAG: ${{ needs.package.outputs.tag }}
+        run: cd dist && sha256sum -c "${TAG}.tar.gz.sha256"
+
+      # --latest=false: a content release must never displace a crate release
+      # as the repository's "Latest". A SemVer pre-release (`-` after the
+      # version core) is published with --prerelease.
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.package.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # #8389: re-check the tag right before creating it. The package job's
+          # check can be stale by now, and with Immutable Releases on, a release
+          # attached to a hand-pushed tag at another commit cannot be repaired.
+          # Only a 404 proves the tag is unused; any other status fails closed.
+          resp="$(gh api --include "repos/${GH_REPO}/git/ref/tags/${TAG}" 2>/dev/null || true)"
+          status="$(printf '%s\n' "$resp" | awk 'NR == 1 { print $2; exit }')"
+          if [ "$status" != 404 ]; then
+            echo "::error::tag ${TAG} lookup returned HTTP '${status:-none}', not 404; refusing to create the release"
+            exit 1
+          fi
+          prerelease=false
+          case "${TAG#content-v}" in *-*) prerelease=true ;; esac
+          gh release create "$TAG" \
+            "dist/${TAG}.tar.gz" "dist/${TAG}.tar.gz.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file dist/release-notes.md \
+            --prerelease="$prerelease" \
+            --latest=false

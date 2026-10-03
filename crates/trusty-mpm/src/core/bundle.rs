@@ -1,7 +1,8 @@
 //! Compile-time embedded framework artifacts.
 //!
 //! Why: `trusty-mpm install` must deploy a working set of default artifacts
-//! (optimizer/overseer policy, agent/skill catalog)
+//! (optimizer/overseer policy, skill catalog; the agent roster is runtime
+//! content since #9011, see [`crate::core::content_source`])
 //! without depending on files shipped alongside the binary — embedding them
 //! at compile time keeps the installer a single self-contained executable.
 //! (Issue #3374: the former `CLAUDE_STUB` user-instruction-stub artifact was
@@ -29,120 +30,6 @@ pub const OPTIMIZER_TOML: &str = include_str!("../assets/hooks/optimizer.toml");
 /// installing it is inert until an operator flips the flag.
 pub const OVERSEER_TOML: &str = include_str!("../assets/hooks/overseer.toml");
 
-/// Base agent — the root of every trusty-mpm inheritance chain.
-pub const BASE_AGENT: &str = trusty_agents_common::agent_assets::BASE_AGENT;
-
-/// Base engineer agent — foundation for all engineer agents.
-pub const BASE_ENGINEER: &str = trusty_agents_common::agent_assets::BASE_ENGINEER;
-
-/// Base research agent — foundation for all research agents.
-pub const BASE_RESEARCH: &str = trusty_agents_common::agent_assets::BASE_RESEARCH;
-
-/// Base QA agent — foundation for all QA agents.
-pub const BASE_QA: &str = trusty_agents_common::agent_assets::BASE_QA;
-
-/// Base ops agent — foundation for all ops agents.
-pub const BASE_OPS: &str = trusty_agents_common::agent_assets::BASE_OPS;
-
-/// Concrete general-purpose engineer agent (`extends: base-engineer`).
-pub const ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::ENGINEER;
-
-/// Concrete QA agent (`extends: base-qa`).
-pub const QA_AGENT: &str = trusty_agents_common::agent_assets::QA;
-
-/// Concrete research agent (`extends: base-research`).
-pub const RESEARCH_AGENT: &str = trusty_agents_common::agent_assets::RESEARCH;
-
-/// Concrete secrets-manager agent (`extends: base-agent`).
-pub const SECRETS_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::SECRETS_MANAGER;
-
-/// Concrete security agent (`extends: base-agent`).
-pub const SECURITY_AGENT: &str = trusty_agents_common::agent_assets::SECURITY;
-
-/// Concrete documentation agent (`extends: base-agent`).
-pub const DOCUMENTATION_AGENT: &str = trusty_agents_common::agent_assets::DOCUMENTATION;
-
-/// Concrete data-engineer agent (`extends: base-engineer`).
-pub const DATA_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DATA_ENGINEER;
-
-/// Concrete version-control agent (`extends: base-ops`).
-pub const VERSION_CONTROL_AGENT: &str = trusty_agents_common::agent_assets::VERSION_CONTROL;
-
-/// Concrete ticketing agent (`extends: base-agent`).
-pub const TICKETING_AGENT: &str = trusty_agents_common::agent_assets::TICKETING;
-
-/// Concrete code-analyzer agent (`extends: base-research`).
-pub const CODE_ANALYZER_AGENT: &str = trusty_agents_common::agent_assets::CODE_ANALYZER;
-
-/// Concrete python-engineer agent (`extends: base-engineer`).
-pub const PYTHON_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PYTHON_ENGINEER;
-
-/// Concrete typescript-engineer agent (`extends: base-engineer`).
-pub const TYPESCRIPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::TYPESCRIPT_ENGINEER;
-
-/// Concrete golang-engineer agent (`extends: base-engineer`).
-pub const GOLANG_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::GOLANG_ENGINEER;
-
-/// Concrete rust-engineer agent (`extends: base-engineer`).
-pub const RUST_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::RUST_ENGINEER;
-
-/// Concrete java-engineer agent (`extends: base-engineer`).
-pub const JAVA_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::JAVA_ENGINEER;
-
-/// Concrete php-engineer agent (`extends: base-engineer`).
-pub const PHP_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PHP_ENGINEER;
-
-/// Concrete ruby-engineer agent (`extends: base-engineer`).
-pub const RUBY_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::RUBY_ENGINEER;
-
-/// Concrete react-engineer agent (`extends: base-engineer`).
-pub const REACT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::REACT_ENGINEER;
-
-/// Concrete nextjs-engineer agent (`extends: base-engineer`).
-pub const NEXTJS_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::NEXTJS_ENGINEER;
-
-/// Concrete svelte-engineer agent (`extends: base-engineer`).
-pub const SVELTE_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::SVELTE_ENGINEER;
-
-/// Concrete web-qa agent (`extends: base-qa`).
-pub const WEB_QA_AGENT: &str = trusty_agents_common::agent_assets::WEB_QA;
-
-/// Concrete api-qa agent (`extends: base-qa`).
-pub const API_QA_AGENT: &str = trusty_agents_common::agent_assets::API_QA;
-
-// --- Increment 3 agents ---
-
-/// Concrete javascript-engineer agent (`extends: base-engineer`).
-pub const JAVASCRIPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::JAVASCRIPT_ENGINEER;
-
-/// Concrete elixir-engineer agent — Elixir/OTP/Mix (`extends: base-engineer`).
-pub const ELIXIR_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::ELIXIR_ENGINEER;
-
-/// Concrete phoenix-engineer agent — the Phoenix web layer (`extends: base-engineer`).
-pub const PHOENIX_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PHOENIX_ENGINEER;
-
-/// Concrete dart-engineer agent — Flutter/Dart (`extends: base-engineer`).
-pub const DART_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DART_ENGINEER;
-
-/// Concrete dotnet-engineer agent — C#/.NET 8+ with VB.NET awareness (`extends: base-engineer`).
-pub const DOTNET_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DOTNET_ENGINEER;
-
-/// Concrete tauri-engineer agent (`extends: base-engineer`).
-pub const TAURI_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::TAURI_ENGINEER;
-
-/// Concrete web-ui-engineer agent (`extends: base-engineer`).
-pub const WEB_UI_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::WEB_UI_ENGINEER;
-
-/// Concrete refactoring-engineer agent (`extends: base-engineer`).
-pub const REFACTORING_ENGINEER_AGENT: &str =
-    trusty_agents_common::agent_assets::REFACTORING_ENGINEER;
-
-/// Concrete prompt-engineer agent (`extends: base-engineer`).
-pub const PROMPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PROMPT_ENGINEER;
-
-/// Concrete code-critic agent — adversarial reviewer (`extends: base-qa`).
-pub const CODE_CRITIC_AGENT: &str = trusty_agents_common::agent_assets::CODE_CRITIC;
-
 /// `code-review-standards` skill — the full adversarial review rubric
 /// (severity taxonomy, 80% confidence filter, verdict protocol) that
 /// `code-critic` declares in its `skills:` frontmatter (issue #2890, DOC-42).
@@ -168,24 +55,6 @@ pub const CODE_REVIEW_STANDARDS: &str = include_str!("../assets/skills/code-revi
 /// Test: `bundle_table_is_complete`, `code_critic_declared_skills_are_in_bundle`.
 pub const CONTRACT_DRIVEN_TESTING: &str =
     include_str!("../assets/skills/contract-driven-testing.md");
-
-/// Concrete gcp-ops agent — Google Cloud Platform (`extends: base-ops`).
-pub const GCP_OPS_AGENT: &str = trusty_agents_common::agent_assets::GCP_OPS;
-
-/// Concrete vercel-ops agent (`extends: base-ops`).
-pub const VERCEL_OPS_AGENT: &str = trusty_agents_common::agent_assets::VERCEL_OPS;
-
-/// Concrete local-ops agent — local dev environment (`extends: base-ops`).
-pub const LOCAL_OPS_AGENT: &str = trusty_agents_common::agent_assets::LOCAL_OPS;
-
-/// Concrete memory-manager agent — trusty-memory MCP backend only (`extends: base-agent`).
-pub const MEMORY_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MEMORY_MANAGER;
-
-/// Concrete mpm-agent-manager agent — bundled-asset catalog lifecycle (`extends: base-agent`).
-pub const MPM_AGENT_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MPM_AGENT_MANAGER;
-
-/// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
-pub const MPM_SKILLS_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MPM_SKILLS_MANAGER;
 
 // --- Issue #2911: `documentation-style` bundled skill (SLD-grounded
 // per-artifact-type documentation conventions) — own module, kept separate
@@ -310,13 +179,13 @@ pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str =
 #[path = "bundle_tm_skills.rs"]
 mod tm_skills_inner;
 pub use tm_skills_inner::{
-    TM_ADR, TM_AGENT_ARCHITECTURE, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER, TM_CLI_OPERATIONS,
-    TM_DELEGATION_PATTERNS, TM_DOCTOR, TM_EPIC, TM_EPIC_ANTI_PATTERNS, TM_EPIC_MANUAL_PROCEDURE,
-    TM_EPIC_PHASE_TEMPLATE, TM_EPIC_TRACKER_TEMPLATE, TM_GIT_FILE_TRACKING, TM_INIT,
-    TM_ISSUES_PRUNE, TM_OVERVIEW, TM_POSTMORTEM, TM_PROSE_STYLE, TM_SECRETS, TM_SESSION_MANAGEMENT,
-    TM_SESSION_PAUSE, TM_SESSION_RESUME, TM_SLACK, TM_TEACHING_TEMPLATES, TM_TICKETING,
-    TM_TICKETING_REFERENCES_README, TM_TOOL_USAGE_GUIDE, TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW,
-    TM_WORKFLOW_REFERENCES_README,
+    TM_ADR, TM_AGENT_ARCHITECTURE, TM_ARCHITECT_SETUP, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER,
+    TM_CLI_OPERATIONS, TM_DELEGATION_PATTERNS, TM_DOCTOR, TM_EPIC, TM_EPIC_ANTI_PATTERNS,
+    TM_EPIC_MANUAL_PROCEDURE, TM_EPIC_PHASE_TEMPLATE, TM_EPIC_TRACKER_TEMPLATE,
+    TM_GIT_FILE_TRACKING, TM_INIT, TM_ISSUES_PRUNE, TM_OVERVIEW, TM_POSTMORTEM, TM_PROSE_STYLE,
+    TM_SECRETS, TM_SESSION_MANAGEMENT, TM_SESSION_PAUSE, TM_SESSION_RESUME, TM_SLACK,
+    TM_TEACHING_TEMPLATES, TM_TICKETING, TM_TICKETING_REFERENCES_README, TM_TOOL_USAGE_GUIDE,
+    TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW, TM_WORKFLOW_REFERENCES_README,
 };
 
 // --- tm-capabilities: auto-generated harness capability catalog (issue
@@ -354,6 +223,16 @@ pub const OUTPUT_STYLE_TEACHER: &str =
 pub const OUTPUT_STYLE_RESEARCH: &str =
     include_str!("../assets/output-styles/trusty-mpm-research.md");
 
+/// Fleet-supervisor Claude Code output style (id `trusty-mpm-supervisor`, #8453).
+///
+/// Why: the supervisor acts directly, so it cannot run on a style whose floor
+/// forbids direct work, and CLAUDE.md cannot override an output style. It
+/// carries the "Communication — Write Plainly" section verbatim and no
+/// delegation directive. Selected by the supervisor profile
+/// ([`crate::core::session_profile`]) and refused under the PM profile.
+pub const OUTPUT_STYLE_SUPERVISOR: &str =
+    include_str!("../assets/output-styles/trusty-mpm-supervisor.md");
+
 /// The default output-style id used when none is configured/selected.
 ///
 /// Why: callers (config resolution, settings writer) need a single source of
@@ -387,8 +266,10 @@ pub struct BundledStyle {
 /// up a configured/selected id against this table; a single ordered slice keeps
 /// both behaviours consistent.
 /// What: the professional (`trusty-mpm`), teaching (`trusty-mpm-teacher`), and
-/// research (`trusty-mpm-research`) styles.
-/// Test: `bundle_tests::output_style_registry_has_three_distinct_ids`.
+/// research (`trusty-mpm-research`) PM styles, then the fleet-supervisor style
+/// (`trusty-mpm-supervisor`, #8453). Deploying and `tm doctor` cover all four;
+/// only a supervisor session may select the last.
+/// Test: `bundle_tests::output_style_registry_has_four_distinct_ids`.
 pub const OUTPUT_STYLES: &[BundledStyle] = &[
     BundledStyle {
         id: DEFAULT_OUTPUT_STYLE_ID,
@@ -405,7 +286,24 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
         file_name: "trusty-mpm-research.md",
         content: OUTPUT_STYLE_RESEARCH,
     },
+    BundledStyle {
+        id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
+        file_name: "trusty-mpm-supervisor.md",
+        content: OUTPUT_STYLE_SUPERVISOR,
+    },
 ];
+
+/// The bundled PM output styles: [`OUTPUT_STYLES`] without the supervisor style.
+///
+/// Why (#8453): the PM invariants — the mandatory-delegation floor, the
+/// identity protocol, the TodoWrite section — hold for every style a PM session
+/// can select, and the supervisor style deliberately carries none of them.
+/// Test: `the_pm_styles_are_every_style_but_the_supervisor_style`.
+pub fn pm_output_styles() -> impl Iterator<Item = &'static BundledStyle> {
+    OUTPUT_STYLES
+        .iter()
+        .filter(|s| s.id != crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+}
 
 // BundledArtifact, InstallPolicy, and ALL are defined in bundle_all.rs.
 // They are included here so they can access the constants above via `use super::*`.

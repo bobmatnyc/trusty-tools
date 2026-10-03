@@ -755,6 +755,38 @@ stamp "$R" crateaextra
 commit_all "$R" "second row present but keyed out of cratea's scope"
 run_case "case24e a row keyed outside the crate's scope fires MANIFEST-GAP" 1 "MANIFEST-GAP" "$R" cratea
 
+# ---------------------------------------------------------------------------
+# Case 26 — shared_dirs (column 4): files OUTSIDE the UI project that the build
+# imports are hashed TOGETHER with the source dir. The search dashboard imports
+# docs/design/UI/design-system/components/ through a Vite alias; before this
+# column, an edit there left the digest unchanged over a stale bundle — the
+# #3606 failure mode with the source moved one directory over.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case26)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+mkdir -p "${R}/docs/shared"
+echo "export const KIND = 'old';" > "${R}/docs/shared/codeView.js"
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist${TAB}docs/shared"
+stamp "$R" cratea
+commit_all "$R" "bundle built from ui/ + docs/shared"
+run_case "case26a shared_dirs row fresh when stamped" 0 "recorded source digest" "$R"
+echo "export const KIND = 'new';" > "${R}/docs/shared/codeView.js"
+commit_all "$R" "edit only the shared component"
+run_case "case26b an edit under shared_dirs makes the bundle stale" 1 "BUNDLE-STALE" "$R"
+stamp "$R" cratea
+commit_all "$R" "rebuild + re-stamp"
+run_case "case26c re-stamping clears it" 0 "recorded source digest" "$R"
+# Column 4 is opt-in: a three-column row hashes the source dir alone, so the
+# same shared edit leaves it fresh — every existing row keeps its digest.
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+commit_all "$R" "three-column row"
+echo "export const KIND = 'newer';" > "${R}/docs/shared/codeView.js"
+commit_all "$R" "shared edit under a row that does not list it"
+run_case "case26d a row without shared_dirs ignores the shared dir" 0 "recorded source digest" "$R"
+
 echo
 echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"
 [ "$FAILED" -eq 0 ] || exit 1

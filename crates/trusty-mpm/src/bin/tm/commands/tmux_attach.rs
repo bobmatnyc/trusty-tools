@@ -193,9 +193,10 @@ fn inside_tmux_from_env(tmux: Option<String>, tmux_pane: Option<String>) -> bool
 /// attempts pane-targeted resolution is unit-testable independent of a live
 /// tmux server.
 /// What: `Some(value)` unchanged when it is an immutable `%N` pane id; `None`
-/// for an unset var, an empty-string export, or anything else (#8443).
+/// for an unset var, an empty-string export, or anything else (#8443). The
+/// `Notification` hook applies the same gate to its `$TMUX_PANE` (#8392).
 /// Test: `tmux_pane_env_gate_present_and_empty_matrix`.
-fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
+pub(crate) fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
     // #8443: only an immutable `%N` is acted on — the tmux-exact-targets
     // allowlist excuses the bare `-t pane_id` below on exactly that basis.
     value.filter(|s| s.starts_with('%') && trusty_mpm::core::tmux::is_immutable_id(s))
@@ -209,27 +210,44 @@ fn tmux_pane_id_from_env(value: Option<String>) -> Option<String> {
 /// (nested) one. `$TMUX`'s own value encodes a socket path and a numeric
 /// window/pane index, not the session's NAME, so the name has to come from
 /// tmux itself.
-/// What: returns `None` immediately when [`inside_tmux`] is `false` (no
-/// session to query). Otherwise runs `tmux display-message -p '#S'` (via
-/// `core::tmux::display_message_argv`/`run_tmux_argv_with_bin` — #2414) and
-/// returns the trimmed, non-empty stdout, or `None` on any I/O failure,
-/// non-zero exit, or empty output.
-/// Test: I/O path, not unit-tested (requires a live tmux server); the guard's
+/// What: the session of the caller's own pane, `$TMUX_PANE`, through
+/// [`caller_session_name_with`]; `None` when `$TMUX_PANE` is not a `%N` pane
+/// id or tmux cannot answer. A caller that needs a name refuses on `None`
+/// and asks for `--session`.
+/// Test: `caller_session_targets_the_callers_own_pane`; the guard's
 /// decision logic that CONSUMES this value is pure and tested separately
 /// (`nested_managed_match_*` in `tests_behavior_c_tests.rs`).
 pub(crate) fn current_tmux_session_name() -> Option<String> {
-    if !inside_tmux() {
-        return None;
-    }
-    // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
-    // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
-    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    let argv = trusty_mpm::core::tmux::display_message_argv(None, "#S");
-    let output = trusty_mpm::core::tmux::run_tmux_argv_with_bin(&tmux_bin, &argv).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    caller_session_name_with(std::env::var("TMUX_PANE").ok(), |argv| {
+        // #2414: routes through the shared tmux binary-resolution + TCC-disclaim
+        // spawn primitive instead of a bare, unresolved `Command::new("tmux")`.
+        let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+        let output = trusty_mpm::core::tmux::run_tmux_argv_with_bin(&tmux_bin, argv).ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+}
+
+/// The tmux session of the pane `pane_env` names, read through `run`.
+///
+/// Why: #8694 — an untargeted `display-message -p '#S'` answers with the
+/// most recently attached client's session, so `tm issue epic create` and
+/// `tm pr open` labelled work with an unrelated session.
+/// What: `None` unless [`tmux_pane_id_from_env`] accepts `pane_env`; then
+/// `run` gets `display-message -t <pane> -p '#S'` and its trimmed, non-empty
+/// stdout is the name. `run` answers `None` on any spawn or exit failure.
+/// Test: `caller_session_targets_the_callers_own_pane`.
+fn caller_session_name_with(
+    pane_env: Option<String>,
+    run: impl FnOnce(&[String]) -> Option<String>,
+) -> Option<String> {
+    // #8694: never untargeted; no own pane means no answer, not a guess.
+    let pane = tmux_pane_id_from_env(pane_env)?;
+    let target = trusty_mpm::core::tmux::TmuxTarget::pane("", pane);
+    let argv = trusty_mpm::core::tmux::display_message_argv(Some(&target), "#S");
+    let name = run(&argv)?.trim().to_string();
     (!name.is_empty()).then_some(name)
 }
 
@@ -813,6 +831,29 @@ mod tests {
             tmux_pane_id_from_env(Some("%7".to_string())),
             Some("%7".to_string())
         );
+    }
+
+    /// #8694: the session lookup targets `$TMUX_PANE`, and without a pane it
+    /// never asks tmux at all.
+    #[test]
+    fn caller_session_targets_the_callers_own_pane() {
+        let mut seen = Vec::new();
+        let name = caller_session_name_with(Some("%42".to_string()), |argv| {
+            seen = argv.to_vec();
+            Some("tm-mine\n".to_string())
+        });
+        assert_eq!(name.as_deref(), Some("tm-mine"));
+        assert_eq!(seen, ["display-message", "-t", "%42", "-p", "#S"]);
+
+        for pane in [None, Some(String::new()), Some("tm-other".to_string())] {
+            let asked = caller_session_name_with(pane.clone(), |_| {
+                panic!("asked tmux without a pane: {pane:?}")
+            });
+            assert_eq!(asked, None);
+        }
+        assert_eq!(caller_session_name_with(Some("%1".into()), |_| None), None);
+        let blank = caller_session_name_with(Some("%1".into()), |_| Some(" \n".into()));
+        assert_eq!(blank, None);
     }
 
     /// #8443: operator hints normalize and quote the name like tmux does.

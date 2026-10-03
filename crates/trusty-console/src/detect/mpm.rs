@@ -20,6 +20,10 @@ use crate::connector::{ServiceConnector, ServiceInfo, ServiceLifecycle, ServiceS
 
 use super::helpers::{binary_on_path, detect_service, tcp_probe};
 
+/// The binary whose presence on PATH means trusty-mpm is installed. `tm` is
+/// the one full binary; `trusty-mpm` is only a compatibility alias of it.
+const MPM_BINARY: &str = "tm";
+
 /// ServiceConnector for `trusty-mpm`.
 ///
 /// Why: surfaces the running trusty-mpm daemon in the console Overview and
@@ -141,7 +145,7 @@ impl ServiceConnector for MpmConnector {
     /// Test: `mpm_connector_surfaces_url_via_http_addr` (primary path),
     /// `mpm_connector_parses_lock_addr` (fallback path).
     fn detect(&self) -> ServiceInfo {
-        if !binary_on_path("trusty-mpm") {
+        if !binary_on_path(MPM_BINARY) {
             return ServiceInfo {
                 id: self.id().to_string(),
                 display_name: self.display_name().to_string(),
@@ -163,7 +167,7 @@ impl ServiceConnector for MpmConnector {
             if addr_file.exists() {
                 // Delegate to the shared helper which does addr-file read,
                 // TCP probe, version fetch, and builds ServiceInfo with url.
-                return detect_service(self.id(), self.display_name(), "trusty-mpm", addr_file);
+                return detect_service(self.id(), self.display_name(), MPM_BINARY, addr_file);
             }
         }
 
@@ -276,7 +280,7 @@ mod tests {
     #[test]
     fn mpm_connector_absent_binary() {
         // Only meaningful when the binary is genuinely not installed (CI).
-        if which::which("trusty-mpm").is_ok() {
+        if which::which(MPM_BINARY).is_ok() {
             return;
         }
         let tmp = TempDir::new().expect("tempdir");
@@ -308,7 +312,7 @@ mod tests {
         unsafe {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
-        if which::which("trusty-mpm").is_ok() {
+        if which::which(MPM_BINARY).is_ok() {
             // Binary present, no http_addr, dead lock port → Available (not Running).
             assert_eq!(info.status, ServiceStatus::Available);
         } else {
@@ -331,7 +335,7 @@ mod tests {
         unsafe {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
-        if which::which("trusty-mpm").is_ok() {
+        if which::which(MPM_BINARY).is_ok() {
             assert_eq!(info.status, ServiceStatus::Available);
         } else {
             assert_eq!(info.status, ServiceStatus::Absent);
@@ -367,7 +371,7 @@ mod tests {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
 
-        if which::which("trusty-mpm").is_ok() {
+        if which::which(MPM_BINARY).is_ok() {
             assert_eq!(
                 info.status,
                 ServiceStatus::Running,

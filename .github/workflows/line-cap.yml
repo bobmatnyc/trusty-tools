@@ -95,6 +95,15 @@ jobs:
       - name: Every generated doc region has an owning test
         run: bash scripts/check_generated_regions.sh
 
+      # #8926: only trusty-console may listen on TCP (ADR-0032). Pure text scan,
+      # no toolchain, so it rides this unfiltered job. Selftest FIRST: the gate
+      # must still reject an injected bind, a stale row and an empty scan.
+      - name: TCP-listener lint selftest (must reject a non-allowlisted bind)
+        run: bash scripts/check_no_tcp_listeners_selftest.sh
+
+      - name: No TCP listener outside the allowlist (ADR-0032)
+        run: bash scripts/check_no_tcp_listeners.sh
+
   # Test-only workspace dev-dependency edges (#8341). A separate job because it
   # is the one gate in this file that needs cargo: `cargo metadata --no-deps`
   # reads the member manifests and nothing else — no registry index, no network,

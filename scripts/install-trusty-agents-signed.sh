@@ -22,8 +22,8 @@
 #
 # Second artifact — `Trusty Agents.app` (the Tauri desktop shell,
 # `crates/trusty-agents/ui/src-tauri`) — uses a DIFFERENT, DELIBERATELY BETTER
-# mechanism than the `trusty-mpm-gui`/`trusty-code-gui` precedent. Those two
-# GUIs hardcode `bundle.macOS.signingIdentity` directly in their
+# mechanism than the `trusty-code-gui` precedent. That
+# GUI hardcodes `bundle.macOS.signingIdentity` directly in its
 # `tauri.conf.json`, which means `cargo tauri build` HARD-FAILS on any machine
 # without that exact certificate (see `docs/reference/common-pitfalls.md`).
 # `crates/trusty-agents/ui/src-tauri/tauri.conf.json` deliberately leaves

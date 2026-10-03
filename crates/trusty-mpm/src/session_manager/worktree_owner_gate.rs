@@ -7,9 +7,10 @@
 //! is any live party still entitled to this tree?
 //! What: [`owner_refusal`] applies conditions (a)–(d) of the #7771 rule. (a) no
 //! harness lock names a running pid whose start time matches the lock; (b) no
-//! non-terminal delegation names the owner file's agent; (c) no process stands
-//! in the tree; (d) the owner file's session is the caller or provably ended.
-//! An owner file that names nobody makes (b) and (d) vacuous.
+//! non-terminal delegation names the owner file's agent, unless the session
+//! that dispatched it provably ended; (c) no process stands in the tree; (d)
+//! the owner file's session is the caller or provably ended. An owner file
+//! that names nobody makes (b) and (d) vacuous.
 //!
 //! # Fail direction
 //!
@@ -33,7 +34,7 @@ use super::worktree_registry::{
 ///
 /// Why: both sides are whole seconds, taken by different clocks at different
 /// moments, so exact equality would call a live holder "reused".
-const START_TOLERANCE_SECS: i64 = 2;
+pub(crate) const START_TOLERANCE_SECS: i64 = 2;
 
 /// What git's lock on a tree says about who holds it (#7771 condition a).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +70,16 @@ impl LockLiveness {
 /// `lock_start_is_none_for_a_reason_without_one`.
 pub(crate) fn parse_lock_start(reason: &str) -> Option<i64> {
     let rest = reason.split_once(" start ")?.1;
-    let stamp = rest.split_once(')').map_or(rest, |(s, _)| s);
+    parse_start_stamp(rest.split_once(')').map_or(rest, |(s, _)| s))
+}
+
+/// A `Thu Sep 24 02:08:36 2026` UTC process-start stamp as Unix seconds.
+///
+/// Why: #7771 — Claude Code's own session registry writes a process's start in
+/// the same shape the harness lock does, so both are read by one parser.
+/// Test: `lock_start_reads_the_measured_reason_shape`,
+/// `claude_registry_reads_the_measured_entry_shape`.
+pub(crate) fn parse_start_stamp(stamp: &str) -> Option<i64> {
     // The weekday is dropped: it restates the date, and a writer that got it
     // wrong must not turn a readable start into "no start".
     let normal = stamp
@@ -300,10 +310,15 @@ impl OwnerGate<'_> {
 /// What: (a) the lock, then the owner file (one naming nobody skips (b) and
 /// (d); one that cannot be read keeps the tree — [`read_owner`]), then (b) and
 /// (d) against an agent or session owner, then (c) last,
-/// because it is the one probe that costs a process-table walk.
+/// because it is the one probe that costs a process-table walk. A `Live`
+/// delegation whose dispatching session is [`SessionEnd::Ended`] is stale and
+/// does not refuse (#7771); a held lock or a process in the tree still does.
 /// Test: `owner_refusal_reclaims_a_tree_with_no_owner_file`,
 /// `owner_refusal_keeps_a_tree_a_live_pid_locks`,
 /// `owner_refusal_keeps_a_live_delegations_tree`,
+/// `worktree_7771_a_dead_sessions_open_delegation_is_stale`,
+/// `worktree_7771_an_unregistered_claude_process_keeps_a_live_delegations_tree`,
+/// `worktree_7771_a_stale_delegation_still_yields_to_a_held_lock`,
 /// `owner_refusal_keeps_another_live_sessions_tree`,
 /// `owner_refusal_permits_the_callers_own_agent_tree`,
 /// `owner_refusal_permits_an_ended_sessions_agent_tree`,
@@ -317,19 +332,32 @@ pub(crate) fn owner_refusal(path: &Path, gate: &OwnerGate<'_>) -> Option<String>
         Err(why) => return Some(why),
         Ok(None | Some(SentinelOwner::Unknown)) => None,
         Ok(Some(SentinelOwner::Agent(owner, _))) => {
-            if (gate.agent_state)(&owner) == AgentDelegationState::Live {
+            let session = owner.parent_session_id.0.to_string();
+            let end = (gate.session_end)(&session);
+            // #7771: a delegation record still `Running` after its dispatching
+            // session provably ended is stale — the agent ran inside that
+            // session and died with it. Only `Ended` releases it; the caller's
+            // own live agent, and every unproven session, still keep the tree.
+            // A registry-only `Ended` needs a complete registry read, one that
+            // lists every running Claude Code process (#7771 critic).
+            if end != SessionEnd::Ended && (gate.agent_state)(&owner) == AgentDelegationState::Live
+            {
                 return Some(format!(
                     "owned by dispatched agent {} — a delegation naming it has not ended \
                      (#5661, #7771)",
                     owner.agent_id
                 ));
             }
-            Some(owner.parent_session_id.0.to_string())
+            Some((session, end))
         }
-        Ok(Some(SentinelOwner::Known(owner, _))) => Some(owner.to_string()),
+        Ok(Some(SentinelOwner::Known(owner, _))) => {
+            let session = owner.to_string();
+            let end = (gate.session_end)(&session);
+            Some((session, end))
+        }
     };
-    if let Some(session) = session {
-        match (gate.session_end)(&session) {
+    if let Some((session, end)) = session {
+        match end {
             SessionEnd::Caller | SessionEnd::Ended => {}
             SessionEnd::Live => {
                 return Some(format!(

@@ -90,7 +90,11 @@ pub(crate) fn group_by_git_root<'a>(
 /// daemon; Telegram token resolution is tested in `trusty-mpm-telegram`.
 pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     println!("daemon: ok");
-    print_sessions(client, url).await
+    print_sessions(&trusty_mpm::client::DaemonClient::with_client(
+        client.clone(),
+        url,
+    ))
+    .await
 }
 
 /// Print the session listing and Telegram-bot note, with no health line.
@@ -105,13 +109,15 @@ pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow:
 /// an unavailable LISTING rather than as an unreachable daemon.
 /// Test: `status_reports_the_live_daemon_when_the_listing_fails` in
 /// `status_daemon_tests.rs` drives the failing-listing half.
-pub(crate) async fn print_sessions(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+pub(crate) async fn print_sessions(
+    daemon: &trusty_mpm::client::DaemonClient,
+) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct Body {
         sessions: Vec<SessionRow>,
     }
-    let body: Body = client
-        .get(format!("{url}/sessions"))
+    let body: Body = daemon
+        .get("/sessions")
         .send()
         .await?
         .error_for_status()?
@@ -264,13 +270,14 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     let exe = std::env::current_exe()?;
     // Set a stable cwd so the spawned daemon never inherits a deleted directory.
     let stable_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-    std::process::Command::new(&exe)
-        .arg("daemon")
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon")
         .current_dir(&stable_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
-        .stderr(std::process::Stdio::from(stderr))
-        .spawn()?;
+        .stderr(std::process::Stdio::from(stderr));
+    // #8783: own session, so a group kill aimed at this CLI spares the daemon.
+    trusty_common::daemon_guard::start_in_new_session(&mut cmd).spawn()?;
 
     // Poll the lock file for up to 5 seconds. The daemon writes it as soon as
     // it has a bound address — use that URL for the health check.
@@ -481,37 +488,25 @@ pub(crate) fn cleanup_lock_file(stopped: &[u32]) {
 /// (`trusty-mpm` or `tm`) was used to launch it. Matching argv on `daemon`
 /// filters out short-lived CLI invocations (`tm status`, `tm doctor`) whose
 /// process names also match.
-/// What: refreshes the process list once, matches `name() in {trusty-mpm,
-/// tm}` AND `cmd().contains("daemon")`. Excludes the current process.
-/// Test: covered indirectly by the stop integration path.
+/// What: refreshes the process list once WITH argv (#9034: without it `cmd()`
+/// is always empty and nothing matched), and keeps every pid that
+/// [`super::daemon_pid_identity::classify_process`] calls a daemon — a name in
+/// `OWN_BINARY_NAMES` (#4058) with a `daemon` argument. Excludes the current
+/// process.
+/// Test: `find_daemon_pids_finds_a_tm_daemon_process`.
 pub(crate) fn find_daemon_pids() -> Vec<u32> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
-    );
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    use super::daemon_pid_identity::{PidIdentity, classify_process, name_and_cmd};
+    let sys = super::daemon_pid_identity::refresh_with_cmd(sysinfo::ProcessesToUpdate::All);
     let me = std::process::id();
-    let mut out = Vec::new();
-    for (pid, proc_) in sys.processes() {
-        let raw = pid.as_u32();
-        if raw == me {
-            continue;
-        }
-        let name = proc_.name().to_string_lossy();
-        // #4058: sourced from the crate's single canonical binary-name list
-        // rather than a third hand-copy of {trusty-mpm, tm}.
-        let is_tm_binary = trusty_mpm::core::own_binary_names::OWN_BINARY_NAMES
-            .iter()
-            .any(|n| name == *n);
-        if !is_tm_binary {
-            continue;
-        }
-        let is_daemon = proc_.cmd().iter().any(|a| a.to_string_lossy() == "daemon");
-        if is_daemon {
-            out.push(raw);
-        }
-    }
-    out
+    sys.processes()
+        .iter()
+        .filter(|(pid, _)| pid.as_u32() != me)
+        .filter(|(_, p)| {
+            let (name, cmd) = name_and_cmd(p);
+            classify_process(&name, &cmd) == PidIdentity::Daemon
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect()
 }
 
 /// Send a POSIX signal to a PID by shelling out to `/bin/kill`.

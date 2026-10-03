@@ -736,6 +736,8 @@ fn data_dir_respects_trusty_data_dir_env_var() {
 /// What: calls the production resolver directly (bypassing the branch) and
 /// asserts it equals the well-known user location.
 /// Test: this test.
+// #5937: reads HOME, which data_dir.rs tests set under #[serial].
+#[serial_test::serial]
 #[test]
 fn production_data_dir_is_the_real_user_location() {
     let Some(expected) = dirs::data_local_dir().map(|b| b.join("trusty-search")) else {

@@ -155,11 +155,13 @@ mod tests {
 
     /// `<tmp>/ancestor/project`, so the project has exactly one ancestor the
     /// test controls plus the temp root above it.
+    // #8838: `project` is a registered project, so the nearest-boundary walk
+    // stops there whatever a shared temp root above the fixture holds.
     fn fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tmp = TempDir::new().unwrap();
         let ancestor = tmp.path().join("ancestor");
         let project = ancestor.join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
         (tmp, ancestor, project)
     }
 
@@ -186,6 +188,21 @@ mod tests {
             "{}",
             check.message
         );
+    }
+
+    /// #8838: a `.trusty-mpm/` in the shared temp root, above the fixture,
+    /// became the project boundary and hid the ancestor file below it — the
+    /// Linux CI failure. Planted one level closer here, so it binds on macOS.
+    /// Test: this is the test. RED at 94a16fc27 — the row is `Ok`.
+    #[test]
+    fn a_marker_above_the_fixture_does_not_hide_its_ancestor() {
+        let (tmp, ancestor, project) = fixture();
+        std::fs::create_dir_all(tmp.path().join(".trusty-mpm")).unwrap();
+        std::fs::write(ancestor.join("CLAUDE.md"), CLAUDE_MD_STUB).unwrap();
+
+        let check = check_ancestor_claude_md(Some(&project), None, None);
+
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
     }
 
     #[test]

@@ -100,12 +100,8 @@ pub(crate) async fn list(
 /// Test: `account_change_log_line_*` (pure-function coverage of the decision;
 /// the HTTP fetch-then-upsert sequencing itself has no hermetic test in this
 /// file — see that function's doc).
-pub(crate) async fn register(
-    client: &reqwest::Client,
-    url: &str,
-    input: RegisterInput,
-) -> anyhow::Result<()> {
-    let previous_gh_account = daemon(client, url)
+pub(crate) async fn register(client: &DaemonClient, input: RegisterInput) -> anyhow::Result<()> {
+    let previous_gh_account = client
         .registry_get_project(&input.name)
         .await
         .ok()
@@ -134,7 +130,7 @@ pub(crate) async fn register(
         // configurator-only fields have no `register` flag either).
         worktree: None,
     };
-    let project = daemon(client, url).registry_register_project(&args).await?;
+    let project = client.registry_register_project(&args).await?;
     println!(
         "registered project '{}' ({} @ {})",
         project.name, project.repo_url, project.default_branch
@@ -221,11 +217,14 @@ pub(crate) async fn auto_persist_account_selection(
         );
     }
 
-    let default_branch = current_default_branch(client, url, &name).await;
+    let default_branch = current_default_branch(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        &name,
+    )
+    .await;
 
     if let Err(e) = register(
-        client,
-        url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         RegisterInput {
             name,
             repo_url,
@@ -292,8 +291,9 @@ fn resolve_account_gh_config_dir(
 /// mirroring [`register`]'s own `previous_gh_account` fetch.
 /// Test: exercised via `run_target`/`main.rs`'s call sites; the decision
 /// itself is [`default_branch_to_preserve`], tested directly below.
-async fn current_default_branch(client: &reqwest::Client, url: &str, name: &str) -> Option<String> {
-    let existing = daemon(client, url).registry_get_project(name).await.ok();
+pub(crate) async fn current_default_branch(client: &DaemonClient, name: &str) -> Option<String> {
+    // #6288: takes the client, so `tm sessions --account` stays on the socket.
+    let existing = client.registry_get_project(name).await.ok();
     default_branch_to_preserve(existing.as_ref())
 }
 

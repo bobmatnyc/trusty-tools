@@ -72,6 +72,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use trusty_mpm::core::agent::is_subagent_dispatch_tool;
+use trusty_mpm::core::content_source::AgentRoster;
 use trusty_mpm::core::delegation_authority::deployed_agent_dirs;
 use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, requires_own_worktree_in_main_checkout,
@@ -157,11 +158,12 @@ const IN_PLACE_WORKFLOW_NOTE: &str = "\n\n---\nWorktree isolation is OFF for thi
 /// `does_not_grant_outside_a_main_checkout`, `does_not_grant_a_read_only_agent`,
 /// `grants_nothing_when_the_project_opts_out`.
 pub(crate) fn evaluate_worktree_grant(
+    roster: &AgentRoster,
     tool_name: &str,
     tool_input: Option<&Value>,
     cwd: &Path,
 ) -> Option<WorktreeGrant> {
-    evaluate_worktree_grant_with(tool_name, tool_input, cwd, &deployed_agent_dirs)
+    evaluate_worktree_grant_with(roster, tool_name, tool_input, cwd, &deployed_agent_dirs)
 }
 
 /// [`evaluate_worktree_grant`] with the roster tiers injected.
@@ -170,6 +172,7 @@ pub(crate) fn evaluate_worktree_grant(
 /// test in this target may not write; a hermetic test passes its own tiers.
 /// Test: `a_project_agent_is_known_from_a_subdirectory_of_the_checkout`.
 pub(crate) fn evaluate_worktree_grant_with(
+    roster: &AgentRoster,
     tool_name: &str,
     tool_input: Option<&Value>,
     cwd: &Path,
@@ -179,7 +182,8 @@ pub(crate) fn evaluate_worktree_grant_with(
         return None;
     }
     let agent = dispatch_agent(tool_input).unwrap_or_default();
-    if !requires_own_worktree_in_main_checkout(agent, dispatch_isolation(tool_input)) {
+    if !requires_own_worktree_in_main_checkout(Some(roster), agent, dispatch_isolation(tool_input))
+    {
         return None;
     }
     if !is_main_checkout(cwd) {
@@ -192,7 +196,9 @@ pub(crate) fn evaluate_worktree_grant_with(
     }
     let accepts_isolation = tool_name == ISOLATION_AWARE_DISPATCH_TOOL;
     // #8547: refuse, never isolate, a dispatch whose type is missing or unknown.
-    if let Some(reason) = undetermined_type_refusal(tool_input, cwd, accepts_isolation, deployed) {
+    if let Some(reason) =
+        undetermined_type_refusal(roster, tool_input, cwd, accepts_isolation, deployed)
+    {
         return Some(WorktreeGrant::Deny(reason));
     }
     if !accepts_isolation {
@@ -294,15 +300,16 @@ pub(crate) fn build_worktree_grant_response(updated_input: &Value) -> String {
 /// Add `additionalContext` to an already-rendered allow response (#8261).
 ///
 /// Why: a `PreToolUse` hook's stdout may carry exactly ONE object, so the
-/// builder slot's `CARGO_TARGET_DIR` notice cannot be a second `println!`
-/// beside the grant's own — it has to be merged into the same
-/// `hookSpecificOutput` that already carries `updatedInput`. It lives here
+/// agent-cost notice cannot be a second `println!` beside a build-lease
+/// rewrite — it has to be merged into the same `hookSpecificOutput` that
+/// already carries `updatedInput`. (#8261 round 5: no dispatch-time slot
+/// notice exists; a build learns its slot from `tm build-lease`.) It lives here
 /// rather than in `pm_guard.rs` because that file sits at its 500-SLOC cap.
 /// What: parses `response`, inserts `additionalContext` into its
 /// `hookSpecificOutput`, and re-renders. `None` — or a response this does not
 /// recognise — returns the input unchanged, so a parse failure degrades to
 /// today's answer instead of emitting something malformed.
-/// Test: `a_slot_notice_is_merged_into_the_one_hook_output_object`,
+/// Test: `an_agent_cost_notice_is_merged_into_the_one_hook_output_object`,
 /// `an_absent_notice_leaves_the_response_byte_identical`.
 pub(crate) fn with_additional_context(response: &str, context: Option<&str>) -> String {
     let Some(context) = context else {
@@ -327,6 +334,11 @@ pub(crate) fn with_additional_context(response: &str, context: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout roster (#9011) every classifier in this suite reads.
+    fn r() -> &'static trusty_mpm::core::content_source::AgentRoster {
+        crate::commands::install::test_roster_ref()
+    }
     use tempfile::TempDir;
     use trusty_mpm::core::dispatch_isolation::ISOLATING_DISPATCH_MODES;
 
@@ -360,9 +372,13 @@ mod tests {
     #[test]
     fn grants_a_worktree_to_an_unisolated_writer() {
         let dir = main_checkout();
-        let grant =
-            evaluate_worktree_grant("Agent", Some(&input("rust-engineer", None)), dir.path())
-                .expect("a writer in a main checkout must be granted a worktree");
+        let grant = evaluate_worktree_grant(
+            r(),
+            "Agent",
+            Some(&input("rust-engineer", None)),
+            dir.path(),
+        )
+        .expect("a writer in a main checkout must be granted a worktree");
         let Some(WorktreeGrant::Rewrite(updated)) = Some(grant) else {
             panic!("expected a rewrite");
         };
@@ -372,7 +388,7 @@ mod tests {
 
     /// The `isolation` a dispatch of `agent` from `dir` was granted.
     fn granted_isolation(agent: &str, dir: &Path) -> Value {
-        match evaluate_worktree_grant("Agent", Some(&input(agent, None)), dir) {
+        match evaluate_worktree_grant(r(), "Agent", Some(&input(agent, None)), dir) {
             Some(WorktreeGrant::Rewrite(updated)) => updated["isolation"].clone(),
             other => panic!("{agent} must be granted a worktree, got {other:?}"),
         }
@@ -411,7 +427,7 @@ mod tests {
 
     /// The deny reason for `tool_input`, panicking on any other outcome.
     fn refusal(tool_input: Option<&Value>, dir: &Path) -> String {
-        match evaluate_worktree_grant("Agent", tool_input, dir) {
+        match evaluate_worktree_grant(r(), "Agent", tool_input, dir) {
             Some(WorktreeGrant::Deny(reason)) => reason,
             other => panic!("{tool_input:?} must be refused, got {other:?}"),
         }
@@ -460,6 +476,7 @@ mod tests {
         // #8547 review: `Task` cannot carry `isolation`, so it is pointed at
         // the `Agent` tool rather than told to declare a field it lacks.
         let task = evaluate_worktree_grant(
+            r(),
             "Task",
             Some(&input("some-project-custom-agent", None)),
             dir.path(),
@@ -472,6 +489,7 @@ mod tests {
         // The same name with explicit isolation is the documented fix.
         assert_eq!(
             evaluate_worktree_grant(
+                r(),
                 "Agent",
                 Some(&input("some-project-custom-agent", Some("worktree"))),
                 dir.path()
@@ -495,7 +513,7 @@ mod tests {
             "claude-code-guide",
         ] {
             assert_eq!(
-                evaluate_worktree_grant("Agent", Some(&input(agent, None)), dir.path()),
+                evaluate_worktree_grant(r(), "Agent", Some(&input(agent, None)), dir.path()),
                 None,
                 "{agent} only reads and must not be moved"
             );
@@ -511,7 +529,12 @@ mod tests {
         // push had to be issued by SHA.
         let dir = main_checkout();
         assert_eq!(
-            evaluate_worktree_grant("Agent", Some(&input("version-control", None)), dir.path()),
+            evaluate_worktree_grant(
+                r(),
+                "Agent",
+                Some(&input("version-control", None)),
+                dir.path()
+            ),
             None,
             "version-control merges into main and must not be moved out of it"
         );
@@ -525,6 +548,7 @@ mod tests {
         for mode in ["worktree", "remote"] {
             assert_eq!(
                 evaluate_worktree_grant(
+                    r(),
                     "Agent",
                     Some(&input("rust-engineer", Some(mode))),
                     dir.path()
@@ -544,6 +568,7 @@ mod tests {
         std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
         assert_eq!(
             evaluate_worktree_grant(
+                r(),
                 "Agent",
                 Some(&input("rust-engineer", None)),
                 worktree.path()
@@ -553,7 +578,12 @@ mod tests {
 
         let plain = tempfile::tempdir().expect("tempdir");
         assert_eq!(
-            evaluate_worktree_grant("Agent", Some(&input("rust-engineer", None)), plain.path()),
+            evaluate_worktree_grant(
+                r(),
+                "Agent",
+                Some(&input("rust-engineer", None)),
+                plain.path()
+            ),
             None
         );
     }
@@ -563,7 +593,7 @@ mod tests {
         let dir = main_checkout();
         for tool in ["Read", "Edit", "Write", "Bash", "SendMessage"] {
             assert_eq!(
-                evaluate_worktree_grant(tool, Some(&input("rust-engineer", None)), dir.path()),
+                evaluate_worktree_grant(r(), tool, Some(&input("rust-engineer", None)), dir.path()),
                 None,
                 "{tool} is not a dispatch"
             );
@@ -576,7 +606,7 @@ mod tests {
         // failed tool call rather than an isolated agent.
         let dir = main_checkout();
         let grant =
-            evaluate_worktree_grant("Task", Some(&input("rust-engineer", None)), dir.path())
+            evaluate_worktree_grant(r(), "Task", Some(&input("rust-engineer", None)), dir.path())
                 .expect("a Task writer in a main checkout must be handled");
         assert_eq!(grant, WorktreeGrant::Deny(TASK_DENY_REASON.to_string()));
         assert!(TASK_DENY_REASON.contains("Agent"));
@@ -622,7 +652,7 @@ mod tests {
         // and the rewrite carries no `isolation` at all.
         let dir = main_checkout_with_config("agent_worktree = false\n");
         let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "do the thing"});
-        let grant = evaluate_worktree_grant("Agent", Some(&sent), dir.path())
+        let grant = evaluate_worktree_grant(r(), "Agent", Some(&sent), dir.path())
             .expect("an opted-out project must still annotate the dispatch");
         let WorktreeGrant::InPlace(updated) = grant else {
             panic!("an opted-out project must not be granted a worktree");
@@ -643,7 +673,7 @@ mod tests {
         let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "go"});
         assert!(
             matches!(
-                evaluate_worktree_grant("Task", Some(&sent), dir.path()),
+                evaluate_worktree_grant(r(), "Task", Some(&sent), dir.path()),
                 Some(WorktreeGrant::InPlace(_))
             ),
             "the opt-out must reach Task before the deny"
@@ -665,7 +695,7 @@ mod tests {
         ] {
             let dir = main_checkout_with_config(body);
             let sent = serde_json::json!({"subagent_type": "rust-engineer", "prompt": "go"});
-            let grant = evaluate_worktree_grant("Agent", Some(&sent), dir.path())
+            let grant = evaluate_worktree_grant(r(), "Agent", Some(&sent), dir.path())
                 .expect("a writer in a main checkout is still granted a worktree");
             let WorktreeGrant::Rewrite(updated) = grant else {
                 panic!("expected the ordinary grant for config: {body}");
@@ -727,19 +757,25 @@ mod tests {
         );
     }
 
-    /// #8261: the builder slot's notice must land INSIDE the grant's own
-    /// `hookSpecificOutput`. A `PreToolUse` hook's stdout may carry exactly one
-    /// object, so a second printed object would be dropped or misread — and the
-    /// `updatedInput` the grant already carries must survive the merge.
+    /// #8261 round 6 (critic LOW): renamed from
+    /// `a_slot_notice_is_merged_into_the_one_hook_output_object` — round 5
+    /// removed the dispatch-time slot notice entirely, so the only context
+    /// this function ever merges today is the agent-cost notice. The MERGE
+    /// mechanism this test proves is unchanged; only the example content
+    /// moved to match what actually calls it.
+    ///
+    /// A `PreToolUse` hook's stdout may carry exactly one object, so a second
+    /// printed object would be dropped or misread — and the `updatedInput`
+    /// the grant already carries must survive the merge.
     #[test]
-    fn a_slot_notice_is_merged_into_the_one_hook_output_object() {
+    fn an_agent_cost_notice_is_merged_into_the_one_hook_output_object() {
         let grant = build_worktree_grant_response(&serde_json::json!({"isolation": "worktree"}));
-        let merged = with_additional_context(&grant, Some("CARGO_TARGET_DIR=/pool/slot-0"));
+        let merged = with_additional_context(&grant, Some("this build costs an extra 3 min"));
 
         let parsed: Value = serde_json::from_str(&merged).expect("valid JSON");
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"],
-            "CARGO_TARGET_DIR=/pool/slot-0"
+            "this build costs an extra 3 min"
         );
         assert_eq!(
             parsed["hookSpecificOutput"]["updatedInput"]["isolation"], "worktree",

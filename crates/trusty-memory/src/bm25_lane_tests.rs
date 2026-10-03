@@ -44,8 +44,10 @@ async fn default_cap_is_three() {
 #[test]
 #[serial_test::serial]
 fn max_resident_honours_env_override() {
+    // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let prev = std::env::var(ENV_MAX_PALACES).ok();
-    // Safety: `#[serial]` makes this test the sole writer of this key.
+    // Safety: `env_test_lock()` makes this test the sole writer of this key.
     unsafe { std::env::set_var(ENV_MAX_PALACES, "7") };
     assert_eq!(max_resident_from_env(), 7);
     unsafe { std::env::set_var(ENV_MAX_PALACES, "not-a-number") };
@@ -68,8 +70,10 @@ fn max_resident_honours_env_override() {
 #[test]
 #[serial_test::serial]
 fn text_budget_honours_env_override() {
+    // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+    let _env = crate::commands::env_test_lock().blocking_lock();
     let prev = std::env::var(ENV_TEXT_BUDGET_MB).ok();
-    // Safety: `#[serial]` makes this test the sole writer of this key.
+    // Safety: `env_test_lock()` makes this test the sole writer of this key.
     unsafe { std::env::set_var(ENV_TEXT_BUDGET_MB, "64") };
     assert_eq!(text_budget_from_env(), Some(64));
     unsafe { std::env::set_var(ENV_TEXT_BUDGET_MB, "0") };

@@ -88,18 +88,6 @@ pub(crate) const IDLE_PARK_DETECT_TIMEOUT: std::time::Duration =
 /// once so the retry branch and its tests name the same string.
 pub(crate) const SUBAGENT_STOP_EVENT: &str = "SubagentStop";
 
-/// `status` subcommand — probe daemon health and list sessions.
-///
-/// Why: the first thing an operator runs to see if the daemon is alive. #8025
-/// moved the body to [`super::status_daemon`] so the verdict comes from the
-/// probe `tm doctor` already uses, and because this file sits three SLOC under
-/// the 500-line production cap.
-/// What: delegates to [`super::status_daemon::run`].
-/// Test: `src/bin/tm/commands/status_daemon_tests.rs`.
-pub(crate) async fn status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    super::status_daemon::run(client, url).await
-}
-
 /// `events` subcommand — print the recent hook-event feed.
 ///
 /// Why: gives operators a quick tail of daemon activity without the TUI. The
@@ -221,20 +209,26 @@ fn print_gaps(gaps: &[trusty_mpm::core::deploy_validate::DeploymentGap]) {
 /// of truth per the chat-core nucleus. The `resolved:` line tells operators
 /// whether traffic is flowing via the trusty-console gateway or direct to the
 /// daemon, making the resolution path transparent (#1849 Phase 2).
-/// What: runs `TrustyCommand::Health` through the executor and prints a compact,
-/// scriptable summary. A dead daemon prints `daemon: unreachable` and is NOT an
-/// error exit (the probe succeeded in determining the daemon is down). The
-/// `resolved:` line is printed only on success so unreachable output is unchanged.
-/// Test: `cli_parses_health` covers parsing; the executor's `execute_health_*`
-/// tests cover the live and dead-daemon report paths.
-pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
+/// What: #6288 step 1 — probes `/health` over the daemon socket first; a
+/// socket that is absent, refuses, or answers badly is an ERROR naming the
+/// socket path (exit 1), never a TCP retry and never a healthy line. Then runs
+/// `TrustyCommand::Health` through the executor and prints a compact,
+/// scriptable summary whose `resolved:` line names the transport.
+/// Test: `cli_parses_health` covers parsing;
+/// `tm_health_over_an_absent_socket_fails_and_never_dials_tcp` and
+/// `tm_health_status_and_doctor_work_over_the_socket_alone` cover both arms.
+pub(crate) async fn health(daemon: &trusty_mpm::client::DaemonClient) -> anyhow::Result<()> {
     use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand};
-    use trusty_mpm::core::GATEWAY_PATH;
 
-    let executor = CommandExecutor::new(url.to_string());
+    // #6288: a socket error is never downgraded to "unreachable" + exit 0.
+    daemon
+        .health_snapshot()
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon: unreachable — {e:#}"))?;
+    let executor = CommandExecutor::from_daemon_client(daemon.clone());
     match executor.execute(TrustyCommand::Health).await {
         CommandResult::Health(report) if !report.reachable => {
-            println!("daemon: unreachable ({})", report.url);
+            anyhow::bail!("daemon: unreachable ({})", daemon.transport_label());
         }
         CommandResult::Health(report) => {
             let catalog = if report.catalog_unknown {
@@ -244,23 +238,16 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
             } else {
                 "up to date"
             };
-            // Indicate the resolution path so operators can see whether traffic
-            // is flowing via the console gateway or direct to the daemon.
-            let resolved_via = if url.contains(GATEWAY_PATH) {
-                format!("via gateway {url}")
-            } else {
-                format!("direct {url}")
-            };
             println!("daemon: {} ({})", report.status, report.url);
-            println!("resolved: {resolved_via}");
+            println!("resolved: {}", daemon.transport_label());
             println!("catalog: {catalog}");
             println!(
                 "fleet: {} session(s), {} awaiting a decision",
                 report.managed_total, report.managed_pending_decisions
             );
         }
-        CommandResult::Error(msg) => eprintln!("health failed: {msg}"),
-        other => eprintln!("health: unexpected result {other:?}"),
+        CommandResult::Error(msg) => anyhow::bail!("health failed: {msg}"),
+        other => anyhow::bail!("health: unexpected result {other:?}"),
     }
     Ok(())
 }
@@ -420,6 +407,37 @@ async fn detect_idle_parking_from_payload_in(
     trusty_mpm::core::idle_parking::detect_idle_parking_in_transcript(&jsonl)
 }
 
+/// The `PreToolUse` Bash rewrite `tm hook` prints, if any.
+///
+/// Why (#8261): `tm hook --pm-guard` wraps heavy builds in `tm build-lease`,
+/// and both hooks run on the same call in parallel. For a heavy build this hook
+/// therefore emits the SAME response the guard does — compression inside the
+/// lease — so whichever one Claude Code applies, the build is leased. A heavy
+/// build the guard refuses gets no rewrite here; the guard's deny decides it.
+/// What: the lease response for a heavy build, the compression-only response
+/// (#1956) otherwise, `None` when neither applies. Inside an isolation
+/// worktree, or with an unreadable cwd, neither response compresses (#7477) —
+/// the lease itself still applies there.
+/// Test: `hook_emits_the_guards_lease_rewrite_for_a_heavy_build` in
+/// `tests/tm_hook_pm_guard_build_lease.rs`.
+fn pretooluse_bash_rewrite(
+    cmd: &str,
+    tool_input: Option<&serde_json::Value>,
+    cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
+    let cwd = cwd.unwrap_or(std::path::Path::new(""));
+    match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
+        (LeaseRewrite::Rewrite(new), permission) => Some(
+            super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
+        ),
+        (LeaseRewrite::Refuse(_), _) => None,
+        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
+        (LeaseRewrite::None, _) => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
+            .map(|rewritten| build_pretooluse_rewrite_response(&rewritten).to_string()),
+    }
+}
+
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
 ///
 /// Why: Claude Code invokes the configured hook command on every PreToolUse /
@@ -551,11 +569,9 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == "PreToolUse"
         && tool_name == Some("Bash")
         && let Some(cmd) = bash_command
-        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
-        && let Some(rewritten) =
-            rewrite_bash_command_unless_isolated(cmd, hook_cwd(stdin_payload.as_ref()).as_deref())
+        && let Some(response) =
+            pretooluse_bash_rewrite(cmd, tool_input, hook_cwd(stdin_payload.as_ref()).as_deref())
     {
-        let response = build_pretooluse_rewrite_response(&rewritten);
         println!("{response}");
         return Ok(());
     }
@@ -585,6 +601,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
+    // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
+    super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd);
     // #2610 (idle-parking flags), #1956 (tool/input), #2864 (subagent
     // correlation keys: tool_use_id / agent_id / transcript paths). Built by
     // `commands::hook_payload` — a pure, unit-tested function that performs no
@@ -612,37 +630,16 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         return Ok(());
     }
 
-    // Build a hook-specific client with a tight connect timeout so a
-    // pathological OS-level TCP-connect stall never eats into the 2 s
-    // total budget. The shared `client` parameter is used for all other
-    // subcommands; for the hook we build a short-lived client here so
-    // the connect guard applies only to this hot path.
-    let hook_client = match reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(500))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            // Client build failure is programmer-class; degrade to the
-            // shared client (no connect timeout) rather than blocking.
-            let req = client
-                .post(format!("{url}/hooks"))
-                .timeout(std::time::Duration::from_secs(2))
-                .json(&body)
-                .send();
-            let _ = req.await;
-            return Ok(());
-        }
-    };
-
-    // Best-effort POST — any failure (daemon down, network blip, malformed
-    // url) becomes a silent Ok(()) so Claude Code never sees a non-zero exit.
-    let _ = hook_client
-        .post(format!("{url}/hooks"))
-        .json(&body)
-        .send()
-        .await;
+    // #8392: moved to `hook_notify` (this file is over the SLOC cap); same
+    // 500 ms connect / 2 s total bounds, every failure dropped.
+    // #8531: SessionStart over the socket, so the daemon can bind its claude.
+    // #8980: SessionEnd too — only a socket SessionEnd from that claude stales
+    // the session's live delegations.
+    if event == "SessionStart" || event == "SessionEnd" {
+        super::hook_notify::post_lifecycle_via_socket(client, url, &body).await;
+        return Ok(());
+    }
+    super::hook_notify::post_best_effort(client, url, &body).await;
     Ok(())
 }
 

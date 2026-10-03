@@ -35,6 +35,8 @@ use super::super::managed_render::{
     truncate,
 };
 use super::{session_activity, session_decommission, session_resume, session_stop};
+use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
+use trusty_mpm::core::tmux::{exact_session_target, with_tmux_binary};
 
 #[test]
 fn truncate_clips_and_appends_ellipsis() {
@@ -212,8 +214,10 @@ async fn session_decommission_prints_daemon_verdict_over_http() {
     tokio::spawn(axum::serve(listener, api::router(state)).into_future());
 
     session_decommission(
-        &reqwest::Client::new(),
-        &format!("http://{addr}"),
+        &trusty_mpm::client::DaemonClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}"),
+        ),
         id.to_string(),
     )
     .await
@@ -251,9 +255,12 @@ async fn spawn_test_daemon() -> String {
 async fn session_stop_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_stop(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_stop(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
@@ -265,9 +272,12 @@ async fn session_stop_not_found_errors() {
 async fn session_resume_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_resume(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
@@ -362,9 +372,12 @@ async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, Stri
 async fn session_resume_restart_failure_errors() {
     let (url, id) = spawn_test_daemon_with_unrestartable_stopped_session().await;
     let client = reqwest::Client::new();
-    let err = session_resume(&client, &url, id)
-        .await
-        .expect_err("a daemon-rejected restart must be a hard failure, not Ok(())");
+    let err = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        id,
+    )
+    .await
+    .expect_err("a daemon-rejected restart must be a hard failure, not Ok(())");
     assert!(
         err.to_string().contains("cannot restart"),
         "error should surface the daemon's rejection: {err}"
@@ -414,6 +427,11 @@ async fn session_resume_restart_failure_errors() {
 /// always flips state to `active`. The real tmux session is owned by a
 /// `ScratchTmuxSession` guard, so it is killed on every exit path — normal
 /// return, assertion failure, and panic alike (#6116).
+///
+/// #6542: that session lives on a `PrivateTmuxServer`, and the CLI's probes
+/// reach it through a `with_tmux_binary` shim scope. On the default server a
+/// killed run leaked `tm-r<pid>-01`, a name outside the reserved namespace the
+/// stale sweep collects.
 #[tokio::test]
 async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     use trusty_mpm::daemon::{api, state::DaemonState};
@@ -463,8 +481,12 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     //
     // #6116: owned by an RAII guard, so the session dies with this test whether
     // it returns, fails an assertion, or panics inside the wait below.
-    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+    // #6542: on a private server, which the guard declared first outlives.
+    let server = PrivateTmuxServer::new(&tmux_bin, "resume-live");
+    let shim = server.shim_bin();
+    let scratch = ScratchTmuxSession::spawn_on_socket(
         &tmux_bin,
+        Some(server.name()),
         &record.tmux_name,
         "sleep 300",
     );
@@ -474,7 +496,7 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     // sends this test down the #3873 dead-runtime branch. Wait for the pane to
     // settle into the live-runtime state the test is actually about — the exact
     // inverse of the wait in the dead-runtime counterpart below.
-    wait_for_stable_live_runtime(&record.tmux_name);
+    wait_for_stable_live_runtime(&shim, &record.tmux_name);
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -483,7 +505,14 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = session_resume(&client, &url, id.to_string()).await;
+    let result = with_tmux_binary(
+        shim.into(),
+        session_resume(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            id.to_string(),
+        ),
+    )
+    .await;
 
     // Killed here, before the assertions, as it always has been. Dropping the
     // guard is now only the EARLIEST it can happen — an assertion failure or
@@ -511,20 +540,51 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     );
 }
 
+/// Block until the server behind `tmux_bin` answers for `session_name`.
+///
+/// Why (#6542): the stability waits below each allow 10 s for a pane to settle.
+/// On a private per-test server that window also absorbed the server's cold
+/// start and the shim's exec under load, and the live-runtime fixture failed
+/// 3 of 20 runs right after a rebuild. Server readiness now has its own
+/// budget, so the 10 s measures only the pane.
+/// What: polls `has-session -t =<name>` every 50 ms until it exits 0, or
+/// panics after 60 s naming the server, not the pane, as the cause.
+fn wait_for_server_answer(tmux_bin: &str, session_name: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let target = exact_session_target(session_name.trim());
+    while std::time::Instant::now() < deadline {
+        let answered = std::process::Command::new(tmux_bin)
+            .args(["has-session", "-t", &target])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if answered {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "fixture precondition: the tmux server behind '{tmux_bin}' never answered \
+         for session '{session_name}' within 60s"
+    );
+}
+
 /// Block until `session_name`'s panes read as a settled LIVE runtime (#3873).
 ///
 /// Why: the mirror of [`wait_for_stable_dead_runtime`] — see its doc. tmux
 /// launches a pane command through a shell, so a pane told to run a long-lived
 /// process still reports the shell for a moment; a test asserting about the
 /// Attach branch must not start until the fixture actually expresses it.
-/// What: polls until three consecutive probes report a live runtime, or panics
-/// at a 10-second deadline. Any dead reading resets the streak.
-fn wait_for_stable_live_runtime(session_name: &str) {
+/// What: waits for the server to answer ([`wait_for_server_answer`]), then
+/// polls until three consecutive probes report a live runtime, or panics at a
+/// 10-second deadline. Any dead reading resets the streak. Probes through
+/// `tmux_bin`, so a test on a private server (#6542) probes that server.
+fn wait_for_stable_live_runtime(tmux_bin: &str, session_name: &str) {
     const REQUIRED_AGREEING_READS: u32 = 3;
+    wait_for_server_answer(tmux_bin, session_name);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut streak = 0;
     while std::time::Instant::now() < deadline {
-        if crate::commands::guided_resume::session_runtime_live(session_name) {
+        if crate::commands::guided_resume::session_runtime_live_with_bin(tmux_bin, session_name) {
             streak += 1;
             if streak == REQUIRED_AGREEING_READS {
                 return;
@@ -552,13 +612,15 @@ fn wait_for_stable_live_runtime(session_name: &str) {
 /// What: polls until three consecutive probes report a dead runtime, or panics
 /// at a 10-second deadline rather than letting the caller proceed on an
 /// unsettled fixture (a silent proceed is what produced an intermittent
-/// failure). Any live reading resets the streak.
-fn wait_for_stable_dead_runtime(session_name: &str) {
+/// failure). Any live reading resets the streak. The 10 s clock starts only
+/// once the server answers ([`wait_for_server_answer`]).
+fn wait_for_stable_dead_runtime(tmux_bin: &str, session_name: &str) {
     const REQUIRED_AGREEING_READS: u32 = 3;
+    wait_for_server_answer(tmux_bin, session_name);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut streak = 0;
     while std::time::Instant::now() < deadline {
-        if crate::commands::guided_resume::session_runtime_live(session_name) {
+        if crate::commands::guided_resume::session_runtime_live_with_bin(tmux_bin, session_name) {
             streak = 0;
         } else {
             streak += 1;
@@ -683,8 +745,12 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // replaces never ran on that path — every such run leaked a real
     // `tm-deadrt<pid>-01` session permanently. `Drop` still cannot run on a
     // SIGKILL; `spawn` also sweeps what an earlier hard-killed run left behind.
-    let scratch = crate::test_support::tmux_session::ScratchTmuxSession::spawn(
+    // #6542: on a private server, which the guard declared first outlives.
+    let server = PrivateTmuxServer::new(&tmux_bin, "resume-dead");
+    let shim = server.shim_bin();
+    let scratch = ScratchTmuxSession::spawn_on_socket(
         &tmux_bin,
+        Some(server.name()),
         &record.tmux_name,
         "sh",
     );
@@ -692,7 +758,7 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     // dead" reading to be STABLE (three consecutive probes) before proceeding,
     // so a single transient child during pane setup cannot send this test down
     // the Attach branch it is not testing.
-    wait_for_stable_dead_runtime(&record.tmux_name);
+    wait_for_stable_dead_runtime(&shim, &record.tmux_name);
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -701,7 +767,14 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = session_resume(&client, &url, id.to_string()).await;
+    let result = with_tmux_binary(
+        shim.into(),
+        session_resume(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            id.to_string(),
+        ),
+    )
+    .await;
 
     // The daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a
     // no-op and this guard is what actually tears the real session down.
@@ -856,7 +929,12 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
     // this zombie instead of dead-ending on the daemon's raw 409. The
     // eventual runtime spawn is environment-dependent (see doc above), so
     // only the ABSENCE of the specific 409 dead-end text is asserted here.
-    if let Err(e) = session_resume(&client, &url, id.to_string()).await {
+    if let Err(e) = session_resume(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        id.to_string(),
+    )
+    .await
+    {
         let msg = e.to_string();
         assert!(
             !msg.contains("cannot resume a session in state"),
@@ -954,31 +1032,74 @@ fn pushed_repo_7660() -> (tempfile::TempDir, std::path::PathBuf, std::path::Path
     (tmp, root, repo)
 }
 
-/// Write `wt`'s ownership marker where tm writes it since #8511 — `git
-/// rev-parse --git-path trusty-mpm-worktree`, outside the working tree. The
-/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
-/// git for the same path.
-fn mark_owned_7660(wt: &std::path::Path) {
+/// The absolute path of `name` in `wt`'s git admin dir — `git rev-parse
+/// --git-path`, outside the working tree.
+fn admin_path_7660(wt: &std::path::Path, name: &str) -> std::path::PathBuf {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(wt)
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "trusty-mpm-worktree",
-        ])
+        .args(["rev-parse", "--path-format=absolute", "--git-path", name])
         .output()
         .expect("run git rev-parse");
     assert!(out.status.success(), "git rev-parse --git-path failed");
-    let marker = String::from_utf8(out.stdout).expect("utf8 path");
-    std::fs::write(marker.trim(), b"").expect("write the admin-dir marker");
+    String::from_utf8(out.stdout)
+        .expect("utf8 path")
+        .trim()
+        .into()
+}
+
+/// Write `wt`'s ownership marker where tm writes it since #8511. The
+/// library's `write_sentinel_bytes` is crate-private, so this binary test asks
+/// git for the same path.
+fn mark_owned_7660(wt: &std::path::Path) {
+    std::fs::write(admin_path_7660(wt, "trusty-mpm-worktree"), b"")
+        .expect("write the admin-dir marker");
+}
+
+/// Record the provisioning ledger a launch writes (#8663) for the files
+/// [`provision_dirt_7660`] wrote, so `--force` can match their content
+/// (#8540). The library's ledger writer is crate-private, so this writes its
+/// version-1 JSON beside the marker.
+fn record_ledger_7660(wt: &std::path::Path) {
+    use sha2::{Digest as _, Sha256};
+    let files: serde_json::Map<String, serde_json::Value> = [
+        "CLAUDE.md",
+        ".claude/settings.json",
+        ".claude/settings.json.bak",
+    ]
+    .into_iter()
+    .map(|rel| {
+        let bytes = std::fs::read(wt.join(rel)).expect("read a provisioned file");
+        (
+            rel.to_string(),
+            format!("{:x}", Sha256::digest(bytes)).into(),
+        )
+    })
+    .collect();
+    let ledger = serde_json::json!({ "version": 1, "files": files, "gitignore_appended": [] });
+    std::fs::write(
+        admin_path_7660(wt, "trusty-mpm-provisioning-ledger.json"),
+        serde_json::to_vec(&ledger).expect("serialize the ledger"),
+    )
+    .expect("write the ledger");
 }
 
 /// Dirty `ws` exactly as tm's provisioning does (#7660): the scaffolded
 /// `.gitignore` block, untracked settings files, and `CLAUDE.md`.
 fn provision_dirt_7660(ws: &std::path::Path) {
-    trusty_mpm::core::scaffold_gitignore::ensure_scaffold_gitignored(ws).expect("scaffold");
+    use trusty_mpm::core::scaffold_gitignore::{
+        SCAFFOLD_GITIGNORE_BEGIN, SCAFFOLD_GITIGNORE_END, SCAFFOLD_IGNORED_PATHS,
+    };
+    // The block a pre-#8758 launch appended; nothing writes it any more.
+    let mut gitignore = std::fs::read_to_string(ws.join(".gitignore")).unwrap_or_default();
+    if !gitignore.is_empty() {
+        gitignore.push('\n');
+    }
+    gitignore.push_str(&format!(
+        "{SCAFFOLD_GITIGNORE_BEGIN}\n{}\n{SCAFFOLD_GITIGNORE_END}\n",
+        SCAFFOLD_IGNORED_PATHS.join("\n")
+    ));
+    std::fs::write(ws.join(".gitignore"), gitignore).expect("scaffold");
     std::fs::create_dir_all(ws.join(".claude")).expect("mkdir .claude");
     std::fs::write(ws.join(".claude/settings.json"), "{}\n").expect("settings");
     std::fs::write(ws.join(".claude/settings.json.bak"), "{}\n").expect("settings bak");
@@ -1039,6 +1160,7 @@ async fn spawn_daemon_with_provisioned_worktree() -> Served7660 {
     );
     mark_owned_7660(&wt);
     provision_dirt_7660(&wt);
+    record_ledger_7660(&wt);
     let (url, id) = serve_session_on_7660(&root, &wt).await;
     (url, id, wt, tmp)
 }
@@ -1061,9 +1183,13 @@ async fn session_decommission_routed_fails_naming_why_the_workspace_was_kept() {
     let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, false)
-        .await
-        .expect_err("a kept workspace must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        false,
+    )
+    .await
+    .expect_err("a kept workspace must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("workspace NOT removed"), "{msg}");
@@ -1080,9 +1206,13 @@ async fn session_decommission_routed_force_removes_a_provisioning_only_worktree(
     let (url, id, wt, _tmp) = spawn_daemon_with_provisioned_worktree().await;
     let client = reqwest::Client::new();
 
-    super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect("--force removes a provisioning-only tree");
+    super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect("--force removes a provisioning-only tree");
 
     assert!(!wt.exists(), "the workspace directory must be gone");
 }
@@ -1095,9 +1225,13 @@ async fn session_decommission_routed_force_keeps_user_work_naming_the_file() {
     std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect_err("user work must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect_err("user work must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("notes.rs"), "the file must be named: {msg}");
@@ -1112,9 +1246,13 @@ async fn session_decommission_routed_keeps_the_shared_main_checkout_under_force(
     let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
-    let err = super::session_decommission_routed(&client, &url, &id, true)
-        .await
-        .expect_err("a kept main checkout must fail the command");
+    let err = super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        true,
+    )
+    .await
+    .expect_err("a kept main checkout must fail the command");
 
     let msg = err.to_string();
     assert!(msg.contains("main checkout"), "{msg}");
@@ -1131,10 +1269,12 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     let (url, id, repo, _tmp) = spawn_daemon_on_the_main_checkout().await;
     let client = reqwest::Client::new();
 
-    let outcome = super::super::managed_route::executor(&client, &url)
-        .decommission_managed_target(&id, false)
-        .await
-        .expect("decommission");
+    let outcome = super::super::managed_route::executor(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+    )
+    .decommission_managed_target(&id, false)
+    .await
+    .expect("decommission");
     let printed = super::decommission_report(&outcome);
     let why = printed.lines().nth(1).expect("a by-design reason line");
     assert!(why.contains("kept by design"), "{printed}");
@@ -1148,9 +1288,13 @@ async fn session_decommission_routed_says_why_it_kept_the_main_checkout() {
     // The CLI entry point itself exits 0 on a second decommission of a
     // fresh launch-on-main session.
     let (url, id, repo2, _tmp2) = spawn_daemon_on_the_main_checkout().await;
-    super::session_decommission_routed(&client, &url, &id, false)
-        .await
-        .expect("a by-design keep exits 0");
+    super::session_decommission_routed(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        &id,
+        false,
+    )
+    .await
+    .expect("a by-design keep exits 0");
     assert!(repo.exists() && repo2.join(".git").is_dir());
 }
 
@@ -1163,10 +1307,12 @@ async fn decommission_report_says_nothing_was_on_disk_for_an_absent_workspace() 
     std::fs::remove_dir_all(&wt).expect("remove the worktree out of band");
     let client = reqwest::Client::new();
 
-    let outcome = super::super::managed_route::executor(&client, &url)
-        .decommission_managed_target(&id, false)
-        .await
-        .expect("decommission");
+    let outcome = super::super::managed_route::executor(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+    )
+    .decommission_managed_target(&id, false)
+    .await
+    .expect("decommission");
     let printed = super::decommission_report(&outcome);
 
     assert!(printed.contains("no workspace was on disk"), "{printed}");
@@ -1195,18 +1341,24 @@ async fn session_decommission_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
 
-    let err = session_decommission(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a malformed id must be a hard failure, not a silent Ok(())");
+    let err = session_decommission(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a malformed id must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the rejected id: {err}"
     );
 
     let absent = "11111111-2222-3333-4444-555555555555";
-    let err = session_decommission(&client, &url, absent.to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_decommission(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        absent.to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert_eq!(
         err.to_string(),
         format!("managed session '{absent}' not found"),
@@ -1276,9 +1428,12 @@ async fn decommission_entry_points_agree_on_every_verdict() {
         let url = spawn_decommission_stub(verdict).await;
         let client = reqwest::Client::new();
 
-        let bulk = super::session_decommission_line(&client, &url, STUB_ID)
-            .await
-            .unwrap_or_else(|e| panic!("verdict {verdict:?}: bulk path failed: {e}"));
+        let bulk = super::session_decommission_line(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            STUB_ID,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("verdict {verdict:?}: bulk path failed: {e}"));
         let routed = super::super::managed_route::render_cli(
             &CommandExecutor::with_client(client.clone(), url.clone())
                 .execute(TrustyCommand::ManagedDecommission {
@@ -1304,9 +1459,12 @@ async fn decommission_entry_points_agree_on_every_verdict() {
 async fn session_activity_not_found_errors() {
     let url = spawn_test_daemon().await;
     let client = reqwest::Client::new();
-    let err = session_activity(&client, &url, "nonexistent-id".to_string())
-        .await
-        .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
+    let err = session_activity(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+        "nonexistent-id".to_string(),
+    )
+    .await
+    .expect_err("a missing managed session must be a hard failure, not a silent Ok(())");
     assert!(
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
@@ -1343,6 +1501,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         slot,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 
@@ -1671,6 +1830,37 @@ fn ls_row_renders_the_startup_context_column() {
         unmeasured.chars().count(),
         "the START column keeps its width with and without a reading"
     );
+}
+
+/// #8942 design §4: `tm ls` lists the live Architect first and tags its rows
+/// by kind; a deleted Architect row is not pinned, an ordinary row untagged.
+#[test]
+fn session_table_pins_and_tags_the_architect_row() {
+    use crate::commands::managed_render::{kind_tag, pinned_first};
+    use trusty_mpm::session_manager::SessionKind;
+
+    let with = |name: &str, kind: Option<SessionKind>, deleted: bool| {
+        let mut s = ls_session(name, 1);
+        s.kind = kind;
+        s.deleted = deleted;
+        s
+    };
+    let rows = [
+        with("ordinary", None, false),
+        with("gone-arch", Some(SessionKind::Supervisor), true),
+        with("poller", Some(SessionKind::SupervisorAux), false),
+        with("arch", Some(SessionKind::Supervisor), false),
+    ];
+    let order: Vec<&str> = pinned_first(&rows)
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(order, ["arch", "poller", "ordinary", "gone-arch"]);
+    assert!(format_ls_row(&rows[3], false, 14, None).contains("active [architect]"));
+    assert!(format_ls_row(&rows[2], false, 14, None).contains("[architect-helper]"));
+    assert!(!format_ls_row(&rows[0], false, 14, None).contains('['));
+    assert_eq!(kind_tag(Some(SessionKind::Unknown)), Some("protected"));
+    assert_eq!(kind_tag(Some(SessionKind::Ordinary)), None);
 }
 
 /// Why: a recorded-and-tiny startup and an unrecorded one are different facts,

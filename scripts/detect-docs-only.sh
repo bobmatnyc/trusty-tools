@@ -8,7 +8,7 @@
 #   filter on the workflow trigger is NOT the fix: GitHub never creates the
 #   check runs for a workflow the filters skipped, so a REQUIRED context stays
 #   pending forever and the PR becomes unmergeable rather than fast. The same
-#   trap is documented in .github/workflows/changelog-fragment.yml. So the
+#   trap is documented in .github/workflows/ci.yml. So the
 #   exemption lives here, in a script the always-running job consults, and the
 #   jobs keep reporting.
 #
@@ -44,26 +44,54 @@
 #                                   these validate prose but cannot affect a
 #                                   Cargo result
 #
+#   Inert ONLY when ADDED or MODIFIED (owner ruling 2026-09-27, ADR-0064).
+#   The list is is_inert_instruction_asset in scripts/lib/source_class.sh,
+#   which check_changelog_fragment.sh applies too:
+#     crates/trusty-mpm/src/assets/**/*.md
+#                                 instruction content compiled in via
+#                                 include_str!. An edit cannot change whether
+#                                 the workspace compiles, lints or formats.
+#                                 What it CAN break — the resident budgets, the
+#                                 generated tm-capabilities skill, the
+#                                 asset-content tests — capabilities-drift.yml
+#                                 still runs, because both roots sit in
+#                                 trusty-mpm's build closure.
+#     content/**                  the post-PHASE_1 home of the same content.
+#   A DELETE (or the delete half of a rename, since the diff is taken with
+#   --no-renames) or a type change under those roots is CODE: it removes a
+#   path an include_str! names. A bare path with no status column is CODE
+#   too — the status is what makes the edit inert.
+#
 #   Deliberately NOT inert, though they look like documentation:
-#     crates/*/src/**/*.md   — bundled agent/skill/instruction assets that are
-#                              compiled into binaries via include_dir!/
-#                              include_str!. Editing one changes program
-#                              output and breaks asset-pin and drift tests.
+#     crates/*/src/**/*.md   — outside the two roots above (e.g. trusty-code's
+#                              forked agents): compiled in via include_dir!/
+#                              include_str!, and asset-pin tests read them.
+#     non-.md files under the two asset roots — manifests, JSON schemas and
+#                              hook scripts are parsed or executed.
 #     other scripts/**       — may be invoked by integration tests or builds.
 #     other workflows/**     — unknown workflow changes fail closed.
 #     crates/*/changelog.d/*/*  — a NESTED fragment is already a defect the
 #                              changelog gate rejects; do not also exempt it.
 #
 # Usage:
+#   scripts/detect-docs-only.sh --instruction-assets < paths
+#     prints each stdin path whose ADD or MODIFY is inert instruction content
+#     (the second list above). The capabilities-drift relevance step and
+#     scripts/check_asset_test_filter.py read the asset-content definition
+#     from here, so it has one copy (#8378).
+#   git diff --name-status --no-renames "$MERGE_BASE" HEAD | scripts/detect-docs-only.sh
 #   git diff --name-only --no-renames "$MERGE_BASE" HEAD | scripts/detect-docs-only.sh
 #   DOCS_ONLY_BASE=origin/main scripts/detect-docs-only.sh     # resolves its own diff
+#
+#   A stdin line is `<status><TAB><path>` (git --name-status) or a bare
+#   `<path>`. Only the status form can make an instruction asset inert.
 #
 # Exit: always 0 on a successful classification; non-zero only when a requested
 #   base ref cannot be resolved (fail closed — the caller must not guess).
 #
 # Test: scripts/check-ci-helpers-selftest.sh (`detect-docs-only:` cases) runs
-#   this against docs-only, code-only, mixed, embedded-asset, and empty change
-#   sets and asserts the emitted verdict for each.
+#   this against docs-only, code-only, mixed, embedded-asset, instruction-asset
+#   add/modify/delete, and empty change sets and asserts the verdict for each.
 
 set -euo pipefail
 
@@ -151,7 +179,23 @@ is_inert_path() {
   return 1
 }
 
+# is_inert_instruction_asset <status> <path> lives in lib/source_class.sh, so
+# check_changelog_fragment.sh exempts exactly the paths this script treats as
+# inert. Sourced from this script's OWN directory, as that gate does.
+# shellcheck source=lib/source_class.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/source_class.sh"
+
 main() {
+  if [ "${1:-}" = "--instruction-assets" ]; then
+    local p
+    while IFS= read -r p; do
+      if [ -n "$p" ] && is_inert_instruction_asset M "$p"; then
+        printf '%s\n' "$p"
+      fi
+    done
+    return 0
+  fi
+
   local input
   if [ -n "${DOCS_ONLY_BASE:-}" ]; then
     local merge_base
@@ -159,21 +203,40 @@ main() {
       echo "detect-docs-only: cannot resolve merge-base against '${DOCS_ONLY_BASE}'" >&2
       return 2
     fi
-    input="$(git diff --name-only --no-renames "${merge_base}" HEAD)"
+    # --name-status: an instruction asset is inert only when added or
+    # modified, so each path's status is part of the answer.
+    if ! input="$(git diff --name-status --no-renames "${merge_base}" HEAD)"; then
+      echo "detect-docs-only: git diff against '${merge_base}' failed" >&2
+      return 2
+    fi
   else
     input="$(cat)"
   fi
 
   local docs_only=true
   local count=0
-  local path
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
+  local tab line status path
+  tab="$(printf '\t')"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
     count=$((count + 1))
+    # `<status><TAB><path>` from --name-status, or a bare path. A status is one
+    # capital letter plus an optional similarity score (R100, C75).
+    status="?"
+    path="$line"
+    case "$line" in
+      [ACDMRTUXB]"$tab"* | [ACDMRTUXB][0-9]*"$tab"*)
+        status="${line%%"$tab"*}"
+        status="${status:0:1}"
+        path="${line#*"$tab"}"
+        ;;
+    esac
     if is_inert_path "$path"; then
-      echo "  inert: ${path}" >&2
+      echo "  inert: ${status} ${path}" >&2
+    elif is_inert_instruction_asset "$status" "$path"; then
+      echo "  inert: ${status} ${path} (instruction content, added or modified)" >&2
     else
-      echo "  code : ${path}" >&2
+      echo "  code : ${status} ${path}" >&2
       docs_only=false
     fi
   done <<<"$input"

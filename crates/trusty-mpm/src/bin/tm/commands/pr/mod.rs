@@ -222,8 +222,8 @@ pub(crate) fn argv(parts: &[&str]) -> Vec<String> {
 /// [`EXIT_CHECK_FAILED`].
 /// Test: the verb bodies are unit-tested against [`GhRunner`] fakes; this is
 /// the exit-code wrapper.
-pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
-    let code = match run_inner(cmd, client, url).await {
+pub(crate) async fn run(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> ! {
+    let code = match run_inner(cmd, daemon).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tm pr: {e:#}");
@@ -233,8 +233,55 @@ pub(crate) async fn run(cmd: PrCmd, client: &reqwest::Client, url: &str) -> ! {
     std::process::exit(code)
 }
 
+/// The notice every `tm pr` verb prints instead of running in a local-only
+/// repository (#8934).
+///
+/// Why: open, merge, queue-check and cleanup all act on a GitHub PR, which a
+/// repository with no `origin` cannot have — and its session's gh is disabled.
+/// Skipping with one line, exit 0, keeps a delivery flow that calls `tm pr`
+/// from failing on a step that has nothing to do.
+/// What: `Some(notice)` when no `--repo` was given and `dir` is inside a
+/// local-only repository whose gh is disabled; `None` otherwise. An explicit
+/// `--repo` names a remote PR, so the verb runs and fails loudly under the pin
+/// rather than printing a skip a caller reads as success (#8934 HIGH 3). The
+/// allow-listed supervisor keeps gh, so its verbs run too.
+/// Test: `pr_8934_a_local_only_repo_skips_every_verb`,
+/// `pr_8934_an_explicit_repo_never_skips`.
+pub(crate) fn local_only_skip(
+    dir: &std::path::Path,
+    repo: Option<&str>,
+    mpm: &trusty_mpm::core::config::MpmConfig,
+) -> Option<String> {
+    use trusty_mpm::core::remote_mode::{LOCAL_ONLY_SKIP, RemoteMode, gh_disabled_for};
+    if repo.is_some() {
+        return None;
+    }
+    match trusty_mpm::core::remote_mode::remote_mode(dir).ok()? {
+        RemoteMode::LocalOnly { root } if gh_disabled_for(&root, mpm) => Some(format!(
+            "tm pr: {LOCAL_ONLY_SKIP}; merge locally with `git merge` instead"
+        )),
+        _ => None,
+    }
+}
+
+/// The `--repo` a `tm pr` verb was given, if any.
+fn repo_arg(cmd: &PrCmd) -> Option<&str> {
+    match cmd {
+        PrCmd::Open(args) => args.repo.as_deref(),
+        PrCmd::Merge(args) => args.repo.as_deref(),
+        PrCmd::QueueCheck(args) => args.repo.as_deref(),
+        PrCmd::Cleanup(args) => args.repo.as_deref(),
+    }
+}
+
 /// The fallible body of [`run`], split out so every error leaves one way.
-async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::Result<i32> {
+async fn run_inner(cmd: PrCmd, daemon: &trusty_mpm::client::DaemonClient) -> anyhow::Result<i32> {
+    // #8934: a local-only repo has no remote to push to or open a PR on.
+    let mpm = trusty_mpm::core::config::MpmConfig::load_default();
+    if let Some(notice) = local_only_skip(&std::env::current_dir()?, repo_arg(&cmd), &mpm) {
+        println!("{notice}");
+        return Ok(EXIT_OK);
+    }
     let gh = RealGhRunner::new()?;
     match cmd {
         PrCmd::Open(args) => open::run(&gh, &args, &open::RealPreflight),
@@ -257,12 +304,12 @@ async fn run_inner(cmd: PrCmd, client: &reqwest::Client, url: &str) -> anyhow::R
                 }
                 cleanup::PostMerge::AwaitSweep => Ok(EXIT_OK),
                 cleanup::PostMerge::Cleanup { repo } => {
-                    cleanup::after_merge(&args, repo, client, url).await
+                    cleanup::after_merge(&args, repo, daemon).await
                 }
             }
         }
         PrCmd::QueueCheck(args) => queue_check::run(&gh, &args),
         // #7275: the executor every cleanup trigger shares.
-        PrCmd::Cleanup(args) => cleanup::run(&args, client, url).await,
+        PrCmd::Cleanup(args) => cleanup::run(&args, daemon).await,
     }
 }

@@ -76,6 +76,8 @@ pub mod server;
 pub mod service;
 // #6642: per-service pid discovery + CPU sampling for the home-page graphs.
 pub mod service_metrics;
+// #9035: peer-identity gate for the `--tailscale` listener.
+pub(crate) mod tailnet_peer;
 // #6155: the trusty-search, trusty-memory and trusty-analyze SPAs, mounted
 // under /tools/<tool>/.
 pub mod tools_ui;
@@ -127,7 +129,7 @@ pub enum Commands {
     Config(trusty_common::inference::config::ConfigCommand),
     /// Manage the macOS launchd LaunchAgent for the console daemon (#2557).
     ///
-    /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-console.plist`
+    /// `install` writes `~/Library/LaunchAgents/com.trusty.console.plist` (#8253)
     /// (running `trusty-console serve`) and bootstraps it; `uninstall` unloads
     /// and removes it; `status` / `logs` inspect the running agent. macOS-only.
     /// `tctl install` / `tctl start` call `install` on the operator's behalf.
@@ -592,23 +594,15 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     info!("trusty-console listening on http://{primary_local}");
 
     // ── bind additional listeners (Tailscale mode: secondary addr) ──────────
-    for &extra_addr in addrs.get(1..).unwrap_or(&[]) {
-        let extra_listener = bind::bind_listener(extra_addr).await?;
-        let extra_local = extra_listener
-            .local_addr()
-            .context("get extra local addr")?;
-        info!("trusty-console also listening on http://{extra_local}");
-        eprintln!("trusty-console (tailnet): http://{extra_local}");
-        let r = router.clone();
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(extra_listener, r)
-                .with_graceful_shutdown(trusty_common::shutdown_signal())
-                .await
-            {
-                tracing::warn!("extra listener {extra_local} exited: {e}");
-            }
-        });
-    }
+    // #9035: each serves only nodes owned by this machine's own Tailscale
+    // login, addressed to itself by exact Host/Origin; loopback is not gated.
+    tailnet_peer::spawn_tailnet_listeners(
+        addrs.get(1..).unwrap_or(&[]),
+        &router,
+        Arc::new(tailnet_peer::TailscaleCliResolver),
+        shutdown_signal,
+    )
+    .await?;
 
     // ── write discovery file (primary address) ──────────────────────────────
     // Best-effort: log a warning on failure but do not abort the serve.
@@ -872,5 +866,27 @@ mod tests {
             std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
         }
         assert!(result.is_ok(), "run_port(port --json) should succeed");
+    }
+
+    /// Why: #8253 — the `service` clap doc comment (printed by `trusty-console
+    /// service --help`) named a plist launchd never loaded, so an operator
+    /// following it acted on a nonexistent unit.
+    /// What: requires lib.rs's `Service` help text to name
+    /// `<launchd_labels::CONSOLE>.plist` and never the pre-#4868 name.
+    /// Test: pure string check on the embedded source, no fs side effects.
+    #[test]
+    fn service_help_names_the_registry_plist() {
+        let src = include_str!("lib.rs");
+        let want = format!(
+            "~/Library/LaunchAgents/{}.plist",
+            trusty_common::launchd_labels::CONSOLE
+        );
+        // Built piecewise so this test's own text never matches itself.
+        let stale = format!("com.trusty.{}.plist", "trusty-console");
+        assert!(src.contains(&want), "`service --help` must name {want}");
+        assert!(
+            !src.contains(&stale),
+            "`service --help` names {stale}, a unit launchd never loaded"
+        );
     }
 }

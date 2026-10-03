@@ -1,0 +1,2 @@
+Fixed
+- `version-control`'s guarded `git worktree remove` no longer refuses a clean worktree left on an earlier review round, whose HEAD is an ancestor of its merged pull request's head (the last round landed on a renamed `-rN` branch). The guard now admits it when HEAD is that head or one of its ancestors and the pull request's merge commit is on the refreshed `origin` base. A commit that pull request never carried, a dirty tree, an unrefreshable `origin`, a missing or off-base merge commit, and any failed ancestry probe still refuse, and the refusal says which (#8849).

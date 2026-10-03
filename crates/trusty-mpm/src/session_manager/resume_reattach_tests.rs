@@ -111,6 +111,8 @@ async fn manager_resume_errors_when_recreated_pane_cwd_mismatches() {
     let workspace_dir = TempDir::new().unwrap();
     let wrong_dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let workspace_path = workspace_dir.path().to_owned();
     let record = mgr

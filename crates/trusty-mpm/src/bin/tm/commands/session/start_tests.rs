@@ -116,8 +116,7 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 
     let client = reqwest::Client::new();
     let result = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(repo.to_string_lossy().to_string()),
     )
     .await;
@@ -172,8 +171,7 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     // passes the same tempdir `fw` is rooted at, which is what lets the test
     // stop repointing the process's `$HOME`.
     let result = start_session_in_place(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         target.path(),
         &fw,
         Some(tmp_home.path()),
@@ -220,8 +218,7 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     .expect("write config");
 
     let result = start_session_in_place(
-        &reqwest::Client::new(),
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(reqwest::Client::new(), UNREACHABLE_URL),
         target.path(),
         &fw,
         Some(tmp_home.path()),
@@ -243,8 +240,10 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
     let subscriber = tracing_subscriber::registry().with(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
-    let line =
-        tracing::subscriber::with_default(subscriber, || super::inplace_session_line(&state));
+    let spec = tracing::subscriber::with_default(subscriber, || {
+        super::inplace_session_spec(target.path(), &state)
+    });
+    let line = crate::test_support::spec_text(&spec);
     let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
         &trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::default(),
     )
@@ -376,7 +375,11 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
     let (captured, url) = spawn_capturing_managed_spawn_server().await;
 
     let client = reqwest::Client::new();
-    let result = start_session(&client, &url, Some(repo.to_string_lossy().to_string())).await;
+    let result = start_session(
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
+        Some(repo.to_string_lossy().to_string()),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "expected Ok from a successful spawn, got {result:?}"
@@ -437,8 +440,7 @@ async fn session_start_refuses_a_non_git_directory() {
 
     let client = reqwest::Client::new();
     let err = start_session(
-        &client,
-        UNREACHABLE_URL,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), UNREACHABLE_URL),
         Some(plain.to_string_lossy().to_string()),
     )
     .await
@@ -515,8 +517,7 @@ async fn capture_guided_launch_body(
     .await;
     let client = reqwest::Client::new();
     let result = crate::commands::guided_launch::launch_new_session_and_attach(
-        &client,
-        &url,
+        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url),
         "https://example.invalid/owner/repo.git",
         name_hint,
         isolation,
@@ -619,10 +620,11 @@ async fn launch_new_session_and_attach_requests_a_worktree_when_asked() {
 /// #8405: the in-place start seam reads the renderer from its config root,
 /// both directions. Fails if the seam ignores the config.
 #[test]
-fn inplace_session_line_follows_the_configured_renderer() {
+fn inplace_session_spec_follows_the_configured_renderer() {
     for alternate_screen in [true, false] {
         let root = crate::test_support::config_root_with_alternate_screen(alternate_screen);
-        let line = super::inplace_session_line(root.path());
+        let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path());
+        let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
     }

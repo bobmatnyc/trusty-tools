@@ -1,0 +1,7 @@
+Fixed
+- `tm sessions new --account X`, `tm sessions start --account X` and `tm launch --account X` now run the session's `gh` and HTTPS git as X. Before, the flag was parsed and dropped, and the session ran as the machine's active gh account (#8914).
+- tm now writes the account's proven token into its own `~/.trusty-mpm/gh-accounts/<login>/hosts.yml` (mode 0600), taken from `gh auth token -u X` against your default gh config or from stdin with the new `--account-token-stdin` flag, and proves it with `GET /user` first. tm no longer suggests `gh auth login`, which moves the machine-wide keyring's active account (#8914).
+- Every session whose project pins a gh config dir, tm's own or one set with `--gh-config-dir`, now gets that account's proven token, `GH_CONFIG_DIR` and a git credential helper pin. When no token is proven, the session gets a token that authenticates as nobody. Before, `GH_CONFIG_DIR` alone resolved the keyring's active account (#8914).
+- Registry records that pin different accounts for one repository, and a registry that cannot be read, now give the session a token that authenticates as nobody instead of the active account (#8914).
+- An `--account` that has no proven credential, an unreadable per-account dir, an unresolved SSH host alias, or a malformed `hosts.yml` or `config.yml` now refuses the command. `--account` prints each project it re-pins with the account it replaces, and says when git uses SSH and so is not pinned (#8914).
+- `--account` on a `tm sessions` verb that spawns nothing is refused rather than ignored (#8914).

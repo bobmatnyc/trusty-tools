@@ -50,7 +50,6 @@ fn triple(subject: &str, predicate: &str, object: &str) -> Triple {
 /// Ignored by default: it writes a redb file and re-opens it, which is heavier
 /// than a unit test and unnecessary on every inner-loop run.
 #[tokio::test]
-#[ignore = "writes and re-opens a redb palace; run with --include-ignored"]
 async fn legacy_palace_migrates_on_open_and_accepts_multi_valued_writes() {
     let dir = tempdir().unwrap();
     let redb_path = dir.path().join("kg.redb");

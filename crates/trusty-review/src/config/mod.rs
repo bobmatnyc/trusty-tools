@@ -18,7 +18,9 @@ pub mod context;
 pub mod index_resolver;
 pub mod mapreduce;
 // #8649: per-call owner/repo -> index resolution for `review_pr`; crate-only
-// so the published API does not grow.
+// so the published API does not grow. Gated on `mcp`, its only caller, so a
+// `default-features = false` build carries no dead code.
+#[cfg(feature = "mcp")]
 pub(crate) mod repo_index;
 pub mod role_models;
 pub mod verification;
@@ -261,6 +263,9 @@ pub struct ReviewConfig {
     ///
     /// When `TRUSTY_SEARCH_INDEX` is not set, this starts as `"main"` and is
     /// overwritten by `ReviewConfig::resolve_index` at startup (issue #661).
+    /// Empty means no index covers this checkout (#8411): the context gate
+    /// reviews the diff alone, labelled DEGRADED, or skips where search is
+    /// required.
     /// The MCP `review_pr` tool does not use it directly: it resolves the PR
     /// repo's own index per call (`repo_index::resolve_repo_index`, #8649).
     pub search_index: String,
@@ -552,9 +557,13 @@ impl ReviewConfig {
     /// no-op so explicit configuration always wins.
     /// What: calls `SearchClient::list_indexes` on the configured daemon, runs
     /// `index_resolver::resolve_index_from_list`, and writes the result into
-    /// `self.search_index`.  Failures degrade to a stderr warning; `search_index`
-    /// is left unchanged (keeps the `"main"` default or the explicit value).
-    /// Test: `resolve_index_noop_when_explicit`, `resolve_index_updates_when_unset`.
+    /// `self.search_index`. #8411: a linked worktree with no index of its own
+    /// uses its main checkout's index; with no match at all, and no registered
+    /// index named by the current value, `search_index` becomes empty ("no
+    /// index"), which the context gate reviews diff-only rather than skipping.
+    /// A daemon error leaves `search_index` unchanged.
+    /// Test: `resolve_index_noop_when_explicit`, `resolve_index_updates_when_unset`,
+    /// `fresh_worktree_reuses_the_main_checkout_index_instead_of_skipping`.
     pub async fn resolve_index(
         &mut self,
         client: &dyn crate::integrations::search_client::SearchClient,
@@ -566,19 +575,34 @@ impl ReviewConfig {
         let repo_root = index_resolver::repo_root_from_cwd();
         match client.list_indexes().await {
             Ok(indexes) => {
-                if let Some(id) = index_resolver::resolve_index_from_list(&indexes, &repo_root) {
+                // #8411: a fresh worktree has no index; its main checkout's does.
+                let matched = index_resolver::resolve_index_from_list(&indexes, &repo_root)
+                    .or_else(|| {
+                        let main = index_resolver::main_checkout_root(&repo_root)?;
+                        let id = index_resolver::best_matching_index(&indexes, &main)?;
+                        warn!(
+                            index = %id,
+                            main_checkout = %main.display(),
+                            "trusty-review: worktree has no search index; using its main \
+                             checkout's index (#8411)"
+                        );
+                        Some(id)
+                    });
+                if let Some(id) = matched {
                     tracing::info!(
                         index = %id,
                         repo_root = %repo_root.display(),
                         "trusty-review: auto-derived search index from repo root"
                     );
                     self.search_index = id;
-                } else {
+                } else if !indexes.iter().any(|i| i.id == self.search_index) {
+                    // #8411: the unregistered "main" default hard-skipped every review.
                     warn!(
                         repo_root = %repo_root.display(),
-                        "trusty-review: could not auto-derive search index; \
-                         using fallback \"main\". Set TRUSTY_SEARCH_INDEX to suppress."
+                        "trusty-review: no search index covers this checkout; reviews run \
+                         diff-only. Set TRUSTY_SEARCH_INDEX to pick one."
                     );
+                    self.search_index = String::new();
                 }
             }
             Err(e) => {

@@ -296,6 +296,27 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 ```
 
+**Local-only repository — no `origin` remote (#8934).** Branch from the local
+default branch instead (`git worktree add -b <branch> .claude/worktrees/<dirname>
+main`), skip every fetch, pull, push and PR step, and merge locally: `git merge
+--no-ff <branch>` in the main checkout, then `git worktree remove` and `git
+branch -d`. This is the one exception to ADR-0061: commits land on local
+`main` only in a repository with no remote. Merge only when no sibling agent
+is recorded in that checkout — pm-guard denies a HEAD-moving git command there
+while the daemon records one. `tm pr` with no `--repo` prints `local-only repo:
+no remote; skipping push/PR` and exits 0; with `--repo` it runs and fails. The
+session's `gh` is disabled, so no `gh` step can run — except in the
+allow-listed Architect directory, which keeps the machine's gh.
+
+**Python editable installs across worktrees (#8386).** pip's wheel cache can
+serve one worktree's editable build to another, so the `.pth` file points at a
+sibling worktree's source and tests run foreign code. In a Python project, give
+each worktree its own venv and install with
+`pip install -e <path> --no-cache-dir --force-reinstall`, or skip the install
+and run with `PYTHONPATH=<worktree>/src`. Check where the package resolves
+(`python -c "import <pkg>; print(<pkg>.__file__)"`) before the first test. Put
+this in the brief of any Python dispatch.
+
 🟡 **This is for the PM or a human working directly. It is NOT the dispatch
 mechanism** — a subagent dispatch declares `isolation: "worktree"` instead, per
 "Worktree Discipline" below and `tm-delegation-patterns`.

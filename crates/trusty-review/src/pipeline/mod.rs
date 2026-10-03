@@ -29,6 +29,8 @@ pub mod absence_claim;
 // consumers read (and post) as the human-readable review (#4999).
 pub(crate) mod body_render;
 pub mod citation_check;
+// #8905: checks each finding's cited line holds the code it describes.
+pub mod citation_gate;
 // Why: the grounding guard for package-registry / version-existence claims
 // (#4081) — kept separate from `finding_hygiene` (self-admission markers) and
 // `citation_check` (path/content verification) because it keys on a different
@@ -64,7 +66,9 @@ pub mod runner_context;
 pub mod runner_mapreduce;
 pub mod trigger;
 pub mod verify;
+pub mod verify_batch;
 pub mod verify_liveness;
+pub mod verify_posted;
 pub mod verify_prompt;
 // Why: the narrative summary is written before the verification round on both
 // pipeline paths and nothing revisits it, so a refuted finding kept being cited

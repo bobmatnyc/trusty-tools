@@ -10,7 +10,7 @@
 # which the job authenticates with its own GITHUB_TOKEN, and the workspace
 # build. It must not need an API key, a live daemon, a compiled binary on disk,
 # a Python/torch venv, tmux, macOS hardware, or minutes of soak time. Those are
-# the reasons the other 151 ignored tests stay unselected; see the baseline
+# the reasons the other 128 ignored tests stay unselected; see the baseline
 # note at the bottom.
 #
 # ADDING A ROW is how you widen the gate, and it is always welcome. Removing one
@@ -36,16 +36,28 @@ trusty-memory	transport::methods::health_tests::health_endpoint_returns_ok	loads
 trusty-memory	transport::methods::health_tests::health_endpoint_includes_resource_fields	loads the default ONNX embedder in-process; no daemon
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_on_fresh_install_is_ok	loads the default ONNX embedder; fresh-install path a published daemon runs at first start
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_with_palace_is_ok	loads the default ONNX embedder; palace-backed round trip
+trusty-common	memory_core::retrieval::tests::cold_restart_recalls_beyond_l1_snapshot	the real ONNX embedder in its own process (the shared embedder is process-global)
+trusty-common	memory_core::retrieval::tests::recall_ranks_by_similarity_over_importance	the real ONNX embedder in its own process (the shared embedder is process-global)
+trusty-common	memory_core::retrieval::timeout_tests::tests::timeout_fires_on_embedder_init_with_tiny_limit	its own process: sets an env var and fills the process-global embedder cell; no model, no network
+trusty-console	webhook::tests::from_env_meters_every_targets_inbox	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
+trusty-console	webhook::tests::integration_from_env_delivery_survives_a_console_restart	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
+trusty-console	webhook::tests::integration_from_env_fails_closed_when_the_secret_is_unset	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
+trusty-embedderd	uds_bit_identical_vs_in_process	HuggingFace ONNX model download; UDS server vs in-process vectors, no daemon, no binary
+trusty-installer	download::release::tests::resolve_latest_tag_live	public GitHub release API read; job GITHUB_TOKEN, no other key
+trusty-installer	download::tests::try_install_prebuilt_live	public GitHub release API + one trusty-installer asset download; job GITHUB_TOKEN, no other key
+trusty-search	migration_e2e_already_current_is_noop	loads the default ONNX embedder in-process; temp redb corpus, no daemon
+trusty-search	migration_e2e_empty_corpus_advances_to_current	loads the default ONNX embedder in-process; temp redb corpus, no daemon
+trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 
-# THE UNSELECTED REMAINDER. 164 ignored tests are enumerable in this workspace
-# on the Linux runner; the 13 rows above run, and 151 do not. A macOS checkout
+# THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
+# on the Linux runner; the 25 rows above run, and 126 do not. A macOS checkout
 # enumerates one more (trusty-mpm's macOS-only
 # `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
-# local `--list-only` run there reads 152 against this Linux baseline. The gate
+# local `--list-only` run there reads 127 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
-# WHY 151 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# WHY 126 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
 # API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
 # TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
 # compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
@@ -64,5 +76,26 @@ trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_with_
 # runner does not carry) without raising this baseline, which is why this
 # release cut is the one paying it down: 148 -> 151.
 #
+# The 2026-09-27 ignored-test sweep (baseline: docs/research/2026-09-27-test-audit.md)
+# ran every unselected test once: 13 now run by default and 12 joined the rows
+# above: 151 -> 126. Every remaining one outside trusty-mpm carries a reason
+# string except two whose crates cannot take a src/** edit in that PR under the
+# version-bump gate (#4421): tga's empty `effort_cross_validate` placeholder
+# (tga 8.0.0 is published and its release line lives in the trusty-git-analytics
+# repo) and trusty-review's `stage_c_live_bedrock`, whose reason string and the
+# paused-clock timeout test's un-ignore ride with the trusty-review 0.36.2 bump.
+# That bump has landed; see the merge note below.
+#
+# Two of the 13 tests this sweep un-ignored — tga's
+# `catch_rate_on_trusty_tools_history` and
+# `a_configured_marker_raises_the_catch_rate` — went back to `#[ignore]` in the
+# same PR (Bob ruling: no tga edits in trusty-tools PRs; tga lives in its own
+# repo). That puts the baseline back up by two: 126 -> 128.
+#
+# Merging main into that PR brought in the trusty-review 0.36.2 bump, which
+# un-ignores the paused-clock timeout test (-1). A macOS `--list-only` run of
+# the merge reads 127, which is 126 on Linux; the 128 above was the macOS
+# reading, one high for Linux. 128 -> 126.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 151
+# UNSELECTED-BASELINE: 126

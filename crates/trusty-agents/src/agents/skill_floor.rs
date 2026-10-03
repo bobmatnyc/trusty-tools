@@ -93,6 +93,8 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm",
     "tm-adr",
     "tm-agent-architecture",
+    // #8436: Architect session setup, non-coding like `tm-init`.
+    "tm-architect-setup",
     "tm-bug-reporting",
     "tm-capabilities",
     "tm-circuit-breaker",

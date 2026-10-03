@@ -16,14 +16,16 @@
 //! What: an inherent `impl SessionManager` block adding
 //! [`SessionManager::delete_record`], guarded by the SAME fail-closed running
 //! guard `super::prune::is_running` enforces elsewhere — a real tmux liveness
-//! probe, not a persisted-state check (#2022).
+//! probe, not a persisted-state check (#2022). #8935: the probe asks whether the live
+//! session holds the record's own pane, so a name another session reused does
+//! not block, or get blamed on, a stale record's delete.
 //! Test: `delete_record_*` in `super::delete_tests`.
 
 use chrono::Utc;
 
 use super::manager::{ManagedError, SessionManager};
-use super::prune::is_running;
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::runtime_identity;
 
 impl SessionManager {
     /// Soft-delete a single managed session RECORD — mark it `--deleted--` (#2012).
@@ -47,8 +49,9 @@ impl SessionManager {
     ///
     /// What: looks up the record (a missing id surfaces as
     /// [`ManagedError::SessionNotFound`]). When `force` is `false` (the default)
-    /// and [`is_running`] finds a LIVE tmux session backing the record (#2022 — a
-    /// real probe, not the persisted `state` field), returns
+    /// and a LIVE tmux session may back the record (#2022 — a real probe, not
+    /// the persisted `state` field; #8935 — see [`Self::delete_record_reporting`]),
+    /// returns
     /// [`ManagedError::InvalidState`] with an actionable message telling the
     /// operator to stop the session first or pass `--force` — no record is
     /// touched. That message names the session's FRIENDLY name and puts the full
@@ -62,7 +65,9 @@ impl SessionManager {
     /// A liveness probe that could not reach tmux at all is neither "running"
     /// nor "not running": its error surfaces as
     /// [`ManagedError::TmuxUnavailable`] and no record is touched (#5859).
-    /// Test: `delete_record_marks_deleted`,
+    /// #8942: a non-terminal record of a protected kind is refused with
+    /// [`ManagedError::InvalidState`], even with `force`.
+    /// Test: `delete_refuses_a_live_supervisor_record`, `delete_record_marks_deleted`,
     /// `delete_record_refuses_when_the_tmux_probe_fails` (#5859),
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,
@@ -77,10 +82,51 @@ impl SessionManager {
         id: &ManagedSessionId,
         force: bool,
     ) -> Result<SessionRecord, ManagedError> {
+        Ok(self.delete_record_reporting(id, force).await?.0)
+    }
+
+    /// [`Self::delete_record`], also returning the note to show when a live
+    /// tmux session carries the record's name (#8935).
+    ///
+    /// Why: a delete never touches tmux. When a session with the record's name
+    /// is still up, the command output must say it was left running, and
+    /// whether it is this record's or another session that took the name.
+    /// What: the same delete. The running guard asks
+    /// [`runtime_identity::runtime_ownership`] instead of name membership, so
+    /// a live session proved NOT to hold the record's pane (`Foreign`) no
+    /// longer blocks the delete of a stale record; `Owned` and `Unverifiable`
+    /// still need `force`. A failed probe refuses without `force` (#5859) and,
+    /// with `force`, reads as `Unverifiable` so the delete proceeds and the
+    /// note says the probe failed. The second value is
+    /// [`runtime_identity::RuntimeOwnership::left_running_note`].
+    /// Test: `deleting_a_stale_record_leaves_the_live_session_and_says_so`,
+    /// `delete_refuses_an_unverifiable_live_name_without_force`,
+    /// `a_forced_delete_survives_a_failed_tmux_probe`.
+    pub async fn delete_record_reporting(
+        &self,
+        id: &ManagedSessionId,
+        force: bool,
+    ) -> Result<(SessionRecord, Option<String>), ManagedError> {
         let record = self.get(id).await?;
+        // #8942 critic MEDIUM: a live Architect record is never tombstoned,
+        // `--force` or not; the kind is what keeps the floor protecting it.
+        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Delete)?;
         // #5859: `?` — a probe that could not reach tmux refuses the delete
         // instead of answering "not running" and dropping a live session.
-        if !force && is_running(&record, self.tmux.as_ref())? {
+        // #8935: the guard asks whose the live session is, not only whether
+        // the name is live; a session that took a stale record's name since
+        // does not make the stale record "running".
+        // #8935 critic round: `--force` asks for the record to go whatever
+        // tmux says, so under `force` a failed probe is a note, not an error.
+        let ownership = match runtime_identity::runtime_ownership(&record, self.tmux.as_ref()) {
+            Err(e) if force => runtime_identity::RuntimeOwnership::Unverifiable(format!(
+                "tmux probe failed ({e}), so any live tmux session named '{}' \
+                 could not be checked",
+                record.tmux_name
+            )),
+            probed => probed?,
+        };
+        if !force && ownership.may_be_ours() {
             // #7224: the refusal used to inline the 36-character UUID twice, mid
             // sentence, which any width-clamped surface cut mid-token. The
             // friendly name carries the identity; the id gets its own line.
@@ -118,6 +164,8 @@ impl SessionManager {
         // #7087: `Deleted` is terminal, so nothing will ask the residency
         // route about this session again — drop its derivation entry.
         self.residency_cache_evict(id).await;
-        Ok(record)
+        // #8935: delete is record-only; say so when a live session remains.
+        let note = ownership.left_running_note(&record.tmux_name);
+        Ok((record, note))
     }
 }

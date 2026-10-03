@@ -31,31 +31,60 @@ use std::process::Command;
 // #8094: the pure half of the UI-build decision, shared verbatim with the test
 // target that covers it. See `build_ui_policy.rs` for why it is `include!`d.
 include!("build_ui_policy.rs");
+// #8787: the pure git-dir resolution, shared verbatim with the test target
+// that covers it. See `build_git_paths.rs` for why it is `include!`d.
+include!("build_git_paths.rs");
 
 fn main() {
-    // Re-run whenever HEAD moves so a new commit triggers a rebuild.
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // #8787: `.git/HEAD` and `.git/index` are repo-root-relative, not
+    // crate-relative, so a crate under `crates/trusty-agents/` never has them
+    // next to it — the two lines this replaced never existed on disk, which
+    // made cargo treat the build script as always-stale and rebuild the whole
+    // crate on every invocation. Resolve the real paths (following a
+    // worktree's `gitdir:` pointer where applicable) so cargo reruns this
+    // script only when a commit or `git add` actually changes them; a
+    // dirtied-but-unstaged file no longer refreshes `GIT_DIRTY` until the next
+    // rerun this crate's other watched inputs already trigger, which is the
+    // efficiency this fix trades for.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Some((head, index)) = resolve_git_watch_paths(&manifest_dir) {
+        println!("cargo:rerun-if-changed={}", head.display());
+        println!("cargo:rerun-if-changed={}", index.display());
+    }
 
-    // Re-run whenever the built UI bundle changes so rust-embed re-inlines fresh
-    // assets. We watch `ui/dist/index.html` (the output) rather than `ui/src/`
-    // because cargo's `rerun-if-changed` only tracks the directory inode, not
-    // recursive file mutations — edits to `.svelte`/`.ts` files inside `ui/src/`
-    // wouldn't trigger a rebuild and stale assets would stay embedded. Watching
-    // the build output is reliable: every `pnpm build` regenerates `index.html`,
-    // and the `pnpm build` invocation below runs on every cargo build anyway,
-    // so cargo will pick up the resulting change on the subsequent build cycle.
-    println!("cargo:rerun-if-changed=ui/dist/index.html");
-    println!("cargo:rerun-if-changed=ui/index.html");
-    println!("cargo:rerun-if-changed=ui/package.json");
+    // Re-run when the UI source that `pnpm build` reads changes; cargo scans a
+    // watched directory such as `ui/src` recursively. `ui/dist/` is NOT watched:
+    // it is this script's own output, and cargo's staleness reference is
+    // `invoked.timestamp`, stamped BEFORE the script runs, so every `pnpm build`
+    // made the next build re-run this script and rebuild the crate. rust-embed
+    // reads `ui/dist/` itself. Only paths that exist are declared: a missing one
+    // counts as changed, and the published tarball ships no `ui/public`.
+    for rel in [
+        "ui/src",
+        "ui/public",
+        "ui/index.html",
+        "ui/package.json",
+        "ui/pnpm-lock.yaml",
+        "ui/pnpm-workspace.yaml",
+        "ui/vite.config.ts",
+        "ui/svelte.config.js",
+        "ui/tailwind.config.js",
+        "ui/postcss.config.js",
+        "ui/tsconfig.json",
+    ] {
+        if Path::new(rel).exists() {
+            println!("cargo:rerun-if-changed={rel}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
 
     // #8094: this script emits `rerun-if-changed`, which switches cargo off its
-    // whole-package default, so the `include!`d policy file must be named or an
-    // edit to it would not rebuild the script.
+    // whole-package default, so the `include!`d policy files must be named or
+    // an edit to either would not rebuild the script.
     println!("cargo:rerun-if-changed=build_ui_policy.rs");
-
-    // #4260: watch the index too so a `git add` refreshes the dirty flag.
-    println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=build_git_paths.rs");
 
     ensure_ui_dist();
     emit_git_provenance();
@@ -177,10 +206,11 @@ fn ensure_placeholder(ui_dist: &Path) {
 /// `GIT_COMMIT_HASH`, `GIT_COMMIT_HASH_FULL`, `GIT_COMMIT_DATE`, and
 /// `GIT_DIRTY` (`"1"`/`"0"`). Each git value falls back to `"unknown"` (dirty
 /// to `"0"`) when git is unavailable or this is not a repo. The dirty flag
-/// describes the tree as of the last build-script run: the
-/// `cargo:rerun-if-changed` paths above are repo-root-relative and so never
-/// exist next to this crate, which makes cargo re-run this script on every
-/// build and keeps the flag current.
+/// describes the tree as of the last build-script run: #8787 resolved the
+/// `cargo:rerun-if-changed` paths above to the real `HEAD`/`index` files, so
+/// this script (and the flag) now refresh on a commit or `git add`, not on
+/// every unrelated build — trading always-current staleness detection for
+/// not rebuilding this crate on every invocation.
 /// Test: `crates/trusty-agents/tests/version_provenance.rs` asserts the
 /// binary's `--version` carries `GIT_COMMIT_HASH`;
 /// `build_info::commit_mark_matches_the_dirty_flag` covers the rendering.

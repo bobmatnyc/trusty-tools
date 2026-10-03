@@ -37,7 +37,11 @@ name = "trusty-agents-common"
 # the 0.7.0 baseline (alongside `provenance` and an added enum variant, both
 # already accumulated at 0.7.2 and unpublished). The gate is never advisory
 # (#5050), so this lands where the gate names.
-version = "0.8.4"
+# 0.8.4 -> 0.8.5 (issue #4421): patch — 0.8.4 is already live on crates.io and
+# open PR #8259 changes `src/**`, so this branch opens the next patch version
+# ahead of that PR's rebase. No public item added, removed, or changed shape
+# on main as of this bump.
+version = "0.8.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -67,7 +71,7 @@ chrono = { workspace = true }
 # ruling 2026-09-05) can consume them without depending on this producer.
 # `events` re-exports them; the in-process channel and stderr relay stay here
 # until slice 9 (#6854).
-trusty-common = { workspace = true }
+trusty-common = { workspace = true, features = ["content-resolver"] }
 # adapters/patterns.rs uses regex for pattern compilation.
 regex = { workspace = true }
 # Wave 3 P0 (issue #875): events::bus uses tokio::sync::broadcast for the
@@ -94,6 +98,11 @@ futures-util = { workspace = true }
 fd-lock = { workspace = true }
 
 [dev-dependencies]
+# harness_doc_tests builds a content-v0.1.0-shaped bundle to prove the legacy
+# `harness_understanding/` key still resolves (#9011). Both already sit in the
+# normal graph through trusty-common's `content-resolver`.
+flate2 = { workspace = true }
+tar = { workspace = true }
 # session_registry tests use tempfile for isolated state-dir creation.
 tempfile = { workspace = true }
 # events::tests use serial_test to serialise tests that share the

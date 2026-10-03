@@ -47,6 +47,8 @@ mod launch_on_main;
 /// Post-send "did the relaunch actually take?" status check (#6766).
 mod launch_verify;
 mod lifecycle;
+// #8934: spawn in a repository with no `origin` remote (local-only worktrees).
+mod local_only_spawn;
 pub mod managed_checkout;
 mod mcp_spawn_gate;
 // #6288: `pub` so `rpc::registry::projects` can call the shared `*_op` bodies.
@@ -63,10 +65,15 @@ pub(crate) mod residency;
 // #6497: the explicit ownership transfer for a dead owner's worktree.
 pub mod adopt_worktree;
 pub mod rename;
+// #8942: `tm fleet init` registers the Architect's sessions.
 mod resume_error;
+pub mod supervisor;
 // #8233 item 1: the resume claim's span across `resume_managed`.
 #[cfg(test)]
 mod resume_claim_tests;
+// #8983: the resume grant across both daemon resume paths.
+#[cfg(test)]
+mod resume_grant_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
@@ -405,6 +412,29 @@ pub struct DeleteResponse {
     pub summary: SessionSummary,
     /// Always `true` on success — the record was marked `--deleted--`.
     pub deleted: bool,
+    /// #8935: set when a live tmux session still carries the record's name.
+    /// Delete never touches tmux; this says the session was left running and
+    /// whether it is this record's or one that took the name since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
+}
+
+/// Response body for POST /api/v1/sessions/managed/{id}/runtime-stop.
+///
+/// Why (#8935): a stop whose record's tmux name now belongs to another
+/// session moves the record only. The caller must be told the live session
+/// was left running, not that the runtime stopped.
+/// What: the post-stop [`SessionSummary`], flattened so the body keeps its
+/// pre-#8935 shape, plus `runtime_left_running` when nothing was signalled.
+/// Test: `the_stop_report_says_the_runtime_was_left_running` (the report it carries).
+#[derive(Debug, Serialize)]
+pub struct StopResponse {
+    /// The record after the stop.
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    /// Why the live tmux session carrying the name was left running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_left_running: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/send.

@@ -9,13 +9,20 @@
    * with user/assistant bubbles and collapsible source lists. Chat input is
    * disabled with a hint when no OpenRouter or local-model provider is
    * configured.
-   * Test: With at least one index seeded, type "fn" and click Search;
-   * results render with non-zero scores. With OPENROUTER_API_KEY set, the
-   * chat panel's textarea is enabled; type a question and click Send; an
-   * assistant bubble appears after the loading dots resolve.
+   * The query box offers typeahead suggestions (`SearchBox`), and clicking a
+   * hit's path opens its line range in `HitViewer`.
+   * Test: `SearchBox.test.js`, `HitViewer.test.js`; manually, with at least
+   * one index seeded, type "fn" and click Search; results render with non-zero
+   * scores, and clicking a path opens the viewer. Served by the daemon with
+   * OPENROUTER_API_KEY set, the chat panel's textarea is enabled; type a
+   * question and click Send; an assistant bubble appears after the loading
+   * dots resolve.
    */
   import { api } from '../api.js';
   import { getIndexes, getChatAvailable } from '../state.svelte.js';
+  import { dashboardTransport, chatUnavailableReason } from '../transport.js';
+  import SearchBox from '../components/SearchBox.svelte';
+  import HitViewer from '../components/HitViewer.svelte';
   import { tick } from 'svelte';
 
   // ─── Search state ────────────────────────────────────────────────────────────
@@ -29,7 +36,24 @@
 
   // ─── Shared state ────────────────────────────────────────────────────────────
   let indexes = $derived(getIndexes());
+  let indexIds = $derived(indexes.map((ix) => ix.id));
   let chatAvailable = $derived(getChatAvailable());
+  let chatOffReason = $derived(chatUnavailableReason(dashboardTransport(null).mode));
+
+  // The hit open in the viewer, and the button that opened it (focus returns there).
+  let viewing = $state(null);
+  let opener = null;
+
+  function openHit(hit, e) {
+    opener = e.currentTarget;
+    viewing = hit;
+  }
+
+  function closeHit() {
+    viewing = null;
+    opener?.focus();
+    opener = null;
+  }
 
   // ─── Chat state ──────────────────────────────────────────────────────────────
 
@@ -49,12 +73,12 @@
   // Per-message collapsed state for source lists (keyed by message index).
   let sourcesOpen = $state({});
 
-  async function runSearch() {
-    if (!query.trim()) return;
+  async function runSearch(q = query) {
+    if (!q.trim()) return;
     loading = true;
     error = null;
     try {
-      const body = await api.globalSearch(query.trim(), topK, false);
+      const body = await api.globalSearch(q.trim(), topK, false);
       results = body.results || [];
       intent = body.intent ?? null;
       latencyMs = body.latency_ms ?? null;
@@ -64,10 +88,6 @@
     } finally {
       loading = false;
     }
-  }
-
-  function onSearchKey(e) {
-    if (e.key === 'Enter') runSearch();
   }
 
   /**
@@ -143,7 +163,7 @@
       const detail = e.message || String(e);
       const friendly =
         e.status === 503
-          ? 'Chat unavailable — set OPENROUTER_API_KEY in .env.local and restart the daemon.'
+          ? `Chat unavailable — ${chatOffReason}`
           : `Request failed: ${detail}`;
       messages = [
         ...messages,
@@ -186,12 +206,11 @@
 <div class="card mb-4">
   <div class="card-body">
     <div class="search-row">
-      <input
-        type="text"
-        class="input"
-        placeholder="Search across all indexes…"
+      <SearchBox
         bind:value={query}
-        onkeydown={onSearchKey}
+        {indexIds}
+        onsearch={runSearch}
+        placeholder="Search across all indexes…"
       />
       <input
         type="number"
@@ -203,7 +222,7 @@
       />
       <button
         class="btn btn-primary"
-        onclick={runSearch}
+        onclick={() => runSearch()}
         disabled={loading || !query.trim()}
       >
         {loading ? 'Searching…' : 'Search'}
@@ -249,9 +268,14 @@
       <div class="result">
         <div class="result-head">
           <div class="result-path">
-            <span class="text-mono text-sm">{r.file || r.path || r.id}</span>
-            {#if r.function}
-              <span class="badge badge-muted">{r.function}</span>
+            <button
+              type="button"
+              class="result-open text-mono text-sm"
+              title="Open lines {r.start_line}–{r.end_line}"
+              onclick={(e) => openHit(r, e)}>{r.file || r.path || r.id}</button
+            >
+            {#if r.function_name}
+              <span class="badge badge-muted">{r.function_name}</span>
             {/if}
             {#if r.index_id}
               <span class="badge badge-info">{r.index_id}</span>
@@ -274,14 +298,16 @@
   </div>
 {/if}
 
+{#if viewing}
+  <HitViewer hit={viewing} onclose={closeHit} />
+{/if}
+
 <!-- ─── Chat panel ───────────────────────────────────────────────────────── -->
 <div class="chat-section">
   <div class="chat-header">
     <h2 class="section-title">Chat</h2>
     {#if !chatAvailable}
-      <span class="chat-unavailable-hint text-muted text-sm">
-        Set <code>OPENROUTER_API_KEY</code> in <code>.env.local</code> to enable chat.
-      </span>
+      <span class="chat-unavailable-hint text-muted text-sm">{chatOffReason}</span>
     {:else}
       <div class="chat-toolbar">
         {#if indexes.length > 0}
@@ -387,7 +413,7 @@
     <div class="chat-disabled-panel">
       <textarea
         class="chat-textarea chat-textarea-disabled"
-        placeholder="Chat disabled — configure OPENROUTER_API_KEY to enable"
+        placeholder="Chat unavailable"
         rows="2"
         disabled
       ></textarea>
@@ -441,6 +467,21 @@
     gap: var(--trusty-space-2);
     min-width: 0;
     flex: 1;
+  }
+  .result-open {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--trusty-accent);
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .result-open:hover {
+    text-decoration: underline;
   }
   .result-score {
     display: flex;

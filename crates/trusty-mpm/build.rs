@@ -3,7 +3,7 @@
 //!
 //! Why: #7822 fingerprinted the running executable as `"<mtime>:<size>"` so
 //! `tm doctor`'s `daemon_version` check could tell two same-version builds
-//! apart. That fingerprint is per-FILE, and this package ships two `[[bin]]`
+//! apart. That fingerprint is per-FILE, and this package shipped two `[[bin]]`
 //! targets from one source: `tm` runs the check, `trusty-mpm` runs the daemon.
 //! One `cargo install` writes them seconds apart, so their fingerprints differ
 //! by construction — the observed pair was daemon `1789397245:73209856` against

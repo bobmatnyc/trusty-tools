@@ -64,8 +64,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 use tracing::warn;
 
-use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER};
+use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER, WithheldFinding};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
+
+/// `WithheldFinding::reason` prefix for a citation-integrity drop.
+pub const CITATION_REASON: &str = "#4042 citation";
 
 /// The four inline bracket-citation forms the system prompt mandates
 /// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[confluence: … ]`).
@@ -82,7 +85,7 @@ use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
 /// #4999: the `apex:` form was dropped when APEX retrieval was removed.
 /// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
 /// `extract_spans_skips_confluence_citation_form`.
-static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     // #5022: `confluence:` is a form code-intelligence emits.
     Regex::new(r"(?i)\[(?:code|jira|gh|confluence):[^\]]*\]")
         .expect("bracket-citation regex is a valid literal")
@@ -104,7 +107,7 @@ static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// What: matches case-insensitively; group 1 is the backtick-delimited
 /// `path[:line]` locator, group 2 is everything else in the bracket up to `]`.
 /// Test: `code_citation_re_captures_path_line_and_excerpt`.
-static CODE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static CODE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)\[code:\s*`([^`\]]+)`\s*[—-]+\s*([^\]]*)\]")
         .expect("code-citation regex is a valid literal")
 });
@@ -116,7 +119,7 @@ static CODE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// appear in many files and would drive false-positive drops; a finding must
 /// quote a substantial fragment before we hold it to the "must appear in the
 /// cited file" bar. Below this length we FAIL-OPEN.
-const MIN_SPAN_LEN: usize = 12;
+pub(crate) const MIN_SPAN_LEN: usize = 12;
 
 // ─── Diff content index ─────────────────────────────────────────────────────────
 
@@ -233,21 +236,7 @@ impl DiffContentIndex {
     /// ambiguous, since guessing would ground a citation against the wrong file.
     /// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`.
     fn resolve_key(&self, cited_path: &str) -> Option<&str> {
-        let key = normalize_path(cited_path);
-        if let Some((k, _)) = self.by_file.get_key_value(&key) {
-            return Some(k.as_str());
-        }
-        let base = basename(&key);
-        let mut hit: Option<&str> = None;
-        for path in self.by_file.keys() {
-            if basename(path) == base {
-                if hit.is_some() {
-                    return None; // ambiguous basename — refuse to guess
-                }
-                hit = Some(path.as_str());
-            }
-        }
-        hit
+        resolve_path_key(&self.by_file, cited_path)
     }
 
     /// Look up the normalized content of the file a finding cites, if present.
@@ -321,11 +310,18 @@ impl DiffContentIndex {
 /// FAIL-OPEN: a finding with no quoted content and a resolvable `file` is left
 /// completely untouched.
 ///
+/// Every dropped finding is pushed onto `withheld` with the reason
+/// `#4042 citation: <why>` (owner ruling on #8905, 2026-09-30).
+///
 /// Test: `drops_cross_file_misattribution`, `keeps_grounded_code_provable`,
 /// `drops_citation_to_path_outside_diff` (#4042),
 /// `drops_findings_with_line_contradiction` (#4042),
-/// `fail_open_when_no_quote`.
-pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffContentIndex) -> usize {
+/// `fail_open_when_no_quote`, `a_dropped_citation_is_recorded_as_withheld`.
+pub fn enforce_citation_integrity(
+    findings: &mut Vec<Finding>,
+    index: &DiffContentIndex,
+    withheld: &mut Vec<WithheldFinding>,
+) -> usize {
     let contradictory = detect_line_contradictions(findings);
 
     let mut reasons: Vec<Option<&'static str>> = Vec::with_capacity(findings.len());
@@ -353,6 +349,11 @@ pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffConte
                     "citation-check: dropping unverifiable finding (#4042)"
                 );
                 dropped += 1;
+                withheld.push(WithheldFinding {
+                    finding: f,
+                    reason: format!("{CITATION_REASON}: {reason}"),
+                    missing_fragment: None,
+                });
             }
             None => kept.push(f),
         }
@@ -613,7 +614,7 @@ fn split_locator(locator: &str) -> (String, Option<u32>) {
 /// What: walks `text` splitting on `delim`; every ODD segment (between a pair of
 /// delimiters) is normalized and pushed. Unterminated trailing text is ignored.
 /// Test: covered by `extract_spans_pulls_backtick_and_quotes`.
-fn collect_delimited(text: &str, delim: char, out: &mut Vec<String>) {
+pub(crate) fn collect_delimited(text: &str, delim: char, out: &mut Vec<String>) {
     let mut inside = false;
     for segment in text.split(delim) {
         if inside {
@@ -638,7 +639,7 @@ fn collect_delimited(text: &str, delim: char, out: &mut Vec<String>) {
 /// A header that does not parse returns `None`, which fails the check OPEN.
 /// Test: `hunk_max_line_reads_both_sides`, `hunk_max_line_defaults_count_to_one`,
 /// `hunk_max_line_rejects_a_malformed_header`.
-fn hunk_max_line(header: &str) -> Option<u32> {
+pub(crate) fn hunk_max_line(header: &str) -> Option<u32> {
     let inner = header.strip_prefix("@@")?.split("@@").next()?;
     let mut max = 0u32;
     for token in inner.split_whitespace() {
@@ -661,12 +662,12 @@ fn hunk_max_line(header: &str) -> Option<u32> {
 /// space makes the comparison robust without being lossy about the code itself.
 /// What: splits on ASCII/Unicode whitespace and rejoins with single spaces, trimmed.
 /// Test: `contains_is_whitespace_tolerant`.
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Normalize a diff file path for matching (strip `a/`/`b/` prefixes, trim).
-fn normalize_path(p: &str) -> String {
+pub(crate) fn normalize_path(p: &str) -> String {
     let t = p.trim();
     t.strip_prefix("a/")
         .or_else(|| t.strip_prefix("b/"))
@@ -674,8 +675,35 @@ fn normalize_path(p: &str) -> String {
         .to_string()
 }
 
+/// Resolve a cited path to the key of `map` that names it (#8905: shared with
+/// `citation_gate`, so both gates resolve a path by one rule).
+///
+/// What: exact normalized-path match first, else a basename match when exactly
+/// one key shares that basename; `None` when the basename is ambiguous.
+/// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`.
+pub(crate) fn resolve_path_key<'a, V>(
+    map: &'a HashMap<String, V>,
+    cited_path: &str,
+) -> Option<&'a str> {
+    let key = normalize_path(cited_path);
+    if let Some((k, _)) = map.get_key_value(&key) {
+        return Some(k.as_str());
+    }
+    let base = basename(&key);
+    let mut hit: Option<&'a str> = None;
+    for path in map.keys() {
+        if basename(path) == base {
+            if hit.is_some() {
+                return None; // ambiguous basename — refuse to guess
+            }
+            hit = Some(path.as_str());
+        }
+    }
+    hit
+}
+
 /// Return the final path component of `p`.
-fn basename(p: &str) -> &str {
+pub(crate) fn basename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 

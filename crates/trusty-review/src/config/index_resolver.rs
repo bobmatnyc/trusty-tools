@@ -64,6 +64,32 @@ pub fn repo_root_from_cwd() -> PathBuf {
     git_root.canonicalize().unwrap_or(git_root)
 }
 
+/// The main checkout a linked git worktree belongs to, or `None`.
+///
+/// Why: #8411 — a fresh worktree has no index of its own, but its main
+/// checkout's index covers every file the diff did not change, so the review
+/// can use it instead of hard-skipping until a manual reindex.
+/// What: reads `<repo_root>/.git` as a `gitdir:` file, then that admin dir's
+/// `commondir`; returns the parent of the resolved common `.git` directory.
+/// A normal checkout (`.git` is a directory), a submodule (no `commondir`), or
+/// a bare common dir yields `None`.
+/// Test: `main_checkout_root_follows_a_linked_worktree`,
+/// `main_checkout_root_is_none_for_a_plain_checkout`.
+pub fn main_checkout_root(repo_root: &Path) -> Option<PathBuf> {
+    let dot_git = std::fs::read_to_string(repo_root.join(".git")).ok()?;
+    let gitdir = dot_git
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))?
+        .trim();
+    let admin = repo_root.join(gitdir);
+    let commondir = std::fs::read_to_string(admin.join("commondir")).ok()?;
+    let common = admin.join(commondir.trim()).canonicalize().ok()?;
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
+}
+
 // ─── Index matching ───────────────────────────────────────────────────────────
 
 /// Pick the best matching index from a list of known indexes.
@@ -165,11 +191,10 @@ pub fn resolve_index_from_list(indexes: &[IndexInfo], repo_root: &Path) -> Optio
     }
     let result = best_matching_index(indexes, repo_root);
     if result.is_none() {
+        // #8411: the caller now tries the main checkout next, so no fallback is named here.
         warn!(
             repo_root = %repo_root.display(),
-            "trusty-review index auto-derive: no index root_path matches the repo root; \
-             falling back to \"main\". Register an index with `trusty-search index .` \
-             or set TRUSTY_SEARCH_INDEX explicitly."
+            "trusty-review index auto-derive: no index root_path matches the repo root"
         );
     }
     result
@@ -198,6 +223,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = find_git_root(dir.path());
         assert_eq!(result, dir.path());
+    }
+
+    // ── main_checkout_root (#8411) ────────────────────────────────────────────
+
+    #[test]
+    fn main_checkout_root_follows_a_linked_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let admin = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("commondir"), "../..\n").unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+
+        assert_eq!(main_checkout_root(&wt), Some(main.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn main_checkout_root_is_none_for_a_plain_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        assert_eq!(main_checkout_root(tmp.path()), None);
     }
 
     #[test]

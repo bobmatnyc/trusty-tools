@@ -174,7 +174,8 @@ pub mod llm;
 /// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (32 dispatchable tcode agents: the
 /// original 4 (`engineer`/`qa-agent`/`code-reviewer`/`pm`), authored as
 /// Markdown+frontmatter as of #2897 Slice C, plus 28 coding-relevant tm
-/// agents bundled and wired in as of Slice E, #2958);
+/// agents wired in as of Slice E, #2958, whose shared texts are read from
+/// instructional content since #9011);
 /// `EmbeddedSkill`/`DEFAULT_SKILLS` (trusty-mpm's universal skill set, minus
 /// the `tm-*` orchestration skills).
 /// Test: `assets::tests::*`.

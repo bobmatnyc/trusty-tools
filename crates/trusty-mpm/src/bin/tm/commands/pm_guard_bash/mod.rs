@@ -49,6 +49,11 @@
 // sibling rules ask, replacing the per-guard lexing and redirect/program-text
 // splitting that disagreed with the shell four different ways.
 mod bash_tokens;
+// #8261: heavy builds rewritten to run under `tm build-lease`.
+// #8969: build_lease_cwd carries the build's directory into the lease.
+pub(crate) mod build_lease_cwd;
+mod build_lease_program;
+pub(crate) mod build_lease_rewrite;
 // #8596, #8248: a credential CLI whose printed value would reach tool output.
 mod credential_print;
 mod destructive_delete;
@@ -65,6 +70,8 @@ mod path_tokens;
 mod persistence;
 // #7648: an unscoped environment dump inside a Kubernetes pod.
 mod pod_env_dump;
+// #8756: a launchd or pm2 query that prints a managed job's environment.
+mod process_env_dump;
 // #8439: a read-only dispatch runs only allowlisted command shapes.
 mod read_only_allow;
 // #8567: the `gh` read verbs a read-only dispatch may run.
@@ -75,14 +82,43 @@ mod read_only_programs;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
+// #8756: one substitution scanner for the forbidden-verb and secret rules.
+mod substitutions;
 mod worktree_remove;
+// #8849: the removal guard's ancestry route for a HEAD behind its merged head.
+mod worktree_remove_ancestry;
 mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 // #8730: the files a command writes — `tee`, substitution and subshell bodies.
 mod write_targets;
+// #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
+mod anchor_verbs;
+// #8902: the Architect pane floor — no tmux verb aimed at the Architect's pane.
+mod architect_pane;
+mod architect_pane_env;
+mod architect_pane_parse;
+mod architect_pane_probe;
+mod architect_pane_reach;
+mod architect_pane_verbs;
+#[cfg(test)]
+pub(crate) use architect_pane::Pane;
+pub(crate) use architect_pane::{ARCHITECT_PANE_RULE, PaneProbe, evaluate_architect_pane};
+pub(crate) use architect_pane_probe::LivePanes;
+// #9001: the exact-target floor — a tmux target must name an existing object.
+mod tmux_exact_target;
+#[cfg(test)]
+pub(crate) use tmux_exact_target::TmuxObject;
+pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
+// #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
+mod floor_d4;
+mod floor_d4_rules;
+mod force_push;
 
+pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
-pub(crate) use destructive_delete::evaluate_destructive_delete_command;
+pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_command};
+pub(crate) use floor_d4::evaluate_d4_floor;
+pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
 pub(crate) use main_checkout::{
@@ -91,11 +127,15 @@ pub(crate) use main_checkout::{
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
+pub(crate) use process_env_dump::evaluate_process_env_dump_command;
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
+// #9001: the `$'…'` decoder, and the #6660 refusal that names its token.
+mod ansi_c_decode;
+pub(crate) use ansi_c_decode::unclassifiable_reason;
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
@@ -105,7 +145,9 @@ pub(crate) use bash_tokens::{
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.
-use bash_tokens::redirect_role;
+// #8869: and by the secret-read key-consumer rule, with the input-side parser.
+pub(crate) use bash_tokens::{RedirectRole, redirect_role};
+pub(crate) use credential_print::input_redirect_operand;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file
 // is screened against the same pattern list, the same brace expander and the
@@ -145,6 +187,12 @@ use path_tokens::unresolved_target;
 // it reaches this resolver instead of growing a second normalizer.
 pub(crate) use path_tokens::{PathEnv, resolve_target_path};
 use shell_lex::QuoteScan;
+// #8756: `substitutions` asks the credential rule which programs run their input.
+use credential_print::is_evaluator;
+// #8756: the secret rules read substitution bodies through the same scanner.
+pub(crate) use substitutions::{
+    MAX_SUBSTITUTION_DEPTH, Substitution, command_substitutions, without_inert_heredoc_bodies,
+};
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
 pub(crate) const SHELL_EDIT_REASON: &str = "PM must not edit files via shell tools \
@@ -240,19 +288,6 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
     }
     None
 }
-
-/// Maximum command-substitution recursion depth before conservatively denying.
-///
-/// Why: [`classify_command_substitutions`] recurses through
-/// [`evaluate_bash_command`] on each `$(…)` / backtick body. Adversarial deep
-/// nesting (`$($($(…`) would otherwise recurse without bound and could exhaust
-/// the stack, crashing the short-lived `tm hook --pm-guard` process. Capping
-/// the depth turns a crash into a (safe-direction) deny. The cap is generous —
-/// real commands nest a handful of levels at most, never dozens.
-/// What: the recursion budget threaded as `depth` through
-/// [`evaluate_bash_command_inner`] → [`classify_bash_segment`] →
-/// [`classify_command_substitutions`]. Past it, substitution scanning denies.
-const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 /// Classify a `Bash` command: `Some(reason)` denies, `None` allows.
 ///
@@ -499,36 +534,6 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     classify_command_substitutions(trimmed, depth)
 }
 
-/// Whether a paren-delimited substitution opens at byte `i`, and whether it is
-/// live there given the segment's quote map.
-///
-/// Why (#2745): `$(…)`, `<(…)` and `>(…)` are one CLASS — bash executes the
-/// body of each, so each must be decomposed and classified. Naming them in one
-/// place is what makes that true by construction: a spelling added here is
-/// scanned by [`classify_command_substitutions`] with no other edit, and the
-/// gap that let `diff <(sed -i …) x` through cannot reopen one form at a time.
-/// The two forms differ in ONE respect, which is why this returns liveness
-/// rather than a bare bool: double quotes suppress process substitution
-/// (`echo "<(x)"` is literal text) but NOT command substitution
-/// (`echo "$(sed -i …)"` still runs `sed`).
-/// What: `Some(true)` when a substitution opens at `i` and is live shell
-/// syntax there, `Some(false)` when one opens but is quoted into literal text,
-/// `None` when no substitution opens at `i`. On unbalanced quotes the map is
-/// untrustworthy, so every opener reads as live — the conservative direction.
-/// Test: `evaluate_bash_command_denies_process_substitution_edit`,
-/// `evaluate_bash_command_allows_quoted_process_substitution_prose`,
-/// `evaluate_bash_command_allows_quoted_substitution_prose`.
-fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Option<bool> {
-    if bytes.get(i + 1).copied() != Some(b'(') {
-        return None;
-    }
-    match bytes[i] {
-        b'$' => Some(!scan.balanced || scan.allows_substitution(i)),
-        b'<' | b'>' => Some(!scan.balanced || scan.is_unquoted(i)),
-        _ => None,
-    }
-}
-
 /// Inspect every substitution in a segment — `$(…)`, `<(…)`, `>(…)`, and
 /// backticks — for hidden forbidden verbs.
 ///
@@ -549,7 +554,10 @@ fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usize) -> Optio
 /// `diff <(sed -i s/a/b/ f) x` was ALLOWED while bash ran the `sed -i`, and
 /// `>(…)` denied only incidentally — its leading `>` tripped
 /// [`has_file_write_redirection`], never its body. Both now classify like every
-/// other substitution, via [`paren_substitution_live_at`].
+/// other substitution, via `substitutions::paren_substitution_live_at`.
+///
+/// #8756: the byte scan moved to [`substitutions::segment_substitutions`], which
+/// the secret rules share, so both read the same bodies.
 /// What: past the depth cap, returns [`SHELL_EDIT_REASON`] immediately.
 /// Otherwise byte-scans for each paren-delimited opener (matching `)` with
 /// paren-depth tracking) and for backtick pairs, recursively evaluates each
@@ -570,52 +578,16 @@ fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'stati
         // than recurse further and risk a stack overflow.
         return Some(SHELL_EDIT_REASON);
     }
-    let scan = QuoteScan::new(segment);
-    let backtick_live = |i: usize| !scan.balanced || scan.allows_substitution(i);
-    let bytes = segment.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if let Some(live) = paren_substitution_live_at(&scan, bytes, i) {
-            if !live {
-                i += 1;
-                continue;
-            }
-            let mut paren = 1usize;
-            let mut j = i + 2;
-            while j < bytes.len() && paren > 0 {
-                match bytes[j] {
-                    b'(' => paren += 1,
-                    b')' => paren -= 1,
-                    _ => {}
+    for body in substitutions::segment_substitutions(segment) {
+        match body {
+            // Unbalanced opener — cannot decompose; deny conservatively.
+            Substitution::Unclosed(_) => return Some(SHELL_EDIT_REASON),
+            Substitution::Closed(text) => {
+                if let Some(reason) = evaluate_bash_command_inner(&text, depth + 1) {
+                    return Some(reason);
                 }
-                j += 1;
             }
-            if paren != 0 {
-                // Unbalanced opener — cannot decompose; deny conservatively.
-                return Some(SHELL_EDIT_REASON);
-            }
-            if let Some(reason) = evaluate_bash_command_inner(&segment[i + 2..j - 1], depth + 1) {
-                return Some(reason);
-            }
-            i = j;
-            continue;
         }
-        if bytes[i] == b'`' && backtick_live(i) {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b'`' {
-                j += 1;
-            }
-            if j >= bytes.len() {
-                // Unbalanced backtick — cannot decompose; deny conservatively.
-                return Some(SHELL_EDIT_REASON);
-            }
-            if let Some(reason) = evaluate_bash_command_inner(&segment[i + 1..j], depth + 1) {
-                return Some(reason);
-            }
-            i = j + 1;
-            continue;
-        }
-        i += 1;
     }
     None
 }
@@ -1124,6 +1096,9 @@ mod tests;
 // the allow case and the deny case bounding it sit side by side per issue.
 #[cfg(test)]
 mod false_positive_tests;
+// #9001: case 3's allow beside its deny bound, plus the mysql DENY rows.
+#[cfg(test)]
+mod false_positive_9001_tests;
 
 // #7839, #7833, #7479, #7744, #7743, #7738, #7728, #7863: one row per issue
 // for the shared-tokenizer cluster, beside the still-refused controls that

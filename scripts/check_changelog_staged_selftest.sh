@@ -35,6 +35,10 @@
 #     staged-docs-only-exempt         a staged docs-only change passes, so the
 #                                     mode inherits the exemptions rather than
 #                                     re-deriving them.
+#     staged-instruction-asset-exempt a staged modify and an untracked add of
+#                                     .md instruction content under
+#                                     crates/trusty-mpm/src/assets/ pass with
+#                                     no fragment (owner ruling 2026-09-27).
 #     staged-empty-index-scan-floor   a clean tree with nothing staged and
 #                                     nothing untracked FAILS with SCAN FLOOR.
 #                                     The floor is relaxed to "at least one
@@ -89,7 +93,7 @@
 # Exit: 0 when every case holds; 1 (naming the case) when one does not.
 #
 # Test: this IS the test. It is wired into
-#   .github/workflows/changelog-fragment.yml ahead of the real gate run.
+#   .github/workflows/ci.yml (changelog-fragment job) ahead of the real gate run.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only. Same constraints as the script under test.
@@ -151,6 +155,11 @@ printf 'Placeholder keeping changelog.d/ tracked between releases.\n' \
   >"$REPO/crates/demo/changelog.d/README.md"
 printf '# Docs\n' >"$REPO/docs/notes.md"
 printf 'target/\n*.log\n' >"$REPO/.gitignore"
+# The instruction-asset root the shared Cargo-inert list names.
+mkdir -p "$REPO/crates/trusty-mpm/src/assets/agents" "$REPO/crates/trusty-mpm/changelog.d"
+printf 'pub fn v() -> u32 { 1 }\n' >"$REPO/crates/trusty-mpm/src/lib.rs"
+printf '[package]\nname = "trusty-mpm"\nversion = "0.1.0"\n' >"$REPO/crates/trusty-mpm/Cargo.toml"
+printf '# QA agent\n' >"$REPO/crates/trusty-mpm/src/assets/agents/qa.md"
 
 g init -q -b main
 g config user.email selftest@example.invalid
@@ -270,6 +279,17 @@ reset_tree
 printf '# Docs\n\nchanged\n' >"$REPO/docs/notes.md"
 g add -A
 assert_gate staged-docs-only-exempt 0 \
+  'no crate source changed \(docs-only / CI-only / test-only\) — OK' \
+  'FAIL' \
+  --staged
+
+# 5b. The instruction-asset exemption holds before the commit too: a staged
+#     modify and an UNTRACKED add (an add, in this mode) need no fragment.
+reset_tree
+printf '# QA agent\n\nchanged\n' >"$REPO/crates/trusty-mpm/src/assets/agents/qa.md"
+g add -A
+printf '# Ops agent\n' >"$REPO/crates/trusty-mpm/src/assets/agents/ops.md"
+assert_gate staged-instruction-asset-exempt 0 \
   'no crate source changed \(docs-only / CI-only / test-only\) — OK' \
   'FAIL' \
   --staged

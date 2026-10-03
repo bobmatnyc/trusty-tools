@@ -14,7 +14,7 @@
 //! Test: batch helpers covered by `reindex_walks_directory_and_emits_events`
 //! and the stall/memory-abort tests.
 
-use crate::core::indexer::{CommitTimings, ParsedBatch};
+use crate::core::indexer::{CommitTimings, IndexFileOutcome, ParsedBatch};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::walker::should_skip_content;
 use dashmap::DashMap;
@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrde
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::hash::{hash_content, shrink_hashes_if_needed, MAX_FILE_HASHES_PER_INDEX};
-use super::hash_cache;
+use super::hash::hash_content;
+use super::hash_withhold::{chunk_ids_by_file, record_hashes, withhold_chunkless_hashes};
 use super::progress::ReindexProgress;
 use super::prune::to_corpus_relative_path;
 
@@ -175,6 +175,10 @@ pub(super) struct ParsedReadyBatch {
     /// BEFORE inserting the new chunks (fix for issue #855: delete-then-insert
     /// semantics to prevent orphan chunk IDs when a file shrinks).
     pub changed_corpus_paths: Vec<String>,
+    /// #8976: corpus-relative paths whose zero chunks are final (blank
+    /// content, or JSON above the window ceiling), so their hash is recorded
+    /// without chunks.
+    pub final_chunkless_paths: Vec<String>,
 }
 
 /// Sanitised contents of one batch after read + filter passes.
@@ -190,6 +194,8 @@ pub(super) struct BatchPayload {
     /// Corpus-relative paths of files being re-indexed (same strings as the
     /// first element of each `to_index` entry).
     pub changed_corpus_paths: Vec<String>,
+    /// #8976: the subset of `changed_corpus_paths` whose zero chunks are final.
+    pub final_chunkless_paths: Vec<String>,
 }
 
 /// Process a single batch end-to-end (sequential; not pipelined).
@@ -398,6 +404,7 @@ pub(super) async fn prepare_and_parse_batch(
         new_hashes: payload.new_hashes,
         batch_files,
         changed_corpus_paths: payload.changed_corpus_paths,
+        final_chunkless_paths: payload.final_chunkless_paths,
     })
 }
 
@@ -427,12 +434,13 @@ pub(super) async fn commit_parsed_and_finalize(
         new_hashes,
         batch_files,
         changed_corpus_paths,
+        final_chunkless_paths,
     } = ready;
     let parse_ms = parsed.parse_ms;
     let embed_ms = parsed.embed_ms;
     let vector_count = parsed.vector_count;
 
-    let commit = {
+    let (commit, durable, keep_chunkless) = {
         let indexer = ctx.handle.indexer.write().await;
 
         // Issue #855: delete-then-insert for changed files. For every file
@@ -455,8 +463,8 @@ pub(super) async fn commit_parsed_and_finalize(
                     error = %e,
                     remove_failures,
                     "reindex: #855 pre-commit remove failed — skipping insert for \
-                     this file to avoid duplicate chunks (issue #1002); stale \
-                     chunks will persist until next --force reindex"
+                     this file to avoid duplicate chunks (issue #1002); its hash \
+                     is withheld, so the next reindex retries it (#8976)"
                 );
             }
         }
@@ -466,18 +474,36 @@ pub(super) async fn commit_parsed_and_finalize(
         } else {
             parsed
         };
+        // #8976: each file's chunk ids, read before the commit consumes them.
+        let expected = chunk_ids_by_file(&parsed);
+        // #8976: a failed remove left the old chunks, so the file's zero
+        // chunks are not final; withhold its hash and let the next run retry.
+        let keep_chunkless: Vec<String> = final_chunkless_paths
+            .into_iter()
+            .filter(|p| !remove_failed_files.contains(p.as_str()))
+            .collect();
 
-        match indexer.commit_parsed_batch(parsed, true).await {
+        let commit = match indexer.commit_parsed_batch(parsed, true).await {
             Ok(c) => c,
             Err(e) => {
                 drop(indexer);
                 let placeholder_paths: Vec<PathBuf> =
                     new_hashes.iter().map(|(p, _)| p.clone()).collect();
                 emit_batch_error(ctx, &placeholder_paths, e).await;
+                // #8976: the pre-commit remove already dropped these files'
+                // chunks, so their old hashes must not survive the failure.
+                let withheld = withhold_chunkless_hashes(ctx, new_hashes, &Default::default(), &[]);
+                record_hashes(ctx, &withheld).await;
                 return BatchOutcome::default();
             }
-        }
+        };
+        let durable = indexer.files_with_all_chunks(&expected).await;
+        (commit, durable, keep_chunkless)
     };
+    // #8976: a hash with no chunks behind it makes every later reindex skip
+    // the file, so only files whose chunks all landed (or whose zero chunks
+    // are final) keep it; the rest overwrite their old hash.
+    let new_hashes = withhold_chunkless_hashes(ctx, new_hashes, &durable, &keep_chunkless);
 
     apply_successful_commit(ctx, new_hashes, batch_files, &commit).await;
     let mem_limit_hit = check_post_commit_memory(ctx);
@@ -524,6 +550,7 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
     // chunks before inserting the new set (delete-then-insert per changed
     // file).
     let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
+    let mut final_chunkless_paths: Vec<String> = Vec::new();
     for (path, content_res) in read_results {
         let rel = to_corpus_relative_path(&ctx.root, &path);
         let content = match content_res {
@@ -551,11 +578,16 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // Issue #1073: use the corpus-RELATIVE PathBuf as the DashMap key so
         // the in-process cache and the redb-persisted cache use the SAME key space.
         let rel_path = PathBuf::from(&rel);
-        if ctx
-            .hashes
-            .get(&rel_path)
-            .map(|prev| *prev == h)
-            .unwrap_or(false)
+        // #8922: sops content is never hash-skipped. A hash recorded before the
+        // content check existed may still sit over the file's chunks, and the
+        // commit's delete-then-insert below is what removes them; the indexer
+        // then parses the content to zero chunks.
+        if !crate::core::sops::is_sops_encrypted(&content)
+            && ctx
+                .hashes
+                .get(&rel_path)
+                .map(|prev| *prev == h)
+                .unwrap_or(false)
         {
             emit_skip(ctx, &rel, None).await;
             continue;
@@ -563,6 +595,15 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         // Issue #402 — relocation resilience: store file paths RELATIVE to the
         // index root so the corpus is portable when `root_path` is updated.
         let path_str = rel.clone();
+        // #8976: blank content, over-ceiling JSON and (#8922) sops content keep
+        // their hash unchunked. #8922: they are also counted as skipped — they
+        // never reach the embedder, so the zero-vector gate (#868) must not read
+        // a batch of only such files (a new empty `__init__.py`) as an embedder
+        // failure.
+        if IndexFileOutcome::classify(&rel, &content, 0).zero_chunks_is_final() {
+            final_chunkless_paths.push(rel.clone());
+            ctx.progress.skipped.fetch_add(1, Ordering::Release);
+        }
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());
         // Issue #1073: use the relative path as the hash-map key.
@@ -578,6 +619,7 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
         to_index_paths,
         new_hashes,
         changed_corpus_paths,
+        final_chunkless_paths,
     }
 }
 
@@ -683,20 +725,8 @@ pub(super) async fn apply_successful_commit(
     let chunks_per_sec = (ctx.progress.total_chunks.load(Ordering::Acquire) as u64 * 1000)
         .checked_div(elapsed_ms)
         .unwrap_or(0);
-    for (path, h) in &new_hashes {
-        ctx.hashes.insert(path.clone(), h.clone());
-    }
-    // Issue #75: cap per-index hash-cache size.
-    shrink_hashes_if_needed(&ctx.hashes);
-    // Issue #662: mirror the newly-committed hashes to the redb corpus store
-    // so they survive daemon restarts.
-    hash_cache::persist_batch(
-        &ctx.handle,
-        &new_hashes,
-        MAX_FILE_HASHES_PER_INDEX,
-        ctx.hashes.len(),
-    )
-    .await;
+    // Issue #75 / #662: bounded in memory, mirrored to redb for restarts.
+    record_hashes(ctx, &new_hashes).await;
     ctx.progress
         .push(serde_json::json!({
             "event": "batch",

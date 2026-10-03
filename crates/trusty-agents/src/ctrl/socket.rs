@@ -116,8 +116,7 @@ const ENOTSOCK: i32 = 38;
 /// What: Matches `ConnectionRefused` (the common stale-socket signal),
 /// `NotFound` (no file), and the `ENOTSOCK` raw errno (path is a non-socket
 /// file).
-/// Test: `is_connection_refused_classifies_enotsock` plus the bind_singleton
-/// stale-takeover test.
+/// Test: `is_connection_refused_classifies_enotsock`.
 pub fn is_connection_refused(err: &io::Error) -> bool {
     matches!(
         err.kind(),
@@ -129,7 +128,7 @@ pub fn is_connection_refused(err: &io::Error) -> bool {
 /// caller already handles.
 ///
 /// Why: `is_connection_refused` classifies on `ErrorKind` and raw errno, and
-/// `bind_singleton`'s stale-takeover branch depends on it. Wrapping every
+/// probe callers depend on it. Wrapping every
 /// `UdsSecurityError` in `io::Error::other` would erase the kernel's `NotFound`
 /// for an absent socket and leave the controller unable to ever start.
 /// What: unwraps the two variants that carry the original `io::Error`; every
@@ -148,9 +147,8 @@ fn probe_error_from_uds(err: trusty_common::uds::UdsSecurityError) -> io::Error 
 ///
 /// Why: the dialer refuses to *talk* to such a socket (#5089 step 1a), but
 /// refusing alone would brick the project: nothing would ever replace the bad
-/// socket. Classifying it takeover-safe is what lets `bind_singleton` unlink it
-/// and bind a hardened one. Note this does NOT relax the check — the untrusted
-/// socket is still never written to.
+/// socket. Classifying it takeover-safe lets an owner replace it. Note this
+/// does NOT relax the check — the untrusted socket is still never written to.
 /// What: downcasts the `io::Error`'s source to `UdsSecurityError` and matches
 /// the one variant that means "the path exists but is not trustworthy".
 fn is_untrusted_socket(err: &io::Error) -> bool {
@@ -173,12 +171,10 @@ fn is_untrusted_socket(err: &io::Error) -> bool {
 /// socket) and one that is not about the socket at all: **the containing
 /// directory is not `0700`**. That last arm is true of a perfectly healthy
 /// `0600` socket with a live process behind it, condemned for its directory's
-/// mode. [`CtrlSocket::bind_singleton`] may act on it because it calls
-/// `prepare_socket_dir` *before* probing — so the directory arm is unreachable
-/// there — and because it binds the path it just unlinked. A caller with
-/// neither property must use [`is_connection_refused`], which fires only when
-/// the kernel says nobody is listening. #5089 review: the argv-forward client
-/// path used this predicate and unlinked live controllers.
+/// mode. #8870: [`CtrlSocket::bind_singleton`] no longer acts on it — it
+/// takes over only a socket the kernel proves unserved, under the bind lock.
+/// #5089 review: the argv-forward client path used this predicate and
+/// unlinked live controllers.
 ///
 /// Why: refusing to dial an unverifiable socket would otherwise brick the
 /// project — nothing would replace the bad socket. This is what lets the owner
@@ -282,33 +278,36 @@ impl CtrlSocket {
     /// `trusty-agents` re-invocations reach the become-controller path without the
     /// argv-gated probe in `mode_dispatch`, so the singleton guarantee has to
     /// live here, atomically with the bind, to be race-safe.
-    /// What: Probes `path` with `timeout`. If a controller answers, returns
-    /// [`BindOutcome::AlreadyRunning`] with the open stream and binds nothing.
-    /// If the probe fails with a stale-socket signal (connection-refused /
-    /// not-found / timeout), removes the stale file and binds a fresh listener,
-    /// returning [`BindOutcome::Bound`]. Any other probe error (e.g. permission
-    /// denied) is treated conservatively as "do not clobber" and propagated.
+    /// What: binds through [`trusty_common::uds::bind_singleton_hardened`],
+    /// which holds the `<path>.lock` flock across its probe, corpse unlink,
+    /// bind and listen, and takes over only a socket the kernel proves nobody
+    /// serves. When it refuses because a process is serving the path, `path`
+    /// is dialed with `timeout` and a verified stream is returned as
+    /// [`BindOutcome::AlreadyRunning`]; if that dial fails (an owner whose
+    /// socket fails verification, or one that just exited) its error is
+    /// returned and nothing is unlinked. Every other refusal — the bind lock
+    /// held by another starter or unusable, a non-socket on the path — is
+    /// returned as an `io::Error` whose source is the `UdsSecurityError`.
     /// Test: `bind_singleton_refuses_when_controller_alive`,
-    /// `bind_singleton_binds_when_socket_absent`, and
-    /// `bind_singleton_binds_over_stale_socket`.
+    /// `bind_singleton_binds_when_socket_absent`,
+    /// `bind_singleton_binds_over_stale_socket`,
+    /// `racing_starters_on_a_stale_socket_never_both_bind`,
+    /// `bind_singleton_refuses_while_another_starter_holds_the_bind_lock`,
+    /// `bind_singleton_fails_closed_when_the_bind_lock_cannot_be_taken`,
+    /// `bind_singleton_refuses_a_live_owner_it_cannot_verify`,
+    /// `bind_singleton_refuses_a_regular_file_and_leaves_it`.
     pub async fn bind_singleton(path: &Path, timeout: Duration) -> io::Result<BindOutcome> {
-        // #5099: harden the directory BEFORE probing. The probe can succeed
-        // against a socket sitting in a wide directory, and the takeover branch
-        // below must not be the only path that narrows it.
-        if let Some(parent) = path.parent() {
-            trusty_common::uds::prepare_socket_dir(parent).map_err(io::Error::other)?;
-        }
-        match Self::probe(path, timeout).await {
-            // A controller answered — refuse to clobber; hand the stream back.
-            Ok(stream) => Ok(BindOutcome::AlreadyRunning(stream)),
-            // Stale, unverifiable, or no socket at all: safe to take over.
-            Err(e) if is_stale_socket_for_owner(&e) || e.kind() == io::ErrorKind::TimedOut => {
-                Self::cleanup(path);
-                let listener = trusty_common::uds::bind_hardened(path).map_err(io::Error::other)?;
-                Ok(BindOutcome::Bound(listener))
+        // #8870: the hand-rolled probe → unlink → bind ran without the bind
+        // lock, so two starters could both bind, or one unlink the other's
+        // fresh socket. The shared singleton path serializes the whole sequence.
+        match trusty_common::uds::bind_singleton_hardened(path).await {
+            Ok(listener) => Ok(BindOutcome::Bound(listener)),
+            Err(trusty_common::uds::UdsSecurityError::AlreadyServing { .. }) => {
+                Self::probe(path, timeout)
+                    .await
+                    .map(BindOutcome::AlreadyRunning)
             }
-            // Any other error (permission denied, etc.): do NOT clobber.
-            Err(e) => Err(e),
+            Err(e) => Err(io::Error::other(e)),
         }
     }
 
@@ -402,14 +401,16 @@ mod tests {
 
     /// #5089 step 1a: the availability half of the refusal above. Refusing to
     /// *dial* an unverifiable socket must not brick the project — the singleton
-    /// path unlinks it and binds a hardened replacement.
+    /// path unlinks it and binds a hardened replacement. #8870: only once
+    /// nothing serves it — a live owner is refused, see
+    /// `bind_singleton_refuses_a_live_owner_it_cannot_verify`.
     #[tokio::test]
     async fn bind_singleton_takes_over_a_socket_that_fails_verification() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let sock = tmp.path().join("sockets").join("wide.ctrl.sock");
-        let _stale = CtrlSocket::bind(&sock).await.expect("bind");
+        drop(CtrlSocket::bind(&sock).await.expect("bind"));
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))
             .expect("widen socket");
 
@@ -628,8 +629,10 @@ mod tests {
     async fn bind_singleton_binds_over_stale_socket() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stale-takeover.ctrl.sock");
-        // Simulate a leftover socket file with no listener.
-        tokio::fs::write(&path, b"stale").await.unwrap();
+        // A leftover socket file with no listener. #8870: a real socket — a
+        // regular file is refused, see
+        // `bind_singleton_refuses_a_regular_file_and_leaves_it`.
+        dead_socket(&path);
         assert!(path.exists());
 
         let outcome = CtrlSocket::bind_singleton(&path, Duration::from_millis(50))
@@ -654,5 +657,152 @@ mod tests {
             .expect("probe should connect");
         drop(stream);
         CtrlSocket::cleanup(&path);
+    }
+
+    /// The `UdsSecurityError` a `bind_singleton` refusal carries, if any.
+    fn uds_error(err: &io::Error) -> Option<&trusty_common::uds::UdsSecurityError> {
+        err.get_ref()
+            .and_then(|e| e.downcast_ref::<trusty_common::uds::UdsSecurityError>())
+    }
+
+    /// A socket file nothing serves: `std`'s listener does not unlink on drop.
+    fn dead_socket(path: &Path) {
+        trusty_common::uds::prepare_socket_dir(path.parent().expect("parent")).expect("dir");
+        drop(std::os::unix::net::UnixListener::bind(path).expect("bind corpse"));
+    }
+
+    /// #8870 regression: a starter that finds another starter mid-bind — the
+    /// `<socket>.lock` flock held — must refuse, not bind beside it. Against
+    /// the pre-fix hand-rolled bind this returned `Bound`.
+    #[tokio::test]
+    async fn bind_singleton_refuses_while_another_starter_holds_the_bind_lock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("p.ctrl.sock");
+        dead_socket(&sock);
+        let lock = std::fs::File::create(tmp.path().join("sockets").join("p.ctrl.sock.lock"))
+            .expect("lock file");
+        lock.try_lock().expect("the other starter holds the lock");
+
+        let err = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect_err("a held bind lock must refuse the second starter");
+        assert!(
+            matches!(
+                uds_error(&err),
+                Some(trusty_common::uds::UdsSecurityError::BindInProgress { .. })
+            ),
+            "expected BindInProgress, got: {err}"
+        );
+    }
+
+    /// #8870: a lock that cannot be taken at all fails closed — never an
+    /// unlocked bind. Against the pre-fix code this returned `Bound`.
+    #[tokio::test]
+    async fn bind_singleton_fails_closed_when_the_bind_lock_cannot_be_taken() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("p.ctrl.sock");
+        dead_socket(&sock);
+        std::fs::create_dir(tmp.path().join("sockets").join("p.ctrl.sock.lock"))
+            .expect("a directory where the lock file belongs");
+
+        let err = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect_err("an unusable bind lock must refuse");
+        assert!(
+            matches!(
+                uds_error(&err),
+                Some(trusty_common::uds::UdsSecurityError::BindLock { .. })
+            ),
+            "expected BindLock, got: {err}"
+        );
+    }
+
+    /// #8870: a live owner whose socket fails verification is refused, not
+    /// unlinked. The pre-fix code took it over and orphaned the incumbent.
+    #[tokio::test]
+    async fn bind_singleton_refuses_a_live_owner_it_cannot_verify() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("wide.ctrl.sock");
+        let _incumbent = CtrlSocket::bind(&sock).await.expect("bind incumbent");
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))
+            .expect("widen socket");
+
+        let err = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect_err("a live, unverifiable owner must be refused");
+        assert!(
+            matches!(
+                uds_error(&err),
+                Some(trusty_common::uds::UdsSecurityError::UntrustedSocket { .. })
+            ),
+            "expected UntrustedSocket, got: {err}"
+        );
+        std::os::unix::net::UnixStream::connect(&sock)
+            .expect("the incumbent must still own the path");
+    }
+
+    /// #8870 (#7312 rule): a regular file on the socket path is refused and
+    /// left on disk. The pre-fix code deleted it and bound over it.
+    #[tokio::test]
+    async fn bind_singleton_refuses_a_regular_file_and_leaves_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("p.ctrl.sock");
+        trusty_common::uds::prepare_socket_dir(sock.parent().expect("parent")).expect("dir");
+        std::fs::write(&sock, b"not a socket").expect("seed file");
+
+        let err = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect_err("a regular file must be refused");
+        assert!(
+            matches!(
+                uds_error(&err),
+                Some(trusty_common::uds::UdsSecurityError::NotASocketFile { .. })
+            ),
+            "expected NotASocketFile, got: {err}"
+        );
+        assert_eq!(std::fs::read(&sock).expect("file kept"), b"not a socket");
+    }
+
+    /// #8870 regression: two starters racing on one stale socket never both
+    /// own it. Each holds what it bound until both have finished, so a second
+    /// starter that unlinked the first's fresh socket and bound its own shows
+    /// up as two `Bound` outcomes.
+    #[test]
+    fn racing_starters_on_a_stale_socket_never_both_bind() {
+        const STARTERS: usize = 4;
+        for round in 0..64 {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let sock = tmp.path().join("sockets").join("race.ctrl.sock");
+            dead_socket(&sock);
+            let start = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
+            let done = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
+            let starters: Vec<_> = (0..STARTERS)
+                .map(|_| {
+                    let (sock, start, done) = (sock.clone(), start.clone(), done.clone());
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect("runtime");
+                        rt.block_on(async {
+                            start.wait();
+                            let outcome =
+                                CtrlSocket::bind_singleton(&sock, Duration::from_millis(200)).await;
+                            let bound = matches!(outcome, Ok(BindOutcome::Bound(_)));
+                            done.wait();
+                            bound
+                        })
+                    })
+                })
+                .collect();
+            let bound = starters
+                .into_iter()
+                .map(|t| t.join().expect("starter thread"))
+                .filter(|b| *b)
+                .count();
+            assert_eq!(bound, 1, "round {round}: {bound} starters own the socket");
+        }
     }
 }

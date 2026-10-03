@@ -14,7 +14,7 @@
 //! unreachable.
 //!
 //! What: [`run_bounded`] spawns the child in its OWN process group, drains both
-//! pipes on their own threads, polls `try_wait` until `budget` expires, then
+//! pipes on their own threads, polls for the exit until `budget` expires, then
 //! SIGKILLs the whole group and reaps it. It is the mechanics
 //! [`crate::session_manager::worktree_reclaim_gh::run_with_timeout`] has used
 //! since #6867, lifted out verbatim so the hygiene sweep does not get a second,
@@ -30,9 +30,12 @@
 //!
 //! Test: `run_bounded_captures_stdout_and_status`,
 //! `run_bounded_kills_a_hung_child`, `run_bounded_kills_the_whole_process_group`,
-//! `run_bounded_reports_a_spawn_failure` in `bounded_proc_tests.rs`.
+//! `run_bounded_reports_a_spawn_failure`, `run_bounded_with_input_feeds_stdin`,
+//! `run_bounded_reports_a_pipe_held_open_after_exit`,
+//! `run_bounded_kills_the_pipe_holder_it_reports_held_open` in
+//! `bounded_proc_tests.rs`.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -77,6 +80,9 @@ pub enum BoundedError {
     TimedOut,
     /// `try_wait` itself failed; the child's fate is unknown.
     Wait(std::io::Error),
+    /// The child exited, but something it left behind still held the named
+    /// pipe open, so its output is incomplete (#8306).
+    PipeHeldOpen(&'static str),
 }
 
 impl std::fmt::Display for BoundedError {
@@ -86,6 +92,12 @@ impl std::fmt::Display for BoundedError {
             Self::NoPipe(which) => write!(f, "exposed no {which} pipe"),
             Self::TimedOut => write!(f, "did not answer within its budget"),
             Self::Wait(e) => write!(f, "could not be waited on: {e}"),
+            Self::PipeHeldOpen(which) => {
+                write!(
+                    f,
+                    "exited, but its {which} pipe stayed open past the drain wait"
+                )
+            }
         }
     }
 }
@@ -125,20 +137,22 @@ fn isolate_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 fn isolate_process_group(_cmd: &mut Command) {}
 
-/// SIGKILL the timed-out child's whole process group, then reap it (#6867).
+/// SIGKILL the failed child's whole process group, then reap it (#6867).
 ///
 /// What: `killpg` on the child's pid — which [`isolate_process_group`] made the
 /// group id — then the direct kill and the `wait` that reaps the zombie. The
 /// group is signalled BEFORE the reap: once `wait` returns the pid may be
-/// recycled and the group id would name someone else's processes.
-/// Test: `run_bounded_kills_the_whole_process_group`.
+/// recycled and the group id would name someone else's processes. The child
+/// must be running or an unreaped zombie; [`supervise`] never reaps (#8306).
+/// Test: `run_bounded_kills_the_whole_process_group`,
+/// `run_bounded_kills_the_pipe_holder_it_reports_held_open`.
 #[cfg(unix)]
 fn kill_child_group(child: &mut Child) {
     if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: `child` has not been waited on yet, so its pid is still
-        // reserved and — because the child was spawned with `process_group(0)` —
-        // names its own process group. A group with no members left returns
-        // ESRCH, which is ignored.
+        // SAFETY: `child` has not been waited on yet — running or a zombie — so
+        // its pid is still reserved and, because the child was spawned with
+        // `process_group(0)`, names its own process group (never 0, never the
+        // caller's). A group with no members left returns ESRCH, ignored.
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }
@@ -158,25 +172,85 @@ fn kill_child_group(child: &mut Child) {
 /// Why: see the module doc — an unbounded child is how a background sweep turns
 /// into a permanent tax on the request path.
 /// What: spawns the child in its own process group with both pipes drained on
-/// their own threads, polls `try_wait` every 25 ms until `budget` expires, then
-/// kills the GROUP and reaps. `Ok` carries the exit status and both streams even
-/// for a non-zero exit; every `Err` means no output was produced. Both exits that
-/// can leave a child RUNNING — the deadline and an errored `try_wait` — kill the
-/// group before returning (#7652 critic round 2). The kill on the `try_wait` arm
-/// carries no test of its own: `try_wait` fails only when `waitpid` does
-/// (`ECHILD`, a reaped or stolen child), which this crate cannot provoke without
-/// a wait seam whose only user would be that test. It is one call adjacent to the
-/// deadline arm's identical, tested call.
+/// their own threads, polls for the exit every 25 ms until `budget` expires,
+/// then kills the GROUP and reaps. `Ok` carries the exit status and both streams
+/// even for a non-zero exit; every `Err` means no output was produced. Every
+/// error after the spawn kills the group before returning (#7652 critic round 2,
+/// #8306). The kill on an errored wait carries no test of its own: `waitid`
+/// fails only with `ECHILD` (a reaped or stolen child), which this crate cannot
+/// provoke without a wait seam whose only user would be that test. It shares
+/// the one kill site with the tested timeout and held-open arms.
 /// Test: `run_bounded_captures_stdout_and_status`, `run_bounded_kills_a_hung_child`,
 /// `run_bounded_kills_the_whole_process_group`, `run_bounded_reports_a_spawn_failure`.
-pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, BoundedError> {
+pub fn run_bounded(cmd: Command, budget: Duration) -> Result<BoundedOutput, BoundedError> {
+    run_bounded_with_input(cmd, None, budget)
+}
+
+/// [`run_bounded`], writing `input` to the child's stdin first (#8306).
+///
+/// Why: `git patch-id` reads its patch on stdin. A blocking `write_all` into a
+/// child that never reads is its own unbounded wait, so the write runs on a
+/// thread the deadline does not wait for.
+/// What: with `Some(input)`, stdin is piped, written and closed on its own
+/// thread; with `None`, stdin is whatever `cmd` already set. The poll starts at
+/// 1 ms and backs off to 25 ms, so a fast git call is not charged a full poll.
+/// A pipe still held open after the exit is [`BoundedError::PipeHeldOpen`],
+/// never an empty `Ok` a caller would read as "no output".
+/// Test: `run_bounded_with_input_feeds_stdin`,
+/// `run_bounded_reports_a_pipe_held_open_after_exit`,
+/// `run_bounded_kills_the_pipe_holder_it_reports_held_open`.
+pub fn run_bounded_with_input(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    budget: Duration,
+) -> Result<BoundedOutput, BoundedError> {
     // #6867: BEFORE the spawn — a group cannot be joined retroactively.
     isolate_process_group(&mut cmd);
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(BoundedError::Spawn)?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A child killed mid-write fails the write with EPIPE; nothing waits on it.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
+    match supervise(&mut child, budget) {
+        // Every pipe reached EOF, so no pipe holder is left to kill; the zombie
+        // is reaped here for its status. This reap fails only with ECHILD — the
+        // pid is no longer ours — so it is deliberately NOT followed by a
+        // `killpg`, which could then land on a recycled pid's group.
+        Ok((stdout, stderr)) => Ok(BoundedOutput {
+            status: child.wait().map_err(BoundedError::Wait)?,
+            stdout,
+            stderr,
+        }),
+        // #8306: EVERY post-spawn error — TimedOut, Wait, NoPipe, PipeHeldOpen —
+        // kills the group before returning. A held-open pipe means a grandchild
+        // is still running; returning without the kill leaked it.
+        Err(e) => {
+            kill_child_group(&mut child);
+            Err(e)
+        }
+    }
+}
+
+/// Wait for `child` to exit and drain both of its pipes, WITHOUT reaping it.
+///
+/// Why (#8306): the caller must be able to kill the child's process group on any
+/// error here, and the group id is the child's pid. An unreaped zombie keeps that
+/// pid reserved, so the `killpg` cannot land on a recycled pid's group.
+/// What: `Ok` carries both streams once the child has exited and both pipes hit
+/// EOF; the child is left a zombie for the caller to reap. Every `Err` leaves it
+/// either running or an unreaped zombie.
+/// Test: `run_bounded_kills_a_hung_child`,
+/// `run_bounded_kills_the_pipe_holder_it_reports_held_open`.
+fn supervise(child: &mut Child, budget: Duration) -> Result<(String, String), BoundedError> {
     let stdout = child
         .stdout
         .take()
@@ -188,30 +262,63 @@ pub fn run_bounded(mut cmd: Command, budget: Duration) -> Result<BoundedOutput, 
         .ok_or(BoundedError::NoPipe("stderr"))
         .map(drain_pipe)?;
     let deadline = Instant::now() + budget;
+    let mut pause = Duration::from_millis(1);
+    // #7652 critic round 2: an errored wait leaves the loop without reaching
+    // the deadline; `?` hands it to the caller's group kill like the timeout.
+    while !has_exited(child).map_err(BoundedError::Wait)? {
+        if Instant::now() >= deadline {
+            return Err(BoundedError::TimedOut);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(25));
+    }
+    // #8306: an undrained pipe is an error, never an empty success.
+    let out = stdout
+        .recv_timeout(PIPE_DRAIN_WAIT)
+        .map_err(|_| BoundedError::PipeHeldOpen("stdout"))?;
+    let err = stderr
+        .recv_timeout(PIPE_DRAIN_WAIT)
+        .map_err(|_| BoundedError::PipeHeldOpen("stderr"))?;
+    Ok((out, err))
+}
+
+/// Has `child` exited? Leaves an exited child unreaped (#8306).
+///
+/// What: `waitid(WEXITED | WNOHANG | WNOWAIT)`. A zeroed `si_pid` means no
+/// child changed state — the portable reading, since macOS returns 0 without
+/// filling `siginfo_t` under `WNOHANG`.
+/// Test: `run_bounded_kills_the_pipe_holder_it_reports_held_open`.
+#[cfg(unix)]
+fn has_exited(child: &Child) -> std::io::Result<bool> {
+    let pid = libc::id_t::from(child.id());
+    // SAFETY: an all-zero `siginfo_t` is a valid value of this plain C struct.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Ok(BoundedOutput {
-                    status,
-                    stdout: stdout.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default(),
-                    stderr: stderr.recv_timeout(PIPE_DRAIN_WAIT).unwrap_or_default(),
-                });
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                // #6867: the GROUP, not just the pid.
-                kill_child_group(&mut child);
-                return Err(BoundedError::TimedOut);
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            // #7652 critic round 2: this arm leaves the loop WITHOUT reaching
-            // the deadline, so it is the only other exit that can abandon a
-            // running child. Kill the group first, exactly as the timeout does.
-            Err(e) => {
-                kill_child_group(&mut child);
-                return Err(BoundedError::Wait(e));
-            }
+        // SAFETY: `info` is a valid, writable `siginfo_t`; `pid` is our own
+        // unreaped child, and WNOWAIT leaves it unreaped.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            // SAFETY: `si_pid` is valid for a SIGCHLD-shaped `siginfo_t`, and
+            // the zeroed value reads 0 when `waitid` filled nothing.
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
         }
     }
+}
+
+#[cfg(not(unix))]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
 }
 
 #[cfg(test)]

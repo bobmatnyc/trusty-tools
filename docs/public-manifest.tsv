@@ -113,9 +113,11 @@ PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
 PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
 PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
 PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
+PAGE	tools	docs/trusty-console/secrets.md	/tools/trusty-console/secrets	Console Secrets Service (planned)
 
 SECTION	roadmap	Roadmap
-PAGE	roadmap	docs/roadmap/trusty-mpm.md	/roadmap/trusty-mpm	trusty-mpm roadmap
+PAGE	roadmap	docs/roadmap/trusty-tools.md	/roadmap	trusty-tools roadmap
+PAGE	roadmap	docs/roadmap/trusty-mpm.md	/roadmap/trusty-mpm	trusty-mpm roadmap (moved)
 
 SECTION	guides	User Guides
 PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
@@ -123,6 +125,8 @@ PAGE	guides	docs/trusty-agents/user/cli-reference.md	/guides/trusty-agents/cli-r
 PAGE	guides	docs/trusty-agents/user/configuration.md	/guides/trusty-agents/configuration	trusty-agents Configuration
 PAGE	guides	docs/trusty-agents/user/agents-and-skills.md	/guides/trusty-agents/agents-and-skills	Agents and Skills
 PAGE	guides	docs/guides/audit-instructions.md	/guides/audit-instructions	Engagement Instructions (instructions.md)
+PAGE	guides	docs/guides/secrets-from-code.md	/guides/secrets/from-code	Using Secrets from Code (planned)
+PAGE	guides	docs/guides/secrets-security-model.md	/guides/secrets/security-model	Secrets Security Model (planned)
 
 SECTION	reference	Reference
 PAGE	reference	docs/architecture/harnesses.md	/reference/harnesses	Harnesses

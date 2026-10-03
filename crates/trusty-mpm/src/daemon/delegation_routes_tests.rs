@@ -1590,12 +1590,6 @@ async fn an_admitted_grant_revives_the_record_its_own_deny_tombstoned_7487() {
         "a revived record carries no end time"
     );
     assert_eq!(record.isolation.as_deref(), Some("worktree"));
-    let holders = state.builder_slot_holders(None);
-    assert_eq!(
-        holders.len(),
-        1,
-        "the revived builder holds its slot again: {holders:?}"
-    );
 }
 
 // ── operator repair of a stuck record (#7602) ────────────────────────────
@@ -1726,38 +1720,27 @@ async fn list_route_names_the_blocking_record_8257() {
 // #8257: the id-less record is reachable over the wire by its delegation id.
 #[tokio::test]
 async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
-    use crate::core::session::{ControlModel, Session};
+    use crate::core::session::{ControlModel, Session, SessionStatus};
     use crate::daemon::services::delegation_repair::RepairOutcome;
-
-    use crate::daemon::services::delegation_repair::CALLER_SESSION_HEADER;
 
     let (state, _dir, session) = hermetic();
     state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
     let d = type_matched_record(&state, session);
-    let by_id = |headers| {
-        repair_delegation_by_id_route(
-            State(state.clone()),
-            Path(d.id.0.to_string()),
-            headers,
-            None,
-        )
-    };
+    let by_id =
+        || repair_delegation_by_id_route(State(state.clone()), Path(d.id.0.to_string()), None);
 
-    // #8257: a type-matched stop may be a sibling's, so an anonymous caller is
-    // refused while the owner lives; the owner's own header clears it.
-    let Json(anonymous) = by_id(axum::http::HeaderMap::new())
-        .await
-        .expect("a well-formed id");
+    // #8257: a type-matched stop may be a sibling's, so an HTTP caller is
+    // refused while the owner lives (#8531: HTTP never proves the owner).
+    let Json(anonymous) = by_id().await.expect("a well-formed id");
     assert!(
         matches!(anonymous, RepairOutcome::Refused { .. }),
         "{anonymous:?}"
     );
-    let mut owner = axum::http::HeaderMap::new();
-    owner.insert(
-        CALLER_SESSION_HEADER,
-        session.0.to_string().parse().expect("header value"),
-    );
-    let Json(outcome) = by_id(owner).await.expect("a well-formed id");
+    // Once the owner is gone the record ends by its delegation id.
+    let mut stopped = Session::new(session, "/repo", ControlModel::Tmux, None);
+    stopped.status = SessionStatus::Stopped;
+    state.register_session(stopped);
+    let Json(outcome) = by_id().await.expect("a well-formed id");
 
     assert_eq!(outcome, RepairOutcome::Ended { records: 1 });
     assert_eq!(
@@ -1777,65 +1760,13 @@ async fn repair_by_id_route_ends_a_record_with_no_agent_id_8257() {
     );
 }
 
-// #8257 owner ruling, over the wire: the caller-session header lets the owning
-// session clear its own live record; any other session's header does not.
-#[tokio::test]
-async fn repair_route_lets_the_owning_session_clear_its_record_8257() {
-    use crate::core::session::{ControlModel, Session};
-    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairOutcome};
-
-    let (state, _dir, session) = hermetic();
-    state.register_session(Session::new(session, "/repo", ControlModel::Tmux, None));
-    let mut d = Delegation::observed(session, "version-control", "task", Some("toolu_o".into()));
-    d.agent_id = Some("a0wner".to_string());
-    state.upsert_delegation(d);
-    let as_session = |s: SessionId| {
-        let mut h = axum::http::HeaderMap::new();
-        h.insert(
-            CALLER_SESSION_HEADER,
-            s.0.to_string().parse().expect("header value"),
-        );
-        h
-    };
-
-    let Json(stranger) = repair_delegation_as_route(
-        State(state.clone()),
-        Path("a0wner".to_string()),
-        as_session(SessionId::new()),
-        None,
-    )
-    .await;
-    assert!(
-        matches!(stranger, RepairOutcome::Refused { .. }),
-        "{stranger:?}"
-    );
-    // #8257 owner ruling: the route's answer does not hand the stranger the
-    // owner's UUID to replay in the caller header.
-    crate::daemon::services::delegation_records::delegation_records_tests::assert_no_uuid(
-        &serde_json::to_string(&stranger).expect("json"),
-        session,
-    );
-
-    let Json(owner) = repair_delegation_as_route(
-        State(state.clone()),
-        Path("a0wner".to_string()),
-        as_session(session),
-        None,
-    )
-    .await;
-    assert_eq!(owner, RepairOutcome::Ended { records: 1 });
-}
-
 // #8257 owner ruling: ownership is never taken from caller-supplied content. A
-// different session that names the owner's id in the request body — the wire
-// form a CLI argument would take — is still refused, as is a request that
-// names the owner in the body and carries no caller session at all.
+// request that names the owner's id in the request body — the wire form a CLI
+// argument would take — is refused.
 #[tokio::test]
 async fn repair_route_ignores_an_owner_id_the_caller_supplies_8257() {
     use crate::core::session::{ControlModel, Session};
-    use crate::daemon::services::delegation_repair::{
-        CALLER_SESSION_HEADER, RepairDelegationRequest, RepairOutcome,
-    };
+    use crate::daemon::services::delegation_repair::{RepairDelegationRequest, RepairOutcome};
 
     let (state, _dir, owner) = hermetic();
     state.register_session(Session::new(owner, "/repo", ControlModel::Tmux, None));
@@ -1853,29 +1784,12 @@ async fn repair_route_ignores_an_owner_id_the_caller_supplies_8257() {
             serde_json::from_value::<RepairDelegationRequest>(raw).expect("request body"),
         ))
     };
-    let mut stranger = axum::http::HeaderMap::new();
-    stranger.insert(
-        CALLER_SESSION_HEADER,
-        SessionId::new()
-            .0
-            .to_string()
-            .parse()
-            .expect("header value"),
+    let Json(outcome) =
+        repair_delegation_route(State(state.clone()), Path("a0wnclaim".to_string()), body()).await;
+    assert!(
+        matches!(outcome, RepairOutcome::Refused { .. }),
+        "{outcome:?}"
     );
-
-    for headers in [stranger, axum::http::HeaderMap::new()] {
-        let Json(outcome) = repair_delegation_as_route(
-            State(state.clone()),
-            Path("a0wnclaim".to_string()),
-            headers,
-            body(),
-        )
-        .await;
-        assert!(
-            matches!(outcome, RepairOutcome::Refused { .. }),
-            "{outcome:?}"
-        );
-    }
     assert!(
         state
             .all_delegations()

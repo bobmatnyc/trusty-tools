@@ -12,6 +12,15 @@ use super::*;
 
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 
+/// Every admitted path under `repos_root`, unscoped: the `_in` form under
+/// `WorktreeScope::all()` (#8782), reduced to its paths.
+fn enumerate_all(repos_root: &std::path::Path, adopted: &[PathBuf]) -> Vec<PathBuf> {
+    enumerate_registered_worktrees_in(repos_root, adopted, &WorktreeScope::all())
+        .into_iter()
+        .map(|row| row.path)
+        .collect()
+}
+
 // ── the pure parser ──────────────────────────────────────────────────────
 
 #[test]
@@ -208,7 +217,7 @@ fn list_registered_worktrees_none_outside_a_repo() {
 fn enumerate_finds_worktree_at_an_unwalked_location() {
     let fixture = GitWorktreeFixture::new();
     let parked = fixture.add_worktree_at(&fixture.repo.join("agents").join("scratch"), "wt-1");
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical = std::fs::canonicalize(&parked).unwrap_or_else(|_| parked.clone());
     assert!(
         found.contains(&canonical),
@@ -222,7 +231,7 @@ fn enumerate_finds_worktree_at_an_unwalked_location() {
 fn enumerate_finds_worktree_registered_to_base_clone() {
     let fixture = GitWorktreeFixture::new();
     let wt = fixture.add_base_clone_worktree("session-in-base");
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
     assert!(
         found.contains(&canonical),
@@ -241,7 +250,7 @@ fn enumerate_ignores_plain_directory_that_is_not_a_worktree() {
     let fixture = GitWorktreeFixture::new();
     let fake = fixture.repo.join(".worktrees").join("just-a-mkdir");
     std::fs::create_dir_all(&fake).expect("mkdir");
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical = std::fs::canonicalize(&fake).unwrap_or_else(|_| fake.clone());
     assert!(
         !found.contains(&canonical),
@@ -254,7 +263,7 @@ fn enumerate_ignores_plain_directory_that_is_not_a_worktree() {
 fn enumerate_excludes_the_main_checkout() {
     let fixture = GitWorktreeFixture::new();
     fixture.add_worktree("some-session");
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical_repo =
         std::fs::canonicalize(&fixture.repo).unwrap_or_else(|_| fixture.repo.clone());
     assert!(
@@ -295,7 +304,7 @@ fn enumerate_excludes_a_sibling_checkout_of_the_same_repo() {
     // Positive control: an ordinary in-project worktree in the SAME call.
     let control = fixture.add_worktree("control-session");
 
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
     assert!(
         found.contains(&canonical_control),
@@ -331,7 +340,7 @@ fn enumerate_excludes_a_worktree_parked_beside_the_project() {
     let parked = fixture.add_worktree_at(&parking_lot, "wt-1");
     let control = fixture.add_worktree("control-session");
 
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
     assert!(
         found.contains(&canonical_control),
@@ -427,7 +436,7 @@ fn enumerate_excludes_a_locked_worktree() {
     fixture.lock_worktree(&locked);
     let control = fixture.add_worktree("not-locked");
 
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
     assert!(
         found.contains(&canonical_control),
@@ -457,7 +466,7 @@ fn enumerate_excludes_worktrees_outside_the_repos_root() {
     let fixture = GitWorktreeFixture::new();
     let outside_parent = tempfile::tempdir().expect("tempdir");
     let outside = fixture.add_worktree_at(outside_parent.path(), "far-away");
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical = std::fs::canonicalize(&outside).unwrap_or_else(|_| outside.clone());
     assert!(
         !found.contains(&canonical),
@@ -480,7 +489,7 @@ fn enumerate_ignores_a_worktree_whose_directory_is_gone() {
     let canonical = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
     std::fs::remove_dir_all(&wt).expect("remove the worktree directory");
 
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     assert!(
         !found.contains(&canonical),
         "a worktree with no directory left is not a deletion candidate; got {found:?}"
@@ -490,7 +499,7 @@ fn enumerate_ignores_a_worktree_whose_directory_is_gone() {
 #[test]
 fn enumerate_missing_repos_root_is_empty() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    assert!(enumerate_registered_worktrees(&tmp.path().join("nope"), &[]).is_empty());
+    assert!(enumerate_all(&tmp.path().join("nope"), &[]).is_empty());
 }
 
 // ── the full scan and its exclusion reasons (#4288) ──────────────────────
@@ -532,7 +541,7 @@ fn scan_reports_the_excluded_set_with_reasons() {
 
     // The admitted subset is exactly what `enumerate` still returns — the scan
     // widened what is REPORTED, never what is proposed for deletion.
-    let enumerated = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let enumerated = enumerate_all(&fixture.repos_root, &[]);
     let admitted_from_scan: Vec<_> = scan
         .iter()
         .filter(|s| s.admission == Admission::Admitted)
@@ -591,7 +600,7 @@ fn enumerate_orders_nested_worktree_before_its_parent() {
     let parent = fixture.add_worktree("outer");
     let child = fixture.add_nested_worktree(&parent, ".claude/worktrees", "inner");
 
-    let found = enumerate_registered_worktrees(&fixture.repos_root, &[]);
+    let found = enumerate_all(&fixture.repos_root, &[]);
     let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
     let idx = |p: &std::path::Path| {
         found
@@ -910,8 +919,7 @@ fn enumerate_admits_a_worktree_under_an_adopted_checkout() {
     let canonical = std::fs::canonicalize(&wt).expect("canonical worktree");
     let elsewhere = tempfile::tempdir().expect("tempdir");
 
-    let found =
-        enumerate_registered_worktrees(elsewhere.path(), std::slice::from_ref(&fixture.repo));
+    let found = enumerate_all(elsewhere.path(), std::slice::from_ref(&fixture.repo));
     assert!(
         found.contains(&canonical),
         "an adopted checkout's worktree must be enumerable; got {found:?}"

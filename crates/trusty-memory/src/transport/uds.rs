@@ -422,7 +422,9 @@ pub fn socket_path() -> Result<PathBuf> {
 ///
 /// When the socket cannot be bound — including
 /// `UdsSecurityError::AlreadyServing`, which means another trusty-memory is
-/// live on this path and this process must not start.
+/// live on this path and this process must not start. #8759: likewise
+/// `BindInProgress` (a concurrent starter holds the bind lock) and `BindLock`
+/// (the lock could not be taken); none of the three is downgraded to a warning.
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.

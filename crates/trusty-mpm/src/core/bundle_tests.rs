@@ -14,52 +14,9 @@ fn constants_are_non_empty() {
     // `include_str!` target would mean a missing or truncated asset file.
     assert!(!OPTIMIZER_TOML.trim().is_empty());
     assert!(!OVERSEER_TOML.trim().is_empty());
-    assert!(!BASE_AGENT.trim().is_empty());
-    assert!(!BASE_ENGINEER.trim().is_empty());
-    assert!(!BASE_RESEARCH.trim().is_empty());
-    assert!(!BASE_QA.trim().is_empty());
-    assert!(!BASE_OPS.trim().is_empty());
-    assert!(!ENGINEER_AGENT.trim().is_empty());
-    assert!(!QA_AGENT.trim().is_empty());
-    assert!(!RESEARCH_AGENT.trim().is_empty());
-    assert!(!SECRETS_MANAGER_AGENT.trim().is_empty());
-    assert!(!SECURITY_AGENT.trim().is_empty());
-    assert!(!DOCUMENTATION_AGENT.trim().is_empty());
-    assert!(!DATA_ENGINEER_AGENT.trim().is_empty());
-    assert!(!VERSION_CONTROL_AGENT.trim().is_empty());
-    assert!(!TICKETING_AGENT.trim().is_empty());
-    assert!(!CODE_ANALYZER_AGENT.trim().is_empty());
-    assert!(!PYTHON_ENGINEER_AGENT.trim().is_empty());
-    assert!(!TYPESCRIPT_ENGINEER_AGENT.trim().is_empty());
-    assert!(!GOLANG_ENGINEER_AGENT.trim().is_empty());
-    assert!(!RUST_ENGINEER_AGENT.trim().is_empty());
-    assert!(!JAVA_ENGINEER_AGENT.trim().is_empty());
-    assert!(!PHP_ENGINEER_AGENT.trim().is_empty());
-    assert!(!RUBY_ENGINEER_AGENT.trim().is_empty());
-    assert!(!REACT_ENGINEER_AGENT.trim().is_empty());
-    assert!(!NEXTJS_ENGINEER_AGENT.trim().is_empty());
-    assert!(!SVELTE_ENGINEER_AGENT.trim().is_empty());
-    assert!(!WEB_QA_AGENT.trim().is_empty());
-    assert!(!API_QA_AGENT.trim().is_empty());
     // Increment 3 agents
-    assert!(!JAVASCRIPT_ENGINEER_AGENT.trim().is_empty());
-    assert!(!ELIXIR_ENGINEER_AGENT.trim().is_empty());
-    assert!(!PHOENIX_ENGINEER_AGENT.trim().is_empty());
-    assert!(!DART_ENGINEER_AGENT.trim().is_empty());
-    assert!(!DOTNET_ENGINEER_AGENT.trim().is_empty());
-    assert!(!TAURI_ENGINEER_AGENT.trim().is_empty());
-    assert!(!WEB_UI_ENGINEER_AGENT.trim().is_empty());
-    assert!(!REFACTORING_ENGINEER_AGENT.trim().is_empty());
-    assert!(!PROMPT_ENGINEER_AGENT.trim().is_empty());
-    assert!(!CODE_CRITIC_AGENT.trim().is_empty());
     assert!(!CODE_REVIEW_STANDARDS.trim().is_empty());
     assert!(!CONTRACT_DRIVEN_TESTING.trim().is_empty());
-    assert!(!GCP_OPS_AGENT.trim().is_empty());
-    assert!(!VERCEL_OPS_AGENT.trim().is_empty());
-    assert!(!LOCAL_OPS_AGENT.trim().is_empty());
-    assert!(!MEMORY_MANAGER_AGENT.trim().is_empty());
-    assert!(!MPM_AGENT_MANAGER_AGENT.trim().is_empty());
-    assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
     assert!(!OUTPUT_STYLE_TEACHER.trim().is_empty());
     assert!(!OUTPUT_STYLE_RESEARCH.trim().is_empty());
@@ -132,6 +89,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-cli-operations.md",
         "skills/tm-slack.md",
         "skills/tm-secrets.md",
+        "skills/tm-architect-setup.md",
         // #8376: entry file plus its four reference files.
         "skills/tm-epic.md",
         "skills/tm-epic/references/tracker-template.md",
@@ -234,8 +192,8 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     );
     let stated: Vec<&str> = [
         ("tm-ticketing.md", TM_TICKETING),
-        ("ticketing.md", TICKETING_AGENT),
-        ("version-control.md", VERSION_CONTROL_AGENT),
+        ("ticketing.md", agent("ticketing.md")),
+        ("version-control.md", agent("version-control.md")),
         ("tm-workflow.md", TM_WORKFLOW),
     ]
     .into_iter()
@@ -252,8 +210,8 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     // reader landing in any of them can find it without knowing it exists.
     let name = STANDARD_HEADING.trim_start_matches('#').trim();
     for (file, body) in [
-        ("ticketing.md", TICKETING_AGENT),
-        ("version-control.md", VERSION_CONTROL_AGENT),
+        ("ticketing.md", agent("ticketing.md")),
+        ("version-control.md", agent("version-control.md")),
         ("tm-workflow.md", TM_WORKFLOW),
     ] {
         assert!(
@@ -268,7 +226,7 @@ fn the_labels_project_milestone_standard_is_stated_once() {
 
     // `version-control.md` also has to say what applies its half.
     assert!(
-        VERSION_CONTROL_AGENT.contains("`tm pr open` applies your half itself"),
+        agent("version-control.md").contains("`tm pr open` applies your half itself"),
         "`version-control.md` must say `tm pr open` applies the PR side (#7274)"
     );
 }
@@ -300,6 +258,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-cli-operations", TM_CLI_OPERATIONS),
         ("tm-slack", TM_SLACK),
         ("tm-secrets", TM_SECRETS),
+        ("tm-architect-setup", TM_ARCHITECT_SETUP),
         ("tm-epic", TM_EPIC),
     ];
     for (name, content) in skills {
@@ -336,18 +295,33 @@ fn output_style_has_matching_frontmatter_name() {
 }
 
 #[test]
-fn output_style_registry_has_three_distinct_ids() {
-    // HR-4 bundles exactly three styles with distinct ids and file names.
-    assert_eq!(OUTPUT_STYLES.len(), 3);
+fn output_style_registry_has_four_distinct_ids() {
+    // HR-4 bundles three PM styles; #8453 adds the supervisor style. Ids and
+    // file names are distinct.
+    assert_eq!(OUTPUT_STYLES.len(), 4);
     let mut ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 3, "style ids must be distinct");
+    assert_eq!(ids.len(), 4, "style ids must be distinct");
 
     let mut files: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
     files.sort_unstable();
     files.dedup();
-    assert_eq!(files.len(), 3, "style file names must be distinct");
+    assert_eq!(files.len(), 4, "style file names must be distinct");
+}
+
+#[test]
+fn the_pm_styles_are_every_style_but_the_supervisor_style() {
+    // #8453: the PM-invariant tests iterate `pm_output_styles()`; it must drop
+    // exactly the supervisor style and nothing else.
+    let pm: Vec<&str> = pm_output_styles().map(|s| s.id).collect();
+    assert_eq!(
+        pm,
+        ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
+    );
+    assert!(OUTPUT_STYLES.iter().any(|s| s.id
+        == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
+        && s.content == OUTPUT_STYLE_SUPERVISOR));
 }
 
 #[test]
@@ -537,11 +511,15 @@ fn bundle_table_is_complete() {
     // Issue #8376 (+5): `skills/tm-epic.md` is NEW — tracker + phase-issue
     //   authoring — plus four `references/*.md` files (tracker-template,
     //   phase-template, manual-procedure, anti-patterns). 185 + 5 = 190.
-    assert_eq!(ALL.len(), 190);
+    // Issue #8436 (+1): `skills/tm-architect-setup.md` is NEW — the
+    //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
+    // Issue #9011 (-43): the 43 `agents/*.md` rows left the table — the agent
+    //   roster is runtime content (`content/agents`). 191 - 43 = 148.
+    assert_eq!(ALL.len(), 148);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 190, "artifact paths must be unique");
+    assert_eq!(paths.len(), 148, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -576,10 +554,10 @@ fn overseer_toml_is_in_bundle() {
 fn new_concrete_agents_are_in_bundle() {
     // Every newly-ported concrete agent must be present in ALL so
     // `trusty-mpm install` deploys them offline.
-    let agent_paths: Vec<&str> = ALL
+    // #9011: the agents ship as content, written by `tm install` from the roster.
+    let agent_paths: Vec<String> = crate::core::content_source::test_support::repo_roster()
         .iter()
-        .filter(|a| a.rel_path.starts_with("agents/"))
-        .map(|a| a.rel_path)
+        .map(|(name, _)| format!("agents/{name}"))
         .collect();
 
     for expected in &[
@@ -625,7 +603,7 @@ fn new_concrete_agents_are_in_bundle() {
         "agents/mpm-skills-manager.md",
     ] {
         assert!(
-            agent_paths.contains(expected),
+            agent_paths.iter().any(|p| p == expected),
             "missing bundled agent: {expected}"
         );
     }
@@ -637,45 +615,45 @@ fn new_concrete_agents_have_extends_in_frontmatter() {
     // chain resolves correctly at deploy time.
     let agents = [
         // Increment 1 agents
-        ("qa", QA_AGENT),
-        ("research", RESEARCH_AGENT),
-        ("security", SECURITY_AGENT),
-        ("documentation", DOCUMENTATION_AGENT),
-        ("data-engineer", DATA_ENGINEER_AGENT),
-        ("version-control", VERSION_CONTROL_AGENT),
-        ("ticketing", TICKETING_AGENT),
-        ("code-analyzer", CODE_ANALYZER_AGENT),
+        ("qa", agent("qa.md")),
+        ("research", agent("research.md")),
+        ("security", agent("security.md")),
+        ("documentation", agent("documentation.md")),
+        ("data-engineer", agent("data-engineer.md")),
+        ("version-control", agent("version-control.md")),
+        ("ticketing", agent("ticketing.md")),
+        ("code-analyzer", agent("code-analyzer.md")),
         // Increment 2 language engineers
-        ("python-engineer", PYTHON_ENGINEER_AGENT),
-        ("typescript-engineer", TYPESCRIPT_ENGINEER_AGENT),
-        ("golang-engineer", GOLANG_ENGINEER_AGENT),
-        ("rust-engineer", RUST_ENGINEER_AGENT),
-        ("java-engineer", JAVA_ENGINEER_AGENT),
-        ("php-engineer", PHP_ENGINEER_AGENT),
-        ("ruby-engineer", RUBY_ENGINEER_AGENT),
-        ("react-engineer", REACT_ENGINEER_AGENT),
-        ("nextjs-engineer", NEXTJS_ENGINEER_AGENT),
-        ("svelte-engineer", SVELTE_ENGINEER_AGENT),
+        ("python-engineer", agent("python-engineer.md")),
+        ("typescript-engineer", agent("typescript-engineer.md")),
+        ("golang-engineer", agent("golang-engineer.md")),
+        ("rust-engineer", agent("rust-engineer.md")),
+        ("java-engineer", agent("java-engineer.md")),
+        ("php-engineer", agent("php-engineer.md")),
+        ("ruby-engineer", agent("ruby-engineer.md")),
+        ("react-engineer", agent("react-engineer.md")),
+        ("nextjs-engineer", agent("nextjs-engineer.md")),
+        ("svelte-engineer", agent("svelte-engineer.md")),
         // Increment 2 QA variants
-        ("web-qa", WEB_QA_AGENT),
-        ("api-qa", API_QA_AGENT),
+        ("web-qa", agent("web-qa.md")),
+        ("api-qa", agent("api-qa.md")),
         // Increment 3 agents
-        ("javascript-engineer", JAVASCRIPT_ENGINEER_AGENT),
-        ("elixir-engineer", ELIXIR_ENGINEER_AGENT),
-        ("phoenix-engineer", PHOENIX_ENGINEER_AGENT),
-        ("dart-engineer", DART_ENGINEER_AGENT),
-        ("dotnet-engineer", DOTNET_ENGINEER_AGENT),
-        ("tauri-engineer", TAURI_ENGINEER_AGENT),
-        ("web-ui-engineer", WEB_UI_ENGINEER_AGENT),
-        ("refactoring-engineer", REFACTORING_ENGINEER_AGENT),
-        ("prompt-engineer", PROMPT_ENGINEER_AGENT),
-        ("code-critic", CODE_CRITIC_AGENT),
-        ("gcp-ops", GCP_OPS_AGENT),
-        ("vercel-ops", VERCEL_OPS_AGENT),
-        ("local-ops", LOCAL_OPS_AGENT),
-        ("memory-manager", MEMORY_MANAGER_AGENT),
-        ("mpm-agent-manager", MPM_AGENT_MANAGER_AGENT),
-        ("mpm-skills-manager", MPM_SKILLS_MANAGER_AGENT),
+        ("javascript-engineer", agent("javascript-engineer.md")),
+        ("elixir-engineer", agent("elixir-engineer.md")),
+        ("phoenix-engineer", agent("phoenix-engineer.md")),
+        ("dart-engineer", agent("dart-engineer.md")),
+        ("dotnet-engineer", agent("dotnet-engineer.md")),
+        ("tauri-engineer", agent("tauri-engineer.md")),
+        ("web-ui-engineer", agent("web-ui-engineer.md")),
+        ("refactoring-engineer", agent("refactoring-engineer.md")),
+        ("prompt-engineer", agent("prompt-engineer.md")),
+        ("code-critic", agent("code-critic.md")),
+        ("gcp-ops", agent("gcp-ops.md")),
+        ("vercel-ops", agent("vercel-ops.md")),
+        ("local-ops", agent("local-ops.md")),
+        ("memory-manager", agent("memory-manager.md")),
+        ("mpm-agent-manager", agent("mpm-agent-manager.md")),
+        ("mpm-skills-manager", agent("mpm-skills-manager.md")),
     ];
     for (name, content) in agents {
         assert!(
@@ -694,9 +672,8 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
     // asset files on disk (not temp fixtures) — catches typos in `extends:`
     // values and missing base templates.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     let agents = [
         // Increment 1 agents
@@ -773,9 +750,8 @@ fn base_agent_guidance_sections_survive_composition() {
     // from the real assets dir so a future refactor of the compose/extends
     // pipeline can't silently drop the guidance.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
@@ -923,9 +899,9 @@ fn code_critic_declared_skills_are_in_bundle() {
     // so this only asserts the two #2890-era names are still present, not the
     // full six-skill list (that full-list assertion lives in
     // `code_critic_declares_batch1_skills`).
-    assert!(CODE_CRITIC_AGENT.contains("code-review-standards"));
-    assert!(CODE_CRITIC_AGENT.contains("contract-driven-testing"));
-    assert!(CODE_CRITIC_AGENT.contains("skills: ["));
+    assert!(agent("code-critic.md").contains("code-review-standards"));
+    assert!(agent("code-critic.md").contains("contract-driven-testing"));
+    assert!(agent("code-critic.md").contains("skills: ["));
 }
 
 #[test]
@@ -976,7 +952,8 @@ fn code_critic_declares_batch1_skills() {
     // reference material paid on every review. They remain bundled and
     // invokable via the Skill tool; only the resident declaration shrank.
     assert!(
-        CODE_CRITIC_AGENT.contains("skills: [code-review-standards, contract-driven-testing]"),
+        agent("code-critic.md")
+            .contains("skills: [code-review-standards, contract-driven-testing]"),
         "code-critic's resident skills are its rubric and its contract-test \
          reference, nothing else (#4642)"
     );
@@ -1117,9 +1094,8 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // PM-tier assertion — not a hand-built fixture string.
     use crate::core::agent_builder::compose_agent;
     use crate::core::instruction_pipeline::assemble_system_prompt;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     // (a) BASE-AGENT.md's report-don't-promise subsection (which replaced the
     // retired chunked-repoll guidance in #4792) must reach a composed agent
@@ -1244,9 +1220,8 @@ fn pm_authority_doctrine_survives_composition() {
     // own non-negotiables — must reach a composed agent through the REAL
     // bundled asset chain, not just live in the source .md.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     let composed = compose_agent("version-control", assets_dir)
         .expect("compose_agent(version-control) must succeed");
@@ -1357,9 +1332,8 @@ fn documentation_style_unions_into_engineer_family_via_base_engineer() {
     // `merge_frontmatter`) must propagate it into every concrete engineer-family
     // agent composed from the REAL bundled asset files, not a synthetic fixture.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     let composed = compose_agent("rust-engineer", assets_dir)
         .expect("compose_agent(rust-engineer) must succeed");
@@ -1519,9 +1493,8 @@ fn rust_build_performance_declared_by_rust_family_agents() {
     // Rust), proven against the REAL bundled asset files via compose_agent,
     // mirroring `documentation_style_unions_into_engineer_family_via_base_engineer`.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     for agent in ["rust-engineer", "tauri-engineer"] {
         let composed = compose_agent(agent, assets_dir)
@@ -1543,9 +1516,8 @@ fn rust_engineer_declares_delivery_workflow_and_names_no_absent_skill() {
     // bundle: #2904 claimed to port it and never did, so every dispatched
     // rust-engineer was told to load a skill that does not exist.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
     let composed = compose_agent("rust-engineer", assets_dir)
         .expect("compose_agent(rust-engineer) must succeed");
 
@@ -1606,21 +1578,31 @@ fn output_styles_keep_claude_code_coding_instructions() {
     // Claude Code strips its built-in software-engineering instructions (how to
     // scope changes, write comments, verify work) from any custom output style
     // unless `keep-coding-instructions` is true — the field defaults to FALSE.
-    // All three bundled styles are PM-orchestration styles layered ON TOP of
+    // All three PM styles are PM-orchestration styles layered ON TOP of
     // normal coding behaviour, so all three must opt back in.
-    for style in OUTPUT_STYLES {
-        let frontmatter = style
+    let frontmatter = |style: &BundledStyle| {
+        style
             .content
             .split("---")
             .nth(1)
-            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id));
+            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id))
+            .to_string()
+    };
+    for style in pm_output_styles() {
         assert!(
-            frontmatter.contains("keep-coding-instructions: true"),
+            frontmatter(style).contains("keep-coding-instructions: true"),
             "{} frontmatter must set `keep-coding-instructions: true`, or Claude \
              Code silently drops its built-in coding instructions",
             style.id
         );
     }
+    // #8453: the supervisor is not a coder — its style drops them on purpose,
+    // as the reference supervisor's style did.
+    let supervisor = OUTPUT_STYLES
+        .iter()
+        .find(|s| s.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .expect("the supervisor style is bundled");
+    assert!(frontmatter(supervisor).contains("keep-coding-instructions: false"));
 }
 
 /// Every prose RULE the output styles must state resident, as a short anchor.
@@ -1676,7 +1658,9 @@ fn output_styles_state_every_pm_prose_rule() {
     // is stated RESIDENT here rather than referenced. #7423 kept the rules and
     // moved their examples behind `Skill(skill="tm-prose-style")`, so the
     // contract is "the rule is still stated, and its evidence is one hop away".
-    for style in OUTPUT_STYLES {
+    // #8453: the PM styles; the supervisor style's prose section is pinned
+    // verbatim by `the_supervisor_style_carries_write_plainly_verbatim`.
+    for style in pm_output_styles() {
         for needle in PROSE_RULE_ANCHORS {
             // #7709: whitespace-insensitive, so a rewrap is not a regression.
             assert!(
@@ -1712,7 +1696,7 @@ fn prose_rule_anchors_survive_a_markdown_rewrap_7709() {
             .join("\n")
     }
 
-    for style in OUTPUT_STYLES {
+    for style in pm_output_styles() {
         let rewrapped = rewrap(style.content, 3);
         // A reflow-broken anchor must still match…
         for needle in PROSE_RULE_ANCHORS {
@@ -1755,7 +1739,6 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     // keeps it from degenerating into a phrase list moved to `tm-prose-style`.
     // Both halves are asserted, in their new homes.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
     const RESIDENT: &[&str] = &["**No borrowed-metaphor jargon.**", "load-bearing"];
 
@@ -1769,7 +1752,7 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     for needle in RESIDENT {
@@ -1800,7 +1783,6 @@ fn the_honest_ban_reaches_both_prose_channels() {
     // every position the word can take — the owner's flagged instance was the
     // heading modifier "Distribution, stated honestly", not a bare "honest".
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
     const RESIDENT: &[&str] = &["**Banned word — \"honest\"**", "label on your own register"];
 
@@ -1814,7 +1796,7 @@ fn the_honest_ban_reaches_both_prose_channels() {
         }
     }
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     for needle in RESIDENT {
@@ -1850,7 +1832,6 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
     // #2647) and agent prose (BASE-AGENT.md composition) alike, per the
     // keep-the-two-in-step rule the section states.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
     const RESIDENT: &[&str] = &[
         "ASD-STE-100, applied in spirit",
@@ -1878,7 +1859,7 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
         );
     }
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
     for needle in RESIDENT {
@@ -1926,7 +1907,8 @@ fn output_styles_name_the_todowrite_fallback() {
     // a PM on a harness that does not expose it announced the gap and improvised
     // its own tracking. The section must state the CONDITION and the fallback;
     // pinning both halves keeps a future trim from dropping one of them.
-    for style in OUTPUT_STYLES {
+    // #8453: a PM section; the supervisor style carries no TodoWrite mandate.
+    for style in pm_output_styles() {
         assert!(
             style.content.contains("where the harness exposes it"),
             "{}: the TodoWrite section must make the tool conditional (#2799)",
@@ -1975,7 +1957,20 @@ const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
 
 /// The bundled agent assets directory the composer reads.
 fn agent_assets_dir() -> &'static std::path::Path {
-    std::path::Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR)
+    // #9011: the roster's checkout directory, `content/agents`.
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(crate::core::content_source::test_support::repo_agents_dir)
+}
+
+/// One roster file's body from the checkout roster (#9011), which replaced the
+/// compiled-in `*_AGENT` consts.
+fn agent(file_name: &str) -> &'static str {
+    static ROSTER: std::sync::OnceLock<crate::core::content_source::AgentRoster> =
+        std::sync::OnceLock::new();
+    ROSTER
+        .get_or_init(crate::core::content_source::test_support::repo_roster)
+        .require(file_name)
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Every deployed (non-foundation) bundled agent stem, sorted.
@@ -2160,9 +2155,8 @@ fn base_agent_prose_rules_survive_composition() {
     // heading, the pointer, and one anchor per rule — plus the sparse-on-success
     // rule and the raw-output evidence floor it must not weaken.
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
 
     let composed =
         compose_agent("version-control", assets_dir).expect("compose_agent must succeed");
@@ -2242,9 +2236,8 @@ fn base_agent_prose_rules_survive_composition() {
 #[test]
 fn local_ops_names_tm_wait_for_deploys_and_a_loop_margin_7612() {
     use crate::core::agent_builder::compose_agent;
-    use std::path::Path;
 
-    let assets_dir = Path::new(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR);
+    let assets_dir = agent_assets_dir();
     let local_ops =
         compose_agent("local-ops", assets_dir).expect("compose_agent(local-ops) must succeed");
 
@@ -2379,8 +2372,8 @@ fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
 #[test]
 fn version_control_gate_requires_a_clean_tree_before_push_7739() {
     assert!(
-        VERSION_CONTROL_AGENT.contains("git status --porcelain")
-            && VERSION_CONTROL_AGENT.contains("#7739"),
+        agent("version-control.md").contains("git status --porcelain")
+            && agent("version-control.md").contains("#7739"),
         "version-control.md is missing the #7739 clean-tree-before-gate rule"
     );
     assert!(
@@ -2403,7 +2396,7 @@ fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() 
         "`gh label create <name>` and report what you created",
     ] {
         assert!(
-            TICKETING_AGENT.contains(needle),
+            agent("ticketing.md").contains(needle),
             "ticketing.md is missing the #7871 list-before-asserting-absence \
              rule: {needle:?}"
         );
@@ -2417,11 +2410,12 @@ fn ticketing_reads_the_live_label_list_before_claiming_a_label_is_absent_7871() 
 #[test]
 fn version_control_verifies_before_retrying_a_5xx_8013() {
     assert!(
-        VERSION_CONTROL_AGENT.contains("5xx") && VERSION_CONTROL_AGENT.contains("#8013"),
+        agent("version-control.md").contains("5xx")
+            && agent("version-control.md").contains("#8013"),
         "version-control.md is missing the #8013 verify-before-retry rule"
     );
     assert!(
-        VERSION_CONTROL_AGENT.contains("gh pr view --json state,mergeCommit"),
+        agent("version-control.md").contains("gh pr view --json state,mergeCommit"),
         "version-control.md must name the state-read command that gates a retry (#8013)"
     );
 }
@@ -2432,8 +2426,8 @@ fn version_control_verifies_before_retrying_a_5xx_8013() {
 #[test]
 fn version_control_treats_brief_examples_as_shapes_8014() {
     assert!(
-        VERSION_CONTROL_AGENT.contains("is a shape, not a literal")
-            && VERSION_CONTROL_AGENT.contains("#8014"),
+        agent("version-control.md").contains("is a shape, not a literal")
+            && agent("version-control.md").contains("#8014"),
         "version-control.md is missing the #8014 brief-example-is-a-shape rule"
     );
 }
@@ -2444,7 +2438,8 @@ fn version_control_treats_brief_examples_as_shapes_8014() {
 #[test]
 fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
     assert!(
-        RESEARCH_AGENT.contains("never replaces the report") && RESEARCH_AGENT.contains("#8015"),
+        agent("research.md").contains("never replaces the report")
+            && agent("research.md").contains("#8015"),
         "research.md is missing the #8015 report-carries-findings rule"
     );
 }
@@ -2455,11 +2450,12 @@ fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
 #[test]
 fn web_qa_recovers_a_dropped_tab_group_8022() {
     assert!(
-        WEB_QA_AGENT.contains("Never close the last other tab") && WEB_QA_AGENT.contains("#8022"),
+        agent("web-qa.md").contains("Never close the last other tab")
+            && agent("web-qa.md").contains("#8022"),
         "web-qa.md is missing the #8022 tab-group-recovery rule"
     );
     assert!(
-        WEB_QA_AGENT.contains("tabs_context_mcp"),
+        agent("web-qa.md").contains("tabs_context_mcp"),
         "web-qa.md must name `tabs_context_mcp` as the recovery check (#8022)"
     );
 }
@@ -2470,11 +2466,12 @@ fn web_qa_recovers_a_dropped_tab_group_8022() {
 #[test]
 fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
     assert!(
-        VERCEL_OPS_AGENT.contains("meta.githubCommitSha") && VERCEL_OPS_AGENT.contains("#8023"),
+        agent("vercel-ops.md").contains("meta.githubCommitSha")
+            && agent("vercel-ops.md").contains("#8023"),
         "vercel-ops.md is missing the #8023 commit-verification source"
     );
     assert!(
-        VERCEL_OPS_AGENT.contains("POST /v13/deployments"),
+        agent("vercel-ops.md").contains("POST /v13/deployments"),
         "vercel-ops.md must name the git-sourced redeploy path for a dropped webhook (#8023)"
     );
 }
@@ -2484,12 +2481,12 @@ fn vercel_ops_names_commit_verification_and_webhook_recovery_8023() {
 #[test]
 fn local_ops_honours_diagnose_only_briefs_8027() {
     assert!(
-        LOCAL_OPS_AGENT.contains("A diagnose-only brief overrides this playbook")
-            && LOCAL_OPS_AGENT.contains("#8027"),
+        agent("local-ops.md").contains("A diagnose-only brief overrides this playbook")
+            && agent("local-ops.md").contains("#8027"),
         "local-ops.md is missing the #8027 diagnose-only-overrides-playbook rule"
     );
     assert!(
-        LOCAL_OPS_AGENT.contains("check its mtime against"),
+        agent("local-ops.md").contains("check its mtime against"),
         "local-ops.md must state the log-mtime check before citing root cause (#8027)"
     );
 }
@@ -2504,7 +2501,8 @@ fn local_ops_honours_diagnose_only_briefs_8027() {
 /// deprecated verb there is a warning on every fallback, and an unnamed paging
 /// knob is a paging knob nobody uses.
 /// What: asserts the singular verb is gone from the skill and that the paged
-/// and JSON forms `session_context_catchup` offers are named.
+/// and JSON forms are named — the MCP tool's and, since #8017's CLI half, the
+/// CLI's `--json --sessions-offset`.
 /// Test: this test.
 #[test]
 fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
@@ -2519,7 +2517,7 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
         "--full",
         "sessions_offset",
         "sessions_next_offset",
-        "no JSON mode and no paging",
+        "--json --sessions-offset",
         "#8017",
     ] {
         assert!(

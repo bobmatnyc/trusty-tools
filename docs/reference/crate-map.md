@@ -25,7 +25,6 @@ versions, publishability, and targets.
 | `trusty-agents` | [`crates/trusty-agents/`](../../crates/trusty-agents/) | library, `tagent` | [crate README](../../crates/trusty-agents/README.md), [extended docs](../trusty-agents/README.md) |
 | `trusty-agents-common` | [`crates/trusty-agents-common/`](../../crates/trusty-agents-common/) | library | [crate README](../../crates/trusty-agents-common/README.md), [extended docs](../trusty-agents-common/README.md) |
 | `trusty-analyze` | [`crates/trusty-analyze/`](../../crates/trusty-analyze/) | library, `trusty-analyze` | [crate README](../../crates/trusty-analyze/README.md), [extended docs](../trusty-analyze/README.md) |
-| `trusty-audit` | [`crates/trusty-audit/`](../../crates/trusty-audit/) | library, `trusty-audit`, `taudit` | [crate README](../../crates/trusty-audit/README.md) |
 | `trusty-channels` | [`crates/trusty-channels/`](../../crates/trusty-channels/) | library, `slack-mcp`, `telegram-mcp` | [crate README](../../crates/trusty-channels/README.md) |
 | `trusty-code` | [`crates/trusty-code/`](../../crates/trusty-code/) | library, `tcode` | [crate README](../../crates/trusty-code/README.md), [extended docs](../trusty-code/README.md) |
 | `trusty-code-gui` | [`crates/trusty-code-gui/`](../../crates/trusty-code-gui/) | library, `trusty-code-gui` | [crate README](../../crates/trusty-code-gui/README.md) |
@@ -36,14 +35,13 @@ versions, publishability, and targets.
 | `trusty-cto-db` | [`crates/trusty-cto-db/`](../../crates/trusty-cto-db/) | library | [crate README](../../crates/trusty-cto-db/README.md), [extended docs](../trusty-cto-db/README.md) |
 | `trusty-embedderd` | [`crates/trusty-embedderd/`](../../crates/trusty-embedderd/) | library; bundled binary target is owned by `trusty-search` | [crate README](../../crates/trusty-embedderd/README.md), [extended docs](../trusty-embedderd/README.md) |
 | `trusty-embedderd-py` | [`crates/trusty-embedderd-py/`](../../crates/trusty-embedderd-py/) | library, `trusty-embedderd-py` | [crate README](../../crates/trusty-embedderd-py/README.md) |
-| `tga` | [`crates/trusty-git-analytics/`](../../crates/trusty-git-analytics/) | library, `tga` | [crate README](../../crates/trusty-git-analytics/README.md), [extended docs](../trusty-git-analytics/README.md) |
+| `trusty-events` | crates/trusty-events (planned; created by #9075, not yet in the tree) | library, `trusty-events` daemon binary — internal 0.x with no stability promise for its Rust API; no other crate links it; the wire contract lives in `trusty-common::control_bus`; supervised by launchd ([ADR-0065](../adr/0065-trusty-events-process-placement.md)) | [ADR-0065](../adr/0065-trusty-events-process-placement.md) |
 | `trusty-gworkspace` | [`crates/trusty-gworkspace/`](../../crates/trusty-gworkspace/) | library, `trusty-gworkspace-mcp` | [crate README](../../crates/trusty-gworkspace/README.md), [extended docs](../trusty-gworkspace/README.md) |
 | `trusty-installer` | [`crates/trusty-installer/`](../../crates/trusty-installer/) | library, `trusty-installer`, `tctl` | [crate README](../../crates/trusty-installer/README.md) |
 | `trusty-kb` | [`crates/trusty-kb/`](../../crates/trusty-kb/) | library, `trusty-kb` | [crate README](../../crates/trusty-kb/README.md) |
 | `trusty-mcp` | [`crates/trusty-mcp/`](../../crates/trusty-mcp/) | library | [crate README](../../crates/trusty-mcp/README.md) |
 | `trusty-memory` | [`crates/trusty-memory/`](../../crates/trusty-memory/) | library, `trusty-memory`, compatibility bridge | [crate README](../../crates/trusty-memory/README.md), [extended docs](../trusty-memory/README.md) |
 | `trusty-mpm` | [`crates/trusty-mpm/`](../../crates/trusty-mpm/) | library, `tm`, `trusty-mpm` | [crate README](../../crates/trusty-mpm/README.md), [extended docs](../trusty-mpm/README.md) |
-| `trusty-mpm-gui` | [`crates/trusty-mpm-gui/`](../../crates/trusty-mpm-gui/) | library, `trusty-mpm-gui` | [crate README](../../crates/trusty-mpm-gui/README.md) |
 | `trusty-progress` | [`crates/trusty-progress/`](../../crates/trusty-progress/) | library | [crate README](../../crates/trusty-progress/README.md) |
 | `trusty-publish-guard` | [`crates/trusty-publish-guard/`](../../crates/trusty-publish-guard/) | library, `publish-guard` | [crate README](../../crates/trusty-publish-guard/README.md) |
 | `trusty-review` | [`crates/trusty-review/`](../../crates/trusty-review/) | library, `trusty-review` | [crate README](../../crates/trusty-review/README.md) |
@@ -58,7 +56,18 @@ not reach nested Tauri manifests.
 | Package | Code | Primary target | Documentation |
 |---|---|---|---|
 | `trusty-agents-ui` | [`crates/trusty-agents/ui/src-tauri/`](../../crates/trusty-agents/ui/src-tauri/) | `trusty-agents-ui` | [UI README](../../crates/trusty-agents/ui/README.md) |
-| `trusty-audit-ui` | [`crates/trusty-audit/ui/src-tauri/`](../../crates/trusty-audit/ui/src-tauri/) | `trusty-audit-ui` | [UI README](../../crates/trusty-audit/ui/README.md) |
+
+## External tools
+
+`tga` (binary `tga`) and `trusty-audit` (binaries `trusty-audit`, `taudit`,
+plus the `trusty-audit-ui` desktop client) build, release and publish from
+[bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics);
+trusty-tools does not publish them (owner ruling 2026-09-28).
+The installer's external-tool table
+(`crates/trusty-installer/src/download/external.rs`) routes their prebuilts
+to that repo's GitHub releases. `tctl install tga` still installs `tga`, with
+`cargo install` from crates.io as the fallback; `tctl install` does not take
+`trusty-audit` by name.
 
 ## Consolidated former packages
 

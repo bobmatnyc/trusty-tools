@@ -186,10 +186,10 @@ pub(crate) enum MarkerMigration {
 /// answers `true` — keeping a file is the safe direction.
 /// Test: `a_committed_legacy_marker_is_never_removed`.
 pub(crate) fn legacy_is_tracked(worktree: &Path) -> bool {
-    match trusty_common::git::command_in(worktree)
-        .args(["ls-files", "--", WORKTREE_SENTINEL_FILE])
-        .output()
-    {
+    let mut ls_files = trusty_common::git::command_in(worktree);
+    ls_files.args(["ls-files", "--", WORKTREE_SENTINEL_FILE]);
+    // #8306: bounded; a timeout answers `true` like every other failure.
+    match super::git_ceiling::bounded_git_output(ls_files) {
         Ok(out) if out.status.success() => !out.stdout.is_empty(),
         _ => true,
     }

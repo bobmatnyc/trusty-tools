@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{admin, chat, queries, reads, streams, writes};
+use crate::service::rpc::{admin, chat, queries, reads, streams, warm, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -125,6 +125,9 @@ pub const METHODS: &[&str] = &[
     // listener a new one would be added to.
     writes::METHOD_INDEX_PAUSE_EMBEDDING,
     writes::METHOD_INDEX_RESUME_EMBEDDING,
+    // #6285 consumer move — the quantize backfill, the one CLI route with no
+    // socket twin until the CLI moved onto the socket.
+    writes::METHOD_INDEX_QUANTIZE,
     streams::METHOD_INDEX_FILE_EVENTS,
     // #6285 slice 5 — the streams. Registered in a SEPARATE router table from
     // the twenty-three above: a name is streaming or unary, never both, so
@@ -142,6 +145,9 @@ pub const METHODS: &[&str] = &[
     // and the search UI's chat panel. Both unary, both in the free lane.
     admin::METHOD_ADMIN_STOP,
     chat::METHOD_CHAT,
+    // #9027 — warm-all, both unary and in the free lane.
+    warm::METHOD_WARM_START,
+    warm::METHOD_WARM_STATUS,
 ];
 
 /// The params of a method that takes no arguments.
@@ -273,6 +279,7 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = writes::register(router, state);
     let router = admin::register(router, state);
     let router = chat::register(router, state);
+    let router = warm::register(router, state);
     streams::register(router, state)
 }
 

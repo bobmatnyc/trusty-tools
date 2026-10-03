@@ -2,7 +2,7 @@
 #
 # Cargo cannot share a build script as a library, so the daemon family
 # (trusty-memory, trusty-analyze, trusty-console, trusty-search — #987) and the
-# tauri-ui family (trusty-code-gui, trusty-mpm-gui, trusty-agents-ui — #4699)
+# tauri-ui family (trusty-code-gui, trusty-agents-ui — #4699)
 # each duplicate their canonical build.rs block by necessity. This gate fails
 # CI whenever a family's copies drift apart. See scripts/check_buildrs_sync.sh
 # for the two families' differing failure semantics.
@@ -16,15 +16,12 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/trusty-memory/build.rs"
-      - "crates/trusty-analyze/build.rs"
-      - "crates/trusty-console/build.rs"
-      - "crates/trusty-search/build.rs"
-      - "crates/trusty-code-gui/build.rs"
-      - "crates/trusty-mpm-gui/build.rs"
-      - "crates/trusty-agents/ui/src-tauri/build.rs"
-      - "crates/trusty-audit/ui/src-tauri/build.rs"
+      # Every build script: the watched-path check covers them all.
+      - "crates/*/build.rs"
+      - "crates/*/ui/src-tauri/build.rs"
       - "scripts/check_buildrs_sync.sh"
+      - "scripts/check_buildrs_watched_paths.sh"
+      - "scripts/check_buildrs_watched_paths_selftest.sh"
       - ".github/workflows/buildrs-sync.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
@@ -35,15 +32,12 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
     paths:
-      - "crates/trusty-memory/build.rs"
-      - "crates/trusty-analyze/build.rs"
-      - "crates/trusty-console/build.rs"
-      - "crates/trusty-search/build.rs"
-      - "crates/trusty-code-gui/build.rs"
-      - "crates/trusty-mpm-gui/build.rs"
-      - "crates/trusty-agents/ui/src-tauri/build.rs"
-      - "crates/trusty-audit/ui/src-tauri/build.rs"
+      # Every build script: the watched-path check covers them all.
+      - "crates/*/build.rs"
+      - "crates/*/ui/src-tauri/build.rs"
       - "scripts/check_buildrs_sync.sh"
+      - "scripts/check_buildrs_watched_paths.sh"
+      - "scripts/check_buildrs_watched_paths_selftest.sh"
       - ".github/workflows/buildrs-sync.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
@@ -60,6 +54,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+
+      # The watched-path gate must be shown able to fail before its green
+      # on the live tree means anything (#4618).
+      - name: Watched-path selftest (must reject a missing rerun-if-changed path)
+        run: bash scripts/check_buildrs_watched_paths_selftest.sh
 
       - name: Assert build.rs canonical blocks are in sync
         run: bash scripts/check_buildrs_sync.sh

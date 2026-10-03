@@ -84,6 +84,8 @@ fn mix_json(finding_1: Outcome) -> String {
                 ),
                 Outcome::Confirmed | Outcome::Unjudged => (confidence, format!("observation {n}")),
             };
+            // #8905: every finding quotes the code its line holds, or the gate drops it.
+            let body = format!("{body} at `compute()`");
             let line = if n == 18 { "" } else { r#","line":1"# };
             format!(
                 r#"{{"title":"finding {n}","body":"{body}","severity":"{severity}","confidence":{confidence},"file":"app/module.py"{line},"category":"{category}","code_provable":{}}}"#,
@@ -100,23 +102,49 @@ async fn review_731(finding_1: Outcome) -> ReviewResult {
 
 /// The replay must land every finding in its recorded state, or the verdict
 /// assertions below say nothing about the recorded review.
-fn assert_matches_record(result: &ReviewResult) {
+///
+/// #8904: a refuted finding is withheld, never posted, and a finding recorded
+/// unjudged (below the old candidate floor) is now verified — the fake
+/// verifier confirms it. #4044 (owner ruling on #8905, 2026-09-30): an
+/// unverifiable finding is withheld too, so only confirmed findings post, and
+/// every withheld one is recorded with its reason.
+fn assert_matches_record(result: &ReviewResult, finding_1: Outcome) {
+    let outcome_of = |r: &(u8, &str, &str, f32, Outcome)| if r.0 == 1 { finding_1 } else { r.4 };
+    let posted: Vec<_> = MIX_731
+        .iter()
+        .filter(|r| matches!(outcome_of(r), Outcome::Confirmed | Outcome::Unjudged))
+        .collect();
     assert_eq!(
         result.findings.len(),
-        22,
-        "every recorded finding must survive to the verdict"
+        posted.len(),
+        "only the confirmed findings may be posted"
     );
-    for (f, &(n, _, _, confidence, outcome)) in result.findings.iter().zip(MIX_731.iter()) {
+    let count = |o: Outcome| MIX_731.iter().filter(|r| outcome_of(r) == o).count();
+    let reasons: Vec<&str> = result
+        .withheld_findings
+        .iter()
+        .map(|w| w.reason.as_str())
+        .collect();
+    let n_reason = |s: &str| reasons.iter().filter(|r| **r == s).count();
+    assert_eq!(
+        n_reason("refuted by the verifier"),
+        count(Outcome::Refuted),
+        "{reasons:?}"
+    );
+    assert_eq!(
+        n_reason("unverifiable"),
+        count(Outcome::Unsure) + count(Outcome::SelfAdmitted),
+        "{reasons:?}"
+    );
+    for (f, &&(n, _, _, confidence, outcome)) in result.findings.iter().zip(posted.iter()) {
         if n == 1 {
             continue;
         }
         let state_matches = match outcome {
-            Outcome::Confirmed => matches!(f.verified, Some(VerifyOutcome::Confirmed)),
-            Outcome::Refuted => matches!(f.verified, Some(VerifyOutcome::Refuted)),
-            Outcome::Unsure | Outcome::SelfAdmitted => {
-                matches!(f.verified, Some(VerifyOutcome::Unverifiable { .. }))
+            Outcome::Confirmed | Outcome::Unjudged => {
+                matches!(f.verified, Some(VerifyOutcome::Confirmed))
             }
-            Outcome::Unjudged => f.verified.is_none(),
+            Outcome::Refuted | Outcome::Unsure | Outcome::SelfAdmitted => false,
         };
         assert!(state_matches, "finding {n}: got {:?}", f.verified);
         assert!(
@@ -136,7 +164,7 @@ fn assert_matches_record(result: &ReviewResult) {
 async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
     let result = review_731(Outcome::Confirmed).await;
 
-    assert_matches_record(&result);
+    assert_matches_record(&result, Outcome::Confirmed);
     assert!(matches!(
         result.findings[0].verified,
         Some(VerifyOutcome::Confirmed)
@@ -148,18 +176,15 @@ async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
 
 /// #4044 / cto-reports#731: the same mix with its one BLOCK-grade finding
 /// refuted. What remains is two confirmed Mediums below the 0.80 floor
-/// threshold, confirmed Lows, and unverified advisories: the verification
-/// round's baseline is capped at APPROVE* and nothing surviving raises it.
+/// threshold and confirmed Lows, which alone would approve; the unverifiable
+/// advisories are withheld (#4044). #8904: the refuted findings are withheld, and a blocking review
+/// whose survivors alone approve is withheld as UNKNOWN (the #8905 policy) —
+/// the model's F must not stand, and neither may an approval.
 #[tokio::test]
 async fn run_review_cto_reports_731_mix_without_finding_1_does_not_block() {
     let result = review_731(Outcome::Refuted).await;
 
-    assert_matches_record(&result);
-    assert!(matches!(
-        result.findings[0].verified,
-        Some(VerifyOutcome::Refuted)
-    ));
-    // #4044: the refuted findings carry no weight; the model's F must not stand.
-    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
-    assert_eq!(result.grade.as_deref(), Some("C-"));
+    assert_matches_record(&result, Outcome::Refuted);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
 }

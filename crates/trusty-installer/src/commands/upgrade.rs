@@ -540,8 +540,8 @@ async fn upgrade_one(
                 .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
                 .cloned()
                 .unwrap_or_else(|| install_dir.join(&c.binary));
-            let reported =
-                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
+            // #6231: this process just wrote the file — retry an ETXTBSY exec.
+            let reported = crate::download::fresh_exec::probe_fresh_binary(&bin_path).await?;
             // #8642: the placed binary must report the tag's version and advance.
             // #4964: no `cargo install` on this branch — only activation.
             let applied = verify_applied(c, Some(&version), &reported)

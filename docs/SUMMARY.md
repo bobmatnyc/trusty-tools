@@ -25,12 +25,14 @@
 - [trusty-memory](./trusty-memory/README.md)
 - [trusty-analyze](./trusty-analyze/README.md)
 - [trusty-console](./trusty-console/README.md)
-- [trusty-git-analytics](./trusty-git-analytics/README.md)
+  - [Console Secrets Service (planned)](./trusty-console/secrets.md)
+  - [Using Secrets from Code (planned)](./guides/secrets-from-code.md)
+  - [Secrets Security Model (planned)](./guides/secrets-security-model.md)
 - [trusty-common](./trusty-common/README.md)
 
 # Roadmap
 
-- [trusty-mpm](./roadmap/trusty-mpm.md)
+- [trusty-tools](./roadmap/trusty-tools.md)
 
 # Libraries and Sidecars
 
@@ -46,6 +48,7 @@
 - [Environment Variables](./reference/environment-variables.md)
 - [Running MCP Servers](./reference/running-mcp-servers.md)
 - [Release Workflow](./reference/release-workflow.md)
+- [Install Checkpoint Runbook](./reference/install-checkpoint.md)
 - [Changelog Fragments](./reference/changelog-fragments.md)
 - [Test Ladder Baseline](./reference/test-ladder-baseline.md)
 - [Generated Documentation Regions](./reference/generated-doc-regions.md)

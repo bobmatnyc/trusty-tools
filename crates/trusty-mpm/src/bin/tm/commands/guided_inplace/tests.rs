@@ -568,6 +568,7 @@ fn stopped_record_at(workspace: &std::path::Path) -> trusty_mpm::client::Managed
         slot: 0,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 
@@ -733,6 +734,7 @@ fn synthetic_resume(args: &[&str]) -> trusty_mpm::runtime::InPlaceResumeCommand 
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         config_dir: Some(std::path::PathBuf::from("/fake/config")),
         oauth_token: Some("sk-ant-oat01-fake".to_owned()),
+        profile: Default::default(),
     }
 }
 

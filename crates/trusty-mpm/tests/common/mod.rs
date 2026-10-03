@@ -43,11 +43,47 @@ use std::sync::OnceLock;
 /// `$HOME`, so the fenced roots are the harness's home and the password-database
 /// home, never the scratch dir.
 /// What: records the fenced roots; an in-process writer that reaches one panics.
+/// Also records [`operator_home`] while `$HOME` is still the harness's own.
 /// A spawned `tm` child is not fenced — [`isolate_spawned_tm`] confines it.
 /// Test: `the_home_write_fence_is_armed_for_integration_targets`.
 #[ctor::ctor]
 fn arm_home_write_fence() {
+    OPERATOR_HOME.get_or_init(|| std::env::var_os("HOME").map(PathBuf::from));
     trusty_mpm::core::home_write_fence::arm_for_this_process();
+}
+
+/// `$HOME` as the harness started this process, before any test repointed it.
+static OPERATOR_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The operator's own `$HOME`, as it was before `main` (#8345).
+///
+/// Why: a guard that asserts the operator's files stay untouched must name the
+/// real ones. Since #8345 a module shares its process with [`scratch_home`]'s
+/// callers, so reading `$HOME` mid-run can return the scratch dir and turn that
+/// guard vacuous.
+/// What: the value [`arm_home_write_fence`] captured; `None` when the harness
+/// ran with no `$HOME`, which is the stripped-CI case.
+/// Test: `a_spawned_tm_resolves_the_helper_home_and_leaves_the_operators_alone`.
+pub fn operator_home() -> Option<&'static Path> {
+    OPERATOR_HOME
+        .get_or_init(|| std::env::var_os("HOME").map(PathBuf::from))
+        .as_deref()
+}
+
+/// Give this integration target its own default tmux server, before `main`
+/// (#6542). Its spawned children inherit it: [`CHILD_STATE_ENV`] clears `TMUX`
+/// but keeps `TMUX_TMPDIR`. Aborts rather than let a test reach the operator's
+/// server. See `trusty_mpm::core::tmux_test_isolation`.
+#[ctor::ctor]
+fn isolate_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::isolate_for_this_process()
+        .expect("#6542: create this test binary's private tmux directory");
+}
+
+/// Kill the private tmux servers and remove their directory at exit (#6542).
+#[ctor::dtor]
+fn teardown_tmux_server() {
+    trusty_mpm::core::tmux_test_isolation::teardown_for_this_process();
 }
 
 /// Redirect this test process's `$HOME` to a scratch directory, once (#6671).
@@ -69,8 +105,11 @@ pub fn scratch_home() -> &'static Path {
             .keep();
         // SAFETY: this runs inside `OnceLock::get_or_init`, so exactly one
         // thread ever writes `HOME` in this process and every other thread is
-        // blocked until that write is visible. Nothing else in these targets
-        // mutates `HOME`.
+        // blocked until that write is visible. In the parallel `integration`
+        // target nothing else mutates `HOME` (ratcheted by
+        // `every_integration_target_arms_the_home_write_fence`). `env_serial`
+        // modules do rewrite it, which is safe only because that target runs
+        // one test at a time (#8345).
         unsafe { std::env::set_var("HOME", &dir) };
         dir
     })
@@ -98,16 +137,21 @@ pub fn tm_bin() -> &'static str {
 /// `CLAUDE_CODE_SESSION_ID` is what made a spawned child append a real row to
 /// the operator's savings ledger (#7514). `TRUSTY_MPM_URL`, `TMUX` and the
 /// managed-session ids make a child adopt the developer's live daemon, tmux
-/// server and session rather than the fixture's.
+/// server and session rather than the fixture's. #6288: `TRUSTY_MPM_SOCKET`,
+/// `TRUSTY_DATA_DIR_OVERRIDE` and `XDG_DATA_HOME` pick the daemon socket the
+/// socket-only commands dial, so each points a child at the developer's daemon.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
-/// environment, so the `#5544` hazard — a `set_var` visible to every parallel
-/// sibling in the same test binary — does not arise.
+/// environment, so the `#5544` hazard — a `set_var` visible to every test
+/// running in parallel in the `integration` target — does not arise.
 /// Test: `the_helper_clears_every_state_pointing_var`.
 const CHILD_STATE_ENV: &[&str] = &[
     "TRUSTY_MPM_ROOT",
     "TRUSTY_MPM_URL",
+    "TRUSTY_MPM_SOCKET",
+    "TRUSTY_DATA_DIR_OVERRIDE",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     "CLAUDE_CONFIG_DIR",
     trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
     "CLAUDE_SESSION_ID",
@@ -176,6 +220,15 @@ pub fn tm_command() -> Command {
     tm_command_in(tm_spawn_home())
 }
 
+/// A `trusty-mpm` alias command confined to [`tm_spawn_home`].
+///
+/// The alias execs the `tm` beside it, so the child needs the same isolation.
+pub fn alias_command() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-mpm"));
+    isolate_spawned_tm(&mut cmd, tm_spawn_home());
+    cmd
+}
+
 /// Write `disk.max_usage_pct: <pct>` into `home`'s trusty-mpm config (#7497).
 ///
 /// Why: a spawned `tm hook --pm-guard` gates every `git worktree add` on the
@@ -228,4 +281,66 @@ pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
             "a tm pm-guard refusal must start with {PM_GUARD_REFUSAL_PREFIX:?} exactly once: {reason:?}"
         );
     }
+}
+
+/// Install the checkout's agent roster and harness docs into `home` as a
+/// verified content bundle (#9011).
+///
+/// Why: since #9011 a spawned `tm` reads its agents from instructional
+/// content — a checkout above its cwd, else the bundle pinned under
+/// `<home>/.trusty-mpm/content`. A test that pins the child OUTSIDE any
+/// checkout (the ADR-0048 rule would otherwise rewrite its dispatch) has
+/// neither, and pm-guard refuses every dispatch it cannot classify (owner
+/// ruling 09(a)). This stages what `tm content install` would have.
+/// What: a gzip tar of `content/agents/*.md` and the four harness docs under
+/// the bundle paths the packager uses, plus `bundle-manifest.toml`, written as
+/// `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its sha256.
+/// Idempotent per `home`.
+pub fn stage_repo_content(home: &Path) {
+    use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
+    use trusty_common::integrity::Sha256Digest;
+
+    const TAG: &str = "content-v0.0.1";
+    let cache = home.join(".trusty-mpm").join("content");
+    if cache.join(LOCK_FILE_NAME).exists() {
+        return;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut entries: Vec<(String, Vec<u8>)> = vec![(
+        "bundle-manifest.toml".to_string(),
+        format!("tag = \"{TAG}\"\nschema_major = 1\n").into_bytes(),
+    )];
+    for (dest, rel) in [
+        ("agents", "content/agents"),
+        (
+            "instructions/harness_understanding",
+            "content/instructions/harness_understanding",
+        ),
+    ] {
+        for entry in std::fs::read_dir(repo.join(rel))
+            .expect("content dir")
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".md") {
+                let bytes = std::fs::read(entry.path()).expect("content file");
+                entries.push((format!("{dest}/{name}"), bytes));
+            }
+        }
+    }
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut tar = tar::Builder::new(gz);
+    for (path, data) in &entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        tar.append_data(&mut header, path, data.as_slice())
+            .expect("append");
+    }
+    let bytes = tar.into_inner().expect("tar").finish().expect("gzip");
+    std::fs::create_dir_all(&cache).expect("content cache");
+    let lock = ContentLock::new(TAG, Sha256Digest::of_bytes(&bytes)).expect("lock");
+    std::fs::write(cache.join(lock.bundle_file_name()), &bytes).expect("bundle");
+    lock.store(&cache.join(LOCK_FILE_NAME)).expect("store lock");
 }

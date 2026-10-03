@@ -42,6 +42,8 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+// #8392: the opt-in `Notification` entry and its push target.
+pub mod notification;
 pub mod repoint;
 
 pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};
@@ -957,6 +959,29 @@ pub fn write_project_hooks(
     write_project_hooks_with(settings_path, mpm_hook_additions_with_exe(exe_override))
 }
 
+/// [`write_project_hooks`], honouring the `[pm_guard] enabled` config key.
+///
+/// Why (#9018, owner ruling 307): this writer never adds the
+/// `hook --pm-guard` entry, but `tm install` and the CLI launch run it over
+/// the same settings files the session writer fills. With the guard ruled
+/// off, those runs must also take a guard entry out rather than leave it.
+/// What: `pm_guard_enabled = true` is exactly [`write_project_hooks`].
+/// `false` also strips every entry whose command ends with
+/// [`build_tree::PM_GUARD_SUFFIX`], on every event, before the merge; the
+/// observability `tm hook` groups and foreign entries are untouched.
+/// Test: `write_project_hooks_honoring_pm_guard_strips_the_guard_when_off`,
+/// `write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on`.
+pub fn write_project_hooks_honoring_pm_guard(
+    settings_path: &Path,
+    exe_override: Option<&Path>,
+    pm_guard_enabled: bool,
+) -> anyhow::Result<bool> {
+    let additions = mpm_hook_additions_with_exe(exe_override)?;
+    crate::core::settings_lock::with_settings_lock(settings_path, || {
+        write_project_hooks_locked(settings_path, &additions, !pm_guard_enabled)
+    })?
+}
+
 /// [`write_project_hooks`] with the resolved additions supplied by the caller.
 ///
 /// Why (#7244): the Fail-Open Check this fix owes — "a refusal writes nothing"
@@ -982,7 +1007,7 @@ fn write_project_hooks_with(
     // `tm launch`, the daemon and `tm doctor --fix` all merge into this same
     // file from separate PROCESSES.
     crate::core::settings_lock::with_settings_lock(settings_path, || {
-        write_project_hooks_locked(settings_path, &additions)
+        write_project_hooks_locked(settings_path, &additions, false)
     })?
 }
 
@@ -992,11 +1017,13 @@ fn write_project_hooks_with(
 /// Why (#7762): the lock must span the read and the write; splitting keeps the
 /// acquisition visible at the entry point.
 /// What: exactly what [`write_project_hooks`] documents, minus the `additions`
-/// refusal its caller has already raised.
+/// refusal its caller has already raised. `strip_pm_guard` (#9018) also
+/// removes every `hook --pm-guard` entry.
 /// Test: see [`write_project_hooks`].
 fn write_project_hooks_locked(
     settings_path: &Path,
     additions: &serde_json::Value,
+    strip_pm_guard: bool,
 ) -> anyhow::Result<bool> {
     use trusty_common::claude_config::merge_hook_entries;
 
@@ -1016,6 +1043,13 @@ fn write_project_hooks_locked(
     if let Some(events) = additions.get("hooks").and_then(|h| h.as_object()) {
         let event_keys: Vec<String> = events.keys().cloned().collect();
         strip_mpm_hook_entries_for_events(&mut base, Some(&event_keys));
+    }
+    // #9018: `[pm_guard] enabled = false` — the guard entry is identified by
+    // the same suffix the session writer's strip uses.
+    if strip_pm_guard {
+        strip_hook_entries_matching_for_events(&mut base, None, |cmd| {
+            cmd.ends_with(build_tree::PM_GUARD_SUFFIX)
+        });
     }
 
     let merged = merge_hook_entries(&base, additions);

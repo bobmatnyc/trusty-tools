@@ -7,8 +7,8 @@
 //! and real files, which the unit tests deliberately avoid.
 //! What: (a) default-is-f16, (b) explicit `f32` / `i8` overrides honoured,
 //! (c) opening an existing f32 snapshot leaves it f32 and byte-identical,
-//! (d) the backfill converts f32 → f16 and keeps recall@10 at the
-//! `ooc_quick_wins` f16 baseline (1.00), (e) the vector bytes halve to within
+//! (d) the backfill converts f32 → f16 and keeps recall@10 within the
+//! `ooc_quick_wins` f16 tolerance (>= 0.9), (e) the vector bytes halve to within
 //! 5 % of the documented ~2× reduction.
 //! Test: this file.
 
@@ -227,8 +227,18 @@ async fn opening_an_existing_f32_snapshot_keeps_it_f32() {
 // (d) / (e) The backfill
 // --------------------------------------------------------------------------
 
+/// The f16 recall@10 floor the `ooc_quick_wins` baseline enforces
+/// (`quantization_f16_recall_within_tolerance`, `recall >= 0.9`).
+///
+/// #8634: not an exact 1.00. `requantize` re-adds vectors in `id_to_key`'s
+/// `HashMap` iteration order, which differs per process, and HNSW recall
+/// depends on the graph that order builds — measured 197 of 200 rebuilds at
+/// 1.000 and 3 at 0.99667 (one missed neighbour of 300).
+const F16_RECALL_FLOOR: f32 = 0.9;
+
 /// #6822 acceptance: the backfill converts an f32 index to f16 and recall@10 on
-/// the fixture's query set stays at the `ooc_quick_wins` f16 baseline of 1.00.
+/// the fixture's query set stays within the `ooc_quick_wins` f16 tolerance
+/// ([`F16_RECALL_FLOOR`]).
 #[tokio::test]
 async fn backfill_converts_an_f32_index_to_f16_and_keeps_recall() {
     let n = 200u64;
@@ -262,10 +272,10 @@ async fn backfill_converts_an_f32_index_to_f16_and_keeps_recall() {
     assert_eq!(store.len().await.unwrap(), n as usize);
     let recall_after = recall_at_k(&store, n, 30, 10).await;
     eprintln!("#6822 recall@10 after f32 -> f16 backfill = {recall_after:.3}");
-    assert_eq!(
-        recall_after, 1.0,
-        "#6822: recall@10 must stay at the ooc_quick_wins f16 baseline (1.00), \
-         got {recall_after:.3}"
+    assert!(
+        recall_after >= F16_RECALL_FLOOR,
+        "#6822: recall@10 must stay within the ooc_quick_wins f16 tolerance \
+         (>= {F16_RECALL_FLOOR}), got {recall_after:.3}"
     );
 
     // The conversion is durable: reopening the snapshot reads f16.

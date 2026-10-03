@@ -40,6 +40,7 @@ Name what you changed — `--features memory-core,embedder-test-support` — or
 `--features unconditional-only` for the always-compiled surface.
 `--all-features` is unavailable: the `embedder-*` ORT variants are mutually
 exclusive. `cargo build` and `cargo check -p trusty-common` are unaffected.
+The whole crate, every test once: `./scripts/test_trusty_common_lanes.sh`.
 
 ## Workspace-wide
 
@@ -106,11 +107,11 @@ ONNX-backed embedder tests are marked `#[ignore]` so CI stays fast. They do not
 run under a plain `cargo test`. Use `--include-ignored` when you need local
 validation against the actual model — and expect it to be slow.
 
-## `trusty-mpm-gui` and `trusty-code-gui` Are Excluded by Default
+## `trusty-code-gui` Is Excluded by Default
 
-Both are omitted from the root `Cargo.toml`'s `default-members` (#2951), so a
-bare `cargo build` / `test` / `check` skips them. Name them explicitly
-(`cargo build -p trusty-mpm-gui`) or use `--workspace`, which always builds
+It is omitted from the root `Cargo.toml`'s `default-members`, so a bare
+`cargo build` / `test` / `check` skips it. Name it explicitly
+(`cargo build -p trusty-code-gui`) or use `--workspace`, which always builds
 everything regardless of `default-members`.
 
 ## Crate Names vs. Directory Names
@@ -118,7 +119,6 @@ everything regardless of `default-members`.
 **Crate names** match the `name` field in each crate's `Cargo.toml`, which is
 not always the directory name:
 
-- `crates/trusty-git-analytics/` → `-p tga` (short published name)
 - `crates/trusty-agents/` → `-p trusty-agents`
 
 If you get "package not found", read the `name` field in that crate's

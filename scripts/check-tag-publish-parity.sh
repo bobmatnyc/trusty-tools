@@ -33,7 +33,7 @@
 #     TAG-MISSING         no candidate tag resolves, on origin or locally.
 #                         Publishing would ship an untagged commit.
 #     TAG-SPLIT           two accepted alias tags exist at DIFFERENT commits
-#                         (`tga-v*` and `trusty-git-analytics-v*` — both are
+#                         (`<package>-v*` and `<crate-dir>-v*` — both are
 #                         accepted release tags, #1128). Whichever one a reader
 #                         checks out, one of them is lying.
 #     TAG-DRIFT           the tag resolves, but names a commit other than HEAD.
@@ -209,8 +209,8 @@ else
 fi
 
 # Candidate tags. The crate-dir prefix is bump-version.sh's tag_prefix_for();
-# the package-name prefix covers the tga alias series, which #1128 made a real,
-# accepted release tag and which is the form 2026-08-11 actually pushed. Both
+# the package-name prefix covers an alias series (#1128 made `tga-v*` a real,
+# accepted release tag, the form 2026-08-11 actually pushed). Both
 # are accepted, so both are checked — and disagreeing aliases are TAG-SPLIT
 # rather than a coin flip over which one a reader believes.
 CANDIDATES="${CRATE_DIR}-v${VERSION}"

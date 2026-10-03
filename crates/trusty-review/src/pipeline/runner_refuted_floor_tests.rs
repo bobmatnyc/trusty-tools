@@ -33,16 +33,19 @@ impl LlmProvider for MarkerVerifier {
         "marker-verifier"
     }
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-        let carries = |marker: &str| req.messages.iter().any(|m| m.content.contains(marker));
-        let judgment = if carries(REFUTE_MARKER) {
-            "REFUTED"
-        } else if carries(UNSURE_MARKER) {
-            "UNVERIFIABLE"
-        } else {
-            "CONFIRMED"
-        };
+        // #8904: batch-aware — judge each finding's own section.
+        let text = crate::pipeline::verify_batch::test_support::answer(&req, |section| {
+            if section.contains(REFUTE_MARKER) {
+                "REFUTED"
+            } else if section.contains(UNSURE_MARKER) {
+                "UNVERIFIABLE"
+            } else {
+                "CONFIRMED"
+            }
+            .to_string()
+        });
         Ok(LlmResponse {
-            text: format!(r#"{{"judgment":"{judgment}","reason":"test"}}"#),
+            text,
             model: req.model.clone(),
             input_tokens: 5,
             output_tokens: 3,
@@ -68,7 +71,8 @@ fn blocks_on(findings_json: &str) -> FakeLlm {
 fn finding_json(title: &str, body: &str, severity: &str, category: &str) -> String {
     serde_json::json!({
         "title": title,
-        "body": body,
+        // #8905: the citation gate drops a finding that quotes no code.
+        "body": format!("{body} in `fn bad()`"),
         "severity": severity,
         "confidence": 0.9,
         "file": "src/a.rs",
@@ -138,19 +142,21 @@ async fn run_review_refuted_sole_blocker_does_not_clamp_to_block() {
         );
         let result = review(&format!("{},{confirmed},{medium}", refuted_blocker())).await;
 
-        assert!(
-            matches!(result.findings[0].verified, Some(VerifyOutcome::Refuted)),
-            "{category}: fixture must refute the blocker, got {:?}",
-            result.findings[0].verified
+        // #8904: the refuted blocker is withheld; the two survivors remain.
+        assert_eq!(
+            result.findings.len(),
+            2,
+            "{category}: {:?}",
+            result.findings
         );
         assert!(
-            matches!(result.findings[1].verified, Some(VerifyOutcome::Confirmed)),
+            matches!(result.findings[0].verified, Some(VerifyOutcome::Confirmed)),
             "{category}: fixture must confirm the High {category} finding"
         );
         // Guards a vacuous pass: the confirmed finding must still be a
         // per-finding floor trigger after parse and hygiene.
         assert!(
-            crate::pipeline::grade::drives_block_floor(&result.findings[1]),
+            crate::pipeline::grade::drives_block_floor(&result.findings[0]),
             "{category}: the confirmed finding must pass drives_block_floor"
         );
         assert_eq!(
@@ -177,9 +183,11 @@ async fn run_review_confirmed_blocker_beside_refuted_one_still_blocks() {
     );
     let result = review(&format!("{},{confirmed}", refuted_blocker())).await;
 
+    // #8904: the refuted blocker is withheld; the confirmed one holds BLOCK.
+    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
     assert!(matches!(
         result.findings[0].verified,
-        Some(VerifyOutcome::Refuted)
+        Some(VerifyOutcome::Confirmed)
     ));
     assert_eq!(result.verdict, Verdict::Block);
     assert_eq!(result.grade.as_deref(), Some("F"));

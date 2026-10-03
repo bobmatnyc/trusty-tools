@@ -227,10 +227,12 @@ fn bare_record(
         last_cwd: None,
         deliverable_id: None,
         pane_id: pane_id.map(str::to_string),
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

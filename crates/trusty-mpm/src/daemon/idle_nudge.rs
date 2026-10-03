@@ -104,7 +104,9 @@ pub enum NudgeOutcome {
 /// failed inject still consumes one nudge budget slot — a deliberately
 /// conservative bias toward fewer nudges. Bumps `last_activity_at` via the
 /// manager's normal `inject` path.
+/// #8942: a live protected-kind record never correlates.
 /// Test: `run_nudge_injects_when_idle_and_enabled`,
+/// `idle_nudge_never_types_into_a_supervisor_pane`,
 /// `run_nudge_skips_when_disabled`, `run_nudge_skips_when_live_children`,
 /// `run_nudge_skips_human_wait_phrase`, `run_nudge_no_managed_session`,
 /// `run_nudge_respects_cap`, `run_nudge_prunes_stale_ledger_entries`.
@@ -127,9 +129,11 @@ pub async fn run_nudge(
     let live_ids: std::collections::HashSet<uuid::Uuid> = records.iter().map(|r| r.id.0).collect();
     ledger.lock().prune(&live_ids);
 
+    // #8942 ruling 4: the Architect's pane never correlates, so it is never nudged.
     let Some(record) = records.iter().find(|r| {
         matches!(r.state, ManagedSessionState::Active)
             && r.claude_session_id.as_deref() == Some(claude_session_id)
+            && !crate::session_manager::supervisor::skip_protected(r, "idle nudge")
     }) else {
         return NudgeOutcome::NoManagedSession;
     };
@@ -395,6 +399,31 @@ mod tests {
         assert_eq!(outcome, NudgeOutcome::Nudged);
         // The ledger must record exactly one delivery for the managed session.
         assert_eq!(ledger.lock().snapshot(id.0).count, 1);
+    }
+
+    /// #8942 ruling 4: the same parked, correlated, idle session is never
+    /// nudged once its record is the Architect's.
+    #[tokio::test]
+    async fn idle_nudge_never_types_into_a_supervisor_pane() {
+        let dir = TempDir::new().unwrap();
+        let claude_id = uuid::Uuid::new_v4().to_string();
+        let (mgr, id) = manager_with_active_correlated(&dir, &claude_id).await;
+        let mut record = mgr.get(&id).await.expect("record");
+        record.kind = crate::session_manager::SessionKind::Supervisor;
+        mgr.store.write().await.upsert(record).await.expect("seed");
+        let ledger = parking_lot::Mutex::new(NudgeLedger::new());
+        let outcome = run_nudge(
+            &mgr,
+            &ledger,
+            &[],
+            &enabled_cfg(),
+            &claude_id,
+            Some(MACHINE_PHRASE),
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(outcome, NudgeOutcome::NoManagedSession);
+        assert_eq!(ledger.lock().snapshot(id.0).count, 0);
     }
 
     #[tokio::test]

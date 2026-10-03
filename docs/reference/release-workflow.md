@@ -15,6 +15,37 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > the canonical release's URLs and digests, because whichever CI run finished
 > last wrote the formula. Release tags are immutable (#6178).
 
+## Dev lane and release lane
+
+Work runs in one of two lanes. The lane decides what counts as evidence.
+
+**Dev lane** (changes being made, PR open):
+
+- Live checks run the build slot's debug `tm`.
+- Local gates are set by the change's test ladder rung. Targeted tests are
+  enough; there is no local `cargo doc` run.
+- CI's full suite is the backstop on every PR. Nothing in this lane removes a
+  CI check.
+
+**Release lane** (anything that publishes to crates.io or installs a tagged
+build):
+
+- The serial `cargo test --no-fail-fast` harness, a release-profile build and
+  `cargo install --locked` are the evidence.
+- Nextest-only runs, targeted-only runs and a debug binary are never proof.
+
+### Release scale: SMALL or LARGE
+
+The larger class wins whenever any condition matches. The scale changes the
+gate set only, not what a release must prove.
+
+| Release scale | Gate set |
+|---|---|
+| **SMALL**: a patch bump of ONE crate, where every change since its last tag is test ladder rung 1-4, and no other published crate changes version | Rung 4 on the crate: `fmt --check`, `check`, `clippy --all-targets -D warnings`, `test -p <crate> --no-fail-fast`, and `test --no-fail-fast` for each direct dependent. Green PR CI. The cargo-publish preflight (semver, dry run, parity). Post-publish `cargo install --locked`, then one live check against the installed binary. |
+| **LARGE**: a minor or major bump; a multi-crate wave; any rung-5/6 change since the last tag (security, process lifecycle, persistence, release tooling, MCP/HTTP/UI surface); or the trusty-mpm/tm binary itself | Everything in SMALL, plus: `--include-ignored` integration coverage for the crate, a bare `cargo test --workspace --no-fail-fast` publish gate, a code-critic round on the release diff, a pre-publish CI run on the exact tag SHA, and live checks for every rung-5/6 issue in the release before the tag is announced. |
+
+Owner ruling: item 47, 2026-09-30.
+
 ## Release Steps
 
 1. Bump the crate version in `crates/<name>/Cargo.toml`.
@@ -87,11 +118,6 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
    step of phase 1, not after the first red `--check-only` run — evidence:
    identical `prepublish-gate` FAIL across all 7 crates on branch
    `chore/release-trusty-mpm-2026-09-13` at `3951537e2` (2026-09-13).
-4c. Releasing `trusty-audit`? Run `scripts/refresh-engagement-pins.sh` first and
-   commit the result, so `crates/trusty-audit/templates/engagement.template.toml`
-   pins the sibling versions this train ships rather than the previous ones —
-   `preflight-publish.sh` CHECK 10 fails the release when a pin lags a sibling
-   whose workspace version is not yet published (#6772).
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
@@ -218,7 +244,7 @@ to satisfy it.
 **What happened on 2026-08-11.** `tga-v2.17.0` points at `246e4ca2`; the
 published crate's `.cargo_vcs_info.json` records `7d5cf82e1`, two
 `trusty-search` commits later. Every gate was green.
-`git diff 246e4ca2 7d5cf82e1 -- crates/trusty-git-analytics/` is empty, so that
+A `git diff 246e4ca2 7d5cf82e1` over the crate's directory is empty, so that
 tag misrepresents nothing — luck, not design. Had any intervening commit
 touched the crate, `git checkout tga-v2.17.0` would show a tree that is not
 what shipped. `trusty-review-v0.15.0`, cut at the same `246e4ca2`, is
@@ -253,7 +279,7 @@ then publish. Closing that needs the tag and the upload to be one command, and
 it, before the tag becomes something anyone has relied on.
 
 **Tested by** `scripts/check-tag-publish-parity-selftest.sh` (CI:
-`.github/workflows/tag-publish-parity.yml`), which builds a synthetic repo per
+`.github/workflows/ci.yml`, job `parity-selftest`), which builds a synthetic repo per
 failure and asserts the finding code, not just a non-zero exit. CI runs the
 self-test rather than the gate: on a tag push the workflow checkout IS the
 tagged commit, so the comparison is true by construction and proves nothing.
@@ -736,8 +762,7 @@ single-source-of-truth table used by `trusty-search`/`trusty-mpm`, extended for
 with `codesign --deep --force --options runtime --timestamp --identifier
 com.trusty.assistant`.
 
-🟡 **`Trusty Agents.app` is signed differently from `trusty-mpm-gui`/
-`trusty-code-gui` — deliberately.** Those two hardcode
+🟡 **`Trusty Agents.app` is signed differently from `trusty-code-gui` — deliberately.** That crate hardcodes
 `bundle.macOS.signingIdentity` directly in their `tauri.conf.json` (see
 `docs/reference/common-pitfalls.md`), which makes `cargo tauri build`
 **hard-fail** on any machine without that exact certificate — acceptable only
@@ -1038,6 +1063,11 @@ xcrun stapler staple ~/.cargo/bin/trusty-search
 > (your own machine), notarization adds no benefit; Developer ID signing alone
 > is sufficient for FDA persistence.
 
+> Installing an unreleased trusty-mpm build on a machine with live sessions
+> follows [install-checkpoint.md](install-checkpoint.md): checkpoint every
+> session, install from a pinned rev, restart the daemon, relaunch sessions,
+> roll back (#9032).
+
 ## Connection-Safe Daemon Restart (issue #534)
 
 As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,
@@ -1088,37 +1118,9 @@ gh workflow run e2e-docker.yml
 
 ### Live acceptance (manual) — `trusty-audit`
 
-`scripts/taudit-live-acceptance.sh` walks the whole `taudit` MVP path live
-(#5852, #5858): it builds the binary, runs `taudit distribute`, extracts the
-resulting zip as a recipient would, registers a real repository against a real
-`gh` credential, runs the one-shot `audit` chain through OpenRouter, and then
-checks the returned package's DATA — real rows in the extract database, more
-than one commit and author, real filenames in the report — before grepping every
-extracted member for the API key. No stubs and no offline variant: a stubbed run
-would pass while proving nothing.
-
-Run it before shipping a `trusty-audit` release, and after any change to
-`distribute`, the audit chain, or the return-package assembly. It is NOT wired
-into CI and cannot be — it needs a real credential and real network.
-
-```bash
-OPENROUTER_API_KEY=sk-or-v1-... scripts/taudit-live-acceptance.sh
-TAUDIT_E2E_REPO=owner/name OPENROUTER_API_KEY=... scripts/taudit-live-acceptance.sh
-```
-
-It needs a real `OPENROUTER_API_KEY` exported in the environment (never passed
-as a flag — argv is visible to `ps`), `gh` authenticated with access to a public
-GitHub repository, network access to crates.io, GitHub and OpenRouter, plus
-`cargo` and `unzip`; `sqlite3` is optional and the script falls back to a
-header-and-size check without it. A run takes several minutes.
-
-Each run writes to a fresh directory under `~/.taudit-acceptance` and touches
-nothing under `~/duetto/audit`. Two things survive it: `rm -rf`
-`~/.trusty-tools/trusty-audit/work`, and remove by hand the one `trusty-search`
-allowlist row per audited clone that the script prints (it deliberately does not
-remove its own — `trusty-search index remove` ignores its path argument in
-0.45.1 and would drop an unrelated index). Full rationale, including what the
-script deliberately stopped checking after #5915/#5916, is in its own header.
+`trusty-audit`, its live acceptance script and its engagement-pin refresh moved
+to [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics)
+with the crate (owner ruling 2026-09-28).
 
 ## Bundled Crates — Intentionally Skipped by `release.yml`
 

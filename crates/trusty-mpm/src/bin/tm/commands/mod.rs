@@ -26,6 +26,8 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 pub(crate) mod daemon;
+// #9034: three-state daemon pid identity, read from argv.
+pub(crate) mod daemon_pid_identity;
 pub(crate) mod delete;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;
@@ -35,6 +37,7 @@ pub(crate) mod divert_worker;
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
+pub(crate) mod build_lease;
 pub(crate) mod doctor_builder_cap;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
@@ -44,24 +47,37 @@ pub(crate) mod doctor_fix_agents;
 // #8236: `--fix-launchd-secrets`, the credential strip without the other repairs.
 pub(crate) mod doctor_fix_launchd_secrets;
 pub(crate) mod doctor_fix_skills;
+// #8371: the opt-in `--network` gcloud auth row.
+pub(crate) mod doctor_gcloud;
 pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
 // #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
 pub(crate) mod doctor_repair;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
+// #8939: `tm env set|keys` — dotenv edits that print no value.
+pub(crate) mod env_file;
+// #8378 PR-C: `tm content install|update|status`.
+pub(crate) mod content;
+// #8939 fix round: `tm env`'s no-follow file access and its guard grant.
+pub(crate) mod env_file_fs;
+pub(crate) mod env_file_grant;
+// #8436: `tm fleet init|status` — the Architect's setup.
+pub(crate) mod fleet;
 pub(crate) mod generate;
-// #6483: `tm gui` — split out of main.rs when the TUI view routing pushed that
-// file past the 500-SLOC cap.
-pub(crate) mod gui;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+// #9034: the autostart decision, with launchctl and the process table injected.
+pub(crate) mod guided_autostart_plan;
 pub(crate) mod guided_inplace;
 pub(crate) mod guided_launch;
+// #9034: down versus slow, and the picker/autostart sequence.
+pub(crate) mod guided_liveness;
 pub(crate) mod guided_outside_git;
 pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
+pub(crate) mod hook_notify;
 pub(crate) mod hook_payload;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
@@ -77,6 +93,8 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 // #8545: launch/connect user-home writes, under a caller-named home.
 pub(crate) mod launch_home;
+// #8878: `tm launch --twin` arming.
+pub(crate) mod launch_twin;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
@@ -89,6 +107,8 @@ pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod memory;
+// #8782: the per-project prune-worktrees preview and its scope checks.
+pub(crate) mod prune_preview;
 // #7685: `tm memory import-auto-memory`, in its own file beside the dispatcher.
 pub(crate) mod memory_auto_import;
 // #8352: `tm memory recall|remember|note` — the no-MCP palace verbs, in their
@@ -106,14 +126,21 @@ pub(crate) mod picker_launch_new;
 // #7688: the `tm prompt-feedback` read-back and the capture hook behind it.
 pub(crate) mod prompt_feedback_cli;
 pub(crate) mod prompt_feedback_hook;
+// #8735: the one program-word resolver behind the pm-guard rules.
+pub(crate) mod program_word;
 
 pub(crate) mod pm_guard;
+// #8939: the Architect's `tm env set|keys` exemption from the #7266 rule.
+pub(crate) mod pm_guard_architect_envfile;
+pub(crate) mod pm_guard_architect_reason;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 // #6892: the machine-wide concurrent-builder denial. Fails CLOSED, unlike its
 // #4480 sibling — see its module doc.
-pub(crate) mod pm_guard_builder_cap;
+pub(crate) mod pm_guard_build_lease;
 pub(crate) mod pm_guard_cost;
+// #9011: the content roster pm-guard classifies dispatches against.
+pub(crate) mod pm_guard_content;
 pub(crate) mod pm_guard_deny_by_default;
 // #8722: the denial record and audit POST every pm-guard deny makes.
 pub(crate) mod pm_guard_deny_log;
@@ -128,7 +155,13 @@ pub(crate) mod repair_delegation_list;
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
+// #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
+pub(crate) mod pm_guard_floor;
+// #8453: the PM delegation rules apply by session profile.
+pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;
+// #8004: a resume of an agent whose isolated worktree is gone is refused.
+pub(crate) mod pm_guard_resume_worktree;
 pub(crate) mod pm_guard_routing;
 // #7266: a line-range or partial READ of a secret-bearing file, refused for
 // every caller — the sibling `pm_guard_bash::secret_file_copy` screens only a
@@ -142,6 +175,18 @@ pub(crate) mod pm_guard_secret_words;
 pub(crate) mod pm_guard_secret_positions;
 // #8523: a pm2 dump and a credential-carrying launchd plist hold a process env.
 pub(crate) mod pm_guard_secret_env_files;
+// #8756: the secret rules read every command substitution's body.
+pub(crate) mod pm_guard_secret_nested;
+// #8869: a key handed to a consumer that never prints it; a GET secret listing.
+pub(crate) mod pm_guard_secret_consumers;
+// #9001: a `for` loop whose words reach only `echo` and a gh search.
+pub(crate) mod pm_guard_secret_search_loop;
+// #8879: the credential rules over the body of a script a command runs.
+pub(crate) mod pm_guard_secret_script;
+pub(crate) mod pm_guard_secret_script_read;
+// #8878: the trust-anchor write floor, which the bypass variables do not lift.
+pub(crate) mod pm_guard_trust_anchor;
+pub(crate) mod pm_guard_trust_anchor_paths;
 pub(crate) mod pm_guard_worktree_grant;
 pub(crate) mod pm_guard_write_boundary;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
@@ -168,6 +213,8 @@ pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
+// #8914: `--account` on the session-spawning verbs.
+pub(crate) mod session_account;
 // #7313: `tm session disk` — the shell view of the per-session disk
 // attribution slice 1 added to the `disk_survey` tool.
 pub(crate) mod session_disk;
@@ -182,8 +229,10 @@ pub(crate) mod session_picker_view;
 pub(crate) mod session_tui;
 // The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
 pub(crate) mod shell_init;
+// #6288 step 1: the commands that reach the daemon over its socket only.
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
+pub(crate) mod socket_dispatch;
 pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe

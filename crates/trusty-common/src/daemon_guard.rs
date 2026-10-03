@@ -408,10 +408,12 @@ pub fn spawn_detached_forwarding_parent_link(
 /// Why it is separate: the env decision is the whole of #7085's review finding,
 /// and a `Command` can be inspected in a unit test where a spawned daemon
 /// cannot.
-/// What: null stdio, plus [`crate::parent_death::ENV_EXIT_WITH_PARENT`] either
-/// removed (`stamp` is `None`, the default) or set to `stamp`.
+/// What: null stdio, a new session ([`start_in_new_session`]), plus
+/// [`crate::parent_death::ENV_EXIT_WITH_PARENT`] either removed (`stamp` is
+/// `None`, the default) or set to `stamp`.
 /// Test: `detached_command_scrubs_the_parent_stamp`,
-/// `detached_command_forwards_an_explicit_parent_stamp`.
+/// `detached_command_forwards_an_explicit_parent_stamp`,
+/// `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`.
 fn detached_command(
     program: impl AsRef<std::ffi::OsStr>,
     args: &[&str],
@@ -422,6 +424,9 @@ fn detached_command(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // #8783: out of the spawner's process group, so a group kill aimed at the
+    // spawner (trusty-audit's budget kill, a terminal Ctrl-C) spares the daemon.
+    start_in_new_session(&mut cmd);
     // #7085: scrub by default so an inherited stamp cannot silently arm a
     // daemon; a caller that wants the link asks for it by name.
     match stamp {
@@ -429,6 +434,55 @@ fn detached_command(
         None => cmd.env_remove(crate::parent_death::ENV_EXIT_WITH_PARENT),
     };
     cmd
+}
+
+/// Make the process `cmd` spawns lead a new session: its own process group and
+/// no controlling terminal (Unix; a no-op elsewhere).
+///
+/// Why (#8783): a daemon auto-started by a short-lived CLI otherwise inherits
+/// that CLI's process group, so any kill aimed at the group reaches the daemon
+/// too — `trusty-audit` SIGKILLing `tga audit`'s group on a budget timeout, or a
+/// terminal delivering Ctrl-C to its foreground group. `setsid(2)` is chosen
+/// over `process_group(0)` because it also drops the controlling terminal, so a
+/// terminal hangup or job-control signal can never reach the daemon either; a
+/// daemon has no use for a terminal, and its stdio is null.
+/// What: installs a `pre_exec` hook that runs [`become_session_leader`] in the
+/// forked child; a failure fails the spawn rather than starting a daemon still
+/// in the group. A plain forked child never leads a group, so on its own the
+/// hook does not fail. It DOES fail, with `EPERM`, when the same `Command` also
+/// sets `process_group` (or a `pre_exec` of its own calls `setpgid`) first:
+/// the child then leads a group, and a group leader cannot call `setsid`.
+/// Public so a daemon start that needs its own stdio or cwd — and so cannot use
+/// [`spawn_detached`] — gets the same treatment instead of a second copy.
+/// Test: `a_detached_daemon_survives_a_sigkill_of_its_spawners_group`,
+/// `a_new_session_combined_with_process_group_fails_the_spawn_with_eperm`.
+pub fn start_in_new_session(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: the hook runs in the forked child before `exec`, where only
+        // async-signal-safe calls are allowed; see `become_session_leader`.
+        unsafe {
+            cmd.pre_exec(become_session_leader);
+        }
+    }
+    cmd
+}
+
+/// The `pre_exec` body behind [`start_in_new_session`]: `setsid()`, errno on failure.
+///
+/// Why: `uds::supervisor` starts its detached children through a tokio
+/// `Command`, whose `pre_exec` is a separate method; both share this one body.
+/// It runs between `fork` and `exec`, so it makes async-signal-safe calls only:
+/// `setsid` is one, and building an `io::Error` from errno does not allocate.
+/// Test: `a_new_session_combined_with_process_group_fails_the_spawn_with_eperm`.
+#[cfg(unix)]
+pub(crate) fn become_session_leader() -> std::io::Result<()> {
+    // SAFETY: `setsid` takes no arguments and touches only the calling process.
+    if unsafe { libc::setsid() } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Spawn a prepared detached command, rendering a failure with what was tried.
@@ -531,6 +585,10 @@ pub async fn spin_until_ready(config: &DaemonGuardConfig) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(all(test, unix))]
+#[path = "daemon_guard_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod addr_tests {

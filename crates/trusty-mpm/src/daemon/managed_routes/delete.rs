@@ -67,10 +67,12 @@ pub(crate) async fn delete_core(
         Err((code, msg)) => return RouteOutcome::text(code.as_u16(), msg),
     };
     let mgr = state.session_manager().await;
-    match mgr.delete_record(&id, force).await {
-        Ok(record) => RouteOutcome::ok(&DeleteResponse {
+    // #8935: the note says a live session with the name was left running.
+    match mgr.delete_record_reporting(&id, force).await {
+        Ok((record, runtime_left_running)) => RouteOutcome::ok(&DeleteResponse {
             summary: record_to_summary(&record),
             deleted: true,
+            runtime_left_running,
         }),
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
             RouteOutcome::text(404, format!("session {id_str} not found"))

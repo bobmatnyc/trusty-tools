@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-56 bundled skills.
+57 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -23,7 +23,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `model-context-builder` | agent-reference | no | MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing |
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
-| `rust-build-performance` | agent-reference | no | Practical Rust build-performance discipline for the inner dev loop: cargo check first, measure with --timings before tuning, trim the dependency/feature graph, preserve incremental compilation, and use sccache across worktrees. Use when a Rust build feels slow or before reaching for compiler-flag tricks. |
+| `rust-build-performance` | agent-reference | no | Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs. |
 | `rust-delivery-workflow` | agent-reference | no | Rust delivery process under agent dispatch: commit before the gate chain, match the local toolchain to CI's clippy pin, cap concurrent cargo builds, keep gate output to a verdict, and batch installs before live verification. Use when planning or running the gates for a Rust change, not when a build feels slow. |
 | `security-scanning` | agent-reference | no | CI security scanning: secrets, deps, SAST, triage, expiring exceptions |
 | `self-improvement-loop` | agent-reference | no | Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now |
@@ -35,6 +35,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
 | `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
+| `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
 | `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
 | `tm-circuit-breaker` | pm-framework | no | Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM |

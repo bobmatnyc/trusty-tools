@@ -426,9 +426,41 @@ fn cli_parses_doctor() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
+                network: false,
             }
         }
     ));
+}
+
+/// #8371: `--network` is opt-in; a bare `tm doctor` leaves it off.
+#[test]
+fn cli_parses_doctor_network() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--network"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags { network: true, .. }
+        }
+    ));
+    let bare = Cli::try_parse_from(["trusty-mpm", "doctor"]).unwrap();
+    assert!(matches!(
+        bare.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags { network: false, .. }
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_doctor_dir_and_refuses_it_beside_a_write_flag() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor { flags: DoctorFlags { dir: Some(d), .. } } if d == std::path::Path::new("/tmp/x")
+    ));
+    // #7757: repairs act on the cwd, so a scoped report beside them is refused.
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--dir", "/tmp/x", "--fix"]).is_err());
 }
 
 #[test]
@@ -446,6 +478,8 @@ fn cli_parses_doctor_prune_stale_skills() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
+                network: false,
             }
         }
     ));
@@ -473,6 +507,8 @@ fn cli_parses_doctor_fix_skills() {
                 yes: false,
                 include_frozen: false,
                 quarantine_mcp: None,
+                dir: None,
+                network: false,
             }
         }
     ));
@@ -827,6 +863,7 @@ fn cli_parses_launch() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -844,6 +881,7 @@ fn cli_parses_launch_with_dir() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
@@ -863,6 +901,7 @@ fn cli_parses_launch_with_style() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
@@ -892,6 +931,7 @@ fn cli_parses_launch_with_worktree() {
             dir,
             style,
             worktree,
+            ..
         } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
@@ -901,6 +941,93 @@ fn cli_parses_launch_with_worktree() {
             );
         }
         other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --twin` reaches the launch as an explicit arming request, and a
+/// bare `tm launch` never does (#8878, ruling D1).
+#[test]
+fn cli_parses_launch_with_twin() {
+    for (argv, want) in [
+        (&["trusty-mpm", "launch", "--twin"][..], true),
+        (&["trusty-mpm", "launch"][..], false),
+    ] {
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Launch { twin, worktree, .. } => {
+                assert_eq!(twin, want, "{argv:?}");
+                assert!(!worktree, "{argv:?}");
+            }
+            other => panic!("expected launch, got {other:?}"),
+        }
+    }
+}
+
+/// `--twin --worktree` is refused, and only that pair (#8878 review).
+#[test]
+fn twin_preflight_refuses_only_twin_with_worktree() {
+    use crate::commands::launch_twin::preflight;
+    for (twin, worktree, refused) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
+        let got = preflight(twin, worktree);
+        assert_eq!(got.is_err(), refused, "twin={twin} worktree={worktree}");
+    }
+}
+
+/// `tm launch --twin --worktree` is refused before `launch` resolves, inits
+/// or provisions anything — the directory is not even read (#8878 review).
+#[tokio::test]
+async fn a_twin_worktree_launch_is_refused_before_anything_is_touched() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let absent = root.path().join("never-created");
+    let err = crate::commands::launch::launch(
+        &reqwest::Client::new(),
+        "http://127.0.0.1:1",
+        Some(absent.to_string_lossy().into_owned()),
+        None,
+        true,
+        crate::commands::managed_workspace::LaunchDir::OperatorCwd,
+        None,
+        true,
+    )
+    .await
+    .expect_err("a twin worktree launch is refused");
+    assert!(err.to_string().contains("`--worktree`"), "{err}");
+    assert!(!absent.exists());
+}
+
+/// A twin session must run in the directory the grant was checked for.
+#[test]
+fn twin_placement_must_be_the_checked_directory() {
+    use crate::commands::launch_twin::confirm_placement;
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let (checked, other) = (root.path().join("checked"), root.path().join("other"));
+    std::fs::create_dir(&checked).expect("mkdir");
+    std::fs::create_dir(&other).expect("mkdir");
+    assert!(confirm_placement(&checked, &checked.join(".")).is_ok());
+    assert!(confirm_placement(&checked, &other).is_err());
+    assert!(confirm_placement(&checked, &root.path().join("absent")).is_err());
+}
+
+/// The no-origin and reattach refusals fire for `--twin` only; a plain launch
+/// passes both (#8878 review).
+#[test]
+fn twin_refusals_apply_only_to_twin_launches() {
+    use crate::commands::launch_twin::{refuse_live_checkout, refuse_reattach};
+    for twin in [false, true] {
+        assert_eq!(
+            refuse_live_checkout(twin).is_err(),
+            twin,
+            "live, twin={twin}"
+        );
+        assert_eq!(
+            refuse_reattach(twin, "tm-x").is_err(),
+            twin,
+            "reattach, twin={twin}"
+        );
     }
 }
 
@@ -1196,6 +1323,14 @@ fn cli_account_flag_after_subcommand() {
 #[test]
 fn cli_parses_user_alias_for_account_global() {
     let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+}
+
+/// 🔴 #9090 REGRESSION: `--u <login>` binds the same field as `--account`.
+/// The form × position matrix is in `run_target_tests.rs`.
+#[test]
+fn cli_parses_u_alias_for_account_global() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "--u", "bob-duetto", "status"]).unwrap();
     assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
 }
 
@@ -1860,6 +1995,61 @@ fn resolve_managed_target_empty_list_is_none() {
     );
 }
 
+/// #8378 PR-C: the three `tm content` verbs and their flags.
+#[test]
+fn cli_parses_content_install_update_and_status() {
+    use crate::cli::ContentAction;
+    let parse = |args: &[&str]| {
+        let mut argv = vec!["trusty-mpm", "content"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command.unwrap() {
+            Command::Content { action } => action,
+            other => panic!("expected content, got {other:?}"),
+        }
+    };
+    match parse(&["install", "--from", "/b/content-v0.1.0.tar.gz"]) {
+        ContentAction::Install { from } => {
+            assert_eq!(from, std::path::Path::new("/b/content-v0.1.0.tar.gz"));
+        }
+        other => panic!("expected install, got {other:?}"),
+    }
+    assert!(matches!(
+        parse(&["update"]),
+        ContentAction::Update { content_ref: None }
+    ));
+    match parse(&["update", "--content-ref", "content-v0.2.0"]) {
+        ContentAction::Update { content_ref } => {
+            assert_eq!(content_ref.as_deref(), Some("content-v0.2.0"));
+        }
+        other => panic!("expected update, got {other:?}"),
+    }
+    assert!(matches!(parse(&["status"]), ContentAction::Status));
+    assert!(Cli::try_parse_from(["trusty-mpm", "content", "install"]).is_err());
+}
+
+/// #8389 owner ruling: `install --help` and `update --help` state that the
+/// sidecar is required and checks the transfer only, with a first-use pin.
+#[test]
+fn cli_content_help_states_the_sidecar_limit() {
+    use clap::CommandFactory as _;
+    for verb in ["install", "update"] {
+        let mut root = Cli::command();
+        let help = root
+            .find_subcommand_mut("content")
+            .expect("content group")
+            .find_subcommand_mut(verb)
+            .expect("content verb")
+            .render_long_help()
+            .to_string();
+        for needle in ["is required", "proves the transfer only", "first use"] {
+            assert!(
+                help.contains(needle),
+                "`content {verb} --help` omits {needle}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
@@ -2102,41 +2292,6 @@ fn cli_parses_issue_current_and_states_and_repair() {
             ..
         }
     ));
-}
-
-#[test]
-fn gui_not_found_error_has_install_hint() {
-    // Why: when `trusty-mpm-gui` is not installed, `tm gui` must fail with an
-    // actionable message telling the user how to install it (gui decoupling,
-    // publish-prep). A bare "No such file" from the OS is not acceptable.
-    // What: feeds a synthetic `NotFound` spawn error into the result mapper and
-    // asserts the error string carries the `cargo install trusty-mpm-gui` hint.
-    let not_found = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-    let err = crate::commands::gui::gui_status_to_result(Err(not_found))
-        .expect_err("NotFound spawn error must map to an Err");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("cargo install trusty-mpm-gui"),
-        "expected install hint, got: {msg}"
-    );
-    assert!(
-        msg.contains("not installed"),
-        "expected 'not installed' phrasing, got: {msg}"
-    );
-}
-
-#[test]
-fn gui_binary_resolution_falls_back_to_bare_name() {
-    // Why: when no `trusty-mpm-gui` sibling exists next to the running binary,
-    // the resolver must fall back to the bare name so the OS resolves it on PATH
-    // (Single-Install convention). The test binary's dir has no such sibling.
-    // What: asserts the resolved path's file name is exactly `trusty-mpm-gui`.
-    let resolved = crate::commands::gui::resolve_gui_binary();
-    assert_eq!(
-        resolved.file_name().and_then(|n| n.to_str()),
-        Some("trusty-mpm-gui"),
-        "resolver must yield a trusty-mpm-gui path, got: {resolved:?}"
-    );
 }
 
 #[test]

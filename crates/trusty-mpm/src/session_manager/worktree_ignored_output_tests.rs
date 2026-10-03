@@ -99,7 +99,8 @@ fn harness_paths_are_excused_and_look_alikes_are_not() {
         (".trusty-mpm/", true),
         (".trusty-mpm/sessions/a.json", true),
         (".claude/settings.json", true),
-        (".claude/settings.json.20260926T0000Z.bak", true),
+        (".claude/settings.json.20260926T000000Z.bak", true),
+        (".claude/settings.json.bak", true),
         (".claude/settings.json.lock", true),
         (".claude/settings.local.json", true),
         (".claude/agents/", false),
@@ -117,6 +118,65 @@ fn harness_paths_are_excused_and_look_alikes_are_not() {
         ("crates/a/.claude/settings.json", false),
         (".trusty-mpmx", false),
         ("results/out.json", false),
+    ] {
+        assert_eq!(is_harness_path(rel), harness, "{rel}");
+    }
+}
+
+/// 🔴 #8540: a user file whose name merely starts with `settings.json` is run
+/// output, not harness bookkeeping, so removal keeps it. Fails at a791b467ee,
+/// whose `.claude/settings.json*` prefix excused all three.
+#[test]
+fn settings_json_look_alikes_are_not_harness() {
+    for rel in [
+        ".claude/settings.json-notes.md",
+        ".claude/settings.jsonc",
+        ".claude/settings.json.mine.bak",
+    ] {
+        assert!(!is_harness_path(rel), "{rel}");
+    }
+}
+
+/// 🔴 #8540 follow-up: the `.claude/settings.local.json*` prefix excused a
+/// user's look-alike, and the reap's `git worktree remove --force` deleted it.
+/// Fails at e911f70771.
+#[test]
+fn settings_local_json_look_alikes_are_not_harness() {
+    for rel in [
+        ".claude/settings.local.json-notes.md",
+        ".claude/settings.local.jsonc",
+        ".claude/settings.local.json.mine",
+    ] {
+        assert!(!is_harness_path(rel), "{rel}");
+    }
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("local-look-alike");
+    exclude(&fx, ".claude/\n");
+    put(&wt, ".claude/settings.local.json", "{}");
+    put(&wt, ".claude/settings.local.json-notes.md", "keep me");
+    let kept = kept_ignored_output(&wt)
+        .expect("the check completes")
+        .expect("the notes file is kept output");
+    assert_eq!((kept.files, kept.first.as_str()), (1, ".claude/"));
+}
+
+/// 🔴 #8540 follow-up: a crashed atomic write's staging file is harness
+/// output; a name that only resembles one is not. Fails at e911f70771, where
+/// no `settings.json` staging name was excused.
+#[test]
+fn settings_staging_leftovers_are_harness() {
+    for (rel, harness) in [
+        (".claude/settings.json.tmp.4242.0", true),
+        (".claude/settings.json.bak.4242.17", true),
+        (".claude/settings.json.4242.3.tmp", true),
+        (".claude/settings.local.json.tmp.4242.0", true),
+        (".claude/settings.local.json.4242.3.tmp", true),
+        (".claude/settings.local.json.bak", true),
+        (".claude/settings.json.tmp", false),
+        (".claude/settings.json.tmp.4242", false),
+        (".claude/settings.json.tmp.notes.0", false),
+        (".claude/settings.json.1.2.3.tmp", false),
+        (".claude/settings.local.json.4242.x.tmp", false),
     ] {
         assert_eq!(is_harness_path(rel), harness, "{rel}");
     }

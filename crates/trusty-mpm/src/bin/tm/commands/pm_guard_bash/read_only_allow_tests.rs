@@ -871,3 +871,77 @@ fn shell_syntax_around_quoted_patterns_is_refused() {
         ],
     );
 }
+
+/// 🔴 REGRESSION (#8628): a `security` agent names the project's gh
+/// credential for the #7748 base-ref check. Refused on origin/main, where an
+/// environment prefix reads as the program name.
+#[test]
+fn a_gh_config_dir_prefix_reaches_git_ls_remote() {
+    let incident = "GH_CONFIG_DIR=/Users/example/.config/gh git ls-remote origin refs/heads/main";
+    assert_eq!(run(Some("security"), incident), None);
+    check(
+        true,
+        &[
+            incident,
+            "GH_CONFIG_DIR=/cfg git -C /repo ls-remote origin refs/heads/main",
+            "GH_CONFIG_DIR=/cfg git --no-pager ls-remote --heads origin",
+            "cd /repo && GH_CONFIG_DIR=/cfg git ls-remote origin refs/heads/main",
+            "GH_CONFIG_DIR=/cfg git ls-remote origin refs/heads/main | head -1",
+        ],
+    );
+}
+
+/// #8628: the prefix admits `git ls-remote` and nothing else; every other
+/// assignment, position, spelling and subcommand stays refused.
+#[test]
+fn a_gh_config_dir_prefix_admits_nothing_but_git_ls_remote() {
+    check(
+        false,
+        &[
+            "GH_CONFIG_DIR=/cfg git status",
+            "GH_CONFIG_DIR=/cfg git fetch origin main",
+            "GH_CONFIG_DIR=/cfg git checkout -- Cargo.toml",
+            "GH_CONFIG_DIR=/cfg gh pr view 1",
+            "GH_CONFIG_DIR=/cfg gh api repos/o/r/git/ref/heads/main",
+            "GH_CONFIG_DIR=/cfg sed -i s/a/b/ f",
+            "GH_CONFIG_DIR=/cfg /usr/bin/git ls-remote origin",
+            "GH_CONFIG_DIR=/cfg 'git' ls-remote origin",
+            "GH_CONFIG_DIR=/cfg",
+            "GH_CONFIG_DIR= git ls-remote origin",
+            "GH_CONFIG_DIR=cfg git ls-remote origin",
+            "GH_CONFIG_DIR=~/.config/gh git ls-remote origin",
+            "\"GH_CONFIG_DIR=/cfg\" git ls-remote origin",
+            "GH_CONFIG_DIR=/cfg GIT_SSH_COMMAND=sh git ls-remote origin",
+            "GIT_SSH_COMMAND=sh GH_CONFIG_DIR=/cfg git ls-remote origin",
+            "GH_CONFIG_DIR=/cfg GH_CONFIG_DIR=/cfg git ls-remote origin",
+            "GH_CONFIG_DIR=/cfg git -c core.sshCommand=sh ls-remote origin",
+            "GH_CONFIG_DIR=/cfg git ls-remote -u x origin",
+            "GH_CONFIG_DIR=/cfg git ls-remote --upload-pack=x origin",
+            "GH_CONFIG_DIR=/cfg git ls-remote 'ext::sh -c x'",
+            "GH_CONFIG_DIR=/cfg git ls-remote origin > refs.txt",
+            "git ls-remote origin | GH_CONFIG_DIR=/cfg git ls-remote origin",
+            "for f in /a/*.git; do GH_CONFIG_DIR=/cfg git ls-remote \"$f\"; done",
+        ],
+    );
+}
+
+/// #9001 case 6: a `sed -n` print of a variable path stays refused, and the
+/// refusal names the literal-path remedy; the literal spelling is allowed.
+#[test]
+fn a_variable_path_refusal_names_the_literal_path_remedy_9001() {
+    for command in [
+        "F=crates/x/src/lib.rs; sed -n '10,20p' $F",
+        "sed -n '10,20p' \"$F\"",
+    ] {
+        let reason = run(Some("code-critic"), command).expect("refused");
+        assert!(
+            reason.contains("Write every path out literally")
+                && reason.contains("sed -n '10,20p' src/lib.rs"),
+            "{command}: {reason}"
+        );
+    }
+    assert_eq!(
+        run(Some("code-critic"), "sed -n '10,20p' crates/x/src/lib.rs"),
+        None
+    );
+}

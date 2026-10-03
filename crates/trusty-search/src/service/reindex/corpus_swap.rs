@@ -28,15 +28,16 @@ use std::path::{Path, PathBuf};
 
 use super::checkpoint::{ReindexCheckpoint, ResumeState};
 
-/// Resolve the staging (`index.redb.tmp`) path for this index, or `None` when
-/// it cannot be resolved.
+/// Resolve this run's staging corpus path for this index, or `None` when it
+/// cannot be resolved.
 ///
 /// Why (#3979): `begin_staged_corpus_swap` used to compute this inline, but the
 /// resume probe has to look at the SAME file before staging begins. Two copies
 /// of the colocated-vs-legacy routing would be a silent correctness hazard — the
 /// probe could inspect one file while the swap wrote another — so both callers
 /// share this one function.
-/// What: returns `index.redb.tmp` inside the registry-named storage directory
+/// What: returns `staging_name` (the run's own file, #8889) inside the
+/// registry-named storage directory
 /// (#8438 — never chosen by probing for `<root>/.trusty-search/`). A resolution
 /// failure is logged — a #8438 guard refusal at `error`, anything else at
 /// `warn` — and returns `None`, which puts the caller on the
@@ -47,12 +48,10 @@ use super::checkpoint::{ReindexCheckpoint, ResumeState};
 pub(super) async fn staging_corpus_path(
     handle: &IndexHandle,
     index_id: &IndexId,
+    staging_name: &str,
 ) -> Option<PathBuf> {
-    let resolved = crate::service::storage_layout::handle_file(
-        handle,
-        crate::service::storage_layout::REDB_TMP_FILE,
-    )
-    .await;
+    // #8889: a per-run name, never the shared `index.redb.tmp`.
+    let resolved = crate::service::storage_layout::handle_file(handle, staging_name).await;
     match resolved {
         Ok(p) => Some(p),
         Err(e) => {
@@ -92,8 +91,9 @@ pub(super) async fn staging_corpus_path(
 /// therefore destroyed data the daemon cannot rebuild while the run reported
 /// `Complete` (ADR-0009 §Decision 1 requires the opposite).
 ///
-/// What: when the index has a durable corpus store, opens a fresh
-/// `index.redb.tmp`, seeds it from the live corpus (whole corpus when
+/// What: when the index has a durable corpus store, deletes earlier runs'
+/// leftover staging files and opens a fresh staging corpus under this run's own
+/// `staging_name` (#8889), seeds it from the live corpus (whole corpus when
 /// `!force`, contributed overlay and applied migration stamp always), and
 /// swaps it onto the indexer. Force preserves the exact prior schema version;
 /// only the migration runner can advance it after applying a migration (#6985).
@@ -127,6 +127,7 @@ pub(super) async fn begin_staged_corpus_swap(
     // time, when the rename requires every handle released.
     resume: Option<ResumeState>,
     checkpoint: Option<&ReindexCheckpoint>,
+    staging_name: &str,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
     begin_staged_corpus_swap_with_schema_reader(
         handle,
@@ -134,6 +135,7 @@ pub(super) async fn begin_staged_corpus_swap(
         force,
         resume,
         checkpoint,
+        staging_name,
         crate::core::corpus::CorpusStore::read_schema_version_sync,
     )
     .await
@@ -149,6 +151,7 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     force: bool,
     resume: Option<ResumeState>,
     checkpoint: Option<&ReindexCheckpoint>,
+    staging_name: &str,
     read_schema: impl FnOnce(&crate::core::corpus::CorpusStore) -> anyhow::Result<u32> + Send + 'static,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
     // #3979: adopt the already-validated staging corpus rather than deleting it.
@@ -176,9 +179,11 @@ async fn begin_staged_corpus_swap_with_schema_reader(
     // Issue #403: route tmp corpus path to colocated or legacy storage
     // (extracted to `staging_corpus_path` for #3979 — the resume probe must
     // resolve the identical path).
-    let Some(tmp_path) = staging_corpus_path(handle, index_id).await else {
+    let Some(tmp_path) = staging_corpus_path(handle, index_id, staging_name).await else {
         return Ok(None);
     };
+    // #8889: delete earlier runs' staging files; this run never opens them.
+    super::staging_leftovers::sweep(&tmp_path, index_id).await;
     // Open the staging store on a blocking worker (redb's API is sync), then
     // seed it from the live corpus when performing an incremental reindex.
     //
@@ -339,7 +344,8 @@ async fn begin_staged_corpus_swap_with_schema_reader(
 /// Returns `Ok(Some(tmp_path))` — since #4721 the handle is already open, so
 /// there is no adoption failure mode left to fall back from.
 /// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`,
-/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`.
+/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`,
+/// `super::resume_tests::a_resumed_first_walk_embeds_the_chunks_it_adopted`.
 async fn adopt_staged_corpus(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -356,7 +362,9 @@ async fn adopt_staged_corpus(
         let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
     }
     // Drop caches built from the LIVE corpus — see the doc comment above.
-    let reclaimed = handle.indexer.read().await.reclaim_memory_now().await;
+    // #8884: mark them evicted even when empty (a first walk killed before its
+    // promotion), or no reader rehydrates the adopted rows.
+    let reclaimed = handle.indexer.read().await.invalidate_corpus_caches().await;
     tracing::info!(
         "reindex[{}]: adopted staging corpus {} ({} staged chunk(s)); dropped {} \
          in-memory cache entr(ies) built from the pre-crash live corpus so reads \

@@ -55,6 +55,7 @@ fn session(name: &str, state: &str, slot: u32) -> ManagedSessionSummary {
         slot,
         deleted: false,
         auto_resume_parked: None,
+        kind: None,
     }
 }
 
@@ -601,6 +602,7 @@ fn delete_outcome_names_the_soft_delete() {
             name: "tm-bravo-02".to_string(),
             prior_state: "stopped".to_string(),
             local: false,
+            note: None,
         }),
     );
     assert_eq!(severity, Severity::Info);
@@ -618,9 +620,31 @@ fn delete_outcome_reports_the_local_store() {
             name: "local-01".to_string(),
             prior_state: "stopped".to_string(),
             local: true,
+            note: None,
         }),
     );
     assert!(text.contains("project store"), "{text}");
+}
+
+/// #8935: a delete that left a live tmux session with the record's name says
+/// so in the status line.
+#[test]
+fn delete_outcome_says_a_live_session_was_left_running() {
+    let note = "tmux session 'tm-x' is live but does not hold this record's pane %7; \
+                it was left running";
+    let (text, _) = delete_outcome(
+        "tm-x",
+        Ok(DeleteReport::Deleted {
+            name: "tm-x".to_string(),
+            prior_state: "stopped".to_string(),
+            local: false,
+            note: Some(note.to_string()),
+        }),
+    );
+    assert!(
+        text.contains("record only") && text.contains(note),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1590,6 +1614,18 @@ fn target(name: &str, repo: &str) -> Target {
     }
 }
 
+/// [`target`] carrying [`stub_checkout`]'s answer instead of the real resolver's.
+///
+/// #8582: pairs with `targets_from_with(.., stub_checkout)` so neither side of a
+/// full `Target` comparison reads the projects-root env sibling tests `set_var`.
+fn stub_target(name: &str, repo: &str) -> Target {
+    Target::Registered {
+        name: name.to_string(),
+        repo: repo.to_string(),
+        checkout: stub_checkout(&project(name, repo)),
+    }
+}
+
 /// Three registered rows, in the alphabetical order #7421 renders them:
 /// `acme/widgets`, `bobmatnyc/trusty-tools`, `duetto/apex`.
 fn three_projects() -> Vec<Target> {
@@ -1694,9 +1730,15 @@ fn new_session_labels_disambiguate_by_host() {
 /// Why (#7406 requirement 3): the owner's screen listed a probe registered at a
 /// `/private/tmp/…/scratchpad/…` path. The fixture carries that row, a row
 /// whose path is gone, and two rows that must survive.
+///
+/// #8582: `targets_from_with(.., stub_checkout)` and [`stub_target`], not
+/// `targets_from` and [`target`]. Those resolve `checkout` through the real
+/// `local_checkout_for` twice — once per side — reading `TRUSTY_MPM_REPOS_ROOT`
+/// each time, so a sibling test's `set_var` between the reads failed the
+/// comparison. The filter under test is the same one `targets_from` runs.
 #[test]
 fn new_session_targets_from_drops_a_scratchpad_registration() {
-    let targets = new_session::targets_from(
+    let targets = new_session::targets_from_with(
         &[
             project(
                 "mcp-probe-scratch-4181",
@@ -1707,12 +1749,13 @@ fn new_session_targets_from_drops_a_scratchpad_registration() {
             project("apex", "https://github.com/duetto/apex"),
         ],
         &[],
+        stub_checkout,
     );
     assert_eq!(
         targets,
         vec![
-            target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            target("apex", "https://github.com/duetto/apex"),
+            stub_target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+            stub_target("apex", "https://github.com/duetto/apex"),
             Target::Other,
         ]
     );

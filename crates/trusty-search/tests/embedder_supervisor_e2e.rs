@@ -515,7 +515,6 @@ mod e2e {
     /// Test: this test (no ONNX binary required; always runs).
     #[test]
     #[serial_test::serial(embedder_supervisor_e2e)]
-    #[ignore = "pure env-var test — safe to run but grouped with e2e for discoverability"]
     fn bad_explicit_bin_path_returns_error() {
         // SAFETY: every test in this module shares the same serial guard.
         let old = std::env::var("TRUSTY_EMBEDDERD_BIN").ok();

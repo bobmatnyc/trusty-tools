@@ -14,9 +14,7 @@ use super::*;
 // #7685: the sidecar probes these tests drive now live beside `doctor.rs`
 // rather than inside it. Same functions, same assertions — only the module
 // boundary moved, so the import is what changed and nothing else.
-use super::doctor_sidecars::{
-    check_memory, check_search, expected_search_index_id, index_present, probe_health,
-};
+use super::doctor_sidecars::{check_search, expected_search_index_id, index_present, probe_health};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::daemon::search_rpc;
 
@@ -40,18 +38,13 @@ fn index_present_matches_each_shape() {
 async fn memory_unreachable_is_fail() {
     // #6286: a path under a directory that cannot exist is refused by the
     // kernel immediately, so the probe must fail cleanly rather than hang.
-    // `TRUSTY_MEMORY_SOCKET` is what `resolve_memory_socket` honours first.
-    unsafe {
-        std::env::set_var(
-            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
-            "/nonexistent/trusty-memory/trusty-memory.sock",
-        );
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let check = check_memory(tmp.path()).await;
-    unsafe {
-        std::env::remove_var(trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV);
-    }
+    // #8225: the dead socket is passed to `probe_health` directly, as the
+    // sibling memory tests do. Setting `TRUSTY_MEMORY_SOCKET` process-wide
+    // leaked into a concurrent `run_doctor` and split its `memory` row across
+    // transports in `parity_doctor_agrees_across_transports`.
+    let socket = std::path::Path::new("/nonexistent/trusty-memory/trusty-memory.sock");
+    let addr = socket.display().to_string();
+    let check = probe_health("memory", "trusty-memory", socket, &addr).await;
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
@@ -432,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_sixty_one_checks() {
+async fn run_doctor_produces_sixty_seven_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -473,7 +466,13 @@ async fn run_doctor_produces_sixty_one_checks() {
     // fifty-five); issue #8236 adds `launchd_secrets` and `credential_reach`
     // (fifty-six → fifty-eight); issue #8415 adds `launchd_process_type`
     // (fifty-eight → fifty-nine), then `tmux_priority` (fifty-nine → sixty);
-    // issue #8482 adds `bundled_asset_lag` (sixty → sixty-one).
+    // issue #8482 adds `bundled_asset_lag` (sixty → sixty-one); issue #8453
+    // adds `session_profile` (sixty-one → sixty-two); issue #8926 adds
+    // `tcp_listeners` (sixty-two → sixty-three).
+    // #8980 adds session_claudes (sixty-three → sixty-four).
+    // #9018 adds pm_guard (sixty-four → sixty-five).
+    // #8378 adds content (sixty-five → sixty-six).
+    // #9091 adds org_accounts (sixty-six → sixty-seven).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -504,6 +503,11 @@ async fn run_doctor_produces_sixty_one_checks() {
         "skill_project_tier",
         "legacy_sources",
         "legacy_overrides",
+        // #8453: the resolved session profile, or why it fell back to PM.
+        "session_profile",
+        // #9018: whether `[pm_guard] enabled = false` turned the guard off.
+        "pm_guard",
+        "org_accounts",
         // #7616: whether the instruction fold saved this project anything, or
         // is inactive — the state a daemon-log line used to be the only
         // evidence of. Named `instruction_fold` since #7867.
@@ -558,8 +562,12 @@ async fn run_doctor_produces_sixty_one_checks() {
         // #8482: the binary's own embedded skill assets against `origin/main` —
         // the row above reads a registry ledger, never the source tree.
         "bundled_asset_lag",
+        // #8378 PR-C: the runtime content source, pin and sha256 (ADR-0064).
+        "content",
         // #5007: `sessions.json` integrity — a corrupt store blocks every write.
         "session_store",
+        // #8980: an untrusted `session-claudes.json` seals the registry.
+        "session_claudes",
         // #6556: undelivered SubagentStop records waiting on disk, or a spool
         // the hook cannot write into.
         "stop_spool",
@@ -572,6 +580,8 @@ async fn run_doctor_produces_sixty_one_checks() {
         "launchd_process_type",
         // #8415: the observed priority of the running tmux server.
         "tmux_priority",
+        // #8926: trusty-* TCP listeners against the ADR-0032 allowlist.
+        "tcp_listeners",
         // #6529: pseudo-terminal headroom — a session leak exhausts it and the
         // next spawn fails with a bare ENXIO.
         "pty_headroom",

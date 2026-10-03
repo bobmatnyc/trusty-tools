@@ -47,10 +47,12 @@ fn tombstoned(tmux_name: &str, workspace: &Path) -> SessionRecord {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 

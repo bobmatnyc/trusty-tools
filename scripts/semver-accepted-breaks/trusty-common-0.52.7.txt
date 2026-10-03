@@ -1,0 +1,14 @@
+crate   trusty-common
+version 0.52.7
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::Bind 9 -> 11
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::Chmod 10 -> 12
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::Connect 13 -> 15
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::ForeignPeer 17 -> 19
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::NotASocketFile 8 -> 10
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::PeerCred 16 -> 18
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::SocketBuffer 14 -> 16
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::SocketBufferRead 15 -> 17
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::StatForConnect 12 -> 14
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::UnsupportedPlatform 18 -> 20
+accept  enum_no_repr_variant_discriminant_changed variant UdsSecurityError::UntrustedSocket 11 -> 13

@@ -81,14 +81,68 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// The sha256 (hex) of `path`'s bytes, or `None` when it cannot be read.
+/// The sha256 (hex) of `path`'s bytes, or `None` when it cannot be read or is
+/// not a regular file.
+///
+/// Why: `--force` deletes what this vouches for, and a FIFO named `CLAUDE.md`
+/// blocked the read forever inside decommission's blocking check (#8540).
+/// What: opened with `O_NOFOLLOW | O_NONBLOCK`, so neither a symlink nor a
+/// FIFO can stall the open; the handle must then be a regular file, and its
+/// bytes are streamed into the hash.
+/// Test: `provisioning_entry_refuses_a_claude_md_that_is_not_a_regular_file`.
 fn file_sha256(path: &Path) -> Option<String> {
-    std::fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+    use sha2::{Digest as _, Sha256};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // #8540: fail closed on a symlink, FIFO, socket or device.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
 }
 
-/// `path`'s [`PreState`]; only `NotFound` is [`PreState::Absent`].
+/// `path`'s bytes when it is a regular file and not a symlink, read without
+/// ever blocking on the open.
+///
+/// Why: `std::fs::read` on a FIFO blocks until a writer appears, which hung a
+/// launch's [`snapshot`] and decommission's `?? .gitignore` check (#8540).
+/// What: opened with `O_NOFOLLOW | O_NONBLOCK`, as [`file_sha256`] is, so a
+/// symlink fails the open (`ELOOP`) and a FIFO's open returns at once; the
+/// handle must then be a regular file, or the answer is an `InvalidInput`
+/// error. Every caller treats any error as "not tm's".
+/// Test: `a_fifo_claude_md_or_gitignore_does_not_block_snapshot`,
+/// `a_fifo_untracked_gitignore_is_not_excused_and_does_not_block`,
+/// `a_symlinked_untracked_gitignore_is_not_excused`.
+pub(super) fn read_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // #8540: check the type on the open handle, never read a FIFO or device,
+    // and never follow a symlink to bytes that are not the tree's own.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("`{}` is not a regular file", path.display()),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `path`'s [`PreState`]; only `NotFound` is [`PreState::Absent`], and a
+/// symlink, FIFO or other non-regular file is [`PreState::Unreadable`] (#8540).
 fn pre_state(path: &Path) -> PreState {
-    match std::fs::read(path) {
+    match read_regular_file(path) {
         Ok(bytes) => PreState::Hashed(sha256_hex(&bytes)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => PreState::Absent,
         Err(_) => PreState::Unreadable,
@@ -111,9 +165,13 @@ fn copied_from(rel: &str) -> Option<&'static str> {
     (rel == ".claude/settings.json.bak").then_some(".claude/settings.json")
 }
 
-/// `.gitignore`'s lines under `ws`; empty when absent or unreadable.
+/// `.gitignore`'s lines under `ws`; empty when absent, unreadable, not UTF-8,
+/// a symlink or not a regular file.
 fn gitignore_lines(ws: &Path) -> Vec<String> {
-    std::fs::read_to_string(ws.join(".gitignore"))
+    // #8540: a FIFO `.gitignore` blocked `std::fs::read_to_string` forever.
+    read_regular_file(&ws.join(".gitignore"))
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .map(|body| body.lines().map(str::to_string).collect())
         .unwrap_or_default()
 }

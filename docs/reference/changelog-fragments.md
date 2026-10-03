@@ -8,6 +8,12 @@
 
 Introduced by issue #4476, superseding the shared-`## [Unreleased]` convention.
 
+Instructional content under `content/` keeps its own fragments in
+`content/changelog.d/`, in the same format, rolled into
+`content/CONTENT-CHANGELOG.md` by `scripts/assemble-changelog.sh content
+<version>` (#8388). The same gate enforces them; see
+[content-release.md](content-release.md#versioning-and-changelog-8388).
+
 ## File Location and Name
 
 ```
@@ -135,7 +141,7 @@ banned either way.
 Between a release cut merging and its tag being pushed, a crate's
 `## [<version>]` section already exists. A source fix landing in that gap cannot
 just add a fragment: `scripts/check-changelog-assembled.sh` — preflight CHECK 9,
-and the merge-time half in `changelog-fragment.yml` — fails on any fragment left
+and the merge-time half in the `changelog-fragment` job of `ci.yml` — fails on any fragment left
 unconsumed, so the fix would block the publish it is meant to unblock. Folding it
 in with `--merge` then deleted the fragment, and the per-PR fragment gate read
 that as an omission. Both gates were right and the PR could satisfy neither
@@ -180,10 +186,15 @@ stays, scoped to rendering the **GitHub Release body** in
 
 A PR that changes crate source and lands with no fragment is a **review-gate
 failure**, the same tier as a failing `cargo test` / `cargo clippy` gate — and it
-is also a CI failure (`.github/workflows/changelog-fragment.yml` →
+is also a CI failure (the `changelog-fragment` job of `.github/workflows/ci.yml` →
 `scripts/check_changelog_fragment.sh`). No "trivial change" exception.
 
-Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment.
+Docs-only, CI-only, test-only and `testdata/` PRs may skip the fragment. So
+may a PR that only adds or modifies Cargo-inert instruction assets — the
+`.md` content under `crates/trusty-mpm/src/assets/`, and `content/**` (owner ruling
+2026-09-27). The list is `is_inert_instruction_asset` in
+`scripts/lib/source_class.sh`, which `scripts/detect-docs-only.sh` reads too.
+Deleting such an asset still owes a fragment.
 
 ### The test-only exemption is decided by FILE PATH (#7033)
 

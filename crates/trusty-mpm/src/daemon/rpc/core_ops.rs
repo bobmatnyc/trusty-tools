@@ -84,7 +84,8 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
 
 /// The full stack diagnostic (`GET /api/v1/doctor`, `mpm.doctor`).
 ///
-/// Test: `doctor_endpoint_returns_report`, `parity_doctor_agrees_across_transports`.
+/// Test: `doctor_endpoint_returns_report`, `parity_doctor_agrees_across_transports`,
+/// `a_sealed_daemon_warns_on_the_doctor_route_after_the_file_is_fixed_8980`.
 pub async fn doctor(
     state: &Arc<DaemonState>,
     query: DoctorQuery,
@@ -93,7 +94,11 @@ pub async fn doctor(
     // counts are all derived by `run_doctor_for_manager`, so this route and the
     // daemonless `tm doctor` CLI cannot drift on how the fleet is read.
     let mgr = state.session_manager().await;
-    crate::daemon::doctor::run_doctor_for_manager(&mgr, query.project.as_deref()).await
+    let mut report =
+        crate::daemon::doctor::run_doctor_for_manager(&mgr, query.project.as_deref()).await;
+    // #8980: only this route holds the daemon's seal; a fixed file does not lift it.
+    crate::daemon::doctor::apply_daemon_seal(&mut report, state.session_claudes().sealed());
+    report
 }
 
 /// Recently captured errors from every daemon store (`GET /api/v1/errors`,

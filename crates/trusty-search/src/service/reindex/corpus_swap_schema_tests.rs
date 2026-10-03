@@ -94,10 +94,17 @@ async fn staging_preserves_exact_applied_schema_without_advancing_it() {
     for force in [true, false] {
         for version in [0, CURRENT_SCHEMA_VERSION - 1, CURRENT_SCHEMA_VERSION] {
             let (_root, handle) = fixture(version);
-            let tmp = begin_staged_corpus_swap(&handle, &handle.id, force, None, None)
-                .await
-                .unwrap()
-                .expect("staging must engage");
+            let tmp = begin_staged_corpus_swap(
+                &handle,
+                &handle.id,
+                force,
+                None,
+                None,
+                crate::service::storage_layout::REDB_TMP_FILE,
+            )
+            .await
+            .unwrap()
+            .expect("staging must engage");
             let staged = handle.indexer.read().await.corpus_store().unwrap();
             assert_eq!(staged.chunk_count().unwrap(), usize::from(!force));
             staged.upsert_chunks(&[chunk("rebuilt")]).unwrap();
@@ -190,10 +197,17 @@ async fn force_reindex_preserves_schema_and_vectors_after_reopen() {
 async fn aborted_staging_preserves_live_schema_and_rows() {
     for force in [true, false] {
         let (_root, handle) = fixture(CURRENT_SCHEMA_VERSION - 1);
-        let tmp = begin_staged_corpus_swap(&handle, &handle.id, force, None, None)
-            .await
-            .unwrap()
-            .unwrap();
+        let tmp = begin_staged_corpus_swap(
+            &handle,
+            &handle.id,
+            force,
+            None,
+            None,
+            crate::service::storage_layout::REDB_TMP_FILE,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         handle
             .write_schema_version(CURRENT_SCHEMA_VERSION)
             .await
@@ -216,14 +230,25 @@ async fn aborted_staging_preserves_live_schema_and_rows() {
 #[tokio::test]
 async fn failed_force_staging_preserves_live_schema_and_rows() {
     let (_root, handle) = fixture(CURRENT_SCHEMA_VERSION);
-    let tmp = super::staging_corpus_path(&handle, &handle.id)
-        .await
-        .unwrap();
+    let tmp = super::staging_corpus_path(
+        &handle,
+        &handle.id,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await
+    .unwrap();
     std::fs::create_dir(&tmp).unwrap();
     let before = handle.indexer.read().await.corpus_store().unwrap();
-    let staged = begin_staged_corpus_swap(&handle, &handle.id, true, None, None)
-        .await
-        .unwrap();
+    let staged = begin_staged_corpus_swap(
+        &handle,
+        &handle.id,
+        true,
+        None,
+        None,
+        crate::service::storage_layout::REDB_TMP_FILE,
+    )
+    .await
+    .unwrap();
     assert!(staged.is_none());
     let after = handle.indexer.read().await.corpus_store().unwrap();
     assert!(Arc::ptr_eq(&before, &after));
@@ -252,6 +277,7 @@ async fn failed_schema_read_does_not_promote_force_staging() {
         true,
         None,
         None,
+        crate::service::storage_layout::REDB_TMP_FILE,
         move |source| {
             assert_eq!(
                 source.read_schema_version_sync().unwrap(),

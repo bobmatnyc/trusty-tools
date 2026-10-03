@@ -532,7 +532,8 @@ pub(crate) fn strip_process_substitution(token: &str) -> &str {
 /// secret-shaped rather than guessing.
 /// Test: `denies_brace_expanded_source_copy_into_a_worktree`,
 /// `allows_brace_expanded_source_with_no_secret_alternative`,
-/// `denies_source_with_an_unresolved_brace_group`.
+/// `denies_source_with_an_unresolved_brace_group`,
+/// `denies_a_comma_brace_bomb_past_the_reading_cap`.
 // #7266 round 3: `pub(crate)` so the read guard expands a caller's brace group
 // with THIS expander before screening each alternative — `*.{rs,ts}` must be
 // judged as `*.rs` and `*.ts`, not as one literal whose extension is `{rs,ts}`.
@@ -571,7 +572,13 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
     let prefix = &token[..start];
     let suffix = &after_open[end_rel + 1..];
     let suffix_candidates = expand_brace_alternatives(suffix)?;
-    let mut out = Vec::new();
+    // See #8878: the comma branch obeys the same cap; thirty `{a,b}` groups
+    // are 2^30 readings, and `None` makes every caller fail closed.
+    let count = alternatives.split(',').count();
+    if suffix_candidates.len().saturating_mul(count) > BRACE_READING_CAP {
+        return None;
+    }
+    let mut out = Vec::with_capacity(suffix_candidates.len() * count);
     for alt in alternatives.split(',') {
         for tail in &suffix_candidates {
             out.push(format!("{prefix}{alt}{tail}"));
@@ -587,7 +594,8 @@ pub(crate) fn expand_brace_alternatives(token: &str) -> Option<Vec<String>> {
 /// a `PreToolUse` hook must not be turned into a fork bomb by an argument. A
 /// command spelling more than this many brace readings is pathological, and
 /// failing closed on it is this module's standing bias.
-/// Test: `an_ordinary_sequence_group_is_allowed`.
+/// Test: `an_ordinary_sequence_group_is_allowed`,
+/// `denies_a_comma_brace_bomb_past_the_reading_cap`.
 const BRACE_READING_CAP: usize = 4096;
 
 /// The most elements one `{x..y}` sequence may expand to (#7499 review round).
@@ -924,6 +932,7 @@ fn names_an_unreadable_secret_file(token: &str) -> bool {
 /// `denies_a_secret_renamed_to_a_source_extension_by_any_copy_verb`,
 /// `denies_a_secret_renamed_to_an_unsuspicious_name`,
 /// `denies_a_secret_renamed_through_a_brace_group`,
+/// `denies_a_secret_renamed_to_an_unresolvable_brace_destination`,
 /// `denies_a_secret_redirected_into_a_markup_name`,
 /// `allows_a_secret_copy_that_keeps_its_own_extension`,
 /// `allows_a_secret_copy_into_a_directory`,
@@ -943,7 +952,8 @@ fn laundered_source_rename(argv: &[String]) -> Option<String> {
 /// destination, and was allowed.
 /// What: flat-maps [`expand_brace_alternatives`]; a token whose braces that
 /// expander cannot resolve is kept verbatim, which is what leaves it to the
-/// fail-closed [`is_secret_read_target`] downstream.
+/// fail-closed [`is_secret_read_target`] downstream — as a source only; a
+/// verbatim destination is not taken as proof it stays unreadable (#8878).
 /// Test: `denies_a_secret_renamed_through_a_brace_group`.
 fn brace_expanded_positionals(positional: &[String]) -> Vec<String> {
     positional
@@ -976,7 +986,9 @@ fn renamed_by_a_copy_verb(argv: &[String]) -> Option<String> {
     // #7266 round 3 (critic HIGH 3): the destination test is now "is this name
     // one the read guard also refuses", not "does it end in a source
     // extension" — `cp .env ./notes.txt` laundered a credential just as well.
-    if names_an_unreadable_secret(dest) {
+    // See #8878: an unresolvable dest reads as a secret only to fail closed,
+    // which is no proof it stays unreadable; let the source decide.
+    if expand_brace_alternatives(dest).is_some() && names_an_unreadable_secret(dest) {
         return None;
     }
     let source = sources.iter().find(|source| {
@@ -1235,6 +1247,20 @@ mod tests {
         assert!(eval("cp 'notes.{md,txt' .claude/worktrees/agent-x/").is_some());
         // Nested group: also `None`, also denied.
         assert!(eval("cp 'notes.{md,{txt,csv}}' .claude/worktrees/agent-x/").is_some());
+    }
+
+    /// See #8878: comma groups past `BRACE_READING_CAP` return `None`, which
+    /// denies, and thirty of them finish fast instead of expanding 2^30 words.
+    #[test]
+    fn denies_a_comma_brace_bomb_past_the_reading_cap() {
+        // 2^13 = 8192 readings: past the cap, yet cheap to expand pre-fix.
+        assert!(expand_brace_alternatives(&"{a,b}".repeat(13)).is_none());
+        let started = std::time::Instant::now();
+        let bomb = format!("notes{}.md", "{a,b}".repeat(30));
+        assert!(expand_brace_alternatives(&bomb).is_none());
+        assert!(eval(&format!("cp {bomb} .claude/worktrees/agent-x/")).is_some());
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
     }
 
     // --- #7122 fix round: unresolved destination variable (critic HIGH) ---
@@ -1680,6 +1706,19 @@ mod tests {
             "mv {README,NOTES}.md docs/",
         ] {
             assert_eq!(eval_outside_a_worktree(command), None, "`{command}`");
+        }
+    }
+
+    /// See #8878: a destination the expander cannot resolve (past its cap, or
+    /// unbalanced) is not proof the name stays unreadable, so the source decides.
+    #[test]
+    fn denies_a_secret_renamed_to_an_unresolvable_brace_destination() {
+        let over_cap = format!("git mv terraform.tfvars 'x{}.rs'", "{a,b}".repeat(13));
+        for command in [over_cap.as_str(), "git mv terraform.tfvars 'x{.rs'"] {
+            assert!(
+                eval_outside_a_worktree(command).is_some(),
+                "`{command}` must deny"
+            );
         }
     }
 

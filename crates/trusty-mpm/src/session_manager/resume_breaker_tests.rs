@@ -322,6 +322,16 @@ async fn a_fast_death_after_an_auto_resume_counts() {
 // End to end, through the real SessionManager
 // -------------------------------------------------------------------------
 
+/// A session workspace inside the test's own temp dir.
+///
+/// #8838: every stop writes `<workspace>/.trusty-mpm/scrollback.txt`, so a
+/// shared workspace such as `/tmp` leaks a project marker into the temp root.
+fn fixture_workspace(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).expect("create fixture workspace");
+    ws
+}
+
 /// Build an isolated manager whose breaker parks after `k` fast deaths, and
 /// seed one `Active` session on a fake tmux driver.
 async fn seeded(dir: &tempfile::TempDir, k: u32) -> (Arc<SessionManager>, ManagedSessionId) {
@@ -335,25 +345,15 @@ async fn seeded(dir: &tempfile::TempDir, k: u32) -> (Arc<SessionManager>, Manage
         max_consecutive: k,
     });
     let mgr = Arc::new(mgr);
+    let ws = fixture_workspace(dir);
     let record = mgr
-        .create(
-            "flap-test".into(),
-            Some(std::path::PathBuf::from("/tmp")),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create("flap-test".into(), Some(ws.clone()), None, None, None, None)
         .await
         .expect("create");
     let id = record.id;
-    mgr.set_workspace(
-        &id,
-        std::path::PathBuf::from("/tmp"),
-        ManagedSessionState::Active,
-    )
-    .await
-    .expect("set Active");
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("set Active");
     (mgr, id)
 }
 
@@ -582,25 +582,15 @@ async fn a_session_that_dies_slowly_is_never_parked() {
         max_consecutive: 2,
     });
     let mgr = Arc::new(mgr);
+    let ws = fixture_workspace(&tmp);
     let record = mgr
-        .create(
-            "slow".into(),
-            Some(std::path::PathBuf::from("/tmp")),
-            None,
-            None,
-            None,
-            None,
-        )
+        .create("slow".into(), Some(ws.clone()), None, None, None, None)
         .await
         .expect("create");
     let id = record.id;
-    mgr.set_workspace(
-        &id,
-        std::path::PathBuf::from("/tmp"),
-        ManagedSessionState::Active,
-    )
-    .await
-    .expect("set Active");
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("set Active");
 
     for cycle in 1..=6 {
         let r = one_cycle(&mgr, &id).await;
@@ -624,7 +614,7 @@ async fn stopped_record_with(
     let mut r = mgr
         .create(
             "cause".into(),
-            Some(std::path::PathBuf::from("/tmp")),
+            Some(fixture_workspace(dir)),
             None,
             None,
             None,
@@ -663,6 +653,27 @@ async fn park_reason_is_set_only_for_a_flapping_record() {
     assert!(
         reason.contains("tm session resume"),
         "the reason must tell an operator how to clear it: {reason}"
+    );
+}
+
+/// #8838: a stop captures scrollback into `<workspace>/.trusty-mpm/`. A fixture
+/// workspace of `/tmp` planted `/tmp/.trusty-mpm/` on every run, and every
+/// temp-dir fixture under `/tmp` then resolved its project root to `/tmp`.
+/// Test: this is the test. RED at 94a16fc27 — the path is under `/tmp`.
+#[tokio::test]
+async fn a_stopped_flap_session_writes_its_scrollback_inside_its_own_tempdir() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (mgr, id) = seeded(&tmp, 3).await;
+
+    let stopped = one_cycle(&mgr, &id).await;
+
+    let written = stopped
+        .scrollback_path
+        .expect("the stop path captured scrollback");
+    assert!(
+        written.starts_with(tmp.path()),
+        "scrollback escaped the fixture into a shared directory: {}",
+        written.display()
     );
 }
 

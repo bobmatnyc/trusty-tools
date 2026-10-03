@@ -261,11 +261,11 @@ where
 /// frame, and the server frames on `read_until(b'\n')`, so it never dispatches.
 ///
 /// [`UdsRpcError::HalfClose`] is deliberately absent even at the same errno.
-/// That phase runs after the frame is on the wire, and macOS answers ENOTCONN
-/// there once the peer has closed — which is what a server that read the frame,
-/// replied and dropped looks like. Retrying it would deliver a second copy of a
-/// request the daemon had already executed. Every read failure is out for the
-/// same reason.
+/// That phase runs after the frame is on the wire, so retrying it would
+/// deliver a second copy of a request the daemon may have executed. (Its
+/// macOS ENOTCONN — a peer that replied and closed first — is not an error at
+/// all since #8464; the read decides.) Every read failure is out for the same
+/// reason.
 ///
 /// Test: `a_non_transient_failure_is_not_retried`,
 /// `transient_classification_covers_the_three_dial_errnos`,
@@ -397,6 +397,7 @@ mod tests {
     #[test]
     fn a_failed_half_close_is_never_retried() {
         for kind in [
+            // #8464: `half_close` no longer produces this; the case covers the classifier only.
             ErrorKind::NotConnected,
             ErrorKind::BrokenPipe,
             ErrorKind::ConnectionReset,

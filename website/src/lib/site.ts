@@ -112,7 +112,6 @@ export const CRATE_GROUPS: CrateGroup[] = [
 			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
 			{ name: 'trusty-kb', description: 'Personal knowledge base as an MCP server' },
 			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
-			{ name: 'trusty-mpm-gui', description: 'Desktop dashboard for trusty-mpm' },
 			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }
 		]
 	}

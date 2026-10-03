@@ -45,9 +45,14 @@ mod tests {
     /// `SHARED_EMBEDDER` cell — run with `--include-ignored` in isolation.
     #[tokio::test]
     #[ignore = "mutates process-wide OnceCell; run in isolation with --include-ignored"]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn timeout_fires_on_embedder_init_with_tiny_limit() {
+        // #5937: the default-value readers in `timeouts.rs` hold this lock.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Force a 0-second timeout so the init times out before it can succeed.
-        // SAFETY: single-threaded async test; env mutation safe here.
+        // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
         unsafe {
             std::env::set_var("TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS", "0");
         }
@@ -110,10 +115,16 @@ mod tests {
     /// sleep that exceeds the configured timeout).
     /// What: Acquires the per-palace `write_mutex` in a background task,
     /// then sets `TRUSTY_WRITE_LOCK_TIMEOUT_SECS=0` and attempts `remember`,
-    /// which must time out on lock acquisition.
+    /// which must time out on lock acquisition with the typed
+    /// `WriteTimeout::LockWait` (#8749).
     /// Test: itself.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn write_lock_timeout_returns_error_when_held() {
+        // #5937: the default-value readers in `timeouts.rs` hold this lock.
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::memory_core::retrieval::seed_shared_embedder_with_mock();
 
         let dir = tempdir().unwrap();
@@ -165,6 +176,15 @@ mod tests {
         assert!(
             msg.contains("timed out") || msg.contains("write-lock"),
             "error must mention lock timeout: {msg}"
+        );
+        // #8749: a waiter that gives up gets a typed timeout naming the palace.
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::memory_core::timeouts::WriteTimeout>(),
+                Some(crate::memory_core::timeouts::WriteTimeout::LockWait { palace, .. })
+                    if palace == "lock-timeout"
+            ),
+            "#8749: the lock-wait timeout must be typed: {msg}"
         );
     }
 }

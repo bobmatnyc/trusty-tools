@@ -478,13 +478,35 @@ mod tests {
     /// leaks even if an assertion fails. `#[ignore]` because it needs a real
     /// tmux host; run with `cargo test -p trusty-mpm -- --include-ignored`.
     /// Test: this function IS the test.
+    ///
+    /// #6542: every `TmuxDriver::discover` here, the rollback's included,
+    /// resolves a `PrivateTmuxServer` shim through a `with_tmux_binary` scope,
+    /// so the session never lands on the operator's server. `#[serial]` keeps
+    /// it off the `#[serial]` `scratch_home` tests, whose repointed `$HOME`
+    /// makes the #5784 gate refuse tmux mid-run.
     #[test]
     #[ignore = "requires a real tmux host; run with --include-ignored"]
+    #[serial_test::serial]
     fn spawn_claude_rollback_kills_session_on_send_failure() {
         if !TmuxDriver::is_available() {
             eprintln!("tmux unavailable; skipping real-tmux rollback test");
             return;
         }
+        let tmux_bin = crate::core::tmux::resolve_tmux_binary_or_bare();
+        let server =
+            crate::test_support::tmux_session::PrivateTmuxServer::new(&tmux_bin, "rollback");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(crate::core::tmux::with_tmux_binary(
+            server.shim_bin().into(),
+            async { rollback_on_private_server() },
+        ));
+    }
+
+    /// The body of `spawn_claude_rollback_kills_session_on_send_failure`, run
+    /// inside its private-server scope.
+    fn rollback_on_private_server() {
         let driver = TmuxDriver::discover().expect("tmux available");
         let name = format!("tmpm-rollback-test-{}", std::process::id());
 

@@ -88,6 +88,7 @@ async fn reindex(handle: &Arc<IndexHandle>) {
         None,
         false,
         None,
+        super::try_claim_reindex(&handle.id, "test", false).expect("#8889: unclaimed index"),
     )
     .await;
 }

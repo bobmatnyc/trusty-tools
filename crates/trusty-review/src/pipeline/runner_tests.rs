@@ -106,7 +106,7 @@ impl FakeLlm {
                 response: r#"There is a bug.
 
 ```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
+{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 1: `fn bad`","severity":"medium","confidence":0.9,"file":"src/a.rs","line":1}]}
 ```"#
                     .to_string(),
                 error: None,
@@ -144,7 +144,7 @@ impl FakeLlm {
             response: r#"Looks fine to me.
 
 ```json
-{"verdict":"APPROVE","grade":"A","summary":"LGTM","findings":[{"title":"SQL injection","body":"the query is built by string interpolation","severity":"high","confidence":0.95,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"A","summary":"LGTM","findings":[{"title":"SQL injection","body":"the query is built by string interpolation in `format!(`","severity":"high","confidence":0.95,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
                 .to_string(),
             error: None,
@@ -198,7 +198,10 @@ impl LlmProvider for FakeVerifier {
     }
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            text: format!(r#"{{"judgment":"{}","reason":"test"}}"#, self.judgment),
+            // #8904: batch-aware — several findings may share one request.
+            text: crate::pipeline::verify_batch::test_support::answer(&req, |_| {
+                self.judgment.to_string()
+            }),
             model: req.model.clone(),
             input_tokens: 5,
             output_tokens: 3,
@@ -497,7 +500,13 @@ async fn run_review_request_changes_parsed_correctly() {
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    let deps = ready_deps(Arc::new(FakeLlm::request_changes()), None);
+    // #4044: only a verifier-confirmed finding is posted.
+    let deps = ready_deps(
+        Arc::new(FakeLlm::request_changes()),
+        Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
+    );
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(result.verdict, Verdict::RequestChanges);
@@ -1697,15 +1706,16 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
     );
 
     let result = run_review(&config, input, deps).await;
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "refuting the sole finding must relax REQUEST_CHANGES to APPROVE"
-    );
-    assert_eq!(
-        result.findings.len(),
-        1,
-        "the finding is demoted, not dropped"
+    // #8904: the refuted finding is withheld, and an emptied review is
+    // UNKNOWN — dropping a finding never yields APPROVE.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: not verified (1 refuted by the verifier)"),
+        "{}",
+        result.review_body
     );
 }
 
@@ -1755,8 +1765,10 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
     );
 }
 
-/// When verification is disabled by config, the verifier is never consulted and
-/// the verdict is the un-verified grade.
+/// When verification is disabled by config, the verifier is never consulted.
+/// Since #4044 ("withhold all", 2026-09-30) nothing is posted: the finding is
+/// withheld as "no verifier" — not "refuted", which would mean the verifier
+/// ran — and the review is UNKNOWN.
 #[tokio::test]
 async fn run_review_verification_disabled_skips_round() {
     let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
@@ -1782,15 +1794,17 @@ async fn run_review_verification_disabled_skips_round() {
     );
 
     let result = run_review(&config, input, deps).await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_findings.len(), 1);
     assert_eq!(
-        result.verdict,
-        Verdict::RequestChanges,
-        "with verification disabled the verdict must remain REQUEST_CHANGES"
+        result.withheld_findings[0].reason, "no verifier",
+        "the REFUTED verifier must not have been consulted"
     );
     assert!(
-        result.findings[0].verified.is_none(),
+        result.withheld_findings[0].finding.verified.is_none(),
         "disabled verification must not mark any finding"
     );
+    assert_eq!(result.verdict, Verdict::Unknown);
 }
 
 /// Live post + dedup-skip end-to-end requires a real PR + GitHub creds, so
@@ -1829,7 +1843,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
     let llm_response = r#"Code looks good overall, minor concern.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 1 prints `println!(\"{s}\")` unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":1}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file(
         "src/render.rs",
@@ -1860,34 +1874,12 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
 
     let result = run_review(&config, input, deps).await;
 
-    // After verification refutes the High-effort finding, the verdict must relax.
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "#1486: verification refutes the only blocking finding → verdict must be APPROVE (got {:?})",
-        result.verdict,
-    );
-
-    // The envelope grade must be consistent with APPROVE, not the pre-verification F.
-    let grade = result.grade.as_deref().unwrap_or("(none)");
-    // B- maps to APPROVE; any APPROVE-band grade (A+ through B-) is correct here.
-    // The specific value is B- (the original LLM grade, clamped to APPROVE which
-    // accepts any grade, so no clamping occurs → grade stays B-).
-    assert_eq!(
-        grade, "B-",
-        "#1486: envelope grade must be the original LLM grade B- after verification \
-         relaxes the verdict to APPROVE (before fix, it was F)"
-    );
-
-    // Sanity: the finding is preserved (demoted, not dropped) and is refuted.
-    assert_eq!(result.findings.len(), 1, "finding must be preserved");
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(crate::models::VerifyOutcome::Refuted)
-        ),
-        "the High-effort finding must be marked Refuted"
-    );
+    // #8904: the refuted finding is withheld, the emptied review is UNKNOWN,
+    // and an UNKNOWN review carries no grade (#1474) — so neither the
+    // pre-verification F nor an APPROVE grade survives.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None, "#1474: UNKNOWN carries no grade");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
 /// REGRESSION GUARD (#1486 — stable-escalation path): when a High-effort finding
@@ -1901,7 +1893,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
     let llm_response = r#"Review with confirmed critical finding.
 
 ```json
-{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 1: `fn auth(t: &str)`","severity":"high","confidence":0.95,"file":"src/auth.rs","line":1,"code_provable":true}]}
 ```"#;
     let (source, _tmp) = local_diff_source_for_file("src/auth.rs", "+fn auth(t: &str) {}");
     let config = default_config();
@@ -2355,7 +2347,7 @@ fn blocks_citing_finding_one() -> FakeLlm {
         response: r#"Finding #1 is a high-effort defect and must be resolved before merge.
 
 ```json
-{"verdict":"BLOCK","grade":"F","summary":"blocking defect","findings":[{"title":"missing await","body":"the future is dropped","severity":"high","confidence":0.9,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"BLOCK","grade":"F","summary":"blocking defect","findings":[{"title":"missing await","body":"the future in `fn bad()` is dropped","severity":"high","confidence":0.9,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
             .to_string(),
         error: None,
@@ -2393,36 +2385,20 @@ async fn run_review_refuted_finding_does_not_drive_grade_or_summary() {
 
     let result = run_review(&default_config(), input, deps).await;
 
-    assert_eq!(
-        result.verdict,
-        Verdict::Approve,
-        "refuting the sole blocking finding must relax BLOCK"
-    );
-    assert_eq!(
-        result.grade.as_deref(),
-        Some("B-"),
-        "the model's own F rested on the refuted finding — it must not survive \
-         the relaxed verdict (#4044), got {:?}",
-        result.grade
-    );
-    assert!(
-        result.review_body.contains("Verification notice"),
-        "the summary predates verification and must be qualified (#4044):\n{}",
-        result.review_body
-    );
+    // #8904: the refuted finding is withheld. The emptied review is UNKNOWN
+    // with no grade, so the model's F cannot stand (#4044), and the body leads
+    // with the withheld note so the prose's "finding #1" is qualified.
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None, "the model's F must not survive (#4044)");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(
         result
             .review_body
-            .contains("finding #1 — `src/a.rs`: missing await"),
-        "the qualifier must name the refuted finding by the index the prose \
-         uses (#4044):\n{}",
+            .contains("1 findings withheld: not verified"),
+        "the summary predates verification and must be qualified (#4044):\n{}",
         result.review_body
     );
-    assert_eq!(
-        result.findings_count,
-        result.findings.len(),
-        "the refuted finding stays in the array for transparency (REV-606)"
-    );
+    assert_eq!(result.findings_count, result.findings.len());
 }
 
 /// A reviewer response carrying #5309's finding near-verbatim: `code_provable`,
@@ -2432,7 +2408,7 @@ fn blocks_on_self_admitted_unverifiable() -> FakeLlm {
         response: r#"One blocking issue.
 
 ```json
-{"verdict":"BLOCK","grade":"F","summary":"un-awaited futures","findings":[{"title":"async functions called without .await","body":"incidents::run, dora::run, pr_metrics::run and report::run are invoked without .await, so half the sweep pipeline would silently no-op. The diff does not show their signatures, so this cannot be confirmed from the diff alone.","severity":"high","confidence":0.72,"file":"src/a.rs","line":1,"code_provable":true}]}
+{"verdict":"BLOCK","grade":"F","summary":"un-awaited futures","findings":[{"title":"async functions called without .await","body":"incidents::run, dora::run, pr_metrics::run and report::run are invoked without .await, so half the sweep pipeline would silently no-op. The diff does not show their signatures, so this cannot be confirmed from the diff alone. See `fn bad()`.","severity":"high","confidence":0.72,"file":"src/a.rs","line":1,"code_provable":true}]}
 ```"#
             .to_string(),
         error: None,
@@ -2470,22 +2446,24 @@ async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
 
     let result = run_review(&default_config(), input, deps).await;
 
-    assert_eq!(
-        result.findings.len(),
-        1,
-        "the finding must still be reported"
-    );
+    // #4044 (owner ruling on #8905, 2026-09-30): only CONFIRMED findings are
+    // posted, so the pre-stamped claim is withheld as "unverifiable" and kept
+    // verbatim in the review record.
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_findings.len(), 1);
+    let withheld = &result.withheld_findings[0];
+    assert_eq!(withheld.reason, "unverifiable");
     assert!(
         !matches!(
-            result.findings[0].verified,
+            withheld.finding.verified,
             Some(crate::models::VerifyOutcome::Confirmed)
         ),
         "nothing read the signatures — the claim must not wear a confirmation \
          (#5309), got {:?}",
-        result.findings[0].verified
+        withheld.finding.verified
     );
     assert!(
-        !result.findings[0].code_provable,
+        !withheld.finding.code_provable,
         "a claim the finding says the diff cannot settle is not diff-provable"
     );
     assert_ne!(
@@ -2494,8 +2472,8 @@ async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
         "an unchecked claim must not drive BLOCK (#5309)"
     );
     assert!(
-        result.findings[0].description.contains("incidents::run"),
-        "the original claim must still reach the author verbatim"
+        withheld.finding.description.contains("incidents::run"),
+        "the original claim is kept verbatim in the record"
     );
 }
 
@@ -2775,3 +2753,11 @@ async fn unified_path_emits_no_finding_citing_a_path_outside_the_diff() {
 // #4044: mixed refuted/confirmed sets through the whole run_review path.
 #[path = "runner_refuted_floor_tests.rs"]
 mod refuted_floor;
+
+// #8905: every posted finding cites the line that holds its code.
+#[path = "runner_citation_gate_tests.rs"]
+mod citation_gate;
+
+// #8904: every posted finding has passed the verifier.
+#[path = "runner_verify_coverage_tests.rs"]
+mod verify_coverage;

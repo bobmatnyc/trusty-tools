@@ -29,9 +29,10 @@ mod usage;
 use std::io::Read as _;
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::formatters::info_box::DaemonInfo;
-use account::{claude_account_segment_probe, claude_json_path};
+use account::{ACCOUNT_PROBE_BUDGET, claude_account_segment_probe, claude_json_path};
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
 use savings::{record_session_facts, savings_segment_probe};
@@ -156,7 +157,7 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 /// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
-    render_statusline_from(input, claude_json_path().as_deref())
+    render_statusline_from(input, claude_json_path().as_deref(), ACCOUNT_PROBE_BUDGET)
 }
 
 /// [`render_statusline`] against an explicit Claude Code config path.
@@ -167,9 +168,14 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
 /// rather than a repointed `CLAUDE_CONFIG_DIR`: `env_isolation_tests` bans this
 /// target from writing that variable, since its tests share one process (#5544).
 /// What: identical to [`render_statusline`], except the account is read from
-/// `account_config` (or omitted when that is `None` or unreadable).
+/// `account_config` (or omitted when that is `None`, unreadable, or slower
+/// than `account_budget`).
 /// Test: `render_statusline_shows_claude_account_when_config_is_present`.
-fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) -> String {
+fn render_statusline_from(
+    input: &StatusInput,
+    account_config: Option<&Path>,
+    account_budget: Duration,
+) -> String {
     // Lock-file read only — cheap and non-blocking; no HTTP session-count probe
     // is needed since the reformatted layout (#2011) no longer surfaces a count.
     let daemon = DaemonInfo::from_lock_file();
@@ -179,7 +185,7 @@ fn render_statusline_from(input: &StatusInput, account_config: Option<&Path>) ->
     let gh = gh_account_segment_probe();
     // #6304: the Claude Code account the session runs under; absent from the
     // stdin payload, so it comes from Claude Code's own persisted config.
-    let account = claude_account_segment_probe(account_config);
+    let account = claude_account_segment_probe(account_config, account_budget);
     let model = model_segment(&input.model);
     // #6972: this payload is the only place the authoritative model id reaches
     // `tm`, so remember it here for `tm divert` — a separate process — to price
@@ -390,7 +396,6 @@ fn cost_segment(usd: f64) -> String {
 /// itself is thin bounded glue over the tested local reader.
 fn gh_account_segment_probe() -> Option<String> {
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -912,17 +917,21 @@ mod tests {
     /// Test: itself.
     #[test]
     fn render_statusline_shows_claude_account_when_config_is_present() {
+        // #8867: wait for the read instead of racing the live 100 ms budget;
+        // `Duration::MAX` overflows the deadline, so `recv_timeout` blocks until
+        // the reader sends. The timeout fallback has its own test in `account`.
+        const WAIT_FOR_READER: Duration = Duration::MAX;
         let dir = tempfile::tempdir().expect("temp dir");
         let cfg = dir.path().join(".claude.json");
 
         // Nothing at the path yet → segment omitted.
-        let absent = render_statusline_from(&full_input(), Some(&cfg));
+        let absent = render_statusline_from(&full_input(), Some(&cfg), WAIT_FOR_READER);
         assert!(
             !absent.contains('\u{273b}'),
             "account segment must be omitted with no config: {absent}"
         );
         // No path at all (neither CLAUDE_CONFIG_DIR nor a home dir resolvable).
-        let none = render_statusline_from(&full_input(), None);
+        let none = render_statusline_from(&full_input(), None, WAIT_FOR_READER);
         assert!(
             !none.contains('\u{273b}'),
             "account segment must be omitted with no config path: {none}"
@@ -933,7 +942,7 @@ mod tests {
             r#"{"oauthAccount": {"emailAddress": "someone@example.com"}}"#,
         )
         .expect("write config");
-        let present = render_statusline_from(&full_input(), Some(&cfg));
+        let present = render_statusline_from(&full_input(), Some(&cfg), WAIT_FOR_READER);
         assert!(
             present.contains("\u{273b}someone@example.com"),
             "account segment must appear once the config names one: {present}"

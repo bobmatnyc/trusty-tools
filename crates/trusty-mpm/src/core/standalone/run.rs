@@ -556,6 +556,19 @@ mod tests {
         );
     }
 
+    /// #8453: `tm run` from a supervisor session must not hand the child that
+    /// session's `TRUSTY_MPM_SESSION_PROFILE`; the child has no stamp of its own.
+    #[test]
+    fn test_build_launch_command_never_passes_on_the_profile_stamp() {
+        let tmp = TempDir::new().unwrap();
+        let cmd = build_launch_command_configured(tmp.path(), tmp.path(), None, None, false);
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "TRUSTY_MPM_SESSION_PROFILE" && v.is_none()),
+            "the profile stamp must be REMOVED for the `tm run` session"
+        );
+    }
+
     /// #8405: `tm run` assigns the renderer config decides, in both
     /// directions, whatever the launching shell exports. At df212601d the
     /// builder yielded to an exported value, so this fails there under any

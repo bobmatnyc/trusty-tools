@@ -144,7 +144,8 @@
 #   or an unbaselined crate has findings. 3 = the gate could not compute a
 #   verdict (build failure, vacuous scan, unattributable span, missing crate,
 #   an uncovered or unbuildable feature lane, an unreadable doc-unit inventory,
-#   a scorer that died before printing a failure row)
+#   a scorer that died before printing a failure row, and under
+#   `--require-published` (#8716) a publishable crate with no doc unit)
 #   — distinguished from 1 so a caller can tell "your links got worse" from
 #   "nothing was checked", the distinction #5289 added to the semver gate.
 #   4 = the doc-unit census came up SHORT (#7537): every lane ran and every
@@ -179,6 +180,10 @@
 #   asserted on EVERY case rather than in one of them: `assert_verdict` reads
 #   the last line of each case's output and fails unless it names that case's
 #   actual exit status.
+#
+#   #8716's `published-*` cases: under `--require-published` a publishable
+#   crate in the excluded set fails PUBLISHED-NOT-DOCUMENTED, a `publish =
+#   false` one does not, and the same fixture without the flag still passes.
 
 set -euo pipefail
 
@@ -224,9 +229,11 @@ die() {   # <exit-code> <reason>
 }
 
 usage() {
-  echo "usage: scripts/check_rustdoc_links.sh [--update-baseline]" >&2
+  echo "usage: scripts/check_rustdoc_links.sh [--update-baseline] [--require-published]" >&2
   echo "       [--json <file> [--lane <id>] [--lane-features <list>] [--cargo-rc <n>]]..." >&2
   echo "       --update-baseline   rewrite the baseline from this run's counts" >&2
+  echo "       --require-published every crate cargo metadata calls publishable" >&2
+  echo "                           must declare a doc unit (#8716; release scope)" >&2
   echo "       --json <file>       score a previously captured JSON stream" >&2
   echo "                           instead of running cargo doc (used by the" >&2
   echo "                           self-test). Repeatable: one --json per lane." >&2
@@ -256,6 +263,7 @@ BASELINE="${BASELINE_OVERRIDE:-${REPO_ROOT}/scripts/rustdoc-link-baseline.tsv}"
 # fixtures against a lane set it controls.
 LANES_FILE="${LANES_OVERRIDE:-${REPO_ROOT}/scripts/rustdoc-doc-lanes.tsv}"
 UPDATE=0
+REQUIRE_PUBLISHED=0
 
 # Captured streams, one record per lane, as parallel arrays: bash 3.2 has no
 # associative arrays and this script runs on macOS system bash.
@@ -267,6 +275,7 @@ JSON_RCS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --update-baseline) UPDATE=1; shift ;;
+    --require-published) REQUIRE_PUBLISHED=1; shift ;;
     --json)
       [ -n "${2:-}" ] || usage
       JSON_FILES+=("$2")
@@ -301,19 +310,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# The four Tauri GUI crates are excluded for the same reason every other
+# The Tauri GUI crates are excluded for the same reason every other
 # workspace-wide job in this repo excludes them (ci.yml's clippy, test, doctest
-# and MSRV jobs all carry the same four flags): they need WebKit2GTK, which no
+# and MSRV jobs all carry the same flags): they need WebKit2GTK, which no
 # headless CI runner has. They are not published to crates.io, so they have no
 # docs.rs page for a broken link to land on.
-#
-# trusty-audit-ui was missing from this list until #7466. It lives at
-# crates/trusty-audit/ui/src-tauri, so its diagnostics attribute to the
-# `trusty-audit` directory, which trusty-audit itself documents — the crate
-# failing to build on Linux was therefore invisible in the crate count and
-# surfaced only as `cargo exited 101` on the default lane, which the scorer did
-# not score until #7577.
-EXCLUDES=(--exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --exclude trusty-audit-ui)
+EXCLUDES=(--exclude trusty-code-gui --exclude trusty-agents-ui)
 
 # Cleanup is the EXIT trap armed at the top of this script, which also writes
 # the terminal VERDICT line (#7633).
@@ -443,12 +445,13 @@ FIXTURE_MODE=0
 if [ "${#JSON_FILES[@]}" -gt 0 ]; then FIXTURE_MODE=1; fi
 REPORT_RC=0
 python3 - "$DESC" "$BASELINE" "$UPDATE" "$LANES_FILE" "$META_FILE" "$FIXTURE_MODE" \
-  > "$REPORT" <<'PY' || REPORT_RC=$?
+  "$REQUIRE_PUBLISHED" > "$REPORT" <<'PY' || REPORT_RC=$?
 import json, sys, collections, os, re
 
 desc_path, baseline_path, update = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 lanes_path, meta_path = sys.argv[4], sys.argv[5]
 fixture_mode = sys.argv[6] == "1"
+require_published = sys.argv[7] == "1"
 
 HEADER = """# Per-crate broken intra-doc link baseline (scripts/check_rustdoc_links.sh).
 #
@@ -645,10 +648,8 @@ for lane_id, json_path, lane_rc, _lane_feats in lanes:
 # Parsed AFTER the streams so a malformed row is reported beside whatever the
 # run found, not instead of it.
 EXCLUDED_CRATES = {
-    "trusty-mpm-gui",
     "trusty-code-gui",
     "trusty-agents-ui",
-    "trusty-audit-ui",
 }
 
 lane_members = collections.defaultdict(set)   # lane id -> {crate}
@@ -712,6 +713,8 @@ inventory = {}     # package name -> {declared non-default features}
 pkg_src = {}       # package name -> its own src/ directory
 pkg_dir = {}       # package name -> crate directory the baseline is keyed on
 expected_units = {}   # #7537: doc-unit key -> "<package>/<target> (<kind>)"
+published = set()     # #8716: packages `cargo metadata` calls publishable
+unit_pkgs = set()     # #8716: packages that declare at least one doc unit
 
 
 def default_features(featmap):
@@ -739,6 +742,10 @@ with open(meta_path) as fh:
     meta = json.load(fh)
 for pkg in meta.get("packages") or []:
     name = pkg.get("name") or ""
+    # #8716: `publish` is null when unrestricted and [] for `publish = false`.
+    # Read BEFORE the exclusion, so an excluded publishable crate is caught.
+    if pkg.get("publish") is None or pkg.get("publish"):
+        published.add(name)
     if name in EXCLUDED_CRATES:
         continue
     manifest = pkg.get("manifest_path") or ""
@@ -774,6 +781,7 @@ for pkg in meta.get("packages") or []:
         expected_units[(pkg_dir[name], t.get("name") or "", kind)] = (
             f"{name}/{t.get('name')} ({kind})"
         )
+        unit_pkgs.add(name)
 
     feats = {f for f in (pkg.get("features") or {}) if f != "default"}
     if not feats:
@@ -1041,6 +1049,20 @@ if len(short_units) > 20:
         f"{len(expected_units)} short in total)"
     )
 
+# ---- FAIL CLOSED 11: every published crate is documented (#8716) --------
+# Release scope only. The census above demands every DECLARED unit, but a
+# crate in EXCLUDED_CRATES (or one with no doc-able target) declares none, so
+# it would pass unseen. Publishability comes from `cargo metadata`, never a
+# hand-kept list.
+if require_published:
+    for name in sorted(published - unit_pkgs):
+        why = ("it is in this gate's excluded set" if name in EXCLUDED_CRATES
+               else "it has no lib or default-feature bin target to document")
+        failures.append(
+            f"PUBLISHED-NOT-DOCUMENTED\t{name} is publishable (`publish` is not "
+            f"false in cargo metadata) but declares no doc unit — {why}"
+        )
+
 # ---- FAIL CLOSED 5 + the ratchet itself --------------------------------
 for crate in sorted(counts):
     have = counts[crate]
@@ -1093,6 +1115,9 @@ print(f"SUMMARY\t{len(documented)} crate(s) examined by rustdoc, "
       f"link(s), baseline {base_total}, {parsed_messages} diagnostic(s) examined"
       + (f", {len(cached)} crate(s) SERVED FROM CACHE" if cached else "")
       + f", {len(failures)} failure(s)")
+if require_published:
+    print(f"PUBLISHED\t{len(published & unit_pkgs)} of {len(published)} publishable "
+          "crate(s) declare a doc unit: " + (", ".join(sorted(published)) or "none"))
 # Named, not just counted (#7537): a diff against the declared set is what tells
 # an engineer WHICH unit went missing, and re-running the gate to find out costs
 # a full doc build.
@@ -1111,7 +1136,7 @@ for f in failures:
 if any(f.startswith(("BUILD-ERROR", "VACUOUS-SCAN", "NOT-EXAMINED", "UNATTRIBUTABLE",
                      "NOT-DOCUMENTED", "LANES-FILE", "FEATURE-UNCOVERED",
                      "NO-CFG-STALE", "LANE-NOT-EXAMINED", "LANE-ERROR",
-                     "UNITS-INVENTORY"))
+                     "UNITS-INVENTORY", "PUBLISHED-NOT-DOCUMENTED"))
        for f in failures):
     sys.exit(3)
 if any(f.startswith("UNITS-SHORT") for f in failures):

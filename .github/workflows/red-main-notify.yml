@@ -63,6 +63,7 @@ on:
     workflows:
       - "Agent assets" # agent-assets.yml
       - "AL2023 load-dynamic build gate" # al2023-build.yml
+      - "Architect sub-project" # architect-subproject.yml
       - "build.rs sync" # buildrs-sync.yml
       - "Capabilities drift" # capabilities-drift.yml
       - "Doc numbers" # doc-numbers.yml
@@ -72,13 +73,9 @@ on:
       - "Line cap" # line-cap.yml
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
-      - "Tag/publish parity" # tag-publish-parity.yml
-      - "Teardown guard" # teardown-guard.yml
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
-      - "Tmux exact targets" # tmux-exact-targets.yml
       - "Token drift" # token-drift.yml
-      - "trusty-audit installer" # trusty-audit-install.yml
       - "UI bundle freshness" # ui-bundle-freshness.yml
       - "vmtest harness" # vmtest-harness.yml
       - "Website tests" # website-tests.yml

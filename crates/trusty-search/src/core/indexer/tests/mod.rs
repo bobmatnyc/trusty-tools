@@ -100,6 +100,7 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 mod branch_and_corpus;
 mod chunk_cap;
 mod corpus_fault;
+mod deferred_commit_8761;
 mod embed_pool_routing;
 mod eviction_kg_paths;
 mod exact_match_floor;
@@ -109,3 +110,5 @@ mod persist_root_8438;
 mod persistence_and_search;
 mod ranking_and_modes;
 mod snapshot_guard_7920;
+mod sops_8922;
+mod zero_chunk_8976;

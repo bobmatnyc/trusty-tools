@@ -352,7 +352,10 @@ fn body_headings_are_named_verbatim_in_the_assets() {
     for f in FIELDS {
         let heading = format!("## {}", f.heading());
         assert!(
-            trusty_agents_common::agent_assets::VERSION_CONTROL.contains(&heading),
+            crate::commands::install::test_roster_ref()
+                .require("version-control.md")
+                .unwrap()
+                .contains(&heading),
             "version-control.md is missing {heading:?}"
         );
         assert!(
@@ -1070,6 +1073,38 @@ fn head_rev_candidates_try_the_remote_ref() {
     );
 }
 
+// ── #8145: no gate script means no gate, whatever the --head ─────────────
+
+/// Why (#8145): adaptive-crm has no `scripts/check_changelog_fragment.sh`, and
+/// `tm pr open --head <branch>` still refused, naming that script — the
+/// `--head` check ran before the script-existence check. The agent passed
+/// `--docs-only` on an infra PR to get past it.
+/// Test target: [`open::changelog_gate_at`] in a directory with no script and
+/// a head that is not the checkout's commit.
+#[test]
+fn pr_8145_a_repo_without_the_gate_script_skips_for_any_head() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("no script is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::Skipped);
+}
+
+/// Why (#8145): the reorder must not loosen the gate where it exists. With the
+/// script present, a head this checkout cannot resolve is still refused.
+#[test]
+fn pr_8145_the_script_still_refuses_a_head_elsewhere() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+    std::fs::write(
+        dir.path().join("scripts/check_changelog_fragment.sh"),
+        "exit 0\n",
+    )
+    .expect("script");
+    let verdict = open::changelog_gate_at(dir.path(), "main", "feature/elsewhere")
+        .expect("a head elsewhere is a verdict, not an error");
+    assert_eq!(verdict, ChangelogVerdict::HeadElsewhere);
+}
+
 // ── #7615: --minimal opts out of the nine-heading contract ──────────────
 
 /// Why (#7615): on trusty-things#261 the PM authorized that project's own
@@ -1337,6 +1372,69 @@ fn pr_7336_minimal_validates_with_and_without_the_new_fields() {
         )
         .expect("--minimal accepts another project's standard, widened or not");
     }
+}
+
+// ── #8467: a contract refusal names the full opt-out ─────────────────────
+
+/// Why (#8467): three agents on two repos hit the nine-field contract with a
+/// sparse body their brief authorized and fell back to `gh pr create`, because
+/// the refusal never named `--minimal`. The hint must appear on a contract gap
+/// — missing or empty — and nowhere else. `--minimal` itself must still enforce
+/// the footer and the closing-keyword ban.
+/// Test target: [`open::minimal_hint`] over real `plan` failures.
+#[test]
+fn pr_8467_a_contract_gap_names_the_minimal_opt_out() {
+    let args = open_args("/dev/null");
+    let sparse = format!("Why: a docs fix.\n\n{ATTRIBUTION_FOOTER}\n");
+    let failures = open::plan(
+        &args,
+        &sparse,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ResolvedTicketing::default(),
+    )
+    .expect_err("a sparse body fails the nine-field contract");
+    let hint = open::minimal_hint(&failures, false).expect("a missing heading names --minimal");
+    assert!(
+        hint.contains("--minimal") && hint.contains("Gates not run"),
+        "{hint}"
+    );
+
+    let empty_only = body::validate(&body::skeleton()).failures();
+    assert!(
+        open::minimal_hint(&empty_only, false).is_some(),
+        "{empty_only:?}"
+    );
+
+    let footer_only = body::validate("## Outcome\n\nx\n").merge_failures();
+    assert_eq!(open::minimal_hint(&footer_only, false), None);
+    assert_eq!(open::minimal_hint(&failures, true), None);
+
+    // The opt-out drops the headings and nothing else.
+    let mut minimal = open_args("/dev/null");
+    minimal.minimal = true;
+    let ticketing = ResolvedTicketing::default();
+    open::plan(
+        &minimal,
+        &sparse,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ticketing,
+    )
+    .expect("--minimal opens the sparse body");
+    let closes = format!("Why: a docs fix.\nCloses #12\n\n{ATTRIBUTION_FOOTER}\n");
+    let refused = open::plan(
+        &minimal,
+        &closes,
+        Some("s"),
+        ChangelogVerdict::Skipped,
+        &ticketing,
+    )
+    .expect_err("--minimal keeps the closing-keyword ban");
+    assert!(
+        refused.iter().any(|f| f.contains("closing keyword")),
+        "{refused:?}"
+    );
 }
 
 /// Why: without `--head` the diff must still be the checkout's `HEAD`.
@@ -3489,4 +3587,80 @@ fn pr_8431_a_label_created_concurrently_counts_as_seeded() {
     let creates: Vec<&String> = seen.iter().filter(|c| c.starts_with("pr create")).collect();
     assert_eq!(creates.len(), 2, "{seen:?}");
     assert!(creates[1].contains("--label trusty-mpm"), "{}", creates[1]);
+}
+
+/// #8934: every `tm pr` verb skips with one line in a repository with no
+/// `origin`, and a repository with an origin is left to the verb.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8934_a_local_only_repo_skips_every_verb() {
+    let init = |dir: &std::path::Path, origin: Option<&str>| {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        run(&["init", "-q"]);
+        if let Some(url) = origin {
+            run(&["remote", "add", "origin", url]);
+        }
+    };
+    let mpm = trusty_mpm::core::config::MpmConfig::default();
+    let local = tempfile::tempdir().expect("tempdir");
+    init(local.path(), None);
+    let notice = super::local_only_skip(local.path(), None, &mpm).expect("local-only skips");
+    assert!(
+        notice.contains("local-only repo: no remote; skipping push/PR"),
+        "{notice}"
+    );
+
+    let remote = tempfile::tempdir().expect("tempdir");
+    init(remote.path(), Some("https://github.com/o/r.git"));
+    assert_eq!(super::local_only_skip(remote.path(), None, &mpm), None);
+}
+
+/// 🔴 #8934 HIGH 3 FAIL-OPEN CHECK: `tm pr merge 123 --repo o/r` from a
+/// local-only directory used to print the skip and exit 0 WITHOUT merging,
+/// which a delivery chain reads as merged. With `--repo` the verb runs; the
+/// allow-listed supervisor's verbs run too.
+///
+/// Test: this function IS the test.
+#[test]
+fn pr_8934_an_explicit_repo_never_skips() {
+    let local = tempfile::tempdir().expect("tempdir");
+    let ok = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(local.path())
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git init");
+    let mpm = trusty_mpm::core::config::MpmConfig::default();
+    assert_eq!(
+        super::local_only_skip(local.path(), Some("o/r"), &mpm),
+        None
+    );
+    let cmd = crate::cli::PrCmd::Merge(PrMergeArgs {
+        repo: Some("o/r".into()),
+        ..merge_args()
+    });
+    assert_eq!(super::repo_arg(&cmd), Some("o/r"));
+
+    std::fs::write(
+        local.path().join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .expect("toml");
+    let mut supervisor = trusty_mpm::core::config::MpmConfig::default();
+    supervisor.supervisor.projects = vec![std::fs::canonicalize(local.path()).expect("canon")];
+    assert_eq!(
+        super::local_only_skip(local.path(), None, &supervisor),
+        None
+    );
 }

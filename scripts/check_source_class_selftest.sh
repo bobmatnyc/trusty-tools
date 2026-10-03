@@ -15,7 +15,9 @@
 #                      not (`tests_helper.rs`, `contests/`, `src/testdata.rs`)
 #   is_crate_src_path  the depth-1 shape, and the nested/adjacent paths that are
 #                      deliberately outside it
-#   wiring             both gates source the library; neither redefines it
+#   is_inert_instruction_asset  the Cargo-inert asset list, by status
+#   wiring             both gates and detect-docs-only.sh source the library;
+#                      none redefines it or keeps a private copy of the list
 #
 # Usage: bash scripts/check_source_class_selftest.sh
 # Exit: 0 when every case matches; 1 listing each mismatch.
@@ -83,7 +85,7 @@ src_path "crates/trusty-review/src/report/reporter_tests.rs" yes
 # excludes a nested package from its parent's tarball, so a nested edit is not
 # drift against the parent's published version. scripts/check_changelog_fragment.sh
 # reaches them by structural attribution instead (#4576).
-src_path "crates/trusty-audit/ui/src-tauri/src/main.rs" no
+src_path "crates/trusty-agents/ui/src-tauri/src/main.rs" no
 src_path "crates/trusty-agents/ui/src/App.svelte" no
 # Adjacent shapes that must not read as crate source.
 src_path "crates/trusty-mpm/Cargo.toml" no
@@ -94,6 +96,24 @@ src_path "crates/trusty-mpm" no
 src_path "docs/reference/crate-map.md" no
 src_path "scripts/bump-version.sh" no
 src_path "" no
+
+echo "is_inert_instruction_asset:"
+asset() {
+  local status="$1" path="$2" want="$3" rc=0
+  is_inert_instruction_asset "$status" "$path" || rc=$?
+  assert "is_inert_instruction_asset $status $path" "$want" "$rc"
+}
+asset M "crates/trusty-mpm/src/assets/skills/tm/SKILL.md" yes
+asset A "content/agents/qa.md" yes
+# #9011: the agents moved out, so a .md there would be include_str!-ed code.
+asset A "crates/trusty-agents-common/src/assets/agents/qa.md" no
+asset M "content/agents/qa.json" yes
+asset D "crates/trusty-mpm/src/assets/skills/tm/SKILL.md" no
+asset T "crates/trusty-mpm/src/assets/a.md" no
+asset "?" "crates/trusty-mpm/src/assets/a.md" no
+asset M "crates/trusty-mpm/src/assets/hooks/pre-push" no
+asset M "crates/trusty-code/src/assets/agents/qa.md" no
+asset M "crates/trusty-mpm/src/lib.rs" no
 
 echo "crate_of_src_path:"
 CASES=$((CASES + 1))
@@ -141,6 +161,16 @@ wiring "check_changelog_fragment.sh defines no is_test_path" "0" \
   "$(grep -c '^is_test_path()' scripts/check_changelog_fragment.sh || true)"
 wiring "check-pr-version-bump.sh keeps no private src/ regex" "0" \
   "$(grep -c 'crates/\[\^/\]+/src/' scripts/check-pr-version-bump.sh || true)"
+# The instruction-asset list: detect-docs-only.sh decides what is docs-only and
+# the changelog gate decides what owes a fragment. One copy, or they drift.
+wiring "detect-docs-only.sh sources the library" "1" \
+  "$(grep -c '^\. .*lib/source_class\.sh"$' scripts/detect-docs-only.sh || true)"
+for f in scripts/detect-docs-only.sh scripts/check_changelog_fragment.sh; do
+  wiring "${f#scripts/} defines no is_inert_instruction_asset" "0" \
+    "$(grep -c '^is_inert_instruction_asset()' "$f" || true)"
+  wiring "${f#scripts/} keeps no private asset-root list" "0" \
+    "$(grep -c 'src/assets/?\*\.md' "$f" || true)"
+done
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

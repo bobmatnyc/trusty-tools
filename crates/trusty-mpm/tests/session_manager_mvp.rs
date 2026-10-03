@@ -10,7 +10,7 @@
 //! cache-hit test proving the LLM is skipped on repeated identical content.
 //! Test: this file IS the test; run with `cargo test -p trusty-mpm`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -191,6 +191,27 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.live.lock().unwrap().iter().cloned().collect())
+    }
+    /// #8935: a pane id, so `stop` can prove the session is the record's own
+    /// and tear it down (the trait's `pane_exists` default confirms it).
+    fn get_pane_id(&self, _name: &str) -> Option<String> {
+        Some("%1".to_owned())
+    }
+    /// #9004: the pane on one server, in the first live session.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<trusty_mpm::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        let name = self.live.lock().unwrap().iter().next().cloned();
+        Ok(trusty_mpm::session_manager::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: "1:1".into(),
+            session_name: name.unwrap_or_default(),
+        })
+    }
+    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
+        self.kill_session(name)
     }
 }
 

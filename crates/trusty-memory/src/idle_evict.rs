@@ -149,7 +149,9 @@ mod tests {
     #[test]
     #[serial]
     fn idle_evict_secs_from_env_defaults_and_parses() {
-        // SAFETY: #[serial] serialises env mutation across tests in this crate.
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().blocking_lock();
+        // SAFETY: `env_test_lock()` serialises env mutation across this crate.
         unsafe {
             std::env::remove_var(IDLE_EVICT_ENV);
         }
@@ -177,6 +179,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn spawn_disabled_returns_none() {
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by `env_test_lock()`, held for the whole test.
         unsafe {
             std::env::set_var(IDLE_EVICT_ENV, "0");
         }

@@ -530,15 +530,29 @@ use super::rtk::{compress_via_rtk_binary, rtk_filter_for, rtk_pipe_argv, stderr_
 /// Why: The argv the `rtk` process actually receives is only observable from
 /// inside that process; a shim that echoes its own arguments makes it
 /// observable without needing the real `rtk` on `PATH`.
-/// What: Writes `body` to `<dir>/fake-rtk`, chmods it 0755, returns the path.
+/// What: A short-lived `/bin/sh` child writes `body` to `<dir>/.fake-rtk.tmp`
+/// and chmods it 0755; once it is reaped the file is renamed to
+/// `<dir>/fake-rtk`. This process never holds a write fd on the shim, so a
+/// sibling test's fork cannot inherit one and fail the exec with ETXTBSY
+/// (#6231, same fix as `stub_binary` in trusty-code's daemon_autospawn_tests).
 #[cfg(unix)]
 fn write_rtk_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+    let staging = dir.join(".fake-rtk.tmp");
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#)
+        .arg("sh")
+        .arg(&staging)
+        .arg(body)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .expect("run the shim writer");
+    assert!(
+        status.success(),
+        "shim writer failed for {staging:?}: {status}"
+    );
     let path = dir.join("fake-rtk");
-    std::fs::write(&path, body).expect("write shim");
-    let mut perms = std::fs::metadata(&path).expect("stat shim").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod shim");
+    std::fs::rename(&staging, &path).expect("move the shim into place");
     path
 }
 
@@ -689,12 +703,29 @@ async fn real_rtk_pipe_round_trips_a_marker_payload() {
 #[tokio::test]
 async fn rtk_binary_returns_none_and_warns_on_non_zero_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // #8635: `compress_via_rtk_binary` maps BOTH "spawn failed" and "the
+    // shim ran and exited non-zero" to `None` (see the `spawn().ok()?` vs.
+    // the explicit post-exit `return None` in rtk.rs). Asserting only
+    // `out.is_none()` cannot tell those apart, so it passed even in a Linux
+    // ETXTBSY repro where the shim never spawned. The marker file, `touch`ed
+    // by the shim before it exits, is the only observable proof the shim's
+    // own exit path — not a spawn failure — produced the `None`.
+    let marker = dir.path().join("shim-ran.marker");
     let shim = write_rtk_shim(
         dir.path(),
-        "#!/bin/sh\ncat >/dev/null\necho 'rtk: No such file or directory (os error 2)' >&2\nexit 127\n",
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch '{}'\necho 'rtk: No such file or directory (os error 2)' >&2\nexit 127\n",
+            marker.display()
+        ),
     );
     let out = compress_via_rtk_binary(&shim, "git status", "payload\n").await;
     assert!(out.is_none(), "a non-zero rtk exit must fall back");
+    assert!(
+        marker.exists(),
+        "the shim must actually have run (and exited non-zero) to produce \
+         this None; a missing marker means None came from a spawn failure \
+         instead, which this test must not accept as proof of the non-zero-exit path"
+    );
 }
 
 // ── The resolver seam (#7325) ───────────────────────────────────────────

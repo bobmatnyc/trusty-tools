@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::worktree_claude_registry::ClaudeRegistry;
 use super::worktree_owner_gate::{OwnerGate, SessionEnd, owner_refusal};
 use super::worktree_ownership::{
     AgentDelegationState, AgentWorktreeOwner, SentinelOwner, is_harness_agent_worktree,
@@ -127,6 +128,43 @@ pub(crate) struct SessionOwners {
     /// An agent owner file names the dispatching CLAUDE session, not the
     /// managed record, and a resumed session can be recorded more than once.
     aliases: HashMap<String, Vec<String>>,
+    /// #7771: every Claude id each managed record EVER carried (the #7617
+    /// sidecar), for an id a restart or `/clear` has since replaced.
+    history: LinkHistory,
+    /// #7771: managed id → its record's tmux session name.
+    tmux: HashMap<String, String>,
+    /// #7771: Claude Code's per-process registry, for an id no record proves.
+    claude: ClaudeRegistry,
+}
+
+/// The #7617 session-link history, as the reclaim read it (#7771).
+///
+/// Why: an agent tree's owner file names a Claude session id that a restart or
+/// `/clear` has since replaced on the record, so the record no longer names it.
+/// On one host 185 of 191 agent trees were spared for that reason alone. The
+/// sidecar keeps every id a record ever carried; the reclaim needs to know
+/// whether it read that sidecar, and why not when it could not.
+/// Test: `session_end_judges_a_superseded_claude_id_by_its_history`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum LinkHistory {
+    /// No sidecar was consulted, or none exists: no superseded-id evidence.
+    #[default]
+    Absent,
+    /// Claude id → the managed ids whose link file lists it.
+    Read(HashMap<String, Vec<String>>),
+    /// The sidecar exists and could not be read — carrying why.
+    Unreadable(String),
+}
+
+impl LinkHistory {
+    /// The history under `framework_root`, read strictly (#7771).
+    pub(crate) fn read(framework_root: &Path) -> Self {
+        match crate::core::session_links::link_history(framework_root) {
+            Ok(map) if map.is_empty() => Self::Absent,
+            Ok(map) => Self::Read(map),
+            Err(why) => Self::Unreadable(why),
+        }
+    }
 }
 
 impl SessionOwners {
@@ -147,6 +185,25 @@ impl SessionOwners {
         self
     }
 
+    /// This map, with the session-link history a superseded Claude id is
+    /// judged by (#7771).
+    pub(crate) fn with_history(mut self, history: LinkHistory) -> Self {
+        self.history = history;
+        self
+    }
+
+    /// This map, knowing each managed record's tmux session (#7771).
+    pub(crate) fn with_tmux(mut self, pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.tmux.extend(pairs);
+        self
+    }
+
+    /// This map, with Claude Code's per-process registry (#7771).
+    pub(crate) fn with_claude(mut self, claude: ClaudeRegistry) -> Self {
+        self.claude = claude;
+        self
+    }
+
     /// Whether session `id` (managed or Claude) is the caller or provably
     /// ended (#7771 condition d).
     ///
@@ -154,26 +211,138 @@ impl SessionOwners {
     /// judged by EVERY managed record aliasing it, strictest first: any `Live`
     /// record is `Live`, then any record nothing can judge is
     /// `Undeterminable`, then a caller record is `Caller`; `Ended` needs every
-    /// record gone. One record is judged by [`Self::record_end`].
+    /// record gone. One record is judged by [`Self::alias_end`]. An id that is
+    /// neither a current alias nor a stored record is judged by
+    /// [`Self::superseded_end`], then by [`Self::registry_end`].
     /// Test: `session_end_resolves_a_claude_id_through_its_alias`,
     /// `session_end_keeps_a_claude_id_any_live_record_holds`,
     /// `session_end_ranks_a_live_alias_above_the_caller_alias`,
-    /// `session_end_refuses_an_unread_map`.
+    /// `session_end_refuses_an_unread_map`,
+    /// `session_end_judges_a_superseded_claude_id_by_its_history`,
+    /// `worktree_7771_an_unrecorded_owner_whose_process_is_gone_is_reclaimed`.
     pub(crate) fn session_end(&self, id: &str) -> SessionEnd {
         if self.caller.as_deref() == Some(id) {
             return SessionEnd::Caller;
         }
         // #7771 critic: a Claude session resumed into two records is not
         // judged by whichever pair was recorded last.
-        self.aliases
-            .get(id)
-            .and_then(|records| {
-                records
-                    .iter()
-                    .map(|m| self.record_end(m))
-                    .max_by_key(strictness)
-            })
-            .unwrap_or_else(|| self.record_end(id))
+        if let Some(end) = self.aliases.get(id).and_then(|records| {
+            records
+                .iter()
+                .map(|m| self.alias_end(id, m))
+                .max_by_key(strictness)
+        }) {
+            return end;
+        }
+        match self.record_end(id) {
+            // #7771: not a current alias and not a managed record — a Claude id
+            // a restart or `/clear` may have replaced, or one no record names.
+            SessionEnd::Undeterminable(why) if self.stored(id) == Some(false) => {
+                let end = self
+                    .superseded_end(id)
+                    .unwrap_or(SessionEnd::Undeterminable(why));
+                self.registry_end(id, end)
+            }
+            end => end,
+        }
+    }
+
+    /// Whether Claude Code's registry may add evidence: never over an unread
+    /// store or an unreadable link sidecar (#7771, ADR-0045).
+    fn registry_usable(&self) -> bool {
+        self.by_id.is_some() && !matches!(self.history, LinkHistory::Unreadable(_))
+    }
+
+    /// `end` for an id no record carries, corrected by Claude Code's own
+    /// process registry (#7771).
+    ///
+    /// Why: an owner session `tm` never recorded, or whose record was
+    /// compacted, has nothing in the store to prove it ended. What: a running
+    /// process registered to `id` makes it `Live` whatever the history says;
+    /// an `Undeterminable` becomes `Ended` only on the registry's positive
+    /// proof ([`ClaudeRegistry::session_end`]), which a read missing any
+    /// running Claude Code process never gives, and otherwise keeps both
+    /// reasons.
+    /// Test: `worktree_7771_an_unrecorded_owner_whose_process_is_gone_is_reclaimed`,
+    /// `worktree_7771_an_unregistered_claude_process_keeps_a_live_delegations_tree`,
+    /// `session_end_a_live_registry_entry_outranks_a_superseded_history`,
+    /// `worktree_7771_a_registry_probe_error_keeps_the_tree`,
+    /// `worktree_7771_an_unreadable_sidecar_outranks_the_registry`.
+    fn registry_end(&self, id: &str, end: SessionEnd) -> SessionEnd {
+        if !self.registry_usable() {
+            return end;
+        }
+        match (end, self.claude.session_end(id)) {
+            // #7771: a running process outranks a history-superseded `Ended`.
+            (_, Some(SessionEnd::Live)) => SessionEnd::Live,
+            (SessionEnd::Undeterminable(_), Some(SessionEnd::Ended)) => SessionEnd::Ended,
+            (SessionEnd::Undeterminable(why), Some(SessionEnd::Undeterminable(more))) => {
+                SessionEnd::Undeterminable(format!("{why}; {more}"))
+            }
+            (end, _) => end,
+        }
+    }
+
+    /// One aliasing record's answer for Claude id `id` (#7771).
+    ///
+    /// What: [`Self::record_end`], except that a `Live` record is `Ended` for
+    /// `id` when Claude Code's registry shows its tmux session running another
+    /// Claude session and no process running `id` — a relaunch the record's
+    /// `claude_session_id` never caught up with.
+    /// Test: `worktree_7771_a_session_replaced_in_its_tmux_window_is_reclaimed`,
+    /// `worktree_7771_a_live_id_beside_a_newer_one_keeps_the_tree`,
+    /// `worktree_7771_a_live_record_with_no_registered_process_is_kept`.
+    fn alias_end(&self, id: &str, managed: &str) -> SessionEnd {
+        let end = self.record_end(managed);
+        let replaced = || {
+            self.tmux
+                .get(managed)
+                .is_some_and(|t| self.claude.replaced_in(id, t))
+        };
+        if end == SessionEnd::Live && self.registry_usable() && replaced() {
+            return SessionEnd::Ended;
+        }
+        end
+    }
+
+    /// Whether `managed` is a stored record; `None` when the store was not read.
+    fn stored(&self, managed: &str) -> Option<bool> {
+        self.by_id.as_ref().map(|by_id| by_id.contains_key(managed))
+    }
+
+    /// A Claude id no record carries NOW, judged by the records that once
+    /// carried it (#7771), or `None` when the history does not name it.
+    ///
+    /// Why: a managed session runs one Claude session at a time, and its
+    /// record's `claude_session_id` moves to the new id on every restart or
+    /// `/clear`. An id the history links to a stored record, and that no record
+    /// carries now, is a Claude session that record has left — and a dispatched
+    /// agent runs inside its dispatching session, so it has ended too.
+    /// What: `Ended` only when every managed id the history links to `id` is a
+    /// stored record. A linked id with no stored record (compacted, or never
+    /// persisted) is `Undeterminable`, as is a history that could not be read.
+    /// A live agent still holding the tree is caught by the harness lock and the
+    /// cwd probe ([`super::worktree_owner_gate::owner_refusal`]), not here.
+    /// Test: `session_end_judges_a_superseded_claude_id_by_its_history`.
+    fn superseded_end(&self, id: &str) -> Option<SessionEnd> {
+        let map = match &self.history {
+            LinkHistory::Absent => return None,
+            LinkHistory::Unreadable(why) => {
+                return Some(SessionEnd::Undeterminable(format!(
+                    "the session-link history could not be read ({why}), so whether a record \
+                     once carried it is unknown"
+                )));
+            }
+            LinkHistory::Read(map) => map,
+        };
+        let records = map.get(id)?;
+        if let Some(missing) = records.iter().find(|m| self.stored(m) != Some(true)) {
+            return Some(SessionEnd::Undeterminable(format!(
+                "the session-link history links it to session {missing}, which no stored record \
+                 names"
+            )));
+        }
+        Some(SessionEnd::Ended)
     }
 
     /// One managed record's answer: the caller is `Caller`, then the #7652

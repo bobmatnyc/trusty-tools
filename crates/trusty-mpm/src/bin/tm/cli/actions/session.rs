@@ -446,7 +446,10 @@ pub(crate) enum SessionAction {
     /// and prints the resulting markdown to stdout.
     /// The `--full` flag is accepted for forward-compatibility with PR2 (watermark
     /// logic); for PR1 it forces full history and is otherwise a no-op.
-    /// Test: `cli_parses_session_catchup` in `tests.rs`.
+    /// `--json` prints the `session_context_catchup` MCP tool's paged JSON
+    /// instead, one page per `--sessions-offset` (#8017).
+    /// Test: `cli_parses_session_catchup` in `tests.rs`,
+    /// `cli_parses_session_catchup_json_page`.
     ///
     // CUTOVER BRIDGE — remove post-migration (#1762)
     Catchup {
@@ -457,6 +460,14 @@ pub(crate) enum SessionAction {
         /// forward-compatibility).
         #[arg(long)]
         full: bool,
+        /// Print the `session_context_catchup` JSON page instead of markdown.
+        // #8017: the MCP tool's paged shape, for a caller that lost the MCP server.
+        #[arg(long)]
+        json: bool,
+        /// First paused session of the JSON page; pass the previous page's
+        /// `sessions_next_offset`.
+        #[arg(long, default_value_t = 0, requires = "json")]
+        sessions_offset: usize,
     },
     /// Prune managed sessions by state + compact tombstones (#1508).
     ///
@@ -560,9 +571,15 @@ pub(crate) enum SessionAction {
     /// caller's own claim. The caller's own workspace directory is still
     /// refused, and every refusal now names the session that holds the claim
     /// and says whether it is the caller.
+    ///
+    /// #8782: scoped to the checkout the command runs in unless
+    /// `--all-projects` is given. Every run prints a per-project preview —
+    /// each path, its reason, a count — and `--force` removes only the paths
+    /// that preview listed.
     /// Test: `cli_parses_session_prune_worktrees`,
     /// `cli_prune_worktrees_discard_dirty_is_opt_in`,
-    /// `cli_prune_worktrees_merged_prs_is_opt_in`.
+    /// `cli_prune_worktrees_merged_prs_is_opt_in`,
+    /// `cli_prune_worktrees_all_projects_is_opt_in`.
     PruneWorktrees {
         /// Actually delete orphaned dirs (default: dry-run / preview only).
         ///
@@ -580,6 +597,10 @@ pub(crate) enum SessionAction {
         /// (#2919). Off by default. Never destroys unsaved work.
         #[arg(long)]
         merged_prs: bool,
+        /// Act on EVERY registered project's worktrees (#8782). Off by default:
+        /// the run is scoped to the checkout it is invoked from.
+        #[arg(long)]
+        all_projects: bool,
     },
     /// Report every git-registered worktree against `sessions.json` (#4288).
     ///

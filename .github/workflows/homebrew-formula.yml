@@ -17,7 +17,7 @@
 #     success from the evidence that it ran.
 #
 # Pure shell, no Rust toolchain, so it stays a fast standalone job. Mirrors
-# tag-publish-parity.yml's shape.
+# the release-decision selftests' shape (ci.yml parity-selftest, #8378).
 name: Homebrew formula
 
 on:
@@ -30,7 +30,7 @@ on:
       - ".github/workflows/release.yml"
       - ".github/workflows/homebrew-formula.yml"
   pull_request:
-    # Explicit activity types, matching line-cap.yml and tag-publish-parity.yml:
+    # Explicit activity types, matching line-cap.yml and ci.yml:
     # `edited` catches a base-branch retarget, which the default set does not.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]

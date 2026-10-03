@@ -909,10 +909,12 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: Some(id),
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         mgr.store
             .write()
@@ -1064,10 +1066,12 @@ mod tests {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None, // registry field unset — must fall back
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
 
         assert_eq!(mgr.known_owner_of(&record), Some(sentinel_owner));

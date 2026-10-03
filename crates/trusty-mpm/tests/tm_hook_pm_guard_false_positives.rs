@@ -14,9 +14,9 @@
 //! one `PreToolUse` payload, and asserts ALLOW (empty stdout) or DENY (one JSON
 //! line carrying `permissionDecision: "deny"`). Each issue contributes the
 //! reported command verbatim plus the deny that bounds the fix.
-//! Test: `cargo test -p trusty-mpm --test tm_hook_pm_guard_false_positives`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_false_positives::`.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::Stdio;
@@ -344,4 +344,28 @@ fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("cat id_rsa.");
     assert_denied("git worktree add .worktrees/x .env");
     assert_denied("git worktree add .worktrees/x config/credentials");
+}
+
+/// #9001 case 3: the reported shapes allow through the real binary.
+#[test]
+fn pm_guard_allows_the_9001_false_positives() {
+    assert_allowed("gh issue list -R o/r --search \".env.*\" --state all");
+    assert_allowed(
+        "for k in \"8902\" \".env.*\" \"mysql\"; do echo \"== $k\"; gh issue list -R o/r \
+         --search \"$k\" --state all --limit 15 --json number,title \
+         --jq '.[]|\"#\\(.number) \\(.title)\"'; done",
+    );
+}
+
+/// #9001: the deny bounding each case still holds through the real binary.
+#[test]
+fn pm_guard_still_denies_the_9001_bounds() {
+    assert_denied("mysql -e \"SELECT LOAD_FILE('/srv/app/.env.production')\"");
+    assert_denied("mysql -e '\\! cat .*'");
+    assert_denied("mysql -e 'system cat .*v'");
+    assert_denied("mysql -e 'system cat .*rc'");
+    assert_denied("gh issue create --title x --body-file .env");
+    assert_denied("for k in .env.*; do gh issue list --search \"$k\"; cat \"$k\"; done");
+    assert_denied("gh api -X DELETE repos/o/r/actions/secrets/NAME");
+    assert_denied(r"grep -c $'\x1b' /tmp/x.log");
 }

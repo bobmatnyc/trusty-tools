@@ -17,6 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::injection_status::InjectionStatus;
+pub use super::session_kind::SessionKind;
 
 /// The literal path a record carries when its working directory could not be
 /// resolved at all.
@@ -487,6 +488,20 @@ pub struct SessionRecord {
     #[serde(default)]
     pub pane_id: Option<String>,
 
+    /// The tmux server instance `pane_id` was read on, `<pid>:<start_time>`
+    /// (#9004).
+    ///
+    /// Why: a `%N` pane id is unique within one tmux server only, and a
+    /// restarted server reuses `%0`, `%1`, …, so `pane_id` alone cannot prove
+    /// the live pane is this record's.
+    /// What: written with `pane_id` at every capture
+    /// ([`super::pane_identity::capture`]). `#[serde(default)]` loads every
+    /// record written before this field as `None`, and a `None` is never
+    /// `Owned`: such a record fails closed.
+    /// Test: `a_record_without_a_server_identity_never_owns_its_pane`.
+    #[serde(default)]
+    pub tmux_server: Option<String>,
+
     /// Delivery status of the turnkey `--task` pane injection (#2364).
     ///
     /// Why: `inject_task_when_ready` was fire-and-forget before this field
@@ -568,6 +583,16 @@ pub struct SessionRecord {
     /// in `Stopped` from before the fix stays auto-resumable until then.
     #[serde(default)]
     pub stop_cause: Option<StopCause>,
+
+    /// This session's role in the fleet (#8942).
+    ///
+    /// Why: the Architect and its helpers must never be torn down or
+    /// auto-resumed by the daemon; see [`SessionKind`].
+    /// `#[serde(default)]` (→ [`SessionKind::Ordinary`]) loads every pre-#8942
+    /// record as an ordinary session. A pre-#8942 daemon drops the field on its
+    /// next upsert, so never run one against a post-#8942 store.
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 impl SessionRecord {
@@ -597,7 +622,8 @@ impl SessionRecord {
     /// `tick_never_resumes_a_deliberately_stopped_session` in
     /// `supervisor::tests` and
     /// `boot_reconcile_never_requeues_a_deliberately_stopped_session` in
-    /// `stop_cause_tests.rs`.
+    /// `stop_cause_tests.rs`; the #8942 protected-kind clause by
+    /// `tick_never_resumes_a_supervisor_record` in `supervisor::tests`.
     pub fn is_auto_resumable(&self) -> bool {
         matches!(self.state, ManagedSessionState::Stopped)
             // #6568: `ResumeFlapping` joins `Deliberate` here — a session whose
@@ -614,6 +640,8 @@ impl SessionRecord {
             // leaked pane, reconcile re-adopts it, and the loop sustains itself
             // (observed three times in one day's daemon log).
             && !self.is_leaked_test_adoption()
+            // #8942: the Architect is relaunched only by `tm fleet init`.
+            && !self.kind.is_protected()
     }
 
     /// The operator-facing reason auto-resume is parked, if it is (#6568).

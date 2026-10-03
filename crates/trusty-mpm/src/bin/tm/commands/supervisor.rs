@@ -90,6 +90,12 @@ pub(crate) async fn run_supervisor(
         }
     };
     let mgr = Arc::new(SessionManager::new(&data_dir, tmux).await?);
+    // #7771: the cleanup sweep proves an unrecorded owner ended from Claude
+    // Code's own registry — on a real host only.
+    let host = trusty_mpm::core::host_state_gate::host_state_access();
+    if host.skip_reason().is_none() {
+        mgr.install_claude_registry_roots(trusty_mpm::session_manager::host_claude_config_roots());
+    }
 
     // Build the activity monitor unless classification is disabled.
     let monitor = if cfg.classify_idle {

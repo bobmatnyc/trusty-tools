@@ -813,7 +813,7 @@ fn print_negative_footer(results: &[QueryResult]) {
 /// What: the steps documented in the file-level comment.
 /// Test: this IS the test.
 #[tokio::test]
-#[ignore]
+#[ignore = "benchmark: needs the isolated fixture daemon and corpus (support/isolated_benchmark.rs)"]
 async fn benchmark_open_mpm_per_lane_tools() {
     let client = make_client();
     let health = assert_daemon_healthy(&client).await;

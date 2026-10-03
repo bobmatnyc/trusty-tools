@@ -191,7 +191,7 @@ impl BodyReport {
         }
         for f in &self.empty {
             out.push(format!(
-                "body field {} (`## {}`) has no content",
+                "{EMPTY_FIELD_PREFIX} {} (`## {}`) has no content",
                 field_index(*f),
                 f.heading()
             ));
@@ -230,6 +230,19 @@ impl BodyReport {
 /// spelling keeps the message and its recogniser from drifting apart.
 /// Test: `pr_7574_a_missing_heading_offers_the_body_skeleton`.
 pub(crate) const MISSING_FIELD_PREFIX: &str = "missing required body field";
+
+/// The opening words of every empty-section failure line.
+///
+/// Why (#8467): the `--minimal` hint fires on any contract gap, missing or
+/// empty, and recognises both from the failure line the same way #7574 does.
+pub(crate) const EMPTY_FIELD_PREFIX: &str = "body field";
+
+/// Is `line` a nine-field contract gap — a missing or an empty section?
+///
+/// Test: `pr_8467_a_contract_gap_names_the_minimal_opt_out`.
+pub(crate) fn is_contract_gap(line: &str) -> bool {
+    line.starts_with(MISSING_FIELD_PREFIX) || line.starts_with(EMPTY_FIELD_PREFIX)
+}
 
 /// What a missing [`Field::accepts_none`] field's failure line adds (#7336).
 ///

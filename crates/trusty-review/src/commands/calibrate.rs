@@ -566,7 +566,10 @@ async fn run_pipeline_for_entry(
 /// warnings; that PR contributes an empty findings list).
 /// Test: `cargo run -p trusty-review -- calibrate --corpus corpus.jsonl`
 /// (requires GitHub token + LLM credentials at runtime).
-pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result<()> {
+pub async fn cmd_calibrate(
+    config_path: Option<&std::path::Path>,
+    args: CalibrateArgs,
+) -> Result<()> {
     let corpus = load_corpus(&args.corpus)?;
     if corpus.is_empty() {
         anyhow::bail!("corpus file is empty — nothing to calibrate against");
@@ -577,7 +580,8 @@ pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result
         provider: args.provider.clone(),
         ..Default::default()
     };
-    let config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
+    // #8947: the `--config` file must survive the override rebuild.
+    let config_with_overrides = ReviewConfig::from_env_and_file(config_path, Some(&overrides));
     let reviewer_model = config_with_overrides.role_models.reviewer.model.clone();
     let default_provider = config_with_overrides.role_models.reviewer.provider.clone();
 

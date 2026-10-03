@@ -56,6 +56,9 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     HomeGuard(prior)
 }
 
+/// #9004: the one tmux server instance [`FakeTmuxDriver`] reports.
+pub const FAKE_TMUX_SERVER: &str = "1:1";
+
 /// A fake tmux driver for unit testing.
 ///
 /// Why: the manager must be testable without a real tmux binary; this
@@ -107,6 +110,10 @@ pub struct FakeTmuxDriver {
     /// to simulate the recorded pane having been closed while a sibling
     /// window keeps the tmux session alive.
     pub pane_exists_override: Mutex<Option<bool>>,
+    /// #9004: the session the last pane lookup named, for `pane_identity`.
+    pane_session: Mutex<Option<String>>,
+    /// Controllable `pane_claude` answer (#8942); `Absent` when unset.
+    pub pane_claude_override: Mutex<Option<crate::core::process::PaneClaude>>,
     /// Records every `send_line_to_pane` call as `(session_name, pane_id,
     /// text)` (sibling-window hijack fix, follow-up to #2456).
     pub pane_send_calls: Mutex<Vec<(String, String, String)>>,
@@ -163,6 +170,8 @@ impl FakeTmuxDriver {
             pane_cwd_override: Mutex::new(None),
             pane_id_override: Mutex::new(None),
             pane_exists_override: Mutex::new(None),
+            pane_session: Mutex::new(None),
+            pane_claude_override: Mutex::new(None),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
@@ -311,11 +320,19 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         self.pane_cwd_override.lock().unwrap().clone()
     }
 
+    fn pane_claude(&self, _name: &str) -> crate::core::process::PaneClaude {
+        self.pane_claude_override
+            .lock()
+            .unwrap()
+            .unwrap_or(crate::core::process::PaneClaude::Absent)
+    }
+
     /// Report the controllable `pane_id_override` (sibling-window hijack fix,
     /// follow-up to #2456) instead of the trait's silent `None` default, so
     /// tests can simulate a real driver having captured a `pane_id` at
     /// `create_session` time.
-    fn get_pane_id(&self, _name: &str) -> Option<String> {
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        *self.pane_session.lock().unwrap() = Some(name.to_owned());
         self.pane_id_override.lock().unwrap().clone()
     }
 
@@ -323,8 +340,33 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     /// fix, follow-up to #2456) when set; otherwise fall through to the
     /// trait's optimistic `true` default — matches every existing test's
     /// implicit assumption that a reused pane is still there.
-    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+    fn pane_exists(&self, name: &str, _pane_id: &str) -> bool {
+        *self.pane_session.lock().unwrap() = Some(name.to_owned());
         self.pane_exists_override.lock().unwrap().unwrap_or(true)
+    }
+
+    /// #9004: one fake server, [`FAKE_TMUX_SERVER`]; the pane sits in the
+    /// session the last pane lookup named.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        Ok(super::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: FAKE_TMUX_SERVER.into(),
+            session_name: self
+                .pane_session
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default(),
+        })
+    }
+
+    /// #9004: recorded in `kill_calls` under the session's name.
+    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
+        self.kill_session(name)
     }
 
     /// Records `(name, pane_id, text)` instead of delegating to `send_line`
@@ -405,6 +447,39 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
 
 pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
     let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone())
+        .await
+        .expect("manager");
+    (mgr, fake)
+}
+
+/// A [`FakeTmuxDriver`] whose new sessions carry pane `%1`, which its
+/// `pane_exists` reports present, so a decommission proves the live session
+/// is the record's own (#8935: an unproven one refuses).
+pub(super) fn fake_with_pane() -> Arc<FakeTmuxDriver> {
+    let fake = FakeTmuxDriver::new();
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
+    fake
+}
+
+/// Bind `id`'s record to pane `%1`, which [`FakeTmuxDriver`] reports present
+/// unless overridden, so a decommission proves the live session is the
+/// record's own (#8935). For records written by [`seed_record`].
+pub(super) async fn bind_pane(mgr: &SessionManager, id: &ManagedSessionId) {
+    let mut record = mgr.get(id).await.expect("record");
+    record.pane_id = Some("%1".into());
+    record.tmux_server = Some(FAKE_TMUX_SERVER.into()); // #9004
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("bind pane");
+}
+
+/// [`make_manager`] over [`fake_with_pane`].
+pub(super) async fn make_manager_with_pane(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
+    let fake = fake_with_pane();
     let mgr = SessionManager::new(dir.path(), fake.clone())
         .await
         .expect("manager");
@@ -633,6 +708,8 @@ async fn manager_stop_keeps_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let record = mgr
         .create(
@@ -682,6 +759,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let workspace_path = workspace_dir.path().to_owned();
 
@@ -757,7 +836,8 @@ async fn manager_resume_respawns_in_existing_workspace() {
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
+    // #8935: the record's pane proves the live session is its own.
+    let (mgr, _fake) = make_manager_with_pane(&dir).await;
 
     // Build a workspace path INSIDE a temp "managed root" dir so the
     // path-containment guard passes. `decommission_with_root` is called with
@@ -965,8 +1045,10 @@ async fn decommission_record_only_never_touches_the_runtime() {
         .await
         .expect("record-only decommission");
 
+    // #8935: the teardown's Ctrl-C now targets the record's pane.
     assert!(
-        fake.interrupt_calls.lock().unwrap().is_empty(),
+        fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty(),
         "record-only must never signal the runtime; got {:?}",
         fake.interrupt_calls.lock().unwrap()
     );
@@ -1091,6 +1173,7 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
     assert!(
         fake.kill_calls.lock().unwrap().is_empty()
             && fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.pane_interrupt_calls.lock().unwrap().is_empty()
             && fake.graceful_stop_calls.lock().unwrap().is_empty(),
         "effect 1: the runtime must be untouched"
     );
@@ -1116,6 +1199,8 @@ async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
 async fn decommission_full_still_terminates_the_runtime() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
+    // #8935: a teardown kills only a session proved to hold the record's pane.
+    *fake.pane_id_override.lock().unwrap() = Some("%1".into());
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let workspace_path = managed_root.path().join("owner").join("repo").join("full");
@@ -1184,10 +1269,12 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     }
 }
 
@@ -1314,10 +1401,12 @@ async fn manager_reconcile_skips_decommissioned() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -1376,10 +1465,12 @@ async fn manager_reconcile_skips_deleted() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -1448,10 +1539,12 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -2031,10 +2124,12 @@ pub(super) async fn seed_record(
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -2121,6 +2216,8 @@ async fn decommission_all_ephemeral_ignores_non_ephemeral() {
     let dur_active = ManagedSessionId::new();
     let dur_stopped = ManagedSessionId::new();
     seed_record(&mgr, &dir, eph_active, ManagedSessionState::Active, true).await;
+    // #8935: the record's pane proves the live session is its own.
+    bind_pane(&mgr, &eph_active).await;
     seed_record(&mgr, &dir, eph_stopped, ManagedSessionState::Stopped, true).await;
     seed_record(&mgr, &dir, dur_active, ManagedSessionState::Active, false).await;
     seed_record(&mgr, &dir, dur_stopped, ManagedSessionState::Stopped, false).await;
@@ -2552,10 +2649,12 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -2643,10 +2742,12 @@ async fn manager_decommission_unowned_skips_deletion() {
         last_cwd: None,
         deliverable_id: None,
         pane_id: None,
+        tmux_server: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
         stop_cause: None,
+        kind: Default::default(),
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

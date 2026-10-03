@@ -320,3 +320,78 @@ fn socket_path_is_the_product_named_socket_under_the_data_dir() {
         path.display()
     );
 }
+
+/// #6288 step 1: every route the client transport maps onto the socket names a
+/// method this daemon's router actually serves, so a rename fails here rather
+/// than as a `method_not_found` in a sandboxed `tm` command.
+/// Test: this function IS the test.
+#[test]
+fn every_route_names_a_served_method() {
+    let state = DaemonState::shared();
+    let router = super::build_router(&state);
+    let served: Vec<&str> = router.method_names().collect();
+    for (verb, path, method) in crate::client::http_client::socket_routes::ROUTES {
+        assert!(
+            served.contains(method),
+            "`{verb} {path}` maps to `{method}`, which the daemon socket does not serve"
+        );
+    }
+    for method in crate::daemon::rpc::cli_socket::METHODS {
+        assert!(served.contains(method), "{method} is not registered");
+    }
+}
+
+/// #6288 step 2a: the new methods answer over the REAL listener and the REAL
+/// `build_router`, not only through the in-process dispatcher.
+///
+/// Why: the parity tests prove each method agrees with its HTTP route; this
+/// proves `build_router` mounts them, so a dropped `register` line fails here.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_dispatch_is_registered_on_the_daemon_socket() {
+    let tmp = TempDir::new().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-mpm.sock");
+    let (stop, handle) = spawn_listener(&socket).await;
+
+    let exchange = dial_once(
+        &socket,
+        &serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "mpm.mcp.dispatch",
+            "params": {"jsonrpc": "2.0", "id": 9, "method": "tools/list"},
+        }),
+    )
+    .await;
+    let mcp = &exchange.frame["result"];
+    assert_eq!(
+        mcp["id"], 9,
+        "the MCP envelope's own id: {}",
+        exchange.frame
+    );
+    assert!(
+        mcp["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
+        "tools/list over the socket lists tools: {}",
+        exchange.frame
+    );
+
+    for (method, params) in [
+        ("mpm.sessions.context", serde_json::json!({})),
+        (
+            "mpm.delegation.list",
+            serde_json::json!({ "cwd": tmp.path().display().to_string() }),
+        ),
+    ] {
+        let request =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 4, "method": method, "params": params });
+        let exchange = dial_once(&socket, &request).await;
+        assert!(
+            exchange.frame.get("result").is_some(),
+            "{method} answers over the socket: {}",
+            exchange.frame
+        );
+    }
+
+    let _ = stop.send(());
+    handle.await.expect("the serve task must not panic");
+}

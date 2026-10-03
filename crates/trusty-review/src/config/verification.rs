@@ -18,9 +18,13 @@
 //! operator whose provider was throttling the round had no lever short of a
 //! release.  `pipeline::verify::VerifyPolicy` reads both.
 //!
+//! `max_calls` and `batch_size` arrived with #8904, when every posted finding
+//! became a verifier candidate: they bound the verifier spend per review.
+//!
 //! Test: `verification_defaults_enabled`, `verification_env_disables`,
 //! `verification_file_disables`, `verification_env_beats_file`,
-//! `verify_fan_out_knobs_resolve_and_clamp` in this module.
+//! `verify_fan_out_knobs_resolve_and_clamp`, `verify_cap_knobs_resolve_and_clamp`
+//! in this module.
 
 use serde::Deserialize;
 use tracing::warn;
@@ -58,6 +62,35 @@ const ENV_VERIFY_CONCURRENCY: &str = "TRUSTY_REVIEW_VERIFY_CONCURRENCY";
 /// What: a positive integer counting TOTAL attempts (1 = no retry); `0` and
 /// unparseable values are ignored with a warning.
 const ENV_VERIFY_MAX_ATTEMPTS: &str = "TRUSTY_REVIEW_VERIFY_MAX_ATTEMPTS";
+
+/// Environment variable that caps verifier requests per review (#8904).
+///
+/// Why: every posted finding is now verified, so a review with many findings
+/// costs many verifier calls; the operator needs a ceiling on that spend.
+/// What: a positive integer; `0` and unparseable values are ignored.
+const ENV_VERIFY_MAX_CALLS: &str = "TRUSTY_REVIEW_VERIFY_MAX_CALLS";
+
+/// Environment variable that sets how many findings share one verifier call (#8904).
+///
+/// Why: each call carries the diff, so batching findings cuts the dominant cost.
+/// What: a positive integer; `1` sends one finding per call.
+const ENV_VERIFY_BATCH_SIZE: &str = "TRUSTY_REVIEW_VERIFY_BATCH_SIZE";
+
+/// Verifier requests per review when nothing overrides it (#8904).
+///
+/// Why: with [`DEFAULT_VERIFY_BATCH_SIZE`] this verifies up to 32 findings, and
+/// the 0.36.1 sample posted at most 16 findings across 10 reviews. A finding
+/// past the cap is withheld, not posted unverified.
+/// What: the default for [`VerificationConfig::max_calls`]. Retries of one
+/// call do not count against it.
+pub const DEFAULT_VERIFY_MAX_CALLS: usize = 8;
+
+/// Findings per verifier request when nothing overrides it (#8904).
+///
+/// Why: four findings keep a batched answer well inside the output budget
+/// (128 tokens per finding) while paying for the diff once instead of four times.
+/// What: the default for [`VerificationConfig::batch_size`].
+pub const DEFAULT_VERIFY_BATCH_SIZE: usize = 4;
 
 /// Verifier calls in flight per verification round when nothing overrides it.
 ///
@@ -99,6 +132,11 @@ pub struct VerificationConfig {
     /// Total verifier attempts per finding, first call included (#4459).
     /// Always ≥ 1; `1` disables retry.
     pub max_attempts: u32,
+    /// Verifier requests per review (#8904). Always ≥ 1. Findings past the cap
+    /// are withheld.
+    pub max_calls: usize,
+    /// Findings per verifier request (#8904). Always ≥ 1.
+    pub batch_size: usize,
 }
 
 impl Default for VerificationConfig {
@@ -114,6 +152,8 @@ impl Default for VerificationConfig {
             liveness_check: true,
             concurrency: DEFAULT_VERIFY_CONCURRENCY,
             max_attempts: DEFAULT_VERIFY_MAX_ATTEMPTS,
+            max_calls: DEFAULT_VERIFY_MAX_CALLS,
+            batch_size: DEFAULT_VERIFY_BATCH_SIZE,
         }
     }
 }
@@ -140,6 +180,14 @@ impl VerificationConfig {
                 .and_then(|f| f.max_attempts)
                 .filter(|n| *n > 0)
                 .unwrap_or(DEFAULT_VERIFY_MAX_ATTEMPTS),
+            max_calls: file
+                .and_then(|f| f.max_calls)
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_VERIFY_MAX_CALLS),
+            batch_size: file
+                .and_then(|f| f.batch_size)
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_VERIFY_BATCH_SIZE),
         };
         if let Some(v) = parse_bool_env(ENV_VERIFICATION_ENABLED) {
             cfg.enabled = v;
@@ -152,6 +200,12 @@ impl VerificationConfig {
         }
         if let Some(v) = parse_positive_env(ENV_VERIFY_MAX_ATTEMPTS) {
             cfg.max_attempts = v;
+        }
+        if let Some(v) = parse_positive_env(ENV_VERIFY_MAX_CALLS) {
+            cfg.max_calls = v as usize;
+        }
+        if let Some(v) = parse_positive_env(ENV_VERIFY_BATCH_SIZE) {
+            cfg.batch_size = v as usize;
         }
         cfg
     }
@@ -174,6 +228,10 @@ pub struct VerificationFileConfig {
     pub concurrency: Option<usize>,
     /// `[verification] max_attempts = 5` widens the per-finding retry budget (#4459).
     pub max_attempts: Option<u32>,
+    /// `[verification] max_calls = 4` lowers the per-review verifier-call cap (#8904).
+    pub max_calls: Option<usize>,
+    /// `[verification] batch_size = 1` sends one finding per verifier call (#8904).
+    pub batch_size: Option<usize>,
 }
 
 /// Parse a boolean env var with lenient truthiness, or `None` if unset/empty.
@@ -237,7 +295,33 @@ mod tests {
             std::env::remove_var(ENV_LIVENESS_CHECK);
             std::env::remove_var(ENV_VERIFY_CONCURRENCY);
             std::env::remove_var(ENV_VERIFY_MAX_ATTEMPTS);
+            std::env::remove_var(ENV_VERIFY_MAX_CALLS);
+            std::env::remove_var(ENV_VERIFY_BATCH_SIZE);
         }
+    }
+
+    /// #8904: the call cap and the batch size are operator knobs; a `0` falls
+    /// through to the default, and env beats file.
+    #[test]
+    #[serial]
+    fn verify_cap_knobs_resolve_and_clamp() {
+        clear_env();
+        let file = VerificationFileConfig {
+            max_calls: Some(0),
+            batch_size: Some(2),
+            ..Default::default()
+        };
+        let cfg = VerificationConfig::from_env_and_file(Some(&file));
+        assert_eq!(cfg.max_calls, DEFAULT_VERIFY_MAX_CALLS);
+        assert_eq!(cfg.batch_size, 2);
+        unsafe {
+            std::env::set_var(ENV_VERIFY_MAX_CALLS, "3");
+            std::env::set_var(ENV_VERIFY_BATCH_SIZE, "0");
+        }
+        let cfg = VerificationConfig::from_env_and_file(Some(&file));
+        assert_eq!(cfg.max_calls, 3, "env must override the default");
+        assert_eq!(cfg.batch_size, 2, "a 0 in the env must be ignored");
+        clear_env();
     }
 
     #[test]
@@ -247,6 +331,8 @@ mod tests {
         assert!(cfg.liveness_check, "liveness gate must default ON");
         assert_eq!(cfg.concurrency, DEFAULT_VERIFY_CONCURRENCY);
         assert_eq!(cfg.max_attempts, DEFAULT_VERIFY_MAX_ATTEMPTS);
+        assert_eq!(cfg.max_calls, DEFAULT_VERIFY_MAX_CALLS);
+        assert_eq!(cfg.batch_size, DEFAULT_VERIFY_BATCH_SIZE);
     }
 
     /// #4459: the fan-out ceiling and the retry budget are operator knobs, and a

@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::config::constants::FIX_ISSUE_MIN_CONFIDENCE;
-use crate::models::{Finding, Verdict};
+use crate::models::Finding;
 use crate::pipeline::grade::drives_block_floor;
 
 /// The finding #5309 reports, field for field.
@@ -76,13 +76,13 @@ fn demoted_finding_does_not_drive_the_block_floor() {
 fn demoted_finding_is_never_a_verification_candidate() {
     let mut findings = vec![unawaited_run_finding()];
     assert_eq!(
-        crate::pipeline::verify::select_candidates(Verdict::Block, &findings),
+        crate::pipeline::verify::select_candidates(&findings),
         vec![0],
         "precondition: it was a candidate before the demotion"
     );
     demote_self_admitted_unverifiable(&mut findings);
     assert!(
-        crate::pipeline::verify::select_candidates(Verdict::Block, &findings).is_empty(),
+        crate::pipeline::verify::select_candidates(&findings).is_empty(),
         "a pre-stamped Unverifiable finding must never reach the verifier"
     );
 }
@@ -183,7 +183,8 @@ fn advisory_note_does_not_trip_sibling_pass_markers() {
         0.9,
         Effort::High,
     )];
-    let counts = crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated);
+    let counts =
+        crate::pipeline::finding_hygiene::sanitize_findings(&mut annotated, &mut Vec::new());
     assert_eq!(annotated.len(), 1, "the note must not cause a drop");
     assert_eq!(counts.dropped_self_negated, 0);
     assert_eq!(counts.demoted_diff_absent, 0);

@@ -145,12 +145,32 @@ pub(crate) struct Cli {
     /// unchanged; no validation against `gh auth status` exists for either
     /// spelling, and none is added here (a network/subprocess call at parse
     /// time is not this flag's job).
+    /// #9090: `--u <login>` is a third visible alias of the same arg.
     /// Test: `cli_parses_account_flag_global`, `cli_account_flag_after_subcommand`,
     /// `cli_parses_user_alias_for_account_global`, `cli_user_alias_after_subcommand`,
+    /// `cli_parses_u_alias_for_account_global`,
+    /// `every_account_spelling_selects_the_account_in_every_form_and_position`,
     /// `cli_rejects_a_blank_account_flag_before_the_repository`.
     // #5850: a blank value is refused here, not read as absent downstream.
-    #[arg(long, visible_alias = "user", global = true, value_parser = non_blank_login)]
+    // #9090: `--u` joins `--user`; the bare form lifts it in `run_target`.
+    #[arg(
+        long,
+        visible_aliases = ["user", "u"],
+        global = true,
+        value_parser = non_blank_login
+    )]
     pub(crate) account: Option<String>,
+
+    /// Read a token for `--account` from stdin (#8914).
+    ///
+    /// Why: when this machine's own gh cannot yield the account's token, a
+    /// token on stdin is the setup that touches no keyring. `gh auth login`
+    /// activates the account in the machine-wide keyring slot.
+    /// What: tm proves the token with `GET /user` and stores it in its 0600
+    /// per-account `hosts.yml` before any session starts.
+    /// Test: `cli_account_token_stdin_requires_an_account`.
+    #[arg(long, global = true, requires = "account")]
+    pub(crate) account_token_stdin: bool,
 
     /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
@@ -448,9 +468,6 @@ pub(crate) enum Command {
         #[arg(long)]
         single_pane: bool,
     },
-    /// Launch the Tauri desktop GUI (or open the web build in the browser
-    /// when Tauri is unavailable).
-    Gui,
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {
         /// Telegram action to perform.
@@ -685,6 +702,16 @@ pub(crate) enum Command {
     /// Test: `commands::wait::tests`; `cli_parses_wait_*` in
     /// `tests_behavior_a.rs`.
     Wait(WaitArgs),
+    /// Run a heavy build under a machine-wide build slot (#8261).
+    ///
+    /// Why: the machine-wide builder cap is enforced at the build command,
+    /// not the dispatch; the `PreToolUse` hook rewrites heavy builds to this.
+    /// What: waits (bounded by `builders.lease_wait_secs`) for a `flock` slot
+    /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
+    /// slot's pool directory unless one is pinned, runs the command and exits
+    /// with its status; exits 75 naming the holders when no slot frees.
+    /// Test: `tests/tm_build_lease.rs`.
+    BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.
@@ -767,6 +794,14 @@ pub(crate) enum Command {
         /// untouched.
         #[arg(long)]
         worktree: bool,
+        /// Arm the started `claude` for supervisor-twin mode (#8878).
+        ///
+        /// Needs the project in both `[supervisor] projects` and
+        /// `[supervisor.twin] projects` of `~/.trusty-mpm/config.toml`, and
+        /// `profile = "supervisor"` in its `.trusty-mpm.toml`. Refused on a
+        /// reattach and for a checkout with no origin remote.
+        #[arg(long)]
+        twin: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///
@@ -798,6 +833,35 @@ pub(crate) enum Command {
         /// Optimizer action to perform.
         #[command(subcommand)]
         action: OptimizerAction,
+    },
+    /// Set up and inspect the Architect, the one fleet supervisor per user.
+    ///
+    /// `init` creates the project, grants it the supervisor profile and
+    /// starts tmux session `tm-architect`; `status` checks that setup.
+    // #8436. Test: `cli_parses_fleet_init`, `cli_parses_fleet_status`.
+    Fleet {
+        /// Fleet action to perform.
+        #[command(subcommand)]
+        action: FleetAction,
+    },
+    /// Edit a dotenv file without printing a value: `set` and `keys`.
+    ///
+    /// Only the bound Architect may run either verb.
+    // #8939. Test: `cli_parses_env_set_and_keys`.
+    Env {
+        /// Env-file action to perform.
+        #[command(subcommand)]
+        action: EnvAction,
+    },
+    /// Install, update and inspect the runtime instructional content.
+    ///
+    /// `install --from` is offline; `update` fetches a `content-v*` release;
+    /// `status` shows the source and the pinned tag and sha256.
+    // #8378 PR-C. Test: `cli_parses_content_install_update_and_status`.
+    Content {
+        /// Content action to perform.
+        #[command(subcommand)]
+        action: ContentAction,
     },
     /// Inspect the session overseer.
     Overseer {
@@ -1740,6 +1804,33 @@ pub struct DoctorFlags {
     /// What: promotes `DriftedFrozen` findings into the repair set.
     #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+
+    /// Scope the report to this project directory instead of the current one.
+    ///
+    /// Why (#7757): every project-scoped row (`session_scope`, `instructions`,
+    /// `agents`, `skills`, ...) is read from the cwd, so an operator could not
+    /// ask what a session in ANOTHER project would load without `cd`-ing there.
+    /// What: the path is canonicalized and must be an existing directory; a
+    /// missing or non-directory path is an error, never a silent fall back to
+    /// the cwd. Report-only: it conflicts with every write flag, because the
+    /// repairs act on the cwd and a scoped report beside them would mislead.
+    #[arg(long, value_name = "DIR", conflicts_with = "writes")]
+    pub dir: Option<std::path::PathBuf>,
+
+    /// Also run the checks that make network calls. Off by default.
+    ///
+    /// Why (#8371, owner ruling 4d): `gcp-ops` could not tell "no gcloud
+    /// credentials" from "every account needs an interactive reauth", and
+    /// telling them apart means asking Google for a token. A bare `tm doctor`
+    /// must stay offline, so that probe is opt-in.
+    /// What: adds the `gcloud_auth` row: the active account (redacted to
+    /// `a***@domain`) and whether `gcloud` can mint an access token for it,
+    /// each call bounded at 10 s. No token value is ever printed. Without
+    /// this flag the row reads `skipped (needs --network)` and `gcloud` is
+    /// never spawned.
+    /// Test: `cli_parses_doctor_network`; the row in `doctor_gcloud_tests.rs`.
+    #[arg(long)]
+    pub network: bool,
 }
 
 /// Flags for [`Command::Reinstall`].

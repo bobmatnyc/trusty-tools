@@ -78,6 +78,15 @@ pub enum ManagedError {
     #[error("invalid state transition for session {0}: {1}")]
     InvalidState(String, String),
 
+    /// The #8942 kill floor refused to signal or kill a tmux session by name.
+    ///
+    /// Why: typed, so a teardown aborts before it touches the workspace or
+    /// the record instead of reading the refusal as "already gone".
+    /// What: carries the floor's refusal text, which names the requester.
+    /// Test: `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`.
+    #[error("kill refused: {0}")]
+    KillRefused(String),
+
     /// Another path is already resuming this session (#8233 item 4).
     ///
     /// Why: distinct from [`InvalidState`](Self::InvalidState), which says the
@@ -174,11 +183,14 @@ pub enum ManagedError {
     /// rather than guessing.
     /// What: `(session_id, pane_id)` — the missing pane's id, surfaced in the
     /// error message so the operator knows exactly what vanished.
+    // #8935: the advice names delete as record-only; it never tears down the
+    // sibling's session.
     #[error(
         "recorded pane {1} for session {0} no longer exists, but its tmux session is still \
          alive (likely a sibling window) — refusing to respawn into an unrelated active pane; \
-         close the sibling window and delete/recreate this session, or manually verify pane \
-         state with `tmux list-panes`"
+         close the sibling window and delete/recreate this session (delete removes the record \
+         only and never kills that tmux session), or manually verify pane state with \
+         `tmux list-panes`"
     )]
     PaneGone(String, String),
 
@@ -309,6 +321,11 @@ pub struct SessionManager {
     /// path and the supervisor tick), and a fresh process has no resume in
     /// flight to remember. See `resume_in_flight.rs`.
     pub(crate) resume_in_flight: super::resume_in_flight::InFlightSet,
+    /// #7771: reads the Claude session registry that proves an owner
+    /// session ended. Installed by the host daemon and supervisor only; see
+    /// `worktree_claude_registry.rs`.
+    pub(crate) claude_registry:
+        std::sync::OnceLock<super::worktree_claude_registry::RegistryReader>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -354,6 +371,7 @@ impl SessionManager {
             // #8233 item 4: empty at construction; every entry is added and
             // removed by a `ResumeInFlightGuard` within one resume call.
             resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            claude_registry: std::sync::OnceLock::new(),
         })
     }
 
@@ -840,8 +858,11 @@ impl SessionManager {
         // matter — no earlier capture exists to protect), but a
         // known-good id, once captured at spawn/adopt time, is NEVER
         // re-derived here again.
+        // #9004: a known pane id with no server stays serverless; only a
+        // fresh capture may pair a pane with the server it was read on.
         if record.pane_id.is_none() {
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            (record.pane_id, record.tmux_server) =
+                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
@@ -975,6 +996,8 @@ impl SessionManager {
                 ));
             }
         }
+        // #8942: the Architect is relaunched by `tm fleet init`, never here.
+        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Resume)?;
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
         // below (`session_exists_checked`'s `list-sessions` probe), so a cold
@@ -1019,7 +1042,9 @@ impl SessionManager {
             );
         } else {
             // Best-effort guard: clear any stale entry the driver may still report
-            // before creating the replacement session.
+            // before creating the replacement session. #8942: a name the floor
+            // cannot clear refuses the whole resume, never only the kill.
+            self.kill_gate(&record.tmux_name, "SessionManager::resume")?;
             if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
                 warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
             }
@@ -1039,7 +1064,9 @@ impl SessionManager {
             // match this session again until the next runtime-exit reconcile
             // heals it. Best-effort — `None` on failure, consistent with
             // every other `get_pane_id` call site.
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            // #9004: the new pane with the server it was read on.
+            (record.pane_id, record.tmux_server) =
+                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,

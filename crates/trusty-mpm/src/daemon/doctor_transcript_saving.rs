@@ -154,6 +154,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         std::path::Path::new("/probe"),
         None,
     );
+    // #8453: the control-plane pane line, scrubbed since the stamp fix. A
+    // `None` config root reads no operator file; only the `-u` flags matter.
+    let control_pane_line =
+        crate::control::backend::tmux::pane_claude_line(None, "claude", None).unwrap_or_default();
 
     vec![
         (
@@ -172,6 +176,34 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
             "core::model_inject::build_client_session_command (DaemonClient launch/connect)",
             owned(parse_env_unset_vars(&client_line)),
         ),
+        // #8308: the CLI and fleet paths now launch from these specs; the
+        // string builders above stay covered while they remain public API.
+        (
+            "runtime::cli_launch::isolated_spec (tm launch / tm connect / tm fleet)",
+            crate::runtime::cli_launch::isolated_spec(
+                std::path::Path::new("/probe"),
+                &crate::runtime::cli_launch::CliLaunch {
+                    model: None,
+                    prompt_file: None,
+                    config_dir: Some(&config_dir),
+                    oauth_token: Some(PROBE_TOKEN),
+                    mcp_env: &[],
+                    scoped_mcp: None,
+                    alternate_screen: false,
+                },
+            )
+            .env_unset,
+        ),
+        (
+            "runtime::cli_launch::inplace_spec (tm session start, in place)",
+            crate::runtime::cli_launch::inplace_spec(std::path::Path::new("/probe"), false)
+                .env_unset,
+        ),
+        (
+            "runtime::cli_launch::client_spec (DaemonClient launch/connect)",
+            crate::runtime::cli_launch::client_spec(std::path::Path::new("/probe"), None, false)
+                .env_unset,
+        ),
         (
             "daemon::spawn_command::relaunch_command (pane relaunch)",
             owned(parse_env_unset_vars(&relaunch_line)),
@@ -183,6 +215,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         (
             "control::backend::stream_json::build_claude_command (headless)",
             removed_env_keys(&stream_cmd),
+        ),
+        (
+            "control::backend::tmux::pane_claude_line (control-plane pane)",
+            owned(parse_env_unset_vars(&control_pane_line)),
         ),
     ]
 }

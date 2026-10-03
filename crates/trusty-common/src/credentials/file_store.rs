@@ -10,7 +10,10 @@
 //! What: [`FileKeyStore`] persists a `[keys]` TOML table
 //! (`fireworks = "..."` etc.) atomically (write-to-`.tmp` + rename, mirroring
 //! `crate_config::save_at`'s convention) and re-asserts `0600` permissions on
-//! every write. The base directory is injectable via [`FileKeyStore::at`] so
+//! every write. `set`/`unset` hold an advisory lock on a `0600`
+//! `credentials.toml.lock` beside the store across the whole
+//! read-modify-write, so writers in separate processes cannot lose each
+//! other's keys (#8569). The base directory is injectable via [`FileKeyStore::at`] so
 //! tests never touch the real `$HOME`; [`FileKeyStore::new`] resolves the
 //! real one via `dirs::home_dir()`.
 //! Test: `file_store_tests` (sibling file).
@@ -18,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +33,13 @@ const CREDENTIALS_DIR: &str = ".trusty-tools";
 
 /// Credential file name within [`CREDENTIALS_DIR`].
 const CREDENTIALS_FILE: &str = "credentials.toml";
+
+/// Longest a writer waits for another holder of the store lock before
+/// `set`/`unset` fail with a `TimedOut` I/O error.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// Interval between non-blocking lock attempts while waiting.
+const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// On-disk shape: a single `[keys]` table, `provider = "value"` entries.
 ///
@@ -52,10 +63,12 @@ struct CredentialsFile {
 #[derive(Debug)]
 pub struct FileKeyStore {
     path: PathBuf,
-    // Serialises read-modify-write cycles within this process; the atomic
-    // tmp+rename write additionally protects readers in other processes
-    // from ever observing a torn file.
+    // Serialises cycles on this instance; the file lock (see `lock_file`)
+    // serialises writers across handles and processes, and the atomic
+    // tmp+rename write keeps readers from ever observing a torn file.
     lock: Mutex<()>,
+    // Bound on waiting for the cross-process file lock.
+    lock_wait: Duration,
 }
 
 impl FileKeyStore {
@@ -79,6 +92,59 @@ impl FileKeyStore {
         Self {
             path,
             lock: Mutex::new(()),
+            lock_wait: LOCK_WAIT,
+        }
+    }
+
+    /// Take the cross-process write lock on `credentials.toml.lock`.
+    ///
+    /// Why (#8569): `set`/`unset` are read-modify-write. Without a lock
+    /// shared across processes, two writers read the same old table and the
+    /// second rename drops the first writer's key; both also stage through
+    /// the one `credentials.toml.tmp` path.
+    /// What: opens (creating at `0600`) the lock file beside the store and
+    /// takes an exclusive advisory lock via `File::try_lock` (`flock(2)` on
+    /// unix, `LockFileEx` on Windows), polling until `lock_wait` elapses. The
+    /// lock is released when the returned `File` drops. The kernel also
+    /// releases it when the holding process dies, so a leftover lock file
+    /// from a crashed writer never blocks: only a live holder can make a
+    /// writer wait, and then for at most `lock_wait`, after which this
+    /// returns an `Io` error of kind `TimedOut`.
+    /// Test: `concurrent_writers_with_separate_handles_lose_no_key`,
+    /// `a_held_lock_times_out_and_a_released_one_does_not`,
+    /// `set_keeps_the_store_and_its_lock_file_at_0600`.
+    fn lock_file(&self) -> Result<std::fs::File, KeyStoreError> {
+        let lock_path = self.path.with_extension("toml.lock");
+        let io_err = |source: std::io::Error| KeyStoreError::Io {
+            path: lock_path.clone(),
+            source,
+        };
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| KeyStoreError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&lock_path).map_err(io_err)?;
+        let deadline = Instant::now() + self.lock_wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(io_err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("credential store lock held for over {:?}", self.lock_wait),
+                    )));
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(io_err(e)),
+            }
         }
     }
 
@@ -224,12 +290,20 @@ fn set_permissions_0600(_path: &Path) -> Result<(), KeyStoreError> {
 
 impl KeyStore for FileKeyStore {
     fn get(&self, provider: &str) -> Option<String> {
+        // The trait contract: `None` on any failure. `try_get` carries the error.
+        self.try_get(provider).ok().flatten()
+    }
+
+    // #8569: an unreadable or unparsable store is an error, never "absent";
+    // only a missing file reads as an empty store (see `read`).
+    fn try_get(&self, provider: &str) -> Result<Option<String>, KeyStoreError> {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
-        self.read().ok()?.keys.get(provider).cloned()
+        Ok(self.read()?.keys.get(provider).cloned())
     }
 
     fn set(&self, provider: &str, value: &str) -> Result<(), KeyStoreError> {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = self.lock_file()?;
         let mut data = self.read()?;
         data.keys.insert(provider.to_string(), value.to_string());
         self.write(&data)
@@ -237,6 +311,7 @@ impl KeyStore for FileKeyStore {
 
     fn unset(&self, provider: &str) -> Result<(), KeyStoreError> {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let _file_lock = self.lock_file()?;
         let mut data = self.read()?;
         data.keys.remove(provider);
         self.write(&data)
@@ -414,5 +489,165 @@ mod tests {
         write_owner_only(&target, "[keys]\n").unwrap();
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected tightened 0600, got {mode:o}");
+    }
+
+    /// Path of the store file `FileKeyStore::at(base)` targets.
+    fn store_path(base: &Path) -> PathBuf {
+        base.join(".trusty-tools").join("credentials.toml")
+    }
+
+    /// Why (#8569): a store path that exists but cannot be read is a backend
+    /// failure, and `try_get` must say so instead of reporting "not set".
+    /// Test: itself.
+    #[test]
+    fn a_directory_at_the_store_path_is_an_error_not_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(store_path(tmp.path())).unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        let got = store.try_get("fireworks");
+        assert!(
+            matches!(got, Err(KeyStoreError::Io { .. })),
+            "expected an Io error, got {got:?}"
+        );
+    }
+
+    /// Why (#8569): same as above for a mode-000 file.
+    /// Test: itself (unix only; a root runner can read a mode-000 file, so
+    /// the test returns early there).
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_file_is_an_error_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        store.set("fireworks", "fw-secret").unwrap();
+        let path = store_path(tmp.path());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // running as root: mode 000 does not deny reads
+        }
+        let got = store.try_get("fireworks");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            matches!(got, Err(KeyStoreError::Io { .. })),
+            "expected an Io error, got {got:?}"
+        );
+    }
+
+    /// Why (#8569): a readable store still reports a miss as `Ok(None)` and a
+    /// hit as `Ok(Some)`, and an absent file stays an empty store.
+    /// Test: itself.
+    #[test]
+    fn try_get_separates_a_hit_from_a_miss() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        assert_eq!(store.try_get("fireworks").unwrap(), None);
+        store.set("fireworks", "fw-secret").unwrap();
+        assert_eq!(
+            store.try_get("fireworks").unwrap(),
+            Some("fw-secret".to_string())
+        );
+        assert_eq!(store.try_get("openai").unwrap(), None);
+    }
+
+    /// Why (#8569): two writers with separate file handles (as two processes
+    /// have) must not lose each other's keys in the read-modify-write.
+    /// What: 50 rounds; each round starts two threads, each with its OWN
+    /// `FileKeyStore` (so the in-process `Mutex` does not serialise them),
+    /// released together by a barrier, each writing five distinct keys.
+    /// Every round must end with all ten keys present and no `set` error.
+    /// Test: itself.
+    #[test]
+    fn concurrent_writers_with_separate_handles_lose_no_key() {
+        use std::sync::{Arc, Barrier};
+        const ROUNDS: usize = 50;
+        const KEYS: usize = 5;
+        let mut failed_rounds = Vec::new();
+        for round in 0..ROUNDS {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let writers: Vec<_> = ["a", "b"]
+                .into_iter()
+                .map(|who| {
+                    let base = tmp.path().to_path_buf();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let store = FileKeyStore::at(&base);
+                        barrier.wait();
+                        (0..KEYS)
+                            .filter_map(|i| store.set(&format!("{who}{i}"), "v").err())
+                            .map(|e| e.to_string())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let errors: Vec<String> = writers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect();
+            let present = FileKeyStore::at(tmp.path()).list().len();
+            if present != 2 * KEYS || !errors.is_empty() {
+                failed_rounds.push(format!("round {round}: {present} keys, errors {errors:?}"));
+            }
+        }
+        assert!(
+            failed_rounds.is_empty(),
+            "{} of {ROUNDS} rounds lost a key or failed a set: {failed_rounds:?}",
+            failed_rounds.len()
+        );
+    }
+
+    /// Why (#8569): a live holder of the store lock must make `set` fail
+    /// within the bound rather than hang, and a released lock (what the
+    /// kernel does when a holder process dies) must not block at all.
+    /// What: the holder is a second, independently opened handle in this
+    /// process, which also shows the lock is per open file, not per process.
+    /// Test: itself.
+    #[test]
+    fn a_held_lock_times_out_and_a_released_one_does_not() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileKeyStore {
+            lock_wait: Duration::from_millis(100),
+            ..FileKeyStore::at(tmp.path())
+        };
+        store.set("fireworks", "fw-secret").unwrap();
+        let holder =
+            std::fs::File::open(store_path(tmp.path()).with_extension("toml.lock")).unwrap();
+        holder.lock().unwrap();
+        let started = Instant::now();
+        let err = store.set("openai", "sk-abc").unwrap_err();
+        assert!(
+            matches!(&err, KeyStoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::TimedOut),
+            "expected a TimedOut Io error, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait was not bounded"
+        );
+        drop(holder);
+        store.set("openai", "sk-abc").unwrap();
+        assert_eq!(store.list().len(), 2);
+    }
+
+    /// Why (#8569): `set` must leave an existing `0600` store at `0600`, and
+    /// the lock file it creates beside the store must be `0600` too.
+    /// Test: itself (unix only).
+    #[cfg(unix)]
+    #[test]
+    fn set_keeps_the_store_and_its_lock_file_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = store_path(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[keys]\nfireworks = \"fw-secret\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = FileKeyStore::at(tmp.path());
+        store.set("openai", "sk-abc").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600, "store mode after set");
+        assert_eq!(store.get("fireworks"), Some("fw-secret".to_string()));
+        let lock = path.with_extension("toml.lock");
+        assert!(lock.is_file(), "expected a lock file at {}", lock.display());
+        assert_eq!(mode(&lock), 0o600, "lock file mode");
     }
 }

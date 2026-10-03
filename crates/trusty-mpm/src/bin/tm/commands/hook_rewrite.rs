@@ -348,83 +348,30 @@ fn is_orchestrator_command(command: &str) -> bool {
     }
 }
 
-/// Wrapper words that precede a real command without changing which program
-/// ultimately runs — privilege/environment wrappers (`sudo`, `env`,
-/// `command`, `builtin`, `doas`) and process/resource wrappers (`nice`,
-/// `time`, `nohup`, `exec`, `ionice`, `timeout`, `stdbuf`, `caffeinate`)
-/// alike. Issue #4031 review (pass 2): enumerating only `sudo`/`env` (then
-/// `command`/`builtin`) left `nice rm -rf /`, `nohup rm -rf /`, `exec rm -rf
-/// /`, and `env -i rm -rf /root` unresolved — each is a DIFFERENT wrapper
-/// bypassing the SAME enumeration weakness, so the fix is one list shared by
-/// every caller rather than another single word added to it.
-/// What: matched exactly (no prefix/substring matching) by [`strip_wrapper_prefix`].
-pub(crate) const COMMAND_WRAPPERS: &[&str] = &[
-    "sudo",
-    "env",
-    "command",
-    "builtin",
-    "doas",
-    "nice",
-    "time",
-    "nohup",
-    "exec",
-    "ionice",
-    "timeout",
-    "stdbuf",
-    "caffeinate",
-];
+// #8735: the wrapper list moved beside its option grammars, in `program_word`.
+pub(crate) use super::program_word::COMMAND_WRAPPERS;
 
 /// Skip a leading run of `KEY=value` env-assignments and [`COMMAND_WRAPPERS`]
 /// tokens in `tokens` (a leading `\` on any token stripped before comparison,
 /// per the same alias-bypass idiom [`first_command_token`] documents),
 /// returning the index of the first token that is neither — the real command
-/// — or `None` when a wrapper is immediately followed by a flag-shaped token
-/// (`sudo -u root make`, `env -i cmd`): resolving the real program name past
-/// that needs argument-aware parsing this function doesn't do.
+/// — or `None` when a wrapper takes an option (`sudo -u root make`, `env -i
+/// cmd`), carries an option or operand the resolver cannot measure, or has
+/// nothing after it.
 ///
 /// Why: [`first_command_token`] and `pm_guard_bash::shell_lex::git_subcommand`
 /// both need this exact skip — a wrapper reaching either unresolved is a
 /// classifier silently seeing a different (wrapped) command than the one
-/// that will actually run (issue #4031 review). One generic helper, indexing
-/// into whatever token slice the caller already has (`&[&str]` here,
-/// `&[String]` from `shlex::split` there), is what keeps the two from
-/// re-diverging the way `sudo`/`env`-only enumeration already had once.
-/// What: generic over any `T: AsRef<str>` token slice; loops advancing past
-/// each env-assignment or wrapper ONE TOKEN AT A TIME — a wrapper only
-/// consumes itself, then re-examines the following token (which may be
-/// another wrapper, an env-assignment, or the real command) — and returns
-/// the index it stops at. A wrapper followed by nothing, or by a
-/// flag-shaped token (ambiguous: might be the wrapper's own flag, e.g.
-/// `sudo -u root`), yields `None` rather than guessing.
+/// that will actually run (issue #4031 review). #8735: the skip is now the
+/// shared `program_word` resolver, so `timeout 5 make` resolves to `make`
+/// rather than to its duration `5`; the `None` answers are unchanged.
+/// What: delegates to `program_word::precommand_index`.
 /// Test: `strip_wrapper_prefix_skips_env_assignment`,
 /// `strip_wrapper_prefix_skips_every_known_wrapper`,
 /// `strip_wrapper_prefix_none_for_wrapper_followed_by_flag`,
 /// `strip_wrapper_prefix_skips_backslash_before_a_wrapper`.
 pub(crate) fn strip_wrapper_prefix<T: AsRef<str>>(tokens: &[T]) -> Option<usize> {
-    let mut i = 0;
-    while i < tokens.len() {
-        let raw = tokens[i].as_ref();
-        let tok = raw.strip_prefix('\\').unwrap_or(raw);
-        if is_env_assignment(tok) {
-            i += 1;
-            continue;
-        }
-        if COMMAND_WRAPPERS.contains(&tok) {
-            match tokens.get(i + 1) {
-                // The wrapper itself is the only token consumed here — the
-                // NEXT token becomes the new candidate to re-examine (it may
-                // itself be another wrapper, an env-assignment, or the real
-                // command), which is why this advances by ONE, not two.
-                Some(next) if !next.as_ref().starts_with('-') => {
-                    i += 1;
-                    continue;
-                }
-                _ => return None,
-            }
-        }
-        break;
-    }
-    Some(i)
+    super::program_word::precommand_index(tokens)
 }
 
 /// Extract the effective first command token, stripping noise prefixes.
@@ -1322,10 +1269,16 @@ mod tests {
     #[test]
     fn strip_wrapper_prefix_skips_every_known_wrapper() {
         for wrapper in COMMAND_WRAPPERS {
-            let tokens = [*wrapper, "rm", "-rf", "/root"];
+            // #8735: `timeout`, `chrt`, `taskset`, `flock` take an operand.
+            let operand = crate::commands::program_word::sample_operand(wrapper);
+            let (tokens, program) = if operand.is_empty() {
+                (vec![*wrapper, "rm", "-rf", "/root"], 1)
+            } else {
+                (vec![*wrapper, operand, "rm", "-rf", "/root"], 2)
+            };
             assert_eq!(
                 strip_wrapper_prefix(&tokens),
-                Some(1),
+                Some(program),
                 "expected wrapper {wrapper} to be skipped"
             );
         }

@@ -14,7 +14,7 @@
 //! `tm_compress_takes_the_rtk_path_when_rtk_is_installed` covers the rtk arm
 //! where a host has one. Every spawn also pins the child's `RUST_LOG` — see
 //! [`STATS_LOG_LEVEL`].
-//! Test: `cargo test -p trusty-mpm --test tm_compress_pipe`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_compress_pipe::`.
 //!
 //! Note on `--tool` values: `commands::hook_rewrite::effective_tool_name`
 //! derives a dispatch-relevant value (e.g. `"cargo test"`, `"git diff"`) from
@@ -26,7 +26,7 @@
 //! literally `"bash"` or any other unmatched name) is always a safe,
 //! byte-for-byte passthrough — never a corruption or crash.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -349,20 +349,17 @@ fn tm_compress_takes_the_rtk_path_when_rtk_is_installed() {
     );
 }
 
-/// The operator's own savings ledger, when this process has a `$HOME` at all.
+/// The operator's own savings ledger, when this process started with a `$HOME`.
 ///
 /// Why (#7618): the harm is rows in THAT file — not in whichever scratch root a
-/// helper points a child at. The assertion has to name the real one.
+/// helper points a child at. The assertion has to name the real one, so it
+/// reads the `$HOME` captured before `main` rather than the live one another
+/// module may have repointed (#8345).
 /// What: `<HOME>/.trusty-mpm/usage/savings.jsonl`; `None` in a stripped
 /// environment, which is the CI case and asserts vacuously.
 /// Test: used by `a_fixture_payload_never_lands_as_a_session_savings_row`.
 fn operator_savings_ledger() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        std::path::Path::new(&home)
-            .join(".trusty-mpm")
-            .join("usage")
-            .join("savings.jsonl")
-    })
+    common::operator_home().map(|home| home.join(".trusty-mpm").join("usage").join("savings.jsonl"))
 }
 
 /// Count `compress` rows in `ledger` whose `tokens_before` is `tokens`.

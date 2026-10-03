@@ -77,9 +77,12 @@ mod sync_assets;
 // unchanged.
 mod system_prompt;
 pub use system_prompt::{
-    build_system_prompt_for, build_system_prompt_for_with_roster,
-    build_system_prompt_for_with_style, build_system_prompt_for_with_style_and_native,
+    CliLaunch, build_system_prompt_for, build_system_prompt_for_profile,
+    build_system_prompt_for_with_roster, build_system_prompt_for_with_style,
+    build_system_prompt_for_with_style_and_native, cli_launch,
 };
+// #8453: the supervisor model key, written and removed by ownership.
+mod supervisor_model;
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -141,6 +144,19 @@ mod tests_settings_lock_7762;
 #[cfg(test)]
 #[path = "tests_style_selection_8533.rs"]
 mod tests_style_selection_8533;
+// #8453: a supervisor launch writes the supervisor prompt, style and model.
+#[cfg(test)]
+#[path = "tests_supervisor_profile_8453.rs"]
+mod tests_supervisor_profile_8453;
+// #9018: `[pm_guard] enabled` wired into the launch and resume writers.
+#[cfg(test)]
+#[path = "tests_pm_guard_9018.rs"]
+mod tests_pm_guard_9018;
+
+// #8311: the catch-up watermark lands under `fw.root`, never the home.
+#[cfg(test)]
+#[path = "tests_catchup_root_8311.rs"]
+mod tests_catchup_root_8311;
 
 use std::path::{Path, PathBuf};
 
@@ -154,11 +170,12 @@ use settings::{
     remove_global_trusty_memory_hooks,
     write_auto_memory_enabled,
     write_output_style,
-    // #7688: the launch path is the only caller that turns the capture on, so
-    // the plain `write_project_hooks` is not reached from this module.
+    // #9018: the launch builds its additions with every toggle resolved — the
+    // #7688 capture and `[pm_guard] enabled` included — and hands them to the
+    // shared writer.
     // write_enabled_plugins is not imported here: it is already brought into
     // scope by the pub(crate) re-export below (#7678).
-    write_project_hooks_with_prompt_feedback,
+    write_project_hooks_with,
 };
 
 /// Re-export of the project-tier `enabledPlugins` writer (#7678).
@@ -372,6 +389,8 @@ pub struct PrepReport {
     /// `true` means auto memory was turned off, `false` means it was restored.
     /// Test: `prepare_session_reports_the_resolved_reachability`.
     pub memory_reachable: bool,
+    /// The session profile this preparation resolved and wrote for (#8453).
+    pub profile: crate::core::session_profile::SessionProfile,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -601,6 +620,9 @@ pub(super) fn prepare_session_inner(
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
     // before style resolution) was a redundant filesystem read for the same data.
     let config = crate::core::config::MpmConfig::load(&fw.root);
+    // #8453: resolved ONCE per launch; the composer, the style, the model and
+    // the settings below all take this value, and it is returned for the stamp.
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
@@ -645,26 +667,34 @@ pub(super) fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
+    // #9011 critic r1: no content means zero agents. The framework source may
+    // still hold a previous binary's roster; the quarantine below reports why.
+    let stale_source =
+        plan.agent_source == fw.agents && crate::core::content_source::agent_roster().is_err();
     // #7727: `fw.skill_deploy_dir()` is the skills tier the agent bodies name.
-    let deploy = match deploy_agents_filtered(
-        &plan.agent_source,
-        &fw.agent_deploy_dir(),
-        &fw.skill_deploy_dir(),
-        |name| plan.agent_selected(name),
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            // LOUD: an empty agent roster means the launched session has
-            // nothing to delegate to. This must never be a quiet `warn` — it
-            // is the exact failure mode that shipped issue #2149 (a session
-            // with no roster AND no trusty-mpm identity).
-            tracing::error!(
-                project_dir = %project_dir.display(),
-                "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
-                 roster: {err}. Identity/output-style provisioning continues regardless."
-            );
-            roster_errors.push(format!("agent deploy failed: {err}"));
-            DeployResult::default()
+    let deploy = if stale_source {
+        DeployResult::default()
+    } else {
+        match deploy_agents_filtered(
+            &plan.agent_source,
+            &fw.agent_deploy_dir(),
+            &fw.skill_deploy_dir(),
+            |name| plan.agent_selected(name),
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                // LOUD: an empty agent roster means the launched session has
+                // nothing to delegate to. This must never be a quiet `warn` — it
+                // is the exact failure mode that shipped issue #2149 (a session
+                // with no roster AND no trusty-mpm identity).
+                tracing::error!(
+                    project_dir = %project_dir.display(),
+                    "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
+                     roster: {err}. Identity/output-style provisioning continues regardless."
+                );
+                roster_errors.push(format!("agent deploy failed: {err}"));
+                DeployResult::default()
+            }
         }
     };
 
@@ -732,6 +762,12 @@ pub(super) fn prepare_session_inner(
                 ));
             }
             quarantine_report = Some(report);
+        }
+        // #9011 D4: no content is ONE gap, printed by every caller of this
+        // report; no WARN of its own, and no second line from a later consumer.
+        Err(quarantine_shadows::ShadowQuarantineError::Roster(err)) if err.is_not_installed() => {
+            trusty_agents_common::agent_content::mark_not_installed_reported();
+            roster_errors.push(err.to_string());
         }
         Err(err) => {
             tracing::warn!(
@@ -818,10 +854,13 @@ pub(super) fn prepare_session_inner(
     // flag and the host config, and a project style file resolves like a
     // bundled one.
     // The report (`describe_effective_style`) calls this same selector.
-    let selected_style =
-        crate::core::output_style::select_style(project_dir, explicit_style, &config, || {
-            plan.style.clone()
-        });
+    let selected_style = crate::core::output_style::select_style(
+        project_dir,
+        explicit_style,
+        &config,
+        || plan.style.clone(),
+        profile,
+    );
     let effective_style: Option<String> = selected_style.id.clone();
 
     // Resolve the active output style for settings.json using the same
@@ -858,6 +897,11 @@ pub(super) fn prepare_session_inner(
     if let Err(err) = write_output_style(project_dir, Some(&active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
     }
+    // #8453: every launch path reads the project settings' `model`, including
+    // those that pass no `--model`; a supervisor runs on the Opus tier alias.
+    if let Err(err) = supervisor_model::write_supervisor_model(project_dir, profile) {
+        tracing::warn!("failed to update the supervisor model: {err}");
+    }
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -873,10 +917,11 @@ pub(super) fn prepare_session_inner(
     // breaking the stash/launch invariant in a host-dependent way. Routing both
     // through the single seam keeps them identical regardless of Claude version
     // (issue #381 / the #382 concern).
-    let resolved_prompt = build_system_prompt_for_with_style_and_native(
+    let resolved_prompt = build_system_prompt_for_profile(
         project_dir,
         effective_style.as_deref(),
         native_supported,
+        profile,
     );
     // #4752: these two writes DEGRADE TO A WARNING; they must never short-circuit
     // this function. An unwritable `.trusty-mpm/` (disk full, bad perms) used to
@@ -969,8 +1014,10 @@ pub(super) fn prepare_session_inner(
     // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
     // `trusty-memory prompt-context` injection (and strips one a prior launch
     // wrote). Default `true` — every other hook is written either way.
-    let hooks_written = match write_project_hooks_with_prompt_feedback(
-        project_dir,
+    //
+    // #9018: `[pm_guard] enabled = false` leaves the `hook --pm-guard` entry
+    // out and strips one a prior launch wrote; every other hook is unchanged.
+    let additions = project_hooks::project_managed_hook_additions_with_pm_guard(
         // #7244: `None` resolves the running installed binary. When nothing
         // stable resolves this now returns an error and writes NOTHING, rather
         // than wiring every hook to a build artifact. A test pins a stable path
@@ -981,7 +1028,9 @@ pub(super) fn prepare_session_inner(
         // #7688: register the `Stop`/`SubagentStop` capture only where the flag
         // is on, so a project with the feature off spawns no process per turn.
         crate::core::prompt_self_improvement::enabled_for(project_dir),
-    ) {
+        config.pm_guard.enabled,
+    );
+    let hooks_written = match write_project_hooks_with(project_dir, additions) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
@@ -1084,18 +1133,20 @@ pub(super) fn prepare_session_inner(
         tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
     }
 
-    // Issue #3427: ensure the harness-scaffolding paths this deploy just wrote
-    // (or may write in a future session) are gitignored in `project_dir`, so
-    // they never enter this project's git history — the precondition for the
-    // "would be overwritten by merge" collision this issue reports. A no-op
-    // when `project_dir` is not a git working tree, and idempotent otherwise
-    // (see `scaffold_gitignore` module docs). Non-fatal: a write failure only
-    // means the operator keeps doing this manually, it never blocks launch.
-    // This only prevents FUTURE commits — a project that already committed
-    // these paths needs the `scaffold_tracking` doctor check's remediation,
-    // not this step.
-    if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
-        tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
+    // Issue #3427: keep the harness-scaffolding paths this deploy just wrote
+    // out of `project_dir`'s git history. #8758: through the shared
+    // `.git/info/exclude`, never the tracked `.gitignore`, whose append left
+    // `git status` dirty on every launch. A no-op when `project_dir` is not a
+    // git working tree. Non-fatal: a failure never blocks launch. A project
+    // that already committed these paths needs the `scaffold_tracking` doctor
+    // check's remediation, not this step.
+    match crate::core::harness_exclude::ensure_scaffold_excluded(project_dir) {
+        Ok(added) if !added.is_empty() => tracing::info!(
+            "added {} to the shared info/exclude (#8758)",
+            added.join(", ")
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!("harness scaffolding NOT excluded (non-fatal, #8758): {err}"),
     }
     // #8663: after the last write to a ledgered path. A failure only means a
     // later decommission keeps this workspace.
@@ -1125,8 +1176,9 @@ pub(super) fn prepare_session_inner(
             full: false,
         };
         // Auto-inject advances the watermark so subsequent sessions are incremental.
-        // #8545: the watermark follows the injected home, not the process one.
-        let state_root = home.map(|h| FrameworkPaths::under(h).root);
+        // #8311: the watermark is framework state, so it lives under `fw.root`
+        // — always named, never the process home a `None` home fell back to.
+        let state_root = Some(fw.root.clone());
         let ctx = crate::core::catchup::run_catchup_blocking_in(opts, true, state_root);
         if ctx.is_empty() { None } else { Some(ctx) }
     } else {
@@ -1198,6 +1250,7 @@ pub(super) fn prepare_session_inner(
         roster_errors,
         asset_notices,
         memory_reachable,
+        profile,
     })
 }
 

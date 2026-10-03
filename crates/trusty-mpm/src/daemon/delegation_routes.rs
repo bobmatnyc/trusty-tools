@@ -175,7 +175,7 @@ pub fn router() -> Router<Arc<DaemonState>> {
         // — the whole case is a record whose session the daemon has lost.
         .route(
             "/api/v1/delegations/{agent_id}/repair",
-            post(repair_delegation_as_route),
+            post(repair_delegation_route),
         )
         // #8257: the same repair addressed by delegation id — the only address
         // a record matched by agent type ever has — and the read-only listing.
@@ -203,41 +203,76 @@ pub async fn list_delegations_route(
     State(state): State<Arc<DaemonState>>,
     Query(q): Query<ListDelegationsQuery>,
 ) -> Json<crate::daemon::services::delegation_records::DelegationListing> {
-    let records = crate::daemon::services::delegation_records::list_for_dir(&state, &q.cwd);
-    Json(
-        crate::daemon::services::delegation_records::DelegationListing {
-            cwd: q.cwd,
-            records,
-        },
-    )
+    // #6288: the body is shared with `mpm.delegation.list`.
+    Json(list_delegations_op(&state, q.cwd))
+}
+
+/// [`list_delegations_route`]'s body, with no transport in it (#6288 step 2a).
+///
+/// Test: `parity_delegation_list_agrees_across_transports`.
+pub fn list_delegations_op(
+    state: &DaemonState,
+    cwd: PathBuf,
+) -> crate::daemon::services::delegation_records::DelegationListing {
+    let records = crate::daemon::services::delegation_records::list_for_dir(state, &cwd);
+    crate::daemon::services::delegation_records::DelegationListing { cwd, records }
 }
 
 /// `POST /api/v1/delegations/by-id/{delegation_id}/repair` (#8257).
 ///
 /// Why: see [`crate::daemon::services::delegation_repair::repair_delegation_by_id`].
 /// What: a malformed id is a 400; otherwise the outcome, always 200, exactly
-/// as [`repair_delegation_route`] answers.
-/// Test: `repair_by_id_route_ends_a_record_with_no_agent_id_8257`.
+/// as [`repair_delegation_route`] answers. #8531: HTTP establishes no caller,
+/// so the owner path opens only over the socket.
+/// Test: `repair_by_id_route_ends_a_record_with_no_agent_id_8257`,
+/// `an_asserted_owner_session_id_is_refused_on_both_transports_8531`.
 pub async fn repair_delegation_by_id_route(
     State(state): State<Arc<DaemonState>>,
     Path(delegation_id): Path<String>,
-    headers: axum::http::HeaderMap,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Result<Json<crate::daemon::services::delegation_repair::RepairOutcome>, DaemonError> {
-    let id = uuid::Uuid::parse_str(&delegation_id)
+    let force = body.is_some_and(|Json(b)| b.force);
+    // #8531: the `x-tm-caller-session` header is never read — any local
+    // process can write it, so it proved nothing.
+    let peer = crate::daemon::services::delegation_repair_caller::RepairPeer::http();
+    // #6288: the body is shared with `mpm.delegation.repair_by_id`.
+    Ok(Json(
+        repair_delegation_by_id_op(state, &delegation_id, force, peer).await?,
+    ))
+}
+
+/// [`repair_delegation_by_id_route`]'s body, with no transport in it (#6288
+/// step 2a).
+///
+/// # Errors
+///
+/// [`DaemonError::InvalidRequest`] when `delegation_id` is not a UUID.
+///
+/// Test: `parity_delegation_repair_by_id_agrees_across_transports`,
+/// `rpc_delegation_repair_by_id_rejects_a_malformed_id`.
+pub async fn repair_delegation_by_id_op(
+    state: Arc<DaemonState>,
+    delegation_id: &str,
+    force: bool,
+    peer: crate::daemon::services::delegation_repair_caller::RepairPeer,
+) -> Result<crate::daemon::services::delegation_repair::RepairOutcome, DaemonError> {
+    let id = uuid::Uuid::parse_str(delegation_id)
         .map(crate::core::agent::DelegationId)
         .map_err(|_| {
             DaemonError::InvalidRequest(format!("malformed delegation id: {delegation_id}"))
         })?;
-    let (force, caller) = force_and_caller(&headers, body);
-    Ok(Json(
-        repair_off_worker(move || {
-            crate::daemon::services::delegation_repair::repair_delegation_by_id(
-                &state, id, force, &caller,
-            )
-        })
-        .await,
-    ))
+    Ok(repair_off_worker(move || {
+        // #8531: the caller is the kernel's peer, walked to its session.
+        let caller = crate::daemon::services::delegation_repair_caller::establish_caller(
+            &state,
+            peer,
+            |d| d.id == id,
+        );
+        crate::daemon::services::delegation_repair::repair_delegation_by_id(
+            &state, id, force, &caller,
+        )
+    })
+    .await)
 }
 
 /// Run one repair on tokio's blocking pool (#8257 critic R6).
@@ -266,27 +301,6 @@ async fn repair_off_worker(
         })
 }
 
-/// The body's `force` flag and the caller-session header of a repair (#8257).
-fn force_and_caller(
-    headers: &axum::http::HeaderMap,
-    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
-) -> (
-    bool,
-    crate::daemon::services::delegation_repair::RepairCaller,
-) {
-    use crate::daemon::services::delegation_repair::{CALLER_SESSION_HEADER, RepairCaller};
-    let force = body.is_some_and(|Json(b)| b.force);
-    let raw = headers.get(CALLER_SESSION_HEADER).map(|v| v.to_str());
-    let caller = match raw {
-        Some(Err(_)) => RepairCaller::Unestablished(format!(
-            "the {CALLER_SESSION_HEADER} header is not valid text"
-        )),
-        Some(Ok(s)) => RepairCaller::from_request(Some(s)),
-        None => RepairCaller::from_request(None),
-    };
-    (force, caller)
-}
-
 /// `POST /api/v1/delegations/{agent_id}/repair` (#7602).
 ///
 /// Why: a delegation stuck non-terminal has no other way out — `SubagentStop`
@@ -298,45 +312,46 @@ fn force_and_caller(
 /// [`crate::daemon::services::delegation_repair::repair_delegation`], which owns
 /// every refusal arm, and returns its outcome as JSON. Always 200 — a refusal is
 /// an ANSWER, and a client that read it as a transport error would retry it.
+/// #8531: HTTP establishes no caller, so the owner path opens only over the
+/// socket (`mpm.delegation.repair`).
 /// Test: `repair_route_ends_a_stuck_record_7602`,
-/// `repair_route_refuses_a_live_owner_7602`.
+/// `repair_route_refuses_a_live_owner_7602`,
+/// `an_asserted_owner_session_id_is_refused_on_both_transports_8531`.
 pub async fn repair_delegation_route(
     State(state): State<Arc<DaemonState>>,
     Path(agent_id): Path<String>,
     body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
 ) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
-    // #8257: no headers, so no caller session — the owner path never opens.
-    repair_delegation_as_route(
-        State(state),
-        Path(agent_id),
-        axum::http::HeaderMap::new(),
-        body,
-    )
-    .await
+    let force = body.is_some_and(|Json(b)| b.force);
+    // #8531: the `x-tm-caller-session` header is never read.
+    let peer = crate::daemon::services::delegation_repair_caller::RepairPeer::http();
+    // #6288: the body is shared with `mpm.delegation.repair`.
+    Json(repair_delegation_op(state, agent_id, force, peer).await)
 }
 
-/// [`repair_delegation_route`] reading the caller-session header (#8257).
+/// [`repair_delegation_route`]'s body, with no transport in it (#6288
+/// step 2a). Always an outcome: a refusal is an answer, never an error.
+/// #8531: `peer` is what the transport proves about the caller; the caller
+/// session is established from it on the blocking pool.
 ///
-/// Why: the owner ruling lets the owning session clear its own live record,
-/// so the router registers this form; the header-less one keeps its public
-/// signature and simply never establishes a caller.
-/// Test: `repair_route_lets_the_owning_session_clear_its_record_8257`,
-/// `repair_route_ignores_an_owner_id_the_caller_supplies_8257`.
-pub async fn repair_delegation_as_route(
-    State(state): State<Arc<DaemonState>>,
-    Path(agent_id): Path<String>,
-    headers: axum::http::HeaderMap,
-    body: Option<Json<crate::daemon::services::delegation_repair::RepairDelegationRequest>>,
-) -> Json<crate::daemon::services::delegation_repair::RepairOutcome> {
-    let (force, caller) = force_and_caller(&headers, body);
-    Json(
-        repair_off_worker(move || {
-            crate::daemon::services::delegation_repair::repair_delegation_as(
-                &state, &agent_id, force, &caller,
-            )
-        })
-        .await,
-    )
+/// Test: `parity_delegation_repair_agrees_across_transports`.
+pub async fn repair_delegation_op(
+    state: Arc<DaemonState>,
+    agent_id: String,
+    force: bool,
+    peer: crate::daemon::services::delegation_repair_caller::RepairPeer,
+) -> crate::daemon::services::delegation_repair::RepairOutcome {
+    repair_off_worker(move || {
+        let caller = crate::daemon::services::delegation_repair_caller::establish_caller(
+            &state,
+            peer,
+            |d| d.agent_id.as_deref() == Some(agent_id.as_str()),
+        );
+        crate::daemon::services::delegation_repair::repair_delegation_as(
+            &state, &agent_id, force, &caller,
+        )
+    })
+    .await
 }
 
 /// `POST /api/v1/sessions/{id}/delegations/granted-worktree` (#5769).
@@ -529,9 +544,15 @@ pub fn shared_tree_dispatch_op(
     // ADR-0056: `blocked_by_shared_tree`, not `shares_the_callers_tree` — the
     // guard's admission question, so the two halves stay one policy.
     let is_dispatch = str_field(payload, "tool").is_some_and(is_subagent_dispatch_tool);
+    // #9011: no content roster makes the classifier fail closed (`None`).
+    // Critic r1: resolved from the query's cwd, and a content error is logged.
+    let roster = is_dispatch
+        .then(|| crate::core::content_source::agent_roster_for_query(&cwd))
+        .flatten();
     let eligible = is_dispatch
-        && dispatch_agent(input)
-            .is_some_and(|agent| blocked_by_shared_tree(agent, dispatch_isolation(input)));
+        && dispatch_agent(input).is_some_and(|agent| {
+            blocked_by_shared_tree(roster.as_ref(), agent, dispatch_isolation(input))
+        });
     // #6556: this route serves BOTH questions. `tm hook` posts here for a
     // `Bash` payload too — that is the ADR-0049 documents-only commit and the
     // ADR-0048 HEAD-move query — and those must not hear a record #6556

@@ -61,7 +61,11 @@ pub(crate) mod snapshot_guard;
 pub use snapshot_guard::SnapshotOverwriteRefused;
 pub mod typeahead;
 mod types;
+// #9027: warm-all rehydrates a corpus to completion.
+mod warm;
+pub(crate) use warm::warm_corpus;
 
+pub(crate) use ingest::deferred::VectorCoverage;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
@@ -103,10 +107,20 @@ pub(crate) use helpers::{
 // Re-export types so callers outside this module see the same paths.
 pub use corpus_fault::CorpusReadUnavailable;
 pub use delete_close::IndexDeleted;
+// #8976: what one `index_file` write did, reported by `POST /index-file`.
+pub use ingest::outcome::IndexFileOutcome;
+// #8976: the failed-remove fault seam for `service::reindex::hash_withhold_tests`.
+#[cfg(test)]
+pub(crate) use files::TEST_FAIL_REMOVE;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
 pub use migration_state::{IndexMigrationInProgress, MigrationWindow};
+// #8348: the typed error a pinned semantic query raises when its embed fails.
+pub use search::embed_degrade::{EmbedderUnavailable, PrecomputedQueryVector};
+// #8600: test-only no-progress deadline override for the embed wave loop.
+#[cfg(test)]
+pub(crate) use ingest::embed::WAVE_DEADLINE_OVERRIDE;
 // #7979: the failed-migration record `GET /indexes/:id/status` reports.
 pub use migration_state::{
     MigrationFault, MIGRATION_STAGE_JSON_TO_REDB, MIGRATION_STAGE_SCHEMA_CHAIN,
@@ -117,6 +131,15 @@ pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
 pub use types::{CodeChunk, CommitTimings, ParsedBatch, SearchMode, SearchQuery, SearchStage};
+
+/// Record "now" on an index's idle clock ([`CodeIndexer::touch_activity`]).
+///
+/// #8761: a free function so the deferred-embed loop, which holds no indexer
+/// lock, can stamp the clock through its own clones of the two fields.
+fn stamp_activity(created_at: Instant, last_activity_ms: &AtomicU64) {
+    let ms = created_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    last_activity_ms.store(ms, Ordering::Relaxed);
+}
 
 /// LRU capacity (entries) for the per-indexer query embedding cache.
 const QUERY_CACHE_CAPACITY: usize = 256;
@@ -758,8 +781,7 @@ impl CodeIndexer {
     /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` touches then
     /// asserts eviction is skipped within the window.
     pub(super) fn touch_activity(&self) {
-        let ms = self.created_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        self.last_activity_ms.store(ms, Ordering::Relaxed);
+        stamp_activity(self.created_at, &self.last_activity_ms);
     }
 
     /// Milliseconds since the last recorded activity (query/ingest).
@@ -901,13 +923,17 @@ impl CodeIndexer {
     /// see that field's doc comment) — marks `chunks_evicted` and bumps the
     /// generation counter TOGETHER as one critical section, so a concurrent
     /// rehydrate commit can never read the pre-bump generation and then clear
-    /// this flag back to `false` after the fact. Returns the reclaimed chunk
-    /// count. Callers own any logging.
+    /// this flag back to `false` after the fact. #8761: all of it happens
+    /// under the map's write guard, so a reader that sees an empty map also
+    /// sees the flag. Returns the reclaimed chunk count. Callers own any
+    /// logging.
     /// Test: exercised by `idle_eviction_drops_and_lazily_rehydrates_chunks`
     /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure
     /// path); `rehydrate_commit_skips_flag_clear_when_evict_races_it` and
     /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
-    /// in `indexer::rehydrate_tests` pin the race itself.
+    /// in `indexer::rehydrate_tests` pin the race itself;
+    /// `a_reclaim_between_the_wait_and_the_pre_upsert_read_is_waited_out`
+    /// pins the flag-before-release order.
     async fn clear_in_memory_chunks(&self) -> usize {
         if self.corpus.is_none() {
             return 0;
@@ -919,12 +945,14 @@ impl CodeIndexer {
         let evicted = chunks.len();
         chunks.clear();
         chunks.shrink_to_fit();
-        drop(chunks);
         // Issue #3683 round-3 review (remaining HIGH): the flag-set and the
         // generation bump MUST happen under the same lock acquisition as a
         // single critical section — see `rehydrate_generation`'s doc comment.
         // A short, never-awaited-while-held std Mutex critical section (no
         // I/O, no `.await` inside it).
+        // #8761: both land before the write guard drops, so no reader sees the
+        // emptied map with the flag still clear. Lock order is chunks, then
+        // generation; nothing takes `chunks` while holding the generation lock.
         {
             let mut generation = self
                 .rehydrate_generation
@@ -933,6 +961,7 @@ impl CodeIndexer {
             self.chunks_evicted.store(true, Ordering::Relaxed);
             *generation += 1;
         }
+        drop(chunks);
         evicted
     }
 

@@ -107,8 +107,8 @@ fn tmux_output_owned(tmux_bin: &str, args: &[String]) -> std::io::Result<std::pr
     super::tmux_spawn(tmux_bin, args)
 }
 
-/// The global `-L <socket>` args a tmux invocation needs to reach a private
-/// server instead of the machine-shared default one, or none at all.
+/// The global args every tmux invocation here passes: `-f /dev/null`, plus
+/// `-L <socket>` to reach a private server instead of the default one.
 ///
 /// See #7848: `a_session_outside_the_root_is_left_alone` and its siblings
 /// spawn a real session on the shared default server to prove a guard leaves
@@ -118,11 +118,18 @@ fn tmux_output_owned(tmux_bin: &str, args: &[String]) -> std::io::Result<std::pr
 /// `*_on_socket` entry point below threads `socket` through to this helper so
 /// a caller that supplies one gets a server nothing else on the host can
 /// reach.
+///
+/// #6542: every server these helpers start does so with `-f /dev/null`. The operator's
+/// `~/.tmux.conf` can run plugins at server start — tmux-continuum's
+/// `@continuum-restore` recreated every saved session inside each test
+/// server, which delayed the fixtures past their 10s settle deadline. `-f`
+/// is read only by the command that starts the server.
 fn socket_prefix(socket: Option<&str>) -> Vec<String> {
-    match socket {
-        Some(name) => vec!["-L".to_string(), name.to_string()],
-        None => Vec::new(),
+    let mut prefix = vec!["-f".to_string(), "/dev/null".to_string()];
+    if let Some(name) = socket {
+        prefix.extend(["-L".to_string(), name.to_string()]);
     }
+    prefix
 }
 
 /// Age past which a reserved-namespace session is certainly leaked (#6116).
@@ -632,7 +639,7 @@ impl PrivateTmuxServer {
         let path = self.shim_dir.path().join("tmux-private");
         if !path.exists() {
             let script = format!(
-                "#!/bin/sh\nexec '{}' -L '{}' \"$@\"\n",
+                "#!/bin/sh\nexec '{}' -f /dev/null -L '{}' \"$@\"\n",
                 self.tmux_bin, self.socket
             );
             std::fs::write(&path, script).expect("write tmux shim");

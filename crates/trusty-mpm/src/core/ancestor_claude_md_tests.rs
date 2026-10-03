@@ -9,12 +9,14 @@ use tempfile::TempDir;
 
 /// `<tmp>/ancestor/project`, canonicalised so assertions compare the same
 /// spelling the scan reports.
+// #8838: `project` is a registered project, so the nearest-boundary walk stops
+// there whatever a shared temp root above the fixture holds.
 fn fixture() -> (TempDir, PathBuf, PathBuf) {
     let tmp = TempDir::new().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let ancestor = root.join("ancestor");
     let project = ancestor.join("project");
-    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
     (tmp, ancestor, project)
 }
 
@@ -238,7 +240,28 @@ fn resolve_project_root_falls_back_to_the_given_dir_with_no_git_or_marker() {
     let dir = std::fs::canonicalize(tmp.path()).unwrap().join("scratch");
     std::fs::create_dir_all(&dir).unwrap();
 
-    assert_eq!(resolve_project_root(&dir, None).unwrap(), dir);
+    // #8838: the ceiling keeps the shared temp root above `tmp` out of the walk.
+    assert_eq!(
+        resolve_project_root_below(&dir, None, Some(tmp.path())).unwrap(),
+        dir
+    );
+}
+
+/// #8838: a boundary at the ceiling is never probed; without the ceiling the
+/// same walk finds it, so the ceiling is what hides it.
+#[test]
+fn a_boundary_at_the_ceiling_is_never_probed() {
+    let tmp = TempDir::new().unwrap();
+    let top = std::fs::canonicalize(tmp.path()).unwrap();
+    std::fs::create_dir_all(top.join(".trusty-mpm")).unwrap();
+    let dir = top.join("scratch");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    assert_eq!(resolve_project_root(&dir, None).unwrap(), top);
+    assert_eq!(
+        resolve_project_root_below(&dir, None, Some(&top)).unwrap(),
+        dir
+    );
 }
 
 /// `scan` (as opposed to `scan_with_excludes`) resolves the exclude set from the
@@ -450,18 +473,17 @@ fn a_partial_scan_notice_names_the_unchecked_directories_once() {
 /// and hid `$HOME/CLAUDE.md`.
 #[test]
 fn the_home_directory_is_never_a_project_boundary() {
-    let Some((_tmp, home, _project, file)) = dotfiles_home() else {
+    let Some((tmp, home, _project, file)) = dotfiles_home() else {
         return;
     };
     std::fs::create_dir_all(home.join(".trusty-mpm")).unwrap();
     let scratch = home.join("scratch");
     std::fs::create_dir_all(&scratch).unwrap();
 
-    assert_eq!(
-        resolve_project_root(&scratch, Some(&home)).unwrap(),
-        scratch
-    );
-    let found = scan(&scratch, Some(&home), None).unwrap().found;
+    // #8838: the ceiling keeps the shared temp root above `tmp` out of the walk.
+    let root = resolve_project_root_below(&scratch, Some(&home), Some(tmp.path())).unwrap();
+    assert_eq!(root, scratch);
+    let found = scan_with_excludes(&root, &none()).unwrap().found;
     assert_eq!(
         found.iter().map(|f| &f.path).collect::<Vec<_>>(),
         vec![&file],

@@ -239,7 +239,10 @@ fn roster_falls_back_to_the_embedded_bundle() {
     let paths = hermetic_paths(tmp.path());
     assert!(!paths.agent_source_dir().is_dir());
 
-    let roster = bundled_roster(&paths);
+    let roster = crate::core::bundled_roster::bundled_roster_with(
+        &paths,
+        &crate::core::content_source::test_support::repo_roster(),
+    );
     assert!(
         roster.contains("rust-engineer"),
         "embedded roster missing rust-engineer: {roster:?}"
@@ -254,7 +257,10 @@ fn roster_keys_the_embedded_half_by_declared_name() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = hermetic_paths(tmp.path());
 
-    let roster = bundled_roster(&paths);
+    let roster = crate::core::bundled_roster::bundled_roster_with(
+        &paths,
+        &crate::core::content_source::test_support::repo_roster(),
+    );
     assert!(roster.contains("base-agent"), "roster: {roster:?}");
     assert!(!roster.contains("BASE-AGENT"), "roster: {roster:?}");
 }
@@ -269,7 +275,13 @@ fn roster_includes_on_disk_source_names() {
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("whatever.md"), doc("locally-installed")).unwrap();
 
-    assert!(bundled_roster(&paths).contains("locally-installed"));
+    assert!(
+        crate::core::bundled_roster::bundled_roster_with(
+            &paths,
+            &crate::core::content_source::test_support::repo_roster(),
+        )
+        .contains("locally-installed")
+    );
 }
 
 #[test]

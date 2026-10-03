@@ -1,6 +1,10 @@
 //! End-to-end regression tests for #8653: a blocker whose verification FAILED
-//! (the verifier errored or its answer was cut off) must keep the verdict it
-//! drove, even when an unrelated finding in the same round is cleanly refuted.
+//! (the verifier errored or its answer was cut off) must never let the review
+//! relax to APPROVE, even when an unrelated finding in the same round is
+//! cleanly refuted. #8904 withholds such a blocker instead of posting it; the
+//! review then settles by the #8905 withhold policy, floored at the
+//! pre-verification verdict because the verifier failed, and counts the
+//! withheld finding in `unverified_count`.
 //!
 //! Why: `rederive_verdict` preserved the pre-verification verdict only when the
 //! round rendered no judgment at all. One clean refutation of an unrelated nit
@@ -11,12 +15,13 @@
 //! [`ERROR_MARKER`] (alarm class) and [`TRANSPORT_MARKER`] (retryable), returns
 //! unparseable text on [`TRUNCATE_MARKER`], refutes [`REFUTE_MARKER`], answers
 //! UNVERIFIABLE on `UNSURE_MARKER`, and confirms every other finding.
-//! Test: `run_review_truncated_blocker_beside_refuted_nit_keeps_block`,
-//! `run_review_errored_blocker_beside_refuted_nit_keeps_block`,
-//! `run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block`,
+//! Test: `run_review_truncated_blocker_beside_refuted_nit_is_withheld_as_unknown`,
+//! `run_review_errored_blocker_beside_refuted_nit_is_withheld_as_unknown`,
+//! `run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_unknown`,
 //! `run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes`,
-//! `run_review_truncated_blocker_beside_confirmed_conformance_keeps_block`,
-//! `run_review_refuted_blocker_beside_refuted_nit_still_relaxes`.
+//! `run_review_withheld_blocker_keeps_its_block_floor`,
+//! `run_review_partial_verifier_outage_reports_the_withheld_count`,
+//! `run_review_refuted_blocker_beside_refuted_nit_is_withheld_as_unknown`.
 
 use super::*;
 
@@ -52,14 +57,17 @@ impl LlmProvider for InfraVerifier {
         let text = if carries(TRUNCATE_MARKER) {
             "the answer was cut off befo".to_string()
         } else {
-            let judgment = if carries(REFUTE_MARKER) {
-                "REFUTED"
-            } else if carries(UNSURE_MARKER) {
-                "UNVERIFIABLE"
-            } else {
-                "CONFIRMED"
-            };
-            format!(r#"{{"judgment":"{judgment}","reason":"test"}}"#)
+            // #8904: batch-aware — judge each finding's own section.
+            crate::pipeline::verify_batch::test_support::answer(&req, |section| {
+                if section.contains(REFUTE_MARKER) {
+                    "REFUTED"
+                } else if section.contains(UNSURE_MARKER) {
+                    "UNVERIFIABLE"
+                } else {
+                    "CONFIRMED"
+                }
+                .to_string()
+            })
         };
         Ok(LlmResponse {
             text,
@@ -76,6 +84,14 @@ impl LlmProvider for InfraVerifier {
 /// Run the whole review path with [`InfraVerifier`] as the verifier.
 async fn review_with_infra(findings_json: &str) -> ReviewResult {
     review_with_infra_config(&default_config(), findings_json).await
+}
+
+/// `config` with one finding per verifier request, so a request-level marker
+/// fails only its own finding (#8904 batches by default).
+fn per_finding(config: &ReviewConfig) -> ReviewConfig {
+    let mut config = config.clone();
+    config.verification.batch_size = 1;
+    config
 }
 
 /// [`review_with_infra`] under an explicit config.
@@ -96,7 +112,7 @@ async fn review_with_infra_config(config: &ReviewConfig, findings_json: &str) ->
         Arc::new(blocks_on(findings_json)),
         Some(Arc::new(InfraVerifier)),
     );
-    run_review(config, input, deps).await
+    run_review(&per_finding(config), input, deps).await
 }
 
 /// The High correctness finding that alone floors the verdict to BLOCK; its
@@ -120,68 +136,36 @@ fn refuted_nit() -> String {
     )
 }
 
-/// Assert the #8653 outcome for a blocker whose verification failed beside a
-/// cleanly refuted nit: never below REQUEST_CHANGES, and in fact the BLOCK / F
-/// the blocker drove before verification.
-fn assert_unverified_blocker_keeps_block(result: &ReviewResult) {
-    assert!(
-        matches!(result.findings[1].verified, Some(VerifyOutcome::Refuted)),
-        "fixture must cleanly refute the nit, got {:?}",
-        result.findings[1].verified
-    );
-    assert!(
-        result.verdict.ordinal() >= Verdict::RequestChanges.ordinal(),
-        "an unverified blocker must not post {} (#8653)",
-        result.verdict
-    );
-    assert_eq!(result.verdict, Verdict::Block);
-    assert_eq!(result.grade.as_deref(), Some("F"));
+/// #8904: a blocker whose verification failed is withheld (fail closed), not
+/// posted; beside a refuted nit nothing survives, so the review is UNKNOWN —
+/// never the APPROVE #8653 guarded against, and no grade.
+fn assert_withheld_as_unknown(result: &ReviewResult) {
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
 }
 
-/// #8653 (a): the blocker's verifier answer was cut off and an unrelated nit is
-/// cleanly refuted. Pre-fix this returned APPROVE: the clean refutation sent
-/// the round down path (b) and the survivors excluded the truncated blocker.
+/// #8653 (a), #8904 form: the blocker's verifier answer was cut off and an
+/// unrelated nit is cleanly refuted. Pre-#8653 this returned APPROVE.
 #[tokio::test]
-async fn run_review_truncated_blocker_beside_refuted_nit_keeps_block() {
+async fn run_review_truncated_blocker_beside_refuted_nit_is_withheld_as_unknown() {
     let result =
         review_with_infra(&format!("{},{}", blocker(TRUNCATE_MARKER), refuted_nit())).await;
-
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(VerifyOutcome::TruncationRefuted)
-        ),
-        "fixture must truncate the blocker's verification, got {:?}",
-        result.findings[0].verified
-    );
-    assert_unverified_blocker_keeps_block(&result);
+    assert_withheld_as_unknown(&result);
 }
 
-/// #8653 (b): as (a), but the blocker's verifier call errored.
+/// #8653 (b), #8904 form: as (a), but the blocker's verifier call errored.
 #[tokio::test]
-async fn run_review_errored_blocker_beside_refuted_nit_keeps_block() {
+async fn run_review_errored_blocker_beside_refuted_nit_is_withheld_as_unknown() {
     let result = review_with_infra(&format!("{},{}", blocker(ERROR_MARKER), refuted_nit())).await;
-
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(VerifyOutcome::ErrorRefuted { .. })
-        ),
-        "fixture must error the blocker's verification, got {:?}",
-        result.findings[0].verified
-    );
-    assert_unverified_blocker_keeps_block(&result);
+    assert_withheld_as_unknown(&result);
 }
 
-/// #8653: as (a), but every verifier call for the blocker failed with a
-/// retryable transport error until the retry budget ran out. The finding is
-/// recorded `Unverifiable`, and it is still a failed verification, not a
-/// judgment. One attempt keeps the test free of backoff sleeps.
-///
-/// Pre-fix this returned APPROVE: only the ErrorRefuted / TruncationRefuted
-/// arms fed the unverified floor.
+/// #8653, #8904 form: as (a), but every verifier call for the blocker failed
+/// with a retryable transport error until the retry budget ran out. One
+/// attempt keeps the test free of backoff sleeps.
 #[tokio::test]
-async fn run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block() {
+async fn run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_unknown() {
     let mut config = default_config();
     config.verification.max_attempts = 1;
     let result = review_with_infra_config(
@@ -189,83 +173,88 @@ async fn run_review_retry_exhausted_blocker_beside_refuted_nit_keeps_block() {
         &format!("{},{}", blocker(TRANSPORT_MARKER), refuted_nit()),
     )
     .await;
-
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(VerifyOutcome::Unverifiable { .. })
-        ),
-        "fixture must exhaust the blocker's retry budget, got {:?}",
-        result.findings[0].verified
-    );
-    assert_unverified_blocker_keeps_block(&result);
+    assert_withheld_as_unknown(&result);
 }
 
-/// Control for the test above: a blocker the verifier itself judged
-/// UNVERIFIABLE (#5309) is a judgment, not a failure, and #5309 keeps it from
-/// blocking. Beside a refuted nit the review still relaxes to APPROVE.
+/// Control: a blocker the verifier itself judged UNVERIFIABLE (#5309) is a
+/// judgment, not a failure. Since #4044 (owner ruling on #8905, 2026-09-30)
+/// only CONFIRMED findings are posted, so it is withheld as "unverifiable"
+/// beside the refuted nit, and the emptied BLOCK review is withheld as
+/// UNKNOWN (#8904, the #8905 policy) — not floored, since nothing failed.
 #[tokio::test]
 async fn run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes() {
     let result = review_with_infra(&format!("{},{}", blocker(UNSURE_MARKER), refuted_nit())).await;
 
-    assert!(
-        matches!(
-            result.findings[0].verified,
-            Some(VerifyOutcome::Unverifiable { .. })
-        ),
-        "fixture must have the verifier judge the blocker UNVERIFIABLE, got {:?}",
-        result.findings[0].verified
-    );
+    assert_withheld_as_unknown(&result);
+    let unverifiable: Vec<_> = result
+        .withheld_findings
+        .iter()
+        .filter(|w| w.reason == "unverifiable")
+        .collect();
+    assert_eq!(unverifiable.len(), 1, "{:?}", result.withheld_findings);
     assert!(matches!(
-        result.findings[1].verified,
-        Some(VerifyOutcome::Refuted)
+        unverifiable[0].finding.verified,
+        Some(VerifyOutcome::Unverifiable { .. })
     ));
-    assert_eq!(result.verdict, Verdict::Approve);
-    assert_eq!(result.grade.as_deref(), Some("B-"));
 }
 
-/// #8653 (c), the #4044 critic's example: a truncated blocker beside a
-/// CONFIRMED High method-conformance finding. The confirmed finding caps at
-/// REQUEST_CHANGES (#1359), but the unverified blocker still carries BLOCK.
-///
-/// Pre-fix this returned REQUEST_CHANGES / D-: path (a2) capped the baseline at
-/// APPROVE* and only the conformance finding survived to re-escalate it.
-#[tokio::test]
-async fn run_review_truncated_blocker_beside_confirmed_conformance_keeps_block() {
-    let conformance = finding_json(
+/// A CONFIRMED High method-conformance finding, which caps at REQUEST_CHANGES
+/// (#1359).
+fn conformance() -> String {
+    finding_json(
         "diverges from the spec",
         "the handler skips the documented retry",
         "high",
         "method-conformance",
-    );
-    let result = review_with_infra(&format!("{},{conformance}", blocker(TRUNCATE_MARKER))).await;
-
-    assert!(matches!(
-        result.findings[0].verified,
-        Some(VerifyOutcome::TruncationRefuted)
-    ));
-    assert!(matches!(
-        result.findings[1].verified,
-        Some(VerifyOutcome::Confirmed)
-    ));
-    assert_eq!(result.verdict, Verdict::Block);
-    assert_eq!(result.grade.as_deref(), Some("F"));
+    )
 }
 
-/// Control: a CLEANLY refuted blocker beside a refuted nit still relaxes to
-/// APPROVE (#4044 behaviour), and the model's F is reconciled to APPROVE's B-.
+/// #8653 (c), #8904 form: a truncated or errored blocker beside a CONFIRMED
+/// conformance finding. The blocker is withheld and the conformance finding
+/// alone would settle REQUEST_CHANGES, but a verifier failure floors the
+/// verdict at the pre-verification BLOCK / F (owner decision pending).
 #[tokio::test]
-async fn run_review_refuted_blocker_beside_refuted_nit_still_relaxes() {
-    let result = review_with_infra(&format!("{},{}", blocker(REFUTE_MARKER), refuted_nit())).await;
+async fn run_review_withheld_blocker_keeps_its_block_floor() {
+    for marker in [TRUNCATE_MARKER, ERROR_MARKER] {
+        let result = review_with_infra(&format!("{},{}", blocker(marker), conformance())).await;
 
-    assert!(matches!(
-        result.findings[0].verified,
-        Some(VerifyOutcome::Refuted)
-    ));
-    assert!(matches!(
-        result.findings[1].verified,
-        Some(VerifyOutcome::Refuted)
-    ));
-    assert_eq!(result.verdict, Verdict::Approve);
-    assert_eq!(result.grade.as_deref(), Some("B-"));
+        assert_eq!(result.findings.len(), 1, "{marker}: {:?}", result.findings);
+        assert!(matches!(
+            result.findings[0].verified,
+            Some(VerifyOutcome::Confirmed)
+        ));
+        assert_eq!(result.verdict, Verdict::Block, "{marker}");
+        assert_eq!(result.grade.as_deref(), Some("F"), "{marker}");
+    }
+}
+
+/// #8904: a partial verifier outage that leaves a posted survivor still
+/// reports the withheld finding — machine-readable in `unverified_count`, and
+/// in the note that leads the body.
+#[tokio::test]
+async fn run_review_partial_verifier_outage_reports_the_withheld_count() {
+    let result =
+        review_with_infra(&format!("{},{}", blocker(TRUNCATE_MARKER), conformance())).await;
+
+    assert_eq!(result.findings.len(), 1, "{:?}", result.findings);
+    assert_eq!(
+        result.unverified_count, 1,
+        "the withheld blocker was never judged"
+    );
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld: not verified (1 the verifier could not judge)"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// Control: a CLEANLY refuted blocker beside a refuted nit. Before #8904 both
+/// stayed on the result and the review relaxed to APPROVE; now both are
+/// withheld and the emptied review is UNKNOWN. No verifier failure, no floor.
+#[tokio::test]
+async fn run_review_refuted_blocker_beside_refuted_nit_is_withheld_as_unknown() {
+    let result = review_with_infra(&format!("{},{}", blocker(REFUTE_MARKER), refuted_nit())).await;
+    assert_withheld_as_unknown(&result);
 }

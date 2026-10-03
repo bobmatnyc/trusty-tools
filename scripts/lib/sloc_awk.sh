@@ -372,3 +372,67 @@ END {
   print sloc
 }
 '
+
+# SLOC_PY_AWK — the Python counter (issue #8891).
+#
+# Why: `python/trusty-architect/scripts/fleet-poll.py` reached 666 lines while
+#   the gate measured only `.rs` and `.swift` files, so it passed. Python has
+#   its own comment syntax, so it gets its own program. It lives in this file
+#   so every gate and selftest that already copies `sloc_awk.sh` gets it too.
+#
+# What: one left-to-right lexer pass per line. A line counts as 1 SLOC when
+#   any non-whitespace text is left after `#` comments are removed, full-line
+#   and trailing alike. The lexer tracks string literals, so a `#` inside a
+#   string is not a comment:
+#     - single- and double-quoted strings end on their own line; a backslash
+#       escapes the next character;
+#     - a triple-quoted string (`"""` or `'''`, any `r`/`b`/`u`/`f` prefix)
+#       can span lines. Every non-blank line of it counts, including a line
+#       that starts with `#`, because that text is string content.
+#   Docstrings COUNT. The Rust rules strip comment syntax only; a docstring is
+#   a string literal (it becomes `__doc__`), and Rust string literals count.
+#   The one semantic Rust exclusion, `#[cfg(test)]` modules, is kept narrow
+#   so it fails closed (docs/reference/sloc-cap.md). A docstring detector
+#   that guesses from position would fail open on data strings.
+#
+# Test: scripts/check_line_cap_selftest.sh, fixture `scripts/test-data/sloc-python-comments.py`.
+SLOC_PY_AWK='
+# Position just past the closing delimiter d, searching from pos; 0 if the
+# string stays open past the end of this line.
+function close_at(line, pos, d,    n, c) {
+  n = length(line)
+  while (pos <= n) {
+    c = substr(line, pos, 1)
+    if (c == "\\") { pos += 2; continue }
+    if (substr(line, pos, length(d)) == d) return pos + length(d)
+    pos++
+  }
+  return 0
+}
+BEGIN { SQ = sprintf("%c", 39); DQ = "\""; tq = "" }
+{
+  line = $0; n = length(line); pos = 1; code = 0
+  if (tq != "") {
+    end = close_at(line, 1, tq)
+    span = (end == 0) ? line : substr(line, 1, end - 1)
+    if (span ~ /[^ \t\r\f\v]/) code = 1
+    if (end == 0) { if (code) sloc++; next }
+    tq = ""; pos = end
+  }
+  while (pos <= n) {
+    c = substr(line, pos, 1)
+    if (c == " " || c == "\t" || c == "\r" || c == "\f" || c == "\v") { pos++; continue }
+    if (c == "#") break
+    code = 1
+    if (c != DQ && c != SQ) { pos++; continue }
+    d = substr(line, pos, 3)
+    if (d != c c c) d = c
+    end = close_at(line, pos + length(d), d)
+    if (end > 0) { pos = end; continue }
+    if (length(d) == 3) tq = d
+    break
+  }
+  if (code) sloc++
+}
+END { print sloc + 0 }
+'

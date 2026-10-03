@@ -240,6 +240,9 @@ pub async fn handle_start(
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        // #8783: own session, so a group kill aimed at this CLI's caller spares
+        // the daemon. Not `spawn_current_exe`: `--data-dir` may be non-UTF-8.
+        trusty_common::daemon_guard::start_in_new_session(&mut cmd);
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("could not spawn detached daemon: {e}"))?;
@@ -250,6 +253,12 @@ pub async fn handle_start(
         );
         return Ok(());
     }
+
+    // #8900: opt-in parent-death linkage, armed before anything can block. A
+    // test stamps its spawn with `parent_death::exit_with_parent`; SIGKILL that
+    // test and no `Drop` runs, so without this watchdog the daemon outlives the
+    // run. Absent `TRUSTY_EXIT_WITH_PARENT` (launchd, a hand run) it arms nothing.
+    trusty_common::parent_death::arm_from_env("trusty-search");
 
     // Issue #35: the foreground daemon owns tracing init so it can wire the
     // in-memory `LogBuffer` that backs `GET /logs/tail`.

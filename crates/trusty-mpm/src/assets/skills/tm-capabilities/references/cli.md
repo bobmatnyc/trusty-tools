@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-63 top-level commands.
+66 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -13,6 +13,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `set-token` — Store a `CLAUDE_CODE_OAUTH_TOKEN` for managed sessions to use
   - `status` — Report the current auth configuration without printing any secret
 - `banner` — Preview the launch banner in the current terminal without starting Claude
+- `build-lease` — Run a heavy build under a machine-wide build slot (#8261)
 - `catalog` — Sync and inspect the claude-mpm agent/skill catalog
   - `apply` — Rebuild/redeploy the manifest-selected content from the catalog (HR-3)
   - `ls` — List the cached agents and skills
@@ -27,17 +28,26 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `test` — Cheap live auth check: probe the provider with the resolved key
     - `unset` — Remove a provider's key from the secure store (never touches env/.env.local)
 - `connect` — Start or attach to a session without running the deployment sequence
+- `content` — Install, update and inspect the runtime instructional content
+  - `install` — Install a content bundle from a local file, with no network
+  - `status` — Show the content source `tm` reads and the installed pin's health
+  - `update` — Fetch and pin a content release from GitHub
 - `coordinator` — Send a message to the cross-session coordinator / session manager
   - `serve` — Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface)
 - `daemon` — Run the trusty-mpm daemon
 - `divert` — Bulk-read diversion worker (issue #6887)
   - `bulk-read` — Read files on a cheap worker model and print only the answer
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
+- `env` — Edit a dotenv file without printing a value: `set` and `keys`
+  - `keys` — Print a dotenv file's key names, never a value
+  - `set` — Set one key in a dotenv file, never printing its value
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
+- `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
+  - `init` — Set up the Architect project and start its session
+  - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
   - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files
-- `gui` — Launch the Tauri desktop GUI (or open the web build in the browser when Tauri is unavailable)
 - `health` — Report daemon health: reachability, catalog freshness, and a fleet summary
 - `hook` — Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop)
 - `hooks` — Project-settings hook hygiene: detect and remove tm hook contamination (issue #2940)

@@ -180,7 +180,10 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, the stray-`.mcp.json`
 /// sweep (`stray_mcp_json`), the LaunchAgent credential strip
-/// (`launchd_secrets`, #8236), and the ownership-marker move into the git
+/// (`launchd_secrets`, #8236), the `ProcessType=Interactive` plist write
+/// (`launchd_process_type`, #8562 — file only, applies when launchd next loads
+/// the label), the opt-in `Notification` entry
+/// (`notification_hook`, #8392), and the ownership-marker move into the git
 /// admin dir across every registered project (`worktree_markers`, #8511) — printing each item's path, what would change,
 /// and the outcome. In dry run it closes by naming the flag that applies. It
 /// never deletes: `legacy_sources` findings are reported as refused, and a
@@ -298,6 +301,29 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         steps.extend(
             trusty_mpm::daemon::doctor_launchd_secrets_repair::repair_launchd_plist_secrets(
                 &home, mode,
+            ),
+        );
+        // #8562: set ProcessType=Interactive in the daemon and supervisor
+        // plists. The file only — launchd is never reloaded, so each step says
+        // it applies when launchd next loads that label (owner ruling 2026-09-28).
+        steps.extend(
+            trusty_mpm::daemon::doctor_launchd_process_type::repair::repair_launchd_process_type(
+                &home, mode,
+            ),
+        );
+    }
+
+    // #8392: bring tm's opt-in `Notification` entry in the managed settings in
+    // line with `[notification_hook] enabled`; silent when it already matches.
+    if let Some(dir) = trusty_mpm::core::trusty_tools_config::managed_claude_config_dir() {
+        steps.extend(
+            trusty_mpm::core::standalone::hooks::notification::repair_notification_hook(
+                &dir.join("settings.json"),
+                None,
+                trusty_mpm::core::config::MpmConfig::load_default()
+                    .notification_hook
+                    .enabled,
+                mode,
             ),
         );
     }

@@ -157,7 +157,7 @@ palace creation for the *spawned sessions* (that is separate work — §8.5).
 | `sm.sessions.list` | `{}` | `{ sessions: [...] }` | `GET /sessions` (§2.6) |
 | `sm.sessions.get` | `{ session_id }` | `{ session, output?, events? }` | `GET /sessions/{id}` + `/output` + `/events` (§2.6) |
 | `sm.sessions.send` | `{ session_id, text }` | `{ ok }` | `POST /sessions/{id}/command` (§2.6) |
-| `sm.sessions.stop` | `{ session_id }` | `{ ok }` | `DELETE /sessions/{id}` (§2.6) |
+| `sm.sessions.stop` | `{ session_id }` | `{ ok, runtime_left_running }` (#8935: the reason a live tmux session with the record's name was left running, or `null`) | `DELETE /sessions/{id}` (§2.6) |
 | `sm.sessions.resume` | `{ session_id }` | `{ ok }` | `POST /sessions/{id}/resume` (§2.6) |
 | `sm.sessions.kill` | `{ session_id }` | `{ ok }` | force-stop / reap (`DELETE /sessions/{id}`, `/sessions/dead`, §2.6) |
 | `sm.context.get` | `{ conv_id? }` | `{ compressed_context, recent_rounds, total_rounds, token_estimate }` | Context engine state (§7.1/§7.5) |
@@ -205,7 +205,7 @@ initial API-first build**; each becomes its own future ticket (§14 FUTURE group
 | **(a) TUI** (coordinator/SM TUI) | DEFERRED — UAT UI, **built after stdio** | DOC-13 / PR #1271 / epic **#1272**; tested via the `tmux` agent. |
 | **(b) Telegram bot UI** | DEFERRED — future ticket | Thin front-end over SM core; chat + status over Telegram. |
 | **(c) Slack bot UI** | DEFERRED — future ticket | Thin front-end over SM core; chat + status over Slack. |
-| **(d) Web (console) UI** | DEFERRED — future ticket | Thin front-end over SM core; lives in `trusty-console` / `trusty-mpm-gui`. |
+| **(d) Web (console) UI** | DEFERRED — future ticket | Thin front-end over SM core; lives in `trusty-console`. |
 
 The SM core must be designed so these attach without core changes: they all speak
 the JSON-RPC surface (or the aliased HTTP endpoints, D0.1). Building any of them
@@ -1029,7 +1029,7 @@ parse. The `config_valid_parsed` test (`config.rs:334`) is extended to cover it.
   for the initial API-first build (epic #1272).
 - **Telegram / Slack / Web (console) UIs** — explicitly **deferred** future UIs
   (§1A.3); each is its own future ticket (§14 FUTURE group). The Web UI lives in
-  `trusty-console` / `trusty-mpm-gui`.
+  `trusty-console`.
 - Trust-dialog / headless-spawn auto-accept (#1269) — a blocker, not in scope.
 - Per-project palace creation for *spawned sessions* (§8.5).
 - Retiring the `/api/v1/coordinator/*` paths (alias kept per D0.1).
@@ -1230,7 +1230,7 @@ Child tickets (small, independently shippable):
 
 ### FUTURE: SM Web (console) UI
 - **Scope:** A Web/console front-end over the SM core (chat + goals + sessions),
-  living in `trusty-console` / `trusty-mpm-gui`, speaking the JSON-RPC/HTTP
+  living in `trusty-console`, speaking the JSON-RPC/HTTP
   surface; no SM core changes.
 - **Deps:** SM-STDIO / SM-7.
 - **Acceptance:** operator can drive the SM (chat, goals, sessions) from the web

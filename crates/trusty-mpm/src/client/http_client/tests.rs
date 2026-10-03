@@ -63,22 +63,89 @@ fn set_base_url_repoints_client() {
 
 #[tokio::test]
 async fn launch_session_errors_when_daemon_unreachable() {
-    // Why: `/connect <dir>` launches via `launch_session`; when the daemon
-    // POST fails (port 0 never connects) the error must surface rather than
+    // Why: `/connect <dir>` launches via `launch_session`; when the daemon is
+    // unreachable (port 0 never connects) the error must surface rather than
     // proceeding to spawn tmux against an unregistered session.
-    // #8545: session prep runs before the POST and refreshes the framework
-    // skill source, so it must land under a temp home, never the operator's.
+    // #8545: pinned to a temp home so any prep that did run could never reach
+    // the operator's.
     let home = crate::test_support::hermetic_temp_dir();
     let client = DaemonClient::new("http://127.0.0.1:0").with_home(home.path());
     let result = client.launch_session("/tmp/no-such-project").await;
     assert!(result.is_err(), "expected launch to fail with no daemon");
-    // The refresh no-ops when a checkout's `agents/skills` submodule is the source.
-    let fw = crate::core::paths::FrameworkPaths::under(home.path());
+}
+
+/// #8719: an unreachable daemon fails the launch BEFORE session prep, so
+/// neither the project nor the home gains a file.
+#[tokio::test]
+async fn launch_session_writes_nothing_when_daemon_unreachable() {
+    let home = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let client = DaemonClient::new("http://127.0.0.1:0").with_home(home.path());
+    let workdir = project.path().to_string_lossy().into_owned();
+    let result = client.launch_session(&workdir).await;
+    assert!(result.is_err(), "expected launch to fail with no daemon");
+    for (what, dir) in [("project", project.path()), ("home", home.path())] {
+        let written: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            written.is_empty(),
+            "{what} gained {written:?} on a failed launch"
+        );
+    }
+}
+
+/// #8719: with a reachable daemon, prep runs — under the pinned home — before
+/// the tmux step; a failed tmux create is reported as such.
+///
+/// Why: restores the coverage the pre-#8719 unreachable-daemon test gave (prep
+/// lands under `with_home`, never the operator's home), now that an unreachable
+/// daemon stops the launch before prep.
+/// What: a fake listener answers `GET /health` and `POST /sessions` with 200;
+/// a fake `tmux` exits 1 inside a `with_tmux_binary` scope, so no real tmux
+/// server is touched.
+#[tokio::test]
+async fn launch_session_prepares_under_the_pinned_home_before_tmux() {
+    use std::future::IntoFuture as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let router = axum::Router::new()
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/sessions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({"name": "tm-8719-fake"}))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+
+    let bin_dir = tempfile::tempdir().unwrap();
+    let tmux = bin_dir.path().join("fake-tmux");
+    std::fs::write(&tmux, "#!/bin/sh\necho 'fake tmux refuses' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let home = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let workdir = project.path().to_string_lossy().into_owned();
+    let client = DaemonClient::new(format!("http://{addr}")).with_home(home.path());
+    let result = crate::core::tmux::with_tmux_binary(tmux, client.launch_session(&workdir)).await;
+
+    let err = result.expect_err("a failed tmux create must fail the launch");
     assert!(
-        fw.skill_source_dir() != fw.skills || fw.skills.is_dir(),
-        "prep did not write the skill source under the pinned home: {}",
-        fw.skills.display()
+        err.to_string()
+            .contains("failed to create tmux session tm-8719-fake"),
+        "{err}"
     );
+    // Prep's trust seed and agent deploy land under the pinned home.
+    for written in [".claude.json", ".claude"] {
+        assert!(
+            home.path().join(written).exists(),
+            "prep did not write {written} under the pinned home"
+        );
+    }
 }
 
 #[tokio::test]
@@ -162,10 +229,12 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
             last_cwd: None,
             deliverable_id: None,
             pane_id: None,
+            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
+            kind: Default::default(),
         };
         mgr.store
             .write()
@@ -631,6 +700,27 @@ fn decommission_outcome_keeps_unmodelled_daemon_fields() {
             "{modelled} is modelled and must not be collected as unrecognized"
         );
     }
+}
+
+#[test]
+fn managed_session_summary_carries_the_kind() {
+    use crate::session_manager::SessionKind;
+    // #8942: the daemon's summary serializes the record kind, and the client
+    // reads it back; a pre-#8942 daemon omits it.
+    let record: crate::session_manager::SessionRecord = serde_json::from_value(serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000001", "task": "t", "tmux_name": "tm-arch",
+        "cwd": "/tmp", "state": "active", "created_at": "2026-09-30T00:00:00Z",
+        "kind": "supervisor",
+    }))
+    .unwrap();
+    let summary = crate::daemon::managed_routes::summary::record_to_summary(&record);
+    let wire = serde_json::to_value(summary).unwrap();
+    let s: ManagedSessionSummary = serde_json::from_value(wire).unwrap();
+    assert_eq!(s.kind, Some(SessionKind::Supervisor));
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert_eq!(s.kind, None);
 }
 
 /// #2595: `unresumable` must round-trip when present, and default `false`

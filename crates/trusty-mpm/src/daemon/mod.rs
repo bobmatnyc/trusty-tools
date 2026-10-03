@@ -12,6 +12,8 @@
 pub mod api;
 pub mod audit;
 pub mod bug_report;
+/// The build-lease admission decision log (#8261).
+pub mod build_lease_routes;
 /// The machine-wide builder-slot claim route and its read-only census (#6892).
 pub mod builder_slot_routes;
 /// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
@@ -52,9 +54,15 @@ pub mod doctor_launchd_process_type;
 // #8415: the observed priority of the RUNNING tmux server, which a plist fix
 // does not lift until the server restarts.
 mod doctor_tmux_priority;
+// #8926: trusty-* processes listening on TCP, against the ADR-0032 allowlist.
+mod doctor_tcp_listeners;
+// #8378 PR-C: the instructional-content source and the installed pin (ADR-0064).
+mod doctor_content;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
+// #8942: the shutdown legacy-registry reap's kill loop.
+mod legacy_reap;
 pub mod llm_overseer;
 pub mod lock;
 /// The cloud log-drain scheduler (#6535, Phase 3 of #6533).
@@ -430,7 +438,8 @@ pub async fn serve_with_shutdown(
 /// `kill_session` for every name in its own registry. It asks
 /// [`host_state_refusal`] first, and a refusal returns before a driver exists.
 /// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op);
-/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`.
+/// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`;
+/// `reap_all_live_sessions_never_kills_a_sidecar_named_session` (#8942).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
     if let Some(reason) = host_state_refusal(&state) {
         tracing::warn!("graceful shutdown: legacy session reap skipped — {reason}");
@@ -448,19 +457,8 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
         .map(|s| s.tmux_name)
         .collect();
 
-    let mut reaped = 0usize;
-    for name in names {
-        match driver.kill_session(&name) {
-            Ok(()) => reaped += 1,
-            Err(e) => {
-                // Fail-open: a kill failing (already gone, or never had a host)
-                // must not stop us reaping the rest. stderr only via tracing.
-                tracing::warn!(
-                    "graceful shutdown: kill_session({name}) failed (may already be gone): {e}"
-                );
-            }
-        }
-    }
+    // #8942: the kill floor inside `kill_session` spares the Architect's names.
+    let reaped = legacy_reap::reap_legacy_names(&driver, names);
     info!("graceful shutdown: reaped {reaped} legacy session(s)");
 }
 
@@ -561,8 +559,9 @@ impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
     }
 }
 
-/// Interval between dead-session reap sweeps.
-const REAP_INTERVAL_SECS: u64 = 60;
+/// Interval between dead-session reap sweeps. #9010: also how recent a hook
+/// event must be to hold a settled session whose `claude` is gone.
+pub(crate) const REAP_INTERVAL_SECS: u64 = 60;
 
 /// Periodically prune registry entries whose tmux session has exited.
 ///

@@ -124,6 +124,21 @@ pub(crate) const META_KEY_REINDEX_CHECKPOINT: &str = "reindex_checkpoint";
 /// Test: `core::migration::m005::tests::m005_resumes_after_a_crash_before_the_first_batch`.
 pub(crate) const META_KEY_M005_PLAN: &str = "m005_plan";
 
+/// The chunks whose embedding the vector store refused, keyed by content (#8884).
+///
+/// Why: a refused (NaN or all-zero, #764) embedding leaves its chunk without a
+/// vector on every pass. Restore compares chunks against vectors, so without a
+/// durable record of the refusals every restart demoted `semantic` and queued a
+/// backfill that refused the same chunks again.
+/// What: a UTF-8 JSON blob (`core::indexer::ingest::refusals::RefusalRecord`)
+/// mapping chunk id to the SHA-256 of the content that was refused. Absent on
+/// every corpus written before #8884's follow-up, which reads as "nothing
+/// refused". Not in `CorpusStore::copy_all_from`'s copied-key list: a promoted
+/// staging corpus starts without it, which costs one backfill, never a
+/// hidden gap.
+/// Test: `a_restore_after_a_refused_embedding_does_not_demote_the_stage`.
+pub(crate) const META_KEY_VECTOR_REFUSALS: &str = "vector_refusals";
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Structured errors from the migration subsystem.

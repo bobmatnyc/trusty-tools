@@ -195,6 +195,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.prune_worktrees",
         "mpm.managed.reconcile_worktrees",
         "mpm.managed.fleet",
+        "mpm.managed.register_supervisor",
         "mpm.residency.active",
         "mpm.managed.get",
         "mpm.managed.stop",
@@ -1419,6 +1420,8 @@ fn blank_identity(body: &Value) -> Value {
             "cwd",
             "workspace_path",
             "created_at",
+            // #8935: the left-running note names the record's own session.
+            "runtime_left_running",
         ] {
             if map.contains_key(field) {
                 map.insert(field.to_owned(), Value::Null);
