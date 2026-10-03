@@ -66,8 +66,8 @@ mod heredoc;
 // #8161: HEAD moves into a linked worktree a live agent stands in.
 mod linked_worktree_head_move;
 mod main_checkout;
-// #8524, #7905: operator-listed runtime and documents checkouts.
-pub(crate) mod operator_checkouts;
+// #8524: operator-listed runtime checkouts.
+mod operator_checkouts;
 mod path_tokens;
 mod persistence;
 // #7648: an unscoped environment dump inside a Kubernetes pod.

@@ -1,4 +1,4 @@
-//! Unit tests for [`super`] — the operator-listed checkout rules (#8524, #7905).
+//! Unit tests for [`super`] — the operator-listed runtime checkout rule (#8524).
 
 use super::*;
 

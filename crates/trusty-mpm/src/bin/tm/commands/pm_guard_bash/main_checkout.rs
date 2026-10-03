@@ -388,7 +388,6 @@ fn evaluate_main_checkout_commit_command_in(
         staged_paths(&target),
         &target,
         root,
-        operator_checkouts::is_documents_repo,
     ))
 }
 
@@ -476,14 +475,12 @@ fn command_is_a_lone_commit(command: &str) -> bool {
 /// `classify_staged_commit_denies_source_and_names_it`,
 /// `classify_staged_commit_denies_a_mixed_set_and_names_only_the_source`,
 /// `classify_staged_commit_denies_an_unreadable_or_empty_index`,
-/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`,
-/// `classify_staged_commit_counts_source_as_documents_in_a_documents_repo` (#7905).
+/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`.
 fn classify_staged_commit(
     tail: &[String],
     staged: Option<Vec<String>>,
     target: &Path,
     root: PathBuf,
-    documents_repo: impl FnOnce(&Path) -> bool,
 ) -> CommitVerdict {
     if !commit_flags_leave_the_index_authoritative(tail) {
         return CommitVerdict::Deny(commit_deny_reason(&root));
@@ -496,8 +493,7 @@ fn classify_staged_commit(
         .map(String::as_str)
         .filter(|p| is_source_code_path(p))
         .collect();
-    // #7905: an operator-listed documents repo counts every path as a document.
-    if source.is_empty() || documents_repo(&root) {
+    if source.is_empty() {
         CommitVerdict::DocsOnly {
             dirs: [root.clone(), target.to_path_buf()],
             root,
@@ -1781,11 +1777,6 @@ mod tests {
     /// `classify_staged_commit` with the shapes the caller supplies, so each
     /// case reads as the argv tail plus the staged set and nothing else.
     fn classify(tail: &[&str], staged: Option<&[&str]>) -> CommitVerdict {
-        classify_in(tail, staged, false)
-    }
-
-    /// [`classify`] with the #7905 documents-repo answer chosen.
-    fn classify_in(tail: &[&str], staged: Option<&[&str]>, documents: bool) -> CommitVerdict {
         let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
         let staged = staged.map(|s| s.iter().map(|p| (*p).to_string()).collect());
         classify_staged_commit(
@@ -1793,33 +1784,7 @@ mod tests {
             staged,
             Path::new("/repo/crates"),
             PathBuf::from("/repo"),
-            |_| documents,
         )
-    }
-
-    /// 🔴 REGRESSION (#7905): in an operator-listed documents repo a staged
-    /// `.py` is a document, so the rename commit is not refused as source.
-    /// Every other deny arm still holds there: `-a` and an empty index.
-    #[test]
-    fn classify_staged_commit_counts_source_as_documents_in_a_documents_repo() {
-        let staged = &["drafts/video/make-graphics.py", "archive/x.md"][..];
-        assert!(is_docs_only(&classify_in(
-            &["-m", "s", "-m", "b"],
-            Some(staged),
-            true
-        )));
-        assert!(!is_docs_only(&classify_in(
-            &["-m", "s"],
-            Some(staged),
-            false
-        )));
-        assert!(!is_docs_only(&classify_in(
-            &["-a", "-m", "s"],
-            Some(staged),
-            true
-        )));
-        assert!(!is_docs_only(&classify_in(&["-m", "s"], Some(&[]), true)));
-        assert!(!is_docs_only(&classify_in(&["-m", "s"], None, true)));
     }
 
     fn is_docs_only(verdict: &CommitVerdict) -> bool {

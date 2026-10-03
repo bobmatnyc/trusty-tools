@@ -334,7 +334,7 @@ impl Default for HooksConfig {
 /// Test: `config_pm_guard_defaults_to_enabled`,
 /// `config_pm_guard_can_be_disabled`,
 /// `config_pm_guard_malformed_file_stays_enabled`,
-/// `config_pm_guard_operator_checkout_lists` (#8524, #7905).
+/// `config_pm_guard_runtime_checkouts` (#8524).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PmGuardConfig {
@@ -345,10 +345,6 @@ pub struct PmGuardConfig {
     /// tracked content already equals `<rev>`. Default empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub runtime_checkouts: Vec<PathBuf>,
-    /// Documents repositories whose main checkout may write and commit any
-    /// path, source extensions included (#7905). Default empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub documents_repos: Vec<PathBuf>,
 }
 
 impl Default for PmGuardConfig {
@@ -356,7 +352,6 @@ impl Default for PmGuardConfig {
         Self {
             enabled: true,
             runtime_checkouts: Vec::new(),
-            documents_repos: Vec::new(),
         }
     }
 }

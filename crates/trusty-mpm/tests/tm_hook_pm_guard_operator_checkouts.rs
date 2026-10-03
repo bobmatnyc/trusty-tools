@@ -1,10 +1,9 @@
-//! End-to-end proof of the operator-listed checkout rules (#8524, #7905).
+//! End-to-end proof of the operator-listed runtime checkout rule (#8524).
 //!
 //! Why: the unit rows in `pm_guard_bash::operator_checkouts` inject the
 //! allowlist and the content probe. Only the real binary proves the list is
 //! read from `~/.trusty-mpm/config.toml`, that the probe is a real
-//! `git diff --quiet`, and that the destructive, commit and write rules all
-//! consult it.
+//! `git diff --quiet`, and that the destructive rule consults it.
 //! What: a real repository per test, the built `tm` against an unreachable
 //! daemon, and a scratch `$HOME` whose config lists (or does not list) it.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_operator_checkouts::`.
@@ -124,37 +123,4 @@ fn pm_guard_allows_reset_keep_in_a_listed_runtime_checkout() {
         &repo,
         bash("git reset --keep no-such-ref", &repo)
     ));
-}
-
-/// 🔴 REGRESSION (#7905): a listed documents repo commits and writes a
-/// tracked `.py` from its main checkout. Denied on origin/main; the same
-/// repo unlisted stays denied.
-#[test]
-fn pm_guard_documents_repo_commits_and_writes_a_script() {
-    let (_dir, repo, home) = fixture();
-    std::fs::write(repo.join("make-graphics.py"), "print(1)\n").expect("write");
-    git(&repo, &["add", "make-graphics.py"]);
-    let commit = bash("git commit -m \"archive: move\" -m \"body\"", &repo);
-    let write = serde_json::json!({
-        "agent_id": "agent-7905",
-        "agent_type": "engineer",
-        "hook_event_name": "PreToolUse",
-        "cwd": repo.display().to_string(),
-        "tool_name": "Write",
-        "tool_input": {
-            "file_path": repo.join("archive/make-graphics.py").display().to_string(),
-            "content": "print(1)\n",
-        },
-    });
-    assert!(
-        denied(&home, &repo, commit.clone()),
-        "unlisted commit stays denied"
-    );
-    assert!(
-        denied(&home, &repo, write.clone()),
-        "unlisted write stays denied"
-    );
-    list(&home, "documents_repos", &repo);
-    assert!(!denied(&home, &repo, commit), "listed commit is allowed");
-    assert!(!denied(&home, &repo, write), "listed write is allowed");
 }

@@ -213,17 +213,15 @@ to guarded. The `tm doctor` `pm_guard` row reports the state, and warns
 A running Claude Code session keeps the hooks it loaded at startup, so the
 change takes effect at the session's next launch.
 
-#### `runtime_checkouts` and `documents_repos` (#8524, #7905)
+#### `runtime_checkouts` (#8524)
 
 ```toml
 [pm_guard]
 # Cron-host checkouts that launchd jobs read in place (#8524).
 runtime_checkouts = ["/Users/me/Projects/cron-host"]
-# Documents repositories whose main checkout may commit any path (#7905).
-documents_repos = ["/Users/me/Projects/notes"]
 ```
 
-Both lists default to empty, which keeps every main checkout under the full
+The list defaults to empty, which keeps every main checkout under the full
 rules.
 
 - **Match semantics.** An entry matches a main checkout when both
@@ -237,16 +235,11 @@ rules.
   nothing but `cd` around it, and only when `git diff --quiet` reports that
   the tracked content already equals `<rev>`. A probe that cannot answer
   keeps the deny.
-- **`documents_repos`.** In a listed checkout every staged or written path
-  counts as a document. The commit rule and the main-checkout write rule
-  then treat source extensions such as `.py` as documents. The commit
-  rule's other deny arms still apply: `-a`, `--amend`, an empty or unreadable
-  index, and a composed commit.
-- **Trust.** Both lists are trusted to the #8878 trust-anchor floor, which
+- **Trust.** The list is trusted to the #8878 trust-anchor floor, which
   refuses a write to `~/.trusty-mpm/config.toml` from any session but the
   Architect's. The #8879 residual applies: a write made by an interpreter,
   `dd`, `rsync`, `find -exec`, or an executed script file is not seen, so a
-  session that reaches one of those can add a checkout to either list.
+  session that reaches one of those can add a checkout to the list.
 
 ### The `[accounts]` section (#9091)
 
