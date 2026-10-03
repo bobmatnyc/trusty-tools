@@ -1,3 +1,3 @@
 Fixed
 - `trusty-search start --data-dir <dir>` now wins over an inherited `TRUSTY_DATA_DIR` on the foreground path too, so a second daemon derives its RPC socket, lockfile and registry from the directory it named instead of binding the first daemon's socket (#8149).
-- A daemon started against a data directory that did not exist (or was empty) before this start no longer runs the auto-discovery scan, so a throwaway `--data-dir` instance never reindexes unrelated colocated repositories; the new `--auto-discover` flag opts that scan back in, and the machine's default data directory is unchanged (#8176).
+- A daemon started against an explicit data directory (`--data-dir` or `TRUSTY_DATA_DIR`) no longer runs the auto-discovery scan on any start, first or later, so a throwaway instance never reindexes unrelated colocated repositories; the new `--auto-discover` flag opts that scan back in, and the machine's default data directory is unchanged (#8176).

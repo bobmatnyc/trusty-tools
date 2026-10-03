@@ -7,9 +7,7 @@
 //!
 //! Test: this file IS the coverage.
 
-use super::{
-    auto_discover_enabled, data_dir_is_fresh, resolve_data_dir_override, spawn_auto_discover_arg,
-};
+use super::{auto_discover_enabled, resolve_data_dir_override, spawn_auto_discover_arg, StartPlan};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -80,57 +78,74 @@ fn a_relative_data_dir_is_refused() {
     );
 }
 
-/// Why (#8176): a daemon started for a throwaway test against a brand-new
+/// Simulate what a first start leaves in its data dir: the lockfile and the
+/// registry. A second start sees a non-empty directory.
+fn leave_first_start_state(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("the data dir must be creatable");
+    std::fs::write(dir.join("daemon.lock"), "4242").expect("the lockfile must be writable");
+    std::fs::write(dir.join("indexes.toml"), "").expect("the registry must be writable");
+}
+
+/// Why (#8176): a daemon started for a throwaway test against its own
 /// `--data-dir` walked the machine and force-reindexed ~21 unrelated colocated
-/// repositories, because auto-discovery was the default on every data dir. The
-/// safe default now applies to a fresh isolated data dir, and only an explicit
-/// opt-in re-enables it. Against the pre-fix resolution — auto-discovery on
-/// unless `--no-auto-discover` — the first assertion below fails.
+/// repositories. The first fix withheld the scan only while the directory was
+/// empty, so the SECOND start of the same data dir — which finds `daemon.lock`
+/// and `indexes.toml` from the first — scanned again. Against that logic the
+/// second-start assertions below fail.
 /// Test: this function IS the test.
 #[test]
-fn fresh_data_dir_does_not_auto_discover_without_opt_in() {
+fn an_explicit_data_dir_never_auto_discovers_on_any_start() {
     let tmp = TempDir::new().expect("a tempdir must be creatable");
-    let fresh = tmp.path().join("instance-two");
+    let dir = tmp.path().join("instance-two");
+
+    // First start: the directory does not exist yet.
+    let first = StartPlan::resolve(None, Some(&dir), false, false).expect("must resolve");
     assert!(
-        data_dir_is_fresh(&fresh),
-        "a directory that does not exist yet is fresh"
-    );
-    std::fs::create_dir_all(&fresh).expect("the fresh dir must be creatable");
-    assert!(
-        data_dir_is_fresh(&fresh),
-        "an empty directory is still fresh"
+        !first.discovery.runs_auto_discover(),
+        "the first start of an explicit data dir must not auto-discover"
     );
 
+    // Second start: the first start's lockfile and registry are present.
+    leave_first_start_state(&dir);
+    let second = StartPlan::resolve(None, Some(&dir), false, false).expect("must resolve");
     assert!(
-        !auto_discover_enabled(false, false, data_dir_is_fresh(&fresh)),
-        "a fresh isolated data dir must not auto-discover without --auto-discover"
+        !second.discovery.runs_auto_discover(),
+        "the second start of an explicit data dir must not auto-discover either"
+    );
+    assert!(
+        second.discovery.warm_boot_skips_colocated(),
+        "the second start must not run warm boot's colocated scan"
     );
 
-    std::fs::write(fresh.join("indexes.toml"), "").expect("the registry stub must be writable");
+    // The same data dir named only through TRUSTY_DATA_DIR.
+    let via_env = StartPlan::resolve(Some(dir.clone().into_os_string()), None, false, false)
+        .expect("must resolve");
+    assert_eq!(via_env.data_dir.as_deref(), Some(dir.as_path()));
     assert!(
-        !data_dir_is_fresh(&fresh),
-        "a data dir carrying a registry is not fresh"
-    );
-    assert!(
-        auto_discover_enabled(false, false, data_dir_is_fresh(&fresh)),
-        "a data dir this daemon has used before keeps the pre-#8176 default"
+        !via_env.discovery.runs_auto_discover(),
+        "TRUSTY_DATA_DIR is an explicit data dir too"
     );
 }
 
 /// Why (#8176): the opt-in must be able to turn the scan back on for the exact
-/// case the safe default turns it off for, or an operator who wants a fresh
+/// case the safe default turns it off for, or an operator who wants an
 /// isolated daemon to discover has no way to ask.
 /// Test: this function IS the test.
 #[test]
-fn auto_discover_opt_in_beats_a_fresh_data_dir() {
+fn auto_discover_opt_in_beats_an_explicit_data_dir() {
     assert!(
         auto_discover_enabled(false, true, true),
-        "--auto-discover must grant the scan on a fresh isolated data dir"
+        "--auto-discover must grant the scan on an explicit data dir"
     );
     assert!(
         !auto_discover_enabled(true, true, false),
         "--no-auto-discover must still refuse first, even against the opt-in"
     );
+
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    leave_first_start_state(tmp.path());
+    let plan = StartPlan::resolve(None, Some(tmp.path()), false, true).expect("must resolve");
+    assert!(plan.discovery.runs_auto_discover());
 }
 
 /// Why (#8176 blast radius): the change must not alter the machine's default
@@ -146,33 +161,103 @@ fn the_default_data_dir_still_auto_discovers() {
         !auto_discover_enabled(true, false, false),
         "--no-auto-discover must keep working on the default data dir"
     );
+    let plan = StartPlan::resolve(None, None, false, false).expect("must resolve");
+    assert!(plan.data_dir.is_none());
+    assert!(plan.discovery.runs_auto_discover());
 }
 
-/// Why (#8176): the detached child re-resolves the decision against the data
-/// dir its parent just created, which is still empty and so still fresh. A
+/// Why (#8176): `handle_start` reads one decision at three sites, and warm
+/// boot's reads it negated. Flipping any site's reading must fail here.
+/// What: for each input shape, the warm-boot argument is the negation of the
+/// spawn decision, and both match the expected scan verdict.
+/// Test: this function IS the test.
+#[test]
+fn start_plan_wires_every_scan_to_one_decision() {
+    let tmp = TempDir::new().expect("a tempdir must be creatable");
+    let dir = tmp.path().to_path_buf();
+    // (flag, no_auto_discover, auto_discover, expected scan verdict)
+    let cases: [(Option<&Path>, bool, bool, bool); 5] = [
+        (None, false, false, true),
+        (None, true, false, false),
+        (Some(&dir), false, false, false),
+        (Some(&dir), false, true, true),
+        (Some(&dir), true, false, false),
+    ];
+    for (flag, no, opt_in, scans) in cases {
+        let d = StartPlan::resolve(None, flag, no, opt_in)
+            .expect("must resolve")
+            .discovery;
+        let shape = format!("flag={flag:?} no={no} opt_in={opt_in}");
+        assert_eq!(
+            d.runs_auto_discover(),
+            scans,
+            "auto-discover spawn: {shape}"
+        );
+        assert_eq!(d.warm_boot_skips_colocated(), !scans, "warm boot: {shape}");
+        assert_eq!(
+            d.spawn_arg(),
+            spawn_auto_discover_arg(scans, opt_in),
+            "{shape}"
+        );
+    }
+}
+
+/// Why (#8176): the plan is only as good as `handle_start`'s reading of it. A
+/// unit test cannot boot the daemon, so this pins the call sites in source:
+/// the resolver call, warm boot's argument and the spawn guard. Whitespace and
+/// trailing commas are dropped first, so a `cargo fmt` rewrap does not trip it.
+/// Test: this function IS the test.
+#[test]
+fn handle_start_reads_the_plan_at_every_scan_site() {
+    fn normalize(code: &str) -> String {
+        let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+        flat.replace(",)", ")")
+    }
+    let src = normalize(include_str!("daemon.rs"));
+    for site in [
+        "StartPlan::resolve(std::env::var_os(DATA_DIR_ENV), data_dir, no_auto_discover, auto_discover)?",
+        "restore_indexes(&install_state, &embedder, discovery.warm_boot_skips_colocated())",
+        "if discovery.runs_auto_discover() { tokio::spawn(crate::commands::discover::auto_discover_and_index())",
+        "if let Some(flag) = discovery.spawn_arg() { cmd.arg(flag)",
+    ] {
+        assert!(
+            src.contains(&normalize(site)),
+            "handle_start must read the plan at: {site}"
+        );
+    }
+}
+
+/// Why (#8176): the detached child re-resolves the decision on its own. A
 /// parent that granted the scan through `--auto-discover` must hand the child
-/// the same grant, or the child refuses it. This composes the parent's
-/// decision, the forwarded flag, and the child's own resolution.
+/// the same grant, and a refusal must stay a refusal after the parent has
+/// populated the data dir. This composes the parent's plan, the forwarded
+/// flag, and the child's own plan.
 /// Test: this function IS the test.
 #[test]
 fn spawn_forwards_the_parents_auto_discover_decision() {
     let tmp = TempDir::new().expect("a tempdir must be creatable");
     let dir = tmp.path().join("instance-two");
 
-    // Parent: a fresh isolated dir, the opt-in passed.
-    let parent = auto_discover_enabled(false, true, data_dir_is_fresh(&dir));
-    assert!(parent, "the opt-in must grant the scan in the parent");
-    std::fs::create_dir_all(&dir).expect("the parent creates the data dir");
+    for opt_in in [true, false] {
+        let parent = StartPlan::resolve(None, Some(&dir), false, opt_in).expect("must resolve");
+        assert_eq!(parent.discovery.runs_auto_discover(), opt_in);
+        leave_first_start_state(&dir);
 
-    // Child: sees only what the parent forwarded, against the created dir.
-    let forwarded = spawn_auto_discover_arg(parent, true);
-    assert_eq!(forwarded, Some("--auto-discover"));
-    let child = auto_discover_enabled(
-        forwarded == Some("--no-auto-discover"),
-        forwarded == Some("--auto-discover"),
-        data_dir_is_fresh(&dir),
-    );
-    assert_eq!(child, parent, "the child must reach the parent's decision");
+        // Child: the forwarded flag, the inherited env and the explicit flag.
+        let forwarded = parent.discovery.spawn_arg();
+        let child = StartPlan::resolve(
+            Some(dir.clone().into_os_string()),
+            Some(&dir),
+            forwarded == Some("--no-auto-discover"),
+            forwarded == Some("--auto-discover"),
+        )
+        .expect("must resolve");
+        assert_eq!(
+            child.discovery.runs_auto_discover(),
+            opt_in,
+            "the child must reach the parent's decision (opt_in={opt_in})"
+        );
+    }
 
     // A refusal is forwarded as a refusal; a default grant forwards nothing.
     assert_eq!(

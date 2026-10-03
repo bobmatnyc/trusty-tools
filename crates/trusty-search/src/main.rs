@@ -442,13 +442,13 @@ enum Commands {
     ///   trusty-search start --foreground --port 7878   # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
     ///
-    /// #8176: an isolated instance started against a data directory that did
-    /// not exist (or was empty) before this start does NOT auto-discover — it
-    /// never walks `scan_paths` and never touches a colocated
-    /// `.trusty-search/` store it has not been given. `--no-auto-discover`
-    /// says the same thing explicitly on any data directory, including the
-    /// machine default; `--auto-discover` is the opt-in that grants the scan
-    /// on a fresh isolated one.
+    /// #8176: an isolated instance started against an explicit data directory
+    /// (`--data-dir` or `TRUSTY_DATA_DIR`) does NOT auto-discover, on its first
+    /// start or any later one — it never walks `scan_paths` and never touches a
+    /// colocated `.trusty-search/` store it has not been given.
+    /// `--no-auto-discover` says the same thing explicitly on any data
+    /// directory, including the machine default; `--auto-discover` is the
+    /// opt-in that grants the scan on an explicit one.
     #[command(display_order = 20)]
     Start {
         /// Port to listen on (default: 7878, auto-selects next if busy)
@@ -511,7 +511,8 @@ enum Commands {
         /// repositories, or when reproducible startup behaviour is required.
         ///
         /// Precedence: CLI flag > `TRUSTY_NO_AUTO_DISCOVER` env var > default
-        /// (auto-discover enabled).
+        /// (auto-discover enabled on the default data directory, disabled on an
+        /// explicit `--data-dir` / `TRUSTY_DATA_DIR` — #8176).
         ///
         /// Accepted env values: `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`
         /// (case-insensitive). Before #4823 this was a bare `bool`, which under
@@ -523,11 +524,11 @@ enum Commands {
         #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = commands::service_unit::parse_truthy_bool)]
         no_auto_discover: bool,
 
-        /// Run the auto-discovery scan even on a fresh isolated data directory.
+        /// Run the auto-discovery scan even on an explicit data directory.
         ///
-        /// #8176: a daemon started against a brand-new `--data-dir` (or
-        /// `TRUSTY_DATA_DIR`) no longer auto-discovers. A throwaway instance
-        /// used to walk `scan_paths` and force-reindex the colocated
+        /// #8176: a daemon started against an explicit `--data-dir` (or
+        /// `TRUSTY_DATA_DIR`) no longer auto-discovers, on any start. A throwaway
+        /// instance used to walk `scan_paths` and force-reindex the colocated
         /// `.trusty-search/` stores of every unrelated repository it found,
         /// which is the opposite of what an isolated data directory asks for.
         /// Pass this flag to opt that scan back in; it has no effect on the
