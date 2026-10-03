@@ -9,15 +9,17 @@
 //! What: [`resolve_snapshot_for_caller`] tries the exact `session_id` first and,
 //! only on a miss, the newest paused snapshot in the same project whose recorded
 //! `tmux_window` carries the caller's window id, then (#8408) the newest one
-//! recorded in the caller's tmux session, because a relaunch recreates the
-//! window. [`ResolutionPath`] names which route answered so a caller never
-//! reads a fallback as an exact match.
+//! recorded in the caller's tmux session since that session was created,
+//! because a relaunch recreates the window. [`ResolutionPath`] names which
+//! route answered so a caller never reads a fallback as an exact match.
 //! [`redact_sessions_not_owned_by`] applies the same ownership test to the
 //! digest, so the response cannot hand out the material for a claim the caller
 //! could not otherwise make (#5386).
 //! Test: inline `#[cfg(test)]` module.
 
 use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
 
 use crate::catchup::json::PausedSessionJson;
 use crate::catchup::session_finder::{PausedSession, find_paused_sessions};
@@ -37,7 +39,9 @@ pub enum ResolutionPath {
     /// The caller runs in the tmux window that wrote this snapshot.
     TmuxWindow,
     /// The caller runs in the named tmux session that wrote this snapshot, in a
-    /// window created since — every relaunch recreates the window (#8408).
+    /// window created since — every relaunch recreates the window (#8408). The
+    /// snapshot was paused after that tmux session was created, so a later
+    /// session reusing the name never matches it.
     TmuxSession,
 }
 
@@ -88,51 +92,79 @@ impl ResolvedSnapshot {
 /// #8408: a relaunch recreates the window, so the window id changes too
 /// (`@258` to `@262` within two minutes, live). The tmux SESSION name is what
 /// a relaunch keeps, so it is a third route, reached only when the window
-/// route misses. It carries the same bounded reuse risk as a window id, under
-/// the same project-path scope. A digits-only name is tmux's own default
-/// numbering, not an identity, and never matches.
-/// What: (1) the exact `session_id` match via
-/// [`latest_trusty_mpm_snapshot`](crate::catchup::session_finder::latest_trusty_mpm_snapshot),
-/// which always wins; (2) failing that, the newest paused snapshot under
-/// `project_dir` whose `## Tmux Window` section carries the caller's window id;
-/// (3) failing that, the newest one recorded in the caller's tmux session name
-/// ([`session_name_of`]); (4) otherwise `None`. A snapshot with no recorded
-/// window, or with a window field that does not parse, never matches.
+/// route misses. A session name is NOT bounded like a window id: trusty-mpm
+/// names every session `tm-<folder>`, so each later session for the project
+/// reuses it. The route therefore also requires the snapshot to have been
+/// paused after the caller's tmux session was created (`#{session_created}`),
+/// which a predecessor's snapshot never was. With no creation time the route
+/// resolves nothing. A digits-only name is tmux's own default numbering, not
+/// an identity, and never matches.
+/// What: delegates to [`resolve_snapshot_for_identity`] with no session
+/// creation time, so the tmux-session route is closed for this caller.
 /// Test: `exact_session_id_match_wins_over_window_match`,
 /// `window_fallback_resolves_when_session_id_never_paused`,
 /// `window_fallback_is_scoped_to_the_project_dir`,
 /// `malformed_window_fields_never_match`,
-/// `a_relaunched_window_resolves_through_its_tmux_session`,
-/// `a_window_match_outranks_a_session_match`,
-/// `a_numbered_tmux_session_never_matches`.
+/// `the_session_route_without_a_creation_time_resolves_nothing`.
 pub fn resolve_snapshot_for_caller(
     project_dir: &Path,
     session_id: Option<&str>,
     tmux_window: Option<&str>,
 ) -> Option<ResolvedSnapshot> {
+    resolve_snapshot_for_identity(project_dir, &CallerIdentity::new(session_id, tmux_window))
+}
+
+/// Resolve the snapshot a caller should resume from, by every route its
+/// identity supports.
+///
+/// Why: see [`resolve_snapshot_for_caller`]; this form also carries the tmux
+/// session's creation time, which the tmux-session route needs (#8408).
+/// What: (1) the exact `session_id` match via
+/// [`latest_trusty_mpm_snapshot`](crate::catchup::session_finder::latest_trusty_mpm_snapshot),
+/// which always wins; (2) failing that, the newest paused snapshot under
+/// `project_dir` whose `## Tmux Window` section carries the caller's window id;
+/// (3) failing that, the newest one recorded in the caller's tmux session name
+/// ([`session_name_of`]) and paused strictly after
+/// `caller.tmux_session_created`; (4) otherwise `None`. A snapshot with no
+/// recorded window, a window field that does not parse, or no pause time never
+/// matches route 3.
+/// Test: `a_relaunched_window_resolves_through_its_tmux_session`,
+/// `a_reused_session_name_does_not_claim_its_predecessors_snapshot`,
+/// `a_window_match_outranks_a_session_match`,
+/// `a_numbered_tmux_session_never_matches`.
+pub fn resolve_snapshot_for_identity(
+    project_dir: &Path,
+    caller: &CallerIdentity<'_>,
+) -> Option<ResolvedSnapshot> {
     if let Some(path) =
-        crate::catchup::session_finder::latest_trusty_mpm_snapshot(project_dir, session_id)
+        crate::catchup::session_finder::latest_trusty_mpm_snapshot(project_dir, caller.session_id)
     {
         return Some(ResolvedSnapshot::new(path, ResolutionPath::SessionId));
     }
     // #5272: this is NOT the "latest overall" fallback that issue removed. That
     // one answered an unidentified caller with an arbitrary session's file; this
     // one requires the caller to be in the window that wrote the snapshot.
-    let tmux_window = tmux_window?;
+    let tmux_window = caller.tmux_window?;
     let caller_window = window_id_of(tmux_window)?;
     if let Some(path) =
-        newest_snapshot_where(project_dir, |w| window_id_of(w) == Some(caller_window))
+        newest_snapshot_where(project_dir, |w, _| window_id_of(w) == Some(caller_window))
     {
         return Some(ResolvedSnapshot::new(path, ResolutionPath::TmuxWindow));
     }
     // #8408: the relaunched window has a new id; its tmux session kept the name.
+    // The name is reused by every later `tm-<folder>` session, so only a pause
+    // inside THIS session's lifetime counts; an unknown lifetime matches nothing.
     let caller_session = session_name_of(tmux_window)?;
-    newest_snapshot_where(project_dir, |w| session_name_of(w) == Some(caller_session))
-        .map(|path| ResolvedSnapshot::new(path, ResolutionPath::TmuxSession))
+    let created = caller.tmux_session_created?;
+    newest_snapshot_where(project_dir, |w, paused_at| {
+        session_name_of(w) == Some(caller_session)
+            && paused_at.is_some_and(|t| t.timestamp() > created)
+    })
+    .map(|path| ResolvedSnapshot::new(path, ResolutionPath::TmuxSession))
 }
 
 /// The newest paused snapshot under `project_dir` whose recorded window field
-/// satisfies `matches`.
+/// and pause time satisfy `matches`.
 ///
 /// Why: [`find_paused_sessions`] already sorts newest-first and already scopes
 /// itself to one project's store, so "newest in this window, in this project" is
@@ -141,7 +173,10 @@ pub fn resolve_snapshot_for_caller(
 /// snapshot whose window field is absent.
 /// Test: `window_fallback_resolves_when_session_id_never_paused`,
 /// `snapshot_without_a_recorded_window_is_skipped`.
-fn newest_snapshot_where(project_dir: &Path, matches: impl Fn(&str) -> bool) -> Option<PathBuf> {
+fn newest_snapshot_where(
+    project_dir: &Path,
+    matches: impl Fn(&str, Option<DateTime<Utc>>) -> bool,
+) -> Option<PathBuf> {
     find_paused_sessions(project_dir)
         .ok()?
         .into_iter()
@@ -149,8 +184,9 @@ fn newest_snapshot_where(project_dir: &Path, matches: impl Fn(&str) -> bool) -> 
             PausedSession::TrustyMpm {
                 path,
                 tmux_window: Some(w),
+                paused_at,
                 ..
-            } if matches(&w) => Some(path),
+            } if matches(&w, paused_at) => Some(path),
             _ => None,
         })
 }
@@ -219,15 +255,26 @@ pub struct CallerIdentity<'a> {
     pub session_id: Option<&'a str>,
     /// The caller's own tmux window field, when it is running inside tmux.
     pub tmux_window: Option<&'a str>,
+    /// The caller's tmux session creation time, tmux's `#{session_created}`
+    /// (Unix seconds). The tmux-session route needs it (#8408).
+    pub tmux_session_created: Option<i64>,
 }
 
 impl<'a> CallerIdentity<'a> {
-    /// Build an identity from the two MCP arguments.
+    /// Build an identity from the two MCP arguments, with no session creation
+    /// time.
     pub fn new(session_id: Option<&'a str>, tmux_window: Option<&'a str>) -> Self {
         Self {
             session_id,
             tmux_window,
+            tmux_session_created: None,
         }
+    }
+
+    /// Add the caller's tmux `#{session_created}` epoch seconds (#8408).
+    pub fn with_tmux_session_created(mut self, created: Option<i64>) -> Self {
+        self.tmux_session_created = created;
+        self
     }
 }
 
@@ -244,10 +291,13 @@ impl<'a> CallerIdentity<'a> {
 /// the means to re-create it is not the invariant #5272 was defending, so the
 /// response now honors it directly.
 ///
-/// What: ownership is the same claim [`resolve_snapshot_for_caller`] accepts —
+/// What: ownership is the same claim [`resolve_snapshot_for_identity`] accepts —
 /// the session is attributed to `caller.session_id` in `sessions-log.jsonl` (or
 /// sits in that id's directory), OR the caller is in the tmux window that paused
-/// it. For everything else the entry keeps `format`, `paused_at` and `summary`
+/// it, OR (#8408) it is the ONE snapshot the resolver answered by tmux session
+/// name. A shared session name alone owns nothing: the name is reused by every
+/// later session for the project, and other windows of the same session are
+/// not the caller. For everything else the entry keeps `format`, `paused_at` and `summary`
 /// and loses the rest, with `owned: false` saying so. The line is drawn at what
 /// a resuming PM would ACT on: `source_file`/`tmux_window` are the handles that
 /// load a snapshot, and `in_progress`/`next_steps`/`git_context` are the state
@@ -260,13 +310,14 @@ impl<'a> CallerIdentity<'a> {
 /// withheld — only its `in_progress`/`next_steps` fold.
 /// Test: `redaction_withholds_handles_and_restorable_state`,
 /// `owner_sees_every_field`, `window_owner_sees_every_field`,
-/// `redaction_leaves_nothing_to_reconstruct_a_window_claim_from`.
+/// `redaction_leaves_nothing_to_reconstruct_a_window_claim_from`,
+/// `a_session_name_match_owns_only_the_resolved_snapshot`.
 pub fn redact_sessions_not_owned_by(
     project_dir: &Path,
     caller: &CallerIdentity<'_>,
     sessions: &mut [PausedSessionJson],
 ) {
-    let owned_paths = caller
+    let mut owned_paths = caller
         .session_id
         .map(|id| {
             let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
@@ -276,11 +327,17 @@ pub fn redact_sessions_not_owned_by(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // #8408: the session-name route grants exactly the snapshot it resolved —
+    // never every entry that shares the reused `tm-<folder>` name.
+    if let Some(resolved) = resolve_snapshot_for_identity(project_dir, caller)
+        && resolved.via == ResolutionPath::TmuxSession
+    {
+        owned_paths.push(canonical(&resolved.path));
+    }
     let caller_window = caller.tmux_window.and_then(window_id_of);
-    let caller_session = caller.tmux_window.and_then(session_name_of);
 
     for s in sessions.iter_mut() {
-        if !is_owned_by(s, &owned_paths, caller_window, caller_session) {
+        if !is_owned_by(s, &owned_paths, caller_window) {
             withhold(s);
         }
     }
@@ -289,18 +346,17 @@ pub fn redact_sessions_not_owned_by(
 /// Whether one digest entry is attributable to the caller.
 ///
 /// Why: the ownership routes have to agree with
-/// [`resolve_snapshot_for_caller`], or a caller could resolve a snapshot whose
-/// own digest entry it is not allowed to read.
-/// What: true when the entry's `source_file` is one of the caller's attributed
-/// snapshots, its recorded window id equals the caller's, or (#8408) its
-/// recorded tmux session name equals the caller's.
+/// [`resolve_snapshot_for_identity`], or a caller could resolve a snapshot
+/// whose own digest entry it is not allowed to read.
+/// What: true when the entry's `source_file` is in `owned_paths` (the caller's
+/// attributed snapshots plus any snapshot resolved by tmux session name), or
+/// its recorded window id equals the caller's.
 /// Test: `owner_sees_every_field`, `window_owner_sees_every_field`,
-/// `a_relaunched_window_resolves_through_its_tmux_session`.
+/// `a_session_name_match_owns_only_the_resolved_snapshot`.
 fn is_owned_by(
     session: &PausedSessionJson,
     owned_paths: &[PathBuf],
     caller_window: Option<&str>,
-    caller_session: Option<&str>,
 ) -> bool {
     if let Some(file) = session.source_file.as_deref() {
         let path = canonical(Path::new(file));
@@ -308,10 +364,8 @@ fn is_owned_by(
             return true;
         }
     }
-    let recorded = session.tmux_window.as_deref();
-    let same = |a: Option<&str>, b: Option<&str>| matches!((a, b), (Some(x), Some(y)) if x == y);
-    same(recorded.and_then(window_id_of), caller_window)
-        || same(recorded.and_then(session_name_of), caller_session)
+    let recorded = session.tmux_window.as_deref().and_then(window_id_of);
+    matches!((recorded, caller_window), (Some(x), Some(y)) if x == y)
 }
 
 /// Strip a digest entry down to what a non-owning caller may see.
@@ -644,22 +698,126 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let mine = pause(tmp.path(), "tmux-window-258", Some("tm-supervisor:0:@258"));
         pause(tmp.path(), "someone-else", Some("tm-other:0:@300"));
+        let caller = CallerIdentity::new(None, Some("tm-supervisor:0:@262"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
 
-        let got = resolve_snapshot_for_caller(tmp.path(), None, Some("tm-supervisor:0:@262"))
+        let got = resolve_snapshot_for_identity(tmp.path(), &caller)
             .expect("a relaunched window must resolve its session's own snapshot");
         assert_eq!(got.path, mine);
         assert_eq!(got.via, ResolutionPath::TmuxSession);
 
         let mut sessions = vec![entry(&mine, Some("tm-supervisor:0:@258"))];
-        redact_sessions_not_owned_by(
-            tmp.path(),
-            &CallerIdentity::new(Some("tmux-window-262"), Some("tm-supervisor:0:@262")),
-            &mut sessions,
-        );
+        let caller = CallerIdentity::new(Some("tmux-window-262"), Some("tm-supervisor:0:@262"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        redact_sessions_not_owned_by(tmp.path(), &caller, &mut sessions);
         assert!(
             sessions[0].owned,
             "the resolved snapshot's entry must be readable"
         );
+    }
+
+    /// 2020-09-13T12:26:40Z: when the caller's tmux session was created in
+    /// these tests — after [`PREDECESSOR_STAMP`], before any live pause.
+    const SESSION_CREATED: i64 = 1_600_000_000;
+
+    /// 2020-01-01T00:00:00Z: a pause by an earlier session of the same name.
+    const PREDECESSOR_STAMP: &str = "20200101-000000";
+
+    /// Pause, then re-date the snapshot to [`PREDECESSOR_STAMP`] by renaming
+    /// it — the reader dates a snapshot from its filename.
+    fn pause_as_predecessor(dir: &Path, session_id: &str, window: &str) -> PathBuf {
+        let path = pause(dir, session_id, Some(window));
+        let old = path.with_file_name(format!("session-{PREDECESSOR_STAMP}.md"));
+        std::fs::rename(&path, &old).unwrap();
+        old
+    }
+
+    /// Why (#8408, MEDIUM-1): trusty-mpm names every tmux session
+    /// `tm-<folder>`, so a FRESH session for the project reuses its
+    /// predecessor's name. A name match alone handed the new session the old
+    /// one's snapshot.
+    /// What: a snapshot paused before the caller's session was created does
+    /// not resolve, and a relaunch inside the same session (paused after it
+    /// was created) does.
+    /// Test: itself.
+    #[test]
+    fn a_reused_session_name_does_not_claim_its_predecessors_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old = pause_as_predecessor(tmp.path(), "predecessor", "tm-apex:0:@263");
+        let fresh = CallerIdentity::new(None, Some("tm-apex:0:@5"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        assert!(
+            resolve_snapshot_for_identity(tmp.path(), &fresh).is_none(),
+            "a predecessor's snapshot must not resolve under a reused name"
+        );
+
+        let mine = pause(tmp.path(), "this-session", Some("tm-apex:0:@6"));
+        let relaunched = CallerIdentity::new(None, Some("tm-apex:0:@7"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        let got = resolve_snapshot_for_identity(tmp.path(), &relaunched)
+            .expect("a relaunch inside the same tmux session must resolve");
+        assert_eq!(got.path, mine);
+        assert_eq!(got.via, ResolutionPath::TmuxSession);
+        assert_ne!(got.path, old);
+    }
+
+    /// Why (#8408): with no creation time the resolver cannot tell this
+    /// session from a predecessor of the same name, so it must fail closed.
+    /// What: the same caller resolves through the session route with a
+    /// creation time and resolves nothing without one.
+    /// Test: itself.
+    #[test]
+    fn the_session_route_without_a_creation_time_resolves_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        pause(tmp.path(), "writer", Some("tm-apex:0:@6"));
+        assert!(resolve_snapshot_for_caller(tmp.path(), None, Some("tm-apex:0:@7")).is_none());
+        let caller = CallerIdentity::new(None, Some("tm-apex:0:@7"));
+        assert!(resolve_snapshot_for_identity(tmp.path(), &caller).is_none());
+        let caller = caller.with_tmux_session_created(Some(SESSION_CREATED));
+        assert!(resolve_snapshot_for_identity(tmp.path(), &caller).is_some());
+    }
+
+    /// Why (#8408, HIGH-1): the digest marked every entry sharing the caller's
+    /// tmux session name `owned`, so a caller in `@263` read the restorable
+    /// state of `@270` and of every earlier `tm-<folder>` session.
+    /// What: a window-route caller owns only its window's entry; a
+    /// session-route caller owns exactly the one snapshot the resolver
+    /// answered; neither owns the predecessor's.
+    /// Test: itself.
+    #[test]
+    fn a_session_name_match_owns_only_the_resolved_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old = pause_as_predecessor(tmp.path(), "predecessor", "tm-apex:0:@200");
+        let w263 = pause(tmp.path(), "in-263", Some("tm-apex:0:@263"));
+        let w270 = pause(tmp.path(), "in-270", Some("tm-apex:1:@270"));
+        let digest = || {
+            vec![
+                entry(&old, Some("tm-apex:0:@200")),
+                entry(&w263, Some("tm-apex:0:@263")),
+                entry(&w270, Some("tm-apex:1:@270")),
+            ]
+        };
+
+        let mut sessions = digest();
+        let in_263 = CallerIdentity::new(Some("relaunched"), Some("tm-apex:0:@263"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        redact_sessions_not_owned_by(tmp.path(), &in_263, &mut sessions);
+        let owned: Vec<bool> = sessions.iter().map(|s| s.owned).collect();
+        assert_eq!(owned, [false, true, false], "only @263's own entry");
+
+        let mut sessions = digest();
+        let in_280 = CallerIdentity::new(Some("relaunched"), Some("tm-apex:2:@280"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        let resolved = resolve_snapshot_for_identity(tmp.path(), &in_280).unwrap();
+        assert_eq!(resolved.via, ResolutionPath::TmuxSession);
+        redact_sessions_not_owned_by(tmp.path(), &in_280, &mut sessions);
+        let owned: Vec<&str> = sessions
+            .iter()
+            .filter(|s| s.owned)
+            .filter_map(|s| s.source_file.as_deref())
+            .collect();
+        assert_eq!(owned, [resolved.path.to_str().unwrap()]);
+        assert!(!sessions[0].owned, "the predecessor's entry is never owned");
     }
 
     /// Why (#8408): the session route is a later fallback, so it must never
@@ -673,7 +831,9 @@ mod tests {
         let by_window = pause(tmp.path(), "a", Some("tm-apex:0:@263"));
         pause(tmp.path(), "b", Some("tm-apex:1:@270"));
 
-        let got = resolve_snapshot_for_caller(tmp.path(), None, Some("tm-apex:0:@263")).unwrap();
+        let caller = CallerIdentity::new(None, Some("tm-apex:0:@263"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        let got = resolve_snapshot_for_identity(tmp.path(), &caller).unwrap();
         assert_eq!(got.path, by_window);
         assert_eq!(got.via, ResolutionPath::TmuxWindow);
     }
@@ -688,14 +848,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let theirs = pause(tmp.path(), "writer", Some("0:0:@5"));
         assert_eq!(session_name_of("0:0:@5"), None);
-        assert!(resolve_snapshot_for_caller(tmp.path(), None, Some("0:0:@9")).is_none());
+        let caller = CallerIdentity::new(None, Some("0:0:@9"))
+            .with_tmux_session_created(Some(SESSION_CREATED));
+        assert!(resolve_snapshot_for_identity(tmp.path(), &caller).is_none());
 
         let mut sessions = vec![entry(&theirs, Some("0:0:@5"))];
-        redact_sessions_not_owned_by(
-            tmp.path(),
-            &CallerIdentity::new(None, Some("0:0:@9")),
-            &mut sessions,
-        );
+        redact_sessions_not_owned_by(tmp.path(), &caller, &mut sessions);
         assert!(!sessions[0].owned);
     }
 

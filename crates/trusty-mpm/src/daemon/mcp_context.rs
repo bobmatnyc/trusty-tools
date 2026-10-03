@@ -27,7 +27,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::core::catchup::resolve::{
-    CallerIdentity, ResolvedSnapshot, redact_sessions_not_owned_by, resolve_snapshot_for_caller,
+    CallerIdentity, ResolvedSnapshot, redact_sessions_not_owned_by, resolve_snapshot_for_identity,
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
 use crate::daemon::catchup_bounds::{CATCHUP_BUDGET_BYTES, bound_catchup};
@@ -242,6 +242,35 @@ pub async fn session_context_catchup(
     full: bool,
     sessions_offset: usize,
 ) -> Result<Value, String> {
+    session_context_catchup_with_session_created(
+        project_dir,
+        session_id,
+        tmux_window,
+        None,
+        all_projects,
+        full,
+        sessions_offset,
+    )
+    .await
+}
+
+/// [`session_context_catchup`] plus the caller's tmux `#{session_created}`.
+///
+/// Why: #8408 — trusty-mpm names every tmux session `tm-<folder>`, so the
+/// session-name route must know when the caller's session began, or a fresh
+/// session would claim its predecessor's snapshot.
+/// What: `tmux_session_created` (Unix seconds) opens the tmux-session route
+/// for snapshots paused after it; `None` keeps that route closed.
+/// Test: `session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes`.
+pub async fn session_context_catchup_with_session_created(
+    project_dir: &str,
+    session_id: Option<&str>,
+    tmux_window: Option<&str>,
+    tmux_session_created: Option<i64>,
+    all_projects: bool,
+    full: bool,
+    sessions_offset: usize,
+) -> Result<Value, String> {
     let primary = PathBuf::from(project_dir);
     if !primary.is_dir() {
         return Err(format!(
@@ -289,7 +318,10 @@ pub async fn session_context_catchup(
     // than concatenating it — an empty `sessions` array is only "nothing
     // paused" when that total is 0.
     let mut merged = trusty_common::catchup::CatchupJson::default();
-    let caller = CallerIdentity::new(session_id, tmux_window);
+    // #8408: the creation time gates the tmux-session route in both the
+    // digest's ownership test and the resolver.
+    let caller = CallerIdentity::new(session_id, tmux_window)
+        .with_tmux_session_created(tmux_session_created);
 
     for dir in &project_dirs {
         let opts = CatchupOptions {
@@ -313,7 +345,7 @@ pub async fn session_context_catchup(
 
     // PR #5386: the exact-id lookup misses across a Claude Code relaunch, which
     // mints a new harness session id inside the same tmux window.
-    let resolved = resolve_snapshot_for_caller(&primary, session_id, tmux_window);
+    let resolved = resolve_snapshot_for_identity(&primary, &caller);
 
     // #7501: a snapshot whose recorded commit the checkout has moved past
     // describes a plan that may already be done. Fail-open — see
@@ -1193,8 +1225,10 @@ mod tests {
     /// (supervisor `@258` to `@262`, live) and a catch-up called with only
     /// `tmux_window` resolved nothing — resume needed an explicit session id.
     /// What: a pause filed with no session id from `@258`, then a catch-up with
-    /// no session id from `@262` in the same named tmux session, resolves that
-    /// pause and reports `resolved_via: "tmux_session"`.
+    /// no session id from `@262` in the same named tmux session, created
+    /// before the pause, resolves that pause and reports
+    /// `resolved_via: "tmux_session"`. With no creation time, or one after the
+    /// pause (a fresh session reusing the name), it resolves nothing.
     /// Test: itself.
     #[tokio::test]
     async fn session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes() {
@@ -1217,12 +1251,20 @@ mod tests {
         .unwrap();
         let snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let relaunched =
-            session_context_catchup(dir, None, Some("tm-supervisor:0:@262"), false, true, 0)
-                .await
-                .unwrap();
+        let window = Some("tm-supervisor:0:@262");
+        let catchup = |created: Option<i64>| {
+            session_context_catchup_with_session_created(dir, None, window, created, false, true, 0)
+        };
+        let relaunched = catchup(Some(1_600_000_000)).await.unwrap();
         assert_eq!(relaunched["resolved_snapshot"], snapshot, "{relaunched}");
         assert_eq!(relaunched["resolved_via"], "tmux_session");
+
+        // #8408: no creation time, or a session created after the pause.
+        let future = chrono::Utc::now().timestamp() + 3600;
+        for created in [None, Some(future)] {
+            let body = catchup(created).await.unwrap();
+            assert!(body["resolved_snapshot"].is_null(), "{created:?}: {body}");
+        }
     }
 
     /// The `summary` of every session on a response, in page order.

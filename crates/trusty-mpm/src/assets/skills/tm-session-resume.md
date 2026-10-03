@@ -75,6 +75,7 @@ mcp__trusty-mpm__session_context_catchup(
   # session_id: OMIT IT — the tool derives the same id your pause was filed
   #             under (#6888). Pass one only to read a specific KNOWN session.
   tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
+  tmux_session_created: <your own `tmux display-message -p '#{session_created}'`, an integer>,
   all_projects: false,   # true also scans machine-wide registered projects
   full: false,            # true ignores the watermark, returns full history
   sessions_offset: 0      # which page of the ordered session list to read — yours first, then newest
@@ -82,12 +83,17 @@ mcp__trusty-mpm__session_context_catchup(
 ```
 
 `project_dir` is **required** — the MCP transport forwards no cwd, so pass the
-current project's absolute path explicitly. Pass `tmux_window` whenever `$TMUX`
-is set; capture it with:
+current project's absolute path explicitly. Pass `tmux_window` and
+`tmux_session_created` whenever `$TMUX` is set; capture them with:
 
 ```bash
 [ -n "$TMUX" ] && tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
+[ -n "$TMUX" ] && tmux display-message -p '#{session_created}'
 ```
+
+Every trusty-mpm tmux session is named `tm-<folder>`, so a later session
+reuses the name. Without `tmux_session_created` the session-name route
+resolves nothing (#8408).
 
 The tool returns:
 
@@ -220,7 +226,7 @@ not a target.
 Resolution order for `resolved_snapshot`: the newest `pause` snapshot recorded
 for the `session_id` you passed → the newest snapshot this project paused from
 your `tmux_window`'s `@id` → the newest one paused from your tmux session name
-(not a digits-only name) → null. Resume reads
+(not a digits-only name) after `tmux_session_created` → null. Resume reads
 existing snapshots only — it never creates snapshot files. It MAY append a
 `resume` line to `sessions-log.jsonl` for audit, but snapshots are kept after
 resume so you can resume more than once.

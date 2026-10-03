@@ -141,6 +141,7 @@ impl OrchestratorBackend for MockBackend {
         project_dir: &str,
         session_id: Option<&str>,
         tmux_window: Option<&str>,
+        tmux_session_created: Option<i64>,
         all_projects: bool,
         full: bool,
         sessions_offset: usize,
@@ -155,6 +156,7 @@ impl OrchestratorBackend for MockBackend {
             "project_dir": project_dir,
             "session_id": session_id,
             "tmux_window": tmux_window,
+            "tmux_session_created": tmux_session_created,
             "all_projects": all_projects,
             "full": full,
             "sessions_offset": sessions_offset,
@@ -956,6 +958,33 @@ async fn dispatch_session_context_catchup_forwards_tmux_window() {
             .unwrap()
             .contains("tm-dogfood:0:@230")
     );
+}
+
+/// Why (#8408): the tmux-session route is closed without the caller's session
+/// creation time, so a dropped argument would fail silently as "no snapshot".
+/// What: an integer and the digit string `tmux display-message` prints both
+/// reach the backend as the same epoch; a non-numeric string is absent.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_context_catchup_forwards_tmux_session_created() {
+    for (sent, want) in [
+        (json!(1_700_000_000), json!(1_700_000_000)),
+        (json!("1700000000\n"), json!(1_700_000_000)),
+        (json!("soon"), Value::Null),
+    ] {
+        let resp = dispatch(
+            &MockBackend,
+            call(
+                "session_context_catchup",
+                json!({ "project_dir": "/tmp/proj", "tmux_session_created": sent }),
+            ),
+        )
+        .await;
+        let result = resp.result.unwrap();
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["tmux_session_created"], want, "sent {sent}");
+    }
 }
 
 /// Why: #5557 — pagination only rescues `full: true` if the offset the response
