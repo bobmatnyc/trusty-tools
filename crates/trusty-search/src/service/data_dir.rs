@@ -196,7 +196,8 @@ pub(super) fn names_production_data_dir(dir: &Path) -> bool {
 /// Mirrors `persistence::production_data_dir` and
 /// [`data_dir_home_fallback`], which do create; the two must stay in step, and
 /// `production_location_is_recognised_as_production` is what pins that.
-fn production_data_dir_candidates() -> Vec<PathBuf> {
+// #8176: `pub(super)` so `persistence::default_data_dir_candidates` can expose it.
+pub(super) fn production_data_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(base) = dirs::data_local_dir() {
         out.push(base.join("trusty-search"));

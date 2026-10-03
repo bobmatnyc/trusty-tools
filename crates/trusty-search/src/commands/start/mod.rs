@@ -24,6 +24,10 @@ mod daemon;
 mod embedder;
 mod embedder_fallback;
 mod graceful_bootstrap;
+// #8149 / #8176: the two isolation decisions `handle_start` used to make as
+// inline branches no test could reach — which data dir every per-instance path
+// derives from, and whether an explicit one may auto-discover.
+mod isolation;
 // #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
 // starts, which used to match by process name alone.
 mod reap_orphans;
