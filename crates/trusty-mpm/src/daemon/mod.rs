@@ -75,6 +75,8 @@ pub mod mcp_console;
 // #6927: the Disk dashboard survey backing the `disk_survey` MCP tool.
 pub mod mcp_context;
 pub mod mcp_disk;
+// #8985: the last complete `disk_survey` pass, refreshed in the background.
+pub(crate) mod disk_survey_cache;
 pub mod mcp_project;
 // #7357: the backfill both registration transports share.
 pub mod mcp_proxy;

@@ -50,6 +50,10 @@ pub(super) fn disk_tools() -> Vec<Value> {
          `review`, and a project or root past it reports `bytes: null`. \
          Worktrees are measured before projects and the root, so a \
          budget-limited pass spends what it has on the rows a view colours. \
+         A pass that runs out of budget starts one unbudgeted background pass, \
+         and later calls are answered from the last complete pass at once \
+         (#8985): `freshness` (`live`, `cached`, `partial`), `age_seconds` and \
+         `background_pass` (`running`, `idle`) say which answer this is. \
          Every row also carries `owning_session` — the live session claiming \
          it, else the session its ownership sentinel names, so an ENDED \
          session's leftovers are attributed rather than orphaned — and \

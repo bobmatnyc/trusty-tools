@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::core::trusty_tools_config::{self, TrustyToolsConfig};
+use crate::daemon::disk_survey_cache::{Plan, SurveyKey};
 use crate::daemon::state::DaemonState;
 use crate::disk::size_index::DirSize;
 use crate::disk::survey::GroupBy;
@@ -103,18 +104,86 @@ fn parse_group_by(group_by: Option<&str>) -> Result<GroupBy, String> {
 /// [`MAX_BUDGET_SECONDS`] (#7313) — see that constant for why a larger figure
 /// cannot produce a survey any caller receives.
 /// `group_by` (#7313) adds the per-session roll-up to the response.
-/// Test: `crate::disk::survey_tests`, and `dispatch_disk_survey_tool` for the
-/// dispatch wiring.
+/// #8985: a fleet too large for the clamp is answered from the last complete
+/// pass, which an unbudgeted background pass keeps current — see
+/// [`crate::daemon::disk_survey_cache`]. The response's `freshness`,
+/// `age_seconds` and `background_pass` say which answer it is.
+/// Test: `crate::disk::survey_tests`, `disk_survey_cache_tests`, and
+/// `dispatch_disk_survey_tool` for the dispatch wiring.
 pub async fn disk_survey(
     state: &Arc<DaemonState>,
     project: Option<&str>,
     budget_seconds: Option<u64>,
     group_by: Option<&str>,
 ) -> Result<Value, String> {
-    let group_by = parse_group_by(group_by)?;
+    let group = parse_group_by(group_by)?;
     // #7313: clamped BEFORE the deadline is computed, so the clamp is what the
     // pass actually runs under rather than a figure reported beside a longer one.
     let (budget_seconds, budget_clamped) = clamp_budget(budget_seconds);
+    let key = SurveyKey {
+        project: project.map(str::to_string),
+        group_by: group_by.map(str::to_string),
+    };
+    let cache = state.disk_survey_cache();
+    let mut value = match cache.plan(&key, Instant::now()) {
+        Plan::Serve { survey, refresh } => {
+            if refresh {
+                spawn_background_pass(state, key, group);
+            }
+            survey
+        }
+        Plan::Live => {
+            let deadline = budget_seconds.map(|s| Instant::now() + Duration::from_secs(s));
+            let live = survey_pass(state, project, deadline, group).await?;
+            let (answer, refresh) = cache.after_live(&key, live, Instant::now());
+            if refresh {
+                spawn_background_pass(state, key, group);
+            }
+            answer
+        }
+    };
+    // #7313: the clamp is a TRANSPORT fact, not a survey fact — the survey
+    // ran a full pass under whatever deadline it was handed and has nothing
+    // to say about what the caller originally asked for. Recorded here, on
+    // the response, so it stays out of `DiskSurvey`'s shape.
+    if let Value::Object(map) = &mut value {
+        map.insert("budget_clamped".to_string(), Value::Bool(budget_clamped));
+    }
+    Ok(value)
+}
+
+/// Run one unbudgeted pass for `key` off the caller's path (#8985).
+///
+/// Why: the caller holds the refresh slot [`DiskSurveyCache::plan`] or
+/// [`DiskSurveyCache::after_live`] gave it, and must hand it back whatever the
+/// pass does — [`DiskSurveyCache::after_background`] always frees it.
+/// Test: `a_failed_background_pass_frees_the_slot_and_keeps_the_old_pass`.
+///
+/// [`DiskSurveyCache::plan`]: crate::daemon::disk_survey_cache::DiskSurveyCache::plan
+/// [`DiskSurveyCache::after_live`]: crate::daemon::disk_survey_cache::DiskSurveyCache::after_live
+/// [`DiskSurveyCache::after_background`]: crate::daemon::disk_survey_cache::DiskSurveyCache::after_background
+fn spawn_background_pass(state: &Arc<DaemonState>, key: SurveyKey, group: GroupBy) {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let result = survey_pass(&state, key.project.as_deref(), None, group).await;
+        state
+            .disk_survey_cache()
+            .after_background(&key, result, Instant::now());
+    });
+}
+
+/// One survey pass under `deadline`, serialized (#6927, #8985).
+///
+/// What: the body `disk_survey` ran before #8985. With a deadline, each
+/// measurement waits for the shared index no longer than the time left, so a
+/// background pass holding the index for a walk cannot push a live call past
+/// its clamp.
+async fn survey_pass(
+    state: &Arc<DaemonState>,
+    project: Option<&str>,
+    deadline: Option<Instant>,
+    group_by: GroupBy,
+) -> Result<Value, String> {
     let config = TrustyToolsConfig::load();
     let repos_root = trusty_tools_config::workspace_root(&config);
     // #6927: read FALLIBLY, separately from the lenient `load` above. A config
@@ -133,7 +202,6 @@ pub async fn disk_survey(
     let index = state.disk_size_index();
     let state_for_agents = Arc::clone(state);
     let project = project.map(str::to_string);
-    let deadline = budget_seconds.map(|s| Instant::now() + Duration::from_secs(s));
     // #7357: this tool is the entry point, so it resolves the adopted anchors
     // under the daemon's own framework root; `survey_run::run` takes them.
     let adopted = crate::project::adopted_anchors_under(state.framework_root());
@@ -164,8 +232,7 @@ pub async fn disk_survey(
         // 30-second ceiling and overrunning the survey the console is waiting
         // on.
         let measure = |path: &Path, budget: Option<Duration>| -> Option<DirSize> {
-            let mut index = index.lock();
-            survey_run::measure(&mut index, path, budget)
+            measure_within_budget(&index, path, budget)
         };
         let probes = DiskProbes {
             pr_state: &pr_state,
@@ -184,19 +251,33 @@ pub async fn disk_survey(
             group_by,
             &adopted,
         );
-        let mut value = serde_json::to_value(survey)
-            .map_err(|e| format!("disk_survey: serialize error: {e}"))?;
-        // #7313: the clamp is a TRANSPORT fact, not a survey fact — the survey
-        // ran a full pass under whatever deadline it was handed and has nothing
-        // to say about what the caller originally asked for. Recorded here, on
-        // the response, so it stays out of `DiskSurvey`'s shape.
-        if let Value::Object(map) = &mut value {
-            map.insert("budget_clamped".to_string(), Value::Bool(budget_clamped));
-        }
-        Ok(value)
+        serde_json::to_value(survey).map_err(|e| format!("disk_survey: serialize error: {e}"))
     })
     .await
     .map_err(|e| format!("disk_survey: the survey pass panicked: {e}"))?
+}
+
+/// Measure `path` through the shared index, waiting for it no longer than
+/// `budget` (#8985).
+///
+/// Why: a background pass can hold the index for a whole walk; a live pass
+/// that queued behind it would run past its clamp.
+/// What: no budget takes the lock unconditionally. With one, the lock is
+/// awaited for at most `budget`; a timeout is `None` (no byte figure), and a
+/// won lock measures with what the wait did not spend.
+/// Test: `a_held_index_costs_a_budgeted_measurement_no_more_than_its_budget`.
+fn measure_within_budget(
+    index: &parking_lot::Mutex<crate::disk::size_index::DirSizeIndex>,
+    path: &Path,
+    budget: Option<Duration>,
+) -> Option<DirSize> {
+    let Some(budget) = budget else {
+        return survey_run::measure(&mut index.lock(), path, None);
+    };
+    let asked = Instant::now();
+    let mut index = index.try_lock_for(budget)?;
+    let left = budget.saturating_sub(asked.elapsed());
+    survey_run::measure(&mut index, path, Some(left))
 }
 
 /// The pull-request state of one scanned worktree's branch.
@@ -330,6 +411,26 @@ mod tests {
             err.contains("session"),
             "the error must name what IS accepted: {err}"
         );
+    }
+
+    /// #8985 error arm: an index held by another pass yields no byte figure
+    /// once the budget is spent, instead of blocking the live call.
+    #[test]
+    fn a_held_index_costs_a_budgeted_measurement_no_more_than_its_budget() {
+        let index = parking_lot::Mutex::new(crate::disk::size_index::DirSizeIndex::new());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let held = index.lock();
+        let started = Instant::now();
+        let got = measure_within_budget(&index, dir.path(), Some(Duration::from_millis(100)));
+        assert!(got.is_none(), "a held index must yield no figure: {got:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?}",
+            started.elapsed()
+        );
+        drop(held);
+        let free = measure_within_budget(&index, dir.path(), Some(Duration::from_secs(5)));
+        assert!(free.is_some(), "a free index measures");
     }
 
     #[test]

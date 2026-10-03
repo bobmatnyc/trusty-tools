@@ -126,6 +126,7 @@ fn pinned(usage_pct: f32) -> MeasuredMount {
     MeasuredMount {
         mount_point: "/System/Volumes/Data".to_string(),
         usage_pct,
+        bytes: None,
     }
 }
 
