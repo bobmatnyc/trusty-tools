@@ -102,7 +102,10 @@ fn allow_failing_waives_only_a_named_non_required_check() {
         reason.contains("CI gate") && !reason.contains("scaffold"),
         "{reason}"
     );
-    assert_eq!(waived(&checks, &gate), vec!["scaffold".to_string()]);
+    assert_eq!(
+        waived(&checks, &gate),
+        vec!["scaffold (failed)".to_string()]
+    );
 
     // An unknown required list waives nothing.
     let unknown = CheckGate {
@@ -131,13 +134,17 @@ fn auto_refuses_while_a_non_required_check_runs() {
     );
     // FAILS BEFORE the #8614 fix round: without `--auto`, `gh pr merge` merges
     // an UNSTABLE PR at once, so a running non-required check is no safer.
+    // Nor is a running required one: only `--auto` waits for it.
     let direct = CheckGate {
         auto: false,
         ..gate
     };
     let reason = refusal(&checks, &direct, 676).expect("refused without --auto too");
     assert!(reason.contains("travel-live"), "{reason}");
-    assert!(!reason.contains("CI gate"), "gh blocks on it: {reason}");
+    assert!(
+        reason.contains("CI gate"),
+        "a direct merge does not wait for it: {reason}"
+    );
 }
 
 /// A rules payload: one `required_status_checks` rule requiring `names`, plus
@@ -195,12 +202,25 @@ fn no_registered_check_refuses_unless_one_is_required_or_allowed() {
         };
         assert_eq!(refusal(&none, &allowed, 7), None);
     }
-    // GitHub holds the merge for a required check that has not registered.
+    // `--auto` waits for a required check that has not registered; a direct
+    // merge does not.
     let gate = CheckGate {
         required: Some(&ci),
+        auto: true,
         ..CheckGate::default()
     };
     assert_eq!(refusal(&none, &gate, 7), None);
+    let direct = CheckGate {
+        auto: false,
+        ..gate
+    };
+    assert!(refusal(&none, &direct, 7).is_some());
+    // `--auto` with no required check has nothing to wait for.
+    let bare = CheckGate {
+        auto: true,
+        ..CheckGate::default()
+    };
+    assert!(refusal(&none, &bare, 7).is_some());
 }
 
 #[test]
@@ -363,6 +383,26 @@ fn run_refuses_while_a_non_required_check_runs_without_auto() {
 #[test]
 fn run_refuses_a_failing_check_without_auto() {
     let gh = FakeGh::new(&[failed("scaffold")]);
+    let code = merge::run(&gh, &args(&[])).expect("runs");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// FAILS BEFORE the #8614 final round: a direct merge deferred to GitHub for
+/// a running required check; an admin merge or an UNKNOWN state lands it.
+#[test]
+fn run_refuses_a_running_required_check_without_auto() {
+    let gh = FakeGh::new(&[running("CI gate")]).with_branch(&protected(&["CI gate"]));
+    let code = merge::run(&gh, &args(&[])).expect("runs");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// FAILS BEFORE the #8614 final round: no check registered yet while the base
+/// requires one — a direct merge deferred to GitHub.
+#[test]
+fn run_refuses_a_checkless_pr_with_required_checks_without_auto() {
+    let gh = FakeGh::new(&[]).with_branch(&protected(&["CI gate"]));
     let code = merge::run(&gh, &args(&[])).expect("runs");
     assert_eq!(code, EXIT_BLOCKED);
     assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());

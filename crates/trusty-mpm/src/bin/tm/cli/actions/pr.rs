@@ -200,7 +200,9 @@ pub(crate) struct PrMergeArgs {
     /// PR number to squash-merge.
     pub(crate) pr: u64,
 
-    /// Arm GitHub auto-merge instead of merging now.
+    /// Arm GitHub auto-merge instead of merging now. Only this mode waits for a
+    /// running (or not yet registered) required check; a direct merge refuses
+    /// while any unwaived check is running (#8614).
     #[arg(long)]
     pub(crate) auto: bool,
 

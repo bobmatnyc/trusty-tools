@@ -261,15 +261,19 @@ pub(crate) fn needs_required(
 /// through.
 ///
 /// What: with or without `--auto`, refuses while a deciding run has failed
-/// and is not waived; then while no check has registered, unless a check is
-/// required (GitHub holds the merge for it) or `--allow-no-checks` was
-/// passed; then while a deciding run is unfinished and is neither required
-/// nor waived. A running required check is left to GitHub: a direct merge is
-/// BLOCKED on it and auto-merge waits for it.
+/// and is not waived; then while no check has registered, unless
+/// `--allow-no-checks` was passed or `--auto` arms with a required check
+/// (auto-merge waits for it); then while a deciding run is unfinished and is
+/// not waived. Only under `--auto` is a running required check exempt:
+/// auto-merge waits for it. A direct merge never defers to GitHub, whose
+/// client-side BLOCKED check misses UNKNOWN right after a push and is
+/// bypassed by an admin merge (#8614: blocks whatever branch protection says).
 /// Test: `a_failing_check_refuses_with_or_without_auto`,
 /// `allow_failing_waives_only_a_named_non_required_check`,
 /// `auto_refuses_while_a_non_required_check_runs`,
-/// `no_registered_check_refuses_unless_one_is_required_or_allowed`.
+/// `no_registered_check_refuses_unless_one_is_required_or_allowed`,
+/// `run_refuses_a_running_required_check_without_auto`,
+/// `run_refuses_a_checkless_pr_with_required_checks_without_auto`.
 pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> Option<String> {
     let checks = deciding_per_check(rollup);
     let failing: Vec<String> = checks
@@ -289,26 +293,30 @@ pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> 
     let rerun = format!("tm pr merge {pr}{}", if gate.auto { " --auto" } else { "" });
     if checks.is_empty() {
         let none_required = gate.required.is_none_or(<[String]>::is_empty);
-        return (none_required && !gate.allow_no_checks).then(|| {
+        return (!gate.allow_no_checks && (!gate.auto || none_required)).then(|| {
             format!(
-                "no checks have registered yet and the base branch requires none — a merge \
-                 now would land unchecked (#8614); re-run `{rerun}` once CI registers, or \
-                 pass `--allow-no-checks` for a repo with no CI"
+                "no checks have registered yet — a merge now would land unchecked, and only \
+                 `--auto` can wait for a required check (#8614); re-run `{rerun}` once CI \
+                 registers, or pass `--allow-no-checks` for a repo with no CI"
             )
         });
     }
     let running: Vec<String> = checks
         .iter()
-        .filter(|e| e.is_unfinished() && !gate.is_required(e) && !gate.waives(e))
+        .filter(|e| e.is_unfinished() && !(gate.auto && gate.is_required(e)) && !gate.waives(e))
         .map(|e| e.display_label())
         .collect();
     (!running.is_empty()).then(|| {
         format!(
-            "{} check(s) still running that GitHub would not hold the merge for: {} — only \
-             required checks hold it, so a later failure would still merge (#8614); re-run \
-             `{rerun}` once they settle",
+            "{} check(s) still running that the merge would not wait for: {} — a later \
+             failure would still merge (#8614); re-run `{rerun}` once they settle{}",
             running.len(),
-            running.join(", ")
+            running.join(", "),
+            if gate.auto {
+                ""
+            } else {
+                ", or pass `--auto` to wait on required checks"
+            }
         )
     })
 }
@@ -323,7 +331,14 @@ pub(crate) fn waived(rollup: &[RollupEntry], gate: &CheckGate<'_>) -> Vec<String
     deciding_per_check(rollup)
         .into_iter()
         .filter(|e| (e.failed() || e.is_unfinished()) && gate.waives(e))
-        .map(RollupEntry::display_label)
+        .map(|e| {
+            let state = if e.failed() {
+                "failed"
+            } else {
+                "still running"
+            };
+            format!("{} ({state})", e.display_label())
+        })
         .collect()
 }
 
