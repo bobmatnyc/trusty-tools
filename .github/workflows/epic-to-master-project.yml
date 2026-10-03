@@ -1,0 +1,49 @@
+# Adds `epic`-labeled issues to the user-owned Projects v2 board #45
+# (trusty-tools-master). GitHub's built-in project auto-add workflow cannot be
+# configured through the API, so this workflow replaces it.
+#
+# Needs the repository secret ADD_TO_PROJECT_PAT: the default GITHUB_TOKEN
+# cannot write a user-owned Projects v2 board. Scope: a classic PAT with
+# `project`, or a fine-grained PAT owned by bobmatnyc with account permission
+# "Projects: Read and write" and "Issues: Read" on this repository.
+name: Epic to master project
+
+on:
+  issues:
+    types: [opened, labeled, reopened]
+
+# The PAT does all the work; the job needs no GITHUB_TOKEN scopes.
+permissions: {}
+
+jobs:
+  add-to-project:
+    name: Add epic to project 45
+    # Non-epic events skip here, before a runner is allocated. For `labeled`
+    # the added label must be `epic`; other actions need the label on the issue.
+    # This `if:` is the only epic filter, so the add step never no-ops green.
+    if: >-
+      contains(github.event.issue.labels.*.name, 'epic') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'epic')
+    # Job-level, so skipped non-epic runs never enter the group and evict a
+    # pending epic run.
+    concurrency:
+      group: epic-to-master-project-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require ADD_TO_PROJECT_PAT
+        env:
+          ADD_TO_PROJECT_PAT: ${{ secrets.ADD_TO_PROJECT_PAT }}
+        run: |
+          if [ -z "$ADD_TO_PROJECT_PAT" ]; then
+            echo "::error::Repository secret ADD_TO_PROJECT_PAT is not set; cannot add the issue to project 45."
+            exit 1
+          fi
+
+      # Adding an issue already on the board is a no-op in this action.
+      - name: Add issue to project 45
+        uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
+        with:
+          project-url: https://github.com/users/bobmatnyc/projects/45
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
