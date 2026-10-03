@@ -817,6 +817,27 @@ fn harness_admits_only_an_explicit_temp_socket() {
             "input {explicit:?}"
         );
     }
+
+    // `..` escapes a lexical temp prefix; a symlink escapes it on disk.
+    let unreachable = std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET);
+    assert_eq!(
+        harness_memory_socket(Some("/tmp/../etc/trusty-memory.sock")),
+        unreachable,
+        "a `..` component must be refused"
+    );
+    #[cfg(unix)]
+    {
+        let tmp = TempDir::new().expect("tempdir");
+        let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let link = tmp.path().join("escape");
+        std::os::unix::fs::symlink(outside, &link).expect("symlink");
+        let via_link = link.join("trusty-memory.sock");
+        assert_eq!(
+            harness_memory_socket(via_link.to_str()),
+            unreachable,
+            "a temp symlink to a non-temp dir must be refused"
+        );
+    }
 }
 
 const LIVE_SOCKET_CHILD_ENV: &str = "TCODE_9139_LIVE_SOCKET_CHILD";

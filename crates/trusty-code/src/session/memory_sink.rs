@@ -687,10 +687,18 @@ const UNREACHABLE_MEMORY_SOCKET: &str = "/nonexistent/trusty-memory/trusty-memor
 /// derivation is never consulted, so the default socket is unreachable.
 /// Test: `memory_sink::tests::harness_admits_only_an_explicit_temp_socket`,
 /// `memory_sink::tests::memory_sink_for_under_the_harness_never_binds_a_live_socket`.
-pub fn resolve_recorder_socket() -> std::path::PathBuf {
+pub(crate) fn resolve_recorder_socket() -> std::path::PathBuf {
+    static HARNESS_WARNED: std::sync::Once = std::sync::Once::new();
     if !trusty_common::test_harness::running_under_test_harness() {
         return trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
     }
+    // #9139: a misdetected production run must say why recording stopped.
+    HARNESS_WARNED.call_once(|| {
+        warn!(
+            "turn_recorder: TRUSTY_TEST_HARNESS is set — resolving the memory socket \
+             in test-isolation mode; the live daemon is not dialled (#9139)"
+        );
+    });
     harness_memory_socket(
         std::env::var(trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV)
             .ok()
@@ -702,9 +710,12 @@ pub fn resolve_recorder_socket() -> std::path::PathBuf {
 ///
 /// Why: a test's mock daemon binds under a `TempDir`; a live daemon binds in
 /// the operator's data directory, never under a system temp root.
-/// What: an explicit, non-blank path under a system temp root is returned
-/// unchanged. Anything else — unset, blank, or a non-temp path — yields
-/// [`UNREACHABLE_MEMORY_SOCKET`], so a failed isolation fails closed.
+/// What: an explicit, non-blank path with no `..` component whose parent
+/// directory, once canonicalized (symlinks resolved), is still under a system
+/// temp root is returned unchanged. Anything else — unset, blank, a non-temp
+/// path, a `..` escape, a symlink out of temp, or a parent that cannot be
+/// canonicalized — yields [`UNREACHABLE_MEMORY_SOCKET`], so a failed isolation
+/// fails closed.
 /// Test: `memory_sink::tests::harness_admits_only_an_explicit_temp_socket`.
 pub(crate) fn harness_memory_socket(explicit: Option<&str>) -> std::path::PathBuf {
     let explicit = explicit
@@ -712,7 +723,7 @@ pub(crate) fn harness_memory_socket(explicit: Option<&str>) -> std::path::PathBu
         .filter(|raw| !raw.is_empty())
         .map(std::path::PathBuf::from);
     match explicit {
-        Some(socket) if trusty_common::bin_resolve::is_under_system_temp(&socket) => socket,
+        Some(socket) if socket_resolves_under_system_temp(&socket) => socket,
         Some(socket) => {
             warn!(
                 socket = %socket.display(),
@@ -723,6 +734,30 @@ pub(crate) fn harness_memory_socket(explicit: Option<&str>) -> std::path::PathBu
         }
         None => std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET),
     }
+}
+
+/// Whether `socket` still sits under a system temp root after `..` and
+/// symlinks are resolved (#9139).
+///
+/// Why: a lexical `starts_with` check admits `/tmp/../Users/x/live.sock` and a
+/// temp-dir symlink that points at the operator's data directory.
+/// What: false for any `..` component, or when the parent cannot be
+/// canonicalized; otherwise the canonical parent must pass
+/// `is_under_system_temp`.
+/// Test: `memory_sink::tests::harness_admits_only_an_explicit_temp_socket`.
+fn socket_resolves_under_system_temp(socket: &Path) -> bool {
+    if socket
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Some(parent) = socket.parent() else {
+        return false;
+    };
+    parent
+        .canonicalize()
+        .is_ok_and(|real| trusty_common::bin_resolve::is_under_system_temp(&real))
 }
 
 #[cfg(test)]
