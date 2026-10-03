@@ -1109,6 +1109,8 @@ fn a_git_component_operand_is_refused() {
         format!("rm -rf {base}/clone/.git"),
         format!("cp {base}/src/a {base}/clone/.GIT/config"),
         format!("cp {base}/src/a {base}/clone/.Git/hooks/pre-commit"),
+        // No `.git` exists under `src`, so only the case fold sees this one.
+        format!("cp {base}/src/a {base}/src/.GIT"),
         format!("cp {base}/src/a {base}/clone/cfg"),
         format!("cp {base}/src/a {base}/gitdir/config"),
         format!("cp {base}/src/a {base}/gitdir/hooks/pre-commit"),
