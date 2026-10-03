@@ -99,17 +99,36 @@ pub(crate) async fn start_session(
 ///
 /// Why: the one seam where the in-place start turns the config into the
 /// renderer, split out so a test can drive it from a config root.
-/// What: [`trusty_mpm::runtime::cli_launch::inplace_spec`] rooted at `cwd`, with
+/// What: [`trusty_mpm::runtime::cli_launch::inplace_spec`] rooted at `cwd`,
+/// carrying `prompt.file` as `--append-system-prompt-file` (#8286) and
+/// `prompt.stamp` as an assigned variable (#8453), with
 /// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
-/// Test: `inplace_session_spec_follows_the_configured_renderer`.
+/// Test: `inplace_session_spec_follows_the_configured_renderer`,
+/// `inplace_session_spec_carries_the_prompt_file`,
+/// `inplace_session_spec_carries_the_profile_stamp`.
 pub(crate) fn inplace_session_spec(
     cwd: &std::path::Path,
     config_root: &std::path::Path,
+    prompt: &InplacePrompt,
 ) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
-    trusty_mpm::runtime::cli_launch::inplace_spec(
+    let mut spec = trusty_mpm::runtime::cli_launch::inplace_spec(
         cwd,
+        &prompt.file,
         trusty_mpm::core::alt_screen::configured_alternate_screen_at(config_root),
-    )
+    );
+    // #8286: the stamp of the profile the prompt was composed for (#8453).
+    spec.env_set.push(prompt.stamp.clone());
+    spec
+}
+
+/// The in-place start's PM prompt file and the profile stamp it was composed
+/// for (#8286, #8453).
+#[derive(Debug, Clone)]
+pub(crate) struct InplacePrompt {
+    /// The written `--append-system-prompt-file` payload.
+    pub(crate) file: std::path::PathBuf,
+    /// `TRUSTY_MPM_SESSION_PROFILE=<id>` for the same profile resolution.
+    pub(crate) stamp: (String, String),
 }
 
 /// Refuse a launch from a directory that belongs to no git project (#4832).
@@ -156,8 +175,11 @@ pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Re
 /// production behavior is unchanged.
 /// What: runs `prepare_session` (deploys agents AND skills — printing both
 /// `deploy_summary_line` counts, #1917 — merges CLAUDE.md, prints the
-/// catch-up digest), registers via `POST /sessions`, then creates a detached
-/// tmux session rooted at `path` and starts `claude` in it.
+/// catch-up digest), writes the PM prompt file ([`inplace_prompt_file`],
+/// #8286 — a write failure refuses the launch before anything is registered),
+/// registers via `POST /sessions`, then creates a detached tmux session rooted
+/// at `path` and starts `claude` in it from [`inplace_session_spec`], which
+/// carries that file as `--append-system-prompt-file`.
 /// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
 /// in `start_tests.rs` covers the routing decision hermetically; the tmux/daemon
 /// I/O is exercised by the pre-existing `tests/session_manager_mvp.rs` coverage
@@ -247,6 +269,11 @@ async fn start_session_in_place(
         Err(err) => eprintln!("warning: session preparation failed: {err}"),
     }
 
+    // #8286: the PM prompt goes to `claude` as `--append-system-prompt-file`,
+    // like every other PM launch mode. Built before `POST /sessions`, so a
+    // prompt that cannot be written refuses the launch with nothing registered.
+    let prompt = inplace_prompt_file(path, &std::env::temp_dir())?;
+
     #[derive(Deserialize)]
     struct Body {
         #[serde(default)]
@@ -298,7 +325,8 @@ async fn start_session_in_place(
             // #8308: the launch travels in a spec under this launch's named root.
             let root = fw.crate_config_root();
             // #8405: the config under this launch's named root decides the renderer.
-            let spec = inplace_session_spec(path, &root);
+            // #8286: `prompt` was written by `inplace_prompt_file` above.
+            let spec = inplace_session_spec(path, &root, &prompt);
             let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
             match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
                 Ok(()) => {
@@ -314,14 +342,66 @@ async fn start_session_in_place(
             }
         }
         Ok(_) | Err(_) => {
-            eprintln!(
-                "warning: failed to create tmux session {}; run `claude` manually in {}",
-                body.name, workdir
-            );
+            // #8286: the manual fallback names the prompt file too.
+            eprintln!("{}", manual_launch_hint(&body.name, &workdir, &prompt.file));
             println!("started session {}", body.name);
         }
     }
     Ok(())
+}
+
+/// The warning printed when the in-place tmux session cannot be created.
+///
+/// Why (#8286): the operator's manual fallback must start Claude Code with the
+/// PM prompt file, like every other PM launch mode.
+/// What: names the session, the directory and the
+/// `claude --append-system-prompt-file '<file>'` command to run there.
+/// Test: `manual_launch_hint_names_the_prompt_file`.
+pub(crate) fn manual_launch_hint(
+    session: &str,
+    workdir: &str,
+    prompt_file: &std::path::Path,
+) -> String {
+    format!(
+        "warning: failed to create tmux session {session}; run \
+         `claude --append-system-prompt-file '{}'` manually in {workdir}",
+        prompt_file.display()
+    )
+}
+
+/// Write this project's PM prompt to the file the in-place pane hands
+/// `claude` as `--append-system-prompt-file` (#8286).
+///
+/// Why: the in-place start was the one PM launch mode with no prompt carrier —
+/// its launch carried no prompt flag, so the session ran on the project
+/// `CLAUDE.md` alone. It now composes the prompt through the same seam the
+/// guided relaunch uses, so the in-place session receives the same
+/// instructions. A prompt that cannot be written refuses the launch, matching
+/// #4752's rule that a session never starts without its compiled instructions;
+/// launching without the flag would silently repeat the defect.
+/// What: resolves the profile once with
+/// [`trusty_mpm::core::session_launch::cli_launch`] (no git remote, #8453),
+/// writes its prompt under `dir` (production: the process temp dir) through
+/// [`trusty_mpm::core::model_inject::write_pm_prompt_file_in`], and returns the
+/// written path with that profile's stamp for [`inplace_session_spec`]. `Err`
+/// names the file, the I/O cause and the project.
+/// Test: `inplace_prompt_file_returns_the_written_prompt_file`,
+/// `inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written`,
+/// `inplace_prompt_file_stamps_the_profile_it_composed_for` in
+/// `start_tests.rs`; `session_start_refuses_an_unwritable_prompt_before_registering`
+/// pins the call-site order.
+fn inplace_prompt_file(
+    path: &std::path::Path,
+    dir: &std::path::Path,
+) -> anyhow::Result<InplacePrompt> {
+    // #8286: one profile resolution for the prompt and the stamp (#8453).
+    let cli = trusty_mpm::core::session_launch::cli_launch(path, None);
+    let file =
+        trusty_mpm::core::model_inject::write_pm_prompt_file_in(dir, &cli.prompt, path, "launch")?;
+    Ok(InplacePrompt {
+        file,
+        stamp: trusty_mpm::core::session_profile::launch_env(cli.profile),
+    })
 }
 
 // Unit tests live in session/start_tests.rs (test-file budget: 1500 SLOC).

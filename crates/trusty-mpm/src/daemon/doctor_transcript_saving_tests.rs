@@ -32,7 +32,7 @@ fn every_production_launch_line_preserves_transcript_saving() {
 #[test]
 fn launch_lines_covers_every_builder() {
     let lines = super::launch_lines();
-    let labels: Vec<&str> = lines.iter().map(|(label, _)| *label).collect();
+    let labels: Vec<&str> = lines.iter().map(|line| line.label).collect();
 
     for expected in [
         "runtime::managed_launch::managed_env_unset",
@@ -44,6 +44,7 @@ fn launch_lines_covers_every_builder() {
         "runtime::cli_launch::inplace_spec",
         "runtime::cli_launch::client_spec",
         "daemon::spawn_command::relaunch_command",
+        "daemon::spawn_command::gui_spawn_command",
         "core::standalone::run::build_launch_command",
         "control::backend::stream_json::build_claude_command",
         "control::backend::tmux::pane_claude_line",
@@ -56,7 +57,7 @@ fn launch_lines_covers_every_builder() {
 
     // Every covered builder must actually unset the suppressing marker, and none
     // may unset a deliberate variable.
-    for (label, unset) in &lines {
+    for LaunchLine { label, unset, .. } in &lines {
         assert!(
             unset.iter().any(|n| n == "CLAUDE_CODE_CHILD_SESSION"),
             "{label} must unset CLAUDE_CODE_CHILD_SESSION; unsets: {unset:?}"
@@ -74,6 +75,48 @@ fn launch_lines_covers_every_builder() {
         assert!(
             !unset.iter().any(|n| n == "CLAUDE_CODE_OAUTH_TOKEN"),
             "{label} must NOT unset CLAUDE_CODE_OAUTH_TOKEN (#2246); unsets: {unset:?}"
+        );
+    }
+}
+
+/// The PM launch builders this check reads must also carry the PM prompt file.
+///
+/// Why (#8286): `launch_lines()` proves every builder scrubs the session
+/// markers, but a builder could scrub correctly and still launch with no PM
+/// instructions — the in-place `tm session start` launch did exactly that. The
+/// owner rule is that every PM launch mode delivers its prompt through
+/// `--append-system-prompt-file`, so every PM entry of `launch_lines()` is
+/// read here, from the same builder invocation the scrub check reads.
+/// What: asserts each PM entry's line carries the flag and the probe path, and
+/// that the PM entries include every PM builder named below, so dropping one
+/// from the list (or its line) fails too. The daemon spawn/resume spec is
+/// pinned by `spawn_argv_matches_the_shell_line_it_replaces`.
+#[test]
+fn pm_launch_builders_carry_the_prompt_file() {
+    let lines = super::launch_lines();
+    let pm: Vec<(&str, &str)> = lines
+        .iter()
+        .filter_map(|l| l.pm_line.as_deref().map(|line| (l.label, line)))
+        .collect();
+    for expected in [
+        "core::model_inject::build_claude_command",
+        "core::model_inject::build_inplace_session_command_with_prompt",
+        "core::model_inject::build_client_session_command",
+        "runtime::cli_launch::isolated_spec",
+        "runtime::cli_launch::inplace_spec",
+        "runtime::cli_launch::client_spec",
+        "daemon::spawn_command::gui_spawn_command",
+        "core::standalone::run::build_launch_command",
+    ] {
+        assert!(
+            pm.iter().any(|(label, _)| label.contains(expected)),
+            "{expected} must be a PM entry of launch_lines(); PM entries: {pm:?}"
+        );
+    }
+    for (label, line) in &pm {
+        assert!(
+            line.contains("--append-system-prompt-file") && line.contains(super::PROBE_PROMPT),
+            "{label} must hand the PM prompt file to claude: {line}"
         );
     }
 }
@@ -118,7 +161,8 @@ const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     (
         "daemon/spawn_command.rs",
         1,
-        "relaunch_command; in launch_lines()",
+        "relaunch_command; in launch_lines(). #8286's gui_spawn_command, also in \
+         launch_lines(), emits ` claude --`, which no pattern here matches",
     ),
     (
         "control/backend/stream_json.rs",

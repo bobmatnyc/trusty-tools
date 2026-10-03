@@ -98,29 +98,13 @@ impl DaemonClient {
         // instructions. The temp file persists because `claude` reads it at
         // startup; it lives in `/tmp` and is superseded by the next launch — no
         // explicit cleanup is performed.
-        let prompt =
-            crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
-        let claude_spec = {
-            let path = std::env::temp_dir().join(format!(
-                "trusty-mpm-system-prompt-{}.txt",
-                uuid::Uuid::new_v4()
-            ));
-            // #4467: the line is built in `core::model_inject` so it carries the
-            // shared inherited-marker scrub and the `transcript_saving` doctor
-            // check can read it. Hand-building it here is what left this launch
-            // path silently saving no transcript.
-            match std::fs::write(&path, &prompt) {
-                Ok(()) => client_claude_spec(
-                    std::path::Path::new(workdir),
-                    config_root.as_deref(),
-                    Some(&path),
-                ),
-                Err(err) => {
-                    tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    client_claude_spec(std::path::Path::new(workdir), config_root.as_deref(), None)
-                }
-            }
-        };
+        // #8286: a prompt that cannot be written refuses the launch; no bare claude.
+        let claude_spec = client_prompt_spec(
+            &std::env::temp_dir(),
+            workdir,
+            config_root.as_deref(),
+            "launch",
+        )?;
 
         // #8719: register only once prep and the line are ready, so the
         // POST-to-tmux window holds nothing that can fail slowly.
@@ -190,6 +174,19 @@ impl DaemonClient {
     pub async fn connect_session(&self, workdir: &str) -> anyhow::Result<String> {
         // #8405: the operator's config decides the renderer (see `client_claude_spec`).
         let config_root = crate::core::alt_screen::operator_config_root();
+        // Build the `--append-system-prompt` text so a freshly-started `claude`
+        // is a configured PM, resolved *for this project directory* so override
+        // files under `<workdir>/.trusty-mpm/` take effect (issue #381). This is
+        // prompt composition from bundled assets + project overrides, not
+        // deployment of agents/skills/hooks into the project — `connect` only
+        // skips the latter (`prepare_session`). #8286: written BEFORE the daemon
+        // POST, so a prompt that cannot be written refuses with nothing registered.
+        let claude_spec = client_prompt_spec(
+            &std::env::temp_dir(),
+            workdir,
+            config_root.as_deref(),
+            "connect",
+        )?;
         #[derive(Deserialize)]
         struct Body {
             #[serde(default)]
@@ -207,36 +204,6 @@ impl DaemonClient {
             .error_for_status()?
             .json()
             .await?;
-
-        // Build the `--append-system-prompt` text so a freshly-started `claude`
-        // is a configured PM, resolved *for this project directory* so override
-        // files under `<workdir>/.trusty-mpm/` take effect (issue #381). This is
-        // prompt composition from bundled assets + project overrides, not
-        // deployment of agents/skills/hooks into the project — `connect` only
-        // skips the latter (`prepare_session`).
-        let prompt =
-            crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
-        let claude_spec = {
-            let path = std::env::temp_dir().join(format!(
-                "trusty-mpm-system-prompt-{}.txt",
-                uuid::Uuid::new_v4()
-            ));
-            // #4467: the line is built in `core::model_inject` so it carries the
-            // shared inherited-marker scrub and the `transcript_saving` doctor
-            // check can read it. Hand-building it here is what left this launch
-            // path silently saving no transcript.
-            match std::fs::write(&path, &prompt) {
-                Ok(()) => client_claude_spec(
-                    std::path::Path::new(workdir),
-                    config_root.as_deref(),
-                    Some(&path),
-                ),
-                Err(err) => {
-                    tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    client_claude_spec(std::path::Path::new(workdir), config_root.as_deref(), None)
-                }
-            }
-        };
 
         // `tmux new-session -A` is idempotent: it attaches to the session when
         // it already exists and creates it (detached, `-d`) otherwise. The
@@ -296,6 +263,32 @@ impl DaemonClient {
     }
 }
 
+/// Write the PM prompt for `workdir` under `dir` and build the client launch
+/// spec that carries it (#8286, #4467).
+///
+/// Why: `launch_session` and `connect_session` used to start a bare `claude`
+/// when this write failed, so the session ran without its PM instructions. A PM
+/// launch has no optional prompt, so both refuse instead. The line is built in
+/// `core::model_inject` so it carries the shared inherited-marker scrub the
+/// `transcript_saving` doctor check reads (#4467).
+/// What: composes the prompt for `workdir`, writes it with
+/// [`crate::core::model_inject::write_pm_prompt_file_in`] (production: the
+/// process temp dir; `action` is "launch" or "connect" in the refusal text), and returns [`client_claude_spec`] carrying that file;
+/// `Err` names the file, the I/O cause and `workdir`.
+/// Test: `launch_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
+/// `connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`.
+fn client_prompt_spec(
+    dir: &std::path::Path,
+    workdir: &str,
+    config_root: Option<&std::path::Path>,
+    action: &str,
+) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
+    let project = std::path::Path::new(workdir);
+    let prompt = crate::core::session_launch::build_system_prompt_for(project);
+    let file = crate::core::model_inject::write_pm_prompt_file_in(dir, &prompt, project, action)?;
+    Ok(client_claude_spec(project, config_root, Some(&file)))
+}
+
 /// The launch spec the daemon client starts a fresh pane with (#8405, #8308).
 ///
 /// Why: the one seam where `DaemonClient::launch_session` / `connect_session`
@@ -315,6 +308,37 @@ fn client_claude_spec(
         prompt_file,
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     )
+}
+
+#[cfg(test)]
+mod prompt_refusal_tests {
+    /// Drive `client_prompt_spec` with a prompt dir that is a regular file, so
+    /// the write fails for real (ENOTDIR), and return the refusal text.
+    fn refusal(action: &str) -> (String, String) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
+        let workdir = tmp.path().to_string_lossy().into_owned();
+        let err = super::client_prompt_spec(&not_a_dir, &workdir, None, action)
+            .expect_err("a PM launch without its prompt must be refused");
+        (err.to_string(), not_a_dir.to_string_lossy().into_owned())
+    }
+
+    /// #8286: `DaemonClient::launch_session` refuses, naming the file and cause.
+    #[test]
+    fn launch_prompt_spec_refuses_when_the_prompt_file_cannot_be_written() {
+        let (err, file) = refusal("launch");
+        assert!(err.contains(&file) && err.contains("os error"), "{err}");
+        assert!(err.contains("refusing to launch"), "{err}");
+    }
+
+    /// #8286: `DaemonClient::connect_session` refuses, naming the file and cause.
+    #[test]
+    fn connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written() {
+        let (err, file) = refusal("connect");
+        assert!(err.contains(&file) && err.contains("os error"), "{err}");
+        assert!(err.contains("refusing to connect"), "{err}");
+    }
 }
 
 #[cfg(test)]

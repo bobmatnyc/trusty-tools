@@ -83,8 +83,32 @@ const PROBE_CONFIG_DIR: &str = "/managed/claude-config";
 /// Test: `over_scrub_of_the_oauth_token_is_detected`.
 const PROBE_TOKEN: &str = "probe-token-not-a-credential";
 
-/// Every launch-line builder that spawns a `claude`, paired with the variables it
-/// unsets.
+/// The probe prompt path every PM launch builder is handed (#8286).
+const PROBE_PROMPT: &str = "/probe/prompt.txt";
+
+/// One launch line [`launch_lines`] reads.
+///
+/// Why (#8286): the scrub check and the prompt-file check must read the SAME
+/// builder invocations, or a PM builder could be listed for one and missed by
+/// the other.
+/// What: the builder's label, the variables it unsets, and — for a builder that
+/// starts a PM session and whose whole line this probe can read — that line
+/// (a spec's or `Command`'s argv joined with spaces).
+/// Test: `launch_lines_covers_every_builder`,
+/// `pm_launch_builders_carry_the_prompt_file`.
+struct LaunchLine {
+    /// Human-readable builder name, used in failure messages.
+    label: &'static str,
+    /// The variables the builder unsets for its child.
+    unset: Vec<String>,
+    /// The full line, `Some` only for a PM launch builder (#8286).
+    // #8286: read by `pm_launch_builders_carry_the_prompt_file` only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pm_line: Option<String>,
+}
+
+/// Every launch-line builder that spawns a `claude`, with the variables it
+/// unsets and, for a PM launch, its whole line.
 ///
 /// Why (review follow-up on #4467): the first version of this check parsed only
 /// `runtime::claude_code::env_bin_prefix`, so it reported `Ok` while
@@ -94,18 +118,24 @@ const PROBE_TOKEN: &str = "probe-token-not-a-credential";
 /// returns `Ok` for a leaking path is worse than no check: it actively certifies
 /// the broken state. Enumerating the builders here — and reading each one's real
 /// output — is what makes the verdict cover what its message claims.
-/// What: `(label, unset-variable-names)` per builder. Shell-string builders are
-/// parsed with [`parse_env_unset_vars`]; `Command` builders report their
-/// `env_remove`d keys, which `get_envs()` surfaces as `(key, None)`.
+/// What: one [`LaunchLine`] per builder. Shell-string builders are parsed with
+/// [`parse_env_unset_vars`]; `Command` builders report their `env_remove`d
+/// keys, which `get_envs()` surfaces as `(key, None)`. Every PM builder is
+/// handed [`PROBE_PROMPT`] (#8286). The daemon's managed spawn carries only a
+/// structured unset list here; its prompt flag is pinned by
+/// `spawn_argv_matches_the_shell_line_it_replaces`.
 ///
 /// `bin/tm`'s `build_inplace_exec_command` is deliberately absent: it lives in
 /// the `tm` BINARY crate, which this library cannot reference. It is covered by
 /// its own `inplace_exec_command_scrubs_inherited_session_markers` test, and the
 /// message below names the gap rather than implying coverage.
 /// Test: `every_production_launch_line_preserves_transcript_saving`,
-/// `launch_lines_covers_every_builder`.
-fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
+/// `launch_lines_covers_every_builder`,
+/// `pm_launch_builders_carry_the_prompt_file`.
+fn launch_lines() -> Vec<LaunchLine> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
+    let probe = std::path::Path::new(PROBE_PROMPT);
+    let cwd = std::path::Path::new("/probe");
 
     // #8233: the daemon's spawn/resume/attach paths no longer build a shell
     // string, so there is no `env -u` prefix to parse for them — they carry a
@@ -121,7 +151,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // `_with` keeps the probe hermetic (no ambient token resolution).
     let launch_line = crate::core::model_inject::build_claude_command_with_configured(
         None,
-        None,
+        Some(probe), // #8286: a PM launch carries its prompt.
         Some(&config_dir),
         Some(PROBE_TOKEN),
         &[],
@@ -133,94 +163,132 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     // #8405: the `false` renderer argument above and below is immaterial — the
     // probe reads the `-u` scrub, which no renderer value changes.
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
-    // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
-    let inplace_line = crate::core::model_inject::build_inplace_session_command_configured(false);
-    let client_line = crate::core::model_inject::build_client_session_command_configured(
-        Some(std::path::Path::new("/probe/prompt.txt")),
-        false,
+    // #8286: the GUI "New Session" spawn's own line, with the profile stamp.
+    let gui_line = crate::daemon::spawn_command::gui_spawn_command(
+        probe,
+        &crate::core::session_profile::launch_env(crate::core::session_profile::SessionProfile::Pm),
     );
+    // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
+    // #8286: the prompt-carrying twin of the spec the in-place launch sends.
+    let inplace_line =
+        crate::core::model_inject::build_inplace_session_command_with_prompt(probe, false);
+    let client_line =
+        crate::core::model_inject::build_client_session_command_configured(Some(probe), false);
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
     // #7422: `None` for the composed MCP file — this probe checks env scrubbing
     // and composes nothing, so it must not name a file that does not exist.
-    let run_cmd = crate::core::standalone::run::build_launch_command_configured(
+    // #8286: `tm run` launches through the prompt-carrying builder.
+    let run_cmd = crate::core::standalone::run::build_launch_command_with_prompt(
         std::path::Path::new("/probe/repo"),
         &config_dir,
         None,
         None,
+        probe,
         false,
     );
-    let stream_cmd = crate::control::backend::stream_json::build_claude_command(
-        std::path::Path::new("/probe"),
-        None,
-    );
+    let stream_cmd = crate::control::backend::stream_json::build_claude_command(cwd, None);
     // #8453: the control-plane pane line, scrubbed since the stamp fix. A
     // `None` config root reads no operator file; only the `-u` flags matter.
     let control_pane_line =
         crate::control::backend::tmux::pane_claude_line(None, "claude", None).unwrap_or_default();
 
+    // #8308: the CLI and fleet paths now launch from these specs; the string
+    // builders above stay covered while they remain public API.
+    let isolated = crate::runtime::cli_launch::isolated_spec(
+        cwd,
+        &crate::runtime::cli_launch::CliLaunch {
+            model: None,
+            prompt_file: Some(probe),
+            config_dir: Some(&config_dir),
+            oauth_token: Some(PROBE_TOKEN),
+            mcp_env: &[],
+            scoped_mcp: None,
+            alternate_screen: false,
+        },
+    );
+    let inplace = crate::runtime::cli_launch::inplace_spec(cwd, probe, false);
+    let client = crate::runtime::cli_launch::client_spec(cwd, Some(probe), false);
+
+    let pm = |label, unset, line: String| LaunchLine {
+        label,
+        unset,
+        pm_line: Some(line),
+    };
+    let other = |label, unset| LaunchLine {
+        label,
+        unset,
+        pm_line: None,
+    };
     vec![
-        (
+        other(
             "runtime::managed_launch::managed_env_unset (daemon spawn + resume + attach)",
             managed_unset,
         ),
-        (
+        pm(
             "core::model_inject::build_claude_command (tm launch / tm connect)",
             owned(parse_env_unset_vars(&launch_line)),
+            launch_line,
         ),
-        (
-            "core::model_inject::build_inplace_session_command (tm session start, in place)",
+        pm(
+            "core::model_inject::build_inplace_session_command_with_prompt (tm session start, in place)",
             owned(parse_env_unset_vars(&inplace_line)),
+            inplace_line,
         ),
-        (
+        pm(
             "core::model_inject::build_client_session_command (DaemonClient launch/connect)",
             owned(parse_env_unset_vars(&client_line)),
+            client_line,
         ),
-        // #8308: the CLI and fleet paths now launch from these specs; the
-        // string builders above stay covered while they remain public API.
-        (
+        pm(
             "runtime::cli_launch::isolated_spec (tm launch / tm connect / tm fleet)",
-            crate::runtime::cli_launch::isolated_spec(
-                std::path::Path::new("/probe"),
-                &crate::runtime::cli_launch::CliLaunch {
-                    model: None,
-                    prompt_file: None,
-                    config_dir: Some(&config_dir),
-                    oauth_token: Some(PROBE_TOKEN),
-                    mcp_env: &[],
-                    scoped_mcp: None,
-                    alternate_screen: false,
-                },
-            )
-            .env_unset,
+            isolated.env_unset,
+            isolated.args.join(" "),
         ),
-        (
+        pm(
             "runtime::cli_launch::inplace_spec (tm session start, in place)",
-            crate::runtime::cli_launch::inplace_spec(std::path::Path::new("/probe"), false)
-                .env_unset,
+            inplace.env_unset,
+            inplace.args.join(" "),
         ),
-        (
+        pm(
             "runtime::cli_launch::client_spec (DaemonClient launch/connect)",
-            crate::runtime::cli_launch::client_spec(std::path::Path::new("/probe"), None, false)
-                .env_unset,
+            client.env_unset,
+            client.args.join(" "),
         ),
-        (
-            "daemon::spawn_command::relaunch_command (pane relaunch)",
+        // #8286: the config-apply restarter only; it relaunches an existing
+        // pane and stays bare.
+        other(
+            "daemon::spawn_command::relaunch_command (config-apply pane relaunch)",
             owned(parse_env_unset_vars(&relaunch_line)),
         ),
-        (
+        pm(
+            "daemon::spawn_command::gui_spawn_command (GUI New Session)",
+            owned(parse_env_unset_vars(&gui_line)),
+            gui_line,
+        ),
+        pm(
             "core::standalone::run::build_launch_command (tm run)",
             removed_env_keys(&run_cmd),
+            command_line(&run_cmd),
         ),
-        (
+        other(
             "control::backend::stream_json::build_claude_command (headless)",
             removed_env_keys(&stream_cmd),
         ),
-        (
+        other(
             "control::backend::tmux::pane_claude_line (control-plane pane)",
             owned(parse_env_unset_vars(&control_pane_line)),
         ),
     ]
+}
+
+/// A `Command`'s program and argv, joined with spaces (#8286).
+fn command_line(cmd: &std::process::Command) -> String {
+    std::iter::once(cmd.get_program())
+        .chain(cmd.get_args())
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Borrow-to-owned helper so both builder shapes share one verdict type.
@@ -264,7 +332,7 @@ pub(super) fn check_transcript_saving() -> DoctorCheck {
     let present = markers_present_in_env();
     let lines = launch_lines();
     let covered = lines.len();
-    for (label, unset) in &lines {
+    for LaunchLine { label, unset, .. } in &lines {
         let names: Vec<&str> = unset.iter().map(String::as_str).collect();
         let check = verdict(label, &names, &present);
         if check.status != CheckStatus::Ok {

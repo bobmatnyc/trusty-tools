@@ -172,8 +172,13 @@ pub(crate) fn start(
     }
     let config = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(dir));
     let model = session_profile::launch_model(cli.profile, &config);
-    let prompt = trusty_mpm::core::model_inject::write_prompt_file(&cli.prompt)
-        .context("failed to write the Architect's system prompt file")?;
+    // #8286: the same shared refusal as every other PM launch.
+    let prompt = trusty_mpm::core::model_inject::write_pm_prompt_file_in(
+        &std::env::temp_dir(),
+        &cli.prompt,
+        dir,
+        "launch",
+    )?;
     let scoped_mcp = crate::commands::launch_home::provision_session_mcp(
         dir,
         config_dir.as_deref(),

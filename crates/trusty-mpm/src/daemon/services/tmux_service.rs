@@ -192,7 +192,8 @@ impl TmuxService {
     /// well-formed but the daemon cannot honour it on this host), then
     /// creates `tmux_name` rooted at `workdir` (idempotently — `new-session
     /// -A` attaches if a session of that name already exists) and pipes
-    /// `claude` into the session's first pane via `send-keys`.
+    /// `claude` into the session's first pane via `send-keys`, carrying the PM
+    /// prompt file written just before the session is created (#8286).
     /// Test: `spawn_claude_without_binary_is_unprocessable`,
     /// `spawn_claude_without_tmux_is_unprocessable`, and the handler-level
     /// `spawn_session_without_claude_returns_422` and
@@ -213,6 +214,12 @@ impl TmuxService {
         let driver = TmuxDriver::discover()
             .map_err(|e| DaemonError::Unprocessable(format!("tmux unavailable for spawn: {e}")))?;
 
+        // #8286: a GUI session is a PM session, so it starts with the PM prompt
+        // file. Written before the tmux host exists, so a refusal leaves no
+        // session behind and the caller registers nothing.
+        let line = crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
+            .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
+
         let workdir_str = workdir.to_string_lossy().into_owned();
         driver
             .create_session(tmux_name, Some(&workdir_str))
@@ -231,8 +238,7 @@ impl TmuxService {
         // may already be gone); the original `send_line` error still propagates
         // to the caller — the rollback never masks it.
         let target = TmuxTarget::session(tmux_name);
-        if let Err(e) = driver.send_line(&target, &crate::daemon::spawn_command::relaunch_command())
-        {
+        if let Err(e) = driver.send_line(&target, &line) {
             Self::kill_best_effort(tmux_name);
             return Err(DaemonError::Internal(format!(
                 "failed to launch claude in {tmux_name}: {e}"

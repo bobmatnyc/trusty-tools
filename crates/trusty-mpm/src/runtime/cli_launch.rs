@@ -140,12 +140,16 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
 /// The spec for the in-place `tm session start`.
 ///
 /// Why: the structured twin of
-/// [`crate::core::model_inject::build_inplace_session_command_configured`] —
+/// [`crate::core::model_inject::build_inplace_session_command_with_prompt`] —
 /// no `--setting-sources`, so the operator's own `user` tier still loads.
-/// What: [`base`] plus `--dangerously-skip-permissions`.
+/// What: [`base`] plus `--append-system-prompt-file <prompt_file>
+/// --dangerously-skip-permissions`. `prompt_file` is required, not optional
+/// (#8286): every PM launch mode delivers its prompt through that flag, so a
+/// spec without it cannot be built.
 /// Test: `inplace_and_client_specs_match_the_lines_they_replace`.
-pub fn inplace_spec(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
+pub fn inplace_spec(cwd: &Path, prompt_file: &Path, alternate_screen: bool) -> LaunchSpec {
     let mut spec = base(cwd, alternate_screen);
+    push_prompt(&mut spec.args, Some(prompt_file));
     spec.args
         .extend(split(crate::core::model_inject::PERMISSION_MODE_FLAG));
     spec
