@@ -28,6 +28,8 @@ pub(crate) mod compress;
 pub(crate) mod daemon;
 // #9034: three-state daemon pid identity, read from argv.
 pub(crate) mod daemon_pid_identity;
+// #9121: `tm daemon --sandbox` — refuse an unisolated env, skip pollers/secrets.
+pub(crate) mod daemon_sandbox;
 pub(crate) mod delete;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;
