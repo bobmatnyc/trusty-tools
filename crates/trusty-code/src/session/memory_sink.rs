@@ -668,6 +668,63 @@ pub fn derive_palace_id_for_project(
     trusty_common::palace_resolve::resolve_palace(project_dir).map(|resolution| resolution.id)
 }
 
+/// A socket path nothing serves: a dial is refused by the kernel at once.
+const UNREACHABLE_MEMORY_SOCKET: &str = "/nonexistent/trusty-memory/trusty-memory.sock";
+
+/// Resolve the trusty-memory socket the turn recorder and the PM catch-up read
+/// may dial — never the operator's live daemon from a test process (#9139).
+///
+/// Why: a test process inherited the operator's environment, so the recorder
+/// resolved the LIVE daemon's socket and a managed shell's
+/// `TRUSTY_MEMORY_PALACE` named the live palace. The #4638 create bound did not
+/// stop it, because that palace already exists: 2,308 fixture `turn` drawers
+/// landed in it. Test isolation that depends on every caller's environment
+/// fails the first time one caller forgets.
+/// What: outside a test process this is
+/// `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`. Under
+/// the harness (`trusty_common::test_harness::running_under_test_harness`) it
+/// is `harness_memory_socket` over `TRUSTY_MEMORY_SOCKET`; the data-dir
+/// derivation is never consulted, so the default socket is unreachable.
+/// Test: `memory_sink::tests::harness_admits_only_an_explicit_temp_socket`,
+/// `memory_sink::tests::memory_sink_for_under_the_harness_never_binds_a_live_socket`.
+pub fn resolve_recorder_socket() -> std::path::PathBuf {
+    if !trusty_common::test_harness::running_under_test_harness() {
+        return trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+    }
+    harness_memory_socket(
+        std::env::var(trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The socket a test process may dial, given its `TRUSTY_MEMORY_SOCKET` (#9139).
+///
+/// Why: a test's mock daemon binds under a `TempDir`; a live daemon binds in
+/// the operator's data directory, never under a system temp root.
+/// What: an explicit, non-blank path under a system temp root is returned
+/// unchanged. Anything else — unset, blank, or a non-temp path — yields
+/// [`UNREACHABLE_MEMORY_SOCKET`], so a failed isolation fails closed.
+/// Test: `memory_sink::tests::harness_admits_only_an_explicit_temp_socket`.
+pub(crate) fn harness_memory_socket(explicit: Option<&str>) -> std::path::PathBuf {
+    let explicit = explicit
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(std::path::PathBuf::from);
+    match explicit {
+        Some(socket) if trusty_common::bin_resolve::is_under_system_temp(&socket) => socket,
+        Some(socket) => {
+            warn!(
+                socket = %socket.display(),
+                "turn_recorder: test process named a memory socket outside a temp \
+                 root — refusing it (#9139)"
+            );
+            std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET)
+        }
+        None => std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET),
+    }
+}
+
 #[cfg(test)]
 #[path = "memory_sink_tests.rs"]
 mod tests;
