@@ -1018,3 +1018,101 @@ async fn a_failing_embedder_fails_the_near_duplicate_screen() {
         .expect_err("an embed failure fails the screen");
     assert!(format!("{err:#}").contains("embedder down"), "{err:#}");
 }
+
+/// Why (#8729 review MEDIUM-2): the screen searches the live vector index, so
+/// a live drawer that was never embedded was invisible to it, and the dream
+/// pass — which embeds that drawer later — could still merge the imported
+/// copy. The live vectors are backfilled before the screen.
+/// Test: itself.
+#[tokio::test]
+async fn apply_screens_against_a_live_drawer_that_had_no_vector() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    let (_root, palace) = fixture();
+    // A live drawer in kg.redb with no vector, as `fixture` writes its own.
+    let mut unvectored = Drawer::new(Uuid::parse_str(ROOM).expect("room"), INDEXED_LIVE);
+    unvectored.id = Uuid::new_v4();
+    KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
+        .expect("open kg.redb")
+        .upsert_drawer(&unvectored)
+        .expect("seed an unvectored live drawer");
+    let near = Uuid::new_v4();
+    let conn = Connection::open(palace.data_dir.join(LEGACY_KG_FILE)).expect("open kg.db");
+    conn.execute(
+        "INSERT INTO drawers (id, room_id, content, created_at) \
+         VALUES (?1, ?2, ?3, '2026-04-05T09:00:00Z')",
+        [
+            near.to_string().as_str(),
+            ROOM,
+            format!("{INDEXED_LIVE}.").as_str(),
+        ],
+    )
+    .expect("insert legacy row");
+    drop(conn);
+
+    let r = apply_report(&palace, data_root(&palace), true, false, false)
+        .await
+        .expect("apply");
+    let held = r.near_duplicates.clone().expect("the screen ran");
+    assert!(
+        held.iter().any(|n| n.id == near && n.of == unvectored.id),
+        "the near-duplicate of an unvectored live drawer is held back: {held:?}"
+    );
+    assert_eq!(r.unscreened_live, 0, "{}", r.render());
+}
+
+/// A report for the render tests, with a legacy `kg.db` present.
+fn render_report(dry_run: bool) -> LegacyReport {
+    LegacyReport {
+        palace: "p".into(),
+        dry_run,
+        legacy_present: true,
+        ..LegacyReport::default()
+    }
+}
+
+/// Why (#8729 review): the dry run promised a screen that `--no-embed` and
+/// `--include-content-duplicates` turn off. Its line follows the flags.
+/// Test: itself.
+#[test]
+fn dry_run_near_duplicate_line_follows_the_flags() {
+    let screened = dedup::render(&render_report(true));
+    assert!(screened.contains("--apply holds back"), "{screened}");
+    let mut no_embed = render_report(true);
+    no_embed.no_embed = true;
+    let text = dedup::render(&no_embed);
+    assert!(
+        text.contains("--apply --no-embed does NOT screen"),
+        "{text}"
+    );
+    let mut dups = render_report(true);
+    (dups.no_embed, dups.include_content_duplicates) = (true, true);
+    let text = dedup::render(&dups);
+    assert!(
+        text.contains("--apply --include-content-duplicates does NOT screen"),
+        "{text}"
+    );
+}
+
+/// Why (#8729 review): a mass hold-back printed one line per drawer. The list
+/// stops at twenty and counts the rest; unscreened live drawers are named.
+/// Test: itself.
+#[test]
+fn held_back_list_stops_at_twenty_and_counts_the_rest() {
+    let mut r = render_report(false);
+    let of = Uuid::new_v4();
+    r.near_duplicates = Some(
+        (0..25)
+            .map(|_| dedup::NearDuplicate {
+                id: Uuid::new_v4(),
+                of,
+                score: 1.0,
+            })
+            .collect(),
+    );
+    r.unscreened_live = 3;
+    let text = dedup::render(&r);
+    assert_eq!(text.matches("held back ").count(), 20, "{text}");
+    assert!(text.contains("… and 5 more"), "{text}");
+    assert!(text.contains("near_duplicates=25"), "{text}");
+    assert!(text.contains("3 live drawer(s) have no vector"), "{text}");
+}

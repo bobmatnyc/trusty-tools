@@ -220,6 +220,9 @@ libc = { workspace = true }
 postcard = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
+# #8729: capture the user-forget log line in `service::core_tests`. Already a
+# normal dependency of trusty-common, so this adds no crate to the build.
+tracing-subscriber = { workspace = true }
 # Issue #1722: `task_mcp` integration tests drive `seed_shared_embedder_with_mock`
 # which is gated behind `embedder-test-support`. Re-declaring trusty-common here
 # with the feature activates it for all integration tests without enabling it in

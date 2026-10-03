@@ -276,6 +276,10 @@ impl launchd::LaunchdUnit for FakeUnit {
             Terminate::Fail => anyhow::bail!("launchctl kill exited 3"),
         }
     }
+
+    fn kickstart(&self) -> Result<()> {
+        anyhow::bail!("stop never kickstarts")
+    }
 }
 
 /// A launchd-owned daemon stand-in: its pid, a kill-on-drop guard, its stdin
@@ -413,4 +417,117 @@ fn stop_does_not_report_no_daemon_when_launchd_cannot_be_queried() {
     )
     .expect_err("an idle unit and an empty table hold nothing to stop");
     assert_eq!(err.to_string(), "No daemon running");
+}
+
+/// A loaded unit for `service start` (#8750): `before` until a kickstart,
+/// then `after`. Counts kickstarts; never touches the real user domain.
+struct StartFake {
+    before: launchd::UnitState,
+    after: launchd::UnitState,
+    kickstarts: std::cell::Cell<u32>,
+}
+
+impl StartFake {
+    fn new(before: launchd::UnitState, after: launchd::UnitState) -> Self {
+        Self {
+            before,
+            after,
+            kickstarts: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl launchd::LaunchdUnit for StartFake {
+    fn label(&self) -> &str {
+        "com.trusty.memory.test"
+    }
+
+    fn state(&self) -> Result<launchd::UnitState> {
+        Ok(if self.kickstarts.get() == 0 {
+            self.before
+        } else {
+            self.after
+        })
+    }
+
+    fn terminate(&self) -> Result<()> {
+        anyhow::bail!("service start never terminates")
+    }
+
+    fn kickstart(&self) -> Result<()> {
+        self.kickstarts.set(self.kickstarts.get() + 1);
+        Ok(())
+    }
+}
+
+/// Why (#8750 review HIGH-2): after `stop` the unit is loaded with no pid.
+/// The install half of `service start` finds it current and does nothing, so
+/// only a kickstart brings the daemon back.
+#[test]
+fn service_start_kickstarts_a_loaded_unit_with_no_pid() {
+    let unit = StartFake::new(
+        launchd::UnitState::Loaded { pid: None },
+        launchd::UnitState::Loaded { pid: Some(4242) },
+    );
+    let outcome =
+        launchd::start_loaded_unit(&unit, Duration::from_secs(1)).expect("kickstart starts it");
+    assert_eq!(outcome, launchd::StartOutcome::Kickstarted(4242));
+    assert_eq!(unit.kickstarts.get(), 1);
+}
+
+/// A running unit is left alone: a kickstart there is not asked for.
+#[test]
+fn service_start_leaves_a_running_unit_alone() {
+    let running = launchd::UnitState::Loaded { pid: Some(7) };
+    let unit = StartFake::new(running, running);
+    let outcome = launchd::start_loaded_unit(&unit, Duration::from_secs(1)).expect("running");
+    assert_eq!(outcome, launchd::StartOutcome::AlreadyRunning(7));
+    assert_eq!(unit.kickstarts.get(), 0);
+}
+
+/// Fail-Open Check (#8750): a kickstart that leaves no process is a failed
+/// start, never a quiet success; a unit that is not loaded is an error too.
+#[test]
+fn service_start_fails_when_the_kickstarted_unit_never_runs() {
+    let idle = launchd::UnitState::Loaded { pid: None };
+    let unit = StartFake::new(idle, idle);
+    let err = launchd::start_loaded_unit(&unit, Duration::from_millis(200))
+        .expect_err("no pid after the kickstart");
+    assert!(err.to_string().contains("no process"), "{err}");
+    assert_eq!(unit.kickstarts.get(), 1);
+
+    let absent = launchd::UnitState::NotLoaded;
+    let err = launchd::start_loaded_unit(&StartFake::new(absent, absent), Duration::ZERO)
+        .expect_err("not loaded");
+    assert!(err.to_string().contains("not loaded"), "{err}");
+}
+
+/// Why (#8750 review HIGH-2): the stop message promised a restart from
+/// `service start`, which did nothing for an idle unit. It must name that
+/// command, which now kickstarts, and not claim the daemon is running.
+#[test]
+fn stop_message_names_the_command_that_restarts_the_daemon() {
+    let msg = launchd::stopped_message("com.trusty.memory");
+    assert!(msg.contains("`trusty-memory service start`"), "{msg}");
+    assert!(msg.contains("kickstart"), "{msg}");
+}
+
+/// Why (#8750 review MEDIUM-1): every non-zero `launchctl print` exit read as
+/// "not loaded", so an unanswerable launchctl let `stop` report no daemon.
+/// Only launchd's not-found answer is "not loaded".
+#[test]
+fn launchctl_print_exits_classify_into_loaded_absent_or_error() {
+    use launchd::{classify_print, PrintVerdict};
+    let not_found = "Bad request.\nCould not find service \"com.trusty.memory\" in domain";
+    for (code, stderr, want) in [
+        (Some(0), "", PrintVerdict::Loaded),
+        (Some(113), "", PrintVerdict::NotLoaded),
+        (Some(3), not_found, PrintVerdict::NotLoaded),
+    ] {
+        assert_eq!(classify_print(code, stderr).expect("classified"), want);
+    }
+    for (code, stderr) in [(Some(5), "Input/output error"), (Some(1), ""), (None, "")] {
+        let err = classify_print(code, stderr).expect_err("not a not-found answer");
+        assert!(err.to_string().contains("launchctl print"), "{err}");
+    }
 }

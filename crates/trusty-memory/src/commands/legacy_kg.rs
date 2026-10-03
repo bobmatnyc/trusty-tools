@@ -39,9 +39,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
-use trusty_common::memory_core::dream::DreamConfig;
 use trusty_common::memory_core::palace::{Drawer, Palace};
-use trusty_common::memory_core::retrieval::{shared_embedder, VectorBackfillOptions};
+use trusty_common::memory_core::retrieval::VectorBackfillOptions;
 use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
 use trusty_common::memory_core::{memory_content_hash, ContentHash, MaintenanceLease};
 use uuid::Uuid;
@@ -354,13 +353,19 @@ pub struct LegacyReport {
     pub backup: Option<Backup>,
     /// `--allow-short`: the 8-token minimum was skipped (#8434).
     pub allow_short: bool,
-    /// Apply only: `--include-content-duplicates` imported the duplicates.
+    /// `--include-content-duplicates`: an apply imports the duplicates. Set on
+    /// a dry run too, so its report describes the apply (#8729).
     pub include_content_duplicates: bool,
+    /// `--no-embed`: the apply neither screens nor backfills vectors (#8729).
+    pub no_embed: bool,
     /// Drawers this run wrote to `kg.redb`. Always 0 on a dry run.
     pub imported: usize,
     /// Apply only: drawers held back because dream dedup would merge them
     /// (#8729); `None` when the screen did not run.
     pub near_duplicates: Option<Vec<dedup::NearDuplicate>>,
+    /// Apply only: live drawers still without a vector after the pre-screen
+    /// backfill, which the screen therefore could not check against (#8729).
+    pub unscreened_live: usize,
     /// `(repaired, still_missing)` from the vector backfill, when it ran.
     pub vectors: Option<(usize, usize)>,
     /// The embed error after a committed import. The caller prints the report
@@ -526,9 +531,10 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// `kg.redb` drawer already holds under another id unless
 /// `include_content_duplicates` is set; the skipped
 /// count lands in [`LegacyReport::content_duplicates`]. With `embed` and
-/// without `include_content_duplicates`, holds back the drawers the dream
-/// dedup pass would merge ([`dedup::screen_near_duplicates`], #8729) and lists
-/// them in [`LegacyReport::near_duplicates`]. Upserts the rest in
+/// without `include_content_duplicates`, backfills the live vectors and holds
+/// back the drawers the dream dedup pass would merge
+/// ([`dedup::screen_for_import`], #8729), listing them in
+/// [`LegacyReport::near_duplicates`]. Upserts the rest in
 /// one redb transaction, puts them in the in-memory table (replacing an
 /// L1-only entry for the same id), and — unless `embed` is false — runs the
 /// palace's own missing-vector backfill. An embed failure after the commit
@@ -575,6 +581,7 @@ pub(crate) async fn apply_report_with(
     let kept = format!("backup kept at {}", backup.dir.display());
     report.backup = Some(backup);
     report.include_content_duplicates = include_content_duplicates;
+    report.no_embed = !embed;
     import_legacy(palace, data_root, legacy, report, embed)
         .await
         .context(kept)
@@ -622,16 +629,9 @@ async fn import_legacy(
         to_import.extend(duplicates);
     } else if embed && !to_import.is_empty() {
         // #8729: the dream dedup guard — never import what dream dedup merges.
-        let embedder = shared_embedder()
+        to_import = dedup::screen_for_import(&handle, to_import, &mut report)
             .await
-            .map_err(|e| e.context("acquire the embedder for the near-duplicate screen"))?;
-        let threshold = DreamConfig::default().dedup_threshold;
-        let (kept, held) =
-            dedup::screen_near_duplicates(&handle, to_import, embedder.as_ref(), threshold)
-                .await
-                .context("near-duplicate screen failed; nothing was imported")?;
-        to_import = kept;
-        report.near_duplicates = Some(held);
+            .context("near-duplicate screen failed; nothing was imported")?;
     }
     if !to_import.is_empty() {
         handle
@@ -650,7 +650,10 @@ async fn import_legacy(
             })
             .await
         {
-            Ok(v) => report.vectors = Some((v.repaired, v.still_missing_ids.len())),
+            Ok(v) => {
+                let before = report.vectors.map_or(0, |(repaired, _)| repaired);
+                report.vectors = Some((before + v.repaired, v.still_missing_ids.len()));
+            }
             Err(e) => report.embed_error = Some(format!("{e:#}")),
         }
     }

@@ -363,7 +363,8 @@ impl SpawnSpec {
     }
 
     /// Append a detached child's stderr to `path` rather than the caller's
-    /// terminal (#8103). The file is created owner-only when absent.
+    /// terminal (#8103). The file is opened owner-only, and moved to
+    /// `<path>.1` at spawn once it passes 8 MiB.
     pub fn stderr_to(mut self, path: impl Into<PathBuf>) -> Self {
         self.stderr_log = Some(path.into());
         self

@@ -224,14 +224,46 @@ pub(super) async fn spawn_child(
     })
 }
 
-/// Open `path` for appending, creating it owner-only (`0600`) when absent.
+/// Size past which an existing stderr log is rotated at open (#8103).
+const STDERR_LOG_CAP_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Open `path` for appending, owner-only, rotating it past
+/// [`STDERR_LOG_CAP_BYTES`].
 fn open_stderr_log(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
+    open_stderr_log_capped(path, STDERR_LOG_CAP_BYTES)
+}
+
+/// Open `path` for appending, owner-only (`0600`), rotating it first when it
+/// is larger than `cap` bytes.
+///
+/// Why (#8103 review): every probe-started child appends to the same log, so
+/// an uncapped file grows without bound; and `mode` applies only when the
+/// file is created, so a log that already existed kept whatever mode it had.
+/// What: a file larger than `cap` is renamed to `<path>.1`, replacing the
+/// previous rotation — one generation, as the maintenance journal keeps. The
+/// opened file is then set to `0600` whether or not it was just created.
+/// Test: `a_stderr_log_past_its_cap_rotates_at_open`,
+/// `an_existing_stderr_log_is_forced_owner_only`.
+pub(super) fn open_stderr_log_capped(path: &Path, cap: u64) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > cap => {
+            let mut rotated = path.as_os_str().to_owned();
+            rotated.push(".1");
+            std::fs::rename(path, rotated)?;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(path)
+        .open(path)?;
+    // #8103 review: `mode` above only applies to a file this call created.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 /// Copy a captured child's stderr to this process's stderr, keeping the tail.

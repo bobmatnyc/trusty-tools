@@ -314,6 +314,7 @@ pub fn analyze_spawn_spec(socket: &Path) -> Result<SpawnSpec, MissingBinary> {
 ///
 /// What: `trusty-analyze.stderr.log` beside the socket, in the directory the
 /// spawn spec already creates.
+/// Test: `a_quiet_handle_logs_beside_its_socket`.
 pub fn analyze_stderr_log(socket: &Path) -> PathBuf {
     socket.with_file_name(format!("{ANALYZE_SERVICE}.stderr.log"))
 }

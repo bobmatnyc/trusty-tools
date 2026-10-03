@@ -549,6 +549,45 @@ async fn an_unopenable_stderr_log_fails_the_spawn_before_any_child() {
     assert!(!marker.exists(), "no child ran");
 }
 
+/// Why (#8103 review): every probe-started child appends to one log, so it
+/// must not grow without bound. A log past the cap moves to `<log>.1` at open
+/// and the child writes to a fresh file.
+/// Test: this test itself.
+#[test]
+fn a_stderr_log_past_its_cap_rotates_at_open() {
+    use std::io::Write as _;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let log = tmp.path().join("child.stderr.log");
+    std::fs::write(&log, b"old startup lines past the cap").expect("seed log");
+    let mut file = super::child::open_stderr_log_capped(&log, 8).expect("open");
+    file.write_all(b"new").expect("write");
+    assert_eq!(std::fs::read(&log).expect("log"), b"new");
+    let rotated = tmp.path().join("child.stderr.log.1");
+    assert_eq!(
+        std::fs::read(&rotated).expect("rotated log"),
+        b"old startup lines past the cap"
+    );
+
+    // Under the cap, the log is appended to in place.
+    drop(super::child::open_stderr_log_capped(&log, 8).expect("reopen"));
+    assert_eq!(std::fs::read(&log).expect("log"), b"new");
+}
+
+/// Why (#8103 review): `OpenOptions::mode` applies only to a file the open
+/// creates, so a log that already existed kept a looser mode.
+/// Test: this test itself.
+#[test]
+fn an_existing_stderr_log_is_forced_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let log = tmp.path().join("child.stderr.log");
+    std::fs::write(&log, b"").expect("seed log");
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    drop(super::child::open_stderr_log_capped(&log, 1024).expect("open"));
+    let mode = std::fs::metadata(&log).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "an existing log is made owner-only");
+}
+
 /// Why (#8783): a detached child is meant to outlive its caller, so it must
 /// lead its own session, out of reach of a group kill aimed at the caller. A
 /// supervised child is the control: it stays in the caller's session.
