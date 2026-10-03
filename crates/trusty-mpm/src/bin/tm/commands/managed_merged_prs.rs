@@ -381,15 +381,28 @@ pub(crate) async fn session_prune_worktrees(
         // The wait is long and the daemon streams nothing, so say what is
         // happening — an operator with no output cannot tell a running survey
         // from a wedged one.
+        // #8301: the preview is now bounded, and a heartbeat proves it is alive.
         eprintln!(
             "merged-PR pass: surveying the registered worktrees in scope (classify, then \
-             byte-walk) — this takes minutes on a large workspace and prints nothing until it \
-             finishes (#5830)"
+             byte-walk) — the daemon stops classifying after 10 minutes and reports what it did \
+             not reach as not inspected (kept); a heartbeat prints every {}s (#5830, #8301)",
+            SURVEY_HEARTBEAT.as_secs()
         );
     }
+    // #8301: a merged-PR request is the long one, so it carries the heartbeat.
+    let wait = |fut| async move {
+        if merged_prs {
+            with_heartbeat(fut, SURVEY_HEARTBEAT, |elapsed| {
+                eprintln!("{}", heartbeat_line(elapsed));
+            })
+            .await
+        } else {
+            fut.await
+        }
+    };
     // #8782: every run previews first. A `--force` run needs the echo too: a
     // daemon without it would ignore the allowlists as well as the scope.
-    let preview = post(true, None).await?;
+    let preview = wait(post(true, None)).await?;
     let project = project_root.as_deref();
     super::prune_preview::check_scope_echo(&preview, project, project.is_some() || !dry_run)?;
     if !dry_run {
@@ -410,11 +423,46 @@ pub(crate) async fn session_prune_worktrees(
         print_prune_reply(&preview, true, merged_prs);
         return Ok(());
     }
-    let body = post(false, Some(&planned)).await?;
+    let body = wait(post(false, Some(&planned))).await?;
     super::prune_preview::check_scope_echo(&body, project, true)?;
     super::prune_preview::check_allowlist_echo(&body, Some(&planned))?;
     print_prune_reply(&body, false, merged_prs);
     Ok(())
+}
+
+/// How often a merged-PR request prints that it is still waiting (#8301).
+const SURVEY_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Await `fut`, calling `beat` with the elapsed time every `every` (#8301).
+///
+/// Why: the daemon answers a merged-PR survey in one reply, minutes later. A
+/// preview that printed one line and then nothing for 25 minutes could not be
+/// told from a wedged one, and was killed.
+/// What: the first beat comes one `every` after the call starts, then one per
+/// `every`, until `fut` resolves; its output is returned unchanged.
+/// Test: `worktree_8301_the_heartbeat_beats_until_the_reply_arrives`.
+pub(crate) async fn with_heartbeat<F: std::future::Future>(
+    fut: F,
+    every: std::time::Duration,
+    mut beat: impl FnMut(std::time::Duration),
+) -> F::Output {
+    let started = tokio::time::Instant::now();
+    let mut ticks = tokio::time::interval_at(started + every, every);
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            out = &mut fut => return out,
+            _ = ticks.tick() => beat(started.elapsed()),
+        }
+    }
+}
+
+/// The heartbeat a waiting merged-PR request prints (#8301).
+fn heartbeat_line(elapsed: std::time::Duration) -> String {
+    format!(
+        "merged-PR pass: still waiting on the daemon — {}s elapsed (#8301)",
+        elapsed.as_secs()
+    )
 }
 
 /// `tm session prune-worktrees`, scoped from the directory it runs in (#8782).

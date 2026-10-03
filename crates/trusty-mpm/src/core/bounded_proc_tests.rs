@@ -11,7 +11,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::{BoundedError, run_bounded, run_bounded_with_input};
+use super::{BoundedError, clamp_to_deadline, run_bounded, run_bounded_with_input, with_deadline};
 
 /// A command that exits non-zero is `Ok` here, with both streams captured.
 ///
@@ -235,5 +235,37 @@ fn run_bounded_kills_the_pipe_holder_it_reports_held_open() {
         probe.err().and_then(|e| e.raw_os_error()),
         Some(libc::ENXIO),
         "the FIFO still has a reader after the runner returned"
+    );
+}
+
+/// 🔴 #8301: a thread deadline caps a child's own budget, and once it has
+/// passed nothing more is spawned.
+///
+/// Why: the merged-PR survey ran 78 minutes as a loop of children that each
+/// honoured its own budget; only a shared deadline bounds the loop. The second
+/// call must fail without spawning, as a timeout, so every caller keeps the
+/// worktree.
+#[test]
+fn a_deadline_cuts_a_child_short_and_refuses_the_next_one() {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(300);
+    let (first, second) = with_deadline(deadline, || {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let first = run_bounded(cmd, Duration::from_secs(30));
+        let second = run_bounded(Command::new("true"), Duration::from_secs(30));
+        (first, second)
+    });
+    assert!(matches!(first, Err(BoundedError::TimedOut)), "{first:?}");
+    assert!(matches!(second, Err(BoundedError::TimedOut)), "{second:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the deadline, not the 30 s budget, must end the child; took {:?}",
+        started.elapsed()
+    );
+    // The guard restored the thread: no deadline is left in force.
+    assert_eq!(
+        clamp_to_deadline(Duration::from_secs(5)),
+        Some(Duration::from_secs(5))
     );
 }

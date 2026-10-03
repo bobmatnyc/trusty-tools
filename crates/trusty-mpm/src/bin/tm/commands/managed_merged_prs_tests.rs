@@ -9,6 +9,7 @@
 
 use super::{
     classification_clause, diagnostic_lines, print_merged_pr_pass, session_prune_worktrees,
+    with_heartbeat,
 };
 
 /// 🔴 #6561 REGRESSION: "0 reclaimable" must never be printed without saying
@@ -527,4 +528,30 @@ fn merged_pr_pass_tolerates_missing_fields() {
         Some(&serde_json::json!({ "removed": "not-an-array" })),
         false,
     );
+}
+
+/// 🔴 #8301: a merged-PR request prints a heartbeat while it waits, and stops
+/// the moment the reply arrives.
+///
+/// Why: the preview printed one line and then nothing for 25 minutes, and an
+/// operator cannot tell that from a wedged daemon.
+#[tokio::test(start_paused = true)]
+async fn worktree_8301_the_heartbeat_beats_until_the_reply_arrives() {
+    let every = std::time::Duration::from_secs(30);
+    let mut beats = Vec::new();
+    let reply = with_heartbeat(
+        async {
+            tokio::time::sleep(std::time::Duration::from_secs(95)).await;
+            7
+        },
+        every,
+        |elapsed| beats.push(elapsed.as_secs()),
+    )
+    .await;
+    assert_eq!(reply, 7, "the reply passes through unchanged");
+    assert_eq!(beats, vec![30, 60, 90]);
+
+    let mut none = 0;
+    let quick = with_heartbeat(async { 1 }, every, |_| none += 1).await;
+    assert_eq!((quick, none), (1, 0), "a quick reply prints no heartbeat");
 }

@@ -35,10 +35,53 @@
 //! `run_bounded_kills_the_pipe_holder_it_reports_held_open` in
 //! `bounded_proc_tests.rs`.
 
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+
+thread_local! {
+    // #8301: the wall-clock deadline every bounded child on this thread obeys.
+    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Run `f` with every bounded child it starts on this thread cut off at
+/// `deadline` (#8301).
+///
+/// Why: each child already has its own budget, but a survey is a loop of many
+/// children, and the sum of their budgets is not a bound. A merged-PR preview
+/// over 238 worktrees ran 78 minutes, one bounded call at a time.
+/// What: installs `deadline` (the earlier one, when a deadline is already in
+/// force), runs `f`, and restores the previous value through a drop guard, so
+/// a panic cannot leak a deadline onto a pooled thread.
+/// Test: `a_deadline_cuts_a_child_short_and_refuses_the_next_one`.
+pub fn with_deadline<T>(deadline: Instant, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DEADLINE.with(|d| d.set(self.0));
+        }
+    }
+    let outer = DEADLINE.with(Cell::get);
+    let effective = outer.map_or(deadline, |o| o.min(deadline));
+    let _restore = Restore(DEADLINE.with(|d| d.replace(Some(effective))));
+    f()
+}
+
+/// `budget`, shortened to the time left before this thread's deadline (#8301).
+///
+/// What: `budget` unchanged when no deadline is in force; `None` once the
+/// deadline has passed, which [`run_bounded_with_input`] reports as
+/// [`BoundedError::TimedOut`] without spawning anything.
+/// Test: `a_deadline_cuts_a_child_short_and_refuses_the_next_one`.
+pub fn clamp_to_deadline(budget: Duration) -> Option<Duration> {
+    let Some(deadline) = DEADLINE.with(Cell::get) else {
+        return Some(budget);
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    (!left.is_zero()).then(|| budget.min(left))
+}
 
 /// How long to wait for a drained pipe's thread to hand over what it read.
 ///
@@ -204,6 +247,11 @@ pub fn run_bounded_with_input(
     input: Option<Vec<u8>>,
     budget: Duration,
 ) -> Result<BoundedOutput, BoundedError> {
+    // #8301: the caller's deadline caps this child's own budget; past it,
+    // nothing is spawned and the call reads as a timeout — an unknown answer.
+    let Some(budget) = clamp_to_deadline(budget) else {
+        return Err(BoundedError::TimedOut);
+    };
     // #6867: BEFORE the spawn — a group cannot be joined retroactively.
     isolate_process_group(&mut cmd);
     if input.is_some() {

@@ -305,14 +305,20 @@ fn take_suspension(state: &mut GateState, root: &Path, now: Instant) -> Option<S
 /// hide a fixable auth failure behind a "suspended" message.
 /// What: a timeout increments and, at [`TIMEOUT_STRIKES`], arms the deadline
 /// from [`backoff_for`]; anything else drops the root's record entirely, which
-/// also keeps the map bounded by the number of currently-failing roots.
+/// also keeps the map bounded by the number of currently-failing roots. A call
+/// the survey deadline cut short (#8301) leaves the record as it was.
 /// Test: `an_answer_clears_the_strikes`,
-/// `a_fourth_call_is_skipped_after_three_timeouts`.
+/// `a_fourth_call_is_skipped_after_three_timeouts`,
+/// `a_deadline_cut_call_neither_counts_nor_clears_a_strike`.
 fn note_outcome(
     roots: &mut HashMap<PathBuf, RootBackoff>,
     root: &Path,
     result: &Result<String, GhFailure>,
 ) {
+    // #8301: a call the survey deadline ended says nothing about `gh` itself.
+    if matches!(result, Err(f) if f.was_cut_short()) {
+        return;
+    }
     let timed_out = matches!(result, Err(f) if f.timed_out());
     if !timed_out {
         roots.remove(root);

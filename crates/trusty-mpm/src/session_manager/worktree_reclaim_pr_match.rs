@@ -49,6 +49,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use super::git_ceiling::bounded_git_output;
 use super::worktree_reclaim::{BranchPrState, PrIndex, pr_state_for_branch};
 use super::worktree_reclaim_gh::{
     GH_TIMEOUT, gh_pr_list_command, resolve_daemon_gh_env, run_with_timeout,
@@ -421,7 +422,56 @@ pub(crate) fn resolve_with_index(
     {
         pr = probe.state_for_head(registry_root, branch);
     }
-    resolve_landing_parts(worktree, registry_root, branch, pr, probe)
+    // #8301: a complete index already holds the round stem's answer.
+    let probe = IndexFirst {
+        index,
+        inner: probe,
+    };
+    resolve_landing_parts(worktree, registry_root, branch, pr, &probe)
+}
+
+/// A [`LandingProbe`] that answers a branch lookup from a COMPLETE index
+/// (#8301).
+///
+/// Why: rung 2 asked `gh` about the round stem of every `-rN` branch, one call
+/// each, even when the index it was handed already listed every pull request.
+/// What: [`LandingProbe::state_for_head`] reads `index` when it is complete and
+/// asks `inner` otherwise; the other methods always delegate. A failed or
+/// truncated index is never complete, so it still reaches `gh`.
+/// Test: `worktree_8301_a_complete_index_answers_the_round_stem_without_gh`.
+struct IndexFirst<'a> {
+    index: &'a PrIndex,
+    inner: &'a dyn LandingProbe,
+}
+
+impl LandingProbe for IndexFirst<'_> {
+    fn state_for_head(&self, registry_root: &Path, branch: &str) -> BranchPrState {
+        if self.index.is_complete() {
+            return self.index.state_for(Some(branch));
+        }
+        self.inner.state_for_head(registry_root, branch)
+    }
+
+    fn head_commit(&self, worktree: &Path) -> Result<String, String> {
+        self.inner.head_commit(worktree)
+    }
+
+    fn merged_prs_containing(
+        &self,
+        registry_root: &Path,
+        sha: &str,
+    ) -> Result<Vec<MergedPrHead>, String> {
+        self.inner.merged_prs_containing(registry_root, sha)
+    }
+
+    fn is_ancestor(
+        &self,
+        worktree: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, String> {
+        self.inner.is_ancestor(worktree, ancestor, descendant)
+    }
 }
 
 /// Ask GitHub, in an ALREADY-RESOLVED repository, for the MERGED pull requests
@@ -499,11 +549,12 @@ impl LandingProbe for GhLandingProbe {
         // anything else a fault — so this is the one git call in the module
         // that cannot go through `git_stdout`, which reads a non-zero exit as
         // an error.
-        let out = git_command(
+        // #8301: bounded like every other sweep git call, so it obeys the
+        // ceiling and the survey deadline.
+        let out = bounded_git_output(git_command(
             worktree,
             &["merge-base", "--is-ancestor", ancestor, descendant],
-        )
-        .output()
+        ))
         .map_err(|e| format!("`git merge-base --is-ancestor` could not be run: {e}"))?;
         match out.status.code() {
             Some(0) => Ok(true),

@@ -488,3 +488,29 @@ fn resolve_with_index_widens_a_complete_index_no_pr_answer() {
     .landing;
     assert_eq!(out, BranchPrState::Merged { pr: 105 });
 }
+
+/// 🔴 #8301: a COMPLETE index answers the round-stem lookup itself, so a
+/// `-rN` branch costs no `gh --head` call for its stem.
+///
+/// Fails on `origin/main`: rung 2 asked the probe about the stem even with a
+/// complete index, so `calls()` held `head:fix/8301-batch` and the fake's
+/// answer, `Merged`, came back — a network round-trip per round-suffixed tree.
+#[test]
+fn worktree_8301_a_complete_index_answers_the_round_stem_without_gh() {
+    let probe = FakeProbe::default().with_head("fix/8301-batch", BranchPrState::Merged { pr: 106 });
+    let out = resolve_with_index(
+        worktree(),
+        root(),
+        Some("fix/8301-batch-r2"),
+        &index("someone/else", 103, "MERGED"),
+        true,
+        &probe,
+    )
+    .landing;
+    assert_eq!(out, BranchPrState::NoPr);
+    assert!(
+        !probe.calls().iter().any(|c| c.starts_with("head:")),
+        "a complete index must answer the stem itself: {:?}",
+        probe.calls()
+    );
+}

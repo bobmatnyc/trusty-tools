@@ -329,6 +329,13 @@ impl PrIndex {
     /// Test: `a_budgeted_survey_answers_within_its_budget`,
     /// `pr_index_from_gh_reads_this_repository`.
     pub(crate) fn from_gh_within(registry_root: &Path, timeout: Duration) -> Self {
+        Self::from_gh_listing(registry_root, PR_INDEX_LIMIT, timeout)
+    }
+
+    /// [`from_gh_within`](Self::from_gh_within), asking for up to `limit` rows
+    /// (#8301). The reclaim survey asks for every pull request in one call, so
+    /// no branch needs a lookup of its own; see `worktree_reclaim_budget`.
+    pub(crate) fn from_gh_listing(registry_root: &Path, limit: usize, timeout: Duration) -> Self {
         // #7057: WHICH repository, read from this root's own `origin` rather
         // than left to `gh` to infer from the working directory. Resolved
         // before the gate because a root whose repository cannot be
@@ -350,7 +357,8 @@ impl PrIndex {
         // rather than polled again. The identity resolution sits INSIDE the
         // closure because it shells out to git — a suspended root must not pay
         // for that either.
-        let outcome = gh_gate::shared().poll(registry_root, "index", || {
+        // #8301: keyed by the limit — a 400-row reply is not a full listing.
+        let outcome = gh_gate::shared().poll(registry_root, &format!("index:{limit}"), || {
             // #6623: resolved once per registry root — the daemon's own gh
             // identity, since launchd hands it neither `GH_TOKEN` nor
             // `GH_CONFIG_DIR`.
@@ -358,7 +366,7 @@ impl PrIndex {
             let identity = gh_env.describe();
             let mut cmd = gh_pr_list_command(registry_root, &gh_env, &repo);
             cmd.args(["--state", "all", "--limit"])
-                .arg(PR_INDEX_LIMIT.to_string())
+                .arg(limit.to_string())
                 .args(["--json", PR_JSON_FIELDS]);
             // #6929: the caller's ceiling, so a lookup cannot outlive the
             // survey that asked for it.
@@ -366,7 +374,7 @@ impl PrIndex {
         });
         match outcome {
             Ok(stdout) => {
-                let index = Self::from_json(&stdout, PR_INDEX_LIMIT);
+                let index = Self::from_json(&stdout, limit);
                 // #2919: logged because "resolved 0 branches" is the signature
                 // of a call that ran but answered nothing — the shape the bogus
                 // `-C` flag produced, which was otherwise invisible.
