@@ -456,15 +456,27 @@ async fn source_root_index_is_checked_against_the_pr_repo() {
     assert_eq!(diff_only.ok(), Some(None), "the diff-only fallback is kept");
 }
 
-/// `cmd_run`'s pin classification: `TRUSTY_SEARCH_INDEX` wins over
-/// `--source-root`, as `resolve_source_root_arg` already decides.
+/// `cmd_run`'s pin classification: `--source-root` wins over
+/// `TRUSTY_SEARCH_INDEX`, as `resolve_source_root_arg` decides (#8651).
 #[test]
 fn run_pin_classifies_the_flags() {
-    assert_eq!(RunPin::from_flags(true, true, false), RunPin::Env);
+    assert_eq!(RunPin::from_flags(true, true, false), RunPin::SourceRoot);
+    assert_eq!(
+        RunPin::from_flags(true, true, true),
+        RunPin::SourceRootDiffOnly
+    );
     assert_eq!(RunPin::from_flags(false, true, false), RunPin::SourceRoot);
     assert_eq!(
         RunPin::from_flags(false, true, true),
         RunPin::SourceRootDiffOnly
     );
     assert_eq!(RunPin::from_flags(false, false, false), RunPin::None);
+}
+
+/// With no `--source-root`, the env pin is still classified as a pin, so
+/// `pr_index_for_run` verifies it against the PR repo (#8651).
+#[test]
+fn run_pin_env_pin_applies_without_source_root() {
+    assert_eq!(RunPin::from_flags(true, false, false), RunPin::Env);
+    assert_eq!(RunPin::from_flags(true, false, true), RunPin::Env);
 }

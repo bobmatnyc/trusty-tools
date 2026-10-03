@@ -113,10 +113,10 @@ pub struct RunArgs {
     /// explicit instead of CWD-derived. If it does NOT map to a registered
     /// index, the review degrades to diff-only (no code-context retrieval)
     /// with a clear stderr notice and an in-body banner, instead of silently
-    /// querying an unrelated project's index. `TRUSTY_SEARCH_INDEX` remains
-    /// the fully-explicit override and takes precedence over `--source-root`
-    /// when both are set. On a GitHub-PR run either pin is checked against
-    /// OWNER/REPO, and an index recorded for another repo fails the run (#8651).
+    /// querying an unrelated project's index. This per-run flag takes
+    /// precedence over an ambient `TRUSTY_SEARCH_INDEX` when both are set
+    /// (#8651). On a GitHub-PR run either pin is checked against OWNER/REPO,
+    /// and an index recorded for another repo fails the run (#8651).
     #[arg(long, value_name = "DIR")]
     pub source_root: Option<std::path::PathBuf>,
 
@@ -204,13 +204,15 @@ fn run_config(config_path: Option<&std::path::Path>, args: &RunArgs) -> ReviewCo
 /// Why: one-shot review of a PR or local diff with the selected reviewer model.
 /// What: prints the resolved posting mode (#4460), then resolves the diff
 /// source, builds deps, runs the pipeline, prints the result to STDOUT, and
-/// optionally writes the log file.  Resolves `--source-root` (issue #2994)
-/// first — it wins over CWD auto-derive but loses to an explicit
-/// `TRUSTY_SEARCH_INDEX` — then calls `resolve_index` so the correct
-/// trusty-search index is used even when `TRUSTY_SEARCH_INDEX` is unset
-/// (issue #670 / auto-derive #661). A GitHub PR with no pinned index reviews
-/// against its own repo's index instead (#8651); the PR-context flags fill
-/// the `CallerContext` (#8654).
+/// optionally writes the log file. Index resolution order: (1)
+/// `--source-root` (#2994), which wins over `TRUSTY_SEARCH_INDEX` (#8651);
+/// (2) `TRUSTY_SEARCH_INDEX` when no `--source-root` is given; (3) for a
+/// GitHub PR, `pr_index_for_run` resolves the PR repo's own index or verifies
+/// the step-1/2 pin against that repo (#8651); a `--source-root` that matched
+/// no index skips this step and stays diff-only; (4) otherwise
+/// `resolve_index` derives the index from the CWD (#670, #661), a no-op once
+/// step 1 or 2 pinned one. The PR-context flags fill the `CallerContext`
+/// (#8654).
 /// Test: CLI integration via `cargo run -p trusty-review -- run --help`;
 /// `resolve_index` wiring covered by
 /// `wiring_cmd_run_resolve_index_updates_before_pipeline` in
@@ -239,12 +241,13 @@ pub async fn cmd_run(
     let default_provider = config_with_overrides.role_models.reviewer.provider.clone();
 
     // Resolve the search index from the daemon before building deps. The CWD
-    // resolve_index below runs only for a local diff (`--local-diff`/`--base`),
-    // pinned or not: with TRUSTY_SEARCH_INDEX set it is a no-op, and on any
-    // failure (daemon unreachable, no match) it logs a warning and leaves
-    // search_index at its current value. #8651: a GitHub-PR run never queries
-    // an index kept that way — `pr_index_for_run` resolves or verifies the PR
-    // repo's own index, or fails.
+    // resolve_index below runs whenever `pr_index_for_run` returns `None`: for
+    // a local diff (`--local-diff`/`--base`), and for a GitHub PR whose
+    // --source-root matched no index. It is a no-op once TRUSTY_SEARCH_INDEX
+    // or --source-root set `search_index_explicit`; on any failure (daemon
+    // unreachable, no match) it logs a warning and leaves search_index as is.
+    // #8651: a GitHub-PR run never queries an index kept that way — it uses
+    // the PR repo's own index or a verified pin, runs diff-only, or fails.
     let search_for_resolve = HttpSearchClient::from_config(&config_with_overrides)
         .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
 
@@ -252,10 +255,9 @@ pub async fn cmd_run(
     let env_pinned = config_with_overrides.search_index_explicit;
 
     // ── --source-root (issue #2994) ────────────────────────────────────────
-    // Resolved BEFORE the CWD/env auto-derive below: an explicit --source-root
-    // wins over CWD-derivation, but TRUSTY_SEARCH_INDEX (search_index_explicit)
-    // — the fully-explicit operator override — still wins over both, so this
-    // block is skipped entirely when the env var is already set.
+    // Resolved BEFORE the CWD auto-derive below. #8651: the per-run
+    // --source-root wins over CWD-derivation AND over TRUSTY_SEARCH_INDEX,
+    // which can be ambient (inherited from a parent MCP server's env).
     let source_root_notice = resolve_source_root_arg(
         &mut config_with_overrides,
         &search_for_resolve,
@@ -264,7 +266,7 @@ pub async fn cmd_run(
     .await;
 
     // #8651: a GitHub PR reviews against its own repo's index, and a pin is
-    // checked against that repo; the CWD auto-derive below is for local diffs.
+    // verified against it; the CWD auto-derive below is for local diffs.
     let pin = RunPin::from_flags(
         env_pinned,
         args.source_root.is_some(),
@@ -459,12 +461,14 @@ fn read_pr_context_file(path: &std::path::Path) -> Result<String> {
 /// What: one variant per pin source; `SourceRootDiffOnly` is a
 /// `--source-root` that matched no index and already forced a diff-only run.
 /// Test: `foreign_pin_is_refused_and_matching_pin_is_used`,
-/// `source_root_index_is_checked_against_the_pr_repo`.
+/// `source_root_index_is_checked_against_the_pr_repo`,
+/// `run_pin_classifies_the_flags`,
+/// `run_pin_env_pin_applies_without_source_root`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunPin {
     /// No pin: resolve the PR repo's own index.
     None,
-    /// `TRUSTY_SEARCH_INDEX`, which also wins over `--source-root`.
+    /// `TRUSTY_SEARCH_INDEX` with no `--source-root`.
     Env,
     /// `--source-root` matched a registered index.
     SourceRoot,
@@ -473,13 +477,14 @@ pub(crate) enum RunPin {
 }
 
 impl RunPin {
-    /// Classify the pin from the flags `cmd_run` saw.
+    /// Classify the pin from the flags `cmd_run` saw; `--source-root` is
+    /// checked before the env pin (#8651).
     pub(crate) fn from_flags(env_pinned: bool, source_root: bool, diff_only: bool) -> Self {
-        match (env_pinned, source_root, diff_only) {
-            (true, _, _) => RunPin::Env,
-            (false, true, true) => RunPin::SourceRootDiffOnly,
-            (false, true, false) => RunPin::SourceRoot,
-            (false, false, _) => RunPin::None,
+        match (source_root, diff_only, env_pinned) {
+            (true, true, _) => RunPin::SourceRootDiffOnly,
+            (true, false, _) => RunPin::SourceRoot,
+            (false, _, true) => RunPin::Env,
+            (false, _, false) => RunPin::None,
         }
     }
 }
@@ -728,10 +733,10 @@ pub async fn build_deps_async(
 /// behaviour — a matched source-root sets the index (and is left alone from
 /// then on), a no-match forces a diff-only review — so the logic lives here
 /// once rather than being duplicated per subcommand.
-/// What: a no-op (returns `None`) when `source_root` is `None`, OR when
-/// `config.search_index_explicit` is already `true` (an explicit
-/// `TRUSTY_SEARCH_INDEX` always wins over `--source-root`, logged at `warn`).
-/// Otherwise delegates to `ReviewConfig::resolve_source_root` and returns the
+/// What: a no-op (returns `None`) when `source_root` is `None`. Otherwise
+/// it resolves `source_root` even when `TRUSTY_SEARCH_INDEX` is set: the
+/// per-run flag overrides an env pin that may be ambient (#8651), logged at
+/// `info`. It delegates to `ReviewConfig::resolve_source_root` and returns the
 /// notice string on `SourceRootOutcome::DiffOnly` (the caller must pass it to
 /// `apply_source_root_fallback` to swap both `deps.search` and `deps.analyze`
 /// for null clients built from that notice); returns `None` on
@@ -743,20 +748,20 @@ pub async fn build_deps_async(
 /// once via `warn!` inside `resolve_source_root`, once via a raw `eprintln!`
 /// here — fixed as part of the #2994 re-review).
 /// Test: `resolve_source_root_arg_none_is_noop`,
-/// `resolve_source_root_arg_explicit_env_index_wins`.
+/// `resolve_source_root_arg_beats_env_index`.
 pub async fn resolve_source_root_arg(
     config: &mut ReviewConfig,
     search_client: &HttpSearchClient,
     source_root: Option<&std::path::Path>,
 ) -> Option<String> {
     let dir = source_root?;
+    // #8651: the per-run flag beats an env pin, which can be inherited.
     if config.search_index_explicit {
-        warn!(
-            "--source-root {} ignored: TRUSTY_SEARCH_INDEX={} is already set and takes precedence",
+        tracing::info!(
+            "--source-root {} overrides TRUSTY_SEARCH_INDEX={}",
             dir.display(),
             config.search_index
         );
-        return None;
     }
     match config.resolve_source_root(search_client, dir).await {
         SourceRootOutcome::Matched(_) => None,
@@ -1125,21 +1130,21 @@ mod tests {
         assert!(!config.search_index_explicit);
     }
 
-    /// An explicit `TRUSTY_SEARCH_INDEX` (`search_index_explicit = true`) must
-    /// win over `--source-root` — the fully-explicit override takes precedence.
-    /// Why: proves the precedence rule from #2994 ("Keep TRUSTY_SEARCH_INDEX as
-    /// the explicit override") without needing a reachable trusty-search daemon
-    /// — the whole point is that the daemon is never even queried in this case.
-    /// What: sets `search_index_explicit = true`, calls the helper with a
-    /// `Some(dir)` source_root and an unreachable client; asserts the helper
-    /// returns `None` (no diff-only fallback triggered) and leaves the
-    /// operator-chosen index untouched.
+    /// An explicit `--source-root` beats `TRUSTY_SEARCH_INDEX`
+    /// (`search_index_explicit = true`), which can be ambient (#8651).
+    /// Why: an env pin used to make the helper return early, so the per-run
+    /// flag was ignored.
+    /// What: sets the env pin, passes `Some(dir)` and an unreachable client,
+    /// and asserts the helper still queried the daemon: it returns the
+    /// diff-only notice and turns `require_search` off. The env-pinned index
+    /// is never used for retrieval, because the caller nulls both clients.
     /// Test: this test.
     #[tokio::test]
-    async fn resolve_source_root_arg_explicit_env_index_wins() {
+    async fn resolve_source_root_arg_beats_env_index() {
         let mut config = ReviewConfig::load(None);
-        config.search_index = "operator-chosen".to_string();
+        config.search_index = "ambient-env-pin".to_string();
         config.search_index_explicit = true;
+        config.context.require_search = Some(true);
         let client = HttpSearchClient::new("http://127.0.0.1:1").expect("client init");
 
         let notice = resolve_source_root_arg(
@@ -1149,14 +1154,10 @@ mod tests {
         )
         .await;
 
-        assert!(
-            notice.is_none(),
-            "explicit TRUSTY_SEARCH_INDEX must win — no diff-only fallback"
-        );
-        assert_eq!(
-            config.search_index, "operator-chosen",
-            "explicit index must remain unchanged"
-        );
+        let notice = notice.expect("--source-root must be resolved despite the env pin");
+        assert!(notice.contains("--source-root"), "notice: {notice}");
+        assert_eq!(config.context.require_search, Some(false));
+        assert!(config.search_index_explicit);
     }
 
     // ── apply_source_root_fallback (#2994 re-review, finding #1) ───────────
