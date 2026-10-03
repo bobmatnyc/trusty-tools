@@ -20,6 +20,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::agent_loop::{ContextBudgetSnapshot, ToolEventSink};
+use crate::finish_report::FinishReport;
 use crate::session::SessionRegistry;
 use crate::tools::telemetry::ToolTelemetry;
 
@@ -210,6 +211,20 @@ impl ToolEventSink for SessionToolEventSink {
             tracing::warn!(session_id = %self.session_id, agent, agent_id, "record_agent_failed failed: {e}");
         }
     }
+
+    /// Publish an accepted `finish_task`'s structured report (#8204).
+    ///
+    /// Why: same log-and-swallow contract as the hooks above — a vanished
+    /// session must never derail the run that just finished.
+    /// Test: `tests::forwards_the_finish_report`.
+    async fn task_finished(&self, agent: &str, agent_id: &str, report: &FinishReport) {
+        if let Err(e) =
+            self.registry
+                .record_task_finished(&self.session_id, agent, agent_id, report.clone())
+        {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, "record_task_finished failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +280,61 @@ mod tests {
             .await;
         let ev = next_event_for(&mut events, &session.id).await;
         assert_eq!(ev.kind, "tool_error");
+    }
+
+    /// The completion report reaches the event stream as DATA (#8204) — this
+    /// is the daemon-side half of "structured fields cross the wire", so a
+    /// client never re-parses `render_finish_summary`'s prose.
+    #[tokio::test]
+    async fn forwards_the_finish_report() {
+        use crate::finish_report::{EvidenceOutcome, FinishChange, TestEvidence};
+
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
+        let mut events = crate::events::subscribe();
+
+        let report = FinishReport {
+            status: "completed".to_string(),
+            summary: "added the flag".to_string(),
+            changes: vec![FinishChange {
+                file: "crates/a/src/lib.rs".to_string(),
+                lines_added: Some(10),
+                lines_removed: Some(2),
+            }],
+            tests_run: Some(12),
+            tests_passed: Some(12),
+            evidence: Some(TestEvidence {
+                command: "cargo test -p a".to_string(),
+                lines: vec!["test result: ok. 12 passed; 0 failed".to_string()],
+                truncated: false,
+                outcome: EvidenceOutcome::Passed,
+            }),
+            verified: true,
+        };
+
+        sink.task_finished("engineer", "eng-1", &report).await;
+
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "task_finished");
+        let crate::events::Event::TaskFinished {
+            agent,
+            agent_id,
+            report,
+            ..
+        } = ev.event
+        else {
+            panic!("expected TaskFinished");
+        };
+        assert_eq!(agent, "engineer");
+        assert_eq!(agent_id, "eng-1");
+        assert_eq!(report.changes[0].file, "crates/a/src/lib.rs");
+        assert_eq!(report.tests_passed, Some(12));
+        assert!(report.verified);
+        assert_eq!(
+            report.evidence.expect("evidence").outcome,
+            EvidenceOutcome::Passed
+        );
     }
 
     /// ONE shared sink instance must attribute events to whichever agent

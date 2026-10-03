@@ -525,6 +525,60 @@ fn todos_changed_round_trips_through_json() {
     assert_eq!(todos[1].status, TodoStatus::InProgress);
 }
 
+/// `TaskFinished` must cross the wire with every report field typed (#8204)
+/// — a client renders dedicated slots from these keys, so a collapse back
+/// into one rendered string is a wire break, not a refactor.
+#[test]
+fn task_finished_round_trips_through_json() {
+    use crate::finish_report::{EvidenceOutcome, FinishChange, FinishReport, TestEvidence};
+
+    let event = Event::TaskFinished {
+        session_id: "s1".into(),
+        agent: "engineer".into(),
+        agent_id: "eng-1".into(),
+        report: FinishReport {
+            status: "completed".into(),
+            summary: "added the flag".into(),
+            changes: vec![FinishChange {
+                file: "crates/a/src/lib.rs".into(),
+                lines_added: Some(10),
+                lines_removed: Some(2),
+            }],
+            tests_run: Some(12),
+            tests_passed: Some(12),
+            evidence: Some(TestEvidence {
+                command: "cargo test -p a".into(),
+                lines: vec!["test result: ok. 12 passed; 0 failed".into()],
+                truncated: false,
+                outcome: EvidenceOutcome::Passed,
+            }),
+            verified: true,
+        },
+    };
+    let envelope = SessionEventEnvelope::new("s1".into(), 9, Utc::now(), event);
+    let value = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(value["kind"], "task_finished");
+    assert_eq!(value["event"]["agent_id"], "eng-1");
+    assert_eq!(
+        value["event"]["report"]["changes"][0]["file"],
+        "crates/a/src/lib.rs"
+    );
+    assert_eq!(value["event"]["report"]["tests_passed"], 12);
+    assert_eq!(value["event"]["report"]["verified"], true);
+    assert_eq!(value["event"]["report"]["evidence"]["outcome"], "passed");
+
+    let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+    let Event::TaskFinished { report, .. } = back.event else {
+        panic!("expected TaskFinished");
+    };
+    assert_eq!(report.changes[0].lines_added, Some(10));
+    assert_eq!(
+        report.evidence.expect("evidence").outcome,
+        EvidenceOutcome::Passed
+    );
+}
+
 /// A `SearchPerformed` transcript recorded BEFORE `hits` existed (DOC-39
 /// Slice B) must still deserialize — the whole point of `#[serde(default)]`,
 /// mirroring `tool_started_without_agent_id_field_still_deserializes`.

@@ -88,7 +88,15 @@ async fn redundant_test_rerun_is_suppressed() {
         .expect("loop terminates on finish_task");
 
     assert_eq!(llm.calls(), 3, "both bash turns plus the finish turn run");
-    assert_eq!(out.summary.as_deref(), Some("done"));
+    // #8289: the stubbed `bash` prints no test-result line, so the accepted
+    // finish carries the UNVERIFIED note after the model's own summary.
+    assert!(
+        out.summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("done")),
+        "{:?}",
+        out.summary
+    );
 
     let requests = llm.requests();
     // The FIRST run actually executed — its real bash output reached the model.
@@ -181,7 +189,15 @@ async fn test_rerun_after_edit_is_not_suppressed() {
         4,
         "both bash turns, the write turn, and finish run"
     );
-    assert_eq!(out.summary.as_deref(), Some("done"));
+    // #8289: the stubbed `bash` prints no test-result line, so the accepted
+    // finish carries the UNVERIFIED note after the model's own summary.
+    assert!(
+        out.summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("done")),
+        "{:?}",
+        out.summary
+    );
 
     let requests = llm.requests();
     // The post-write run must have actually executed — a real exit_code line,
@@ -226,7 +242,15 @@ async fn differently_scoped_rerun_is_not_suppressed() {
         .expect("loop terminates on finish_task");
 
     assert_eq!(llm.calls(), 3, "both bash turns plus the finish turn run");
-    assert_eq!(out.summary.as_deref(), Some("done"));
+    // #8289: the stubbed `bash` prints no test-result line, so the accepted
+    // finish carries the UNVERIFIED note after the model's own summary.
+    assert!(
+        out.summary
+            .as_deref()
+            .is_some_and(|s| s.starts_with("done")),
+        "{:?}",
+        out.summary
+    );
 
     let requests = llm.requests();
     // The broader second run must have actually executed — a real exit_code

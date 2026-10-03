@@ -472,7 +472,10 @@ fn agent_attributed_kind(event: &Event) -> Option<&'static str> {
         | Event::PermissionResolved { .. }
         // (#8235) Carries `agent`/`agent_id` so a client can tell whose
         // checklist changed.
-        | Event::TodosChanged { .. } => Some(event.kind()),
+        | Event::TodosChanged { .. }
+        // (#8204) Carries `agent`/`agent_id` so a completion can be placed
+        // inside the delegation that produced it.
+        | Event::TaskFinished { .. } => Some(event.kind()),
         // Not agent-attributed. `AgentStarted`/`ReportGenerated` carry an
         // `agent_name`, not an `agent`, and neither has a producer on this
         // daemon's session path.
@@ -666,7 +669,83 @@ fn delegation_event_samples() -> Vec<Event> {
                 status: crate::events::TodoStatus::InProgress,
             }],
         },
+        // #8204: the structured completion report.
+        Event::TaskFinished {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            report: finish_report_fixture(),
+        },
     ]
+}
+
+/// A populated report, shared by the classification sweep and the mapping
+/// test below (#8204).
+fn finish_report_fixture() -> crate::finish_report::FinishReport {
+    use crate::finish_report::{EvidenceOutcome, FinishChange, FinishReport, TestEvidence};
+    FinishReport {
+        status: "completed".into(),
+        summary: "added the flag".into(),
+        changes: vec![FinishChange {
+            file: "crates/a/src/lib.rs".into(),
+            lines_added: Some(10),
+            lines_removed: Some(2),
+        }],
+        tests_run: Some(12),
+        tests_passed: Some(12),
+        evidence: Some(TestEvidence {
+            command: "cargo test -p a".into(),
+            lines: vec!["test result: ok. 12 passed; 0 failed".into()],
+            truncated: false,
+            outcome: EvidenceOutcome::Passed,
+        }),
+        verified: true,
+    }
+}
+
+/// The report crosses the engine boundary AS DATA (#8204): every field
+/// lands in the matching `ReplEvent::TaskResult` field, and the evidence
+/// outcome arrives as the producer's own wire word.
+///
+/// Why: this is the assertion that would fail if anyone "simplified" the
+/// mapping back into a rendered string — the defect #8204 was filed on.
+#[test]
+fn forward_task_finished_carries_the_typed_report() {
+    let (tx, mut rx) = unbounded_channel();
+
+    let terminal = forward_session_event(
+        envelope(Event::TaskFinished {
+            session_id: "s-1".into(),
+            agent: "engineer".into(),
+            agent_id: "spawn-1".into(),
+            report: finish_report_fixture(),
+        }),
+        &tx,
+    );
+
+    assert!(!terminal, "a completion does not end the human turn");
+    let ReplEvent::TaskResult {
+        agent,
+        agent_id,
+        report,
+    } = rx.try_recv().expect("a TaskResult must be forwarded")
+    else {
+        panic!("expected TaskResult");
+    };
+    assert_eq!(agent, "engineer");
+    assert_eq!(agent_id, "spawn-1");
+    assert_eq!(report.status, "completed");
+    assert_eq!(report.summary, "added the flag");
+    assert_eq!(report.changes.len(), 1);
+    assert_eq!(report.changes[0].file, "crates/a/src/lib.rs");
+    assert_eq!(report.changes[0].lines_added, Some(10));
+    assert_eq!(report.tests_run, Some(12));
+    assert_eq!(report.tests_passed, Some(12));
+    assert!(report.verified);
+    let evidence = report.evidence.expect("evidence");
+    assert_eq!(evidence.command, "cargo test -p a");
+    assert_eq!(evidence.outcome, "passed");
+    assert_eq!(evidence.lines, vec!["test result: ok. 12 passed; 0 failed"]);
 }
 
 #[test]
