@@ -341,8 +341,11 @@ fn scan_file(rel: &str, text: &str) -> Vec<Finding> {
 
 /// Every production `.rs` file under `dir`, as `(path relative to src/, text)`.
 fn production_sources(src: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
-    let entries = std::fs::read_dir(dir).expect("read a src/ directory");
-    for entry in entries.filter_map(Result::ok) {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read src/ directory {}: {e}", dir.display()))
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display()));
+    for entry in entries {
         let path: PathBuf = entry.path();
         if path.is_dir() {
             production_sources(src, &path, out);
@@ -444,7 +447,8 @@ fn the_scan_flags_a_direct_read() {
 /// Why (#9121): blind spots of the first scan — code after a `mod tests;`
 /// declaration, an aliased import, a URL literal whose `//` hid the rest of
 /// its line, and a brace inside an inline test module's string — each let a
-/// direct read through.
+/// direct read through. The lexer edge cases below each guard one rule of
+/// `lex` and its helpers: a fixture goes red if that rule is removed.
 /// Test: this test.
 #[test]
 fn the_scan_reads_past_test_modules_aliases_and_urls() {
@@ -453,11 +457,47 @@ fn the_scan_reads_past_test_modules_aliases_and_urls() {
         "use trusty_common::credentials::default_store as ds;\nfn f() { ds(); }",
         "fn f() { let u = \"https://x\"; default_store(); }",
         "#[cfg(test)]\nmod tests {\n    fn g() { let b = \"}\"; let c = '}'; }\n}\nfn f() { default_store(); }",
+        // string_end: a `"{"` / `'{'` in a test module must not stretch the cut
+        // over the production call after it (a stray `}` closes a wrong cut).
+        "#[cfg(test)]\nmod t { fn g() { let s = \"{\"; let c = '{'; } }\nfn f() { default_store(); }\n}",
+        "#[cfg(test)]\nmod t { fn g() { let s = \"{\"; let c = '{'; } }\nfn f() { default_store(); }",
         "fn f() { let u = r#\"a \" // b\"#; default_store(); }",
+        // raw_string_start, `b` prefix: `br#"…"#` is a raw string, `//` inside it
+        // must not hide the rest of the line.
+        "fn f() { let u = br#\"a \" // b\"#; default_store(); }",
+        // block_comment_end: nested comment closes at its own `*/`.
+        "/* /* */ */ fn f() { default_store(); }",
         "use trusty_common::inference::Configurator as C;\nfn f() { C::new(); }",
     ]
     .into_iter()
     .filter(|fixture| scan_file("daemon/new_route.rs", fixture).is_empty())
     .collect();
     assert!(missed.is_empty(), "not flagged: {missed:#?}");
+
+    // Each of these hides the call inside a comment or a test module; a lexer
+    // rule that fails leaves it visible and the scan flags it.
+    let over_flagged: Vec<&str> = [
+        // raw_string_start, `#` then no quote: `r#type` is an identifier, not a
+        // raw string swallowing the test module's closing brace.
+        "#[cfg(test)]\nmod t { fn g() { let r#type = 1; default_store(); } }\nfn f() {}",
+        // block_comment_end: depth tracking — a nested `/* */` stays one comment.
+        "/* a /* b */ default_store(); */ fn f() {}",
+        // string_end: `{` in a string does not open a brace.
+        "#[cfg(test)]\nmod t { fn g() { let s = \"{\"; default_store(); } }\nfn f() {}",
+        // char_literal_end: `'{'` is a char, not a brace.
+        "#[cfg(test)]\nmod t { fn g() { let c = '{'; default_store(); } }\nfn f() {}",
+        // string_end: an escaped quote does not end the string.
+        "#[cfg(test)]\nmod t { fn g() { let s = \"\\\"}\"; } fn k() { default_store(); } }",
+        // char_literal_end: `'a` is a lifetime, not a char literal that
+        // swallows the `{` up to the next `'`.
+        "#[cfg(test)]\nmod t { fn g<'a>() { let x: &'a u8 = &0; } fn k() { default_store(); } }",
+        "#[cfg(test)]\nmod t { fn g() { 'outer: loop { break 'outer; } } fn k() { default_store(); } }",
+    ]
+    .into_iter()
+    .filter(|fixture| !scan_file("daemon/new_route.rs", fixture).is_empty())
+    .collect();
+    assert!(
+        over_flagged.is_empty(),
+        "wrongly flagged: {over_flagged:#?}"
+    );
 }
