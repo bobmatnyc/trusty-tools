@@ -1,7 +1,7 @@
 //! End-to-end deploy proof for issue #2890's two new bundled skills —
 //! companion file, following the existing `tests_behavior_a/b/c/d/e`/
 //! `tests_behavior_reset_agents`/`tests_behavior_skill_tiers` split
-//! convention (kept separate from `tests_behavior_a.rs` so that file stays
+//! convention (kept separate from `tests_behavior_a_tests.rs` so that file stays
 //! under the 500-SLOC production cap; this file is itself capped at 1500
 //! SLOC as a test file).
 //!
@@ -20,7 +20,7 @@
 //! What: `code_critic_skills_land_in_deployed_dot_claude_skills` calls the
 //! exact two-step path `tm install` uses (`install_to` then
 //! `deploy_all_skill_tiers`, matching `install_then_deploy_deploys_skills`
-//! in `tests_behavior_a.rs`) against a temp framework root, then reads back
+//! in `tests_behavior_a_tests.rs`) against a temp framework root, then reads back
 //! `<dest>/code-review-standards/SKILL.md` and
 //! `<dest>/contract-driven-testing/SKILL.md` from the deployed directory and
 //! asserts their content is byte-identical to the `include_str!`-embedded

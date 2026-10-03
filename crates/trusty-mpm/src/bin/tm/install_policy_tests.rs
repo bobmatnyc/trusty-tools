@@ -1,6 +1,6 @@
 //! `InstallPolicy` behavior tests (issue #3381).
 //!
-//! Why: split out of `tests_behavior_a.rs` to stay under the 500-SLOC
+//! Why: split out of `tests_behavior_a_tests.rs` to stay under the 500-SLOC
 //! production-file cap — this basename ends in `_tests.rs` so it gets the
 //! 1500-SLOC test-file cap instead.
 //! What: pins the real two-way contract `install_to()`/`install_one()` now

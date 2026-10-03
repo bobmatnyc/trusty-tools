@@ -2,7 +2,7 @@
 //! repair subcommands, and regression tests for issue #382
 //! (compose_session_instructions).
 //!
-//! Why: companion to `tests_behavior_a.rs`; extracting the second half of
+//! Why: companion to `tests_behavior_a_tests.rs`; extracting the second half of
 //! the behavioral suite keeps both files well under the 500-line cap.
 //! What: `cli_parses_attach_*`, `cli_parses_connect_*`,
 //! `cli_parses_daemon_custom_addr`, services subcommand parse tests,

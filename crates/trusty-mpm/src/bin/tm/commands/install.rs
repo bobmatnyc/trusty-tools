@@ -423,7 +423,7 @@ fn install_claude_hooks_at_with_pm_guard(
 /// updated (new or changed), `false` when already configured. #9018: honours
 /// `[pm_guard] enabled` from the user config, stripping a guard entry when off.
 /// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
-/// `tests_behavior_a.rs`.
+/// `tests_behavior_a_tests.rs`.
 pub(crate) fn write_project_hooks_for_dir(
     project_dir: &std::path::Path,
     exe_override: Option<&std::path::Path>,

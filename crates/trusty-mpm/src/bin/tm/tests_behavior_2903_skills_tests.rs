@@ -2,7 +2,7 @@
 //! `universal/` skills) — companion file, following the existing
 //! `tests_behavior_a/b/c/d/e`/`tests_behavior_reset_agents`/
 //! `tests_behavior_skill_tiers`/`tests_behavior_2890_skills` split convention
-//! (kept separate so `tests_behavior_a.rs` stays under the 500-SLOC
+//! (kept separate so `tests_behavior_a_tests.rs` stays under the 500-SLOC
 //! production cap; this file is itself capped at 1500 SLOC as a test file).
 //!
 //! Why: mirrors `tests_behavior_2890_skills_tests.rs`'s rationale exactly —
@@ -17,7 +17,7 @@
 //! concerns are actually resolved.
 //! What: `skill_port_batch1_sample_lands_in_deployed_dot_claude_skills` calls
 //! `install_to` then `deploy_all_skill_tiers` (matching
-//! `install_then_deploy_deploys_skills` in `tests_behavior_a.rs` and
+//! `install_then_deploy_deploys_skills` in `tests_behavior_a_tests.rs` and
 //! `code_critic_skills_land_in_deployed_dot_claude_skills` in
 //! `tests_behavior_2890_skills_tests.rs`) against a temp framework root, then
 //! reads back a SAMPLE of the 25 batch-1 skills from the deployed directory:

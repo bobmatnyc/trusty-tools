@@ -1,7 +1,7 @@
 //! `tm install`'s skill deploy step must honor the same multi-tier
 //! precedence as session launch — companion file, following the existing
 //! `tests_behavior_a/b/c/d/e`/`tests_behavior_reset_agents` split convention
-//! (kept separate from `tests_behavior_a.rs` so that file stays under the
+//! (kept separate from `tests_behavior_a_tests.rs` so that file stays under the
 //! 500-SLOC production cap; this file is itself capped at 1500 SLOC as a
 //! test file).
 //!

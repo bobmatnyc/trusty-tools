@@ -1,7 +1,7 @@
-//! `tm install`'s skill-deploy behavior test, split out of `tests_behavior_a.rs`
+//! `tm install`'s skill-deploy behavior test, split out of `tests_behavior_a_tests.rs`
 //! (#7102).
 //!
-//! Why: `tests_behavior_a.rs` sat exactly at the 500-SLOC production cap, and
+//! Why: `tests_behavior_a_tests.rs` sat exactly at the 500-SLOC production cap, and
 //! #7102 adds an assertion to `install_then_deploy_deploys_skills` — that a
 //! bundled skill must NOT land in the operator's `~/.claude/skills`. That file's
 //! own comments already route each deep skill assertion into a `_tests.rs`
