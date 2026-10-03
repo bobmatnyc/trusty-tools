@@ -59,7 +59,8 @@ impl InputBox {
 /// Test: `an_empty_box_is_empty`, `dim_text_is_a_suggestion`,
 /// `plain_text_is_typed`, `a_cursor_over_a_suggestion_is_still_a_suggestion`,
 /// `mixed_dim_and_plain_text_is_typed`, `a_multiline_draft_reads_its_continuation`,
-/// `no_prompt_line_is_none`, `a_lone_cursor_character_reads_as_typed`.
+/// `no_prompt_line_is_none`, `a_lone_cursor_character_reads_as_typed`,
+/// `colour_operands_are_never_read_as_attributes`.
 pub fn classify_input_box(capture: &str) -> Option<InputBox> {
     let lines: Vec<&str> = capture.lines().collect();
     let at = lines.iter().rposition(|l| l.contains(PROMPT))?;
@@ -154,17 +155,40 @@ impl Visible {
         }
     }
 
+    /// Apply one SGR parameter list.
+    ///
+    /// #8407: the list is walked as a sequence, not as a bag of numbers. An
+    /// extended colour (38 foreground, 48 background, 58 underline) consumes
+    /// its own operands — `5;n` or `2;r;g;b` — so a colour component of `2` or
+    /// `7` is never read as dim or reverse. A colon group (`38:2::r:g:b`,
+    /// `4:3`) is one self-contained attribute and is skipped whole. An empty
+    /// parameter is `0`, as ECMA-48 defines it.
     fn apply_sgr(&mut self, params: &str) {
-        if params.is_empty() {
-            (self.dim, self.reverse) = (false, false);
-        }
-        for p in params.split(';') {
-            match p {
-                "0" | "00" => (self.dim, self.reverse) = (false, false),
-                "2" => self.dim = true,
-                "22" => self.dim = false,
-                "7" => self.reverse = true,
-                "27" => self.reverse = false,
+        let mut it = params.split(';');
+        while let Some(p) = it.next() {
+            if p.contains(':') {
+                continue;
+            }
+            let code = if p.is_empty() {
+                Some(0)
+            } else {
+                p.parse::<u32>().ok()
+            };
+            match code {
+                Some(0) => (self.dim, self.reverse) = (false, false),
+                Some(2) => self.dim = true,
+                Some(22) => self.dim = false,
+                Some(7) => self.reverse = true,
+                Some(27) => self.reverse = false,
+                Some(38 | 48 | 58) => match it.next() {
+                    Some("5") => {
+                        it.next();
+                    }
+                    Some("2") => {
+                        it.nth(2);
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -256,6 +280,37 @@ mod tests {
             classify_input_box(&pane("\u{1b}[7mx\u{1b}[27m")),
             Some(InputBox::Typed)
         );
+    }
+
+    /// Why (#8407): the SGR parser read every number as an attribute, so the
+    /// `2` in `38;2;r;g;b` (truecolour) or a colour index of `2` set dim, and a
+    /// typed draft in a coloured span read as a suggestion.
+    /// What: extended-colour operands are consumed as colour, in the `5;n`,
+    /// `2;r;g;b` and colon forms, while an attribute after them still applies.
+    /// Test: itself.
+    #[test]
+    fn colour_operands_are_never_read_as_attributes() {
+        for sgr in [
+            "38;2;255;255;255",
+            "38;5;2",
+            "38;5;7",
+            "48;2;0;2;0",
+            "48;2;0;0;2",
+            "58;5;2",
+            "38:2::255:2:255",
+            "38:5:2",
+            "1;38;5;2;4",
+        ] {
+            let capture = pane(&format!("\u{1b}[{sgr}mdraft\u{1b}[0m"));
+            assert_eq!(
+                classify_input_box(&capture),
+                Some(InputBox::Typed),
+                "SGR {sgr:?}"
+            );
+        }
+        // An attribute after a colour still applies: dim grey is a suggestion.
+        let capture = pane("\u{1b}[38;5;7;2mhint\u{1b}[0m");
+        assert_eq!(classify_input_box(&capture), Some(InputBox::Suggestion));
     }
 
     #[test]
