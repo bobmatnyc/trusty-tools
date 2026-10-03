@@ -53,6 +53,9 @@ static MULTI_NOUN_RE: OnceLock<Regex> = OnceLock::new();
 // from pure acronyms like `HNSW` that are already handled by
 // `ACRONYM_HINT_RE`), and is at least 2 characters total.
 static SCREAM_IDENT_RE: OnceLock<Regex> = OnceLock::new();
+// #9027: a bare one-word topic ("authentication") — letters only, no code
+// punctuation or digits. Matched last, after every identifier shape.
+static BARE_TOPIC_RE: OnceLock<Regex> = OnceLock::new();
 
 impl QueryClassifier {
     /// Classify a query string into a `QueryIntent` for routing weight selection.
@@ -62,9 +65,17 @@ impl QueryClassifier {
     /// per-result heuristics.
     /// What: applies a priority-ordered chain of regex patterns; the first match
     /// wins. Entity-relationship keywords (issue #21) and domain-term definitions
-    /// (issue #88) are checked before the generic structural patterns.
-    /// Test: see the `tests` submodule for representative examples per intent.
+    /// (issue #88) are checked before the generic structural patterns. A query
+    /// still `Unknown` after the chain goes through `topical_fallback` (#9027).
+    /// Test: see the `tests` submodule for representative examples per intent;
+    /// the bare-topic fallback (#9027) is `test_bare_topical_word_is_not_unknown`.
     pub fn classify(query: &str) -> QueryIntent {
+        Self::topical_fallback(query, Self::classify_explicit(query))
+    }
+
+    /// The regex chain without the bare-topic fallback; `Unknown` means no
+    /// explicit signal matched.
+    fn classify_explicit(query: &str) -> QueryIntent {
         let def_re = DEFINITION_RE.get_or_init(|| {
             Regex::new(
                 r"(?i)\b(fn |struct |impl |trait |enum |type |def |class |function |define)\b",
@@ -307,17 +318,16 @@ impl QueryClassifier {
     /// via BM25 weight and lets the user iterate). All other intents survive
     /// untouched so explicit signals (`fn`, `callers of`, `TODO`) keep their
     /// routing.
-    /// What: runs `classify`, then upgrades `Unknown` to `Definition` if any
-    /// non-empty `domain_terms` entry appears case-insensitively as a substring
-    /// of the query.
+    /// What: runs the explicit regex chain, then upgrades `Unknown` to
+    /// `Definition` if any non-empty `domain_terms` entry appears
+    /// case-insensitively as a substring of the query, then applies the
+    /// bare-topic fallback.
     /// Test: `test_domain_term_upgrades_unknown_to_definition`,
-    /// `test_domain_term_does_not_override_explicit_intent`.
+    /// `test_domain_term_does_not_override_explicit_intent`,
+    /// `test_domain_term_upgrades_bare_word_before_topical_fallback`.
     pub fn classify_with_domain(query: &str, domain_terms: &[String]) -> QueryIntent {
-        let base = Self::classify(query);
+        let base = Self::classify_explicit(query);
         if base != QueryIntent::Unknown {
-            return base;
-        }
-        if domain_terms.is_empty() {
             return base;
         }
         let q = query.to_lowercase();
@@ -329,6 +339,32 @@ impl QueryClassifier {
             if q.contains(&t.to_lowercase()) {
                 return QueryIntent::Definition;
             }
+        }
+        // #9027: after the domain upgrade, so a bare domain term stays Definition.
+        Self::topical_fallback(query, base)
+    }
+
+    /// Maps a still-`Unknown` single bare word to `Keyword`.
+    ///
+    /// Why: #9027 — "authentication" reported intent `Unknown`, as if the
+    /// classifier had failed. Every identifier shape (PascalCase, snake_case,
+    /// SCREAMING_SNAKE, acronym) is matched earlier, but a bare lowercase word
+    /// is still either a topic ("authentication") or a symbol ("target"), so
+    /// neither `Conceptual` nor `Definition` fits: both swap the KG edge kinds
+    /// a bare symbol relies on. `Keyword` names the shape and keeps the
+    /// balanced routing `Unknown` gave it.
+    /// What: returns `Keyword` when `base` is `Unknown` and the trimmed query
+    /// is one ASCII-letters-only token; otherwise returns `base`.
+    /// Test: `test_bare_topical_word_is_not_unknown`,
+    /// `test_intent_table_single_and_multi_word`.
+    fn topical_fallback(query: &str, base: QueryIntent) -> QueryIntent {
+        if base != QueryIntent::Unknown {
+            return base;
+        }
+        let bare_topic_re = BARE_TOPIC_RE
+            .get_or_init(|| Regex::new(r"^[A-Za-z]+$").expect("static regex pattern must compile"));
+        if bare_topic_re.is_match(query.trim()) {
+            return QueryIntent::Keyword;
         }
         base
     }

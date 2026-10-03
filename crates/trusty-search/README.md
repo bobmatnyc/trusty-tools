@@ -412,6 +412,7 @@ are optimised separately from CPU and GPU tiers:
 | Usage      | 0.5        | 0.5      | **true** |
 | Conceptual | 0.8        | 0.2      | false    |
 | BugDebt    | 0.1        | 0.9      | false    |
+| Keyword    | 0.6        | 0.4      | false    |
 | Unknown    | 0.6        | 0.4      | false    |
 
 The classifier is a sub-ms regex over the query text. KG expansion is gated

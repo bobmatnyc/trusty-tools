@@ -269,7 +269,9 @@ impl CodeIndexer {
         let effective_mode = match (&intent, query.mode) {
             (QueryIntent::Conceptual, super::SearchMode::Code) => super::SearchMode::All,
             (QueryIntent::Definition, super::SearchMode::Code) => super::SearchMode::All,
-            (QueryIntent::Unknown, super::SearchMode::Code) => super::SearchMode::All,
+            (QueryIntent::Unknown | QueryIntent::Keyword, super::SearchMode::Code) => {
+                super::SearchMode::All
+            }
             _ => query.mode,
         };
 
@@ -548,8 +550,8 @@ impl CodeIndexer {
         // instead so NL queries can't silently come back empty. Every other
         // intent keeps the existing hard filter (no regression for real code
         // queries such as `Usage`/`BugDebt`/explicit `Definition`).
-        let soft_downrank_unknown =
-            matches!(intent, QueryIntent::Unknown) && matches!(mode, super::SearchMode::Code);
+        let soft_downrank_unknown = matches!(intent, QueryIntent::Unknown | QueryIntent::Keyword)
+            && matches!(mode, super::SearchMode::Code);
         if matches!(mode, super::SearchMode::Code) {
             use crate::core::chunker::ChunkType;
             let before = results.len();
@@ -740,14 +742,15 @@ impl CodeIndexer {
         Ok(adjusted)
     }
 
-    /// Issue #20: when intent is Definition or Unknown, inject the exact-name
-    /// entity hit as the rank-1 BM25 result.
+    /// Issue #20: when intent is Definition, Unknown or Keyword, inject the
+    /// exact-name entity hit as the rank-1 BM25 result.
     ///
     /// Why: keeps the RRF lane seeing a strong signal even when the literal
     /// token didn't tokenize (e.g. underscore-heavy names).
-    /// What: scoped to two intents; when an entity match is found, dedupes any
-    /// prior occurrence and prepends a synthetic `(id, beta * 1.5)` pair.
-    /// Test: covered by `test_entity_exact_match_struct_ranks_first`.
+    /// What: scoped to three intents; when an entity match is found, dedupes
+    /// any prior occurrence and prepends a synthetic `(id, beta * 1.5)` pair.
+    /// Test: covered by `test_entity_exact_match_struct_ranks_first`,
+    /// `test_entity_exact_match_bare_word_ranks_first_under_keyword`.
     async fn inject_entity_exact_match(
         &self,
         intent: &QueryIntent,
@@ -755,7 +758,11 @@ impl CodeIndexer {
         beta: f32,
         bm25_results: &mut Vec<(String, f32)>,
     ) {
-        if !matches!(intent, QueryIntent::Definition | QueryIntent::Unknown) {
+        // #9027: a bare word that was Unknown is now Keyword; keep its boost.
+        if !matches!(
+            intent,
+            QueryIntent::Definition | QueryIntent::Unknown | QueryIntent::Keyword
+        ) {
             return;
         }
         let Some(hit) = self.entity_exact_match(query_text).await else {

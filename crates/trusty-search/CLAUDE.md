@@ -14,7 +14,7 @@ serves multiple named indexes (one per project) via HTTP daemon and MCP server.
 - **Hybrid search**: BM25 (lexical) + HNSW vector (semantic) + Knowledge Graph
   expansion, fused via Reciprocal Rank Fusion (RRF, k=60, parameter-free)
 - **Query-type routing**: classify intent (Definition / Usage / Conceptual / BugDebt /
-  Unknown) and route to optimal weighting before searching
+  Keyword / Unknown) and route to optimal weighting before searching
 - **MCP server**: stdio + HTTP/SSE for Claude Code integration
 - **Zero cold-start**: HNSW stays hot (Duration::MAX cool-after), LRU embedding cache
   (256 entries) skips re-embedding on repeated queries
@@ -41,7 +41,7 @@ Machine-wide service (single install, one daemon per machine)
 ### Query Pipeline
 
 1. **Classify intent**: `QueryClassifier` (sub-ms regex) →
-   `Definition / Usage / Conceptual / BugDebt / Unknown`
+   `Definition / Usage / Conceptual / BugDebt / Keyword / Unknown`
 2. **Route weights**: `alpha` (vector), `beta` (BM25), `use_kg_first`
 3. **Search**: 4×top_k HNSW candidates + per-query BM25 index over chunk corpus
 4. **Fuse**: Reciprocal Rank Fusion (k=60, parameter-free)
@@ -57,7 +57,11 @@ Machine-wide service (single install, one daemon per machine)
 | Usage       | 0.5            | 0.5         | true         |
 | Conceptual  | 0.8            | 0.2         | false        |
 | BugDebt     | 0.1            | 0.9         | false        |
+| Keyword     | 0.6            | 0.4         | false        |
 | Unknown     | 0.6            | 0.4         | false        |
+
+`Keyword` (#9027) is a single bare word such as `authentication`. It keeps
+`Unknown`'s routing in every lane; only the reported label differs.
 
 ### CodeChunk
 
@@ -534,7 +538,7 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     "latency_ms": 7
   }
   ```
-  - `intent`: one of `"Definition" | "Usage" | "Conceptual" | "BugDebt" | "Unknown"`.
+  - `intent`: one of `"Definition" | "Usage" | "Conceptual" | "BugDebt" | "Keyword" | "Unknown"`.
   - `match_reason`: one of `"hybrid" | "hybrid+kg" | "bm25" | "vector" | "fallback:ripgrep"`.
   - `on_branch` (issue #122): `true` when the chunk's file appears in the
     branch-modified file set resolved for this query (either explicitly via

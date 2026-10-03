@@ -562,7 +562,9 @@ impl CodeIndexer {
                 EdgeKind::ErrorDescribes,
                 EdgeKind::Configures,
             ],
-            QueryIntent::Unknown => vec![EdgeKind::CallsFunction, EdgeKind::CalledByFunction],
+            QueryIntent::Keyword | QueryIntent::Unknown => {
+                vec![EdgeKind::CallsFunction, EdgeKind::CalledByFunction]
+            }
         }
     }
 }

@@ -318,3 +318,71 @@ fn test_domain_term_empty_list_passthrough() {
         QueryIntent::Unknown
     );
 }
+
+// ── Bare topical query (issue #9027) ───────────────────────────────────
+
+/// #9027: a one-word topical query reported intent `Unknown` on `/search`.
+#[test]
+fn test_bare_topical_word_is_not_unknown() {
+    let intent = QueryClassifier::classify("authentication");
+    assert_ne!(intent, QueryIntent::Unknown);
+    assert_eq!(intent, QueryIntent::Keyword);
+    // Same balanced routing Unknown gave it: only the label changes.
+    assert_eq!(intent.weights(), QueryIntent::Unknown.weights());
+}
+
+/// #9027: the topical fallback runs after the domain-term upgrade, so a bare
+/// domain term still routes to `Definition`.
+#[test]
+fn test_domain_term_upgrades_bare_word_before_topical_fallback() {
+    let terms = vec!["rezo".to_string()];
+    assert_eq!(
+        QueryClassifier::classify_with_domain("rezo", &terms),
+        QueryIntent::Definition
+    );
+    assert_eq!(
+        QueryClassifier::classify_with_domain("authentication", &terms),
+        QueryIntent::Keyword
+    );
+}
+
+/// #9027: pins single- and multi-word classifications around the topical
+/// fallback. Only the "newly classified" rows changed; every other row held
+/// the same intent before the fix.
+#[test]
+fn test_intent_table_single_and_multi_word() {
+    use QueryIntent::*;
+    let cases: &[(&str, QueryIntent)] = &[
+        // Single word, unchanged.
+        ("QueryClassifier", Definition),
+        ("apply_archive_downrank", Definition),
+        ("MAX_BATCH_SIZE", Definition),
+        ("HNSW", Definition),
+        ("schema", Definition),
+        ("usages", Usage),
+        ("overview", Conceptual),
+        ("TODO", BugDebt),
+        // Single token with code punctuation or digits stays Unknown.
+        ("axum-server", Unknown),
+        ("main.rs", Unknown),
+        ("utf8", Unknown),
+        // Single word, newly classified (#9027).
+        ("authentication", Keyword),
+        ("Authentication", Keyword),
+        ("  caching  ", Keyword),
+        // Multi-word, unchanged.
+        ("how does authentication work", Conceptual),
+        ("fn authenticate", Definition),
+        ("callers of parse_token", Usage),
+        ("TODO refactor auth", BugDebt),
+        ("connection pooling", Unknown),
+        ("reservation booking flow", Unknown),
+        ("axum middleware concurrency limiter", Conceptual),
+    ];
+    let mismatches: Vec<_> = cases
+        .iter()
+        .map(|(q, want)| (*q, want.clone(), QueryClassifier::classify(q)))
+        .filter(|(_, want, got)| want != got)
+        .collect();
+    assert!(mismatches.is_empty(), "(query, want, got): {mismatches:?}");
+}

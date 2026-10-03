@@ -885,6 +885,48 @@ async fn test_entity_exact_match_struct_ranks_first() {
     );
 }
 
+/// #9027: a bare lowercase word now classifies `Keyword`; the entity
+/// exact-match injection must still lift the matching type to rank 1 over a
+/// chunk that only repeats the word.
+#[tokio::test]
+async fn test_entity_exact_match_bare_word_ranks_first_under_keyword() {
+    use crate::core::classifier::{QueryClassifier, QueryIntent};
+    let idx = CodeIndexer::new("ent-rank-9027", "/tmp/test");
+    idx.index_file(
+        "src/types.rs",
+        "pub struct Widget { pub x: u32 }\n\nfn unrelated() { let _ = 1; }\n",
+    )
+    .await
+    .unwrap();
+    idx.index_file(
+        "src/other.rs",
+        "pub fn widget() -> usize {\n    let widget = \"widget widget widget widget\";\n    widget.len()\n}\n",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        QueryClassifier::classify("widget"),
+        QueryIntent::Keyword,
+        "fixture query must classify as Keyword for this to be a valid test"
+    );
+
+    let q = SearchQuery {
+        text: "widget".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.expect("search");
+    assert!(!results.is_empty(), "search must return at least one hit");
+    assert_eq!(
+        results[0].file,
+        abs("src/types.rs"),
+        "Widget's defining file must rank first; got {:?}",
+        results.iter().map(|r| &r.file).collect::<Vec<_>>(),
+    );
+}
+
 #[tokio::test]
 async fn test_entity_exact_match_skips_non_symbol_entities() {
     // Issue #20: only NamedType and ModulePath entities should anchor
