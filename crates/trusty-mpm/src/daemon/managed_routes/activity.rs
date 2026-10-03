@@ -116,7 +116,7 @@ fn classifier_key_resolves(
 ///
 /// Why (#9121): the probe walked `.env.local` and the Keychain directly, past
 /// the sandbox latch.
-/// What: [`classifier_key_resolves`] over
+/// What: `classifier_key_resolves` over
 /// [`crate::secret_source::resolve_bounded_gated`], which answers `Absent` in
 /// sandbox mode without reading a tier.
 /// Test: `tests/sandbox_latch_9121.rs`.
