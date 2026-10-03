@@ -27,11 +27,12 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::core::catchup::resolve::{
-    CallerIdentity, ResolvedSnapshot, redact_sessions_not_owned_by, resolve_snapshot_for_identity,
+    CallerIdentity, redact_sessions_not_owned_by, resolve_snapshot_for_identity,
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
-use crate::daemon::catchup_bounds::{CATCHUP_BUDGET_BYTES, bound_catchup};
-use crate::daemon::catchup_superseded::{SnapshotFreshness, assess_snapshot};
+use crate::core::config::MpmConfig;
+use crate::daemon::catchup_payload::{HydrationReceipt, catchup_payload, resolved_note};
+use crate::daemon::catchup_superseded::assess_snapshot;
 use crate::daemon::state::DaemonState;
 
 /// The session id to use for a caller that named none.
@@ -55,124 +56,6 @@ use crate::daemon::state::DaemonState;
 /// `pause_without_an_identifiable_caller_errors`.
 fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
     trusty_common::catchup::session_id::derive_session_id(None, tmux_window)
-}
-
-/// Shape the merged digest into the `session_context_catchup` response body.
-///
-/// Why: `undatable_sessions_dropped` is a receipt — an empty `sessions` array
-/// means "nothing paused" only when it is 0 — and nothing else pins that it
-/// reaches the wire. No end-to-end test can drive it non-zero, because an
-/// undatable session is unreachable through the filesystem once both
-/// `PausedSession` arms fall back to mtime, so substituting a literal `0` here
-/// would leave the suite green while the receipt stopped working (#5072). A
-/// pure function is the seam that makes the field assertable.
-///
-/// #5557: the same argument now covers SIZE. The digest arrays used to go on
-/// the wire whole, so the body grew with the project's snapshot history until
-/// the harness could no longer deliver it. They are paged through
-/// [`bound_catchup`] here, and the page's own receipt —
-/// `truncated` / `truncation_notice` / `sessions_total` / `sessions_next_offset`
-/// — travels with it, because a capped response that reads exactly like a
-/// complete one recreates the silent-loss defect the withheld count exists to
-/// prevent.
-/// What: the seven original response keys, unchanged in meaning, plus six
-/// additive paging keys. `resolved_via` names which lookup produced
-/// `resolved_snapshot` (`session_id`, `tmux_window`, `tmux_session` since
-/// #8408, or `null` alongside a null
-/// snapshot), so a caller can tell an exact match from the window fallback
-/// instead of reading both as ownership. `watermark_advanced` is always `false`
-/// by construction — no path in this module calls `save_catchup_state`.
-///
-/// #7501: three more keys say whether the resolved snapshot has been overtaken
-/// — `resolved_snapshot_superseded`, `commits_since_snapshot` and
-/// `commits_since_snapshot_total`. A snapshot's `next_steps` can go stale within
-/// minutes of the pause, and a PM reading them as current re-plans work that
-/// already merged; the commits since are the evidence that settles which.
-/// Test: `catchup_payload_carries_the_undatable_drop_count`,
-/// `session_context_catchup_returns_expected_shape`,
-/// `catchup_payload_bounds_an_oversized_store`,
-/// `catchup_payload_announces_what_it_withheld`,
-/// `catchup_payload_reports_a_superseded_snapshot`.
-fn catchup_payload(
-    merged: trusty_common::catchup::CatchupJson,
-    sessions_offset: usize,
-    resolved: Option<ResolvedSnapshot>,
-    session_refs: HydrationReceipt,
-    freshness: SnapshotFreshness,
-) -> Value {
-    let (snapshot, via) = match resolved {
-        Some(r) => (Some(r.path.display().to_string()), Some(r.via.as_str())),
-        None => (None, None),
-    };
-    let undatable_sessions_dropped = merged.undatable_sessions_dropped;
-    // #5557: page the digest so the body cannot outgrow what a caller can read.
-    let page = bound_catchup(merged, sessions_offset, CATCHUP_BUDGET_BYTES);
-    json!({
-        "sessions": page.sessions,
-        "sessions_total": page.sessions_total,
-        "sessions_offset": page.sessions_offset,
-        "sessions_next_offset": page.next_offset(),
-        "recent_commits": page.recent_commits,
-        "recent_commits_total": page.recent_commits_total,
-        "recent_memory": page.recent_memory,
-        "recent_memory_total": page.recent_memory_total,
-        "truncated": page.truncated(),
-        "over_budget": page.over_budget(),
-        "page_bytes": page.page_bytes,
-        "truncation_notice": page.truncation_notice(),
-        "resolved_snapshot": snapshot,
-        "resolved_via": via,
-        // #7501: a snapshot the repo has moved past describes work that may
-        // already be finished — the commits since are what says which.
-        "resolved_snapshot_superseded": freshness.superseded,
-        "commits_since_snapshot": freshness.commits_since,
-        "commits_since_snapshot_total": freshness.total_since,
-        "undatable_sessions_dropped": undatable_sessions_dropped,
-        "watermark_advanced": false,
-        // #7830 review: hydration used to fail into `tracing::debug!`, below
-        // the default filter, so a resume that silently read an empty cache
-        // looked identical to one with nothing to restore.
-        "session_refs": {
-            "hydrated": session_refs.hydrated,
-            "refs_seen": session_refs.refs_seen,
-            "own_ref_found": session_refs.own_ref_found,
-            "restored": session_refs.restored,
-            "error": session_refs.error,
-        },
-    })
-}
-
-/// What one session-ref hydration pass produced, as the catch-up reports it.
-///
-/// Why (#7830 review): the resume digest is only as complete as the cache it
-/// was built from. When hydration cannot run — no `origin`, no user id, an
-/// unreachable remote — the caller must be able to see that the cache was NOT
-/// refreshed, rather than infer "nothing paused" from an empty digest.
-/// What: whether the pass completed, how many refs the aggregator saw, whether
-/// the caller's OWN ref was among them, how many snapshots were restored, and
-/// the failure text otherwise. `Default` is the "disabled" state.
-///
-/// `refs_seen` alone cannot be read as success (#7830 review round 2): after a
-/// hostname change or a `gh` account switch every old ref is unreachable
-/// forever, so `hydrated: true, refs_seen: 5, own_ref_found: false,
-/// restored: 0` is a real and permanent state that used to look identical to
-/// "nothing to do". The field is `own_ref_found` rather than `owned` because
-/// `sessions[].owned` in the same response is a different, per-session concept
-/// (#7830 review round 3).
-/// Test: `catchup_reports_a_hydration_failure_without_failing_the_catchup`,
-/// `catchup_hydrates_a_deleted_cache_from_the_session_ref`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct HydrationReceipt {
-    /// Whether the hydration pass ran to completion.
-    hydrated: bool,
-    /// How many `refs/tm/sessions/**` refs the aggregator enumerated.
-    refs_seen: usize,
-    /// Whether the caller's own ref was among them.
-    own_ref_found: bool,
-    /// How many snapshot files this pass wrote back.
-    restored: usize,
-    /// Why the pass did not complete, when it did not.
-    error: Option<String>,
 }
 
 /// Back the `session_context_catchup` MCP tool.
@@ -271,6 +154,51 @@ pub async fn session_context_catchup_with_session_created(
     full: bool,
     sessions_offset: usize,
 ) -> Result<Value, String> {
+    let host = CatchupHost {
+        config: MpmConfig::load_default(),
+        memory_socket: trusty_common::memory_rpc::resolve_memory_socket_or_unreachable(),
+    };
+    session_context_catchup_in(
+        &host,
+        project_dir,
+        session_id,
+        tmux_window,
+        tmux_session_created,
+        all_projects,
+        full,
+        sessions_offset,
+    )
+    .await
+}
+
+/// What a catch-up reads from the host rather than from its arguments.
+///
+/// Why: the public entry points load `~/.trusty-mpm/config.toml` and resolve
+/// the live trusty-memory socket, so a test calling them could reach the
+/// operator's daemon (seen as a flake). Tests pass an isolated host instead.
+/// What: the config whose `[catchup]`/`[session_refs]` sections apply, and the
+/// memory socket the palace leg queries.
+/// Test: `isolated_catchup` in this module's tests builds every catch-up on one.
+pub(crate) struct CatchupHost {
+    /// The loaded `MpmConfig`.
+    pub(crate) config: MpmConfig,
+    /// The trusty-memory socket; an unserved path makes the palace leg empty.
+    pub(crate) memory_socket: PathBuf,
+}
+
+/// [`session_context_catchup_with_session_created`] against an explicit host.
+/// Test: `session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session_context_catchup_in(
+    host: &CatchupHost,
+    project_dir: &str,
+    session_id: Option<&str>,
+    tmux_window: Option<&str>,
+    tmux_session_created: Option<i64>,
+    all_projects: bool,
+    full: bool,
+    sessions_offset: usize,
+) -> Result<Value, String> {
     let primary = PathBuf::from(project_dir);
     if !primary.is_dir() {
         return Err(format!(
@@ -303,7 +231,7 @@ pub async fn session_context_catchup_with_session_created(
         }
     }
 
-    let config = crate::core::config::MpmConfig::load_default();
+    let config = &host.config;
     // #7830 / ADR-0062: rebuild the local cache from `refs/tm/sessions/**`
     // BEFORE anything reads it, so a fresh clone resolves its snapshot through
     // the unchanged read path.
@@ -312,7 +240,6 @@ pub async fn session_context_catchup_with_session_created(
     } else {
         HydrationReceipt::default()
     };
-    let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
 
     // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
     // than concatenating it — an empty `sessions` array is only "nothing
@@ -326,7 +253,7 @@ pub async fn session_context_catchup_with_session_created(
     for dir in &project_dirs {
         let opts = CatchupOptions {
             project_dir: dir.clone(),
-            memory_socket: memory_socket.clone(),
+            memory_socket: host.memory_socket.clone(),
             include_git: config.catchup.include_git,
             include_palace: config.catchup.include_palace,
             git_limit: config.catchup.git_limit,
@@ -355,10 +282,13 @@ pub async fn session_context_catchup_with_session_created(
         .map(|r| assess_snapshot(&primary, &r.path))
         .unwrap_or_default();
 
+    // #8408: a null snapshot must say when the tmux-session route was skipped.
+    let note = resolved_note(resolved.as_ref(), &caller);
     Ok(catchup_payload(
         merged,
         sessions_offset,
         resolved,
+        note,
         session_refs,
         freshness,
     ))
@@ -914,6 +844,71 @@ fn default_branch_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::catchup::resolve::ResolvedSnapshot;
+    use crate::daemon::catchup_bounds::CATCHUP_BUDGET_BYTES;
+    use crate::daemon::catchup_payload::TMUX_SESSION_ROUTE_NOT_TRIED;
+    use crate::daemon::catchup_superseded::SnapshotFreshness;
+
+    /// A catch-up host that reaches neither the operator's config nor a live
+    /// trusty-memory daemon: an empty home's defaults and an unserved socket.
+    fn isolated_host() -> CatchupHost {
+        CatchupHost {
+            config: MpmConfig::default(),
+            memory_socket: PathBuf::from("/nonexistent/mcp-context-test.sock"),
+        }
+    }
+
+    /// [`session_context_catchup`] against [`isolated_host`].
+    async fn isolated_catchup(
+        project_dir: &str,
+        session_id: Option<&str>,
+        tmux_window: Option<&str>,
+        all_projects: bool,
+        full: bool,
+        sessions_offset: usize,
+    ) -> Result<Value, String> {
+        let host = isolated_host();
+        session_context_catchup_in(
+            &host,
+            project_dir,
+            session_id,
+            tmux_window,
+            None,
+            all_projects,
+            full,
+            sessions_offset,
+        )
+        .await
+    }
+
+    /// [`session_context_pause`] with `[session_refs]` off, so it never reads
+    /// the operator's `~/.trusty-mpm/config.toml` or publishes a ref.
+    #[allow(clippy::too_many_arguments)]
+    async fn isolated_pause(
+        state: &Arc<DaemonState>,
+        project_dir: &str,
+        session_id: Option<&str>,
+        summary: &str,
+        completed: Vec<String>,
+        in_progress: Vec<String>,
+        next_steps: Vec<String>,
+        tmux_window: Option<&str>,
+        prune_worktrees: bool,
+    ) -> Result<Value, String> {
+        session_context_pause_with(
+            state,
+            project_dir,
+            session_id,
+            summary,
+            completed,
+            in_progress,
+            next_steps,
+            tmux_window,
+            prune_worktrees,
+            false,
+        )
+        .await
+    }
 
     /// Why: `NotTracked` and `NotAGitRepo` both used to render as a bare
     /// `{"status":"skipped"}`, so a pause result could not say whether the
@@ -970,10 +965,9 @@ mod tests {
 
     #[tokio::test]
     async fn session_context_catchup_missing_project_dir_errors() {
-        let err =
-            session_context_catchup("/nonexistent/does/not/exist", None, None, false, true, 0)
-                .await
-                .unwrap_err();
+        let err = isolated_catchup("/nonexistent/does/not/exist", None, None, false, true, 0)
+            .await
+            .unwrap_err();
         assert!(err.contains("project_dir"), "{err}");
     }
 
@@ -995,10 +989,9 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-m", "init"]);
 
-        let result =
-            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
-                .await
-                .unwrap();
+        let result = isolated_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+            .await
+            .unwrap();
         assert_eq!(result["watermark_advanced"], false);
         assert!(result["sessions"].is_array());
         assert!(result["recent_commits"].is_array());
@@ -1031,6 +1024,7 @@ mod tests {
             merged,
             0,
             Some(resolved),
+            None,
             HydrationReceipt::default(),
             SnapshotFreshness::default(),
         );
@@ -1075,6 +1069,7 @@ mod tests {
             trusty_common::catchup::CatchupJson::default(),
             0,
             Some(resolved),
+            None,
             HydrationReceipt::default(),
             freshness,
         );
@@ -1107,7 +1102,7 @@ mod tests {
         let session_a = "2eb72dca-de08-481b-8dfa-22ab7f81b1f9";
         let session_b = "7bd5c27a-475b-41df-9e9f-a6f630801717";
 
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             dir,
             Some(session_a),
@@ -1122,7 +1117,7 @@ mod tests {
         .unwrap();
         let a_snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let for_b = session_context_catchup(dir, Some(session_b), None, false, true, 0)
+        let for_b = isolated_catchup(dir, Some(session_b), None, false, true, 0)
             .await
             .unwrap();
         assert!(
@@ -1131,13 +1126,13 @@ mod tests {
             for_b["resolved_snapshot"]
         );
 
-        let for_a = session_context_catchup(dir, Some(session_a), None, false, true, 0)
+        let for_a = isolated_catchup(dir, Some(session_a), None, false, true, 0)
             .await
             .unwrap();
         assert_eq!(for_a["resolved_snapshot"], a_snapshot);
         assert_eq!(for_a["resolved_via"], "session_id");
 
-        let anonymous = session_context_catchup(dir, None, None, false, true, 0)
+        let anonymous = isolated_catchup(dir, None, None, false, true, 0)
             .await
             .unwrap();
         assert!(anonymous["resolved_snapshot"].is_null());
@@ -1161,7 +1156,7 @@ mod tests {
         let state = DaemonState::shared();
         let window = "tm-dogfood:0:@230";
 
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             dir,
             Some("e262f4c5-d309-4203-ad3b-e0c29084d87e"),
@@ -1176,7 +1171,7 @@ mod tests {
         .unwrap();
         let snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let relaunched = session_context_catchup(
+        let relaunched = isolated_catchup(
             dir,
             Some("69895d04-149d-4c31-a640-29048831f9a5"),
             Some(window),
@@ -1191,7 +1186,7 @@ mod tests {
 
         // Same window id, different project: the store scanned is the one
         // named by `project_dir`, so nothing resolves.
-        let elsewhere = session_context_catchup(
+        let elsewhere = isolated_catchup(
             other.path().to_str().unwrap(),
             Some("69895d04-149d-4c31-a640-29048831f9a5"),
             Some(window),
@@ -1209,10 +1204,9 @@ mod tests {
 
         // A window field that does not parse resolves nothing and does not panic.
         for bad in ["", "tm-dogfood", "tm-dogfood:0"] {
-            let malformed =
-                session_context_catchup(dir, Some("never-paused"), Some(bad), false, true, 0)
-                    .await
-                    .unwrap();
+            let malformed = isolated_catchup(dir, Some("never-paused"), Some(bad), false, true, 0)
+                .await
+                .unwrap();
             assert!(
                 malformed["resolved_snapshot"].is_null(),
                 "{bad:?} must resolve nothing"
@@ -1228,7 +1222,8 @@ mod tests {
     /// no session id from `@262` in the same named tmux session, created
     /// before the pause, resolves that pause and reports
     /// `resolved_via: "tmux_session"`. With no creation time, or one after the
-    /// pause (a fresh session reusing the name), it resolves nothing.
+    /// pause (a fresh session reusing the name), it resolves nothing; only the
+    /// first, where the route never ran, carries `resolved_note`.
     /// Test: itself.
     #[tokio::test]
     async fn session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes() {
@@ -1236,7 +1231,7 @@ mod tests {
         let dir = tmp.path().to_str().unwrap();
         let state = DaemonState::shared();
 
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             dir,
             None,
@@ -1253,17 +1248,26 @@ mod tests {
 
         let window = Some("tm-supervisor:0:@262");
         let catchup = |created: Option<i64>| {
-            session_context_catchup_with_session_created(dir, None, window, created, false, true, 0)
+            let host = isolated_host();
+            async move {
+                session_context_catchup_in(&host, dir, None, window, created, false, true, 0).await
+            }
         };
         let relaunched = catchup(Some(1_600_000_000)).await.unwrap();
         assert_eq!(relaunched["resolved_snapshot"], snapshot, "{relaunched}");
         assert_eq!(relaunched["resolved_via"], "tmux_session");
+        assert!(relaunched.get("resolved_note").is_none(), "{relaunched}");
 
-        // #8408: no creation time, or a session created after the pause.
+        // #8408: no creation time, or a session created after the pause. Only
+        // the first skipped the route, so only it carries `resolved_note`.
         let future = chrono::Utc::now().timestamp() + 3600;
-        for created in [None, Some(future)] {
+        for (created, note) in [
+            (None, Some(TMUX_SESSION_ROUTE_NOT_TRIED)),
+            (Some(future), None),
+        ] {
             let body = catchup(created).await.unwrap();
             assert!(body["resolved_snapshot"].is_null(), "{created:?}: {body}");
+            assert_eq!(body.get("resolved_note").and_then(Value::as_str), note);
         }
     }
 
@@ -1307,10 +1311,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         seed_snapshots(tmp.path(), 25, 6_000);
 
-        let result =
-            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
-                .await
-                .unwrap();
+        let result = isolated_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+            .await
+            .unwrap();
 
         // The arrays are bounded to the budget plus at most ONE record's
         // overshoot, so the ceiling is the budget plus this fixture's record
@@ -1343,7 +1346,7 @@ mod tests {
         let dir = tmp.path().to_str().unwrap();
         seed_snapshots(tmp.path(), 25, 6_000);
 
-        let first = session_context_catchup(dir, None, None, false, true, 0)
+        let first = isolated_catchup(dir, None, None, false, true, 0)
             .await
             .unwrap();
         assert_eq!(first["truncated"], true);
@@ -1361,7 +1364,7 @@ mod tests {
 
         let mut pages = 1;
         while let Some(offset) = next {
-            let body = session_context_catchup(dir, None, None, false, true, offset as usize)
+            let body = isolated_catchup(dir, None, None, false, true, offset as usize)
                 .await
                 .unwrap();
             assert_eq!(body["sessions_offset"], offset);
@@ -1392,7 +1395,7 @@ mod tests {
         let dir = tmp.path().to_str().unwrap();
         seed_snapshots(tmp.path(), 25, 6_000);
 
-        let first = session_context_catchup(dir, None, None, false, true, 0)
+        let first = isolated_catchup(dir, None, None, false, true, 0)
             .await
             .unwrap();
         let page0: Vec<String> = summaries(&first);
@@ -1411,7 +1414,7 @@ mod tests {
         let mut seen = page0.clone();
         let mut offset = Some(next);
         while let Some(o) = offset {
-            let body = session_context_catchup(dir, None, None, false, true, o)
+            let body = isolated_catchup(dir, None, None, false, true, o)
                 .await
                 .unwrap();
             seen.extend(summaries(&body));
@@ -1446,10 +1449,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         seed_snapshots(tmp.path(), 3, 200);
 
-        let result =
-            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
-                .await
-                .unwrap();
+        let result = isolated_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+            .await
+            .unwrap();
 
         assert_eq!(result["sessions"].as_array().unwrap().len(), 3);
         assert_eq!(result["sessions_total"], 3);
@@ -1480,7 +1482,7 @@ mod tests {
         let session_b = "7bd5c27a-475b-41df-9e9f-a6f630801717";
         let window = "tm-dogfood:0:@230";
 
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             dir,
             Some(session_a),
@@ -1495,7 +1497,7 @@ mod tests {
         .unwrap();
         let a_snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let for_b = session_context_catchup(dir, Some(session_b), None, false, true, 0)
+        let for_b = isolated_catchup(dir, Some(session_b), None, false, true, 0)
             .await
             .unwrap();
         let listed = &for_b["sessions"][0];
@@ -1524,7 +1526,7 @@ mod tests {
         );
 
         // A's own digest entry is untouched — resume still renders it.
-        let for_a = session_context_catchup(dir, Some(session_a), None, false, true, 0)
+        let for_a = isolated_catchup(dir, Some(session_a), None, false, true, 0)
             .await
             .unwrap();
         let own = &for_a["sessions"][0];
@@ -1547,7 +1549,7 @@ mod tests {
         let state = DaemonState::shared();
         let window = "tm-dogfood:0:@230";
 
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             dir,
             Some("e262f4c5-d309-4203-ad3b-e0c29084d87e"),
@@ -1562,7 +1564,7 @@ mod tests {
         .unwrap();
         let snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let relaunched = session_context_catchup(
+        let relaunched = isolated_catchup(
             dir,
             Some("69895d04-149d-4c31-a640-29048831f9a5"),
             Some(window),
@@ -1585,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn session_context_pause_missing_project_dir_errors() {
         let state = DaemonState::shared();
-        let err = session_context_pause(
+        let err = isolated_pause(
             &state,
             "/nonexistent/does/not/exist",
             Some("s1"),
@@ -1605,7 +1607,7 @@ mod tests {
     async fn session_context_pause_requires_summary() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = DaemonState::shared();
-        let err = session_context_pause(
+        let err = isolated_pause(
             &state,
             tmp.path().to_str().unwrap(),
             Some("s1"),
@@ -1625,7 +1627,7 @@ mod tests {
     async fn session_context_pause_writes_snapshot_without_pruning() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = DaemonState::shared();
-        let result = session_context_pause(
+        let result = isolated_pause(
             &state,
             tmp.path().to_str().unwrap(),
             Some("s1"),
@@ -1820,6 +1822,7 @@ mod tests {
             Default::default(),
             0,
             None,
+            None,
             receipt,
             SnapshotFreshness::default(),
         );
@@ -1829,7 +1832,7 @@ mod tests {
         assert_eq!(body["session_refs"]["restored"], 0, "{body}");
         assert_eq!(body["session_refs"]["error"], error, "{body}");
 
-        let live = session_context_catchup(repo.to_str().unwrap(), None, None, false, true, 0)
+        let live = isolated_catchup(repo.to_str().unwrap(), None, None, false, true, 0)
             .await
             .expect("an unreachable remote must never fail a catch-up");
         assert!(
@@ -1890,7 +1893,7 @@ mod tests {
         );
 
         let state = DaemonState::shared();
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             repo.to_str().unwrap(),
             Some("s-hydrate"),
@@ -1925,7 +1928,7 @@ mod tests {
         assert!(receipt.own_ref_found, "{receipt:?}");
         assert_eq!(receipt.restored, 1, "{receipt:?}");
 
-        let resumed = session_context_catchup(
+        let resumed = isolated_catchup(
             repo.to_str().unwrap(),
             Some("s-hydrate"),
             None,
@@ -1956,7 +1959,7 @@ mod tests {
     async fn pause_derives_a_missing_session_id_from_the_callers_window() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = DaemonState::shared();
-        let paused = session_context_pause(
+        let paused = isolated_pause(
             &state,
             tmp.path().to_str().unwrap(),
             None,
@@ -1974,7 +1977,7 @@ mod tests {
             "the response must name the id the snapshot was filed under: {paused}"
         );
 
-        let resumed = session_context_catchup(
+        let resumed = isolated_catchup(
             tmp.path().to_str().unwrap(),
             None,
             Some("renamed:7:@230"),
@@ -2004,7 +2007,7 @@ mod tests {
     async fn pause_without_an_identifiable_caller_errors() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = DaemonState::shared();
-        let err = session_context_pause(
+        let err = isolated_pause(
             &state,
             tmp.path().to_str().unwrap(),
             None,
@@ -2036,7 +2039,7 @@ mod tests {
     async fn catchup_derives_a_missing_session_id_from_the_callers_window() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = DaemonState::shared();
-        session_context_pause(
+        isolated_pause(
             &state,
             tmp.path().to_str().unwrap(),
             Some("tmux-window-77"),
@@ -2050,7 +2053,7 @@ mod tests {
         .await
         .unwrap();
 
-        let resumed = session_context_catchup(
+        let resumed = isolated_catchup(
             tmp.path().to_str().unwrap(),
             None,
             Some("proj:3:@77"),

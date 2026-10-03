@@ -114,6 +114,7 @@ The tool returns:
   "truncation_notice": "<what was withheld and how to get it, or null>",
   "resolved_snapshot": "<path or null>",
   "resolved_via": "session_id" | "tmux_window" | "tmux_session" | null,
+  "resolved_note": "<present only when the tmux-session route was skipped>",
   "undatable_sessions_dropped": 0,
   "watermark_advanced": false,
   "session_refs": {
@@ -143,7 +144,9 @@ stale.
 > new id — its tmux session name (#8408). `resolved_via` names the match; a
 > window or session match is a claim, not a guarantee — window ids and
 > session names are reused after a kill/recreate. `null` means
-> nothing matched; pick from `sessions[]` deliberately. Never invent a
+> nothing matched; pick from `sessions[]` deliberately. A `resolved_note`
+> means a route was skipped, not that nothing paused: pass
+> `tmux_session_created` and call again. Never invent a
 > `session_id`, or resumes report "no snapshot resolved" again (#6888).
 > Ownership also gates `sessions[].owned`: an unowned entry keeps only
 > `format`/`paused_at`/`summary` (#5272, #5386) — report it as "another
