@@ -7,14 +7,28 @@
 //! ruling 2026-09-28: allow scratchpad-only `ls`/`cp`/`rm` for read-only agents
 //! (`ls` was already a plain reader).
 //! What: [`scratchpad_write`] admits `cp` and `rm` only when every operand is a
-//! literal absolute path strictly below a session scratchpad root, both as
-//! spelled and after canonicalizing its nearest existing ancestor — so neither
-//! a symlink nor a `..` can carry the write out. Flags are a short allowlist;
-//! every long option is refused, including `cp -t`/`--target-directory`, which
-//! moves the destination off the operand list.
+//! literal absolute path strictly below THIS session's scratchpad root
+//! (`…/<session_id>/scratchpad`, the id read off the hook payload), both as
+//! spelled and after canonicalizing — so neither a symlink, a `..`, a
+//! symlinked `scratchpad` component, nor another session's scratchpad can
+//! carry the write out. With no session id the rule fails closed. An operand
+//! with a `.git` component is refused, because a write into a clone's
+//! `.git/hooks` or `.git/config` runs code at the next git command. Flags are
+//! a short allowlist; every long option is refused, including `cp -t`/
+//! `--target-directory`, which moves the destination off the operand list.
+//!
+//! Residuals, accepted: `cp -R`/`-a` into an existing directory writes
+//! through any entry below it that is already a symlink — only the operand
+//! itself is resolved, not the tree `cp` walks. And each path is
+//! canonicalized at hook time, so a symlink swapped in between the hook and
+//! the command's run (TOCTOU) is not seen.
 //! Test: `read_only_allow_tests::scratchpad_cp_and_rm_are_allowed`,
-//! `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`.
+//! `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`,
+//! `read_only_allow_tests::a_symlinked_scratchpad_root_is_refused`,
+//! `read_only_allow_tests::another_sessions_scratchpad_is_refused`,
+//! `read_only_allow_tests::a_git_component_operand_is_refused`.
 
+use std::ffi::OsStr;
 use std::path::{Component, Path};
 
 use super::read_only_programs::Arg;
@@ -31,12 +45,24 @@ fn allowed_flags(program: &str) -> &'static str {
 /// Judge a `cp` or `rm` argv tail for a read-only dispatch (#8571).
 ///
 /// Why: see the module doc.
-/// What: `Ok` when every flag is a short cluster from [`allowed_flags`] and
-/// every operand (at least two for `cp`, one for `rm`) passes
-/// [`in_scratchpad`]; `Err` naming the first refusal otherwise.
+/// What: `Ok` when `session` is known, every flag is a short cluster from
+/// [`allowed_flags`], and every operand (at least two for `cp`, one for `rm`)
+/// carries no `.git` component and passes [`in_scratchpad`]; `Err` naming the
+/// first refusal otherwise.
 /// Test: `read_only_allow_tests::scratchpad_cp_and_rm_are_allowed`,
 /// `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`.
-pub(super) fn scratchpad_write(program: &str, rest: &[Arg]) -> Result<(), String> {
+pub(super) fn scratchpad_write(
+    program: &str,
+    rest: &[Arg],
+    session: Option<&str>,
+) -> Result<(), String> {
+    // #8571 review: the ruling names the SESSION scratchpad; without the id
+    // there is no way to tell this session's from another's, so refuse.
+    let Some(session) = session else {
+        return Err(format!(
+            "`{program}` with no session id in the hook payload to bind the scratchpad to"
+        ));
+    };
     let mut operands = 0;
     let mut after_dashdash = false;
     for arg in rest {
@@ -56,7 +82,14 @@ pub(super) fn scratchpad_write(program: &str, rest: &[Arg]) -> Result<(), String
             }
             continue;
         }
-        if !in_scratchpad(Path::new(text)) {
+        let path = Path::new(text);
+        // #8571 review: `.git/hooks/*` and `.git/config` run code later.
+        if path.components().any(|c| c.as_os_str() == ".git") {
+            return Err(format!(
+                "`{program}` naming {text}, which has a `.git` component"
+            ));
+        }
+        if !in_scratchpad(path, session) {
             return Err(format!(
                 "`{program}` naming {text}, which is not a literal absolute path inside the \
                  session scratchpad"
@@ -71,14 +104,16 @@ pub(super) fn scratchpad_write(program: &str, rest: &[Arg]) -> Result<(), String
     Ok(())
 }
 
-/// Whether `path` lies strictly below a session scratchpad root, lexically and
-/// canonically (#8571).
+/// Whether `path` lies strictly below `session`'s scratchpad root, lexically
+/// and canonically (#8571).
 ///
-/// What: `false` for a relative path, any `.`/`..` component, the scratchpad
-/// root itself, or a path whose nearest existing ancestor canonicalizes
-/// outside the canonical form of that same root. Every unreadable step is
-/// `false`, so the rule fails closed.
-fn in_scratchpad(path: &Path) -> bool {
+/// What: `false` for a relative path, any `.`/`..` component, or the root
+/// itself. The root, as spelled AND canonicalized, must be a scratchpad root
+/// whose parent directory is named `session`. An existing operand (a symlink
+/// included) must canonicalize strictly below the canonical root; a new one
+/// is judged by its nearest existing ancestor, which may be the root. Every
+/// unreadable step is `false`, so the rule fails closed.
+fn in_scratchpad(path: &Path, session: &str) -> bool {
     let plain = path.is_absolute()
         && path
             .components()
@@ -89,9 +124,29 @@ fn in_scratchpad(path: &Path) -> bool {
     let Some(root) = scratchpad_root(path).filter(|root| root.as_path() != path) else {
         return false;
     };
-    let (Ok(real_root), Some(real)) = (root.canonicalize(), canonical_existing_ancestor(path))
-    else {
+    let Ok(real_root) = root.canonicalize() else {
         return false;
     };
-    real.starts_with(&real_root)
+    // #8571 review, HIGH: a symlinked `scratchpad` component (`/tmp/scratchpad
+    // -> ~`) canonicalizes elsewhere; the resolved root must still be one.
+    // #8571 review, MEDIUM: and it must be this session's.
+    if !is_session_root(&root, session)
+        || !is_session_root(&real_root, session)
+        || scratchpad_root(&real_root).as_deref() != Some(real_root.as_path())
+    {
+        return false;
+    }
+    match path.symlink_metadata() {
+        Ok(_) => path
+            .canonicalize()
+            .is_ok_and(|real| real != real_root && real.starts_with(&real_root)),
+        Err(_) => {
+            canonical_existing_ancestor(path).is_some_and(|real| real.starts_with(&real_root))
+        }
+    }
+}
+
+/// Whether `root`'s parent directory is named `session`.
+fn is_session_root(root: &Path, session: &str) -> bool {
+    root.parent().and_then(Path::file_name) == Some(OsStr::new(session))
 }

@@ -213,6 +213,41 @@ to guarded. The `tm doctor` `pm_guard` row reports the state, and warns
 A running Claude Code session keeps the hooks it loaded at startup, so the
 change takes effect at the session's next launch.
 
+#### `runtime_checkouts` and `documents_repos` (#8524, #7905)
+
+```toml
+[pm_guard]
+# Cron-host checkouts that launchd jobs read in place (#8524).
+runtime_checkouts = ["/Users/me/Projects/cron-host"]
+# Documents repositories whose main checkout may commit any path (#7905).
+documents_repos = ["/Users/me/Projects/notes"]
+```
+
+Both lists default to empty, which keeps every main checkout under the full
+rules.
+
+- **Match semantics.** An entry matches a main checkout when both
+  canonicalize to the same path. The guard first walks up to the checkout root
+  (the nearest ancestor with a `.git` directory), so an entry must name that
+  root: an entry naming a subdirectory matches nothing. A leading `~` is not
+  expanded, so write absolute paths. An entry or a checkout that cannot be
+  canonicalized matches nothing, and the guard then applies the full rules.
+- **`runtime_checkouts`.** In a listed checkout the destructive-git rule
+  allows exactly one shape: a lone `git reset --keep [-q] [<rev>]`, with
+  nothing but `cd` around it, and only when `git diff --quiet` reports that
+  the tracked content already equals `<rev>`. A probe that cannot answer
+  keeps the deny.
+- **`documents_repos`.** In a listed checkout every staged or written path
+  counts as a document. The commit rule and the main-checkout write rule
+  then treat source extensions such as `.py` as documents. The commit
+  rule's other deny arms still apply: `-a`, `--amend`, an empty or unreadable
+  index, and a composed commit.
+- **Trust.** Both lists are trusted to the #8878 trust-anchor floor, which
+  refuses a write to `~/.trusty-mpm/config.toml` from any session but the
+  Architect's. The #8879 residual applies: a write made by an interpreter,
+  `dd`, `rsync`, `find -exec`, or an executed script file is not seen, so a
+  session that reaches one of those can add a checkout to either list.
+
 ### The `[accounts]` section (#9091)
 
 ```toml

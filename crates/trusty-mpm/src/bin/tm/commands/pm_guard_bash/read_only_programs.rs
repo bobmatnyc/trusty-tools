@@ -22,7 +22,7 @@
 //! - `gh`: see [`super::read_only_gh`] (#8567).
 //! - `date` that only prints ([`date`], #8567).
 //! - `echo`, `pwd`.
-//! - `cp`, `rm` with every operand inside the session scratchpad: see
+//! - `cp`, `rm` with every operand inside this session's scratchpad: see
 //!   [`super::read_only_scratchpad`] (#8571).
 //!
 //! A pipe stage after the first must be `cat`, `head`, `tail`, `wc`, `grep`,
@@ -138,9 +138,10 @@ const FIND_VALUED: &[&str] = &[
 ///
 /// Why: see the module doc.
 /// What: `Ok` when `args[0]` is a bare program name on the allowlist and the
-/// rest fits its shape; `Err` otherwise.
+/// rest fits its shape; `Err` otherwise. `session` is the hook payload's
+/// session id, which binds `cp`/`rm` to that session's scratchpad (#8571).
 /// Test: as the module doc.
-pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
+pub(super) fn check_command(args: &[Arg], piped: bool, session: Option<&str>) -> Verdict {
     // #8628: the #7748 base-ref check needs the project's gh credential.
     if let Some(rest) = gh_config_prefixed(args) {
         return match rest.first() {
@@ -176,7 +177,7 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
         "echo" => Ok(()),
         "pwd" if rest.is_empty() => Ok(()),
         // #8571: owner ruling — scratchpad-only writes for a red-on-base tree.
-        "cp" | "rm" => scratchpad_write(program, rest),
+        "cp" | "rm" => scratchpad_write(program, rest, session),
         _ => Err(format!(
             "`{program}`, which is not on the read-only allowlist"
         )),

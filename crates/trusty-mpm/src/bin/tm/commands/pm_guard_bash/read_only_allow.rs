@@ -64,27 +64,45 @@ pub(super) const READ_ONLY_DISPATCH_AGENTS: &[&str] = &[
 /// Deny a read-only dispatch's command unless it is an allowlisted read.
 ///
 /// Why: see the module doc.
-/// What: `None` when `agent_type` is absent or not in
+/// What: `None` when the payload's `agent_type` is absent or not in
 /// [`READ_ONLY_DISPATCH_AGENTS`], or the command is an allowlisted shape.
 /// `Some(reason)` otherwise — every parse or classification failure is a
-/// deny.
+/// deny. The payload's non-empty `session_id` binds `cp`/`rm` to that
+/// session's scratchpad; without one they are refused (#8571).
 /// Test: `refuses_the_incident_plutil_extract_json_form`,
-/// `only_the_read_only_agents_are_bound`, `legitimate_reads_stay_allowed`.
+/// `only_the_read_only_agents_are_bound`, `legitimate_reads_stay_allowed`,
+/// `another_sessions_scratchpad_is_refused`.
 pub(crate) fn evaluate_read_only_dispatch_command(
     command: &str,
-    identity: DispatchIdentity<'_>,
+    payload: &serde_json::Value,
 ) -> Option<String> {
-    let agent = identity.agent_type?;
+    let agent = DispatchIdentity::from_payload(payload).agent_type?;
     if !READ_ONLY_DISPATCH_AGENTS.contains(&agent) {
         return None;
     }
-    judge(command).err().map(|what| deny_reason(agent, &what))
+    let session = payload
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
+    judge_in(command, session)
+        .err()
+        .map(|what| deny_reason(agent, &what))
+}
+
+/// [`judge_in`] with no session, so `cp`/`rm` are refused.
+#[cfg(test)]
+pub(super) fn judge(command: &str) -> Result<(), String> {
+    judge_in(command, None)
 }
 
 /// `Ok` when `command` is an allowlisted shape; `Err` names the first refusal.
-pub(super) fn judge(command: &str) -> Result<(), String> {
+fn judge_in(command: &str, session: Option<&str>) -> Result<(), String> {
     let toks = lex(command)?;
-    let mut p = Parser { toks: &toks, at: 0 };
+    let mut p = Parser {
+        toks: &toks,
+        at: 0,
+        session,
+    };
     p.skip_seps();
     // #8578: a read-only agent inherits the PM's cwd; one leading `cd` lets it
     // point at another worktree. Every other `&&` stays refused.
@@ -112,6 +130,8 @@ pub(super) fn judge(command: &str) -> Result<(), String> {
 struct Parser<'a> {
     toks: &'a [Tok],
     at: usize,
+    /// The hook payload's session id (#8571).
+    session: Option<&'a str>,
 }
 
 impl Parser<'_> {
@@ -240,7 +260,7 @@ impl Parser<'_> {
         let mut stage = 0;
         loop {
             let args = self.command(var)?;
-            check_command(&args, stage > 0)?;
+            check_command(&args, stage > 0, self.session)?;
             stage += 1;
             if self.toks.get(self.at) != Some(&Tok::Pipe) {
                 return Ok(());
@@ -329,7 +349,7 @@ fn deny_reason(agent: &str, what: &str) -> String {
          -exec/-delete/-fprint; sed -n with a print script; plutil -p/-lint; defaults read; \
          launchctl print/list; tmux capture-pane -p; cargo metadata/tree; gh issue view/list, \
          gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd; \
-         cp/rm whose every operand is a literal absolute path inside the session scratchpad. A \
+         cp/rm whose every operand is a literal absolute path inside this session's scratchpad. A \
          pipe into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` \
          and one leading `cd <dir> &&` with a literal path. Write every path out literally \
          — `sed -n '10,20p' src/lib.rs`, never `sed -n '10,20p' \"$F\"`; a path held in a \
