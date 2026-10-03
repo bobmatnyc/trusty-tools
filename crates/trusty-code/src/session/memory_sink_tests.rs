@@ -793,3 +793,118 @@ fn malformed_pin_is_an_error_not_the_shared_placeholder() {
         "expected PinMalformed, got {err:?}"
     );
 }
+
+/// Under the harness only an explicit socket under a system temp root may be
+/// dialled; every other input fails closed to the unreachable placeholder
+/// (#9139).
+#[test]
+fn harness_admits_only_an_explicit_temp_socket() {
+    let temp_socket = std::env::temp_dir().join("tcode-9139-mock.sock");
+    let unreachable = std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET);
+    let cases: [(Option<&str>, std::path::PathBuf); 4] = [
+        (None, unreachable.clone()),
+        (Some("   "), unreachable.clone()),
+        (Some(LIVE_SOCKET_SENTINEL), unreachable),
+        (
+            Some(temp_socket.to_str().expect("utf-8 temp dir")),
+            temp_socket.clone(),
+        ),
+    ];
+    for (explicit, expected) in cases {
+        assert_eq!(
+            harness_memory_socket(explicit),
+            expected,
+            "input {explicit:?}"
+        );
+    }
+
+    // `..` escapes a lexical temp prefix; a symlink escapes it on disk.
+    let unreachable = std::path::PathBuf::from(UNREACHABLE_MEMORY_SOCKET);
+    assert_eq!(
+        harness_memory_socket(Some("/tmp/../etc/trusty-memory.sock")),
+        unreachable,
+        "a `..` component must be refused"
+    );
+    #[cfg(unix)]
+    {
+        let tmp = TempDir::new().expect("tempdir");
+        let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let link = tmp.path().join("escape");
+        std::os::unix::fs::symlink(outside, &link).expect("symlink");
+        let via_link = link.join("trusty-memory.sock");
+        assert_eq!(
+            harness_memory_socket(via_link.to_str()),
+            unreachable,
+            "a temp symlink to a non-temp dir must be refused"
+        );
+    }
+}
+
+const LIVE_SOCKET_CHILD_ENV: &str = "TCODE_9139_LIVE_SOCKET_CHILD";
+const LIVE_SOCKET_CHILD_TEST_PATH: &str = "session::memory_sink::tests::live_socket_child";
+/// Stands in for the operator's live daemon socket: outside every temp root,
+/// and never served, so even a regressed run dials nothing.
+const LIVE_SOCKET_SENTINEL: &str = "/nonexistent-9139-live-daemon/trusty-memory.sock";
+
+/// Build a registry-owned sink with whatever socket the environment names.
+///
+/// Runs only under the parent below — a bare `cargo test` sees it return
+/// immediately.
+#[tokio::test]
+async fn live_socket_child() {
+    if std::env::var_os(LIVE_SOCKET_CHILD_ENV).is_none() {
+        return;
+    }
+    let registry = Arc::new(crate::session::registry::SessionRegistry::new());
+    let session = registry.create("t".into(), None, crate::binding::ProjectBinding::None);
+    let sink = registry
+        .memory_sink_for(
+            &session.id,
+            Some(std::path::Path::new(
+                "/nonexistent-9139-root/projects/fixture",
+            )),
+        )
+        .expect("a durable root gets a sink");
+    assert_eq!(
+        sink.socket(),
+        std::path::Path::new(UNREACHABLE_MEMORY_SOCKET),
+        "a test process bound the turn recorder to the ambient socket (#9139)"
+    );
+}
+
+/// #9139 regression: a test process whose environment names a live, non-temp
+/// memory socket must not bind the turn recorder to it.
+///
+/// A subprocess because `TRUSTY_MEMORY_SOCKET` is process-global and
+/// `run_task::tests` pins it for the whole lib binary.
+#[test]
+fn memory_sink_for_under_the_harness_never_binds_a_live_socket() {
+    let mut child = Command::new(std::env::current_exe().expect("current test binary"));
+    child.env_clear();
+    for key in ["PATH", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(key) {
+            child.env(key, value);
+        }
+    }
+    let output = child
+        .args([
+            "--exact",
+            LIVE_SOCKET_CHILD_TEST_PATH,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LIVE_SOCKET_CHILD_ENV, "1")
+        .env(
+            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+            LIVE_SOCKET_SENTINEL,
+        )
+        .output()
+        .expect("run live socket child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("1 passed"),
+        "the child test did not run:\n{stdout}"
+    );
+}
