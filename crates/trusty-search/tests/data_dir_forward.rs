@@ -18,13 +18,16 @@
 /// Why: extracted as a pure function so the decision ("include `--data-dir` in
 /// the child args?") can be tested without spawning a real process.
 /// What: returns the CLI args that `handle_start` would pass to the background
-/// child Command, given a `data_dir` override and the value of `no_auto_discover`.
+/// child Command, given a `data_dir` override and whether the scan is refused.
 /// Test: the tests below drive every branch.
+// #8176: `handle_start` forwards the parent's auto-discover DECISION through
+// `spawn_auto_discover_arg`, not the raw flag; that helper carries its own unit
+// test. The `--no-auto-discover` arg shape this mirror asserts on is unchanged.
 fn build_spawn_args(
     port: u16,
     device: &str,
     data_dir: Option<&std::path::Path>,
-    no_auto_discover: bool,
+    refuse_auto_discover: bool,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
         "start".into(),
@@ -34,7 +37,7 @@ fn build_spawn_args(
         "--device".into(),
         device.into(),
     ];
-    if no_auto_discover {
+    if refuse_auto_discover {
         args.push("--no-auto-discover".into());
     }
     // Issue #1182: --data-dir is forwarded explicitly so the CLI flag wins

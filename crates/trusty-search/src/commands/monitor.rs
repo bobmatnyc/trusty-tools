@@ -12,8 +12,51 @@
 //! `cargo run -p trusty-search -- monitor status` against a running daemon.
 
 use anyhow::{bail, Result};
+use clap::Subcommand;
 use trusty_common::monitor::dashboard::{IndexRow, SearchData};
 use trusty_common::monitor::search_client::{resolve_search_url, SearchClient};
+
+/// Target surface for the `monitor` subcommand.
+///
+/// Why: operators want a quick browser link to the daemon's admin panel, the
+/// trusty-search-specific terminal dashboard, OR the same dashboard data as
+/// plain text / JSON so scripts and CI can read it without a TUI (issues #33,
+/// #34).
+/// What: `Web` prints (and opens) the daemon's `/ui` URL; `Tui` launches the
+/// trusty-search-specific `trusty_common::monitor::search_tui` ratatui
+/// dashboard; `Status` and `Indexes` print scriptable health and per-index
+/// stats.
+/// Test: `cargo run -p trusty-search -- monitor --help` lists every variant.
+#[derive(Subcommand)]
+pub enum MonitorTarget {
+    /// Open the web dashboard URL in the terminal (or browser)
+    Web,
+    /// Launch the trusty-search terminal UI: indexes, reindex, and search monitor
+    Tui,
+    /// Print daemon status: health, version, uptime, and corpus totals
+    ///
+    /// Examples:
+    ///   trusty-search monitor status
+    ///   trusty-search monitor status --json
+    Status {
+        /// Emit the status as a JSON object instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List every index, or show one index's detail when an ID is given
+    ///
+    /// Examples:
+    ///   trusty-search monitor indexes
+    ///   trusty-search monitor indexes my-project
+    ///   trusty-search monitor indexes --json
+    Indexes {
+        /// Optional index ID to show detail for (omit to list all)
+        id: Option<String>,
+        /// Emit the result as JSON instead of a plain-text table
+        #[arg(long)]
+        json: bool,
+    },
+}
 
 /// Format a count with comma thousands separators (`18994` → `"18,994"`).
 ///
