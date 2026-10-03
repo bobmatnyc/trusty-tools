@@ -53,9 +53,11 @@
 //!
 //! So the trigger list above is complete as written, and the quarantine
 //! population is no longer transient-dominated. One consequence still worth
-//! keeping in view: an in-process reopen retry would clear the transient part of
-//! this population, which today needs a daemon restart (#4122 / PR #4220
-//! HIGH-1). A corrupt index needs that restart too, but for a different reason —
+//! keeping in view: the transient part of this population is now cleared by the
+//! in-process re-open in `service::corpus_reopen` (#8085), which wires the corpus
+//! only through [`CodeIndexer::set_corpus_store`] under the indexer write lock,
+//! so the invariant below holds. A corrupt index still needs a restart, for a
+//! different reason —
 //! the damaged file is already off the canonical path, so the next boot opens a
 //! clean corpus and boot reconcile rebuilds it from source.
 //!
@@ -274,7 +276,8 @@ impl CodeIndexer {
                  recovery source (issue #4226). {refused} write(s) refused so far. \
                  TO RECOVER: fix the underlying redb file (permissions, stale lock, \
                  corruption), then RESTART THE DAEMON — only a successful \
-                 CorpusStore::open lifts the quarantine."
+                 CorpusStore::open lifts the quarantine. A transient failure (stale \
+                 lock, open timeout) is re-opened in process every 30 s (issue #8085)."
             );
         } else {
             tracing::debug!(
@@ -340,12 +343,12 @@ impl CodeIndexer {
                  legacy chunks.json snapshot, not the HNSW graph (issue #4226) — so \
                  all of them stay recoverable. TO RECOVER: fix the underlying redb \
                  file (permissions, stale lock, corruption), then RESTART THE DAEMON — \
-                 only a successful CorpusStore::open lifts the quarantine, and it is \
-                 attempted solely at load time (there is no in-process reopen retry). \
-                 A reindex will NOT clear this state and will NOT persist anything: \
-                 with no corpus wired it skips staging entirely, so its results are \
-                 discarded at the next restart. Saves dropped while quarantined are \
-                 picked up by the first reindex AFTER a successful restart."
+                 only a successful CorpusStore::open lifts the quarantine. A \
+                 transient failure (stale lock, open timeout) is re-opened in process \
+                 every 30 s and on each reindex request (issue #8085); any other kind \
+                 is retried only at load time. A reindex that cannot re-open the corpus \
+                 is refused (issue #8105). Saves dropped while quarantined are picked \
+                 up by the first reindex after the corpus opens."
             );
         } else {
             tracing::debug!(

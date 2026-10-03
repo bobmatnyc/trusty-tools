@@ -49,6 +49,9 @@ pub enum ServiceAction {
     },
     /// Unload the LaunchAgent and remove the plist
     Uninstall,
+    /// Restart the daemon and verify the old one is gone, including a daemon
+    /// detached from launchd (#8686)
+    Restart,
     /// Show launchd status for the agent
     Status,
     /// Tail the launchd stdout / stderr logs
@@ -79,6 +82,7 @@ pub fn handle_service(action: &ServiceAction) -> Result<()> {
                 force,
             } => service_install(*no_auto_discover, *auto_discover, *force),
             ServiceAction::Uninstall => service_uninstall(),
+            ServiceAction::Restart => service_restart(),
             ServiceAction::Status => service_status(),
             ServiceAction::Logs => service_logs(),
         }
@@ -492,6 +496,21 @@ fn service_install(request_off: bool, request_on: bool, force: bool) -> Result<(
         "trusty-search service status".cyan(),
     );
     Ok(())
+}
+
+/// `service restart` (#8686): the plist on disk is reused, so only the label
+/// and plist path of the config matter.
+#[cfg(target_os = "macos")]
+fn service_restart() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))?;
+    let cfg = build_launchd_config(exe, launchd_log_dir()?, false, None);
+    if !cfg.plist_path()?.exists() {
+        anyhow::bail!(
+            "no LaunchAgent plist for {LAUNCHD_LABEL} — run `trusty-search service install` first"
+        );
+    }
+    crate::commands::service_restart::service_restart(&cfg)
 }
 
 #[cfg(target_os = "macos")]

@@ -65,9 +65,9 @@ async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
 const LOCK_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// [`open_corpus_with_retry`] with the retry budget as a parameter, so a test
-/// can bound it (#8600).
+/// can bound it (#8600). #8085: also the in-process re-open's entry point.
 /// Test: `a_lock_released_after_the_first_retry_still_opens_the_corpus`.
-async fn open_corpus_with_retry_within(
+pub(crate) async fn open_corpus_with_retry_within(
     path: &Path,
     budget: std::time::Duration,
 ) -> Result<CorpusStore> {
@@ -169,7 +169,8 @@ pub async fn build_indexer_from_entry(
     // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
     // non-fatal but logged at ERROR (#840) because a missing corpus means the
     // next reindex cold-starts (Skipped 0).  `open_corpus_with_retry` retries
-    // once on DatabaseAlreadyOpen (stale file lock from a rapid restart).
+    // DatabaseAlreadyOpen for up to `LOCK_RETRY_BUDGET` (#8600); a transient
+    // failure past that is re-attempted in process (#8085, `corpus_reopen`).
     // Issue #1158: set `corpus_open_failed` so the warm-boot stage-classifier
     // can emit `StageStatus::Failed` instead of the misleading `InProgress`.
     match persistence::corpus_redb_path_for_entry(entry) {

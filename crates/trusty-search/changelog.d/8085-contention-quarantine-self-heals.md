@@ -1,0 +1,2 @@
+Fixed
+- An index write-quarantined by a transient corpus open failure (`contention` or `open_timeout`) now recovers in the running daemon: the daemon re-attempts the open every 30 s, lifts the quarantine on success, reloads the chunks, re-derives the stages, and re-runs a schema migration that had failed for lack of a corpus. The status text that promised the state "self-heals" is now accurate, and names the retry (#8085).

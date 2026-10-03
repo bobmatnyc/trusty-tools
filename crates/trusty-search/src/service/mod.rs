@@ -8,6 +8,10 @@ pub mod concurrency;
 pub mod config;
 pub mod constants;
 pub mod context_inference;
+// #8085, #8958: in-process re-open of a transiently quarantined corpus.
+pub mod corpus_reopen;
+#[cfg(test)]
+mod corpus_reopen_tests;
 pub mod daemon;
 pub mod daemon_client;
 pub(crate) mod data_dir;

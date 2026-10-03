@@ -1,0 +1,2 @@
+Added
+- `trusty-search service restart` (macOS) restarts the launchd-supervised daemon and verifies the result. It records every running daemon PID, boots the unit out, terminates any recorded daemon that survived the bootout (a daemon detached from launchd, PPID 1), refuses to bootstrap while one is still alive, and then requires `/health` to report this binary's version with no old PID left (#8686).
