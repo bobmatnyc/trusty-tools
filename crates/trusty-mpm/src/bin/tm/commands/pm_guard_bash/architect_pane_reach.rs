@@ -8,7 +8,8 @@
 //! [`opaque_route`] names the route of a program word whose tmux argv is
 //! unreadable; [`dynamic_name`] and [`names_tmux`] decide when a program word
 //! the shell expands counts; [`with_dynamics`] marks each word the shell
-//! expands.
+//! expands; [`runner_texts`] reads what `watch`/`script`-style runners run
+//! (#9053).
 //! FAIL-CLOSED: each route is refused, not guessed at.
 //! Test: `tmux_exact_target_tests.rs` (`every_opaque_or_dynamic_tmux_route_denies`,
 //! `prose_and_a_literal_program_path_are_not_refused`,
@@ -20,8 +21,42 @@ use super::architect_pane_verbs::DENY_VERBS;
 use super::credential_print::{basename, code_operands, evaluator_name};
 use super::floor_d4::{EXEC_FLAGS, program_positions, segments};
 use super::heredoc::{blank_spans, data_bodies};
-use super::shell_lex::DASH_C_SHELLS;
-use crate::commands::hook_rewrite::is_env_assignment;
+use super::shell_lex::{DASH_C_SHELLS, xargs_utility_index};
+use crate::commands::hook_rewrite::{is_env_assignment, strip_wrapper_prefix};
+use crate::commands::program_word::COMMAND_WRAPPERS;
+
+/// #9053: programs that run their operands as a command line — `watch`
+/// (through `sh -c`), BSD `script` (the argv after its file), util-linux
+/// `script -c`, `entr`, `chronic`, `unshare`, `systemd-run`.
+const RUNNERS: &[&str] = &[
+    "watch",
+    "script",
+    "entr",
+    "chronic",
+    "unshare",
+    "systemd-run",
+];
+
+/// Suffixes of a runner's operands read as shell text.
+const MAX_RUNNER_SUFFIXES: usize = 16;
+
+/// #9053: the shell texts a [`RUNNERS`] program at `pos` of `argv` may run:
+/// every suffix of its operands that starts at a word not shaped like an
+/// option, joined. Reading each suffix rather than parsing the runner's
+/// options means a value-taking option it does not know cannot hide the
+/// command (fail closed); a suffix that is not a command parses to nothing.
+/// Test: `a_runner_running_tmux_is_read_9053`.
+pub(super) fn runner_texts(argv: &[String], pos: usize) -> Vec<String> {
+    if !RUNNERS.contains(&basename(&argv[pos]).as_str()) {
+        return Vec::new();
+    }
+    let after = &argv[pos + 1..];
+    (0..after.len())
+        .filter(|&i| !after[i].starts_with('-'))
+        .take(MAX_RUNNER_SUFFIXES)
+        .map(|i| after[i..].join(" "))
+        .collect()
+}
 
 /// `command` with each here-document body that is stdin data blanked, so
 /// prose in it (`The PM's tmux pane`) is neither parsed nor named.
@@ -127,6 +162,14 @@ pub(super) fn opaque_route(
     if program == "xargs" && xargs_replaces(after) && names_tmux(command) {
         return Some("`xargs` puts words from stdin the guard cannot read into its command");
     }
+    // #9053: `echo 'tmux kill-server' | xargs env` — stdin is the program.
+    if program == "xargs" && stdin_is_the_program(after) && names_tmux(command) {
+        return Some("`xargs` runs a wrapper whose program comes from stdin the guard cannot read");
+    }
+    // #9053: GNU `parallel` builds commands from inputs the guard cannot read.
+    if program == "parallel" && names_tmux(command) {
+        return Some("`parallel` runs commands built from inputs the guard cannot read");
+    }
     if program == "tmux" {
         let in_exec = before.iter().any(|w| EXEC_FLAGS.contains(&w.as_str()));
         if in_exec && after.iter().any(|w| w == "+") {
@@ -144,6 +187,28 @@ pub(super) fn opaque_route(
     let reads_stdin = code_operands(evaluator, after).is_empty() && !runs_script(evaluator, after);
     (fed && reads_stdin && names_tmux(command))
         .then_some("a shell runs program text it reads on stdin")
+}
+
+/// #9053: whether the utility `xargs` runs (its `args` past `xargs`) takes its
+/// program or code from the stdin words xargs appends: a wrapper with no
+/// program word of its own (`env`, `sudo`, `nice`, `timeout 5`), a
+/// [`RUNNERS`] or `parallel` entry, or an evaluator with no inline code and
+/// no script.
+fn stdin_is_the_program(args: &[String]) -> bool {
+    let utility = &args[xargs_utility_index(args)..];
+    let Some(first) = utility.first() else {
+        return false;
+    };
+    let program = basename(first);
+    if RUNNERS.contains(&program.as_str()) || program == "parallel" {
+        return true;
+    }
+    if let Some(evaluator) = evaluator_name(&program) {
+        return code_operands(evaluator, &utility[1..]).is_empty()
+            && !runs_script(evaluator, &utility[1..]);
+    }
+    COMMAND_WRAPPERS.contains(&program.as_str())
+        && strip_wrapper_prefix(utility).is_none_or(|at| at >= utility.len())
 }
 
 /// Whether the `xargs` options in `args`, before its utility, set a
@@ -197,12 +262,24 @@ const XARGS_LONG_VALUED: &[&str] = &[
 /// that script's data: the first operand past its options and redirections.
 /// `-` and a shell's `-s` read stdin; `python -m` runs a module; a process
 /// substitution is program text the guard cannot read.
+/// #9053: an option this table does not know may take the next word as its
+/// value, so the word after it is not read as the script (fail closed).
+/// Test: `an_unknown_evaluator_option_is_no_script_operand_9053`.
 fn runs_script(evaluator: &str, args: &[String]) -> bool {
     let shell = DASH_C_SHELLS.contains(&evaluator) || evaluator == "fish";
+    let python = evaluator.starts_with("python");
+    // #9053: ruby's `-E enc` and `-C dir` take a value too.
     let valued: &[char] = if shell {
         &['o', 'O']
     } else {
-        &['W', 'X', 'r', 'I', 'M']
+        &['W', 'X', 'r', 'I', 'M', 'E', 'C']
+    };
+    let known: &[char] = if shell {
+        SHELL_FLAGS
+    } else if python {
+        PYTHON_FLAGS
+    } else {
+        &[]
     };
     let mut words = args.iter().map(String::as_str);
     while let Some(word) = words.next() {
@@ -228,21 +305,58 @@ fn runs_script(evaluator: &str, args: &[String]) -> bool {
         if let Some(long) = cluster.strip_prefix('-') {
             if ["rcfile", "init-file", "require"].contains(&long) {
                 words.next();
+            } else if !long.contains('=') && !(shell && SHELL_LONG_FLAGS.contains(&long)) {
+                return false;
             }
             continue;
         }
         if shell && cluster.contains('s') {
             return false;
         }
-        if evaluator.starts_with("python") && cluster.contains('m') {
+        if python && cluster.contains('m') {
             return true;
         }
         if cluster.ends_with(valued) {
             words.next();
+        } else if !cluster
+            .chars()
+            .all(|c| known.contains(&c) || valued.contains(&c))
+        {
+            return false;
         }
     }
     false
 }
+
+/// Shell short options that take no value (`-c` and `-s` are read before).
+const SHELL_FLAGS: &[char] = &[
+    'a', 'b', 'e', 'f', 'h', 'i', 'k', 'l', 'm', 'n', 'p', 'r', 't', 'u', 'v', 'x', 'B', 'C', 'E',
+    'H', 'P', 'T',
+];
+
+/// Shell long options that take no value.
+const SHELL_LONG_FLAGS: &[&str] = &[
+    "login",
+    "noprofile",
+    "norc",
+    "posix",
+    "restricted",
+    "verbose",
+    "noediting",
+    "debugger",
+    "pretty-print",
+    "protected",
+    "help",
+    "version",
+    "interactive",
+    "no-config",
+    "private",
+];
+
+/// Python short options that take no value (`-c`, `-m` are read before).
+const PYTHON_FLAGS: &[char] = &[
+    'b', 'B', 'd', 'E', 'h', 'i', 'I', 'O', 'P', 'q', 's', 'S', 'u', 'v', 'V', 'x', 'R', '3',
+];
 
 /// Pair each shlex word with whether the shell expands it.
 pub(super) fn with_dynamics(segment: &str, argv: Vec<String>) -> Vec<Word> {

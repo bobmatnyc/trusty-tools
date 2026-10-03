@@ -23,6 +23,21 @@ use super::credential_print_taint::{
 };
 use super::{Lifted, Refusal, carries};
 
+// #8771: bytes this thread handed to an arithmetic reader, so a test can
+// prove the reading stays linear in the command (no uncharged rescans).
+#[cfg(test)]
+thread_local! {
+    pub(super) static ARITH_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `len` bytes handed to an arithmetic reader (test builds only).
+fn count_read(len: usize) {
+    #[cfg(test)]
+    ARITH_BYTES.with(|c| c.set(c.get() + len));
+    #[cfg(not(test))]
+    let _ = len;
+}
+
 /// `test`/`[[` operators that evaluate both operands as arithmetic.
 const ARITH_TESTS: &[&str] = &["-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
 
@@ -149,6 +164,7 @@ pub(super) fn reads_in_arithmetic(
     while let Some(at) = stage[from..].find("((") {
         let open = from + at + 2;
         let close = matching_close(bytes, open, 2).unwrap_or(bytes.len());
+        count_read(close - open);
         if reads_tainted(&stage[open..close], names) {
             return true;
         }
@@ -215,12 +231,18 @@ fn any_body(
             }
         } else if b == close
             && let Some(Some(from)) = stack.pop()
-            && reads(&text[from..at])
+            && {
+                count_read(at - from);
+                reads(&text[from..at])
+            }
         {
             return true;
         }
     }
-    stack.into_iter().flatten().any(|from| reads(&text[from..]))
+    stack.into_iter().flatten().any(|from| {
+        count_read(text.len() - from);
+        reads(&text[from..])
+    })
 }
 
 /// The offset and length text of a `${NAME:offset[:length]}` or

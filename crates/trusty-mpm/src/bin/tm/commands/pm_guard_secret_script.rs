@@ -29,12 +29,15 @@
 //! judged the same way.
 //!
 //! Fail closed: a script whose body the guard cannot judge in full refuses
-//! ([`Unread`]) — an open or read error, not a regular file, a symlink to a
-//! non-executable, over the 256 KiB `MAX_SCRIPT_BYTES`, or not UTF-8 text; an
+//! ([`Unread`]) — an open or read error (a symlink loop among them), not a
+//! regular file, over the 256 KiB `MAX_SCRIPT_BYTES`, or not UTF-8 text; an
 //! interpreter's script or loaded file computed at run time (`bash "$S"`,
-//! `bash <(…)`, a glob); and a literal script that does not exist and that
-//! nothing else in the command names. `$HOME` and `$PWD` prefixes resolve.
-//! A compiled executable (ELF or Mach-O magic) is not a script and allows.
+//! `bash <(…)`, a glob); a literal script that does not exist and that
+//! nothing else in the command names; and a script run past
+//! [`MAX_SCRIPT_DEPTH`]. Nested runs are resolved as strictly as the top
+//! level (#9037). A symlinked script is judged by its target. `$HOME` and
+//! `$PWD` prefixes resolve. A compiled executable (ELF or Mach-O magic) is
+//! not a script and allows.
 //!
 //! Documented residuals (ruling 268's accepted trade, pinned in
 //! `pm_guard_secret_read`'s `DOCUMENTED_RESIDUALS` and
@@ -45,10 +48,8 @@
 //! 2. A path run directly whose word is computed (`"$DIR"/tool`) — how every
 //!    built binary runs; a script reached by `PATH` lookup (`deploy.sh` with
 //!    no `/`); and a relative script after a `cd` the hook cannot resolve.
-//! 3. Scripts a script runs or sources dynamically: inside a body, a nested
-//!    script named through a variable (`source "$LIB/x.sh"`, `bash "$1"`) is
-//!    not resolved, and nesting stops at [`MAX_SCRIPT_DEPTH`] or a non-shell
-//!    body.
+//! 3. Scripts a non-shell body runs (a Python `subprocess` call): only a
+//!    shell body's own script runs are followed.
 //! 4. A script run by a program not listed above (`xargs`, `make`, `find
 //!    -exec`), by an interpreter option this module does not read, or behind
 //!    a wrapper that takes options (`sudo -u x bash s.sh`, judged only when
@@ -85,6 +86,7 @@ use crate::commands::pm_guard_secret_read::{
 };
 // #8879: the bounded, fail-closed read lives in its own file (500-SLOC cap).
 pub(crate) use crate::commands::pm_guard_secret_script_read::{Body, Unread, read_script};
+use crate::commands::pm_guard_secret_script_self::resolve_self_paths;
 
 /// Script-runs-script nesting the guard follows.
 pub(crate) const MAX_SCRIPT_DEPTH: usize = 4;
@@ -317,6 +319,14 @@ pub(crate) enum Rule {
 
 /// Judge one script: its inline equivalent, then (for a shell body) the
 /// scripts it runs in turn, to [`MAX_SCRIPT_DEPTH`].
+///
+/// #9037: a nested run is resolved strictly — an unresolvable or missing
+/// nested script refuses — after its self-location idioms resolve
+/// ([`resolve_self_paths`]); a script past the bound refuses
+/// ([`Unread::TooDeep`]) unless it is a compiled executable.
+/// Test: `refuses_a_read_one_script_deeper`,
+/// `a_nested_unresolvable_script_refuses_9037`,
+/// `a_chain_past_the_depth_bound_refuses_9037`.
 fn judge_script(
     path: &Path,
     interpreter: Option<&str>,
@@ -331,7 +341,9 @@ fn judge_script(
     seen.push(key);
     // #8879: a body that cannot be read in full refuses; a compiled program is no script.
     let body = match read_script(path) {
-        Ok(Body::Script(body)) => body,
+        Ok(Body::Script(body)) if depth < MAX_SCRIPT_DEPTH => body,
+        // #9037: a script run past the nesting bound is not followed; it refuses.
+        Ok(Body::Script(_)) => return Some(Rule::Unread(Unread::TooDeep)),
         Ok(Body::Executable) => return None,
         Err(why) => return Some(Rule::Unread(why)),
     };
@@ -343,17 +355,18 @@ fn judge_script(
     if let Some(rule) = judge_text(&inline_equivalent(&interpreter, &plain), &plain, cwd) {
         return Some(rule);
     }
-    if depth + 1 >= MAX_SCRIPT_DEPTH || family_of(&interpreter) != Some(Family::Shell) {
+    if family_of(&interpreter) != Some(Family::Shell) {
         return None;
     }
-    // A nested script whose path cannot be resolved is a documented residual.
+    // #9037: nested runs resolve as strictly as the top level.
+    let nested = resolve_self_paths(&body, path);
     each_script(
-        &body,
+        &nested,
         bases,
-        false,
-        |_, inner, inner_interp, inner_bases| {
-            let inner = inner.ok()?;
-            judge_script(&inner, inner_interp, inner_bases, depth + 1, seen)
+        true,
+        |_, inner, inner_interp, inner_bases| match inner {
+            Ok(inner) => judge_script(&inner, inner_interp, inner_bases, depth + 1, seen),
+            Err(why) => Some(Rule::Unread(why)),
         },
     )
 }
@@ -450,6 +463,13 @@ fn shebang_interpreter(body: &str) -> String {
 /// The candidate scripts of one segment's argv, and whether the program word
 /// was resolved exactly rather than found by a scan for an interpreter name.
 fn candidates(argv: &[String]) -> (Vec<Candidate>, bool) {
+    // #9037: a case arm's pattern (`pat)`) is not a command; the words after it are.
+    if let Some(first) = argv.first()
+        && first.ends_with(')')
+        && !first.contains('(')
+    {
+        return candidates(&argv[1..]);
+    }
     let exact = strip_wrapper_prefix(argv);
     let start = exact
         .or_else(|| {
@@ -653,7 +673,9 @@ fn deny_reason(word: &str, rule: Rule) -> String {
         Rule::Unread(why) => match why {
             Unread::Unreadable => "the guard could not read its body, so it fails closed",
             Unread::NotRegular => "it is not a regular file, so the guard fails closed",
-            Unread::Symlink => "it is a symlink to a script, so the guard fails closed",
+            Unread::TooDeep => {
+                "it runs scripts nested past the guard's depth bound, so the guard fails closed"
+            }
             Unread::TooLarge => {
                 "its body is over the guard's 256 KiB read bound, so the guard fails closed"
             }
