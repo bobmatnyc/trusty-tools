@@ -14,13 +14,18 @@
    * immediately and rolls back if the POST fails, because an embedder under load
    * can take a moment to answer and a toggle that does nothing for a second
    * reads as broken.
-   * Test: `indexingPipeline.test.js` covers every mapping this renders; the live
+   * #9059: a held index shows `HeldIndexBanner`, read from the status body's
+   * `status: "held"` and `last_walk_error`, with a link to its settings.
+   * Test: `indexingPipeline.test.js` covers every mapping this renders,
+   * `IndexPipeline.test.js` the held banner; the live
    * check is expanding a row against a real daemon and watching the semantic
    * badge turn PAUSED after the toggle.
    */
   import { onMount, onDestroy } from 'svelte';
   import { api, fileEventsStreamUrl } from '../api.js';
   import Badge from './Badge.svelte';
+  import HeldIndexBanner from './HeldIndexBanner.svelte';
+  import { holdFromStatus } from '../indexHold.js';
   import {
     STAGES,
     stageMeta,
@@ -57,6 +62,8 @@
   // #6689: the verdict the banner shows — stages, capabilities and vector
   // coverage read together, because a status-only read shows an empty index green.
   let health = $derived(indexHealth(status));
+  // #9059: non-null while the daemon holds this index for an invalid glob.
+  let hold = $derived(holdFromStatus(id, status));
 
   /** How often the open row re-reads its status. */
   const POLL_MS = 15_000;
@@ -157,6 +164,11 @@
   });
 </script>
 
+{#if hold}
+  <div class="held-row">
+    <HeldIndexBanner {hold} settingsHref={`/indexes/${encodeURIComponent(id)}/config`} />
+  </div>
+{/if}
 <div class="pipeline">
   <section class="stages">
     <h3 class="section-title">Pipeline</h3>
@@ -249,6 +261,11 @@
 </div>
 
 <style>
+  .held-row {
+    padding: var(--trusty-space-4) var(--trusty-space-5) 0;
+    background: var(--trusty-surface-raised);
+    border-top: 1px solid var(--trusty-border);
+  }
   .pipeline {
     display: grid;
     grid-template-columns: minmax(240px, 1.2fr) minmax(200px, 0.8fr) minmax(260px, 1.4fr);

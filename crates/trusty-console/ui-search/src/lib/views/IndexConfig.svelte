@@ -12,12 +12,16 @@
    * reindex API.
    * Test: open #/indexes/<id>/config, toggle include_docs, click Save, accept
    * the PATCH, observe the "reindex required" notice and that "Reindex now"
-   * fires POST /indexes/<id>/reindex.
+   * fires POST /indexes/<id>/reindex. A held index (#9059) shows
+   * `HeldIndexBanner` from the config's `invalid_exclude_globs`.
+   * Test: `IndexConfig.test.js` covers the held and not-held renders.
    */
   import { onMount } from 'svelte';
   import { api } from '../api.js';
   import { navigate } from '../router.svelte.js';
   import TagListInput from '../components/TagListInput.svelte';
+  import HeldIndexBanner from '../components/HeldIndexBanner.svelte';
+  import { holdFromConfig } from '../indexHold.js';
 
   let { id } = $props();
 
@@ -30,6 +34,8 @@
   let reindexRequired = $state(false);
   let reindexing = $state(false);
   let reindexMessage = $state(null);
+  // #9059: non-null while the daemon holds this index for an invalid glob.
+  let hold = $derived(holdFromConfig(id, config));
 
   // Draft fields. Lists are arrays; toggles booleans; the size cap is split
   // into a numeric value + a unit so we can present KB/MB but store bytes.
@@ -173,6 +179,16 @@
       hydrate(res.config);
       reindexRequired = Boolean(res.reindex_required);
       saveMessage = 'Settings saved.';
+      // #9059: a PATCH that released a hold starts its own catch-up reindex.
+      const catchUp = res.catch_up_reindex;
+      if (catchUp) {
+        if (catchUp.started) {
+          reindexRequired = false;
+          saveMessage = 'Settings saved. The hold is released and a catch-up reindex started.';
+        } else {
+          saveMessage = `Settings saved. The hold is released, but the catch-up reindex did not start: ${catchUp.reason ?? 'no reason given'}`;
+        }
+      }
     } catch (e) {
       saveError = e.message || String(e);
     } finally {
@@ -195,6 +211,8 @@
       reindexMessage = 'Reindex queued. Watch progress on the Indexes page.';
     } catch (e) {
       reindexMessage = `Reindex failed: ${e.message || e}`;
+      // #9059: 409 can mean the index is held; re-read so the banner shows it.
+      if (e.status === 409) await loadConfig();
     } finally {
       reindexing = false;
     }
@@ -228,7 +246,11 @@
 {:else if config == null}
   <div class="card"><div class="card-body text-muted">Loading current settings…</div></div>
 {:else}
-  {#if reindexRequired}
+  {#if hold}
+    <HeldIndexBanner {hold} />
+  {/if}
+  <!-- #9059: a held index refuses reindex, so offer the fix, not the reindex. -->
+  {#if reindexRequired && !hold}
     <div class="card notice mb-4">
       <div class="card-body flex-between">
         <span>
