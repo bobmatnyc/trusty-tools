@@ -379,6 +379,8 @@ pub(crate) struct GhFailure {
     reason: String,
     identity: Option<String>,
     timed_out: bool,
+    /// #8301: the caller's survey deadline, not `gh`, ended the call.
+    cut_short: bool,
 }
 
 impl GhFailure {
@@ -389,6 +391,7 @@ impl GhFailure {
             reason: reason.into(),
             identity: None,
             timed_out: false,
+            cut_short: false,
         }
     }
 
@@ -399,6 +402,20 @@ impl GhFailure {
             timed_out: true,
             ..Self::new(reason)
         }
+    }
+
+    /// A call the caller's survey deadline ended (#8301). Not a hang of `gh`,
+    /// so the backoff neither counts it nor clears its strikes.
+    pub(crate) fn cut_short(reason: impl Into<String>) -> Self {
+        Self {
+            cut_short: true,
+            ..Self::new(reason)
+        }
+    }
+
+    /// Did the survey deadline, rather than `gh`, end the call (#8301)?
+    pub(crate) fn was_cut_short(&self) -> bool {
+        self.cut_short
     }
 
     /// Attach the `gh` identity the caller resolved before spawning (#6623).
@@ -470,14 +487,20 @@ fn failure_reason(code: Option<i32>, stderr: &str) -> String {
 /// `run_with_timeout_marks_a_timeout_as_timed_out`,
 /// `run_with_timeout_reports_the_exit_code_and_stderr`.
 pub(crate) fn run_with_timeout(cmd: Command, budget: Duration) -> Result<String, GhFailure> {
-    use crate::core::bounded_proc::{BoundedError, run_bounded};
+    use crate::core::bounded_proc::{BoundedError, clamp_to_deadline, run_bounded};
 
+    // #8301: a survey deadline shorter than `budget` decides when this call
+    // ends; a timeout then says so, rather than blaming `gh`.
+    let cut_short = clamp_to_deadline(budget) != Some(budget);
     match run_bounded(cmd, budget) {
         Ok(out) if out.status.success() => Ok(out.stdout),
         Ok(out) => Err(GhFailure::new(failure_reason(
             out.status.code(),
             &out.stderr,
         ))),
+        Err(BoundedError::TimedOut) if cut_short => Err(GhFailure::cut_short(
+            "`gh` was cut short by the survey deadline, so its answer is unknown (#8301)",
+        )),
         Err(BoundedError::TimedOut) => Err(GhFailure::timeout(format!(
             "`gh` did not answer within {}s and its process group was killed",
             budget.as_secs()
