@@ -1659,6 +1659,33 @@ mod tests {
         }
     }
 
+    /// Probe (B3 round 3): a main-checkout commit wrapped in a subshell or a
+    /// brace group must still reach the commit rule, not lex as `(git` or `{`.
+    /// Ignored because all four forms are allowed today, on this branch and in
+    /// the released 1.7.10; the fix belongs to pm-guard batch B1.
+    #[test]
+    #[ignore = "pre-existing bypass, see issue: subshell/brace-group commit skips the commit rule"]
+    fn commit_in_a_subshell_or_brace_group_must_deny() {
+        let main = main_checkout_dir();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let real = main.path().display();
+        let missed: Vec<String> = [
+            format!("(git -C {real} commit -a -m x)"),
+            format!("( git -C {real} commit -a -m x)"),
+            format!("( git -C {real} commit -a -m x )"),
+            format!("{{ git -C {real} commit -a -m x; }}"),
+        ]
+        .into_iter()
+        .filter(|command| {
+            !matches!(
+                evaluate_main_checkout_commit_command(command, elsewhere.path()),
+                Some(CommitVerdict::Deny(_))
+            )
+        })
+        .collect();
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+    }
+
     #[test]
     fn unresolved_directory_deny_reason_names_the_variable_and_the_remedy() {
         let reason = unresolved_directory_deny_reason(

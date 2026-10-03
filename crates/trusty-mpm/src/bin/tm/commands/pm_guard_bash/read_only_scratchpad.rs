@@ -12,16 +12,18 @@
 //! spelled and after canonicalizing — so neither a symlink, a `..`, a
 //! symlinked `scratchpad` component, nor another session's scratchpad can
 //! carry the write out. With no session id the rule fails closed. An operand
-//! with a `.git` component is refused, because a write into a clone's
-//! `.git/hooks` or `.git/config` runs code at the next git command. Flags are
-//! a short allowlist; every long option is refused, including `cp -t`/
-//! `--target-directory`, which moves the destination off the operand list.
+//! with a `.git` component, in any ASCII case and as spelled or once resolved,
+//! is refused, because a write into a clone's `.git/hooks` or `.git/config`
+//! runs code at the next git command. Flags are a short allowlist; every long
+//! option is refused, including `cp -t`/`--target-directory`, which moves the
+//! destination off the operand list.
 //!
-//! Residuals, accepted: `cp -R`/`-a` into an existing directory writes
-//! through any entry below it that is already a symlink — only the operand
-//! itself is resolved, not the tree `cp` walks. And each path is
-//! canonicalized at hook time, so a symlink swapped in between the hook and
-//! the command's run (TOCTOU) is not seen.
+//! Residuals, accepted: any `cp` into an existing directory writes through an
+//! existing symlinked entry below it — only the operand itself is resolved,
+//! not the tree `cp` walks — and a recursive copy carries any `.git` entry
+//! already inside its source tree. And each path is canonicalized at hook
+//! time, so a symlink swapped in between the hook and the command's run
+//! (TOCTOU) is not seen.
 //! Test: `read_only_allow_tests::scratchpad_cp_and_rm_are_allowed`,
 //! `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`,
 //! `read_only_allow_tests::a_symlinked_scratchpad_root_is_refused`,
@@ -47,10 +49,11 @@ fn allowed_flags(program: &str) -> &'static str {
 /// Why: see the module doc.
 /// What: `Ok` when `session` is known, every flag is a short cluster from
 /// [`allowed_flags`], and every operand (at least two for `cp`, one for `rm`)
-/// carries no `.git` component and passes [`in_scratchpad`]; `Err` naming the
-/// first refusal otherwise.
+/// carries no `.git` component ([`has_git_component`]) and passes
+/// [`in_scratchpad`]; `Err` naming the first refusal otherwise.
 /// Test: `read_only_allow_tests::scratchpad_cp_and_rm_are_allowed`,
-/// `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`.
+/// `read_only_allow_tests::cp_and_rm_outside_the_scratchpad_are_refused`,
+/// `read_only_allow_tests::a_git_component_operand_is_refused`.
 pub(super) fn scratchpad_write(
     program: &str,
     rest: &[Arg],
@@ -84,7 +87,7 @@ pub(super) fn scratchpad_write(
         }
         let path = Path::new(text);
         // #8571 review: `.git/hooks/*` and `.git/config` run code later.
-        if path.components().any(|c| c.as_os_str() == ".git") {
+        if has_git_component(path) {
             return Err(format!(
                 "`{program}` naming {text}, which has a `.git` component"
             ));
@@ -92,7 +95,7 @@ pub(super) fn scratchpad_write(
         if !in_scratchpad(path, session) {
             return Err(format!(
                 "`{program}` naming {text}, which is not a literal absolute path inside the \
-                 session scratchpad"
+                 session scratchpad, or resolves through a `.git` component"
             ));
         }
         operands += 1;
@@ -111,8 +114,9 @@ pub(super) fn scratchpad_write(
 /// itself. The root, as spelled AND canonicalized, must be a scratchpad root
 /// whose parent directory is named `session`. An existing operand (a symlink
 /// included) must canonicalize strictly below the canonical root; a new one
-/// is judged by its nearest existing ancestor, which may be the root. Every
-/// unreadable step is `false`, so the rule fails closed.
+/// is judged by its nearest existing ancestor, which may be the root. That
+/// canonical path must carry no `.git` component either. Every unreadable
+/// step is `false`, so the rule fails closed.
 fn in_scratchpad(path: &Path, session: &str) -> bool {
     let plain = path.is_absolute()
         && path
@@ -136,14 +140,23 @@ fn in_scratchpad(path: &Path, session: &str) -> bool {
     {
         return false;
     }
-    match path.symlink_metadata() {
+    let real = match path.symlink_metadata() {
         Ok(_) => path
             .canonicalize()
-            .is_ok_and(|real| real != real_root && real.starts_with(&real_root)),
-        Err(_) => {
-            canonical_existing_ancestor(path).is_some_and(|real| real.starts_with(&real_root))
-        }
-    }
+            .ok()
+            .filter(|real| *real != real_root && real.starts_with(&real_root)),
+        Err(_) => canonical_existing_ancestor(path).filter(|real| real.starts_with(&real_root)),
+    };
+    // #8571 review round 2: an in-pad symlink (`cfg -> .git/config`, a link to
+    // a `.git` directory) or a case variant reaches `.git` by another spelling.
+    real.is_some_and(|real| !has_git_component(&real))
+}
+
+/// Whether any component of `path` is `.git`, compared ASCII-case-insensitively
+/// (#8571): on case-insensitive APFS, `.GIT/config` is `.git/config`.
+fn has_git_component(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
 }
 
 /// Whether `root`'s parent directory is named `session`.

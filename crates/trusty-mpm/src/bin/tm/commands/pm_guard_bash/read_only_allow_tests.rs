@@ -1026,22 +1026,32 @@ fn cp_and_rm_outside_the_scratchpad_are_refused() {
 
 /// 🔴 REGRESSION (#8571 review, HIGH): the root was read off the path as
 /// spelled and then canonicalized without a re-check, so a symlinked
-/// `scratchpad` component (`/tmp/scratchpad -> ~`) passed.
+/// `scratchpad` component (`/tmp/scratchpad -> ~`) passed. The
+/// `<SESSION>/notpad` target keeps the session parent, so only the
+/// resolved root's own scratchpad-root check refuses it.
 #[test]
 fn a_symlinked_scratchpad_root_is_refused() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(home.join("project")).expect("mkdir home");
-    let session = dir.path().join(SESSION);
-    std::fs::create_dir_all(&session).expect("mkdir session");
-    let pad = session.join("scratchpad");
-    std::os::unix::fs::symlink(&home, &pad).expect("symlink");
-    let pad = pad.display();
-    for command in [
-        format!("rm -rf {pad}/project"),
-        format!("cp {pad}/project/a {pad}/project/b"),
-    ] {
-        assert!(run(Some("code-critic"), &command).is_some(), "{command}");
+    for target in ["home", "notpad"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = dir.path().join(SESSION);
+        let real = match target {
+            "home" => dir.path().join("home"),
+            _ => session.join("notpad"),
+        };
+        std::fs::create_dir_all(real.join("project")).expect("mkdir target");
+        std::fs::create_dir_all(&session).expect("mkdir session");
+        let pad = session.join("scratchpad");
+        std::os::unix::fs::symlink(&real, &pad).expect("symlink");
+        let pad = pad.display();
+        for command in [
+            format!("rm -rf {pad}/project"),
+            format!("cp {pad}/project/a {pad}/project/b"),
+        ] {
+            assert!(
+                run(Some("code-critic"), &command).is_some(),
+                "{target}: {command}"
+            );
+        }
     }
 }
 
@@ -1082,16 +1092,30 @@ fn another_sessions_scratchpad_is_refused() {
 
 /// 🔴 REGRESSION (#8571 review, MEDIUM): a `cp` into a clone's
 /// `.git/hooks/*` or `.git/config` runs code at the next git command.
+/// Round 2: a case variant (APFS is case-insensitive), an in-pad symlink to
+/// `.git/config`, and a directory symlink to `.git` reach the same files.
 #[test]
 fn a_git_component_operand_is_refused() {
     let (_dir, base) = scratchpad_fixture();
     std::fs::create_dir_all(format!("{base}/clone/.git/hooks")).expect("mkdir .git");
+    std::fs::write(format!("{base}/clone/.git/config"), "").expect("write config");
+    std::os::unix::fs::symlink(".git/config", format!("{base}/clone/cfg")).expect("symlink");
+    std::os::unix::fs::symlink(format!("{base}/clone/.git"), format!("{base}/gitdir"))
+        .expect("dir symlink");
     for command in [
         format!("cp {base}/src/a {base}/clone/.git/hooks/pre-commit"),
         format!("cp {base}/src/a {base}/clone/.git/config"),
         format!("cp -R {base}/src {base}/clone/.git"),
         format!("rm -rf {base}/clone/.git"),
+        format!("cp {base}/src/a {base}/clone/.GIT/config"),
+        format!("cp {base}/src/a {base}/clone/.Git/hooks/pre-commit"),
+        format!("cp {base}/src/a {base}/clone/cfg"),
+        format!("cp {base}/src/a {base}/gitdir/config"),
+        format!("cp {base}/src/a {base}/gitdir/hooks/pre-commit"),
     ] {
         assert!(run(Some("code-critic"), &command).is_some(), "{command}");
     }
+    // A name that merely starts with `.git` is not a `.git` component.
+    let ignore = format!("cp {base}/src/a {base}/clone/.gitignore");
+    assert_eq!(run(Some("code-critic"), &ignore), None, "{ignore}");
 }
