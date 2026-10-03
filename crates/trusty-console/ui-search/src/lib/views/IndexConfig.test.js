@@ -97,4 +97,72 @@ describe('IndexConfig held-index banner', () => {
     // The catch-up already runs, so no second "Reindex now" prompt.
     expect(el.textContent).not.toContain('Reindex required');
   });
+
+  /** Toggle "Include documentation files" so the form is dirty, then click Save. */
+  async function saveDocsToggle(el, expectedText) {
+    const box = el.querySelector('input[type="checkbox"]');
+    box.click();
+    flushSync();
+    [...el.querySelectorAll('button')].find((b) => b.textContent.includes('Save changes')).click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(el.textContent).toContain(expectedText);
+    });
+  }
+
+  const reindexNowButton = (el) => [...el.querySelectorAll('button')].find((b) => b.textContent.includes('Reindex now'));
+
+  it('offers no "Reindex now" while the saved config is still held', async () => {
+    const el = await render(configBody());
+    api.updateIndexConfig.mockResolvedValue({
+      id: 'proj',
+      config: configBody({ include_docs: false, invalid_exclude_globs: ['**.min.js'] }),
+      reindex_required: true
+    });
+    await saveDocsToggle(el, 'Settings saved.');
+    expect(el.querySelector('[data-testid="held-index-banner"]')).not.toBeNull();
+    expect(reindexNowButton(el)).toBeUndefined();
+    expect(el.textContent).not.toContain('Reindex required');
+  });
+
+  it('re-reads the config and shows the banner when Reindex now answers 409', async () => {
+    const el = await render(configBody());
+    api.updateIndexConfig.mockResolvedValue({
+      id: 'proj',
+      config: configBody({ include_docs: false }),
+      reindex_required: true
+    });
+    await saveDocsToggle(el, 'Reindex required');
+    expect(el.querySelector('[data-testid="held-index-banner"]')).toBeNull();
+    api.reindex.mockRejectedValue(Object.assign(new Error('index is held'), { status: 409 }));
+    api.getIndexConfig.mockClear();
+    api.getIndexConfig.mockResolvedValue(configBody({ invalid_exclude_globs: ['**.min.js'] }));
+    reindexNowButton(el).click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(el.querySelector('[data-testid="held-index-banner"]')).not.toBeNull();
+    });
+    expect(api.getIndexConfig).toHaveBeenCalledTimes(1);
+    expect(el.textContent).toContain('Reindex failed: index is held');
+  });
+
+  it('shows the reason when the catch-up reindex did not start', async () => {
+    const el = await render(configBody({ invalid_exclude_globs: ['**.min.js'] }));
+    api.updateIndexConfig.mockResolvedValue({
+      id: 'proj',
+      config: configBody({ exclude_globs: ['**/.env'] }),
+      reindex_required: true,
+      catch_up_reindex: { started: false, reason: 'another reindex is already running' }
+    });
+    const chip = [...el.querySelectorAll('button')].find((b) =>
+      (b.getAttribute('aria-label') ?? '').includes('**.min.js')
+    );
+    chip.click();
+    flushSync();
+    [...el.querySelectorAll('button')].find((b) => b.textContent.includes('Save changes')).click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(el.textContent).toContain('did not start: another reindex is already running');
+    });
+  });
 });

@@ -7,7 +7,7 @@
    * the invalid globs when known, and the fix. `settingsHref` adds a link to the
    * index settings page; the settings page itself omits it and points at the
    * form below instead.
-   * Test: `HeldIndexBanner.test.js`.
+   * Test: `IndexConfig.test.js`, `IndexPipeline.test.js`.
    */
   import { navigate } from '../router.svelte.js';
 
