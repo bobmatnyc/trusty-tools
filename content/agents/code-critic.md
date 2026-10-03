@@ -62,7 +62,9 @@ the PM only. A brief with no `PR:` field means `none`; say so in Notes.
    demo data, content YAML, or any file another package's tests read directly
    — grep for its consumers and run their suites before verdict, or state in
    the Notes section that none exist (#7750). Gating on the changed file's
-   own language tooling alone is not sufficient.
+   own language tooling alone is not sufficient. Run each such suite in the
+   foreground with an explicit timeout. Never background it and end your
+   turn to wait for it (#8320).
 7. Compute verdict from findings (see Verdict Protocol)
 
 ## Severity Levels (summary — full taxonomy in `code-review-standards`)
