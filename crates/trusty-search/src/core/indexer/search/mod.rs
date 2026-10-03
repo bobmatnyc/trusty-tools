@@ -22,6 +22,8 @@ pub(crate) mod path_filter;
 #[cfg(test)]
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
+#[cfg(test)]
+mod tests_keyword_9027;
 
 use std::collections::{HashMap, HashSet};
 
@@ -269,9 +271,8 @@ impl CodeIndexer {
         let effective_mode = match (&intent, query.mode) {
             (QueryIntent::Conceptual, super::SearchMode::Code) => super::SearchMode::All,
             (QueryIntent::Definition, super::SearchMode::Code) => super::SearchMode::All,
-            (QueryIntent::Unknown | QueryIntent::Keyword, super::SearchMode::Code) => {
-                super::SearchMode::All
-            }
+            // #9027: `Keyword` upgrades exactly as `Unknown` does.
+            (i, super::SearchMode::Code) if i.is_balanced() => super::SearchMode::All,
             _ => query.mode,
         };
 
@@ -545,13 +546,13 @@ impl CodeIndexer {
         if results.is_empty() {
             return;
         }
-        // Issue #2203: `Unknown` intent never hard-drops non-code files when
+        // Issue #2203: a balanced intent (`Unknown`; `Keyword` since #9027)
+        // never hard-drops non-code files when
         // `mode` resolves to `Code` — down-rank via `doc_score_penalty`
         // instead so NL queries can't silently come back empty. Every other
         // intent keeps the existing hard filter (no regression for real code
         // queries such as `Usage`/`BugDebt`/explicit `Definition`).
-        let soft_downrank_unknown = matches!(intent, QueryIntent::Unknown | QueryIntent::Keyword)
-            && matches!(mode, super::SearchMode::Code);
+        let soft_downrank_unknown = intent.is_balanced() && matches!(mode, super::SearchMode::Code);
         if matches!(mode, super::SearchMode::Code) {
             use crate::core::chunker::ChunkType;
             let before = results.len();
@@ -759,10 +760,7 @@ impl CodeIndexer {
         bm25_results: &mut Vec<(String, f32)>,
     ) {
         // #9027: a bare word that was Unknown is now Keyword; keep its boost.
-        if !matches!(
-            intent,
-            QueryIntent::Definition | QueryIntent::Unknown | QueryIntent::Keyword
-        ) {
+        if !(matches!(intent, QueryIntent::Definition) || intent.is_balanced()) {
             return;
         }
         let Some(hit) = self.entity_exact_match(query_text).await else {

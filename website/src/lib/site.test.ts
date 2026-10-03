@@ -2,7 +2,16 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CRATE_GROUPS, FACTS, FLAGSHIPS, GITHUB_URL, INSTALL_OPTIONS, STABLE_SET } from './site';
+import {
+	CRATE_GROUPS,
+	currentNavHref,
+	FACTS,
+	FLAGSHIPS,
+	GITHUB_URL,
+	INSTALL_OPTIONS,
+	NAV_LINKS,
+	STABLE_SET
+} from './site';
 
 /**
  * Why: a landing page is where people copy-paste with the least scepticism, so
@@ -109,5 +118,26 @@ describe('landing-page content', () => {
 
 	it('points at the canonical repository', () => {
 		expect(GITHUB_URL).toBe('https://github.com/bobmatnyc/trusty-tools');
+	});
+});
+
+describe('top navigation', () => {
+	it("places Roadmap immediately before What's new", () => {
+		const labels = NAV_LINKS.map((l) => l.label);
+		const roadmap = labels.indexOf('Roadmap');
+		expect(roadmap, labels.join(', ')).toBeGreaterThan(-1);
+		expect(labels[roadmap + 1]).toBe("What's new");
+	});
+
+	it('marks exactly one nav link current, the most specific one', () => {
+		expect(currentNavHref('/')).toBe('/');
+		expect(currentNavHref('/docs')).toBe('/docs');
+		expect(currentNavHref('/docs/getting-started')).toBe('/docs');
+		expect(currentNavHref('/docs/roadmap')).toBe('/docs/roadmap');
+		expect(currentNavHref('/docs/roadmap/trusty-mpm')).toBe('/docs/roadmap');
+		expect(currentNavHref('/whats-new')).toBe('/whats-new');
+		// A prefix that is not a whole path segment owns nothing.
+		expect(currentNavHref('/docsearch')).toBeUndefined();
+		expect(currentNavHref('/tools/trusty-search')).toBeUndefined();
 	});
 });

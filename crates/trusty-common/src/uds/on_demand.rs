@@ -182,6 +182,8 @@ pub fn analyze_idle_timeout_from_env() -> Option<Duration> {
 pub struct OnDemandAnalyze {
     supervisor: UdsServiceSupervisor,
     socket: PathBuf,
+    /// Where a spawned server's stderr goes; `None` inherits the caller's.
+    stderr_log: Option<PathBuf>,
 }
 
 impl OnDemandAnalyze {
@@ -222,7 +224,28 @@ impl OnDemandAnalyze {
                     .with_detached(true),
             ),
             socket: socket.into(),
+            stderr_log: None,
         }
+    }
+
+    /// Send a server this handle spawns to [`analyze_stderr_log`], not the
+    /// caller's terminal (#8103).
+    ///
+    /// Why: a status probe starts the server only to ask its health. Its
+    /// startup lines — the missing-API-key WARN and the serving banner — then
+    /// printed into the probe's output. A user-initiated start keeps them.
+    /// What: sets the log path the spawn spec passes to
+    /// [`SpawnSpec::stderr_to`]. A server already running is untouched.
+    /// Test: `a_quiet_handle_logs_beside_its_socket`.
+    #[must_use]
+    pub fn quiet(mut self) -> Self {
+        self.stderr_log = Some(analyze_stderr_log(&self.socket));
+        self
+    }
+
+    /// The file a spawned server's stderr is appended to, if any.
+    pub fn stderr_log(&self) -> Option<&Path> {
+        self.stderr_log.as_deref()
     }
 
     /// The socket this handle guarantees is being served.
@@ -250,7 +273,12 @@ impl OnDemandAnalyze {
     pub async fn ensure_running(&self) -> Result<PathBuf, SupervisorError> {
         self.supervisor
             .ensure_running(ANALYZE_SERVICE, &self.socket, || {
-                Ok(analyze_spawn_spec(&self.socket)?)
+                let spec = analyze_spawn_spec(&self.socket)?;
+                // #8103: a quiet handle logs instead of inheriting stderr.
+                Ok(match &self.stderr_log {
+                    Some(log) => spec.stderr_to(log),
+                    None => spec,
+                })
             })
             .await
     }
@@ -280,6 +308,15 @@ pub fn analyze_spawn_spec(socket: &Path) -> Result<SpawnSpec, MissingBinary> {
         spec = spec.create_dir(dir);
     }
     Ok(spec)
+}
+
+/// The stderr log of an analyze server spawned on `socket` (#8103).
+///
+/// What: `trusty-analyze.stderr.log` beside the socket, in the directory the
+/// spawn spec already creates.
+/// Test: `a_quiet_handle_logs_beside_its_socket`.
+pub fn analyze_stderr_log(socket: &Path) -> PathBuf {
+    socket.with_file_name(format!("{ANALYZE_SERVICE}.stderr.log"))
 }
 
 /// `trusty-analyze` is not installed anywhere this process can see.

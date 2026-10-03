@@ -65,11 +65,44 @@ async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
 const LOCK_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// [`open_corpus_with_retry`] with the retry budget as a parameter, so a test
-/// can bound it (#8600).
+/// can bound it (#8600). The in-process re-open uses
+/// [`reopen_existing_corpus_within`] instead.
 /// Test: `a_lock_released_after_the_first_retry_still_opens_the_corpus`.
-async fn open_corpus_with_retry_within(
+pub(crate) async fn open_corpus_with_retry_within(
     path: &Path,
     budget: std::time::Duration,
+) -> Result<CorpusStore> {
+    open_corpus_retrying(path, budget, OpenCaller::WarmBoot).await
+}
+
+/// Re-open an EXISTING corpus file, never creating one (#8085, #8958).
+///
+/// Why: `CorpusStore::open` runs `create_dir_all` and creates `index.redb`, so a
+/// re-open racing a `DELETE ?delete_data=true` could resurrect the data dir it
+/// just removed. The sweep also retries every quarantined index each 30 s, so
+/// its retry lines log at DEBUG instead of warm-boot's WARN.
+/// What: [`open_corpus_with_retry_within`], but each attempt first checks that
+/// `path` is a file, inside the serialized open, and fails without touching the
+/// disk when it is not.
+/// Test: `a_reopen_never_creates_a_missing_corpus`.
+pub(crate) async fn reopen_existing_corpus_within(
+    path: &Path,
+    budget: std::time::Duration,
+) -> Result<CorpusStore> {
+    open_corpus_retrying(path, budget, OpenCaller::Reopen).await
+}
+
+/// Who is retrying an open: warm boot creates and warns, a re-open does neither.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenCaller {
+    WarmBoot,
+    Reopen,
+}
+
+async fn open_corpus_retrying(
+    path: &Path,
+    budget: std::time::Duration,
+    caller: OpenCaller,
 ) -> Result<CorpusStore> {
     let owned = path.to_path_buf();
     let started = std::time::Instant::now();
@@ -77,7 +110,15 @@ async fn open_corpus_with_retry_within(
     loop {
         let attempt = {
             let p = owned.clone();
-            open_serialized(&owned, move || CorpusStore::open(&p)).await
+            open_serialized(&owned, move || {
+                // #8085: the existence check sits inside the serialized open so
+                // no create can follow a check made before a delete landed.
+                if caller == OpenCaller::Reopen && !p.is_file() {
+                    anyhow::bail!("corpus file {} does not exist", p.display());
+                }
+                CorpusStore::open(&p)
+            })
+            .await
         };
         let e = match attempt {
             Ok(store) => return Ok(store),
@@ -91,12 +132,22 @@ async fn open_corpus_with_retry_within(
         if !is_already_open || started.elapsed() + delay > budget {
             return Err(e);
         }
-        tracing::warn!(
-            "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
-             retrying in {} ms (refs #840, #8600)",
-            path.display(),
-            delay.as_millis()
-        );
+        if caller == OpenCaller::Reopen {
+            // #8085: the sweep retries every quarantined index each 30 s.
+            tracing::debug!(
+                "corpus re-open: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
+                 retrying in {} ms (#8085)",
+                path.display(),
+                delay.as_millis()
+            );
+        } else {
+            tracing::warn!(
+                "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
+                 retrying in {} ms (refs #840, #8600)",
+                path.display(),
+                delay.as_millis()
+            );
+        }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(std::time::Duration::from_secs(2));
     }
@@ -169,7 +220,8 @@ pub async fn build_indexer_from_entry(
     // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
     // non-fatal but logged at ERROR (#840) because a missing corpus means the
     // next reindex cold-starts (Skipped 0).  `open_corpus_with_retry` retries
-    // once on DatabaseAlreadyOpen (stale file lock from a rapid restart).
+    // DatabaseAlreadyOpen for up to `LOCK_RETRY_BUDGET` (#8600); a transient
+    // failure past that is re-attempted in process (#8085, `corpus_reopen`).
     // Issue #1158: set `corpus_open_failed` so the warm-boot stage-classifier
     // can emit `StageStatus::Failed` instead of the misleading `InProgress`.
     match persistence::corpus_redb_path_for_entry(entry) {

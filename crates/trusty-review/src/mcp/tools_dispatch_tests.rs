@@ -690,3 +690,66 @@ async fn deps_from_state_resolves_a_prefix_the_id_contradicts() {
          already-built one is reused rather than a second being constructed"
     );
 }
+
+// ── #8654: `review_diff` context reaches the prompt ─────────────────────────
+
+/// APPROVE stub that records every prompt it is sent (system + messages).
+struct PromptCapture(std::sync::Mutex<Vec<String>>);
+
+#[async_trait]
+impl LlmProvider for PromptCapture {
+    fn name(&self) -> &str {
+        "prompt-capture-8654"
+    }
+
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let mut text = req.system.clone();
+        for m in &req.messages {
+            text.push('\n');
+            text.push_str(&m.content);
+        }
+        if let Ok(mut seen) = self.0.lock() {
+            seen.push(text);
+        }
+        ApproveLlm.complete(req).await
+    }
+}
+
+/// The `context` argument reaches the reviewer prompt as the PR description,
+/// for a real `diff --git` diff. Before #8654 it was written as a `# Context:`
+/// diff preamble, which the parser discarded as an unattributable section —
+/// the canary from duettoresearch/code-intelligence#5906 never reached the
+/// model.
+#[tokio::test]
+async fn review_diff_context_reaches_the_reviewer_prompt() {
+    let llm = Arc::new(PromptCapture(std::sync::Mutex::new(Vec::new())));
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(false);
+    config.context.require_analyze = false;
+    let state = AppState::new(
+        config,
+        llm.clone(),
+        Arc::new(FakeSearchDispatch),
+        Some(Arc::new(ReadyAnalyzeDispatch)),
+    );
+    let args = json!({
+        "diff": "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+                 @@ -1 +1 @@\n-fn a() {}\n+fn a() { println!(\"a\"); }\n",
+        "context": "PR description CANARY-8654-review-diff"
+    });
+    let result = call_tool("review_diff", &args, &state)
+        .await
+        .expect("a valid review_diff call is not a protocol error");
+    assert_eq!(result["isError"], json!(false), "{result}");
+
+    let prompts = llm.0.lock().map(|p| p.clone()).unwrap_or_default();
+    let reviewer = prompts.first().expect("the reviewer must be called");
+    assert!(
+        reviewer.contains("CANARY-8654-review-diff"),
+        "the context must reach the reviewer prompt: {reviewer}"
+    );
+    assert!(
+        !reviewer.contains("# Context:"),
+        "the context must not ride the diff as a preamble"
+    );
+}

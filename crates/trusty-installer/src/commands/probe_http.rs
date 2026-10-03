@@ -997,7 +997,10 @@ pub async fn probe_daemon_http(app: &str, binary: &str) -> ProbeOutcome {
         // Starting it is the probe: a member that can be started and answers
         // `<domain>.health` is working, and one that cannot is not.
         if on_demand_member(binary) {
+            // #8103: `quiet` — the server's startup lines go to its log, not
+            // onto the terminal of the status command that probed it.
             if let Err(e) = trusty_common::uds::OnDemandAnalyze::at(&socket)
+                .quiet()
                 .ensure_running()
                 .await
             {

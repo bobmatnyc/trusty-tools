@@ -127,7 +127,8 @@ pub fn tool_descriptors() -> Value {
                         "type": "string",
                         "description": "Optional human-readable context — e.g. PR title/description, \
                                        ticket number, or a note about what changed and why. \
-                                       Appended to the diff file so the reviewer model sees it."
+                                       Passed to the reviewer (and the verifier) as the PR \
+                                       description."
                     },
                     "reviewer_model": {
                         "type": "string",
@@ -205,10 +206,12 @@ mod review_pr;
 ///
 /// Why: lets Claude Code pass a raw diff (e.g. from `git diff`) directly to the
 /// review pipeline without requiring a GitHub PR.
-/// What: writes the diff (plus optional context header) to a named temp file,
-/// then runs the pipeline with `DiffSource::LocalFile`.  The temp file is
-/// cleaned up when it is dropped (via `NamedTempFile`'s `Drop`).
-/// Test: `review_diff_returns_review_result_envelope`.
+/// What: writes the diff to a named temp file, then runs the pipeline with
+/// `DiffSource::LocalFile`; a non-empty `context` argument is the
+/// `CallerContext::pr_description` (#8654). The temp file is cleaned up when
+/// it is dropped (via `NamedTempFile`'s `Drop`).
+/// Test: `call_tool_review_diff_returns_non_empty_verdict`,
+/// `review_diff_context_reaches_the_reviewer_prompt`.
 async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolError> {
     let diff = require_str(args, "diff")?;
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
@@ -222,10 +225,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let mut tmp = NamedTempFile::new()
         .map_err(|e| ToolError::InvalidParams(format!("failed to create temp file: {e}")))?;
 
-    if !context.is_empty() {
-        writeln!(tmp, "# Context: {context}")
-            .map_err(|e| ToolError::InvalidParams(format!("temp file write error: {e}")))?;
-    }
+    // #8654: `context` goes to `CallerContext`, never a diff preamble — the
+    // parser discarded that preamble as an unattributable section.
     tmp.write_all(diff.as_bytes())
         .map_err(|e| ToolError::InvalidParams(format!("temp file write error: {e}")))?;
     tmp.flush()
@@ -243,7 +244,11 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
         trigger: MCP_REVIEW_TRIGGER,
         run_mode: mcp_run_mode(&state.config),
         allow_posting: MCP_REVIEW_ALLOW_POSTING,
-        caller_context: crate::pipeline::runner::CallerContext::default(),
+        // #8654: the reviewer prompt's PR-description section.
+        caller_context: crate::pipeline::runner::CallerContext {
+            pr_description: (!context.trim().is_empty()).then(|| context.to_string()),
+            ..Default::default()
+        },
         // See the matching comment in `call_review_pr` — same rationale.
         surface: InvocationSurface::Interactive,
     };

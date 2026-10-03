@@ -1103,7 +1103,10 @@ async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_tra
         let handle = state.registry.get(&IndexId::new("wq")).expect("planted");
         let mut indexer = handle.indexer.write().await;
         indexer.corpus_open_failed = true;
-        indexer.corpus_open_failure = Some(CorpusOpenFailure::Contention);
+        // #8085: a transient kind (`Contention`) is now re-opened in process
+        // before the refusal, and this planted index has no lock holder, so it
+        // would re-open. A non-transient kind keeps the refusal under test.
+        indexer.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
     }
 
     let over_http = http_err(&http, "POST", "/indexes/wq/reindex", serde_json::json!({})).await;

@@ -514,6 +514,8 @@ pub(crate) async fn wait_for_turn(live: LiveJob) -> Result<(), IndexDeleted> {
         .expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
+    // #8659: name this pass to a migration waiting on the same permit.
+    let _holder = super::permit_holder::mark_index_permit_holder(&job.handle.id, "deferred-embed");
 
     // #3049: hold the teardown lock's shared side across the embed pass.
     // `embed_deferred_chunks` has no interior cancel checkpoint, so a DELETE

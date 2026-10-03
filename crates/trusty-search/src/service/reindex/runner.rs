@@ -93,6 +93,8 @@ pub(super) async fn run_reindex(
     let _index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
+    // #8659: name this reindex to a migration waiting on the same permit.
+    let _holder = super::permit_holder::mark_index_permit_holder(&handle.id, "reindex");
     // #3049: fetched AFTER the permit so a delete that already completed cannot
     // leave a stale `true` here — that delete evicted the flag, so this call
     // allocates a fresh `false` one. Polled at the producer/consumer batch

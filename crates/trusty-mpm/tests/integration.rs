@@ -22,6 +22,8 @@ mod common;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
+// #8985: `disk_survey` through a built daemon's `/rpc`.
+mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]
 mod e2e;
 mod inproject_hygiene_test;
@@ -42,6 +44,8 @@ mod proxy_routes;
 mod push_guard_hook;
 mod relocated_interactive_config_4181;
 mod resume_unresumable_mapping;
+// #9121: `tm daemon --sandbox` refuses secret-carrying envs, never printing values.
+mod sandbox_daemon_9121;
 mod services_integration;
 mod session_control_api;
 mod session_lifecycle;
@@ -68,6 +72,7 @@ mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
 mod tm_hook_pm_guard_head_switch;
+mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
 mod tm_hook_pm_guard_secret_batch;
 mod tm_hook_pm_guard_stdin_7975;

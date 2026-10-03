@@ -97,6 +97,20 @@ fn parse_memory_list_result(result: Value) -> anyhow::Result<Vec<DrawerSummary>>
     Ok(drawers)
 }
 
+/// Did the daemon answer that the palace does not exist (#9026)?
+///
+/// Why: a project whose palace was never created is common — the slug is
+/// derived from the repo, and nothing creates the palace until the first
+/// write. The daemon reports that as a coded not-found refusal; treating it
+/// as an outage wrote one stderr line per catch-up run for every such project.
+/// What: true only for a [`crate::memory_rpc::MemoryRpcError`] whose code is
+/// the not-found code. A transport failure, or any other refusal, is false.
+/// Test: `an_absent_palace_is_reached_and_empty_not_unreachable`.
+fn is_absent_palace(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::memory_rpc::MemoryRpcError>()
+        .is_some_and(crate::memory_rpc::MemoryRpcError::is_not_found)
+}
+
 /// Fetch recent drawers from a trusty-memory palace, fail-open.
 ///
 /// Why: palace drawers are one of three catch-up activity sources; failure to
@@ -109,8 +123,9 @@ fn parse_memory_list_result(result: Value) -> anyhow::Result<Vec<DrawerSummary>>
 /// (already resolved by the caller). On success, parses + sorts via
 /// [`parse_memory_list_result`] and — when `since` is `Some` — filters
 /// client-side to drawers created after that timestamp. Returns
-/// `Some(drawers)` on success (possibly empty) or `None` on any
-/// transport/RPC/parse error (after logging a warning to stderr).
+/// `Some(drawers)` on success (possibly empty), `Some(vec![])` without a
+/// warning when the daemon reports the palace absent (#9026), or `None` on any
+/// other transport/RPC/parse error (after logging a warning to stderr).
 /// Test: `drawer_since_filter`, `drawer_empty_array`,
 /// `live_drawer_fetch` (ignored; requires running daemon).
 pub async fn fetch_recent_palace_drawers(
@@ -123,6 +138,9 @@ pub async fn fetch_recent_palace_drawers(
     let result =
         match crate::memory_rpc::call_memory_tool_at(memory_socket, "memory_list", params).await {
             Ok(v) => v,
+            // #9026: the daemon answered that this project's palace does not
+            // exist yet. That is "reached, nothing stored", not an outage.
+            Err(e) if is_absent_palace(&e) => return Some(Vec::new()),
             Err(e) => {
                 eprintln!(
                     "catchup: could not reach trusty-memory at {}: {e}",
@@ -242,5 +260,50 @@ mod tests {
         .await;
         // Just verify it returns without panicking.
         let _ = drawers;
+    }
+
+    /// A one-connection stub daemon that answers `memory_list` with `code`.
+    fn spawn_refusing_daemon(dir: &std::path::Path, code: i64) -> std::path::PathBuf {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let sock = dir.join("sockets").join("memory.sock");
+        let listener = crate::uds::bind_hardened(&sock).expect("bind stub socket");
+        let reply = format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": "palace x"}})
+        );
+        tokio::spawn(async move {
+            let Ok((mut conn, _)) = listener.accept().await else {
+                return;
+            };
+            let mut sink = Vec::new();
+            let _ = conn.read_to_end(&mut sink).await;
+            let _ = conn.write_all(reply.as_bytes()).await;
+            let _ = conn.flush().await;
+        });
+        sock
+    }
+
+    /// Why (#9026): the catch-up digest logged "could not reach trusty-memory"
+    /// on every run for a project whose palace was never created, and rendered
+    /// the section as unreachable. The daemon answered; the palace is absent.
+    /// What: a not-found refusal is `Some(empty)`. Fail-Open Check: any other
+    /// refusal (`-32603`) still reports the daemon unreachable (`None`).
+    #[tokio::test]
+    async fn an_absent_palace_is_reached_and_empty_not_unreachable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let absent = spawn_refusing_daemon(tmp.path(), crate::memory_rpc::CODE_NOT_FOUND);
+        let drawers = fetch_recent_palace_drawers(&absent, "never-created", 5, None).await;
+        assert!(
+            drawers.as_ref().is_some_and(Vec::is_empty),
+            "an absent palace is reached and empty: {drawers:?}"
+        );
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let failing = spawn_refusing_daemon(tmp.path(), -32603);
+        let drawers = fetch_recent_palace_drawers(&failing, "broken", 5, None).await;
+        assert!(
+            drawers.is_none(),
+            "an internal error is not an empty palace"
+        );
     }
 }

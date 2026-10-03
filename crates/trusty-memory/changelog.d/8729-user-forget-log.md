@@ -1,0 +1,2 @@
+Changed
+- A user-initiated forget (`memory_forget` over MCP, or the drawer delete on the service API) now logs one `info` line when a drawer is actually removed. The line names the resolved palace id (`palace`), the palace name the caller used (`requested`), the drawer id and the caller (`mcp`, `http`). It is written before the lexical-index delete, so a forget that fails there still logs the removal. A forget of an id that is not stored logs nothing (#8729).

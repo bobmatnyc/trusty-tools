@@ -17,7 +17,7 @@
 //! Test: `doctor_credential_reach_tests.rs`.
 
 use trusty_common::credential_registry::env_var_for;
-use trusty_common::credentials::{SecretResolveError, resolve_env_var_bounded};
+use trusty_common::credentials::SecretResolveError;
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -119,11 +119,38 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
 pub(crate) fn check_credential_reach() -> DoctorCheck {
     // Runs on the blocking pool — see `check_credential_reach_async`, the only
     // caller on an async path. Nothing here may be awaited.
+    // #9121: the gated resolver, so the latch holds even if this row's own
+    // sandbox check regressed.
+    check_credential_reach_with(
+        crate::secret_source::sandboxed(),
+        crate::secret_source::resolve_bounded_gated,
+    )
+}
+
+/// [`check_credential_reach`] with the sandbox state and the resolver injected.
+///
+/// Why (#9121): this probe walks `.env.local` and the Keychain, so a sandboxed
+/// daemon answering `GET /api/v1/doctor` would read the operator's store.
+/// What: `sandbox` → an `Ok` row saying no tier was consulted; `resolve` is
+/// never called. Otherwise one verdict per [`DAEMON_PROVIDERS`] entry.
+/// Test: `a_sandboxed_row_consults_no_credential_tier`,
+/// `an_unsandboxed_row_consults_every_daemon_credential`.
+pub(crate) fn check_credential_reach_with(
+    sandbox: bool,
+    resolve: impl Fn(&str) -> Result<String, SecretResolveError>,
+) -> DoctorCheck {
+    if sandbox {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            "sandbox mode (#9121): no credential tier is consulted",
+        );
+    }
     let verdicts: Vec<ReachVerdict> = DAEMON_PROVIDERS
         .iter()
         .map(|provider| {
             let var = env_var_for(provider).unwrap_or(provider);
-            verdict_for(var, &resolve_env_var_bounded(var))
+            verdict_for(var, &resolve(var))
         })
         .collect();
     build_row(&verdicts)

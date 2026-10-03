@@ -1,0 +1,2 @@
+Added
+- `tm hook --pm-guard` allows `git reset --keep [<rev>]` in a main checkout listed under `[pm_guard] runtime_checkouts` in `~/.trusty-mpm/config.toml`, when the reset is the only command in the call and `git diff --quiet <rev>` reports the tracked content already equal. Cron hosts can now reconcile a launchd-read checkout in place. Every other destructive git command stays denied on those paths, and a probe git cannot answer denies (#8524).
