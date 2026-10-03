@@ -15,7 +15,11 @@
 //! `tmux_name`, and persists.
 //! Test: `rename_*` in `super::rename_tests`.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+
 use chrono::Utc;
+use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 use super::manager::{ManagedError, SessionManager};
@@ -125,7 +129,9 @@ impl SessionManager {
     /// `rename_renames_live_tmux_session`,
     /// `rename_never_renames_unrelated_live_session_sharing_a_stale_name`,
     /// `rename_renames_live_session_when_pane_confirmed_alive`,
-    /// `rename_reuses_name_freed_by_a_deleted_record` in `super::rename_tests`.
+    /// `rename_reuses_name_freed_by_a_deleted_record` in `super::rename_tests`;
+    /// `two_concurrent_renames_of_one_live_record_leave_tmux_and_the_record_in_step`
+    /// in `super::rename_race_tests` (one record's renames are serialized).
     pub async fn rename(
         &self,
         id: &ManagedSessionId,
@@ -133,6 +139,10 @@ impl SessionManager {
     ) -> Result<SessionRecord, ManagedError> {
         let new_name = validate_session_name(new_name)
             .map_err(|msg| ManagedError::InvalidState(id.to_string(), msg))?;
+        // #9101: renaming by `$N` id dropped the implicit `=old` check that
+        // failed the second of two racing renames at tmux; this record's
+        // renames now wait for each other, snapshot through Guard 2.
+        let _turn = RenameTurn::take(*id).await;
 
         // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
         // `list_sessions` is a blocking tmux subprocess and must never run
@@ -348,6 +358,53 @@ impl SessionManager {
                     crate::core::tmux::shell_exact_session_target(session_id)
                 ),
             ),
+        }
+    }
+}
+
+/// One lock per record id that has a rename running or waiting (#9101).
+static RENAME_LOCKS: LazyLock<Mutex<HashMap<ManagedSessionId, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// A held turn to rename one record (#9101).
+///
+/// Why: a live rename addresses tmux by `$N` id, so two renames of one record
+/// both reach tmux; unserialized, the loser's rollback desyncs tmux and the
+/// record. Keyed by id, so renames of different records never wait.
+/// What: [`Self::take`] waits for the id's lock; drop releases it and removes
+/// the map entry once no other rename holds or waits for it. Entries are
+/// cloned and pruned only under the map lock, so the count check is exact.
+/// Test: `two_concurrent_renames_of_one_live_record_leave_tmux_and_the_record_in_step`.
+struct RenameTurn {
+    id: ManagedSessionId,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl RenameTurn {
+    async fn take(id: ManagedSessionId) -> Self {
+        let lock = Arc::clone(
+            RENAME_LOCKS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(id)
+                .or_default(),
+        );
+        Self {
+            id,
+            guard: Some(lock.lock_owned().await),
+        }
+    }
+}
+
+impl Drop for RenameTurn {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut locks = RENAME_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+        if locks
+            .get(&self.id)
+            .is_some_and(|l| Arc::strong_count(l) == 1)
+        {
+            locks.remove(&self.id);
         }
     }
 }

@@ -110,15 +110,19 @@ impl From<ManagedError> for ResumeManagedError {
     /// What: maps `SessionNotFound` → `NotFound`, `InvalidState` → `InvalidState`
     /// (preserving the descriptive reason), `WorkspaceMissing` → `WorkspaceGone`,
     /// `PaneGone` → `PaneGone` (each preserving the manager's full actionable
-    /// Display message verbatim), and every remaining variant → `Other`.
+    /// Display message verbatim), `NameCollision` → `InvalidState` (#9101, its
+    /// Display message), and every remaining variant → `Other`.
     /// Test: covered transitively by the resume handler 404/409/422 tests
-    /// (`resume_managed_typed_*` in tests/session_manager_mvp.rs).
+    /// (`resume_managed_typed_*` in tests/session_manager_mvp.rs);
+    /// `a_name_collision_is_a_409_conflict` below.
     fn from(e: ManagedError) -> Self {
         match e {
             ManagedError::SessionNotFound(id) => ResumeManagedError::NotFound(id),
             ManagedError::InvalidState(_, reason) => ResumeManagedError::InvalidState(reason),
             // #8233 item 4: a refused claim is a conflict, never a 500.
             ManagedError::ResumeInFlight(id) => ResumeManagedError::AlreadyResuming(id),
+            // #9101: a resume refused because its name is taken is a 409.
+            e @ ManagedError::NameCollision(_) => ResumeManagedError::InvalidState(e.to_string()),
             // The Display impls of these two variants already carry the vanished
             // path/pane and the concrete remedy — preserve them verbatim so the
             // 422 body is fully actionable at the CLI.
@@ -235,5 +239,17 @@ mod tests {
                 "x-trusty-resume-reason header must carry the exact reason passed in"
             );
         }
+    }
+
+    /// #9101: a resume refused because its name is taken answers 409, never
+    /// the 500 of `Other`, and keeps the manager's message.
+    #[test]
+    fn a_name_collision_is_a_409_conflict() {
+        let err = ResumeManagedError::from(ManagedError::NameCollision("tm-taken".into()));
+        assert!(
+            matches!(&err, ResumeManagedError::InvalidState(why) if why.contains("tm-taken")),
+            "{err:?}"
+        );
+        assert_eq!(err.into_response().status(), StatusCode::CONFLICT);
     }
 }

@@ -34,7 +34,10 @@ Fixed
   name is on a restarted tmux server, and refuses when ownership cannot be
   proved, including for a record with no pane id. A live rename proves
   ownership before it takes the store lock and renames the session by its
-  `$N` id (#9101).
+  `$N` id. Two renames of one record run one after the other, so tmux and
+  the record always end under the same name (#9101).
+- A resume refused because the session's name is taken now answers 409
+  instead of 500 (#9101).
 - The bare-`tm` in-place relaunch no longer reactivates a stale record whose
   pane id the current pane reuses after a tmux server restart; the daemon's
   reactivate answers 409 (#9101).

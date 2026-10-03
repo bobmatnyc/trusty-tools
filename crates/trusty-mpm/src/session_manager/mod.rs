@@ -234,6 +234,9 @@ mod delete_tests;
 mod rename_tests;
 
 #[cfg(test)]
+mod rename_race_tests;
+
+#[cfg(test)]
 mod liveness_tests;
 
 #[cfg(test)]
