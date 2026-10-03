@@ -201,6 +201,9 @@ lanes = [
         # collector's `scrub_secrets` path is exercised by the lane that already
         # owns the crate's filesystem-facing modules.
         "log-drain",
+        # #9123: the credential test sandbox sits beside log-drain, the other
+        # feature in this lane that turns on `credentials`.
+        "credential-test-sandbox",
         # #6820: machine-tier joins the core lane, beside host-metrics. Both read
         # the machine; keeping them in one lane is what makes the "sizing budget
         # vs. live telemetry" split visible to whoever edits either.
@@ -1037,6 +1040,11 @@ log-drain = [
 # loader) — all already optional workspace deps. Does NOT pull in the OS
 # keychain backend; see `keyring-store` for that.
 credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
+# #9123: `credentials::test_sandbox` — the shared test-only credential sandbox
+# (empty credential env, temp HOME/config dirs, latched `.env.local` loader)
+# and the redacting `assert_secret_eq`. It mutates the process environment, so
+# consumers enable it from `[dev-dependencies]` only; never from a normal one.
+credential-test-sandbox = ["credentials"]
 # Enables the `codex_config` module: the ONE writer for Codex CLI stdio MCP
 # registrations (`~/.codex/config.toml`), shared by trusty-search (#5264) and
 # trusty-memory (#5265). Pulls in `toml_edit` so a repair preserves the

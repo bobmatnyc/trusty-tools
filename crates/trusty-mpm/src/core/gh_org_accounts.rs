@@ -338,8 +338,10 @@ pub(crate) fn org_map_pin(
         Err(e) => Err(crate::core::gh_account::GhSpawnEnv {
             vars: crate::core::gh_account_proof::identity_token_vars(None),
             warning: Some(format!(
-                "{e}. The session's gh for {origin} is given a token that authenticates as \
-                 nobody until the [accounts] table is fixed (#9091)."
+                "{e}. The session's gh for {} is given a token that authenticates as \
+                 nobody until the [accounts] table is fixed (#9091).",
+                // #9124: the origin may embed `user:token@`.
+                crate::core::remote_url_redact::redact_url(origin)
             )),
         }),
     }

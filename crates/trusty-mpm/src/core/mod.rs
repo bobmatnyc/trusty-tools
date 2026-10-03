@@ -295,6 +295,9 @@ pub mod base_ref_freshness;
 pub mod reinstall;
 // #8934: the one "has an origin remote / local-only" predicate and the no-gh pin.
 pub mod remote_mode;
+// #9124: the one helper that strips `user:token@` from a URL before it reaches
+// a log line or an error message.
+pub mod remote_url_redact;
 // #6958: the per-session token-savings ledger every producer appends to, and
 // the instruction/language-compression producer that writes the first row.
 pub mod savings;

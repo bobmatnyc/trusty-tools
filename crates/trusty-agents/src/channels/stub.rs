@@ -193,7 +193,7 @@ mod tests {
     /// dispatcher consult, so a miss there is a stub channel that cannot be
     /// saved and cannot wake anybody.
     #[test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     fn a_default_environment_has_no_stub_provider() {
         let _off = EnvVarGuard::set(ENABLE_ENV, "");
         assert!(!enabled(), "an empty value is off");

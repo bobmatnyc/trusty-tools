@@ -226,3 +226,6 @@ wiremock = { workspace = true }
 # developer machine that has one. `#[serial]` joins the workspace-wide
 # exclusion group so that mutation cannot race a parallel test thread.
 serial_test = { workspace = true }
+# #9123: the shared credential test sandbox. Dev-only because it mutates the
+# process environment; it must never reach a normal build.
+trusty-common = { workspace = true, features = ["credential-test-sandbox"] }

@@ -80,6 +80,9 @@ mod redact;
 pub mod registry;
 mod resolver;
 mod secret;
+// #9123: test-only; mutates the process environment, so never in production.
+#[cfg(feature = "credential-test-sandbox")]
+pub mod test_sandbox;
 
 pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
 // #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.
@@ -89,7 +92,7 @@ pub use bounded_store::{
 };
 pub use dotenv::{
     env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
-    read_var_from_env_local, user_env_local_path,
+    read_var_from_env_local, skip_env_local_load, user_env_local_path,
 };
 pub use error::CredentialError;
 pub use file_store::FileKeyStore;

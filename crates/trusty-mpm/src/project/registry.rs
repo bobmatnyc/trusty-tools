@@ -300,7 +300,9 @@ impl ProjectRegistry {
         if let Err(e) = self.register(project).await {
             warn!(name = %name, "{log_prefix}: failed to register: {e}");
         } else {
-            info!(name = %name, repo_url = %repo_url, "{log_prefix}: registered project from session history");
+            // #9124: a remote URL may embed `user:token@`.
+            let shown = crate::core::remote_url_redact::redact_url(repo_url);
+            info!(name = %name, repo_url = %shown, "{log_prefix}: registered project from session history");
         }
     }
 }

@@ -281,7 +281,6 @@ pub fn user_env_local_path(home: &Path) -> Option<PathBuf> {
 /// tested because `OnceLock` fires exactly once per test binary — see
 /// module docs for why precedence tests use [`load_env_from_path`] instead.
 pub fn load_env_local_once() {
-    static LOADED: OnceLock<()> = OnceLock::new();
     LOADED.get_or_init(|| {
         if let Ok(cwd) = std::env::current_dir()
             && let Some(path) = find_workspace_env_local(&cwd)
@@ -294,6 +293,24 @@ pub fn load_env_local_once() {
             let _ = dotenvy::from_path(&path);
         }
     });
+}
+
+/// The once-per-process latch [`load_env_local_once`] and
+/// [`skip_env_local_load`] share.
+static LOADED: OnceLock<()> = OnceLock::new();
+
+/// Mark the one-time `.env.local` load as done without reading any file.
+///
+/// Why (#9123): a credential test that reaches [`load_env_local_once`] first
+/// in its test binary loads the developer's real `.env.local` into the
+/// process. A test sandbox calls this before anything else so the loader can
+/// never read a real file for the rest of the process.
+/// What: sets the latch [`load_env_local_once`] checks. `true` when this call
+/// set it — nothing has been or will be loaded — and `false` when a load
+/// already ran, in which case the caller must clear what it loaded.
+/// Test: `credentials::test_sandbox::tests::the_sandbox_reads_no_env_local`.
+pub fn skip_env_local_load() -> bool {
+    LOADED.set(()).is_ok()
 }
 
 /// Read a single variable's value from a specific `.env.local` file **without**

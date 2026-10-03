@@ -450,7 +450,12 @@ async fn run_managed(
             checkout.base_path.display()
         );
     } else {
-        eprintln!("tm: cloned {clone_url} → {}", checkout.base_path.display());
+        // #9124: a remote URL may embed `user:token@`.
+        eprintln!(
+            "tm: cloned {} → {}",
+            trusty_mpm::core::remote_url_redact::redact_url(clone_url),
+            checkout.base_path.display()
+        );
     }
 
     // A skipped fast-forward must be VISIBLE, not just logged. `pull_ff_only`

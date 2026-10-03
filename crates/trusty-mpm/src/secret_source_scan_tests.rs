@@ -75,7 +75,7 @@ const CONFIGURATOR_SITES: &[&str] = &["activity/classifier.rs", "daemon/manager/
 type Finding = (String, String);
 
 /// One source char and whether it is code (`true`) or inside a literal.
-type Lexed = (char, bool);
+pub(super) type Lexed = (char, bool);
 
 /// Whether `rel` is a test file by the line-cap script's own rules.
 fn is_test_file(rel: &str) -> bool {
@@ -89,7 +89,7 @@ fn is_test_file(rel: &str) -> bool {
         || rel.starts_with("tests/")
 }
 
-fn is_ident(c: char) -> bool {
+pub(super) fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
@@ -101,7 +101,7 @@ fn names(code: &str, api: &str) -> bool {
 }
 
 /// Whether `code` names `word` as a whole identifier.
-fn names_word(code: &str, word: &str) -> bool {
+pub(super) fn names_word(code: &str, word: &str) -> bool {
     code.match_indices(word).any(|(at, _)| {
         !code[..at].chars().next_back().is_some_and(is_ident)
             && !code[at + word.len()..].chars().next().is_some_and(is_ident)
@@ -128,7 +128,7 @@ fn code_only(text: &str) -> String {
 
 /// `text` without comments, each char tagged code or literal, so a `//` or a
 /// brace inside a string or char literal is never read as syntax (#9121).
-fn lex(text: &str) -> Vec<Lexed> {
+pub(super) fn lex(text: &str) -> Vec<Lexed> {
     let s: Vec<char> = text.chars().collect();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -270,7 +270,7 @@ fn test_module_end(src: &[Lexed], at: usize) -> Option<usize> {
 }
 
 /// `at + needle.len()` when the code at `at` spells `needle`.
-fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
+pub(super) fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
     let mut i = at;
     for want in needle.chars() {
         match src.get(i) {
@@ -281,7 +281,7 @@ fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
     Some(i)
 }
 
-fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
+pub(super) fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
     while src
         .get(i)
         .is_some_and(|&(c, code)| code && c.is_whitespace())
@@ -293,7 +293,7 @@ fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
 
 /// The index past the `close` balancing the `open` at `at`. Literal chars
 /// never count, so a `"}"` inside a test module cannot end it early.
-fn matching(src: &[Lexed], at: usize, open: char, close: char) -> Option<usize> {
+pub(super) fn matching(src: &[Lexed], at: usize, open: char, close: char) -> Option<usize> {
     let mut depth = 0usize;
     for (i, &(c, code)) in src.iter().enumerate().skip(at) {
         if code && c == open {
