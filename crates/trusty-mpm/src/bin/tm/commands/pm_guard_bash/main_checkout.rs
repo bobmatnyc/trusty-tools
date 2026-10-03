@@ -177,7 +177,12 @@ use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 /// --work-tree=<main> checkout -- .` and the `GIT_DIR=`/`GIT_WORK_TREE=`
 /// prefixes, run from a scratchpad clone or any non-repo cwd, resolve to the
 /// cwd rather than `<main>` and stay ALLOWED.
+///
+/// Grouping that does not parse (#9127) refuses, from any directory, any
+/// command carrying a destructive git verb in a destructive form, as the
+/// commit rule does for `git commit`.
 /// Test: the two halves are covered separately (see the module doc);
+/// `commit_or_reset_behind_coproc_must_deny_9127`;
 /// `destructive_deny_names_an_unresolved_variable_rather_than_the_checkout`,
 /// `destructive_deny_names_a_surviving_tilde_rather_than_the_checkout`,
 /// `destructive_denies_an_unresolved_directory_from_a_worktree` (#8572),
@@ -204,6 +209,13 @@ fn evaluate_main_checkout_destructive_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<String> {
+    // #9127 critic MEDIUM-2: fail closed as the commit rule does — grouping
+    // that does not parse cannot be placed.
+    if !shell_groups::grouped_steps(command).parsed
+        && let Some(verb) = shell_groups::mentions_git_verb(command, is_whole_tree_destructive)
+    {
+        return Some(shell_groups::unparsed_group_destructive_reason(&verb));
+    }
     // #8572: every destructive segment is judged, not only the first — from a
     // worktree, `git reset --hard && git -C $MAIN reset --hard` was cleared on
     // its first segment.
@@ -1933,6 +1945,20 @@ mod tests {
         // The other direction holds too: an `eval` cd into the worktree is real.
         let into_wt = format!("eval \"cd {}\" && git commit -m x", wt.display());
         assert!(evaluate_main_checkout_commit_command(&into_wt, main.path()).is_none());
+        let builtin = format!("command eval \"cd {}\" && git commit -m x", wt.display());
+        assert!(evaluate_main_checkout_commit_command(&builtin, main.path()).is_none());
+        // #9127 critic MEDIUM-1: behind a process wrapper `eval` is a child
+        // process, so its `cd` into the worktree ends with it.
+        let wt = wt.display();
+        let mut missed = commits_not_denied(
+            &[format!("env eval \"cd {wt}\"; git commit -a -m x")],
+            main.path(),
+        );
+        let nohup = format!("nohup eval \"cd {wt}\"; git reset --hard");
+        if evaluate_main_checkout_destructive_command(&nohup, main.path()).is_none() {
+            missed.push(nohup);
+        }
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
     }
 
     /// 🔴 REGRESSION (#9127 critic HIGH-2): `coproc` hid the program word the
@@ -1966,6 +1992,17 @@ mod tests {
         let wt = linked_worktree(main.path());
         let leak = format!("coproc cd {}; git reset --hard", wt.display());
         assert!(evaluate_main_checkout_destructive_command(&leak, main.path()).is_some());
+        // #9127 critic MEDIUM-2: a coproc of a compound command leaves the
+        // grouping unparsed, so a destructive verb in it is refused unplaced.
+        let unparsed = "coproc while :; do :; done; (git reset --hard)";
+        assert!(
+            evaluate_main_checkout_destructive_command(unparsed, main.path()).is_some(),
+            "must deny: {unparsed}"
+        );
+        // A parsed worktree-only reset stays allowed.
+        let in_wt = format!("(git -C {} reset --hard)", wt.display());
+        assert!(evaluate_main_checkout_destructive_command(&in_wt, main.path()).is_none());
+        assert!(evaluate_main_checkout_destructive_command("(git reset --hard)", &wt).is_none());
     }
 
     /// 🔴 REGRESSION (#9127 critic HIGH-3): a paren-form `case` arm and a
@@ -1983,10 +2020,24 @@ mod tests {
                 format!("function f ( git -C {real} commit -a -m x )"),
                 format!("(g''it -C {real} c''ommit -a -m x"),
                 format!("(git -C {real} co\\mmit -a -m x"),
+                // #9127 critic MEDIUM-3: a brace expansion off the program word.
+                format!("case x in (x) {{git,-C,{real},commit,-a}};; esac"),
+                format!("f() ( {{git,-C,{real},commit,-a}} ); f"),
             ],
             &wt,
         );
         assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        for command in [
+            "git add src/{a,b}.rs",
+            "mkdir -p src/{a,b}",
+            "cp f{,.bak}",
+            "git commit -m 'fix(x): {a,b}'",
+        ] {
+            assert!(
+                evaluate_main_checkout_commit_command(command, &wt).is_none(),
+                "must stay allowed: {command}"
+            );
+        }
         // #9127 critic LOW: a stray `)` in a comment is named in the deny.
         let Some(CommitVerdict::Deny(reason)) =
             evaluate_main_checkout_commit_command("(git commit -m x) # a)", &wt)

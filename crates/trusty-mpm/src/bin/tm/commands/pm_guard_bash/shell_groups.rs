@@ -23,7 +23,8 @@
 //! marked unparsed. A balanced command holding a shape the walker cannot place
 //! — a `case`, a function definition, a coproc — comes back peeled but also
 //! marked unparsed. The commit rule refuses either when it carries a
-//! `git commit` ([`mentions_git_commit`]).
+//! `git commit` ([`mentions_git_commit`]), and the destructive rule when it
+//! carries a destructive git verb ([`mentions_git_verb`]).
 //!
 //! Residuals: a function body runs where the function is CALLED, which this
 //! does not follow, so a definition is unparsed rather than placed; `$(…)` and
@@ -351,26 +352,49 @@ fn pop(open: &mut Vec<Group>, kind: Group) -> Result<(), Unbalanced> {
 /// Why: the fail-closed test for a command the walker could not place. It is
 /// deliberately loose — no argv, no position — because the parse that would
 /// place the words is the one that failed.
-/// What: splits on whitespace and on `;&|()<>` and backticks, deletes every
-/// quote and backslash inside each word (so `c''ommit`, `g"i"t` and `co\mmit`
-/// read as the words bash runs), trims `{}!$` from its ends, then asks for a
-/// word equal to `commit` and another whose basename is `git`.
+/// What: [`mentions_git_verb`] asking for the word `commit`.
 /// Test: `mentions_git_commit_reads_words_not_substrings`.
 pub(super) fn mentions_git_commit(command: &str) -> bool {
+    mentions_git_verb(command, |verb, _| verb == "commit").is_some()
+}
+
+/// The first word of `command` that `matches` accepts as a git verb, given
+/// every word after it, when a word whose basename is `git` is present too
+/// (#9127).
+///
+/// What: splits on whitespace, on `;&|()<>` and backticks, and on `,{}` so a
+/// brace expansion `{git,-C,<dir>,commit}` reads as its words (critic
+/// MEDIUM-3); deletes every quote and backslash inside each word (so
+/// `c''ommit`, `g"i"t` and `co\mmit` read as the words bash runs) and trims
+/// `!$` from its ends. Empty words are dropped. Loose by design, as
+/// [`mentions_git_commit`]: the words after a verb may belong to a later
+/// command.
+/// Test: `mentions_git_commit_reads_words_not_substrings`,
+/// `mentions_git_verb_hands_the_matcher_the_words_after_it`.
+pub(super) fn mentions_git_verb(
+    command: &str,
+    matches: impl Fn(&str, &[String]) -> bool,
+) -> Option<String> {
     let words: Vec<String> = command
-        .split(|c: char| c.is_whitespace() || ";&|()<>`".contains(c))
+        .split(|c: char| c.is_whitespace() || ";&|()<>`,{}".contains(c))
         .map(|w| {
             let bare: String = w
                 .chars()
                 .filter(|c| !matches!(c, '\'' | '"' | '\\'))
                 .collect();
-            bare.trim_matches(|c: char| "{}!$".contains(c)).to_string()
+            bare.trim_matches(|c: char| "!$".contains(c)).to_string()
         })
+        .filter(|w| !w.is_empty())
         .collect();
     let git = words
         .iter()
         .any(|w| w.rsplit('/').next().is_some_and(|base| base == "git"));
-    git && words.iter().any(|w| w == "commit")
+    if !git {
+        return None;
+    }
+    (0..words.len())
+        .find(|&i| matches(&words[i], &words[i + 1..]))
+        .map(|i| words[i].clone())
 }
 
 /// Whether a segment's program word is a brace expansion (#9127).
@@ -432,6 +456,20 @@ pub(super) const UNPARSED_GROUP_COMMIT_REASON: &str = "Commit denied because the
      the comment. Run the commit as a plain command — `git -C \
      /abs/path/.claude/worktrees/<name> commit …`, or `cd` into the worktree first — with no \
      grouping around it. Nothing is lost; the changes are still in the tree.";
+
+/// The refusal for a destructive git verb the guard cannot place (#9127
+/// critic MEDIUM-2).
+pub(super) fn unparsed_group_destructive_reason(verb: &str) -> String {
+    format!(
+        "Destructive git command denied because the guard cannot place it (ADR-0037, #9127): \
+         this command carries `git {verb}` in a form that discards work, inside a `( … )` \
+         subshell, a `{{ …; }}` brace group, a function definition, a `case` or a `coproc` whose \
+         openers and closers the guard cannot pair up or whose commands it cannot follow, so it \
+         cannot tell whether it lands in a main checkout. Run it as a plain command — `git -C \
+         /abs/path/.claude/worktrees/<name> {verb} …`, or `cd` into the worktree first — with \
+         no grouping around it."
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -624,11 +662,34 @@ mod tests {
             "(git co\\mmit",
             "(g\"i\"t commit",
             "(cd x;git commit",
+            // #9127 critic MEDIUM-3: a brace expansion off the program word.
+            "case x in (x) {git,-C,/m,commit,-a};; esac",
+            "f() { {git,commit}; }",
         ] {
             assert!(mentions_git_commit(command), "{command}");
         }
-        for command in ["(git status", "git log --grep=commit", "(commit-msg"] {
+        for command in [
+            "(git status",
+            "git log --grep=commit",
+            "(commit-msg",
+            "(git add src/{a,b}.rs",
+        ] {
             assert!(!mentions_git_commit(command), "{command}");
         }
+    }
+
+    /// #9127 critic MEDIUM-2: the destructive fail-closed check reads the verb
+    /// with the words after it, so a harmless form is not refused.
+    #[test]
+    fn mentions_git_verb_hands_the_matcher_the_words_after_it() {
+        let hard = |verb: &str, tail: &[String]| {
+            verb == "reset" && tail.first().is_some_and(|t| t == "--hard")
+        };
+        assert_eq!(
+            mentions_git_verb("coproc x; (git reset --hard", hard).as_deref(),
+            Some("reset")
+        );
+        assert_eq!(mentions_git_verb("(git reset HEAD", hard), None);
+        assert_eq!(mentions_git_verb("(reset --hard", hard), None);
     }
 }

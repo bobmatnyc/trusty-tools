@@ -19,7 +19,7 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
-use crate::commands::hook_rewrite::strip_wrapper_prefix;
+use crate::commands::hook_rewrite::{is_env_assignment, strip_wrapper_prefix};
 // #8735: the xargs option table moved beside the other wrapper grammars.
 use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word};
 
@@ -37,6 +37,11 @@ use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_pro
 // here-document operator line — a body fed to one of these IS shell source, so
 // its separators must keep splitting.
 pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+
+/// Words that may precede `eval` while it still runs in the current shell
+/// (#9127 critic MEDIUM-1). Any other word before it — `env`, `nohup`, `sudo`,
+/// `timeout`, … — is a process, and `eval` cannot run as a builtin there.
+const CURRENT_SHELL_PREFIXES: &[&str] = &["command", "builtin", "noglob", "nocorrect"];
 
 /// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
 ///
@@ -122,7 +127,8 @@ pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
 /// [`wrapped_command`], plus whether the carrier runs its string in the
 /// CURRENT shell (#9127): `eval` does, so a `cd` inside it persists; a shell's
 /// `-c`, `env -S`, `flock -c` and `xargs` start a child process, whose `cd`
-/// ends with it.
+/// ends with it. So does `eval` behind a process wrapper (`env eval`,
+/// `nohup eval`): only assignments and [`CURRENT_SHELL_PREFIXES`] may precede it.
 /// Test: `grouped_steps_scopes_a_child_shell_but_not_eval`,
 /// `a_cd_inside_eval_persists_9127`.
 pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, bool) {
@@ -130,8 +136,12 @@ pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, bool) {
         return (WrappedCommand::None, false);
     };
     let carried = |at: usize| {
-        carried_string(&argv[at], &argv[at + 1..])
-            .map(|inner| (inner, carrier(&argv[at]) == "eval"))
+        carried_string(&argv[at], &argv[at + 1..]).map(|inner| {
+            let in_this_shell = argv[..at]
+                .iter()
+                .all(|w| is_env_assignment(w) || CURRENT_SHELL_PREFIXES.contains(&carrier(w)));
+            (inner, carrier(&argv[at]) == "eval" && in_this_shell)
+        })
     };
     let found = match resolve_program_word(&argv) {
         Ok(word) if word.lookup => None,

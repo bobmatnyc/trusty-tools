@@ -11,11 +11,16 @@ Fixed
   string no longer moves the directory the guard resolves for the commands
   after it, so `sh -c 'cd <worktree>' && git commit -a` in a main checkout is
   refused. A `cd` inside `eval` does persist, as it does in bash, so
-  `eval "cd <main checkout>"; git commit` from a worktree is refused.
+  `eval "cd <main checkout>"; git commit` from a worktree is refused. Behind a
+  process wrapper such as `env` or `nohup`, `eval` runs in a child process, so
+  `env eval "cd <worktree>"; git commit -a` in a main checkout is refused.
 - A `git commit` the guard cannot place is refused from any directory: inside
   grouping that does not balance (a stray `)` in a comment counts), a
   paren-form `case` arm, a function definition, or a coproc. The check reads
-  `g''it`, `c''ommit` and `co\mmit` as `git` and `commit`. Grouped commits in
+  `g''it`, `c''ommit` and `co\mmit` as `git` and `commit`, and a brace
+  expansion such as `{git,-C,<dir>,commit}` as its words. A destructive git
+  command (`reset --hard`, `clean -f`, `checkout -- .`, …) in such a command is
+  refused the same way. Grouped commits in
   a worktree or a scratchpad clone, quoted commit messages containing
   parentheses, and grouped reads such as `(git status)` stay allowed.
 - A command whose program word is a brace expansion, such as
