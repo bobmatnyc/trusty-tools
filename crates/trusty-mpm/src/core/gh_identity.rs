@@ -48,7 +48,9 @@
 //! [`GhEnv::unset_vars`] and removed from the child by
 //! [`GhEnv::apply_to`]. An unbound (`None`) config, and a binding that sets
 //! only `host`, remove nothing — an operator whose sole credential is an
-//! ambient `GH_TOKEN` is unaffected.
+//! ambient `GH_TOKEN` is unaffected. #8383: on the `tm` CLI path,
+//! [`resolve_tiered_gh_env`] removes nothing for the GLOBAL fallback either;
+//! only a project's own binding outranks the caller's token.
 //!
 //! ## `account`-strategy caveat (deliberate decision)
 //!
@@ -325,6 +327,32 @@ pub fn select_github_config<'a>(
     project.or(global)
 }
 
+/// Resolve the [`GhEnv`] for a `tm` CLI `gh` call from its two binding tiers.
+///
+/// Why (#8383): #6668 made a resolved binding strip the caller's inherited
+/// `GH_TOKEN`, so a PROJECT's pinned identity beats a shell token. Applied to
+/// the GLOBAL fallback too, it overrode the operator's explicit `GH_TOKEN` for
+/// every repository no project binds: `tm issue seed-labels` in an unbound
+/// repo asked GitHub as the global `config_dir`'s account, which could not see
+/// the repository, while `gh -R` from the same shell, using the token, could.
+/// What: a `project` binding resolves exactly as [`resolve_gh_env`] does,
+/// clearing the inherited identity. With no `project` binding, the `global`
+/// one sets its vars but removes nothing, so an inherited token still decides,
+/// as it does for the operator's own `gh`.
+/// Test: `an_unbound_repo_keeps_the_callers_token_8383`,
+/// `a_project_binding_still_clears_the_callers_token_8383`.
+pub fn resolve_tiered_gh_env(
+    project: Option<&GithubConfig>,
+    global: Option<&GithubConfig>,
+) -> Result<GhEnv, GhIdentityError> {
+    if project.is_some() {
+        return resolve_gh_env(project);
+    }
+    let mut env = resolve_gh_env(global)?;
+    env.unset.clear();
+    Ok(env)
+}
+
 /// Select the `GithubConfig` that governs `gh` spawns for an already-detected
 /// git origin remote (#6623).
 ///
@@ -572,6 +600,49 @@ mod tests {
         );
         // The var this resolution SETS is never also removed.
         assert!(!unset.contains(&ENV_GH_CONFIG_DIR));
+    }
+
+    /// Why (#8383): the global fallback must keep the caller's `GH_TOKEN`; it
+    /// removed it, so a repository only that token could see failed with
+    /// "Could not resolve to a Repository". The CLI-level red proof is
+    /// `resolve_project_aware_unbound_repo_keeps_the_shell_token_8383`.
+    /// Test: itself.
+    #[test]
+    fn an_unbound_repo_keeps_the_callers_token_8383() {
+        let global = GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/global")),
+            ..cfg()
+        };
+        let env = resolve_tiered_gh_env(None, Some(&global)).expect("ok");
+        assert_eq!(
+            env.vars(),
+            &[(ENV_GH_CONFIG_DIR.to_string(), "/cfg/global".to_string())]
+        );
+        assert!(env.unset_vars().is_empty(), "{env:?}");
+    }
+
+    /// Why (#8383): the fix must not reopen #6668 — a project's own binding
+    /// still outranks the caller's token.
+    /// Test: itself.
+    #[test]
+    fn a_project_binding_still_clears_the_callers_token_8383() {
+        let project = GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/project")),
+            ..cfg()
+        };
+        let global = GithubConfig {
+            config_dir: Some(PathBuf::from("/cfg/global")),
+            ..cfg()
+        };
+        let env = resolve_tiered_gh_env(Some(&project), Some(&global)).expect("ok");
+        assert_eq!(
+            env.vars(),
+            &[(ENV_GH_CONFIG_DIR.to_string(), "/cfg/project".to_string())]
+        );
+        assert!(
+            env.unset_vars().iter().any(|k| k == ENV_GH_TOKEN),
+            "{env:?}"
+        );
     }
 
     /// Why (#6668, review HIGH): `GH_USER` is trusty-mpm's own informational

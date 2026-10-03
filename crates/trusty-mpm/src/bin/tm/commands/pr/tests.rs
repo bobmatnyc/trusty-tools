@@ -2836,6 +2836,7 @@ fn merge_args() -> PrMergeArgs {
         auto: false,
         no_delete_branch: false,
         no_cleanup: false,
+        allow_failing: Vec::new(),
         repo: None,
     }
 }
@@ -3063,6 +3064,7 @@ fn merge_argv_honours_auto_and_no_delete_branch() {
         auto: true,
         no_delete_branch: true,
         no_cleanup: false,
+        allow_failing: Vec::new(),
         repo: Some("o/r".to_string()),
     };
     assert_eq!(merge::run(&gh, &args).expect("runs"), super::EXIT_OK);
@@ -3232,6 +3234,7 @@ fn pr_7945_no_delete_branch_never_downgrades_a_failure() {
         auto: false,
         no_delete_branch: true,
         no_cleanup: false,
+        allow_failing: Vec::new(),
         repo: None,
     };
     let err = merge::run(&gh, &args).expect_err("no delete was asked for, so none can have failed");

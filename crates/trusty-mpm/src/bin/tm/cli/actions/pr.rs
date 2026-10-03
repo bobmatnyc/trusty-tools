@@ -192,8 +192,9 @@ pub(crate) struct PrOpenArgs {
 /// three switches cover the cases the merge-queue procedure actually names:
 /// queue the merge rather than perform it, keep the remote branch, and target
 /// a repo other than the cwd's.
-/// What: the PR number plus `--auto`, `--no-delete-branch`, and `--repo`.
-/// Test: `cli_parses_pr_merge`.
+/// What: the PR number plus `--auto`, `--no-delete-branch`, `--no-cleanup`,
+/// `--allow-failing`, and `--repo`.
+/// Test: `cli_parses_pr_merge`, `cli_parses_pr_merge_allow_failing_8614`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct PrMergeArgs {
     /// PR number to squash-merge.
@@ -212,6 +213,12 @@ pub(crate) struct PrMergeArgs {
     /// `tm pr cleanup <n>` later instead (#8301).
     #[arg(long = "no-cleanup", visible_alias = "keep-worktree")]
     pub(crate) no_cleanup: bool,
+
+    /// Merge over this failing (or, with `--auto`, running) check; exact name,
+    /// repeatable. Never waives a required check. Each waiver is printed and
+    /// heads the squash commit body (#8614).
+    #[arg(long = "allow-failing", value_name = "CHECK")]
+    pub(crate) allow_failing: Vec<String>,
 
     /// `owner/repo` (defaults to the cwd's git remote).
     #[arg(long)]

@@ -166,6 +166,32 @@ fn ops_seed_creates_only_missing() {
     assert!(!created.contains(&"unicorn:queued".to_string()));
 }
 
+/// FAILS BEFORE #8703: the present-check was exact, so seeding called
+/// `gh label create` for a label GitHub already holds in another case.
+/// Test: itself.
+#[test]
+fn ops_seed_treats_a_differently_cased_label_as_present_8703() {
+    let m = model();
+    let existing = vec![RepoLabel::new("Unicorn:Queued", "BFD4F2", "")];
+    let sys = FakeSystem::new(issue_with_labels(1, &[])).with_repo_labels(existing);
+    let report = seed_labels(
+        &sys,
+        &m,
+        &ResolvedTicketing::default(),
+        Some(SESSION),
+        false,
+        &[],
+    )
+    .expect("seed");
+
+    assert!(
+        report
+            .already_present
+            .contains(&"unicorn:queued".to_string())
+    );
+    assert!(!create_names(&sys).contains(&"unicorn:queued".to_string()));
+}
+
 /// #6914: seeding covers the FRAMEWORK's own labels, not just the model's.
 ///
 /// Before the fix, `trusty-mpm` and `ws/<session>` were absent from
