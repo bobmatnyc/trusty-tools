@@ -70,6 +70,7 @@ mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
 mod tm_hook_pm_guard_head_switch;
+mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
 mod tm_hook_pm_guard_secret_batch;
 mod tm_hook_pm_guard_stdin_7975;
